@@ -1,0 +1,114 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body { font-family: system-ui, sans-serif; font-size: 14px; color: #1a1a1a; }
+
+.loading-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: #999;
+}
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid #e5e5e5;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.search-bar input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #d5d5d5;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.folder-tree { flex: 1; }
+
+.review-badge {
+  background: #f59e0b;
+  color: white;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.editor-pane {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.related-notes {
+  width: 260px;
+  flex-shrink: 0;
+  border-left: 1px solid #e5e5e5;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.related-notes h3 { margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+
+.placeholder { color: #aaa; font-size: 13px; }
+
+.setup-wizard {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: #fafafa;
+}
+
+.setup-step {
+  max-width: 480px;
+  width: 100%;
+  padding: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+}
+
+.setup-step h1 { font-size: 24px; }
+.setup-step h2 { font-size: 20px; }
+
+.setup-step button {
+  padding: 10px 20px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.setup-step button:disabled {
+  background: #d0d0d0;
+  cursor: not-allowed;
+}
+
+.selected-path {
+  font-size: 12px;
+  color: #555;
+  word-break: break-all;
+}

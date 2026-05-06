@@ -1,51 +1,34 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useSetupStatus } from "./hooks/useSetupStatus";
+import { SetupWizard } from "./components/setup/SetupWizard";
+import { AppShell } from "./components/shell/AppShell";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+export function App() {
+  const { loading, needsSetup, vaultPath } = useSetupStatus();
+  const [setupComplete, setSetupComplete] = useState(false);
+  const [resolvedVaultPath, setResolvedVaultPath] = useState<string | null>(null);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  if (loading) {
+    return (
+      <div className="loading-screen">
+        <p>Loading...</p>
+      </div>
+    );
   }
 
-  return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
+  if (needsSetup && !setupComplete) {
+    return (
+      <SetupWizard
+        onComplete={(path: string) => {
+          setResolvedVaultPath(path);
+          setSetupComplete(true);
         }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
-  );
+      />
+    );
+  }
+
+  const activePath = resolvedVaultPath ?? vaultPath!;
+  return <AppShell vaultPath={activePath} />;
 }
 
 export default App;
