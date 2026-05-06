@@ -10,8 +10,10 @@ impl AppDb {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        conn.execute_batch(MIGRATION_V1)?;
-        conn.execute_batch(MIGRATION_V2)?;
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2
+        ))?;
         Ok(AppDb(conn))
     }
 }
@@ -19,8 +21,10 @@ impl AppDb {
 #[cfg(test)]
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
-    conn.execute_batch(MIGRATION_V1)?;
-    conn.execute_batch(MIGRATION_V2)?;
+    conn.execute_batch(&format!(
+        "BEGIN;\n{}\n{}\nCOMMIT;",
+        MIGRATION_V1, MIGRATION_V2
+    ))?;
     Ok(conn)
 }
 
