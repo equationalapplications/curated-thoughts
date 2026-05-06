@@ -2,7 +2,7 @@
 
 Curated Thoughts is a privacy-first, local-first desktop second brain built with Tauri, React, and Rust.
 
-Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). It uses `@equationalapplications/react-llm-wiki` to power a local LLM Wiki experience. The automatic librarian will correct the wiki entries based on your immutable sources of truth and the new information it ingests.
+Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) and powered by `@equationalapplications/react-llm-wiki`, the app uses a local LLM Wiki experience to keep generated wiki entries aligned with source documents and newly ingested information.
 
 ## Overview
 
@@ -55,10 +55,10 @@ Curated Thoughts draws on the same core design principles as the Equational Appl
 
 Learn more about the Equational Applications memory and wiki packages:
 
-- `@equationalapplications/react-llm-wiki` — React web support for local LLM Wiki memory. https://www.npmjs.com/package/@equationalapplications/react-llm-wiki
-- `@equationalapplications/expo-llm-wiki` — Expo / React Native version with `expo-sqlite` adapter. https://www.npmjs.com/package/@equationalapplications/expo-llm-wiki
-- `@equationalapplications/core-llm-wiki` — framework-agnostic core logic for Node or browser environments. https://www.npmjs.com/package/@equationalapplications/core-llm-wiki
-- `expo-llm-wiki` GitHub repo — https://github.com/equationalapplications/expo-llm-wiki
+- [`@equationalapplications/react-llm-wiki`](https://www.npmjs.com/package/@equationalapplications/react-llm-wiki) — React web support for local LLM Wiki memory.
+- [`@equationalapplications/expo-llm-wiki`](https://www.npmjs.com/package/@equationalapplications/expo-llm-wiki) — Expo / React Native version with `expo-sqlite` adapter.
+- [`@equationalapplications/core-llm-wiki`](https://www.npmjs.com/package/@equationalapplications/core-llm-wiki) — framework-agnostic core logic for Node or browser environments.
+- [`expo-llm-wiki` GitHub repo](https://github.com/equationalapplications/expo-llm-wiki)
 
 ## Local development
 
