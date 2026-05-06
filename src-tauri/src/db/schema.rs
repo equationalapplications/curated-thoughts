@@ -46,3 +46,13 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (1);
 ";
+
+pub const MIGRATION_V2: &str = "
+CREATE TABLE IF NOT EXISTS embeddings (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    vector   BLOB    NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+";
