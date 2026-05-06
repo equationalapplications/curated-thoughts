@@ -8,9 +8,10 @@ interface Props {
   reviewCount: number;
   selectedDoc: string | null;
   onDocSelect: (path: string) => void;
+  onReviewOpen: () => void;
 }
 
-export function Sidebar({ reviewCount, selectedDoc, onDocSelect }: Props) {
+export function Sidebar({ reviewCount, selectedDoc, onDocSelect, onReviewOpen }: Props) {
   const { query, setQuery, results, searching } = useSearch();
   const files = useVaultFiles();
 
@@ -34,7 +35,9 @@ export function Sidebar({ reviewCount, selectedDoc, onDocSelect }: Props) {
         </>
       )}
       {reviewCount > 0 && (
-        <div className="review-badge">{reviewCount} pages ready to review</div>
+        <button className="review-badge" onClick={onReviewOpen}>
+          {reviewCount} page{reviewCount !== 1 ? "s" : ""} ready to review
+        </button>
       )}
     </aside>
   );

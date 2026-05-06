@@ -21,6 +21,9 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_related_chunks") return Promise.resolve([]);
     if (cmd === "list_vault_files") return Promise.resolve([]);
     if (cmd === "read_document") return Promise.resolve("# Hello\n\nTest document.");
+    if (cmd === "get_review_queue") return Promise.resolve([]);
+    if (cmd === "approve_wiki_page") return Promise.resolve();
+    if (cmd === "reject_wiki_page") return Promise.resolve();
     return Promise.resolve(null);
   }),
 }));
