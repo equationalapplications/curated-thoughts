@@ -1,3 +1,5 @@
+import { IndexingStatus } from "./IndexingStatus";
+
 interface Props { reviewCount: number }
 
 export function Sidebar({ reviewCount }: Props) {
@@ -6,6 +8,7 @@ export function Sidebar({ reviewCount }: Props) {
       <div className="search-bar">
         <input type="search" placeholder="Search your brain..." />
       </div>
+      <IndexingStatus />
       <div className="folder-tree">
         <p className="placeholder">Documents will appear here</p>
       </div>

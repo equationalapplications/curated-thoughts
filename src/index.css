@@ -316,3 +316,25 @@ body {
   font-family: var(--font-mono);
   border: 1px solid var(--outline-var);
 }
+
+.indexing-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--on-surface-var);
+  background: var(--elev-2);
+  border: 1px solid var(--outline-var);
+  padding: 5px 10px;
+  border-radius: var(--r-pill);
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+.indexing-badge--busy {
+  background: var(--primary-container);
+  color: var(--on-primary-cont);
+  border-color: transparent;
+  animation: pulse-badge 1.5s ease-in-out infinite;
+}
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.65; }
+}

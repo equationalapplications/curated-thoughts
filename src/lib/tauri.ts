@@ -29,3 +29,11 @@ export const startOllamaServer = (): Promise<void> =>
 
 export const getRecommendedModel = (): Promise<string> =>
   invoke("get_recommended_model");
+
+export interface IndexingStatus {
+  indexed: number;
+  pending: number;
+}
+
+export const getIndexingStatus = (): Promise<IndexingStatus> =>
+  invoke("get_indexing_status");

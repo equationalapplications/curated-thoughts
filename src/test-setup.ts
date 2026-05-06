@@ -5,6 +5,9 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "check_ollama") {
       return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
     }
+    if (cmd === "get_indexing_status") {
+      return Promise.resolve({ indexed: 0, pending: 0 });
+    }
     return Promise.resolve(null);
   }),
 }));
