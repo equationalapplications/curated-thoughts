@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { checkOllama, pullModel } from "../../lib/tauri";
+import { checkOllama, pullModel, startOllamaServer } from "../../lib/tauri";
 import { onPullProgress } from "../../lib/events";
 
 interface Props { onNext: () => void }
@@ -40,20 +40,27 @@ export function StepOllama({ onNext }: Props) {
   }
 
   useEffect(() => {
-    checkOllama().then((s) => {
+    checkOllama().then(async (s) => {
       if (s.installed && s.running && s.models.length > 0) {
         setPhase("ready");
       } else if (!s.installed) {
         setPhase("needs-install");
-        // Open download page automatically
         open("https://ollama.com/download");
-        // Poll until installed + running, then pull
+        // Poll until installed + running, then auto-start server and pull
         pollRef.current = setInterval(async () => {
           const status = await checkOllama();
-          if (status.installed && status.running) {
+          if (status.installed) {
+            if (!status.running) {
+              await startOllamaServer().catch(() => {});
+            }
             startPull();
           }
         }, POLL_INTERVAL_MS);
+      } else if (s.installed && !s.running) {
+        // Homebrew install: server not started yet
+        setPhase("checking");
+        await startOllamaServer().catch(() => {});
+        startPull();
       } else {
         startPull();
       }

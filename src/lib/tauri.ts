@@ -23,3 +23,6 @@ export const pullModel = (modelId: string): Promise<void> =>
 
 export const startFileWatcher = (vaultPath: string): Promise<void> =>
   invoke("start_file_watcher", { vaultPath });
+
+export const startOllamaServer = (): Promise<void> =>
+  invoke("start_ollama_server");

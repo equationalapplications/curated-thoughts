@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use db::AppDb;
 use vault::VaultConfig;
 use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
-            pull_model as ollama_pull, OllamaStatus};
+            pull_model as ollama_pull, start_ollama_server as ollama_start, OllamaStatus};
 use watcher::start_watcher;
 
 struct DbState(Mutex<AppDb>);
@@ -43,6 +43,11 @@ fn list_local_models() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+fn start_ollama_server() -> Result<(), String> {
+    ollama_start().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn pull_model(model_id: String, app: AppHandle) -> Result<(), String> {
     ollama_pull(&model_id, move |completed, total| {
         let _ = app.emit(
@@ -74,6 +79,7 @@ pub fn run() {
             check_ollama,
             list_local_models,
             pull_model,
+            start_ollama_server,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

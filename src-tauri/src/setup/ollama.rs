@@ -46,6 +46,17 @@ pub fn list_local_models() -> Result<Vec<String>> {
     parse_models_response(&text)
 }
 
+pub fn start_ollama_server() -> Result<()> {
+    Command::new("ollama")
+        .arg("serve")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    // Give the server a moment to bind the port
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    Ok(())
+}
+
 pub fn pull_model<F>(model_id: &str, on_progress: F) -> Result<()>
 where
     F: Fn(u64, u64),
