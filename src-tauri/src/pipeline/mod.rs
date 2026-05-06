@@ -70,14 +70,40 @@ impl PipelineWorker {
     }
 }
 
+fn try_pandoc_convert(source_path: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(source_path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if matches!(ext, "md" | "txt" | "markdown") {
+        return None;
+    }
+    if !matches!(ext, "pdf" | "docx" | "odt" | "doc" | "rtf") {
+        return None;
+    }
+    let converted_dir = p
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|vault| vault.join(".brain").join("converted"))?;
+    std::fs::create_dir_all(&converted_dir).ok()?;
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
+    let out_path = converted_dir.join(format!("{}.md", stem));
+    let status = std::process::Command::new("pandoc")
+        .args([source_path, "-o", out_path.to_str()?, "--to", "markdown"])
+        .status()
+        .ok()?;
+    if status.success() { Some(out_path) } else { None }
+}
+
 fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()> {
     let p = Path::new(path);
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !matches!(ext, "md" | "txt" | "markdown") {
+    if !matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx" | "odt" | "doc" | "rtf") {
         return Ok(());
     }
 
-    let bytes = std::fs::read(path)?;
+    let read_path = try_pandoc_convert(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    let bytes = std::fs::read(&read_path)?;
     let hash = hash_bytes(&bytes);
 
     if let Some(doc) = get_document_by_path(conn, path)? {
@@ -118,4 +144,21 @@ pub fn start_pipeline(db_path: PathBuf) -> mpsc::SyncSender<PipelineJob> {
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pandoc_skips_markdown_files() {
+        assert!(try_pandoc_convert("/vault/documents/note.md").is_none());
+        assert!(try_pandoc_convert("/vault/documents/note.txt").is_none());
+    }
+
+    #[test]
+    fn test_pandoc_skips_unsupported_extensions() {
+        assert!(try_pandoc_convert("/vault/documents/image.png").is_none());
+        assert!(try_pandoc_convert("/vault/documents/data.csv").is_none());
+    }
 }
