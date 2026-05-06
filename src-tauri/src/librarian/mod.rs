@@ -60,8 +60,10 @@ pub fn generate_summary(
     let truncated = &source_text[..byte_limit];
 
     let client = reqwest::blocking::Client::new();
+    let base_url = std::env::var("OLLAMA_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
     let resp = client
-        .post("http://localhost:11434/api/generate")
+        .post(format!("{}/api/generate", base_url))
         .json(&serde_json::json!({
             "model": model,
             "system": "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.",

@@ -1,6 +1,6 @@
 mod chunker;
 mod db;
-mod embedder;
+pub mod embedder;
 mod hasher;
 mod librarian;
 mod pipeline;
