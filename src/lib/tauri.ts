@@ -50,3 +50,15 @@ export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> 
 
 export const getRelatedChunks = (docPath: string, limit = 5): Promise<SearchResult[]> =>
   invoke("get_related_chunks", { docPath, limit });
+
+export interface VaultFile {
+  path: string;
+  name: string;
+  tier: "user_doc" | "wiki";
+}
+
+export const listVaultFiles = (): Promise<VaultFile[]> =>
+  invoke("list_vault_files");
+
+export const readDocument = (path: string): Promise<string> =>
+  invoke("read_document", { path });
