@@ -17,6 +17,8 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "wiki_get_first") return Promise.resolve(null);
     if (cmd === "embed_text") return Promise.resolve(Array(384).fill(0));
     if (cmd === "ollama_generate") return Promise.resolve("");
+    if (cmd === "search_vault") return Promise.resolve([]);
+    if (cmd === "get_related_chunks") return Promise.resolve([]);
     return Promise.resolve(null);
   }),
 }));

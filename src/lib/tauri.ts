@@ -37,3 +37,16 @@ export interface IndexingStatus {
 
 export const getIndexingStatus = (): Promise<IndexingStatus> =>
   invoke("get_indexing_status");
+
+export interface SearchResult {
+  doc_path: string;
+  chunk_text: string;
+  chunk_position: number;
+  score: number;
+}
+
+export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> =>
+  invoke("search_vault", { query, limit });
+
+export const getRelatedChunks = (docPath: string, limit = 5): Promise<SearchResult[]> =>
+  invoke("get_related_chunks", { docPath, limit });
