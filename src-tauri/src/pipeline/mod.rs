@@ -48,8 +48,16 @@ impl PipelineWorker {
         for job in self.rx {
             match job {
                 PipelineJob::Ingest(path) => {
-                    if let Err(e) = ingest_file(&conn, &embedder, &path) {
-                        eprintln!("[pipeline] ingest error {path}: {e}");
+                    match ingest_file(&conn, &embedder, &path) {
+                        Ok(()) => {
+                            if let Err(e) = crate::librarian::generate_summary(
+                                &conn, &path,
+                                crate::setup::recommended_model(),
+                            ) {
+                                eprintln!("[pipeline] librarian error {path}: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("[pipeline] ingest error {path}: {e}"),
                     }
                 }
                 PipelineJob::Delete(path) => {

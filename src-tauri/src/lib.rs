@@ -344,6 +344,75 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
     std::fs::read_to_string(doc_path).map_err(|e| e.to_string())
 }
 
+// ── Review queue ──────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, Clone)]
+pub struct ReviewPage {
+    pub id: i64,
+    pub path: String,
+    pub source_doc_ids: String,
+    pub generated_by: String,
+}
+
+#[tauri::command]
+fn get_review_queue(db_state: State<DbState>) -> Result<Vec<ReviewPage>, String> {
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, path, source_doc_ids, generated_by
+             FROM wiki_pages WHERE status = 'pending_review'
+             ORDER BY id DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut pages = Vec::new();
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        pages.push(ReviewPage {
+            id: row.get(0).map_err(|e| e.to_string())?,
+            path: row.get(1).map_err(|e| e.to_string())?,
+            source_doc_ids: row.get(2).map_err(|e| e.to_string())?,
+            generated_by: row.get(3).map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(pages)
+}
+
+#[tauri::command]
+fn approve_wiki_page(
+    id: i64,
+    content: String,
+    vault_path: String,
+    db_state: State<DbState>,
+) -> Result<(), String> {
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let page_path: String = conn
+        .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let wiki_dir = std::path::Path::new(&vault_path).join("wiki");
+    std::fs::create_dir_all(&wiki_dir).map_err(|e| e.to_string())?;
+    std::fs::write(wiki_dir.join(&page_path), &content).map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE wiki_pages SET status = 'approved', last_synced = unixepoch() WHERE id = ?1",
+        [id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn reject_wiki_page(id: i64, db_state: State<DbState>) -> Result<(), String> {
+    db_state
+        .0
+        .lock()
+        .unwrap()
+        .0
+        .execute("UPDATE wiki_pages SET status = 'rejected' WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -384,6 +453,9 @@ pub fn run() {
             get_related_chunks,
             list_vault_files,
             read_document,
+            get_review_queue,
+            approve_wiki_page,
+            reject_wiki_page,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
