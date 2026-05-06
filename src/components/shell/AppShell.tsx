@@ -8,6 +8,7 @@ interface Props { vaultPath: string }
 
 export function AppShell({ vaultPath }: Props) {
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
+  const isWiki = selectedDoc?.includes("/wiki/") ?? false;
 
   useEffect(() => {
     startFileWatcher(vaultPath).catch(console.error);
@@ -16,7 +17,7 @@ export function AppShell({ vaultPath }: Props) {
   return (
     <div className="app-shell">
       <Sidebar reviewCount={0} selectedDoc={selectedDoc} onDocSelect={setSelectedDoc} />
-      <EditorPane />
+      <EditorPane selectedDoc={selectedDoc} isWiki={isWiki} />
       <RelatedNotes selectedDoc={selectedDoc} />
     </div>
   );

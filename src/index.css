@@ -426,3 +426,66 @@ body {
   color: var(--outline);
   letter-spacing: 0.03em;
 }
+
+/* ── Editor pane ────────────────────────────────────────────────────────────── */
+.editor-pane--active {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 0;
+  overflow: auto;
+}
+
+.editor-protected-badge {
+  padding: 6px 16px;
+  background: var(--tertiary-cont);
+  color: var(--on-surface-var);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--outline-var);
+  flex-shrink: 0;
+}
+
+.editor-error {
+  color: var(--error);
+  font-size: 13px;
+  padding: 24px;
+}
+
+.bn-container {
+  font-family: var(--font-body) !important;
+}
+
+/* ── Folder tree ────────────────────────────────────────────────────────────── */
+.tree-section { display: flex; flex-direction: column; gap: 2px; }
+
+.tree-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--outline);
+  padding: 4px 4px 2px;
+}
+
+.tree-file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-family: var(--font-body);
+  color: var(--on-surface-var);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.1s, color 0.1s;
+}
+.tree-file:hover { background: var(--surface-variant); color: var(--on-surface); }
+.tree-file--active { background: var(--primary-container); color: var(--on-primary-cont); font-weight: 600; }

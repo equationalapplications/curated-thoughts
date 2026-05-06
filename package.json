@@ -12,7 +12,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@blocknote/core": "^0.50.0",
+    "@blocknote/mantine": "^0.50.0",
+    "@blocknote/react": "^0.50.0",
     "@equationalapplications/react-llm-wiki": "^3.0.0",
+    "@mantine/core": "^9.1.1",
+    "@mantine/hooks": "^9.1.1",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
