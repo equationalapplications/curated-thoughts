@@ -68,7 +68,19 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         fs::remove_file(&path).unwrap();
 
-        let event = rx.recv_timeout(Duration::from_secs(5)).expect("no delete event");
-        assert!(matches!(event, VaultEvent::Deleted(_)));
+        // Drain events until Deleted is found — macOS FSEvents may emit spurious
+        // Modify events before the Remove event arrives.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.duration_since(std::time::Instant::now());
+            if let Ok(event) = rx.recv_timeout(remaining) {
+                if matches!(event, VaultEvent::Deleted(_)) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "no Deleted event received within timeout");
     }
 }
