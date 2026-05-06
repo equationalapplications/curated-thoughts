@@ -44,6 +44,8 @@ impl PipelineWorker {
         if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON;") {
             eprintln!("[pipeline] failed to enable FK: {e}");
         }
+        let vault_root = self.db_path.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        let vault_path = vault_root.as_deref();
 
         for job in self.rx {
             match job {
@@ -54,16 +56,38 @@ impl PipelineWorker {
                                 &conn, &path,
                                 crate::setup::recommended_model(),
                             ) {
-                                eprintln!("[pipeline] librarian error {path}: {e}");
+                                let msg = format!("librarian error {}: {}", path, e);
+                                eprintln!("[pipeline] {}", msg);
+                                write_error_log(vault_path, &msg);
                             }
                         }
-                        Err(e) => eprintln!("[pipeline] ingest error {path}: {e}"),
+                        Err(e) => {
+                            let msg = format!("ingest error {}: {}", path, e);
+                            eprintln!("[pipeline] {}", msg);
+                            write_error_log(vault_path, &msg);
+                        }
                     }
                 }
                 PipelineJob::Delete(path) => {
                     if let Err(e) = delete_document(&conn, &path) {
                         eprintln!("[pipeline] delete error {path}: {e}");
                     }
+                    // Remove shadow copy from .brain/converted/
+                    if let Some(vault) = vault_root.as_ref() {
+                        let stem = std::path::Path::new(&path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        let shadow = vault.join(".brain").join("converted").join(format!("{}.md", stem));
+                        std::fs::remove_file(&shadow).ok();
+                    }
+                    // Mark sourced wiki pages as orphaned
+                    conn.execute(
+                        "UPDATE wiki_pages SET status = 'orphaned'
+                         WHERE status NOT IN ('rejected', 'orphaned')
+                         AND source_doc_ids LIKE ?1",
+                        [format!("%{}%", path)],
+                    ).ok();
                 }
             }
         }
@@ -91,6 +115,20 @@ fn try_pandoc_convert(source_path: &str) -> Option<std::path::PathBuf> {
         .status()
         .ok()?;
     if status.success() { Some(out_path) } else { None }
+}
+
+fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
+    let Some(vault) = vault_path else { return; };
+    let log_path = vault.join(".brain").join("errors.log");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{}] {}\n", timestamp, msg);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()> {
