@@ -102,3 +102,6 @@ export const setFolderRule = (
 
 export const deleteFolderRule = (id: number): Promise<void> =>
   invoke("delete_folder_rule", { id });
+
+export const getProposedContent = (pageId: number): Promise<string> =>
+  invoke("get_proposed_content", { pageId });
