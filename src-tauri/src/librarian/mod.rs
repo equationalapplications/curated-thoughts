@@ -52,7 +52,12 @@ pub fn generate_summary(
     }
 
     let source_text = chunks.join("\n\n");
-    let truncated = &source_text[..source_text.len().min(4000)];
+    let byte_limit = source_text
+        .char_indices()
+        .nth(4000)
+        .map(|(i, _)| i)
+        .unwrap_or(source_text.len());
+    let truncated = &source_text[..byte_limit];
 
     let client = reqwest::blocking::Client::new();
     let resp = client

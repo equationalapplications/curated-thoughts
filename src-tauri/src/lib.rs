@@ -52,22 +52,78 @@ fn start_file_watcher(
     vault_path: String,
     app: AppHandle,
     pipeline: State<PipelineTx>,
+    db_state: State<DbState>,
 ) -> Result<(), String> {
     let tx = pipeline.0.lock().unwrap().clone();
-    let documents_root = std::path::PathBuf::from(&vault_path).join("documents");
+
+    let raw_docs = std::path::PathBuf::from(&vault_path).join("documents");
+    // Canonicalize so macOS FSEvents paths (which are real paths) match correctly.
+    let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
+
+    // ── Startup reconciliation ────────────────────────────────────────────────
+    // Purge DB entries whose files no longer exist on disk, and queue ingest for
+    // files on disk that aren't yet indexed. Handles changes made while the app
+    // was closed and any path-format drift.
+    {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+
+        // 1. DB paths that no longer exist on disk → delete
+        let db_paths: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut v = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+            }
+            v
+        };
+        for path in db_paths {
+            if !std::path::Path::new(&path).exists() {
+                eprintln!("[reconcile] purging deleted file from index: {}", path);
+                let _ = tx.try_send(PipelineJob::Delete(path));
+            }
+        }
+
+        // 2. Files on disk → queue ingest (pipeline skips if hash unchanged)
+        if raw_docs.exists() {
+            for entry in walkdir::WalkDir::new(&raw_docs)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
+                if matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx") {
+                    let _ = tx.try_send(PipelineJob::Ingest(
+                        entry.path().to_string_lossy().into_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
     start_watcher(vault_path.into(), move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
         };
-        if !std::path::Path::new(path_str).starts_with(&documents_root) {
+        // For existing files, canonicalize to match documents_root.
+        // For deleted files (don't exist), fall back to the raw path.
+        let canonical = std::fs::canonicalize(path_str)
+            .unwrap_or_else(|_| std::path::PathBuf::from(path_str));
+        if !canonical.starts_with(&documents_root) {
             return;
         }
         let job = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) => Some(PipelineJob::Ingest(p.clone())),
             VaultEvent::Deleted(p) => Some(PipelineJob::Delete(p.clone())),
         };
-        if let Some(j) = job { let _ = tx.try_send(j); }
+        if let Some(j) = job {
+            let _ = tx.try_send(j);
+        }
     })
     .map_err(|e| e.to_string())
 }
@@ -531,6 +587,37 @@ fn save_wiki_page(
     Ok(())
 }
 
+// ── File management ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(), String> {
+    let root = state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault set".to_string())?;
+    let file = std::path::Path::new(&path);
+    if !file.starts_with(std::path::Path::new(&root).join("documents")) {
+        return Err("path outside documents folder".to_string());
+    }
+    std::fs::remove_file(file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String> {
+    let src = std::path::Path::new(&src_path);
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| "invalid filename".to_string())?;
+    let dest_dir = std::path::Path::new(&vault_path).join("documents");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(file_name);
+    std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -579,6 +666,8 @@ pub fn run() {
             delete_folder_rule,
             get_proposed_content,
             save_wiki_page,
+            copy_to_vault,
+            delete_vault_file,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

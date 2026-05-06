@@ -26,6 +26,7 @@ export function AppShell({ vaultPath }: Props) {
       <AppHeader onSettingsOpen={() => setShowSettings(true)} />
       <div className="app-shell">
         <Sidebar
+          vaultPath={vaultPath}
           reviewCount={queue.length}
           selectedDoc={selectedDoc}
           onDocSelect={setSelectedDoc}
