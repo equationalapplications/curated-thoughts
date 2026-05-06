@@ -583,3 +583,13 @@ button.review-badge:hover { opacity: 0.85; }
   color: var(--on-surface);
   line-height: 1.5;
 }
+
+/* ── Model panel ────────────────────────────────────────────────────────────── */
+.model-panel { display: flex; flex-direction: column; gap: 12px; }
+.model-panel h3 { font-family: var(--font-display); font-size: 16px; }
+.model-list { display: flex; flex-direction: column; gap: 4px; }
+.model-list-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--outline); }
+.model-chip { display: inline-block; padding: 3px 10px; background: var(--primary-container); color: var(--on-primary-cont); border-radius: var(--r-pill); font-size: 12px; font-family: var(--font-mono); }
+.model-success { font-size: 13px; color: #2d6a2d; }
+.model-error { font-size: 13px; color: var(--error); }
+.settings-divider { border: none; border-top: 1px solid var(--outline-var); margin: 4px 0; }
