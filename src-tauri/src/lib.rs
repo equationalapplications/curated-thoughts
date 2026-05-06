@@ -4,6 +4,7 @@ mod watcher;
 mod setup;
 mod chunker;
 mod hasher;
+mod embedder;
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
