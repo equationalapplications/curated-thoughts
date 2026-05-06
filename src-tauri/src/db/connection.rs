@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
-use crate::db::schema::{MIGRATION_V1, MIGRATION_V2};
+use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3};
 
 #[allow(dead_code)]
 pub struct AppDb(pub Connection);
@@ -11,8 +11,8 @@ impl AppDb {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(&format!(
-            "BEGIN;\n{}\n{}\nCOMMIT;",
-            MIGRATION_V1, MIGRATION_V2
+            "BEGIN;\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3
         ))?;
         Ok(AppDb(conn))
     }

@@ -28,6 +28,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "set_folder_rule") return Promise.resolve();
     if (cmd === "delete_folder_rule") return Promise.resolve();
     if (cmd === "get_proposed_content") return Promise.resolve("# Test Wiki Page\n\nTest content.");
+    if (cmd === "save_wiki_page") return Promise.resolve();
     return Promise.resolve(null);
   }),
 }));

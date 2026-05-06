@@ -105,3 +105,6 @@ export const deleteFolderRule = (id: number): Promise<void> =>
 
 export const getProposedContent = (pageId: number): Promise<string> =>
   invoke("get_proposed_content", { pageId });
+
+export const saveWikiPage = (path: string, content: string): Promise<void> =>
+  invoke("save_wiki_page", { path, content });
