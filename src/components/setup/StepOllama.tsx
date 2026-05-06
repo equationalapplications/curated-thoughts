@@ -1,29 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-shell";
 import { checkOllama, pullModel } from "../../lib/tauri";
 import { onPullProgress } from "../../lib/events";
 
 interface Props { onNext: () => void }
 
 const DEFAULT_MODEL = "llama3.2:3b";
+const POLL_INTERVAL_MS = 3000;
 
 export function StepOllama({ onNext }: Props) {
   const [phase, setPhase] = useState<"checking" | "needs-install" | "pulling" | "ready" | "error">("checking");
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    checkOllama().then((s) => {
-      if (s.installed && s.running && s.models.length > 0) {
-        setPhase("ready");
-      } else if (!s.installed) {
-        setPhase("needs-install");
-      } else {
-        startPull();
-      }
-    });
-  }, []);
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
 
   async function startPull() {
+    stopPolling();
     setPhase("pulling");
     setProgress(0);
     const unlisten = await onPullProgress(({ completed, total }) => {
@@ -40,19 +39,45 @@ export function StepOllama({ onNext }: Props) {
     }
   }
 
+  useEffect(() => {
+    checkOllama().then((s) => {
+      if (s.installed && s.running && s.models.length > 0) {
+        setPhase("ready");
+      } else if (!s.installed) {
+        setPhase("needs-install");
+        // Open download page automatically
+        open("https://ollama.com/download");
+        // Poll until installed + running, then pull
+        pollRef.current = setInterval(async () => {
+          const status = await checkOllama();
+          if (status.installed && status.running) {
+            startPull();
+          }
+        }, POLL_INTERVAL_MS);
+      } else {
+        startPull();
+      }
+    });
+
+    return stopPolling;
+  }, []);
+
   return (
     <div className="setup-step">
       <h2>Install Ollama</h2>
       {phase === "checking" && <p>Checking for Ollama...</p>}
       {phase === "needs-install" && (
         <>
-          <p>Ollama is required for local AI processing. Download it from <strong>ollama.com</strong>, then click below.</p>
-          <button onClick={() => startPull()}>I've installed Ollama</button>
+          <p>
+            The Ollama download page has been opened in your browser. Install it, then come back — this will continue automatically.
+          </p>
+          <p className="ollama-hint">Or install via Homebrew: <code>brew install ollama</code></p>
+          <button onClick={() => open("https://ollama.com/download")}>Re-open download page</button>
         </>
       )}
       {phase === "pulling" && (
         <>
-          <p>Downloading {DEFAULT_MODEL}... {progress}%</p>
+          <p>Downloading {DEFAULT_MODEL}… {progress}%</p>
           <progress value={progress} max={100} style={{ width: "100%" }} />
         </>
       )}
