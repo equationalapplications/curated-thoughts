@@ -13,7 +13,9 @@ use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use db::AppDb;
 use embedder::Embedder;
-use pipeline::{start_pipeline, PipelineJob};
+use pipeline::start_pipeline;
+#[cfg(not(feature = "test-utils"))]
+use pipeline::PipelineJob;
 use rusqlite::types::Value as SqlVal;
 use serde_json::Value as JsonVal;
 use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
@@ -616,6 +618,42 @@ fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String>
     let dest = dest_dir.join(file_name);
     std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().into_owned())
+}
+
+// ── Test utilities ────────────────────────────────────────────────────────────
+
+#[cfg(feature = "test-utils")]
+pub use pipeline::{PipelineJob, PipelineWorker};
+
+#[cfg(feature = "test-utils")]
+pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
+    let db = db::AppDb::open(&tmp_path.join("brain.db")).expect("open test db");
+    let config = vault::VaultConfig::new(tmp_path.join("config.json"));
+    let (tx, _rx) = std::sync::mpsc::sync_channel::<PipelineJob>(1);
+    tauri::test::mock_builder()
+        .manage(DbState(std::sync::Mutex::new(db)))
+        .manage(VaultConfigState(std::sync::Mutex::new(config)))
+        .manage(PipelineTx(std::sync::Mutex::new(tx)))
+        .manage(WikiEmbedder(std::sync::Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![
+            get_vault_path,
+            set_vault_path,
+            get_review_queue,
+            approve_wiki_page,
+            reject_wiki_page,
+            get_proposed_content,
+            get_folder_rules,
+            set_folder_rule,
+            delete_folder_rule,
+            get_indexing_status,
+            list_vault_files,
+            read_document,
+            search_vault,
+            get_related_chunks,
+            save_wiki_page,
+        ])
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap()
 }
 
 // ── App entry ─────────────────────────────────────────────────────────────────
