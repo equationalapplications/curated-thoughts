@@ -2,9 +2,7 @@
 
 Curated Thoughts is a privacy-first, local-first desktop second brain built with Tauri, React, and Rust.
 
-Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
-
-It uses `@equationalapplications/react-llm-wiki` to power a local LLM Wiki experience and is inspired by Andrej Karpathy's LLM Wiki memory spec.
+Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). It uses `@equationalapplications/react-llm-wiki` to power a local LLM Wiki experience. The automatic librarian will correct the wiki entries based on your immutable sources of truth and the new information it ingests.
 
 ## Overview
 
