@@ -15,7 +15,7 @@ export function AppShell({ vaultPath }: Props) {
 
   return (
     <div className="app-shell">
-      <Sidebar reviewCount={0} onDocSelect={setSelectedDoc} />
+      <Sidebar reviewCount={0} selectedDoc={selectedDoc} onDocSelect={setSelectedDoc} />
       <EditorPane />
       <RelatedNotes selectedDoc={selectedDoc} />
     </div>

@@ -1,14 +1,18 @@
 import { IndexingStatus } from "./IndexingStatus";
 import { SearchResults } from "./SearchResults";
+import { FolderTree } from "./FolderTree";
 import { useSearch } from "../../hooks/useSearch";
+import { useVaultFiles } from "../../hooks/useVaultFiles";
 
 interface Props {
   reviewCount: number;
+  selectedDoc: string | null;
   onDocSelect: (path: string) => void;
 }
 
-export function Sidebar({ reviewCount, onDocSelect }: Props) {
+export function Sidebar({ reviewCount, selectedDoc, onDocSelect }: Props) {
   const { query, setQuery, results, searching } = useSearch();
+  const files = useVaultFiles();
 
   return (
     <aside className="sidebar">
@@ -26,9 +30,7 @@ export function Sidebar({ reviewCount, onDocSelect }: Props) {
       ) : (
         <>
           <IndexingStatus />
-          <div className="folder-tree">
-            <p className="placeholder">Documents will appear here</p>
-          </div>
+          <FolderTree files={files} selectedPath={selectedDoc} onSelect={onDocSelect} />
         </>
       )}
       {reviewCount > 0 && (
