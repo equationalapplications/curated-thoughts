@@ -3,6 +3,7 @@ mod db;
 mod embedder;
 mod hasher;
 mod pipeline;
+mod search;
 mod setup;
 mod vault;
 mod watcher;
