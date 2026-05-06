@@ -1,4 +1,5 @@
 import { FolderRulesPanel } from "./FolderRulesPanel";
+import { ModelPanel } from "./ModelPanel";
 
 interface Props { onClose: () => void }
 
@@ -10,6 +11,8 @@ export function SettingsModal({ onClose }: Props) {
           <h2>Settings</h2>
           <button className="review-close" onClick={onClose}>✕</button>
         </div>
+        <ModelPanel />
+        <hr className="settings-divider" />
         <FolderRulesPanel />
       </div>
     </div>
