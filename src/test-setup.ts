@@ -5,9 +5,18 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "check_ollama") {
       return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
     }
+    if (cmd === "get_recommended_model") {
+      return Promise.resolve("llama3.2:3b");
+    }
     if (cmd === "get_indexing_status") {
       return Promise.resolve({ indexed: 0, pending: 0 });
     }
+    if (cmd === "wiki_exec") return Promise.resolve(null);
+    if (cmd === "wiki_run") return Promise.resolve({ changes: 0, last_insert_row_id: 0 });
+    if (cmd === "wiki_get_all") return Promise.resolve([]);
+    if (cmd === "wiki_get_first") return Promise.resolve(null);
+    if (cmd === "embed_text") return Promise.resolve(Array(384).fill(0));
+    if (cmd === "ollama_generate") return Promise.resolve("");
     return Promise.resolve(null);
   }),
 }));
