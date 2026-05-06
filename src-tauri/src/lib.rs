@@ -8,7 +8,8 @@ use tauri::{AppHandle, Emitter, State};
 use db::AppDb;
 use vault::VaultConfig;
 use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
-            pull_model as ollama_pull, start_ollama_server as ollama_start, OllamaStatus};
+            pull_model as ollama_pull, recommended_model as ollama_recommended,
+            start_ollama_server as ollama_start, OllamaStatus};
 use watcher::start_watcher;
 
 #[allow(dead_code)] // used for DB access in future subprojects
@@ -41,6 +42,11 @@ fn check_ollama() -> OllamaStatus {
 #[tauri::command]
 fn list_local_models() -> Result<Vec<String>, String> {
     ollama_models().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_recommended_model() -> String {
+    ollama_recommended().to_string()
 }
 
 #[tauri::command]
@@ -81,6 +87,7 @@ pub fn run() {
             list_local_models,
             pull_model,
             start_ollama_server,
+            get_recommended_model,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

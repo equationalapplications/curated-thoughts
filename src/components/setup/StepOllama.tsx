@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { checkOllama, pullModel, startOllamaServer } from "../../lib/tauri";
+import { checkOllama, getRecommendedModel, pullModel, startOllamaServer } from "../../lib/tauri";
 import { onPullProgress } from "../../lib/events";
 
 interface Props { onNext: () => void }
 
-const DEFAULT_MODEL = "llama3.2:3b";
 const POLL_INTERVAL_MS = 3000;
 
 export function StepOllama({ onNext }: Props) {
   const [phase, setPhase] = useState<"checking" | "needs-install" | "pulling" | "ready" | "error">("checking");
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [model, setModel] = useState<string>("llama3.2:3b");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function stopPolling() {
@@ -21,15 +21,16 @@ export function StepOllama({ onNext }: Props) {
     }
   }
 
-  async function startPull() {
+  async function startPull(modelId?: string) {
     stopPolling();
+    const target = modelId ?? model;
     setPhase("pulling");
     setProgress(0);
     const unlisten = await onPullProgress(({ completed, total }) => {
       setProgress(total > 0 ? Math.round((completed / total) * 100) : 0);
     });
     try {
-      await pullModel(DEFAULT_MODEL);
+      await pullModel(target);
       setPhase("ready");
     } catch (e) {
       setErrorMsg(String(e));
@@ -40,31 +41,29 @@ export function StepOllama({ onNext }: Props) {
   }
 
   useEffect(() => {
-    checkOllama().then(async (s) => {
+    (async () => {
+      const [s, recommended] = await Promise.all([checkOllama(), getRecommendedModel()]);
+      setModel(recommended);
+
       if (s.installed && s.running && s.models.length > 0) {
         setPhase("ready");
       } else if (!s.installed) {
         setPhase("needs-install");
         open("https://ollama.com/download");
-        // Poll until installed + running, then auto-start server and pull
         pollRef.current = setInterval(async () => {
           const status = await checkOllama();
           if (status.installed) {
-            if (!status.running) {
-              await startOllamaServer().catch(() => {});
-            }
-            startPull();
+            if (!status.running) await startOllamaServer().catch(() => {});
+            startPull(recommended);
           }
         }, POLL_INTERVAL_MS);
       } else if (s.installed && !s.running) {
-        // Homebrew install: server not started yet
-        setPhase("checking");
         await startOllamaServer().catch(() => {});
-        startPull();
+        startPull(recommended);
       } else {
-        startPull();
+        startPull(recommended);
       }
-    });
+    })();
 
     return stopPolling;
   }, []);
@@ -84,7 +83,7 @@ export function StepOllama({ onNext }: Props) {
       )}
       {phase === "pulling" && (
         <>
-          <p>Downloading {DEFAULT_MODEL}… {progress}%</p>
+          <p>Downloading {model}… {progress}%</p>
           <progress value={progress} max={100} style={{ width: "100%" }} />
         </>
       )}

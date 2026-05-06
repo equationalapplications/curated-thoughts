@@ -19,6 +19,25 @@ struct OllamaModel {
     name: String,
 }
 
+fn ram_gb() -> u64 {
+    Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|bytes| bytes / (1024 * 1024 * 1024))
+        .unwrap_or(8)
+}
+
+pub fn recommended_model() -> &'static str {
+    match ram_gb() {
+        0..=7  => "qwen2.5:0.5b",
+        8..=15 => "llama3.2:1b",
+        _      => "llama3.2:3b",
+    }
+}
+
 pub fn parse_models_response(json: &str) -> Result<Vec<String>> {
     let resp: OllamaListResponse = serde_json::from_str(json)?;
     Ok(resp.models.into_iter().map(|m| m.name).collect())
