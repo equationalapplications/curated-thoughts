@@ -478,6 +478,33 @@ fn delete_folder_rule(id: i64, db_state: State<DbState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_proposed_content(
+    page_id: i64,
+    db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+) -> Result<String, String> {
+    let page_path: String = {
+        let guard = db_state.0.lock().unwrap();
+        guard.0
+            .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [page_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+    };
+    let vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault set".to_string())?;
+    let proposed_path = std::path::Path::new(&vault)
+        .join(".brain")
+        .join("proposed")
+        .join(&page_path);
+    Ok(std::fs::read_to_string(&proposed_path)
+        .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)))
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -524,6 +551,7 @@ pub fn run() {
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
+            get_proposed_content,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
