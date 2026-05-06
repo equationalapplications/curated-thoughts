@@ -2,6 +2,7 @@ mod chunker;
 mod db;
 mod embedder;
 mod hasher;
+mod librarian;
 mod pipeline;
 mod search;
 mod setup;
