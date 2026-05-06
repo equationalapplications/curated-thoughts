@@ -49,6 +49,10 @@ impl VaultConfig {
         cfg.vault_path = Some(path.to_string());
         self.write(&cfg)
     }
+
+    pub fn vault_root(&self) -> anyhow::Result<Option<std::path::PathBuf>> {
+        Ok(self.get_vault_path()?.map(std::path::PathBuf::from))
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +89,20 @@ mod tests {
         cfg.set_vault_path("/first").unwrap();
         cfg.set_vault_path("/second").unwrap();
         assert_eq!(cfg.get_vault_path().unwrap(), Some("/second".to_string()));
+    }
+
+    #[test]
+    fn test_vault_root_returns_none_when_unset() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_config(&tmp);
+        assert!(cfg.vault_root().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_vault_root_returns_path_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_config(&tmp);
+        cfg.set_vault_path("/vault/root").unwrap();
+        assert_eq!(cfg.vault_root().unwrap(), Some(std::path::PathBuf::from("/vault/root")));
     }
 }

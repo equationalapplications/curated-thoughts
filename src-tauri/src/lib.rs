@@ -35,7 +35,12 @@ fn get_vault_path(state: State<VaultConfigState>) -> Result<Option<String>, Stri
 
 #[tauri::command]
 fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), String> {
-    state.0.lock().unwrap().set_vault_path(&path).map_err(|e| e.to_string())
+    state.0.lock().unwrap().set_vault_path(&path).map_err(|e| e.to_string())?;
+    let root = std::path::Path::new(&path);
+    for subdir in &["documents", "wiki"] {
+        std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ── Watcher + pipeline ────────────────────────────────────────────────────────
@@ -47,17 +52,20 @@ fn start_file_watcher(
     pipeline: State<PipelineTx>,
 ) -> Result<(), String> {
     let tx = pipeline.0.lock().unwrap().clone();
+    let documents_root = std::path::PathBuf::from(&vault_path).join("documents");
     start_watcher(vault_path.into(), move |event| {
         let _ = app.emit("vault-event", &event);
+        let path_str = match &event {
+            VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
+        };
+        if !std::path::Path::new(path_str).starts_with(&documents_root) {
+            return;
+        }
         let job = match &event {
-            VaultEvent::Added(p) | VaultEvent::Modified(p) => {
-                Some(PipelineJob::Ingest(p.clone()))
-            }
+            VaultEvent::Added(p) | VaultEvent::Modified(p) => Some(PipelineJob::Ingest(p.clone())),
             VaultEvent::Deleted(p) => Some(PipelineJob::Delete(p.clone())),
         };
-        if let Some(j) = job {
-            let _ = tx.try_send(j);
-        }
+        if let Some(j) = job { let _ = tx.try_send(j); }
     })
     .map_err(|e| e.to_string())
 }
