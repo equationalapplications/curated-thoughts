@@ -2,6 +2,8 @@
 
 Curated Thoughts is a privacy-first, local-first desktop second brain built with Tauri, React, and Rust.
 
+Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+
 It uses `@equationalapplications/react-llm-wiki` to power a local LLM Wiki experience and is inspired by Andrej Karpathy's LLM Wiki memory spec.
 
 ## Overview
@@ -59,7 +61,6 @@ Learn more about the Equational Applications memory and wiki packages:
 - `@equationalapplications/expo-llm-wiki` — Expo / React Native version with `expo-sqlite` adapter. https://www.npmjs.com/package/@equationalapplications/expo-llm-wiki
 - `@equationalapplications/core-llm-wiki` — framework-agnostic core logic for Node or browser environments. https://www.npmjs.com/package/@equationalapplications/core-llm-wiki
 - `expo-llm-wiki` GitHub repo — https://github.com/equationalapplications/expo-llm-wiki
-- Equational Applications GitHub — https://github.com/equationalapplications/
 
 ## Local development
 
@@ -97,3 +98,7 @@ npm run build
 ## Design inspiration
 
 Curated Thoughts is built around the idea of a long-term AI memory store that can be queried semantically and augmented safely by local models. It follows the same spirit as the Equational Applications LLM Wiki packages and uses their React adapter to provide local-first wiki behavior in a desktop environment.
+
+---
+
+Made with ❤️ by Equational Applications LLC. [https://equationalapplications.com/](https://equationalapplications.com/)
