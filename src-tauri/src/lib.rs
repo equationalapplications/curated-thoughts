@@ -2,6 +2,8 @@ mod db;
 mod vault;
 mod watcher;
 mod setup;
+mod chunker;
+mod hasher;
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
