@@ -5,6 +5,7 @@ mod setup;
 mod chunker;
 mod hasher;
 mod embedder;
+mod pipeline;
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
