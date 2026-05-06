@@ -1,6 +1,7 @@
 mod db;
 mod vault;
 mod watcher;
+mod setup;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
