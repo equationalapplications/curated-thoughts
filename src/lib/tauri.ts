@@ -1,0 +1,25 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export interface OllamaStatus {
+  installed: boolean;
+  running: boolean;
+  models: string[];
+}
+
+export const getVaultPath = (): Promise<string | null> =>
+  invoke("get_vault_path");
+
+export const setVaultPath = (path: string): Promise<void> =>
+  invoke("set_vault_path", { path });
+
+export const checkOllama = (): Promise<OllamaStatus> =>
+  invoke("check_ollama");
+
+export const listLocalModels = (): Promise<string[]> =>
+  invoke("list_local_models");
+
+export const pullModel = (modelId: string): Promise<void> =>
+  invoke("pull_model", { modelId });
+
+export const startFileWatcher = (vaultPath: string): Promise<void> =>
+  invoke("start_file_watcher", { vaultPath });
