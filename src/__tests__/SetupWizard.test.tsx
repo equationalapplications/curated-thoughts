@@ -10,7 +10,7 @@ test("renders welcome step on mount", () => {
 test("clicking Get Started advances to Ollama step", () => {
   render(<SetupWizard onComplete={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
-  expect(screen.getByText(/install ollama/i)).toBeInTheDocument();
+  expect(screen.getByText(/set up ai model/i)).toBeInTheDocument();
 });
 
 test("calls onComplete when done step button clicked", () => {
