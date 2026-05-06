@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { AppHeader } from "./AppHeader";
 import { Sidebar } from "./Sidebar";
 import { EditorPane } from "./EditorPane";
 import { RelatedNotes } from "./RelatedNotes";
 import { ReviewModal } from "../review/ReviewModal";
+import { SettingsModal } from "../settings/SettingsModal";
 import { startFileWatcher } from "../../lib/tauri";
 import { useReviewQueue } from "../../hooks/useReviewQueue";
 
@@ -11,6 +13,7 @@ interface Props { vaultPath: string }
 export function AppShell({ vaultPath }: Props) {
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const [showReview, setShowReview] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const isWiki = selectedDoc?.includes("/wiki/") ?? false;
   const { queue, refresh } = useReviewQueue();
 
@@ -19,15 +22,18 @@ export function AppShell({ vaultPath }: Props) {
   }, [vaultPath]);
 
   return (
-    <div className="app-shell">
-      <Sidebar
-        reviewCount={queue.length}
-        selectedDoc={selectedDoc}
-        onDocSelect={setSelectedDoc}
-        onReviewOpen={() => setShowReview(true)}
-      />
-      <EditorPane selectedDoc={selectedDoc} isWiki={isWiki} />
-      <RelatedNotes selectedDoc={selectedDoc} />
+    <div className="app-root">
+      <AppHeader onSettingsOpen={() => setShowSettings(true)} />
+      <div className="app-shell">
+        <Sidebar
+          reviewCount={queue.length}
+          selectedDoc={selectedDoc}
+          onDocSelect={setSelectedDoc}
+          onReviewOpen={() => setShowReview(true)}
+        />
+        <EditorPane selectedDoc={selectedDoc} isWiki={isWiki} />
+        <RelatedNotes selectedDoc={selectedDoc} />
+      </div>
       {showReview && (
         <ReviewModal
           queue={queue}
@@ -36,6 +42,7 @@ export function AppShell({ vaultPath }: Props) {
           onAction={() => { refresh(); }}
         />
       )}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
