@@ -234,6 +234,45 @@ fn pull_model(model_id: String, app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+// ── Search commands ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn search_vault(
+    query: String,
+    limit: usize,
+    db_state: State<DbState>,
+    embedder_state: State<WikiEmbedder>,
+) -> Result<Vec<search::SearchResult>, String> {
+    let query_vec = {
+        let mut guard = embedder_state.0.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(Embedder::new().map_err(|e| e.to_string())?);
+        }
+        guard
+            .as_ref()
+            .unwrap()
+            .embed(vec![query])
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    };
+    let guard = db_state.0.lock().unwrap();
+    search::semantic_search(&guard.0, &query_vec, limit.clamp(1, 50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_related_chunks(
+    doc_path: String,
+    limit: usize,
+    db_state: State<DbState>,
+) -> Result<Vec<search::SearchResult>, String> {
+    let guard = db_state.0.lock().unwrap();
+    search::related_chunks(&guard.0, &doc_path, limit.clamp(1, 10))
+        .map_err(|e| e.to_string())
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -270,6 +309,8 @@ pub fn run() {
             pull_model,
             start_ollama_server,
             get_recommended_model,
+            search_vault,
+            get_related_chunks,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
