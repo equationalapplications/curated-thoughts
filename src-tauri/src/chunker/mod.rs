@@ -1,5 +1,6 @@
-const CHUNK_WORDS: usize = 500;
-const OVERLAP_WORDS: usize = 50;
+// AllMiniLML6V2 max input: 256 tokens. ~1.3 tokens/word → 180 words ≈ 234 tokens.
+const CHUNK_WORDS: usize = 180;
+const OVERLAP_WORDS: usize = 20;
 
 pub fn chunk_text(text: &str) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -49,12 +50,13 @@ mod tests {
 
     #[test]
     fn test_chunks_have_overlap() {
-        let words: Vec<String> = (0..600).map(|i| format!("w{}", i)).collect();
+        // 200 words → chunk1: 0..179, chunk2: 160..199 → exactly 2 chunks
+        let words: Vec<String> = (0..200).map(|i| format!("w{}", i)).collect();
         let text = words.join(" ");
         let chunks = chunk_text(&text);
         assert_eq!(chunks.len(), 2);
-        let last_of_first: Vec<&str> = chunks[0].split_whitespace().rev().take(50).collect::<Vec<_>>().into_iter().rev().collect();
-        let first_of_second: Vec<&str> = chunks[1].split_whitespace().take(50).collect();
+        let last_of_first: Vec<&str> = chunks[0].split_whitespace().rev().take(OVERLAP_WORDS).collect::<Vec<_>>().into_iter().rev().collect();
+        let first_of_second: Vec<&str> = chunks[1].split_whitespace().take(OVERLAP_WORDS).collect();
         assert_eq!(last_of_first, first_of_second);
     }
 
@@ -64,7 +66,7 @@ mod tests {
         let chunks = chunk_text(&text);
         for chunk in &chunks {
             let word_count = chunk.split_whitespace().count();
-            assert!(word_count <= 500, "chunk has {} words", word_count);
+            assert!(word_count <= CHUNK_WORDS, "chunk has {} words", word_count);
         }
     }
 }
