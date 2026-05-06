@@ -1,6 +1,10 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use std::{path::{Path, PathBuf}, sync::mpsc};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    sync::mpsc,
+};
 
 use crate::chunker::chunk_text;
 use crate::db::queries::{
@@ -46,82 +50,134 @@ impl PipelineWorker {
         }
 
         for job in self.rx {
-            match job {
-                PipelineJob::Ingest(path) => {
-                    // vault = parent of documents/ dir (i.e. {vault}/documents/file → {vault})
-                    let vault_root = std::path::Path::new(&path)
-                        .parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-                    match ingest_file(&conn, &embedder, &path) {
-                        Ok(()) => {
-                            if let Err(e) = crate::librarian::generate_summary(
-                                &conn, &path,
-                                crate::setup::recommended_model(),
-                            ) {
-                                let msg = format!("librarian error {}: {}", path, e);
+            let job_path = match &job {
+                PipelineJob::Ingest(p) | PipelineJob::Delete(p) => p.clone(),
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match job {
+                    PipelineJob::Ingest(path) => {
+                        let vault_root = std::path::Path::new(&path)
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .map(|p| p.to_path_buf());
+                        match ingest_file(&conn, &embedder, &path) {
+                            Ok(()) => {
+                                if let Err(e) = crate::librarian::generate_summary(
+                                    &conn,
+                                    &path,
+                                    crate::setup::recommended_model(),
+                                ) {
+                                    let msg = format!("librarian error {}: {}", path, e);
+                                    eprintln!("[pipeline] {}", msg);
+                                    write_error_log(vault_root.as_deref(), &msg);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = format!("ingest error {}: {}", path, e);
                                 eprintln!("[pipeline] {}", msg);
                                 write_error_log(vault_root.as_deref(), &msg);
                             }
                         }
-                        Err(e) => {
-                            let msg = format!("ingest error {}: {}", path, e);
-                            eprintln!("[pipeline] {}", msg);
-                            write_error_log(vault_root.as_deref(), &msg);
+                    }
+                    PipelineJob::Delete(path) => {
+                        if let Err(e) = delete_document(&conn, &path) {
+                            eprintln!("[pipeline] delete error {path}: {e}");
                         }
+                        conn.execute(
+                            "UPDATE wiki_pages SET status = 'orphaned'
+                             WHERE status NOT IN ('rejected', 'orphaned')
+                             AND source_doc_ids LIKE ?1",
+                            [format!("%{}%", path)],
+                        )
+                        .ok();
                     }
                 }
-                PipelineJob::Delete(path) => {
-                    if let Err(e) = delete_document(&conn, &path) {
-                        eprintln!("[pipeline] delete error {path}: {e}");
-                    }
-                    // Remove shadow copy from {vault}/.brain/converted/
-                    if let Some(vault) = std::path::Path::new(&path)
-                        .parent().and_then(|p| p.parent())
-                    {
-                        let stem = std::path::Path::new(&path)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        let shadow = vault.join(".brain").join("converted").join(format!("{}.md", stem));
-                        std::fs::remove_file(&shadow).ok();
-                    }
-                    // Mark sourced wiki pages as orphaned
-                    conn.execute(
-                        "UPDATE wiki_pages SET status = 'orphaned'
-                         WHERE status NOT IN ('rejected', 'orphaned')
-                         AND source_doc_ids LIKE ?1",
-                        [format!("%{}%", path)],
-                    ).ok();
-                }
+            }));
+            if let Err(e) = result {
+                let msg = format!("panic processing {}: {:?}", job_path, e);
+                eprintln!("[pipeline] {}", msg);
             }
         }
     }
 }
 
-fn try_pandoc_convert(source_path: &str) -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(source_path);
-    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if matches!(ext, "md" | "txt" | "markdown") {
-        return None;
+/// Extract text from a binary document format using bundled Rust libraries.
+/// Returns `None` for plain-text formats (caller reads bytes directly).
+fn extract_text(path: &str) -> Result<Option<String>> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    match ext {
+        "pdf" => {
+            let text = pdf_extract::extract_text(path)
+                .map_err(|e| anyhow::anyhow!("PDF extraction failed: {e}"))?;
+            Ok(Some(text))
+        }
+        "docx" => Ok(Some(extract_docx_text(path)?)),
+        _ => Ok(None),
     }
-    if !matches!(ext, "pdf" | "docx" | "odt" | "doc" | "rtf") {
-        return None;
+}
+
+fn extract_docx_text(path: &str) -> Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| anyhow::anyhow!("DOCX open failed: {e}"))?;
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .map_err(|e| anyhow::anyhow!("word/document.xml not found: {e}"))?
+        .read_to_string(&mut xml)?;
+    Ok(xml_text_content(&xml))
+}
+
+/// Strip XML tags and collapse whitespace, preserving paragraph breaks.
+fn xml_text_content(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len() / 4);
+    let mut in_tag = false;
+    let mut last_was_newline = false;
+
+    for ch in xml.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+            }
+            '>' => {
+                in_tag = false;
+                if !last_was_newline {
+                    out.push(' ');
+                    last_was_newline = false;
+                }
+            }
+            _ if !in_tag => {
+                out.push(ch);
+                last_was_newline = ch == '\n';
+            }
+            _ => {}
+        }
     }
-    let converted_dir = p
-        .parent()
-        .and_then(|d| d.parent())
-        .map(|vault| vault.join(".brain").join("converted"))?;
-    std::fs::create_dir_all(&converted_dir).ok()?;
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
-    let out_path = converted_dir.join(format!("{}.md", stem));
-    let status = std::process::Command::new("pandoc")
-        .args([source_path, "-o", out_path.to_str()?, "--to", "markdown"])
-        .status()
-        .ok()?;
-    if status.success() { Some(out_path) } else { None }
+
+    // Collapse runs of whitespace into single spaces / newlines
+    let mut result = String::with_capacity(out.len());
+    let mut prev_space = false;
+    for ch in out.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                result.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+            prev_space = true;
+        } else {
+            result.push(ch);
+            prev_space = false;
+        }
+    }
+    result
 }
 
 fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
-    let Some(vault) = vault_path else { return; };
+    let Some(vault) = vault_path else {
+        return;
+    };
     let log_path = vault.join(".brain").join("errors.log");
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -129,23 +185,26 @@ fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
         .unwrap_or(0);
     let line = format!("[{}] {}\n", timestamp, msg);
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
 
 fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()> {
-    let p = Path::new(path);
-    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx" | "odt" | "doc" | "rtf") {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if !matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx") {
         return Ok(());
     }
 
-    let read_path = try_pandoc_convert(path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string());
-    let bytes = std::fs::read(&read_path)?;
-    let hash = hash_bytes(&bytes);
+    let raw_bytes = std::fs::read(path)?;
+    let hash = hash_bytes(&raw_bytes);
 
     if let Some(doc) = get_document_by_path(conn, path)? {
         if doc.hash == hash && doc.status == "indexed" {
@@ -154,7 +213,11 @@ fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()>
         delete_document_chunks(conn, doc.id)?;
     }
 
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    let text = match extract_text(path)? {
+        Some(t) => t,
+        None => String::from_utf8_lossy(&raw_bytes).into_owned(),
+    };
+
     let doc_id = upsert_document(conn, path, &hash)?;
 
     let chunks = chunk_text(&text);
@@ -192,14 +255,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pandoc_skips_markdown_files() {
-        assert!(try_pandoc_convert("/vault/documents/note.md").is_none());
-        assert!(try_pandoc_convert("/vault/documents/note.txt").is_none());
+    fn test_extract_text_skips_markdown() {
+        // plain-text formats return None so caller handles them
+        assert!(extract_text("/vault/documents/note.md").unwrap().is_none());
+        assert!(extract_text("/vault/documents/note.txt").unwrap().is_none());
     }
 
     #[test]
-    fn test_pandoc_skips_unsupported_extensions() {
-        assert!(try_pandoc_convert("/vault/documents/image.png").is_none());
-        assert!(try_pandoc_convert("/vault/documents/data.csv").is_none());
+    fn test_extract_text_skips_unknown() {
+        assert!(extract_text("/vault/documents/image.png").unwrap().is_none());
+        assert!(extract_text("/vault/documents/data.csv").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_xml_text_content_strips_tags() {
+        let xml = "<w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t> world</w:t></w:r></w:p>";
+        let text = xml_text_content(xml);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("world"));
+        assert!(!text.contains('<'));
     }
 }

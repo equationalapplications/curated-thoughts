@@ -1,9 +1,60 @@
+import { useState } from "react";
 import type { VaultFile } from "../../lib/tauri";
+import { deleteVaultFile } from "../../lib/tauri";
 
 interface Props {
   files: VaultFile[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+}
+
+function FileRow({
+  file,
+  isSelected,
+  onSelect,
+  deletable,
+}: {
+  file: VaultFile;
+  isSelected: boolean;
+  onSelect: () => void;
+  deletable: boolean;
+}) {
+  const [confirming, setConfirming] = useState(false);
+
+  function handleDelete(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    deleteVaultFile(file.path).catch((err) =>
+      console.error("delete_vault_file failed:", err)
+    );
+    setConfirming(false);
+  }
+
+  return (
+    <div className={`tree-file-row${isSelected ? " tree-file-row--active" : ""}`}>
+      <button
+        className={`tree-file${isSelected ? " tree-file--active" : ""}`}
+        onClick={onSelect}
+        title={file.name}
+      >
+        {file.name}
+      </button>
+      {deletable && (
+        <button
+          className={`tree-file-delete${confirming ? " tree-file-delete--confirm" : ""}`}
+          onClick={handleDelete}
+          onBlur={() => setConfirming(false)}
+          title={confirming ? "Click again to confirm" : "Delete file"}
+          aria-label={confirming ? "Confirm delete" : "Delete file"}
+        >
+          {confirming ? "✕" : "🗑"}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export function FolderTree({ files, selectedPath, onSelect }: Props) {
@@ -20,13 +71,13 @@ export function FolderTree({ files, selectedPath, onSelect }: Props) {
         <section className="tree-section">
           <h4 className="tree-section-label">Documents</h4>
           {docs.map((f) => (
-            <button
+            <FileRow
               key={f.path}
-              className={`tree-file${selectedPath === f.path ? " tree-file--active" : ""}`}
-              onClick={() => onSelect(f.path)}
-            >
-              {f.name}
-            </button>
+              file={f}
+              isSelected={selectedPath === f.path}
+              onSelect={() => onSelect(f.path)}
+              deletable
+            />
           ))}
         </section>
       )}
@@ -34,13 +85,13 @@ export function FolderTree({ files, selectedPath, onSelect }: Props) {
         <section className="tree-section">
           <h4 className="tree-section-label">Wiki</h4>
           {wiki.map((f) => (
-            <button
+            <FileRow
               key={f.path}
-              className={`tree-file${selectedPath === f.path ? " tree-file--active" : ""}`}
-              onClick={() => onSelect(f.path)}
-            >
-              {f.name}
-            </button>
+              file={f}
+              isSelected={selectedPath === f.path}
+              onSelect={() => onSelect(f.path)}
+              deletable={false}
+            />
           ))}
         </section>
       )}

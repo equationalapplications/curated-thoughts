@@ -79,6 +79,31 @@ body {
   padding: 16px 12px;
   gap: 14px;
   overflow-y: auto;
+  position: relative;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sidebar--drop-active {
+  background: var(--primary-container);
+  border-right-color: var(--primary);
+}
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  border: 2px dashed var(--primary);
+  border-radius: var(--r-sm);
+  margin: 6px;
+}
+.drop-overlay span {
+  font-size: 13px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  color: var(--primary);
+  text-align: center;
+  padding: 8px;
 }
 
 .search-bar input {
@@ -470,9 +495,16 @@ body {
   padding: 4px 4px 2px;
 }
 
+.tree-file-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-sm);
+  position: relative;
+}
+.tree-file-row:hover .tree-file-delete { opacity: 1; }
 .tree-file {
-  display: block;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   text-align: left;
   padding: 5px 8px;
   border-radius: var(--r-sm);
@@ -487,8 +519,23 @@ body {
   text-overflow: ellipsis;
   transition: background 0.1s, color 0.1s;
 }
-.tree-file:hover { background: var(--surface-variant); color: var(--on-surface); }
+.tree-file-row:hover .tree-file { background: var(--surface-variant); color: var(--on-surface); }
 .tree-file--active { background: var(--primary-container); color: var(--on-primary-cont); font-weight: 600; }
+.tree-file-delete {
+  flex-shrink: 0;
+  opacity: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px 5px;
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  color: var(--outline);
+  transition: opacity 0.1s, background 0.1s, color 0.1s;
+  line-height: 1;
+}
+.tree-file-delete:hover { background: var(--error); color: #fff; }
+.tree-file-delete--confirm { color: var(--error); opacity: 1; font-weight: 700; }
 
 /* ── Review modal ───────────────────────────────────────────────────────────── */
 .review-overlay {
