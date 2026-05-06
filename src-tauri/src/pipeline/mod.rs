@@ -44,12 +44,13 @@ impl PipelineWorker {
         if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON;") {
             eprintln!("[pipeline] failed to enable FK: {e}");
         }
-        let vault_root = self.db_path.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-        let vault_path = vault_root.as_deref();
 
         for job in self.rx {
             match job {
                 PipelineJob::Ingest(path) => {
+                    // vault = parent of documents/ dir (i.e. {vault}/documents/file → {vault})
+                    let vault_root = std::path::Path::new(&path)
+                        .parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
                     match ingest_file(&conn, &embedder, &path) {
                         Ok(()) => {
                             if let Err(e) = crate::librarian::generate_summary(
@@ -58,13 +59,13 @@ impl PipelineWorker {
                             ) {
                                 let msg = format!("librarian error {}: {}", path, e);
                                 eprintln!("[pipeline] {}", msg);
-                                write_error_log(vault_path, &msg);
+                                write_error_log(vault_root.as_deref(), &msg);
                             }
                         }
                         Err(e) => {
                             let msg = format!("ingest error {}: {}", path, e);
                             eprintln!("[pipeline] {}", msg);
-                            write_error_log(vault_path, &msg);
+                            write_error_log(vault_root.as_deref(), &msg);
                         }
                     }
                 }
@@ -72,8 +73,10 @@ impl PipelineWorker {
                     if let Err(e) = delete_document(&conn, &path) {
                         eprintln!("[pipeline] delete error {path}: {e}");
                     }
-                    // Remove shadow copy from .brain/converted/
-                    if let Some(vault) = vault_root.as_ref() {
+                    // Remove shadow copy from {vault}/.brain/converted/
+                    if let Some(vault) = std::path::Path::new(&path)
+                        .parent().and_then(|p| p.parent())
+                    {
                         let stem = std::path::Path::new(&path)
                             .file_stem()
                             .and_then(|s| s.to_str())
