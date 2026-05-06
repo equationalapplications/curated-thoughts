@@ -62,3 +62,23 @@ export const listVaultFiles = (): Promise<VaultFile[]> =>
 
 export const readDocument = (path: string): Promise<string> =>
   invoke("read_document", { path });
+
+export interface ReviewPage {
+  id: number;
+  path: string;
+  source_doc_ids: string;
+  generated_by: string;
+}
+
+export const getReviewQueue = (): Promise<ReviewPage[]> =>
+  invoke("get_review_queue");
+
+export const approveWikiPage = (
+  id: number,
+  content: string,
+  vaultPath: string
+): Promise<void> =>
+  invoke("approve_wiki_page", { id, content, vaultPath });
+
+export const rejectWikiPage = (id: number): Promise<void> =>
+  invoke("reject_wiki_page", { id });
