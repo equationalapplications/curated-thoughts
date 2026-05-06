@@ -56,3 +56,21 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (2);
 ";
+
+pub const MIGRATION_V3: &str = "
+CREATE TABLE IF NOT EXISTS wiki_pages_new (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    path           TEXT    NOT NULL UNIQUE,
+    source_doc_ids TEXT    NOT NULL DEFAULT '[]',
+    generated_by   TEXT    NOT NULL,
+    last_synced    INTEGER,
+    status         TEXT    NOT NULL DEFAULT 'pending_review'
+                   CHECK(status IN ('pending_review', 'approved', 'rejected', 'orphaned'))
+);
+
+INSERT OR IGNORE INTO wiki_pages_new SELECT * FROM wiki_pages;
+DROP TABLE wiki_pages;
+ALTER TABLE wiki_pages_new RENAME TO wiki_pages;
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (3);
+";

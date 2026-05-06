@@ -41,6 +41,7 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
     }
+    std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -505,6 +506,31 @@ fn get_proposed_content(
         .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)))
 }
 
+#[tauri::command]
+fn save_wiki_page(
+    path: String,
+    content: String,
+    vault_state: State<VaultConfigState>,
+) -> Result<(), String> {
+    let vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or("no vault set".to_string())?;
+    let wiki_dir = std::path::Path::new(&vault).join("wiki");
+    std::fs::create_dir_all(&wiki_dir).map_err(|e| e.to_string())?;
+    let full_path = std::path::Path::new(&path);
+    // Only allow writing within wiki/
+    if !full_path.starts_with(&wiki_dir) && !path.ends_with(".md") {
+        return Err("invalid wiki path".to_string());
+    }
+    let target = if full_path.is_absolute() { full_path.to_path_buf() } else { wiki_dir.join(&path) };
+    std::fs::write(&target, &content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -552,6 +578,7 @@ pub fn run() {
             set_folder_rule,
             delete_folder_rule,
             get_proposed_content,
+            save_wiki_page,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

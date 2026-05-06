@@ -593,3 +593,6 @@ button.review-badge:hover { opacity: 0.85; }
 .model-success { font-size: 13px; color: #2d6a2d; }
 .model-error { font-size: 13px; color: var(--error); }
 .settings-divider { border: none; border-top: 1px solid var(--outline-var); margin: 4px 0; }
+.editor-toolbar { padding: 6px 16px; background: var(--elev-1); border-bottom: 1px solid var(--outline-var); display: flex; gap: 8px; flex-shrink: 0; }
+.editor-save-btn { padding: 4px 14px; background: var(--primary); color: var(--on-primary); border: none; border-radius: var(--r-pill); font-size: 12px; font-weight: 600; cursor: pointer; }
+.editor-save-btn:hover { background: var(--primary-hover); }
