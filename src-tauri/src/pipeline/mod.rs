@@ -41,6 +41,9 @@ impl PipelineWorker {
                 return;
             }
         };
+        if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON;") {
+            eprintln!("[pipeline] failed to enable FK: {e}");
+        }
 
         for job in self.rx {
             match job {
