@@ -26,3 +26,6 @@ export const startFileWatcher = (vaultPath: string): Promise<void> =>
 
 export const startOllamaServer = (): Promise<void> =>
   invoke("start_ollama_server");
+
+export const getRecommendedModel = (): Promise<string> =>
+  invoke("get_recommended_model");
