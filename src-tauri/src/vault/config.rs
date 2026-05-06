@@ -16,6 +16,7 @@ impl VaultConfig {
         VaultConfig { config_path }
     }
 
+    #[allow(dead_code)]
     pub fn default_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_default()

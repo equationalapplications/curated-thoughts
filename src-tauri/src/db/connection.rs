@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use std::path::Path;
 use crate::db::schema::MIGRATION_V1;
 
+#[allow(dead_code)]
 pub struct AppDb(pub Connection);
 
 impl AppDb {
@@ -14,6 +15,7 @@ impl AppDb {
     }
 }
 
+#[cfg(test)]
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(MIGRATION_V1)?;
