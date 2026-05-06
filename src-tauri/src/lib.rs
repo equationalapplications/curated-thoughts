@@ -413,6 +413,71 @@ fn reject_wiki_page(id: i64, db_state: State<DbState>) -> Result<(), String> {
     Ok(())
 }
 
+// ── Folder rules ──────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct FolderRule {
+    pub id: i64,
+    pub folder_path: String,
+    pub librarian_mode: String,
+    pub auto_approve: bool,
+}
+
+#[tauri::command]
+fn get_folder_rules(db_state: State<DbState>) -> Result<Vec<FolderRule>, String> {
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let mut stmt = conn
+        .prepare("SELECT id, folder_path, librarian_mode, auto_approve FROM folder_rules ORDER BY folder_path")
+        .map_err(|e| e.to_string())?;
+    let mut rules = Vec::new();
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        rules.push(FolderRule {
+            id: row.get(0).map_err(|e| e.to_string())?,
+            folder_path: row.get(1).map_err(|e| e.to_string())?,
+            librarian_mode: row.get(2).map_err(|e| e.to_string())?,
+            auto_approve: row.get::<_, i64>(3).map_err(|e| e.to_string())? != 0,
+        });
+    }
+    Ok(rules)
+}
+
+#[tauri::command]
+fn set_folder_rule(
+    folder_path: String,
+    librarian_mode: String,
+    auto_approve: bool,
+    db_state: State<DbState>,
+) -> Result<(), String> {
+    let auto_i: i64 = if auto_approve { 1 } else { 0 };
+    db_state
+        .0
+        .lock()
+        .unwrap()
+        .0
+        .execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(folder_path) DO UPDATE SET librarian_mode = ?2, auto_approve = ?3",
+            rusqlite::params![folder_path, librarian_mode, auto_i],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_folder_rule(id: i64, db_state: State<DbState>) -> Result<(), String> {
+    db_state
+        .0
+        .lock()
+        .unwrap()
+        .0
+        .execute("DELETE FROM folder_rules WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -456,6 +521,9 @@ pub fn run() {
             get_review_queue,
             approve_wiki_page,
             reject_wiki_page,
+            get_folder_rules,
+            set_folder_rule,
+            delete_folder_rule,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
