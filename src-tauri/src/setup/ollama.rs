@@ -24,12 +24,30 @@ pub fn parse_models_response(json: &str) -> Result<Vec<String>> {
     Ok(resp.models.into_iter().map(|m| m.name).collect())
 }
 
-pub fn check_ollama() -> OllamaStatus {
-    let installed = Command::new("ollama").arg("--version").output().is_ok();
-
-    if !installed {
-        return OllamaStatus { installed: false, running: false, models: vec![] };
+// GUI apps on macOS don't inherit the user's shell PATH, so Homebrew
+// binaries at /opt/homebrew/bin are invisible to Command::new("ollama").
+fn find_ollama() -> Option<std::path::PathBuf> {
+    let known = [
+        "/opt/homebrew/bin/ollama",  // Apple Silicon Homebrew
+        "/usr/local/bin/ollama",     // Intel Homebrew / manual install
+        "/Applications/Ollama.app/Contents/Resources/ollama",
+    ];
+    // Try shell PATH first (works in terminal-launched dev builds)
+    if let Ok(out) = Command::new("sh").args(["-c", "which ollama"]).output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Some(std::path::PathBuf::from(p));
+            }
+        }
     }
+    known.iter().map(std::path::Path::new).find(|p| p.exists()).map(|p| p.to_path_buf())
+}
+
+pub fn check_ollama() -> OllamaStatus {
+    let Some(bin) = find_ollama() else {
+        return OllamaStatus { installed: false, running: false, models: vec![] };
+    };
 
     match reqwest::blocking::get("http://localhost:11434/api/tags") {
         Ok(resp) if resp.status().is_success() => {
@@ -37,7 +55,10 @@ pub fn check_ollama() -> OllamaStatus {
             let models = parse_models_response(&text).unwrap_or_default();
             OllamaStatus { installed: true, running: true, models }
         }
-        _ => OllamaStatus { installed: true, running: false, models: vec![] },
+        _ => {
+            let _ = bin; // binary found but server not up yet
+            OllamaStatus { installed: true, running: false, models: vec![] }
+        }
     }
 }
 
@@ -47,7 +68,8 @@ pub fn list_local_models() -> Result<Vec<String>> {
 }
 
 pub fn start_ollama_server() -> Result<()> {
-    Command::new("ollama")
+    let bin = find_ollama().ok_or_else(|| anyhow::anyhow!("ollama not found"))?;
+    Command::new(bin)
         .arg("serve")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

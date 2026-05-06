@@ -4,13 +4,14 @@ mod watcher;
 mod setup;
 
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use db::AppDb;
 use vault::VaultConfig;
 use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
             pull_model as ollama_pull, start_ollama_server as ollama_start, OllamaStatus};
 use watcher::start_watcher;
 
+#[allow(dead_code)] // used for DB access in future subprojects
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 
