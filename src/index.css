@@ -529,3 +529,43 @@ body {
 .review-btn--secondary { background: var(--elev-2); color: var(--on-surface-var); border: 1px solid var(--outline-var); }
 button.review-badge { cursor: pointer; border: none; font-family: var(--font-body); transition: opacity 0.15s; }
 button.review-badge:hover { opacity: 0.85; }
+
+/* ── App layout ─────────────────────────────────────────────────────────────── */
+.app-root { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ── App header ─────────────────────────────────────────────────────────────── */
+.app-header {
+  height: 38px;
+  flex-shrink: 0;
+  background: var(--elev-1);
+  border-bottom: 1px solid var(--outline-var);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  -webkit-app-region: drag;
+}
+.app-header-title { font-family: var(--font-display); font-size: 13px; font-weight: 600; color: var(--on-surface-var); letter-spacing: 0.01em; }
+.app-header-settings { background: none; border: none; cursor: pointer; font-size: 16px; color: var(--outline); padding: 4px 6px; border-radius: var(--r-sm); transition: color 0.15s, background 0.15s; -webkit-app-region: no-drag; }
+.app-header-settings:hover { color: var(--on-surface); background: var(--surface-variant); }
+
+/* ── Settings modal ─────────────────────────────────────────────────────────── */
+.settings-modal { background: var(--bg); border-radius: var(--r-lg); box-shadow: var(--shadow-lg); padding: 32px; width: min(540px, 90vw); max-height: 80vh; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+.settings-hint { font-size: 13px; color: var(--on-surface-var); }
+
+/* ── Folder rules form ──────────────────────────────────────────────────────── */
+.folder-rules-panel { display: flex; flex-direction: column; gap: 12px; }
+.folder-rules-panel h3 { font-family: var(--font-display); font-size: 16px; }
+.rules-list { display: flex; flex-direction: column; gap: 6px; }
+.rule-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--elev-2); border-radius: var(--r-sm); font-size: 12px; }
+.rule-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--on-surface); }
+.rule-mode { color: var(--primary); font-weight: 600; }
+.rule-auto { font-size: 10px; background: var(--tertiary-cont); color: var(--on-surface-var); padding: 1px 6px; border-radius: 999px; }
+.rule-delete { background: none; border: none; color: var(--outline); cursor: pointer; font-size: 13px; padding: 2px 4px; }
+.rule-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.rule-input { flex: 1; min-width: 200px; padding: 7px 12px; border: 1.5px solid var(--outline-var); border-radius: var(--r-md); font-size: 13px; font-family: var(--font-body); background: var(--elev-2); color: var(--on-surface); outline: none; }
+.rule-input:focus { border-color: var(--primary); background: var(--bg); }
+.rule-select { padding: 7px 10px; border: 1.5px solid var(--outline-var); border-radius: var(--r-md); font-size: 13px; font-family: var(--font-body); background: var(--elev-2); color: var(--on-surface); cursor: pointer; }
+.rule-auto-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--on-surface-var); cursor: pointer; }
+.rule-add-btn { padding: 8px 18px; background: var(--primary); color: var(--on-primary); border: none; border-radius: var(--r-pill); font-size: 13px; font-weight: 600; cursor: pointer; }
+.rule-add-btn:disabled { background: var(--surface-variant); color: var(--outline); cursor: not-allowed; }

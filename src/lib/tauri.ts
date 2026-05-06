@@ -82,3 +82,23 @@ export const approveWikiPage = (
 
 export const rejectWikiPage = (id: number): Promise<void> =>
   invoke("reject_wiki_page", { id });
+
+export interface FolderRule {
+  id: number;
+  folder_path: string;
+  librarian_mode: "index" | "summarize" | "synthesize";
+  auto_approve: boolean;
+}
+
+export const getFolderRules = (): Promise<FolderRule[]> =>
+  invoke("get_folder_rules");
+
+export const setFolderRule = (
+  folderPath: string,
+  librarianMode: string,
+  autoApprove: boolean
+): Promise<void> =>
+  invoke("set_folder_rule", { folderPath, librarianMode, autoApprove });
+
+export const deleteFolderRule = (id: number): Promise<void> =>
+  invoke("delete_folder_rule", { id });
