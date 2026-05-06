@@ -1,7 +1,7 @@
 [package]
-name = "tauri-app"
+name = "curated-thoughts"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Curated Thoughts Tauri backend"
 authors = ["you"]
 edition = "2021"
 
