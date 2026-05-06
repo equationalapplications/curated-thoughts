@@ -281,6 +281,68 @@ fn get_related_chunks(
         .map_err(|e| e.to_string())
 }
 
+// ── Vault file listing ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, Clone)]
+pub struct VaultFile {
+    pub path: String,
+    pub name: String,
+    pub tier: String, // "user_doc" | "wiki"
+}
+
+#[tauri::command]
+fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, String> {
+    let root = match state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())? {
+        Some(p) => std::path::PathBuf::from(p),
+        None => return Ok(vec![]),
+    };
+
+    let mut files = Vec::new();
+
+    for (subdir, tier) in &[("documents", "user_doc"), ("wiki", "wiki")] {
+        let dir = root.join(subdir);
+        if !dir.exists() { continue; }
+        let walker = walkdir::WalkDir::new(&dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                let ext = e.path().extension().and_then(|s| s.to_str()).unwrap_or("");
+                matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx")
+            });
+
+        for entry in walker {
+            let path = entry.path().to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
+            files.push(VaultFile { path, name, tier: tier.to_string() });
+        }
+    }
+
+    Ok(files)
+}
+
+#[tauri::command]
+fn read_document(path: String, state: State<VaultConfigState>) -> Result<String, String> {
+    let root = match state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())? {
+        Some(p) => std::path::PathBuf::from(p),
+        None => return Err("no vault path set".to_string()),
+    };
+
+    let doc_path = std::path::Path::new(&path);
+
+    if !doc_path.starts_with(&root) {
+        return Err("path outside vault".to_string());
+    }
+    let in_documents = doc_path.starts_with(root.join("documents"));
+    let in_wiki = doc_path.starts_with(root.join("wiki"));
+    if !in_documents && !in_wiki {
+        return Err("path not in documents/ or wiki/".to_string());
+    }
+
+    std::fs::read_to_string(doc_path).map_err(|e| e.to_string())
+}
+
 // ── App entry ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -319,6 +381,8 @@ pub fn run() {
             get_recommended_model,
             search_vault,
             get_related_chunks,
+            list_vault_files,
+            read_document,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
