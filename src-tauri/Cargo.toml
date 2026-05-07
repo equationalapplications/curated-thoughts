@@ -37,6 +37,12 @@ flate2 = "1"
 walkdir = "2"
 pdf-extract = "0.10.0"
 zip = "8.6.0"
+tree-sitter = { version = "0.26.8", default-features = false }
+tree-sitter-rust = { version = "0.24.2", default-features = false }
+tree-sitter-typescript = { version = "0.23.2", default-features = false }
+tree-sitter-javascript = { version = "0.25.0", default-features = false }
+tree-sitter-python = { version = "0.25.0", default-features = false }
+tree-sitter-go = { version = "0.25.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

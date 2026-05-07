@@ -3,7 +3,17 @@
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AstLang {
+    Rust,
+    TypeScript,
+    JavaScript,
+    Python,
+    Go,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkStrategy {
+    AstSymbol(AstLang),
     Prose,
     CodeLike,
     Declarative,
@@ -29,12 +39,24 @@ pub fn classify(path: &Path) -> ChunkStrategy {
     let ext = ext.to_ascii_lowercase();
     match ext.as_str() {
         "md" | "markdown" | "txt" | "rst" | "org" => ChunkStrategy::Prose,
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "rs" | "py" | "go" | "java"
-        | "kt" | "swift" | "c" | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "vue"
+        "rs" => ChunkStrategy::AstSymbol(AstLang::Rust),
+        "ts" | "tsx" => ChunkStrategy::AstSymbol(AstLang::TypeScript),
+        "js" | "jsx" | "mjs" | "cjs" => ChunkStrategy::AstSymbol(AstLang::JavaScript),
+        "py" => ChunkStrategy::AstSymbol(AstLang::Python),
+        "go" => ChunkStrategy::AstSymbol(AstLang::Go),
+        "java" | "kt" | "swift" | "c" | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "vue"
         | "svelte" => ChunkStrategy::CodeLike,
         "yaml" | "yml" | "json" | "jsonc" | "toml" | "xml" => ChunkStrategy::Declarative,
         _ => ChunkStrategy::Fallback,
     }
+}
+
+/// True when we must parse with the TSX grammar (`.tsx` sources).
+#[inline]
+pub fn path_uses_tsx(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("tsx"))
 }
 
 #[cfg(test)]
@@ -56,12 +78,48 @@ mod tests {
     }
 
     #[test]
-    fn code_extensions() {
-        assert_eq!(classify(&p("app.ts")), ChunkStrategy::CodeLike);
-        assert_eq!(classify(&p("ui.tsx")), ChunkStrategy::CodeLike);
-        assert_eq!(classify(&p("mod.rs")), ChunkStrategy::CodeLike);
-        assert_eq!(classify(&p("foo.jsx")), ChunkStrategy::CodeLike);
+    fn ast_symbol_extensions() {
+        assert_eq!(classify(&p("main.rs")), ChunkStrategy::AstSymbol(AstLang::Rust));
+        assert_eq!(
+            classify(&p("app.ts")),
+            ChunkStrategy::AstSymbol(AstLang::TypeScript)
+        );
+        assert_eq!(
+            classify(&p("ui.tsx")),
+            ChunkStrategy::AstSymbol(AstLang::TypeScript)
+        );
+        assert_eq!(
+            classify(&p("index.js")),
+            ChunkStrategy::AstSymbol(AstLang::JavaScript)
+        );
+        assert_eq!(
+            classify(&p("comp.jsx")),
+            ChunkStrategy::AstSymbol(AstLang::JavaScript)
+        );
+        assert_eq!(
+            classify(&p("util.mjs")),
+            ChunkStrategy::AstSymbol(AstLang::JavaScript)
+        );
+        assert_eq!(
+            classify(&p("mod.cjs")),
+            ChunkStrategy::AstSymbol(AstLang::JavaScript)
+        );
+        assert_eq!(
+            classify(&p("script.py")),
+            ChunkStrategy::AstSymbol(AstLang::Python)
+        );
+        assert_eq!(classify(&p("service.go")), ChunkStrategy::AstSymbol(AstLang::Go));
+    }
+
+    #[test]
+    fn scanner_extensions() {
+        assert_eq!(classify(&p("Main.java")), ChunkStrategy::CodeLike);
+        assert_eq!(classify(&p("App.kt")), ChunkStrategy::CodeLike);
+        assert_eq!(classify(&p("View.swift")), ChunkStrategy::CodeLike);
+        assert_eq!(classify(&p("main.c")), ChunkStrategy::CodeLike);
+        assert_eq!(classify(&p("main.cpp")), ChunkStrategy::CodeLike);
         assert_eq!(classify(&p("page.vue")), ChunkStrategy::CodeLike);
+        assert_eq!(classify(&p("comp.svelte")), ChunkStrategy::CodeLike);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod ast_symbol;
 mod classify;
 mod code_like;
 mod declarative;
@@ -5,7 +6,7 @@ mod fallback;
 mod limits;
 mod prose;
 
-pub use classify::{classify, should_ingest_extension, ChunkStrategy};
+pub use classify::{classify, path_uses_tsx, should_ingest_extension, AstLang, ChunkStrategy};
 
 use std::path::Path;
 
@@ -77,6 +78,11 @@ pub(super) fn split_oversized_block_spans(
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ChunkStrategyTag {
+    AstSymbolRust,
+    AstSymbolTypeScript,
+    AstSymbolJavaScript,
+    AstSymbolPython,
+    AstSymbolGo,
     Prose,
     Scanner,
     Declarative,
@@ -86,6 +92,11 @@ pub enum ChunkStrategyTag {
 impl ChunkStrategyTag {
     pub fn as_db_str(&self) -> &'static str {
         match self {
+            ChunkStrategyTag::AstSymbolRust => "ast_symbol_rust",
+            ChunkStrategyTag::AstSymbolTypeScript => "ast_symbol_typescript",
+            ChunkStrategyTag::AstSymbolJavaScript => "ast_symbol_javascript",
+            ChunkStrategyTag::AstSymbolPython => "ast_symbol_python",
+            ChunkStrategyTag::AstSymbolGo => "ast_symbol_go",
             ChunkStrategyTag::Prose => "prose",
             ChunkStrategyTag::Scanner => "scanner",
             ChunkStrategyTag::Declarative => "declarative",
@@ -127,6 +138,15 @@ pub fn chunk_autodetect(path: &Path, text: &str) -> Vec<Chunk> {
     }
 
     match strategy {
+        ChunkStrategy::AstSymbol(lang) => {
+            let use_tsx = path_uses_tsx(path);
+            let chunks = ast_symbol::chunk(lang, text, use_tsx);
+            if chunks.is_empty() {
+                code_like::chunk_code_like_chunks(text)
+            } else {
+                chunks
+            }
+        }
         ChunkStrategy::Prose => prose::chunk_prose_chunks(text),
         ChunkStrategy::CodeLike => code_like::chunk_code_like_chunks(text),
         ChunkStrategy::Declarative => declarative::chunk_declarative_chunks(path, text),
@@ -153,5 +173,26 @@ mod integration_tests {
         let text = "One two. Three four.";
         let a: Vec<String> = chunk_autodetect(&p, text).into_iter().map(|c| c.text).collect();
         assert_eq!(a, chunk_text(text));
+    }
+
+    #[test]
+    fn ast_symbol_tags_serialize() {
+        assert_eq!(
+            ChunkStrategyTag::AstSymbolRust.as_db_str(),
+            "ast_symbol_rust"
+        );
+        assert_eq!(
+            ChunkStrategyTag::AstSymbolTypeScript.as_db_str(),
+            "ast_symbol_typescript"
+        );
+        assert_eq!(
+            ChunkStrategyTag::AstSymbolJavaScript.as_db_str(),
+            "ast_symbol_javascript"
+        );
+        assert_eq!(
+            ChunkStrategyTag::AstSymbolPython.as_db_str(),
+            "ast_symbol_python"
+        );
+        assert_eq!(ChunkStrategyTag::AstSymbolGo.as_db_str(), "ast_symbol_go");
     }
 }
