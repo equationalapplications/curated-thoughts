@@ -46,8 +46,8 @@ fn retrieval_facade_semantic_search_readonly_stub() {
             }
 
             let conn = retrieval::open_brain_readonly(&paths.db_path).expect("readonly open");
-
-            let hits = retrieval::semantic_search_chunks(&conn, &paths.config_path, "q".into(), 10)
+            let profile = retrieval::load_embed_profile(&paths.config_path).unwrap();
+            let hits = retrieval::semantic_search_chunks(&conn, &profile, "q", 10)
                 .expect("semantic_search_chunks");
 
             assert_eq!(hits.len(), 1);

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::embedder::EmbedProfile;
+use crate::embedder::{embed_one, EmbedProfile};
 use crate::vault::VaultConfig;
 
 /// Re-exported for integration tests that seed a brain fixture (see `tests/retrieval_facade.rs`).
@@ -68,20 +68,25 @@ pub fn load_embed_profile(config_path: impl AsRef<Path>) -> Result<EmbedProfile>
 
 /// Opens the SQLite brain database read-only (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`).
 pub fn open_brain_readonly(db_path: &Path) -> Result<Connection> {
+    if !db_path.exists() {
+        anyhow::bail!(
+            "brain.db not found at {}; set CURATED_BRAIN_DIR or CURATED_BRAIN_DB",
+            db_path.display()
+        );
+    }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     Ok(Connection::open_with_flags(db_path, flags)?)
 }
 
+/// Embed query + cosine search (`search::semantic_search`) — mirrors Tauri `search_vault` semantics.
 pub fn semantic_search_chunks(
     conn: &Connection,
-    config_path: &Path,
-    query: String,
+    profile: &EmbedProfile,
+    query: &str,
     limit: usize,
 ) -> Result<Vec<crate::search::SearchResult>> {
-    let profile = load_embed_profile(config_path)?;
-    let query_vec = crate::embedder::embed_one(&profile, query)?;
-    let lim = limit.clamp(1, 50);
-    crate::search::semantic_search(conn, &query_vec, lim)
+    let query_vec = embed_one(profile, query.to_string())?;
+    crate::search::semantic_search(conn, &query_vec, limit.clamp(1, 50))
 }
 
 pub fn related_chunks_facade(
