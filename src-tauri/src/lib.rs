@@ -318,11 +318,8 @@ fn search_vault(
         .unwrap()
         .get_embed_profile()
         .map_err(|e| e.to_string())?;
-    let query_vec =
-        crate::embedder::embed_one(&profile, query).map_err(|e| e.to_string())?;
     let guard = db_state.0.lock().unwrap();
-    search::semantic_search(&guard.0, &query_vec, limit.clamp(1, 50))
-        .map_err(|e| e.to_string())
+    retrieval::semantic_search_chunks(&guard.0, &profile, &query, limit).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -332,8 +329,7 @@ fn get_related_chunks(
     db_state: State<DbState>,
 ) -> Result<Vec<search::SearchResult>, String> {
     let guard = db_state.0.lock().unwrap();
-    search::related_chunks(&guard.0, &doc_path, limit.clamp(1, 10))
-        .map_err(|e| e.to_string())
+    retrieval::related_chunks_facade(&guard.0, &doc_path, limit).map_err(|e| e.to_string())
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────
