@@ -54,7 +54,9 @@ impl VaultMcpServer {
         let limit = limit.unwrap_or(10);
         let conn = lock_conn(&self.conn)?;
         let hits = retrieval::semantic_search_chunks(&conn, &self.profile, &query, limit)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
+            })?;
         serde_json::to_string(&hits).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("json encode: {e}"), None)
         })
@@ -72,7 +74,9 @@ impl VaultMcpServer {
         let limit = limit.unwrap_or(5);
         let conn = lock_conn(&self.conn)?;
         let hits = retrieval::related_chunks_facade(&conn, &doc_path, limit)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
+            })?;
         serde_json::to_string(&hits).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("json encode: {e}"), None)
         })

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchResult {
     pub doc_path: String,
     pub chunk_text: String,
@@ -213,5 +213,40 @@ mod tests {
         let result = bytes_to_f32(&bytes);
         assert_eq!(result.len(), 1);
         assert!((result[0] - 1.0_f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn search_result_json_matches_frontend_contract() {
+        let r = SearchResult {
+            doc_path: "/a.md".into(),
+            chunk_text: "hello".into(),
+            chunk_position: 2,
+            score: 0.42_f32,
+            start_line: 1,
+            end_line: 3,
+            symbol_name: Some("foo".into()),
+            strategy: "prose".into(),
+        };
+        let v = serde_json::to_value(&r).expect("serialize");
+        for key in [
+            "doc_path",
+            "chunk_text",
+            "chunk_position",
+            "score",
+            "start_line",
+            "end_line",
+            "symbol_name",
+            "strategy",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "SearchResult JSON must include `{key}` for TS/MCP parity; got {v}"
+            );
+        }
+        let back: SearchResult =
+            serde_json::from_value(v).expect("round-trip SearchResult serde");
+        assert_eq!(back.doc_path, "/a.md");
+        assert_eq!(back.symbol_name.as_deref(), Some("foo"));
+        assert_eq!(back.strategy, "prose");
     }
 }

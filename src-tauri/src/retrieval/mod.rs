@@ -96,3 +96,65 @@ pub fn related_chunks_facade(
 ) -> Result<Vec<crate::search::SearchResult>> {
     crate::search::related_chunks(conn, doc_path, limit.clamp(1, 10))
 }
+
+/// Maps retrieval failures to MCP-friendly text with actionable hints (missing DB paths, SQLITE_BUSY,
+/// embedding connectivity).
+pub fn mcp_error_hint(err: &anyhow::Error) -> String {
+    let base = format!("{err:#}");
+    let lowered = base.to_lowercase();
+    let hint = if lowered.contains("brain.db not found")
+        || lowered.contains("curated_brain_dir")
+        || lowered.contains("curated_brain_db")
+    {
+        Some("Point CURATED_BRAIN_DIR at the folder that contains config.json and brain.db, or set CURATED_BRAIN_DB to the database file path.")
+    } else if lowered.contains("database is locked")
+        || lowered.contains("sqlite_busy")
+        || (lowered.contains("unable to open") && lowered.contains("locked"))
+    {
+        Some("Another process may be writing to the database (e.g. the desktop app). Close it or retry; read-only MCP access still contends if a writer holds the journal.")
+    } else if lowered.contains("/api/embed status")
+        || lowered.contains("ollama")
+        || ((lowered.contains("connection refused")
+            || lowered.contains("error sending request for url"))
+            && lowered.contains("11434"))
+    {
+        Some("Ensure Ollama is running (see OLLAMA_HOST) and the configured local embed model is available (e.g. ollama pull <model>).")
+    } else if lowered.contains("cloud embed not implemented") {
+        Some("This MCP build only resolves local Ollama embedding profiles.")
+    } else if lowered.contains("error sending request for url") {
+        Some("Embedding HTTP request failed; check reachability of the embedding service and TLS/network settings.")
+    } else {
+        None
+    };
+
+    hint.map(|h| format!("{base}\n\nHint: {h}")).unwrap_or(base)
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn hints_missing_db() {
+        let e = anyhow!("brain.db not found at /tmp/x; set CURATED_BRAIN_DIR or CURATED_BRAIN_DB");
+        assert!(mcp_error_hint(&e).contains("CURATED_BRAIN_DIR"));
+    }
+
+    #[test]
+    fn hints_sqlite_busy() {
+        assert!(mcp_error_hint(&anyhow!(
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ErrorCode::DatabaseBusy as i32),
+                Some("database is locked".into()),
+            )
+        ))
+        .contains("Another process"));
+    }
+
+    #[test]
+    fn hint_cloud_embed() {
+        let e = anyhow!("cloud embed not implemented");
+        assert!(mcp_error_hint(&e).contains("Ollama"));
+    }
+}
