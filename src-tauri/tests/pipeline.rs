@@ -1,8 +1,24 @@
 mod helpers;
+
+use std::sync::Mutex;
+
 use tauri_app_lib::{PipelineJob, PipelineWorker};
 use tempfile::TempDir;
 
+static PIPELINE_STUB_GUARD: Mutex<()> = Mutex::new(());
+
+struct StubUnset;
+impl Drop for StubUnset {
+    fn drop(&mut self) {
+        std::env::remove_var("CURATED_EMBED_STUB");
+    }
+}
+
 fn run_pipeline_job(tmp: &TempDir, jobs: Vec<PipelineJob>) {
+    let _stub_lock = PIPELINE_STUB_GUARD.lock().unwrap();
+    std::env::set_var("CURATED_EMBED_STUB", "constant8");
+    let _stub_cleanup = StubUnset;
+
     // make_test_app opens the DB (running migrations), then drops it immediately.
     drop(tauri_app_lib::make_test_app(tmp.path()));
 

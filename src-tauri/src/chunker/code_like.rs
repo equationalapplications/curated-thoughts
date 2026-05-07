@@ -1,6 +1,9 @@
 //! Brace/statement-aware splitting with comment and string awareness (no Tree-sitter).
 
-use super::limits::{code_overlap_lines, overlap_chars, target_chars};
+use super::{
+    limits::{code_overlap_lines, overlap_chars, target_chars},
+    lines_for_byte_span, split_oversized_block_spans, Chunk, ChunkStrategyTag,
+};
 
 #[derive(Clone, Copy)]
 enum State {
@@ -188,80 +191,176 @@ fn signature_prefix(prev_chunk: &str, lines: usize) -> String {
 }
 
 /// Chunk code-like sources using heuristic boundaries + small signature overlap.
+#[allow(dead_code)]
 pub(super) fn chunk_code_like(text: &str) -> Vec<String> {
-    let text = text.trim();
-    if text.is_empty() {
+    chunk_code_like_chunks(text)
+        .into_iter()
+        .map(|c| c.text)
+        .collect()
+}
+
+#[derive(Clone)]
+struct SegmentAcc {
+    buf: String,
+    lo: usize,
+    hi: usize,
+}
+
+fn span_lines_merged_gap(full: &str, lo: usize, hi: usize) -> (u32, u32) {
+    let hi_clip = hi.min(full.len());
+    let (sl, _) = lines_for_byte_span(full, lo, (lo + 1).min(full.len()));
+    let (_, el) = lines_for_byte_span(full, hi_clip.saturating_sub(1), hi_clip);
+    (sl, el.max(sl))
+}
+
+pub(super) fn chunk_code_like_chunks(text: &str) -> Vec<Chunk> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         return vec![];
     }
 
     let max_c = target_chars();
     let ov = overlap_chars();
     let sig_lines = code_overlap_lines();
+    let base = trimmed.as_ptr() as usize - text.as_ptr() as usize;
 
-    let boundaries = statement_boundary_offsets(text);
+    let boundaries = statement_boundary_offsets(trimmed);
     let mut cuts: Vec<usize> = vec![0];
-    cuts.extend(boundaries.into_iter().filter(|&p| p > 0 && p <= text.len()));
-    if cuts.last().copied().unwrap_or(0) < text.len() {
-        cuts.push(text.len());
+    cuts.extend(boundaries.into_iter().filter(|&p| p > 0 && p <= trimmed.len()));
+    if cuts.last().copied().unwrap_or(0) < trimmed.len() {
+        cuts.push(trimmed.len());
     }
     cuts.sort_unstable();
     cuts.dedup();
 
-    let mut raw: Vec<String> = Vec::new();
+    let mut raw: Vec<(String, usize, usize)> = Vec::new();
     for w in cuts.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let piece = text[a..b].trim();
-        if !piece.is_empty() {
-            raw.push(piece.to_string());
+        let slice = &trimmed[a..b];
+        let piece = slice.trim();
+        if piece.is_empty() {
+            continue;
         }
+        let off = slice.find(piece).expect("trimmed substring");
+        let lo = base + a + off;
+        let hi = lo + piece.len();
+        raw.push((piece.to_string(), lo, hi));
     }
 
     if raw.is_empty() {
-        return split_by_chars(text, max_c, ov);
+        return split_by_chars_chunks(text, trimmed, base, max_c, ov);
     }
 
-    let mut merged: Vec<String> = Vec::new();
-    let mut buf = String::new();
-    for piece in raw {
-        if buf.is_empty() {
-            buf = piece;
-            continue;
-        }
-        if buf.len() + 2 + piece.len() <= max_c {
-            buf.push_str("\n\n");
-            buf.push_str(&piece);
-        } else {
-            merged.push(buf);
-            buf = piece;
+    let mut merged: Vec<(String, usize, usize)> = Vec::new();
+    let mut cur: Option<SegmentAcc> = None;
+    for (piece, lo, hi) in raw {
+        match &mut cur {
+            None => {
+                cur = Some(SegmentAcc {
+                    buf: piece,
+                    lo,
+                    hi,
+                });
+            }
+            Some(acc) => {
+                if acc.buf.len() + 2 + piece.len() <= max_c {
+                    acc.buf.push_str("\n\n");
+                    acc.buf.push_str(&piece);
+                    acc.hi = hi;
+                } else {
+                    let done = cur.take().unwrap();
+                    merged.push((done.buf, done.lo, done.hi));
+                    cur = Some(SegmentAcc {
+                        buf: piece,
+                        lo,
+                        hi,
+                    });
+                }
+            }
         }
     }
-    if !buf.is_empty() {
-        merged.push(buf);
+    if let Some(done) = cur {
+        merged.push((done.buf, done.lo, done.hi));
     }
 
-    let mut out: Vec<String> = Vec::new();
-    for (idx, chunk) in merged.into_iter().enumerate() {
-        let mut s = chunk;
+    let mut out: Vec<(String, usize, usize, bool)> = Vec::new();
+    for (idx, (mut chunk_s, mut lo, hi)) in merged.into_iter().enumerate() {
+        let mut merged_gap = false;
         if idx > 0 {
-            let prev = out.last().unwrap();
-            let sig = signature_prefix(prev, sig_lines);
+            let (prev_t, prev_lo, _, _) = out.last().unwrap();
+            let sig = signature_prefix(prev_t, sig_lines);
             let tail = if sig.is_empty() {
-                tail_overlap_chars(prev, ov)
+                tail_overlap_chars(prev_t, ov)
             } else {
                 sig
             };
-            if !tail.is_empty() && !s.contains(tail.trim()) {
-                s = format!("{tail}\n{s}");
+            let ttrim = tail.trim();
+            if !ttrim.is_empty() && !chunk_s.contains(ttrim) {
+                let merged_txt = format!("{tail}\n{chunk_s}");
+                if merged_txt.len() <= max_c.saturating_mul(2) {
+                    if let Some(i) = prev_t.rfind(ttrim) {
+                        lo = prev_lo + i;
+                        merged_gap = true;
+                        chunk_s = merged_txt;
+                    }
+                }
             }
         }
-        if s.len() > max_c.saturating_mul(2) {
-            out.extend(split_by_chars(&s, max_c, ov));
+
+        if chunk_s.len() > max_c.saturating_mul(2) {
+            let pieces =
+                split_oversized_block_spans(&chunk_s, lo.max(base), max_c, ov);
+            let split_merged_gap = merged_gap && pieces.len() > 1;
+            for (p, pl, ph) in pieces {
+                out.push((p, pl, ph, split_merged_gap));
+            }
         } else {
-            out.push(s);
+            out.push((chunk_s, lo, hi, merged_gap));
         }
     }
 
-    out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    out.into_iter()
+        .map(|(piece, lo, hi, merged_gap)| {
+            let hi_c = hi.min(text.len());
+            let (start_line, end_line) = if merged_gap {
+                span_lines_merged_gap(text, lo, hi_c)
+            } else {
+                lines_for_byte_span(text, lo, hi_c)
+            };
+            Chunk {
+                text: piece.trim().to_string(),
+                start_line,
+                end_line,
+                symbol_name: None,
+                strategy: ChunkStrategyTag::Scanner,
+            }
+        })
+        .filter(|c| !c.text.is_empty())
+        .collect()
+}
+
+fn split_by_chars_chunks(
+    source: &str,
+    trimmed: &str,
+    trimmed_base: usize,
+    max_c: usize,
+    ov: usize,
+) -> Vec<Chunk> {
+    split_oversized_block_spans(trimmed, trimmed_base, max_c, ov)
+        .into_iter()
+        .map(|(piece, lo, hi)| {
+            let hi_c = hi.min(source.len());
+            let (start_line, end_line) = lines_for_byte_span(source, lo, hi_c);
+            Chunk {
+                text: piece,
+                start_line,
+                end_line,
+                symbol_name: None,
+                strategy: ChunkStrategyTag::Scanner,
+            }
+        })
+        .filter(|c| !c.text.is_empty())
+        .collect()
 }
 
 fn tail_overlap_chars(s: &str, ov: usize) -> String {
@@ -279,35 +378,6 @@ fn tail_overlap_chars(s: &str, ov: usize) -> String {
         }
     }
     s[start..].trim_start().to_string()
-}
-
-fn split_by_chars(block: &str, max_c: usize, overlap: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    while start < block.len() {
-        let mut end = (start + max_c).min(block.len());
-        if end < block.len() {
-            let slice = &block[start..end];
-            if let Some(rel) = slice.rfind('\n') {
-                end = start + rel + 1;
-            }
-        }
-        let piece = block[start..end].trim();
-        if !piece.is_empty() {
-            out.push(piece.to_string());
-        }
-        if end >= block.len() {
-            break;
-        }
-        start = end.saturating_sub(overlap);
-        while start < block.len() && !block.is_char_boundary(start) {
-            start += 1;
-        }
-        if start >= end {
-            start = end;
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -43,6 +43,10 @@ export interface SearchResult {
   chunk_text: string;
   chunk_position: number;
   score: number;
+  start_line: number;
+  end_line: number;
+  symbol_name: string | null;
+  strategy: string;
 }
 
 export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> =>

@@ -1,5 +1,7 @@
 //! Sentence-aware chunking with neighbor-sentence padding for embeddings.
 
+use super::{lines_for_byte_span, Chunk, ChunkStrategyTag};
+
 const TARGET_WORDS: usize = 100;
 
 fn word_count(s: &str) -> usize {
@@ -112,6 +114,65 @@ pub(super) fn split_sentences(text: &str) -> Vec<&str> {
     out.into_iter().filter(|s| !s.is_empty()).collect()
 }
 
+/// Sentence boundaries as byte spans within `inner` (trimmed source body).
+pub(super) fn sentence_byte_spans(inner: &str) -> Vec<(usize, usize)> {
+    let text = inner.trim();
+    if text.is_empty() {
+        return vec![];
+    }
+
+    let mut spans = Vec::new();
+    let mut sent_start = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if !matches!(ch, '.' | '!' | '?') {
+            continue;
+        }
+        if !ends_sentence(text, byte_idx, ch) {
+            continue;
+        }
+
+        let punct_end = byte_idx + ch.len_utf8();
+        let raw = text.get(sent_start..punct_end).unwrap_or("");
+        let trimmed_seg = raw.trim();
+        if !trimmed_seg.is_empty() {
+            let off = raw
+                .find(trimmed_seg)
+                .expect("trimmed sentence must appear in raw segment");
+            let lo = sent_start + off;
+            let hi = lo + trimmed_seg.len();
+            spans.push((lo, hi));
+        }
+
+        let after = text.get(punct_end..).unwrap_or("");
+        sent_start = punct_end
+            + after
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(char::len_utf8)
+                .sum::<usize>();
+    }
+
+    if sent_start < text.len() {
+        let tail = text.get(sent_start..).unwrap_or("").trim();
+        if !tail.is_empty() {
+            let raw = text.get(sent_start..).unwrap_or("");
+            let off = raw
+                .find(tail)
+                .expect("trimmed tail must appear in slice");
+            spans.push((sent_start + off, sent_start + off + tail.len()));
+        }
+    }
+
+    spans
+}
+
+/// Byte range in `full_text` covered by contiguous `inner`, plus span within `inner`.
+#[inline]
+fn absolute_span(_full_text: &str, base: usize, inner_range: (usize, usize)) -> (usize, usize) {
+    (base + inner_range.0, base + inner_range.1)
+}
+
 /// Core groups by word count; then add prev/next sentence padding for embedding text.
 pub(super) fn chunk_prose(text: &str) -> Vec<String> {
     let sentences: Vec<&str> = split_sentences(text);
@@ -153,6 +214,80 @@ pub(super) fn chunk_prose(text: &str) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Same grouping as [`chunk_prose`], emitting [`Chunk`] with line spans across contributing sentences.
+pub(super) fn chunk_prose_chunks(text: &str) -> Vec<Chunk> {
+    let strings = chunk_prose(text);
+    if strings.is_empty() {
+        return vec![];
+    }
+
+    let trimmed_body = text.trim();
+    let base = trimmed_body.as_ptr() as usize - text.as_ptr() as usize;
+    let spans = sentence_byte_spans(trimmed_body);
+    let sentences: Vec<&str> = split_sentences(text);
+    assert_eq!(
+        sentences.len(),
+        spans.len(),
+        "sentence strings and span table must stay aligned"
+    );
+
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut cur_start = 0usize;
+    let mut acc_words = 0usize;
+
+    for (i, s) in sentences.iter().enumerate() {
+        acc_words += word_count(s);
+        if acc_words >= TARGET_WORDS {
+            groups.push(cur_start..i + 1);
+            cur_start = i + 1;
+            acc_words = 0;
+        }
+    }
+
+    if cur_start < sentences.len() {
+        groups.push(cur_start..sentences.len());
+    }
+
+    let n = groups.len();
+    let mut out = Vec::with_capacity(n);
+    for (gi, r) in groups.iter().enumerate() {
+        let mut parts: Vec<&str> = Vec::new();
+        if gi > 0 {
+            parts.push(sentences[r.start - 1].trim());
+        }
+        for idx in r.clone() {
+            parts.push(sentences[idx].trim());
+        }
+        if gi < n - 1 {
+            parts.push(sentences[r.end].trim());
+        }
+        let joined = parts.join(" ");
+
+        let idx_lo = if gi > 0 { r.start - 1 } else { r.start };
+        let idx_hi = if gi < n - 1 { r.end } else { r.end - 1 };
+        let byte_lo_sp = absolute_span(text, base, spans[idx_lo]);
+        let byte_hi_sp = absolute_span(text, base, spans[idx_hi]);
+        let (start_line, _) = lines_for_byte_span(text, byte_lo_sp.0, byte_lo_sp.1);
+        let (_, end_line) = lines_for_byte_span(text, byte_hi_sp.0, byte_hi_sp.1);
+
+        out.push(Chunk {
+            text: joined,
+            start_line,
+            end_line,
+            symbol_name: None,
+            strategy: ChunkStrategyTag::Prose,
+        });
+    }
+
+    // Preserve exact text parity with legacy `chunk_prose` outputs
+    debug_assert_eq!(
+        strings,
+        out.iter().map(|c| c.text.clone()).collect::<Vec<_>>()
+    );
+
+    out
 }
 
 #[cfg(test)]

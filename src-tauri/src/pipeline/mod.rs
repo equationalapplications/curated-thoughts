@@ -11,7 +11,8 @@ use crate::db::queries::{
     delete_document, delete_document_chunks, get_document_by_path, insert_chunk,
     insert_embedding, mark_document_error, mark_document_indexed, upsert_document,
 };
-use crate::embedder::Embedder;
+use crate::embedder::embed_batch;
+use crate::vault::VaultConfig;
 use crate::hasher::hash_bytes;
 
 #[derive(Debug, Clone)]
@@ -31,13 +32,17 @@ impl PipelineWorker {
     }
 
     pub fn run(self) {
-        let embedder = match Embedder::new() {
-            Ok(e) => e,
-            Err(err) => {
-                eprintln!("[pipeline] embedder init failed: {err}");
-                return;
-            }
-        };
+        let config_path = self
+            .db_path
+            .parent()
+            .map(|p| p.join("config.json"))
+            .unwrap_or_else(|| PathBuf::from("config.json"));
+        let profile = VaultConfig::new(config_path)
+            .get_embed_profile()
+            .unwrap_or_else(|err| {
+                eprintln!("[pipeline] failed to read embed_profile: {err}, using default");
+                crate::embedder::EmbedProfile::default()
+            });
         let conn = match Connection::open(&self.db_path) {
             Ok(c) => c,
             Err(err) => {
@@ -60,7 +65,7 @@ impl PipelineWorker {
                             .parent()
                             .and_then(|p| p.parent())
                             .map(|p| p.to_path_buf());
-                        match ingest_file(&conn, &embedder, &path) {
+                        match ingest_file(&conn, &profile, &path) {
                             Ok(()) => {
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &conn,
@@ -207,7 +212,11 @@ fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
     }
 }
 
-fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()> {
+fn ingest_file(
+    conn: &Connection,
+    profile: &crate::embedder::EmbedProfile,
+    path: &str,
+) -> Result<()> {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -239,7 +248,9 @@ fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()>
         return Ok(());
     }
 
-    let embeddings = embedder.embed(chunks.clone()).map_err(|e| {
+    let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+
+    let embeddings = embed_batch(profile, texts).map_err(|e| {
         let _ = mark_document_error(conn, doc_id);
         e
     })?;

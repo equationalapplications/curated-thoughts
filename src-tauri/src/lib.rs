@@ -14,7 +14,6 @@ mod watcher;
 use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use db::AppDb;
-use embedder::Embedder;
 use chunker::should_ingest_extension;
 use pipeline::start_pipeline;
 #[cfg(not(feature = "test-utils"))]
@@ -30,7 +29,6 @@ use watcher::{start_watcher, VaultEvent};
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
-struct WikiEmbedder(Mutex<Option<Embedder>>);
 
 // ── Vault commands ────────────────────────────────────────────────────────────
 
@@ -241,15 +239,14 @@ fn wiki_get_first(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -
 // ── Embed text (for wiki llmProvider.embed) ───────────────────────────────────
 
 #[tauri::command]
-fn embed_text(text: String, embedder_state: State<WikiEmbedder>) -> Result<Vec<f32>, String> {
-    let mut guard = embedder_state.0.lock().unwrap();
-    if guard.is_none() {
-        *guard = Some(Embedder::new().map_err(|e| e.to_string())?);
-    }
-    guard.as_ref().unwrap()
-        .embed(vec![text])
-        .map_err(|e| e.to_string())
-        .map(|mut vecs| vecs.drain(..).next().unwrap_or_default())
+fn embed_text(text: String, cfg: State<VaultConfigState>) -> Result<Vec<f32>, String> {
+    let profile = cfg
+        .0
+        .lock()
+        .unwrap()
+        .get_embed_profile()
+        .map_err(|e| e.to_string())?;
+    crate::embedder::embed_one(&profile, text).map_err(|e| e.to_string())
 }
 
 // ── Ollama generate (for wiki llmProvider.generateText) ───────────────────────
@@ -312,22 +309,16 @@ fn search_vault(
     query: String,
     limit: usize,
     db_state: State<DbState>,
-    embedder_state: State<WikiEmbedder>,
+    cfg: State<VaultConfigState>,
 ) -> Result<Vec<search::SearchResult>, String> {
-    let query_vec = {
-        let mut guard = embedder_state.0.lock().unwrap();
-        if guard.is_none() {
-            *guard = Some(Embedder::new().map_err(|e| e.to_string())?);
-        }
-        guard
-            .as_ref()
-            .unwrap()
-            .embed(vec![query])
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next()
-            .unwrap_or_default()
-    };
+    let profile = cfg
+        .0
+        .lock()
+        .unwrap()
+        .get_embed_profile()
+        .map_err(|e| e.to_string())?;
+    let query_vec =
+        crate::embedder::embed_one(&profile, query).map_err(|e| e.to_string())?;
     let guard = db_state.0.lock().unwrap();
     search::semantic_search(&guard.0, &query_vec, limit.clamp(1, 50))
         .map_err(|e| e.to_string())
@@ -637,7 +628,6 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
         .manage(DbState(std::sync::Mutex::new(db)))
         .manage(VaultConfigState(std::sync::Mutex::new(config)))
         .manage(PipelineTx(std::sync::Mutex::new(tx)))
-        .manage(WikiEmbedder(std::sync::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -678,7 +668,6 @@ pub fn run() {
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineTx(Mutex::new(pipeline_tx)))
-        .manage(WikiEmbedder(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,

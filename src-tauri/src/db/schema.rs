@@ -74,3 +74,12 @@ ALTER TABLE wiki_pages_new RENAME TO wiki_pages;
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (3);
 ";
+
+pub const MIGRATION_V4: &str = "
+ALTER TABLE chunks ADD COLUMN start_line   INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE chunks ADD COLUMN end_line     INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE chunks ADD COLUMN symbol_name  TEXT;
+ALTER TABLE chunks ADD COLUMN strategy     TEXT NOT NULL DEFAULT 'prose';
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (4);
+";

@@ -8,6 +8,10 @@ pub struct SearchResult {
     pub chunk_text: String,
     pub chunk_position: i64,
     pub score: f32,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub symbol_name: Option<String>,
+    pub strategy: String,
 }
 
 pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -36,7 +40,8 @@ pub fn semantic_search(
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
     let mut stmt = conn.prepare(
-        "SELECT e.vector, c.chunk_text, c.position, d.path
+        "SELECT e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
+         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -50,10 +55,31 @@ pub fn semantic_search(
         let bytes: Vec<u8> = row.get(0)?;
         let chunk_text: String = row.get(1)?;
         let chunk_position: i64 = row.get(2)?;
-        let doc_path: String = row.get(3)?;
+        let start_line: i64 = row.get(3)?;
+        let end_line: i64 = row.get(4)?;
+        let symbol_str: String = row.get(5)?;
+        let strategy: String = row.get(6)?;
+        let doc_path: String = row.get(7)?;
         let vec = bytes_to_f32(&bytes);
         let score = cosine_similarity(query_vec, &vec);
-        results.push((score, SearchResult { doc_path, chunk_text, chunk_position, score }));
+        let symbol_name = if symbol_str.is_empty() {
+            None
+        } else {
+            Some(symbol_str)
+        };
+        results.push((
+            score,
+            SearchResult {
+                doc_path,
+                chunk_text,
+                chunk_position,
+                score,
+                start_line,
+                end_line,
+                symbol_name,
+                strategy,
+            },
+        ));
     }
 
     results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -96,7 +122,8 @@ pub fn related_chunks(
     avg.iter_mut().for_each(|x| *x /= n);
 
     let mut stmt = conn.prepare(
-        "SELECT e.vector, c.chunk_text, c.position, d.path
+        "SELECT e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
+         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -110,15 +137,31 @@ pub fn related_chunks(
         let bytes: Vec<u8> = row.get(0)?;
         let chunk_text: String = row.get(1)?;
         let chunk_position: i64 = row.get(2)?;
-        let doc_path_r: String = row.get(3)?;
+        let start_line: i64 = row.get(3)?;
+        let end_line: i64 = row.get(4)?;
+        let symbol_str: String = row.get(5)?;
+        let strategy: String = row.get(6)?;
+        let doc_path_r: String = row.get(7)?;
         let vec = bytes_to_f32(&bytes);
         let score = cosine_similarity(&avg, &vec);
-        results.push((score, SearchResult {
-            doc_path: doc_path_r,
-            chunk_text,
-            chunk_position,
+        let symbol_name = if symbol_str.is_empty() {
+            None
+        } else {
+            Some(symbol_str)
+        };
+        results.push((
             score,
-        }));
+            SearchResult {
+                doc_path: doc_path_r,
+                chunk_text,
+                chunk_position,
+                score,
+                start_line,
+                end_line,
+                symbol_name,
+                strategy,
+            },
+        ));
     }
 
     results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));

@@ -35,6 +35,8 @@ cargo test --features "test-utils,slow-tests" --test yaml_bench_synthetic -- --n
 
 ## Embedding artifacts
 
+Production vault ingest / `search_vault` use **Ollama** with the vault `embed_profile` (default **local** model `nomic-embed-code`). The SciFact + YAML/code Recall harnesses remain on **FastEmbed** `Embedder` and **frozen gzip** vectors at **384-d**; do not route those benches through Ollama. Pipeline integration tests set **`CURATED_EMBED_STUB=constant8`** so `embed_batch` returns small dummy vectors without a local Ollama.
+
 Precomputed corpus vectors live next to each fixture under `src-tauri/tests/fixtures/<suite>/`. Filenames are defined in:
 
 - `src-tauri/src/scifact_fixture.rs`
@@ -47,3 +49,4 @@ Regeneration (when intentionally refreshing vectors) is documented in those modu
 | Date       | File                                   |
 |-----------|----------------------------------------|
 | 2026-05-07 | [2026-05-07-recall-benchmarks.md](./2026-05-07-recall-benchmarks.md) |
+| 2026-05-07 | [2026-05-07-recall-benchmarks-v2.md](./2026-05-07-recall-benchmarks-v2.md) (rerun, `bbd2b97`) |
