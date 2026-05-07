@@ -9,9 +9,10 @@
 
 ## 1. Goals
 
-- Coding agents get symbol-level retrieval — queries for a function name or concept return the full symbol body with exact file + line range.
+- Coding agents get symbol-level retrieval — queries for a **known symbol name** ("what does `ingest_file` do?") and **concept queries** ("how does authentication work?") both return focused, relevant chunks with exact file + line range.
+- Works across repo scales from small (< 50k lines) to large (50k–500k lines) without configuration changes.
 - Mixed codebases (Rust, TS, YAML, Markdown) work without configuration.
-- Privacy-first: fully local by default (`nomic-embed-code` via Ollama); cloud providers optional per vault.
+- Privacy-first: fully offline by default (`nomic-embed-code` via Ollama, user controls all data); cloud providers optional per vault at user's discretion.
 - Clean schema break (no existing users); old chunks re-index naturally on next file change.
 
 ## 2. Non-Goals
@@ -20,6 +21,7 @@
 - No folder_rules coupling for chunk presets.
 - No wiki/fact extraction (scheduled for immediately after this ships).
 - No perfect classification for polyglot files (`.vue`, `.svelte`) — Scanner fallback is acceptable.
+- No prose-vault optimization mode. V2 is explicitly code-first. Pure prose vaults (personal notes, essays) are v1's domain. `nomic-embed-code` performs well on technical prose (READMEs, docstrings, ADRs) — the degradation vs. a general embedder is small for content that lives alongside code. A vault-level mode can be added in v3 if needed.
 
 ---
 
