@@ -177,6 +177,15 @@ impl ScifactFixtures {
 | Integration tests | `cargo test` | All assertions pass |
 | SciFact benchmark | `cargo test --features slow-tests` | Recall@10 ≥ 0.60 |
 
+### SciFact Benchmark Baseline History
+
+| Chunker | Recall@10 | Notes |
+|---------|-----------|-------|
+| Fixed-word sliding window (180 words, 20-word overlap) | 0.823 | Pre-sentence-chunker baseline; 5,183 single-chunk docs |
+| Sentence-aware + neighbor padding (`TARGET_WORDS=100`) | ≥ 0.85 (expected) | Implemented 2026-05-06; assertion threshold kept at 0.60 pending stable results |
+
+Raise assertion threshold to 0.80 once sentence-chunker results are confirmed stable across runs.
+
 ---
 
 ## Out of Scope
