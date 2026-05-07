@@ -15,6 +15,7 @@ use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use db::AppDb;
 use embedder::Embedder;
+use chunker::should_ingest_extension;
 use pipeline::start_pipeline;
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
@@ -100,7 +101,7 @@ fn start_file_watcher(
                 .filter(|e| e.file_type().is_file())
             {
                 let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
-                if matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx") {
+                if should_ingest_extension(ext) {
                     let _ = tx.try_send(PipelineJob::Ingest(
                         entry.path().to_string_lossy().into_owned(),
                     ));
@@ -371,7 +372,7 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             .filter(|e| e.file_type().is_file())
             .filter(|e| {
                 let ext = e.path().extension().and_then(|s| s.to_str()).unwrap_or("");
-                matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx")
+                should_ingest_extension(ext)
             });
 
         for entry in walker {
