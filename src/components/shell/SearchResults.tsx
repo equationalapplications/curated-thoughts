@@ -19,6 +19,17 @@ export function SearchResults({ results, onSelect }: Props) {
             {r.doc_path.split("/").at(-1)}:{r.start_line}
             {r.end_line !== r.start_line ? `–${r.end_line}` : ""}
           </span>
+          <span className="search-result-meta" aria-label="chunk metadata">
+            <span className="result-chip result-chip--strategy">{r.strategy}</span>
+            <span className="result-chip result-chip--score">
+              {(r.score * 100).toFixed(0)}% match
+            </span>
+            {r.symbol_name ? (
+              <span className="result-chip result-chip--symbol" title={r.symbol_name}>
+                {r.symbol_name}
+              </span>
+            ) : null}
+          </span>
           <span className="search-result-snippet">
             {r.chunk_text.slice(0, 120)}…
           </span>

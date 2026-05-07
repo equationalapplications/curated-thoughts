@@ -8,7 +8,6 @@ use rmcp::{
     transport::{ConfigureCommandExt, TokioChildProcess},
     ServiceExt,
 };
-use serde_json::Value as JsonVal;
 use temp_env::with_vars;
 use tempfile::tempdir;
 
@@ -17,6 +16,7 @@ use tauri_app_lib::embedder::{embed_one, EmbedProfile};
 use tauri_app_lib::retrieval::{
     self, insert_chunk, insert_embedding, mark_document_indexed, upsert_document, AppDb,
 };
+use tauri_app_lib::search::SearchResult;
 
 fn mcp_exe() -> PathBuf {
     for key in [
@@ -151,11 +151,15 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
         .await
         .expect("call_tool semantic");
     let text = first_text_hit(&res);
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&text).expect("tool returns JSON SearchResult array");
+    let parsed: Vec<SearchResult> =
+        serde_json::from_str(&text).expect("tool returns JSON SearchResult array (Tauri/MCP contract)");
     assert!(
-        parsed.iter().any(|row| row.get("symbol_name").and_then(JsonVal::as_str) == Some("mcp_sym")),
+        parsed.iter().any(|row| row.symbol_name.as_deref() == Some("mcp_sym")),
         "semantic JSON missing mcp_sym: {text:?}"
+    );
+    assert!(
+        parsed.iter().any(|row| !row.strategy.is_empty()),
+        "semantic JSON should include chunk strategy: {text:?}"
     );
 
     let rel_args = serde_json::json!({
@@ -173,12 +177,12 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
         .await
         .expect("call_tool related");
     let rel_text = first_text_hit(&rel);
-    let rel_parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&rel_text).expect("related returns JSON array");
+    let rel_parsed: Vec<SearchResult> =
+        serde_json::from_str(&rel_text).expect("related returns SearchResult array (Tauri/MCP contract)");
     assert!(
-        rel_parsed.iter().any(|row| {
-            row.get("doc_path").and_then(JsonVal::as_str) == Some("/fixtures/mcp_other.md")
-        }),
+        rel_parsed
+            .iter()
+            .any(|row| row.doc_path == "/fixtures/mcp_other.md"),
         "related should rank chunks from the other fixtures doc; got {rel_text:?}"
     );
 
