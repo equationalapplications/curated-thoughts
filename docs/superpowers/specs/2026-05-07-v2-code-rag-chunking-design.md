@@ -65,7 +65,23 @@ Classifier is a pure function: `classify(path: &Path) -> Strategy`. No I/O, no c
 
 ---
 
-## 5. Chunk Struct
+## 5. Word-Count Budgets
+
+Chunks are sized in words (whitespace-split). No tokenizer dependency in v2 — word count is a fast, dependency-free proxy (~0.75 words per token for code; close enough for local embedding models). Precise tokenization is deferred to when cloud providers ship, as they have tighter hard limits.
+
+| Strategy | Word budget | Split behavior when exceeded |
+|----------|-------------|------------------------------|
+| `AstSymbol` | 400 | Split at inner method/function boundaries within the symbol; never mid-statement |
+| `Scanner` | 200 | Split at nearest indent-0 boundary |
+| `Declarative` | 150 | Split at next top-level key or table boundary |
+| `Prose` | 100 | Current sentence-group behavior |
+| `Fallback` | 100 | Split at nearest blank line |
+
+Minimum chunk size: 20 words. Chunks below this merge with the next sibling rather than being stored as micro-chunks.
+
+---
+
+## 6. Chunk Struct
 
 ```rust
 pub struct Chunk {
@@ -81,9 +97,9 @@ All chunkers return `Vec<Chunk>`. The pipeline stores `start_line`, `end_line`, 
 
 ---
 
-## 6. Strategy Behavior
+## 7. Strategy Behavior
 
-### 6.1 AstSymbol
+### 7.1 AstSymbol
 
 Tree-sitter parses the file for the target language. Top-level symbols become chunks:
 
@@ -94,38 +110,36 @@ Tree-sitter parses the file for the target language. Top-level symbols become ch
 
 **Method/associated fn chunks** prepend the parent scope signature as a single line prefix (e.g. `impl PipelineWorker {`) so the embedding captures the type relationship without duplicating the full parent body.
 
-**Small symbol merging:** symbols under 20 tokens merge with the next sibling to avoid micro-chunks (e.g. a one-line `const` pairs with the following `fn`).
-
 **Line ranges** come directly from Tree-sitter node `start_position().row` / `end_position().row` — no heuristics.
 
 **Unsupported language fallback:** if Tree-sitter parse fails or returns zero top-level nodes, fall through to Scanner for that file.
 
-### 6.2 Scanner
+### 7.2 Scanner
 
 Brace-depth + indentation scanner. Attempts cuts at statement/declaration boundaries. No parser dependency. Line ranges derived by counting newlines in the accumulated text buffer as chunks are emitted.
 
 Known limitation: cannot correctly handle template literals, JSX, or heredocs — these are acceptable false cuts for unsupported languages.
 
-### 6.3 Declarative
+### 7.3 Declarative
 
 - **YAML:** split on `---` document boundaries, then on top-level keys (column-0 or consistent indent root); group short list items. Symbol name = top-level key.
 - **JSON/JSONC:** split on top-level array elements or object keys by tracking character depth. Symbol name = key string.
 - **TOML:** split on `[table]` / `[[table]]` boundaries. Symbol name = table header.
 - **XML:** split on top-level element boundaries.
 
-Size cap + small overlap between adjacent blocks when a block exceeds the token budget. Line ranges tracked by scanning newlines as boundaries are found.
+Size cap + small overlap between adjacent blocks when a block exceeds the word budget (§5). Line ranges tracked by scanning newlines as boundaries are found.
 
-### 6.4 Prose
+### 7.4 Prose
 
 Existing sentence-aware chunker with neighbor-sentence padding. Line ranges added by scanning the input for each chunk's byte range and counting preceding newlines. Symbol name is always `None`.
 
-### 6.5 Fallback
+### 7.5 Fallback
 
 Blank-line / paragraph-like splits + max segment cap + small overlap. No sentence heuristics. Line ranges by newline scan. Suitable for LICENSE, extensionless configs, unknown formats.
 
 ---
 
-## 7. Embedding Model
+## 8. Embedding Model
 
 ### EmbedProfile
 
@@ -146,7 +160,7 @@ Default for all new vaults: `Local { model: "nomic-embed-code" }`.
 
 ---
 
-## 8. Schema Migration (V4)
+## 9. Schema Migration (V4)
 
 ```sql
 ALTER TABLE chunks ADD COLUMN start_line   INTEGER;
@@ -161,7 +175,7 @@ Old chunks get `start_line = NULL` / `end_line = NULL`. They re-index on next fi
 
 ---
 
-## 9. MCP Server Response
+## 10. MCP Server Response
 
 Each search result includes:
 
@@ -181,7 +195,7 @@ Each search result includes:
 
 ---
 
-## 10. Testing
+## 11. Testing
 
 | Layer | Required Cases |
 |-------|---------------|
@@ -201,7 +215,7 @@ Each search result includes:
 
 ---
 
-## 11. Milestones
+## 12. Milestones
 
 | # | Scope |
 |---|-------|
@@ -214,7 +228,7 @@ Each search result includes:
 
 ---
 
-## 12. Risks / Mitigations
+## 13. Risks / Mitigations
 
 | Risk | Mitigation |
 |------|------------|
@@ -226,7 +240,7 @@ Each search result includes:
 
 ---
 
-## 13. Future Work (Out of Scope)
+## 14. Future Work (Out of Scope)
 
 - **Wiki fact extraction:** atomic claims from prose chunks, LLM-generated tags, librarian reconciliation — next spec after this ships.
 - **Vault-level strategy override:** force a folder to use a specific strategy via folder_rules.
