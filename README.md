@@ -84,6 +84,56 @@ npm run tauri dev
 npm run build
 ```
 
+## MCP agent server (experimental)
+
+The crate can expose a **stdio** [Model Context Protocol](https://modelcontextprotocol.io/) server for local agents. It reads the same brain layout as the desktop app (SQLite chunks and embeddings).
+
+### Build
+
+From `src-tauri/`:
+
+```bash
+cargo build -p curated-thoughts --features mcp-server --bin curated-thoughts-mcp
+```
+
+With the manifest at `src-tauri/Cargo.toml`, Cargo’s default target directory is **`src-tauri/target`**. After a debug build, the binary is:
+
+- **`src-tauri/target/debug/curated-thoughts-mcp`** (from the repo root), or
+- **`target/debug/curated-thoughts-mcp`** when your working directory is `src-tauri/`.
+
+### Environment
+
+| Variable | Purpose |
+| --- | --- |
+| **`CURATED_BRAIN_DIR`** | Brain home directory (expects `brain.db` and `config.json` there). If unset, defaults to **`~/.brain`** (`$HOME/.brain`), same as the app. |
+| **`CURATED_BRAIN_DB`** | Optional explicit path to `brain.db` instead of `{brain_dir}/brain.db`. |
+| **`CURATED_BRAIN_CONFIG`** | Optional explicit path to `config.json` when it is not beside the resolved DB. |
+
+### Security
+
+This is a **local stdio** server: any client you attach can invoke tools that return **indexed chunk text and metadata** from your brain database. Treat the MCP process and its environment as part of your **trust boundary**; do not point it at sensitive data you would not show to the agent.
+
+### Embeddings stub
+
+**`CURATED_EMBED_STUB`** is for **tests and local harnesses only** (deterministic fake vectors). **Do not** enable it for production agent workloads where retrieval quality matters.
+
+### Cursor / VS Code `mcpServers` snippet
+
+Adjust the `command` path to your clone and build output:
+
+```json
+{
+  "mcpServers": {
+    "curated-thoughts": {
+      "command": "/path/to/curated-thoughts/src-tauri/target/debug/curated-thoughts-mcp",
+      "env": {
+        "CURATED_BRAIN_DIR": "/path/to/your/brain"
+      }
+    }
+  }
+}
+```
+
 ## Recommended IDE setup
 
 - [VS Code](https://code.visualstudio.com/)

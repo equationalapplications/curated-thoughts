@@ -1,6 +1,6 @@
 # Integration tests
 
-Rust integration tests in this crate live next to `src/` (see [Cargo’s test layout](https://doc.rust-lang.org/cargo/guide/tests.html)). Many tests need the `test-utils` feature; recall benchmarks (SciFact, YAML/code) additionally need `slow-tests` and load the embedder (SciFact full runs are several minutes; YAML/code suites are smaller).
+Rust integration tests in this crate live next to `src/` (see [Cargo’s test layout](https://doc.rust-lang.org/cargo/guide/tests.html)). Many tests need the `test-utils` feature; recall benchmarks (SciFact, YAML/code) additionally need `slow-tests` and load the embedder (SciFact full runs are several minutes; YAML/code suites are smaller). Experimental **MCP** binary: from `src-tauri/`, `cargo build -p curated-thoughts --features mcp-server --bin curated-thoughts-mcp` — same **`CURATED_BRAIN_DIR`**, **`CURATED_BRAIN_DB`**, and **`CURATED_BRAIN_CONFIG`** overrides as the app (see root `README.md`).
 
 ## YAML & code retrieval benchmarks
 
