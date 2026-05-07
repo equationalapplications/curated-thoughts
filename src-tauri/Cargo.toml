@@ -47,6 +47,7 @@ tree-sitter-go = { version = "0.25.0", default-features = false }
 [dev-dependencies]
 tempfile = "3"
 mockito = "1"
+temp-env = "0.3"
 
 [features]
 test-utils = ["tauri/test"]
