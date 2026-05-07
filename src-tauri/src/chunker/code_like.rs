@@ -15,7 +15,8 @@ enum State {
 }
 
 /// Walk `text` once; emit byte offsets immediately after newlines where a statement/top-level break is likely.
-fn statement_boundary_offsets(text: &str) -> Vec<usize> {
+/// Used by AST symbol splitting to avoid slicing mid-statement (spec §6).
+pub(super) fn statement_boundary_offsets(text: &str) -> Vec<usize> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0usize;
