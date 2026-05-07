@@ -115,6 +115,22 @@ With that manifest path, Cargo’s default target directory is **`src-tauri/targ
 | **`CURATED_BRAIN_DB`** | Optional explicit path to `brain.db` instead of `{brain_dir}/brain.db`. |
 | **`CURATED_BRAIN_CONFIG`** | Optional explicit path to `config.json` when it is not beside the resolved DB. |
 
+### Integration tests (stdio + `vault_*` tools)
+
+End-to-end test spawns **`curated-thoughts-mcp`** and speaks MCP over stdin/stdout (uses **`CURATED_EMBED_STUB`**):
+
+```bash
+cd src-tauri
+cargo test -p curated-thoughts --features mcp-server --test mcp_integration
+```
+
+```bash
+# from repository root
+cargo test --manifest-path src-tauri/Cargo.toml -p curated-thoughts --features mcp-server --test mcp_integration
+```
+
+Cargo sets **`CARGO_BIN_EXE_*`** when building that test target; build the MCP binary once first if you see a missing-binary error message from the harness.
+
 ### Security
 
 This is a **local stdio** server: any client you attach can invoke tools that return **indexed chunk text and metadata** from your brain database. Treat the MCP process and its environment as part of your **trust boundary**; do not point it at sensitive data you would not show to the agent.
