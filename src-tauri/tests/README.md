@@ -4,14 +4,25 @@ Rust integration tests in this crate live next to `src/` (see [Cargo’s test la
 
 ## YAML & code retrieval benchmarks
 
-Four extra suites exercise **structured** corpora (YAML and TypeScript/Rust-style text) with the same harness as SciFact: `corpus.jsonl` + `queries.json` + `qrels.json` + precomputed **sentence-chunk** gzip embeddings (`AllMiniLML6V2`, 384-dim). Filenames live in [`src/recall_bench_fixture.rs`](../src/recall_bench_fixture.rs).
+Four extra suites exercise **structured** corpora (YAML and TypeScript/Rust-style text) with the same harness as SciFact: `corpus.jsonl` + `queries.json` + `qrels.json` + precomputed **gzip JSON** embedding archives (`AllMiniLML6V2`, 384-dim). Canonical basenames live in [`src/recall_bench_fixture.rs`](../src/recall_bench_fixture.rs); **commit those `*.json.gz` files** with the suite so clones and CI reuse the same vectors without regenerating.
 
 | Suite directory | Role | Queries | Embedding gzip (in that directory) |
 |-----------------|------|--------:|-------------------------------------|
-| `fixtures/yaml-bench-synthetic/` | **Option C** deterministic K8s-style deployments | 72 | `yaml-synthetic-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
-| `fixtures/yaml-bench-k8s-curated/` | Richer manifests (Service, ConfigMap, Secret, Ingress, …) | 72 | `yaml-k8s-curated-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
-| `fixtures/code-bench-synthetic/` | Deterministic TSX-ish widgets | 72 | `code-synthetic-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
-| `fixtures/code-bench-curated/` | Alternating TS React + Rust modules | 72 | `code-curated-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
+| `fixtures/yaml-bench-synthetic/` | **Option C** deterministic K8s-style deployments | 72 | `yaml-synthetic-embeddings_all-minilm-l6-v2_dim384_sentence-chunk_t100_chunk-text_multichunk-per-doc.json.gz` |
+| `fixtures/yaml-bench-k8s-curated/` | Richer manifests (Service, ConfigMap, Secret, Ingress, …) | 72 | `yaml-k8s-curated-embeddings_all-minilm-l6-v2_dim384_sentence-chunk_t100_chunk-text_multichunk-per-doc.json.gz` |
+| `fixtures/code-bench-synthetic/` | Deterministic TSX-ish widgets | 72 | `code-synthetic-embeddings_all-minilm-l6-v2_dim384_sentence-chunk_t100_chunk-text_multichunk-per-doc.json.gz` |
+| `fixtures/code-bench-curated/` | Alternating TS React + Rust modules | 72 | `code-curated-embeddings_all-minilm-l6-v2_dim384_sentence-chunk_t100_chunk-text_multichunk-per-doc.json.gz` |
+
+### Embedding gzip naming (YAML / code)
+
+Same idea as SciFact: **`<suite>-embeddings_<model>_dim<size>_<encoding-preset>.json.gz`**.
+
+- **`<suite>`** — Logical prefix (`yaml-synthetic`, `yaml-k8s-curated`, `code-synthetic`, `code-curated`).
+- **`<model>`** — `all-minilm-l6-v2` (`EmbeddingModel::AllMiniLML6V2`).
+- **`dim<size>`** — Vector width (`dim384`).
+- **`<encoding-preset>`** — `sentence-chunk_t100_chunk-text_multichunk-per-doc`: chunks from `chunk_text()` on `title + text` (~100-word target), **multiple vectors per doc**; JSON maps each doc id to a **list** of `[384]` rows.
+
+Do not `.gitignore` these files under `tests/fixtures/`.
 
 Pass criterion (each test): Recall@10 ≥ **0.90** — see [`yaml_bench_synthetic.rs`](yaml_bench_synthetic.rs), [`yaml_bench_k8s_curated.rs`](yaml_bench_k8s_curated.rs), [`code_bench_synthetic.rs`](code_bench_synthetic.rs), [`code_bench_curated.rs`](code_bench_curated.rs).
 

@@ -1,6 +1,9 @@
 //! Precompute sentence-chunk embeddings for a recall bench fixture directory.
 //! Usage: `cargo run --bin embed_bench_fixture -- <subdir>`
 //!
+//! Writes the **canonical gzip JSON basename** from `recall_bench_fixture`; commit that file next
+//! to `corpus.jsonl` after regenerating so others can reuse embeddings without FastEmbed.
+//!
 //! `subdir` must be one of: `yaml-bench-synthetic`, `yaml-bench-k8s-curated`,
 //! `code-bench-synthetic`, `code-bench-curated`.
 
