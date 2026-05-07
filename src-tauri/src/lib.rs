@@ -6,6 +6,7 @@ pub mod librarian;
 mod pipeline;
 pub mod search;
 pub mod scifact_fixture;
+pub mod recall_bench_fixture;
 mod setup;
 mod vault;
 mod watcher;
