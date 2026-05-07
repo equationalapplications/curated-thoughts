@@ -1,10 +1,11 @@
-mod chunker;
+pub mod chunker;
 mod db;
 pub mod embedder;
 mod hasher;
 pub mod librarian;
 mod pipeline;
 pub mod search;
+pub mod scifact_fixture;
 mod setup;
 mod vault;
 mod watcher;
