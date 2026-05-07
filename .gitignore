@@ -25,4 +25,6 @@ src-tauri/.fastembed_cache/
 *.njsproj
 *.sln
 *.sw?
-.vscode/extensions.json
+
+# Precomputed recall-bench embeddings under src-tauri/tests/fixtures/**/*.json.gz must stay
+# tracked (gzip JSON archives, not ephemeral build output). Do not ignore them.
