@@ -1,6 +1,50 @@
 # Integration tests
 
-Rust integration tests in this crate live next to `src/` (see [Cargo’s test layout](https://doc.rust-lang.org/cargo/guide/tests.html)). Many tests need the `test-utils` feature; SciFact recall benchmarks additionally need `slow-tests` and take several minutes.
+Rust integration tests in this crate live next to `src/` (see [Cargo’s test layout](https://doc.rust-lang.org/cargo/guide/tests.html)). Many tests need the `test-utils` feature; recall benchmarks (SciFact, YAML/code) additionally need `slow-tests` and load the embedder (SciFact full runs are several minutes; YAML/code suites are smaller).
+
+## YAML & code retrieval benchmarks
+
+Four extra suites exercise **structured** corpora (YAML and TypeScript/Rust-style text) with the same harness as SciFact: `corpus.jsonl` + `queries.json` + `qrels.json` + precomputed **sentence-chunk** gzip embeddings (`AllMiniLML6V2`, 384-dim). Filenames live in [`src/recall_bench_fixture.rs`](../src/recall_bench_fixture.rs).
+
+| Suite directory | Role | Queries | Embedding gzip (in that directory) |
+|-----------------|------|--------:|-------------------------------------|
+| `fixtures/yaml-bench-synthetic/` | **Option C** deterministic K8s-style deployments | 72 | `yaml-synthetic-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
+| `fixtures/yaml-bench-k8s-curated/` | Richer manifests (Service, ConfigMap, Secret, Ingress, …) | 72 | `yaml-k8s-curated-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
+| `fixtures/code-bench-synthetic/` | Deterministic TSX-ish widgets | 72 | `code-synthetic-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
+| `fixtures/code-bench-curated/` | Alternating TS React + Rust modules | 72 | `code-curated-embeddings_all-minilm-l6-v2_sentence-chunk_t100.json.gz` |
+
+Pass criterion (each test): Recall@10 ≥ **0.90** — see [`yaml_bench_synthetic.rs`](yaml_bench_synthetic.rs), [`yaml_bench_k8s_curated.rs`](yaml_bench_k8s_curated.rs), [`code_bench_synthetic.rs`](code_bench_synthetic.rs), [`code_bench_curated.rs`](code_bench_curated.rs).
+
+### Regenerate corpus + queries (generators)
+
+```bash
+cd src-tauri
+cargo run --bin gen_yaml_synthetic_bench
+cargo run --bin gen_yaml_k8s_curated_bench
+cargo run --bin gen_code_synthetic_bench
+cargo run --bin gen_code_curated_bench
+```
+
+### Regenerate embeddings
+
+```bash
+cd src-tauri
+for d in yaml-bench-synthetic yaml-bench-k8s-curated code-bench-synthetic code-bench-curated; do
+  cargo run --bin embed_bench_fixture -- "$d"
+done
+```
+
+### Run YAML/code tests only
+
+```bash
+cd src-tauri
+cargo test --features test-utils,slow-tests --test yaml_bench_synthetic -- --nocapture
+cargo test --features test-utils,slow-tests --test yaml_bench_k8s_curated -- --nocapture
+cargo test --features test-utils,slow-tests --test code_bench_synthetic -- --nocapture
+cargo test --features test-utils,slow-tests --test code_bench_curated -- --nocapture
+```
+
+Shared loader/seed logic: [`tests/helpers/recall_bench.rs`](helpers/recall_bench.rs) (compiled only with `slow-tests`).
 
 ## SciFact search benchmarks (precomputed embeddings)
 

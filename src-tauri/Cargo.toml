@@ -50,3 +50,23 @@ slow-tests = []
 name = "embed_scifact"
 path = "src/bin/embed_scifact.rs"
 
+[[bin]]
+name = "embed_bench_fixture"
+path = "src/bin/embed_bench_fixture.rs"
+
+[[bin]]
+name = "gen_yaml_synthetic_bench"
+path = "src/bin/gen_yaml_synthetic_bench.rs"
+
+[[bin]]
+name = "gen_yaml_k8s_curated_bench"
+path = "src/bin/gen_yaml_k8s_curated_bench.rs"
+
+[[bin]]
+name = "gen_code_synthetic_bench"
+path = "src/bin/gen_code_synthetic_bench.rs"
+
+[[bin]]
+name = "gen_code_curated_bench"
+path = "src/bin/gen_code_curated_bench.rs"
+

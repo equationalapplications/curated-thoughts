@@ -1,3 +1,6 @@
+#[cfg(feature = "slow-tests")]
+pub mod recall_bench;
+
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tauri::{test::MockRuntime, WebviewUrl, WebviewWindowBuilder};
