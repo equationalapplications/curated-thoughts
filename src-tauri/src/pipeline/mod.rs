@@ -6,7 +6,7 @@ use std::{
     sync::mpsc,
 };
 
-use crate::chunker::chunk_text;
+use crate::chunker::{chunk_autodetect, should_ingest_extension};
 use crate::db::queries::{
     delete_document, delete_document_chunks, get_document_by_path, insert_chunk,
     insert_embedding, mark_document_error, mark_document_indexed, upsert_document,
@@ -212,7 +212,7 @@ fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()>
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    if !matches!(ext, "md" | "txt" | "markdown" | "pdf" | "docx") {
+    if !should_ingest_extension(ext) {
         return Ok(());
     }
 
@@ -233,7 +233,7 @@ fn ingest_file(conn: &Connection, embedder: &Embedder, path: &str) -> Result<()>
 
     let doc_id = upsert_document(conn, path, &hash)?;
 
-    let chunks = chunk_text(&text);
+    let chunks = chunk_autodetect(Path::new(path), &text);
     if chunks.is_empty() {
         mark_document_indexed(conn, doc_id)?;
         return Ok(());
