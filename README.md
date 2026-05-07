@@ -90,13 +90,19 @@ The crate can expose a **stdio** [Model Context Protocol](https://modelcontextpr
 
 ### Build
 
-From `src-tauri/`:
+Cargo needs the manifest at **`src-tauri/Cargo.toml`**. Either change into that crate **or** pass **`--manifest-path`** from the repository root (`curated-thoughts/`):
 
 ```bash
+cd src-tauri
 cargo build -p curated-thoughts --features mcp-server --bin curated-thoughts-mcp
 ```
 
-With the manifest at `src-tauri/Cargo.toml`, Cargo’s default target directory is **`src-tauri/target`**. After a debug build, the binary is:
+```bash
+# from repository root
+cargo build --manifest-path src-tauri/Cargo.toml -p curated-thoughts --features mcp-server --bin curated-thoughts-mcp
+```
+
+With that manifest path, Cargo’s default target directory is **`src-tauri/target`**. After a debug build, the binary is:
 
 - **`src-tauri/target/debug/curated-thoughts-mcp`** (from the repo root), or
 - **`target/debug/curated-thoughts-mcp`** when your working directory is `src-tauri/`.
