@@ -4,7 +4,7 @@ pub mod embedder;
 mod hasher;
 pub mod librarian;
 mod pipeline;
-mod search;
+pub mod search;
 mod setup;
 mod vault;
 mod watcher;
