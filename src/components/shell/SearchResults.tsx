@@ -16,7 +16,8 @@ export function SearchResults({ results, onSelect }: Props) {
           onClick={() => onSelect(r.doc_path)}
         >
           <span className="search-result-path">
-            {r.doc_path.split("/").at(-1)}
+            {r.doc_path.split("/").at(-1)}:{r.start_line}
+            {r.end_line !== r.start_line ? `–${r.end_line}` : ""}
           </span>
           <span className="search-result-snippet">
             {r.chunk_text.slice(0, 120)}…

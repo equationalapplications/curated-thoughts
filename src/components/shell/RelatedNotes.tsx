@@ -19,7 +19,8 @@ export function RelatedNotes({ selectedDoc }: Props) {
           {chunks.map((chunk, i) => (
             <div key={i} className="related-chunk">
               <span className="related-chunk-path">
-                {chunk.doc_path.split("/").at(-1)}
+                {chunk.doc_path.split("/").at(-1)}:{chunk.start_line}
+                {chunk.end_line !== chunk.start_line ? `–${chunk.end_line}` : ""}
               </span>
               <p className="related-chunk-text">
                 {chunk.chunk_text.slice(0, 200)}

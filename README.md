@@ -18,6 +18,10 @@ Key app concepts:
 
 This app applies the LLM Wiki idea to a desktop second brain: persistent episodic memory, semantic retrieval, and human-in-the-loop synthesis. It connects local file content, embeddings, and long-term memory into a unified experience.
 
+## Rapid Development Phase
+
+**Pre-release posture:** - **Breaking changes are acceptable** — schema reshaping, embedding dimension switches, wiping dev databases (`brain.db`), and non-additive Tauri/TS API changes do **not** require backward compatibility with prior milestones or lazy migration of legacy chunk rows.
+
 ## Architecture
 
 Curated Thoughts separates user source material from generated wiki content and local metadata.

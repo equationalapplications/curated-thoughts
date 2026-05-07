@@ -3,8 +3,139 @@
 use std::path::Path;
 
 use super::limits::{overlap_chars, target_chars};
+use super::{lines_for_byte_span, Chunk, ChunkStrategyTag};
 
+#[allow(dead_code)]
 pub(super) fn chunk_declarative(path: &Path, text: &str) -> Vec<String> {
+    chunk_declarative_chunks(path, text)
+        .into_iter()
+        .map(|c| c.text)
+        .collect()
+}
+
+fn declarative_symbol_for_block(path: &Path, block: &str) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "yaml" | "yml" => block
+            .lines()
+            .find(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with('#') && line_looks_like_map_key(l)
+            })
+            .and_then(first_yaml_key_symbol),
+        "toml" => block.lines().find_map(|line| {
+            let t = line.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                return Some(strip_brackets_title(t));
+            }
+            None
+        }),
+        "json" | "jsonc" => first_json_segment_key_hint(block),
+        "xml" => first_xml_element_name(block),
+        _ => block.lines().find_map(|l| {
+            let t = l.trim();
+            if !t.starts_with('#') && line_looks_like_map_key(l) {
+                first_yaml_key_symbol(l)
+            } else {
+                None
+            }
+        }),
+    }
+}
+
+fn strip_brackets_title(t: &str) -> String {
+    let mut s = t.trim().to_string();
+    while s.starts_with('[') && s.ends_with(']') && s.len() >= 2 {
+        s = s[1..s.len() - 1].trim().to_string();
+    }
+    s
+}
+
+fn first_yaml_key_symbol(line: &str) -> Option<String> {
+    let trimmed_line = line.trim_start();
+    let t = trimmed_line.split_once(':').map(|x| x.0).unwrap_or(trimmed_line).trim();
+    if t.starts_with('"') || t.starts_with('\'') {
+        return Some(t.trim_matches(|c| c == '"' || c == '\'').to_string());
+    }
+    if t.starts_with('-') || t.starts_with('?') {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+fn first_json_segment_key_hint(block: &str) -> Option<String> {
+    let t = block.trim();
+    if t.starts_with('[') {
+        return Some("array_item".into());
+    }
+    let snippet = t.chars().take(80).collect::<String>();
+    if let Some(off) = snippet.find('"') {
+        let after = &snippet[off + 1..];
+        if let Some(end) = after.find('"') {
+            return Some(after[..end].to_string());
+        }
+    }
+    None
+}
+
+fn first_xml_element_name(block: &str) -> Option<String> {
+    let b = block.trim();
+    let start = b.find('<')?;
+    let rest = &b[start + 1..];
+    let name_start = rest
+        .chars()
+        .enumerate()
+        .find(|(_, c)| c.is_alphabetic() || *c == '_' || *c == ':')
+        .map(|(i, _)| i)?;
+    let suffix = rest[name_start..]
+        .find(|c: char| c.is_whitespace() || c == '/' || c == '>')
+        .unwrap_or(rest[name_start..].len());
+    let name = &rest[name_start..name_start + suffix];
+    Some(name.into())
+}
+
+pub(super) fn chunk_declarative_chunks(path: &Path, text: &str) -> Vec<Chunk> {
+    let pieces = declarative_piece_strings(path, text);
+    if pieces.is_empty() {
+        return vec![];
+    }
+    let trimmed = text.trim();
+    let base = trimmed.as_ptr() as usize - text.as_ptr() as usize;
+    let mut search_from = base;
+    let mut out = Vec::with_capacity(pieces.len());
+    for raw_chunk in pieces {
+        let trimmed_chunk = raw_chunk.trim();
+        if trimmed_chunk.is_empty() {
+            continue;
+        }
+        let hay = text.get(search_from..).unwrap_or("");
+        let lo = if let Some(i) = hay.find(trimmed_chunk) {
+            search_from + i
+        } else if let Some(i) = trimmed.find(trimmed_chunk) {
+            base + i
+        } else {
+            search_from
+        };
+        let hi = (lo + trimmed_chunk.len()).min(text.len());
+        search_from = hi;
+        let (start_line, end_line) = lines_for_byte_span(text, lo, hi);
+        let sym = declarative_symbol_for_block(path, &raw_chunk);
+        out.push(Chunk {
+            text: trimmed_chunk.into(),
+            start_line,
+            end_line,
+            symbol_name: sym,
+            strategy: ChunkStrategyTag::Declarative,
+        });
+    }
+    out
+}
+
+fn declarative_piece_strings(path: &Path, text: &str) -> Vec<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

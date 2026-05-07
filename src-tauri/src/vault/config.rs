@@ -2,9 +2,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+use crate::embedder::EmbedProfile;
+
 #[derive(Serialize, Deserialize, Default)]
 struct ConfigFile {
     vault_path: Option<String>,
+    #[serde(default)]
+    embed_profile: Option<EmbedProfile>,
 }
 
 pub struct VaultConfig {
@@ -50,14 +54,27 @@ impl VaultConfig {
         self.write(&cfg)
     }
 
+    #[allow(dead_code)]
     pub fn vault_root(&self) -> anyhow::Result<Option<std::path::PathBuf>> {
         Ok(self.get_vault_path()?.map(std::path::PathBuf::from))
+    }
+
+    pub fn get_embed_profile(&self) -> Result<EmbedProfile> {
+        Ok(self.read()?.embed_profile.unwrap_or_default())
+    }
+
+    #[allow(dead_code)]
+    pub fn set_embed_profile(&self, profile: EmbedProfile) -> Result<()> {
+        let mut cfg = self.read()?;
+        cfg.embed_profile = Some(profile);
+        self.write(&cfg)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedder::{CloudProvider, EmbedProfile};
     use tempfile::TempDir;
 
     fn make_config(tmp: &TempDir) -> VaultConfig {
@@ -104,5 +121,35 @@ mod tests {
         let cfg = make_config(&tmp);
         cfg.set_vault_path("/vault/root").unwrap();
         assert_eq!(cfg.vault_root().unwrap(), Some(std::path::PathBuf::from("/vault/root")));
+    }
+
+    #[test]
+    fn embed_profile_defaults_when_absent() {
+        let cfg = make_config(&TempDir::new().unwrap());
+        assert_eq!(cfg.get_embed_profile().unwrap(), EmbedProfile::default());
+    }
+
+    #[test]
+    fn embed_profile_roundtrip_local() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_config(&tmp);
+        let p = EmbedProfile::Local {
+            model: "mx".into(),
+        };
+        cfg.set_embed_profile(p.clone()).unwrap();
+        assert_eq!(cfg.get_embed_profile().unwrap(), p);
+    }
+
+    #[test]
+    fn embed_profile_roundtrip_cloud() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_config(&tmp);
+        let p = EmbedProfile::Cloud {
+            provider: CloudProvider::Cohere,
+            model: "x".into(),
+            api_key: "abc".into(),
+        };
+        cfg.set_embed_profile(p.clone()).unwrap();
+        assert_eq!(cfg.get_embed_profile().unwrap(), p);
     }
 }
