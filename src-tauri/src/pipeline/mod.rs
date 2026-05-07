@@ -80,6 +80,19 @@ impl PipelineWorker {
                         }
                     }
                     PipelineJob::Delete(path) => {
+                        // Remove shadow copy from .brain/converted/ (PDF/DOCX conversion artifact)
+                        if let Some(original) = std::path::Path::new(&path).file_stem() {
+                            if let Some(vault_root) = std::path::Path::new(&path)
+                                .parent()
+                                .and_then(|p| p.parent())
+                            {
+                                let shadow = vault_root
+                                    .join(".brain")
+                                    .join("converted")
+                                    .join(format!("{}.md", original.to_string_lossy()));
+                                let _ = std::fs::remove_file(&shadow);
+                            }
+                        }
                         if let Err(e) = delete_document(&conn, &path) {
                             eprintln!("[pipeline] delete error {path}: {e}");
                         }
