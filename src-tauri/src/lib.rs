@@ -54,14 +54,29 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
 
 #[tauri::command]
 fn start_file_watcher(
-    vault_path: String,  // trusted: vault root from Tauri file picker dialog (canonicalize before use)
+    vault_path: String,
     app: AppHandle,
     pipeline: State<PipelineTx>,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
 ) -> Result<(), String> {
+    // Validate vault_path matches configured vault root (webview is semi-trusted).
+    let configured_vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+    let vault_root = std::path::PathBuf::from(&vault_path);
+    let configured_root = std::path::PathBuf::from(&configured_vault);
+    if vault_root.canonicalize().ok() != configured_root.canonicalize().ok() {
+        return Err("vault_path does not match configured vault root".to_string());
+    }
+
     let tx = pipeline.0.lock().unwrap().clone();
 
-    let raw_docs = std::path::PathBuf::from(&vault_path).join("documents");
+    let raw_docs = vault_root.join("documents");
     // Canonicalize so macOS FSEvents paths (which are real paths) match correctly.
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
@@ -420,9 +435,24 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
         None => return Err("no vault path set".to_string()),
     };
 
+    // Normalize path: if absolute and starts with vault root, make it vault-relative.
+    // Preserves backward compatibility with DB/search results (which store absolute paths)
+    // while still enforcing containment via safe_vault_path.
+    let normalized_path = {
+        let candidate = std::path::Path::new(&path);
+        if candidate.is_absolute() {
+            candidate
+                .strip_prefix(&root)
+                .map(|rel| rel.to_string_lossy().to_string())
+                .unwrap_or(path.clone())
+        } else {
+            path.clone()
+        }
+    };
+
     let safe = crate::vault::safe_vault_path(
         &root,
-        &path,
+        &normalized_path,
         &["documents", "wiki"],
         crate::vault::PathMode::MustExist,
     )

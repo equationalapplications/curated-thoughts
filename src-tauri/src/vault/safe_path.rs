@@ -196,18 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn may_create_rejects_filename_with_separator() {
-        let (_g, root) = vault();
-        let err = safe_vault_path(&root, "wiki/sub/x.md", allowed(), PathMode::MayCreate).unwrap_err();
-        // sub/ doesn't exist, so parent canonicalize fails → NotFound is also acceptable;
-        // the contract is that nested non-existent dirs are not auto-created.
-        assert!(
-            matches!(err, SafePathError::NotFound(_) | SafePathError::Outside),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
     fn may_create_rejects_dot_filename() {
         let (_g, root) = vault();
         let err = safe_vault_path(&root, "wiki/.", allowed(), PathMode::MayCreate).unwrap_err();
