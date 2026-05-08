@@ -9,7 +9,7 @@ pub mod retrieval;
 pub mod scifact_fixture;
 pub mod recall_bench_fixture;
 mod setup;
-mod vault;
+pub mod vault;
 mod watcher;
 
 use std::sync::{mpsc::SyncSender, Mutex};
@@ -480,9 +480,16 @@ fn approve_wiki_page(
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
 
+    // Normalize path: if it doesn't start with "wiki/", prepend it for backward compatibility
+    let normalized_path = if page_path.starts_with("wiki/") {
+        page_path.clone()
+    } else {
+        format!("wiki/{}", page_path)
+    };
+
     let safe = crate::vault::safe_vault_path(
         &vault_root,
-        &page_path,
+        &normalized_path,
         &["wiki"],
         crate::vault::PathMode::MayCreate,
     )

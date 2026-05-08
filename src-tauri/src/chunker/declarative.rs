@@ -226,12 +226,12 @@ fn yaml_documents(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut rest = text;
     if rest.starts_with("---") {
-        rest = rest.strip_prefix("---").unwrap_or(rest).trim_start_matches(|c| c == '\n' || c == '\r');
+        rest = rest.strip_prefix("---").unwrap_or(rest).trim_start_matches(['\n', '\r']);
     }
     while let Some(idx) = rest.find(marker) {
         parts.push(rest[..idx].trim());
         rest = &rest[idx + marker.len()..];
-        rest = rest.trim_start_matches(|c| c == '\n' || c == '\r');
+        rest = rest.trim_start_matches(['\n', '\r']);
     }
     parts.push(rest.trim());
     parts.into_iter().filter(|s| !s.is_empty()).collect()
@@ -590,12 +590,10 @@ fn chunk_xml(text: &str) -> Vec<String> {
             continue;
         }
 
-        if ch == '<' && bytes.get(i + 1) == Some(&b'!') {
-            if text[i..].starts_with("<!--") {
-                if let Some(end) = text[i + 4..].find("-->") {
-                    i += 4 + end + 3;
-                    continue;
-                }
+        if ch == '<' && bytes.get(i + 1) == Some(&b'!') && text[i..].starts_with("<!--") {
+            if let Some(end) = text[i + 4..].find("-->") {
+                i += 4 + end + 3;
+                continue;
             }
         }
 

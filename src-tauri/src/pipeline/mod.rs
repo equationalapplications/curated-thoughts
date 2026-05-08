@@ -281,9 +281,8 @@ fn ingest_file(
 
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
 
-    let embeddings = embed_batch(profile, texts).map_err(|e| {
+    let embeddings = embed_batch(profile, texts).inspect_err(|_| {
         let _ = mark_document_error(conn, doc_id);
-        e
     })?;
 
     for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {

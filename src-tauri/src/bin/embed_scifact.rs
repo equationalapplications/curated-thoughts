@@ -104,7 +104,7 @@ fn embed_sentence_chunk(docs: Vec<(String, String)>, embedder: &Embedder, out_pa
     let mut embedded_chunks_done: usize = 0;
 
     let mut flush = |pending_text: &mut Vec<String>, pending_meta: &mut Vec<(String, usize)>| {
-        let n = flush_embedding_batch(&embedder, pending_text, pending_meta, &mut chunks_out);
+        let n = flush_embedding_batch(embedder, pending_text, pending_meta, &mut chunks_out);
         if n == 0 {
             return;
         }
@@ -157,7 +157,7 @@ fn embed_fulltext_single(
     let mut embeddings: Map<String, Value> = Map::new();
 
     let batch_size = 64usize;
-    for batch_idx in 0..(docs.len() + batch_size - 1) / batch_size {
+    for batch_idx in 0..docs.len().div_ceil(batch_size) {
         let chunk = &docs[batch_idx * batch_size..((batch_idx + 1) * batch_size).min(docs.len())];
         let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
         let vecs = embedder.embed(texts).expect("embed batch");
@@ -169,7 +169,7 @@ fn embed_fulltext_single(
             println!(
                 "  batch {}/{chunks}",
                 batch_idx + 1,
-                chunks = (docs.len() + batch_size - 1) / batch_size
+                chunks = docs.len().div_ceil(batch_size)
             );
         }
     }

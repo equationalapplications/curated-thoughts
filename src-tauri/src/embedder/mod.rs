@@ -79,7 +79,7 @@ impl Embedder {
     }
 
     pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        Ok(self.model.embed(texts, None)?)
+        self.model.embed(texts, None)
     }
 
     pub fn dimensions() -> usize {
