@@ -189,6 +189,10 @@ pub fn safe_vault_path(
                 .iter()
                 .any(|sub| canonical.starts_with(sub))
             {
+                let meta = std::fs::metadata(&canonical).map_err(SafePathError::Io)?;
+                if !meta.is_file() {
+                    return Err(SafePathError::NotARegularFile);
+                }
                 Ok(canonical)
             } else {
                 Err(SafePathError::Outside)
@@ -329,6 +333,21 @@ mod tests {
         let out =
             safe_vault_path(&root, "documents/foo.md", allowed(), PathMode::MustExist).unwrap();
         assert_eq!(out, target.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn must_exist_rejects_non_regular_file() {
+        let (_g, root) = vault();
+        let dir = root.join("documents").join("only-a-dir");
+        fs::create_dir_all(&dir).unwrap();
+        let err = safe_vault_path(
+            &root,
+            "documents/only-a-dir",
+            allowed(),
+            PathMode::MustExist,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SafePathError::NotARegularFile), "got {err:?}");
     }
 
     #[test]
