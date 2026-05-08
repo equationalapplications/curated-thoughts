@@ -3,6 +3,8 @@
 **Original date:** 2026-05-07  
 **Revised:** 2026-05-07 — **Aligned with the shipped hybrid chunk autodetect layer** (`chunk_autodetect`, extension classifier, prose / code-like / declarative / fallback). Supersedes narrative written against the pre-hybrid codebase.
 
+**Status:** Implemented
+
 **Scope (target):** Evolve ingestion from **`Vec<String>` chunks** to **`Chunk { text, line range, optional symbol, strategy tag}`**, introduce **schema migration adding chunk metadata columns**, and make **embedding** selectable (**`nomic-embed-code` via Ollama** locally by default) while keeping **FastEmbed frozen-vector benchmarks** intact. Expose chunk metadata through **Tauri search APIs** (and TypeScript types); treat **MCP** as a **follow-on transport**, not a dependency for shipping retrieval upgrades.
 
 **Pre-release posture:** The app has **no active production users** yet. **Breaking changes are acceptable** — schema reshaping, embedding dimension switches, wiping dev databases (`brain.db`), and non-additive Tauri/TS API changes do **not** require backward compatibility with prior milestones or lazy migration of legacy chunk rows.

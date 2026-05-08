@@ -2,6 +2,8 @@
 
 **Date:** 2026-05-07
 
+**Status:** Implemented
+
 **Scope:** Implement the `AstSymbol` chunking strategy for Rust, TypeScript, JavaScript, Python, and Go using the `tree-sitter` crate with per-language `.scm` query strings. This covers M5 and M6 from the V2 Code-First RAG Chunking spec (`2026-05-07-v2-code-rag-chunking-design.md`).
 
 **Pre-release posture:** No active production users. Breaking changes to chunk shape, strategy tags, and DB rows are acceptable.
