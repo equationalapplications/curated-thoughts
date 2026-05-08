@@ -10,11 +10,19 @@ import { useReviewQueue } from "../../hooks/useReviewQueue";
 
 interface Props { vaultPath: string }
 
+/** Vault-relative paths from the file list use `wiki/...`; DB/search may still use absolute paths containing `/wiki/`. */
+function isWikiDocPath(p: string | null | undefined): boolean {
+  if (!p) return false;
+  const norm = p.replace(/\\/g, "/");
+  if (norm.startsWith("wiki/")) return true;
+  return norm.includes("/wiki/");
+}
+
 export function AppShell({ vaultPath }: Props) {
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const [showReview, setShowReview] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const isWiki = selectedDoc?.includes("/wiki/") ?? false;
+  const isWiki = isWikiDocPath(selectedDoc);
   const { queue, refresh } = useReviewQueue();
 
   useEffect(() => {
