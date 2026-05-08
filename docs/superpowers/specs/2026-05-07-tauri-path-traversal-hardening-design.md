@@ -116,7 +116,7 @@ For `copy_to_vault`, the destination is computed from `src.file_name()`. Validat
 
 Grep for every `#[tauri::command]` whose signature includes a `String` that is later used as a path. For each one, route through `safe_vault_path` or document in code why the value is trusted. Acceptable trusted sources:
 
-- `vault_path` returned from the Tauri file picker dialog (still canonicalize before use).
+- `vault_path` (vault root) from `VaultConfigState`, which stores the user's file-picker selection. **NEVER accept `vault_path` as a command parameter** — a compromised webview could control both the path being validated and the root it's validated against, bypassing containment.
 - Paths derived purely from constants and the canonicalized `vault_root`.
 
 Anything else routes through the helper.
