@@ -18,7 +18,7 @@ export function AppShell({ vaultPath }: Props) {
   const { queue, refresh } = useReviewQueue();
 
   useEffect(() => {
-    startFileWatcher(vaultPath).catch(console.error);
+    startFileWatcher().catch(console.error);
   }, [vaultPath]);
 
   return (

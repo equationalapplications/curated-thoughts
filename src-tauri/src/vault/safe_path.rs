@@ -58,7 +58,7 @@ pub fn safe_vault_path(
 
     let root_canonical = vault_root
         .canonicalize()
-        .map_err(|e| SafePathError::NotFound(format!("{}: {}", vault_root.display(), e)))?;
+        .map_err(|_| SafePathError::NotFound("vault root not found".to_string()))?;
 
     let allowed_canonical: Vec<PathBuf> = allowed_subdirs
         .iter()
@@ -74,7 +74,7 @@ pub fn safe_vault_path(
             let joined = root_canonical.join(candidate);
             let canonical = joined
                 .canonicalize()
-                .map_err(|e| SafePathError::NotFound(format!("{}: {}", joined.display(), e)))?;
+                .map_err(|_| SafePathError::NotFound(format!("file not found: {}", user_path)))?;
             if allowed_canonical.iter().any(|sub| canonical.starts_with(sub)) {
                 Ok(canonical)
             } else {
@@ -108,7 +108,7 @@ pub fn safe_vault_path(
             let joined_parent = root_canonical.join(parent);
             let canonical_parent = joined_parent
                 .canonicalize()
-                .map_err(|e| SafePathError::NotFound(format!("{}: {}", joined_parent.display(), e)))?;
+                .map_err(|_| SafePathError::NotFound(format!("parent directory not found: {}", user_path)))?;
             if !allowed_canonical
                 .iter()
                 .any(|sub| canonical_parent.starts_with(sub))

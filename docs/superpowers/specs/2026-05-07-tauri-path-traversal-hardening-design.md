@@ -166,3 +166,26 @@ No data migration, no config changes, no API surface change visible to the front
 ## Threat model note
 
 The webview is treated as semi-trusted. It loads local content including wiki pages generated from LLM output, which can be prompt-injected by ingested documents. Any `#[tauri::command]` reachable from the webview must validate path arguments as if they came from a remote attacker. This spec establishes the helper that enforces that invariant; future commands that touch the filesystem MUST go through it.
+
+## Post-implementation security review fixes (2026-05-08)
+
+Copilot security review identified additional hardening opportunities:
+
+### 1. SafePathError information leak
+**Issue:** `SafePathError::NotFound` included absolute filesystem paths in error messages (via `.display()`), which were returned to the webview and exposed the user's vault location.
+
+**Fix:** Changed error messages to only include vault-relative paths or generic messages:
+- Vault root canonicalization failure: `"vault root not found"`
+- MustExist file not found: `"file not found: {user_path}"`
+- MayCreate parent not found: `"parent directory not found: {user_path}"`
+
+### 2. start_file_watcher vault_path parameter
+**Issue:** `start_file_watcher` accepted `vault_path` as a command parameter from the webview, violating the spec rule "NEVER accept vault_path as a command parameter". While the implementation validated that the parameter matched `VaultConfigState`, the parameter was unnecessary attack surface.
+
+**Fix:** Removed `vault_path` parameter entirely. Command now derives vault root solely from `VaultConfigState`, eliminating any webview control over the watcher root path.
+
+### 3. get_related_chunks path normalization
+**Issue:** When converting relative paths to absolute for DB queries, the code joined paths but didn't canonicalize the result. Since the DB stores canonical paths (from the watcher), non-canonical query paths could fail to match even when the file exists.
+
+**Fix:** Canonicalize both absolute and relative paths before querying, falling back to non-canonical on error (for deleted files or edge cases).
+
