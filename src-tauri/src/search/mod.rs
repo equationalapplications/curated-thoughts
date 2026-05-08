@@ -201,6 +201,112 @@ pub fn related_chunks_try_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::connection::open_in_memory;
+
+    fn vec_blob2(x: f32, y: f32) -> Vec<u8> {
+        [x.to_le_bytes(), y.to_le_bytes()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Two indexed documents, each with one chunk and one 2-D embedding.
+    fn seed_two_doc_fixture() -> rusqlite::Connection {
+        let conn = open_in_memory().expect("open in-memory db");
+        conn
+            .execute(
+                "INSERT INTO documents (path, hash, tier, status) VALUES (?1, ?2, 'user_doc', 'indexed')",
+                ["stored-a", "ha"],
+            )
+            .expect("insert doc a");
+        let id_a: i64 = conn.last_insert_rowid();
+        conn
+            .execute(
+                "INSERT INTO documents (path, hash, tier, status) VALUES (?1, ?2, 'user_doc', 'indexed')",
+                ["stored-b", "hb"],
+            )
+            .expect("insert doc b");
+        let id_b: i64 = conn.last_insert_rowid();
+
+        conn
+            .execute(
+                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy) \
+                 VALUES (?1, 'chunk-a', 0, 1, 1, 'prose')",
+                [id_a],
+            )
+            .expect("chunk a");
+        let chunk_a: i64 = conn.last_insert_rowid();
+        conn
+            .execute(
+                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy) \
+                 VALUES (?1, 'chunk-b', 0, 1, 1, 'prose')",
+                [id_b],
+            )
+            .expect("chunk b");
+        let chunk_b: i64 = conn.last_insert_rowid();
+
+        conn
+            .execute(
+                "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![chunk_a, vec_blob2(1.0, 0.0)],
+            )
+            .expect("emb a");
+        conn
+            .execute(
+                "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![chunk_b, vec_blob2(0.0, 1.0)],
+            )
+            .expect("emb b");
+        conn
+    }
+
+    #[test]
+    fn related_chunks_try_paths_skips_empty_candidates() {
+        let conn = seed_two_doc_fixture();
+        let hits = related_chunks_try_paths(
+            &conn,
+            &["no-such-doc-path".into(), "stored-a".into()],
+            10,
+        )
+        .expect("try_paths");
+        assert!(!hits.is_empty(), "expected fallback to second path");
+        assert!(
+            hits.iter().all(|h| h.doc_path == "stored-b"),
+            "related view for stored-a should only surface other docs; got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn related_chunks_try_paths_returns_empty_when_none_match() {
+        let conn = seed_two_doc_fixture();
+        let hits = related_chunks_try_paths(
+            &conn,
+            &["missing-one".into(), "missing-two".into()],
+            10,
+        )
+        .expect("try_paths");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn related_chunks_try_paths_returns_first_non_empty() {
+        let conn = seed_two_doc_fixture();
+        let limit = 10;
+        let expected = related_chunks(&conn, "stored-a", limit).expect("direct related");
+        let merged = related_chunks_try_paths(
+            &conn,
+            &["stored-a".into(), "stored-b".into()],
+            limit,
+        )
+        .expect("try_paths");
+        assert_eq!(merged.len(), expected.len());
+        for (m, e) in merged.iter().zip(expected.iter()) {
+            assert_eq!(m.doc_path, e.doc_path);
+            assert_eq!(m.chunk_text, e.chunk_text);
+            assert_eq!(m.chunk_position, e.chunk_position);
+            assert!((m.score - e.score).abs() < 1e-5);
+        }
+    }
 
     #[test]
     fn test_cosine_identical_vectors() {
