@@ -228,6 +228,15 @@ pub fn safe_vault_path(
             {
                 return Err(SafePathError::Outside);
             }
+            let parent_meta = std::fs::metadata(&canonical_parent).map_err(|_| {
+                SafePathError::NotFound(format!("parent directory not found: {}", user_path))
+            })?;
+            if !parent_meta.is_dir() {
+                return Err(SafePathError::NotFound(format!(
+                    "parent is not a directory: {}",
+                    user_path
+                )));
+            }
             let target_path = canonical_parent.join(filename);
 
             // Reject if target already exists as a symlink (or if following it escapes).
@@ -385,6 +394,26 @@ mod tests {
         let err =
             safe_vault_path(&root, "wiki/never/x.md", allowed(), PathMode::MayCreate).unwrap_err();
         assert!(matches!(err, SafePathError::NotFound(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn may_create_rejects_parent_that_is_file() {
+        let (_g, root) = vault();
+        fs::write(root.join("wiki").join("existing.md"), b"x").unwrap();
+        let err = safe_vault_path(
+            &root,
+            "wiki/existing.md/new.md",
+            allowed(),
+            PathMode::MayCreate,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SafePathError::NotFound(msg) if msg.contains("not a directory")
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]
