@@ -11,14 +11,32 @@ use crate::db::queries::{
     delete_document, delete_document_chunks, get_document_by_path, insert_chunk,
     insert_embedding, mark_document_error, mark_document_indexed, upsert_document,
 };
-use crate::embedder::embed_batch;
+use crate::embedder::{embed_batch, EmbedProfile};
 use crate::vault::VaultConfig;
 use crate::hasher::hash_bytes;
 
 #[derive(Debug, Clone)]
 pub enum PipelineJob {
-    Ingest(String),
+    /// Chunk + embed path. With `force: true`, re-runs chunking even when content hash unchanged
+    /// (chunk strategy upgrades, embedding model swaps).
+    Ingest { path: String, force: bool },
     Delete(String),
+}
+
+impl PipelineJob {
+    pub fn ingest(path: impl Into<String>) -> Self {
+        Self::Ingest {
+            path: path.into(),
+            force: false,
+        }
+    }
+
+    pub fn rechunk(path: impl Into<String>) -> Self {
+        Self::Ingest {
+            path: path.into(),
+            force: true,
+        }
+    }
 }
 
 pub struct PipelineWorker {
@@ -56,16 +74,17 @@ impl PipelineWorker {
 
         for job in self.rx {
             let job_path = match &job {
-                PipelineJob::Ingest(p) | PipelineJob::Delete(p) => p.clone(),
+                PipelineJob::Ingest { path, .. } => path.clone(),
+                PipelineJob::Delete(path) => path.clone(),
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job {
-                    PipelineJob::Ingest(path) => {
+                    PipelineJob::Ingest { path, force } => {
                         let vault_root = std::path::Path::new(&path)
                             .parent()
                             .and_then(|p| p.parent())
                             .map(|p| p.to_path_buf());
-                        match ingest_file(&conn, &profile, &path) {
+                        match ingest_document(&conn, &profile, &path, force) {
                             Ok(()) => {
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &conn,
@@ -212,10 +231,22 @@ fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
     }
 }
 
+/// Runs the normal ingestion path (conversion, chunking, embedding). Same code as the desktop
+/// pipeline worker — safe to call inline from tooling (e.g. bulk rechunk).
+pub fn ingest_document(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    path: &str,
+    force_rechunk: bool,
+) -> Result<()> {
+    ingest_file(conn, profile, path, force_rechunk)
+}
+
 fn ingest_file(
     conn: &Connection,
-    profile: &crate::embedder::EmbedProfile,
+    profile: &EmbedProfile,
     path: &str,
+    force_rechunk: bool,
 ) -> Result<()> {
     let ext = Path::new(path)
         .extension()
@@ -229,7 +260,7 @@ fn ingest_file(
     let hash = hash_bytes(&raw_bytes);
 
     if let Some(doc) = get_document_by_path(conn, path)? {
-        if doc.hash == hash && doc.status == "indexed" {
+        if !force_rechunk && doc.hash == hash && doc.status == "indexed" {
             return Ok(());
         }
         delete_document_chunks(conn, doc.id)?;

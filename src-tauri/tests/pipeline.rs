@@ -43,7 +43,7 @@ fn ingest_markdown_indexes_document_with_chunks_and_embeddings() {
     let doc_path = docs_dir.join("note.md");
     std::fs::write(&doc_path, "# Test Note\n\n".to_owned() + &"word ".repeat(20)).unwrap();
 
-    run_pipeline_job(&tmp, vec![PipelineJob::Ingest(doc_path.to_string_lossy().to_string())]);
+    run_pipeline_job(&tmp, vec![PipelineJob::ingest(doc_path.to_string_lossy().to_string())]);
 
     let conn = rusqlite::Connection::open(tmp.path().join("brain.db")).unwrap();
 
@@ -77,20 +77,40 @@ fn ingest_same_file_twice_unchanged_does_not_reindex() {
     std::fs::write(&doc_path, "stable content").unwrap();
     let path_str = doc_path.to_string_lossy().to_string();
 
-    run_pipeline_job(&tmp, vec![PipelineJob::Ingest(path_str.clone())]);
+    run_pipeline_job(&tmp, vec![PipelineJob::ingest(path_str.clone())]);
 
     let conn = rusqlite::Connection::open(tmp.path().join("brain.db")).unwrap();
     let count_before: i64 = conn
         .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
         .unwrap();
+    let max_id_before: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |r| r.get(0))
+        .unwrap();
 
     // Ingest again without changing the file
-    run_pipeline_job(&tmp, vec![PipelineJob::Ingest(path_str)]);
+    run_pipeline_job(&tmp, vec![PipelineJob::ingest(path_str.clone())]);
 
     let count_after: i64 = conn
         .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count_before, count_after, "chunks changed despite file being unchanged");
+
+    run_pipeline_job(&tmp, vec![PipelineJob::rechunk(path_str)]);
+
+    let count_force: i64 = conn
+        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count_force, count_after,
+        "strategy-stable rechunk preserves chunk count"
+    );
+    let max_id_after: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        max_id_after > max_id_before,
+        "force rechunk should replace chunk rows"
+    );
 }
 
 #[test]
@@ -103,11 +123,11 @@ fn ingest_changed_file_replaces_old_chunks() {
     std::fs::write(&doc_path, "original content").unwrap();
     let path_str = doc_path.to_string_lossy().to_string();
 
-    run_pipeline_job(&tmp, vec![PipelineJob::Ingest(path_str.clone())]);
+    run_pipeline_job(&tmp, vec![PipelineJob::ingest(path_str.clone())]);
 
     // Change file content
     std::fs::write(&doc_path, "completely different new content for re-indexing").unwrap();
-    run_pipeline_job(&tmp, vec![PipelineJob::Ingest(path_str.clone())]);
+    run_pipeline_job(&tmp, vec![PipelineJob::ingest(path_str.clone())]);
 
     let conn = rusqlite::Connection::open(tmp.path().join("brain.db")).unwrap();
     let hash: String = conn
@@ -134,7 +154,7 @@ fn unsupported_extension_not_indexed() {
     let img_path = docs_dir.join("photo.png");
     std::fs::write(&img_path, b"\x89PNG fake image data").unwrap();
 
-    run_pipeline_job(&tmp, vec![PipelineJob::Ingest(img_path.to_string_lossy().to_string())]);
+    run_pipeline_job(&tmp, vec![PipelineJob::ingest(img_path.to_string_lossy().to_string())]);
 
     let conn = rusqlite::Connection::open(tmp.path().join("brain.db")).unwrap();
     let count: i64 = conn
