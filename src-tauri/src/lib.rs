@@ -565,7 +565,7 @@ fn get_related_chunks(
     let vault_root = std::path::PathBuf::from(&root);
 
     let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
-    // `related_chunks_facade` only queries SQLite; the document row may still exist after the
+    // `related_chunks_try_paths` only reads SQLite; the document row may still exist after the
     // file was removed from disk. MayCreate validates containment via the parent dir without
     // requiring the target file to exist.
     let safe = crate::vault::safe_vault_path(
@@ -575,10 +575,29 @@ fn get_related_chunks(
         crate::vault::PathMode::MayCreate,
     )
     .map_err(|e| e.to_string())?;
-    let normalized_path = safe.to_string_lossy().to_string();
+
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if !candidates.iter().any(|e| e == &s) {
+            candidates.push(s);
+        }
+    };
+    if safe.exists() {
+        if let Ok(canon) = std::fs::canonicalize(&safe) {
+            push(canon.to_string_lossy().into_owned());
+        }
+    }
+    push(safe.to_string_lossy().into_owned());
+    push(normalized_rel.clone());
+    push(
+        vault_root
+            .join(Path::new(&normalized_rel))
+            .to_string_lossy()
+            .into_owned(),
+    );
 
     let guard = db_state.0.lock().unwrap();
-    retrieval::related_chunks_facade(&guard.0, &normalized_path, limit).map_err(|e| e.to_string())
+    crate::search::related_chunks_try_paths(&guard.0, &candidates, limit).map_err(|e| e.to_string())
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────

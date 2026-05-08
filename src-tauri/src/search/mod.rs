@@ -179,6 +179,25 @@ pub fn related_chunks(
     Ok(results.into_iter().take(limit).map(|(_, r)| r).collect())
 }
 
+/// Try [`related_chunks`] with each candidate `documents.path` key until one returns results.
+///
+/// Ingestion and the file watcher typically persist **canonical** absolute paths, while the UI
+/// often holds **vault-relative** paths. Older rows may use other spellings; exact SQLite
+/// equality would otherwise miss the document row.
+pub fn related_chunks_try_paths(
+    conn: &Connection,
+    doc_paths: &[String],
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    for p in doc_paths {
+        let hits = related_chunks(conn, p, limit)?;
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+    }
+    Ok(vec![])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
