@@ -15,6 +15,10 @@ mod watcher;
 use chunker::should_ingest_extension;
 use db::AppDb;
 use pipeline::start_pipeline;
+#[cfg(feature = "test-utils")]
+pub use pipeline::{PipelineJob, PipelineWorker};
+#[cfg(not(feature = "test-utils"))]
+use pipeline::PipelineJob;
 use rusqlite::types::Value as SqlVal;
 use serde_json::Value as JsonVal;
 use setup::{
@@ -23,11 +27,7 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::SyncSender,
-    Mutex,
-};
+use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{start_watcher, VaultEvent};
@@ -35,7 +35,7 @@ use watcher::{start_watcher, VaultEvent};
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
-struct WatcherStarted(AtomicBool);
+struct WatcherStarted(Mutex<bool>);
 
 fn to_forward_slash_relative(path: &Path) -> String {
     path.components()
@@ -46,6 +46,44 @@ fn to_forward_slash_relative(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Convert an absolute path under the vault into a vault-relative forward-slash path.
+/// Avoids `canonicalize()` on attacker-controlled absolute paths outside the vault.
+fn normalize_path_argument_to_vault_relative(
+    path: &str,
+    vault_root: &Path,
+) -> Result<String, String> {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Ok(path.to_string());
+    }
+
+    let canon_root = vault_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize vault root: {}", e))?;
+
+    if candidate.starts_with(&canon_root) {
+        let canon_candidate = candidate
+            .canonicalize()
+            .map_err(|e| format!("failed to canonicalize path: {}", e))?;
+        if !canon_candidate.starts_with(&canon_root) {
+            return Err("path resolves outside vault".to_string());
+        }
+        let rel = canon_candidate
+            .strip_prefix(&canon_root)
+            .map_err(|_| "path strip failed".to_string())?;
+        return Ok(to_forward_slash_relative(rel));
+    }
+
+    if candidate.starts_with(vault_root) {
+        let rel = candidate
+            .strip_prefix(vault_root)
+            .map_err(|_| "path strip failed".to_string())?;
+        return Ok(to_forward_slash_relative(rel));
+    }
+
+    Err("absolute path outside vault".to_string())
 }
 
 fn normalize_wiki_relative_path(path: &str) -> String {
@@ -100,14 +138,11 @@ fn start_file_watcher(
     vault_state: State<VaultConfigState>,
     watcher_started: State<WatcherStarted>,
 ) -> Result<(), String> {
-    // Idempotency guard: prevent duplicate watcher threads on repeated invocations.
-    if watcher_started
-        .0
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let mut started = watcher_started.0.lock().unwrap();
+    if *started {
         return Ok(());
     }
+
     // Get configured vault root from state (trusted source)
     let configured_vault = vault_state
         .0
@@ -203,7 +238,10 @@ fn start_file_watcher(
             let _ = tx.try_send(j);
         }
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    *started = true;
+    Ok(())
 }
 
 // ── Indexing status ───────────────────────────────────────────────────────────
@@ -479,32 +517,25 @@ fn get_related_chunks(
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
 ) -> Result<Vec<search::SearchResult>, String> {
-    // DB stores absolute paths (from watcher), but frontend may send relative paths
-    // (from list_vault_files). Normalize to absolute for DB query.
-    let normalized_path = {
-        let path = std::path::Path::new(&doc_path);
-        if path.is_absolute() {
-            // Already absolute — trust the value and use it directly for the DB
-            // lookup. Calling canonicalize() on attacker-controlled absolute paths
-            // can perform unnecessary filesystem I/O on paths outside the vault.
-            doc_path
-        } else {
-            // Convert relative to absolute, then canonicalize to match DB format
-            let root = vault_state
-                .0
-                .lock()
-                .unwrap()
-                .get_vault_path()
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "no vault path set".to_string())?;
-            let vault_root = std::path::PathBuf::from(&root);
-            let joined = vault_root.join(path);
-            joined
-                .canonicalize()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| joined.to_string_lossy().to_string())
-        }
-    };
+    let root = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault path set".to_string())?;
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_rel,
+        &["documents", "wiki"],
+        crate::vault::PathMode::MustExist,
+    )
+    .map_err(|e| e.to_string())?;
+    let normalized_path = safe.to_string_lossy().to_string();
+
     let guard = db_state.0.lock().unwrap();
     retrieval::related_chunks_facade(&guard.0, &normalized_path, limit).map_err(|e| e.to_string())
 }
@@ -581,30 +612,7 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
         None => return Err("no vault path set".to_string()),
     };
 
-    // Normalize path: if absolute and starts with vault root, make it vault-relative.
-    // Preserves backward compatibility with DB/search results (which store absolute paths)
-    // while still enforcing containment via safe_vault_path.
-    let normalized_path = {
-        let candidate = std::path::Path::new(&path);
-        if candidate.is_absolute() {
-            // Try canonical normalization for robust symlink/casing handling
-            match (candidate.canonicalize(), root.canonicalize()) {
-                (Ok(can_candidate), Ok(can_root)) => can_candidate
-                    .strip_prefix(&can_root)
-                    .map(|rel| rel.to_string_lossy().to_string())
-                    .unwrap_or(path.clone()),
-                _ => {
-                    // Fall back to non-canonical strip_prefix
-                    candidate
-                        .strip_prefix(&root)
-                        .map(|rel| rel.to_string_lossy().to_string())
-                        .unwrap_or(path.clone())
-                }
-            }
-        } else {
-            path.clone()
-        }
-    };
+    let normalized_path = normalize_path_argument_to_vault_relative(&path, &root)?;
 
     let safe = crate::vault::safe_vault_path(
         &root,
@@ -880,30 +888,7 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
         .ok_or_else(|| "no vault set".to_string())?;
     let vault_root = std::path::PathBuf::from(&root);
 
-    // Normalize path: if absolute and starts with vault root, make it vault-relative.
-    // Preserves backward compatibility with DB/search results (which store absolute paths)
-    // while still enforcing containment via safe_vault_path.
-    let normalized_path = {
-        let candidate = std::path::Path::new(&path);
-        if candidate.is_absolute() {
-            // Try canonical normalization for robust symlink/casing handling
-            match (candidate.canonicalize(), vault_root.canonicalize()) {
-                (Ok(can_candidate), Ok(can_root)) => can_candidate
-                    .strip_prefix(&can_root)
-                    .map(|rel| rel.to_string_lossy().to_string())
-                    .unwrap_or(path.clone()),
-                _ => {
-                    // Fall back to non-canonical strip_prefix
-                    candidate
-                        .strip_prefix(&vault_root)
-                        .map(|rel| rel.to_string_lossy().to_string())
-                        .unwrap_or(path.clone())
-                }
-            }
-        } else {
-            path.clone()
-        }
-    };
+    let normalized_path = normalize_path_argument_to_vault_relative(&path, &vault_root)?;
 
     let safe = crate::vault::safe_vault_path(
         &vault_root,
@@ -970,9 +955,6 @@ fn copy_os_drop_paths_to_vault(
 pub use pipeline::ingest_document;
 
 #[cfg(feature = "test-utils")]
-pub use pipeline::{PipelineJob, PipelineWorker};
-
-#[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
     let db = db::AppDb::open(&tmp_path.join("brain.db")).expect("open test db");
     let config = vault::VaultConfig::new(tmp_path.join("config.json"));
@@ -1031,7 +1013,7 @@ pub fn run() {
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineTx(Mutex::new(pipeline_tx)))
-        .manage(WatcherStarted(AtomicBool::new(false)))
+        .manage(WatcherStarted(Mutex::new(false)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
