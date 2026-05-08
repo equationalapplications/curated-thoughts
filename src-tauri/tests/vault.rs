@@ -12,7 +12,10 @@ fn set_vault_path_creates_subdirs() {
 
     assert!(vault.join("documents").is_dir(), "documents/ not created");
     assert!(vault.join("wiki").is_dir(), "wiki/ not created");
-    assert!(vault.join(".brain").join("converted").is_dir(), ".brain/converted/ not created");
+    assert!(
+        vault.join(".brain").join("converted").is_dir(),
+        ".brain/converted/ not created"
+    );
 }
 
 #[test]
@@ -62,7 +65,15 @@ fn save_wiki_page_accepts_backslash_separators() {
         json!({ "path": "wiki\\backslash.md", "content": "# ok" }),
     );
 
-    let written = app.tmp.path().join("vault").join("wiki").join("backslash.md");
-    assert!(written.exists(), "expected normalized wiki path to be written");
+    let written = app
+        .tmp
+        .path()
+        .join("vault")
+        .join("wiki")
+        .join("backslash.md");
+    assert!(
+        written.exists(),
+        "expected normalized wiki path to be written"
+    );
     assert_eq!(std::fs::read_to_string(&written).unwrap(), "# ok");
 }

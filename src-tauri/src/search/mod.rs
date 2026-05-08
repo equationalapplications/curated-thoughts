@@ -254,8 +254,7 @@ mod tests {
                 "SearchResult JSON must include `{key}` for TS/MCP parity; got {v}"
             );
         }
-        let back: SearchResult =
-            serde_json::from_value(v).expect("round-trip SearchResult serde");
+        let back: SearchResult = serde_json::from_value(v).expect("round-trip SearchResult serde");
         assert_eq!(back.doc_path, "/a.md");
         assert_eq!(back.symbol_name.as_deref(), Some("foo"));
         assert_eq!(back.strategy, "prose");

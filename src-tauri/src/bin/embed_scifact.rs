@@ -74,9 +74,7 @@ fn flush_embedding_batch(
 }
 
 fn embed_sentence_chunk(docs: Vec<(String, String)>, embedder: &Embedder, out_path: &str) {
-    println!(
-        "Preset sentence-chunk: chunk_text() groups, TARGET_WORDS neighbors (see chunker)."
-    );
+    println!("Preset sentence-chunk: chunk_text() groups, TARGET_WORDS neighbors (see chunker).");
 
     let doc_chunks: Vec<(String, Vec<String>)> = docs
         .into_iter()
@@ -91,8 +89,7 @@ fn embed_sentence_chunk(docs: Vec<(String, String)>, embedder: &Embedder, out_pa
         doc_chunks.len()
     );
 
-    let mut chunks_out: HashMap<String, Vec<Vec<f32>>> =
-        HashMap::with_capacity(doc_chunks.len());
+    let mut chunks_out: HashMap<String, Vec<Vec<f32>>> = HashMap::with_capacity(doc_chunks.len());
     for (id, chunks) in &doc_chunks {
         chunks_out.insert(id.clone(), vec![Vec::new(); chunks.len()]);
     }
@@ -136,9 +133,7 @@ fn embed_sentence_chunk(docs: Vec<(String, String)>, embedder: &Embedder, out_pa
     for (id, vecs) in chunks_out {
         let rows: Vec<Value> = vecs
             .into_iter()
-            .map(|v| {
-                Value::Array(v.into_iter().map(|f| Value::from(f as f64)).collect())
-            })
+            .map(|v| Value::Array(v.into_iter().map(|f| Value::from(f as f64)).collect()))
             .collect();
         embeddings.insert(id, Value::Array(rows));
     }
@@ -147,11 +142,7 @@ fn embed_sentence_chunk(docs: Vec<(String, String)>, embedder: &Embedder, out_pa
     write_gz_json(out_path, embeddings);
 }
 
-fn embed_fulltext_single(
-    docs: Vec<(String, String)>,
-    embedder: &Embedder,
-    out_path: &str,
-) {
+fn embed_fulltext_single(docs: Vec<(String, String)>, embedder: &Embedder, out_path: &str) {
     println!("Preset fulltext-single: one embedding per doc (combined title + text).");
 
     let mut embeddings: Map<String, Value> = Map::new();

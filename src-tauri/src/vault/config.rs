@@ -120,7 +120,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = make_config(&tmp);
         cfg.set_vault_path("/vault/root").unwrap();
-        assert_eq!(cfg.vault_root().unwrap(), Some(std::path::PathBuf::from("/vault/root")));
+        assert_eq!(
+            cfg.vault_root().unwrap(),
+            Some(std::path::PathBuf::from("/vault/root"))
+        );
     }
 
     #[test]
@@ -133,9 +136,7 @@ mod tests {
     fn embed_profile_roundtrip_local() {
         let tmp = TempDir::new().unwrap();
         let cfg = make_config(&tmp);
-        let p = EmbedProfile::Local {
-            model: "mx".into(),
-        };
+        let p = EmbedProfile::Local { model: "mx".into() };
         cfg.set_embed_profile(p.clone()).unwrap();
         assert_eq!(cfg.get_embed_profile().unwrap(), p);
     }

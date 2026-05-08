@@ -6,7 +6,8 @@ fn fixture(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ast")
         .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("fixture not found: {}", path.display()))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("fixture not found: {}", path.display()))
 }
 
 #[test]
@@ -58,7 +59,9 @@ fn python_standalone_methods_and_dataclass() {
     assert!(names.contains(&"Calculator.add"));
     assert!(names.contains(&"Calculator.sub"));
     assert!(names.contains(&"Config"));
-    assert!(chunks.iter().all(|c| c.strategy == ChunkStrategyTag::AstSymbolPython));
+    assert!(chunks
+        .iter()
+        .all(|c| c.strategy == ChunkStrategyTag::AstSymbolPython));
 }
 
 #[test]
@@ -72,7 +75,9 @@ fn go_method_names_use_receiver_form() {
     names.sort_unstable();
     assert!(names.contains(&"(*Counter).Increment"));
     assert!(names.contains(&"Counter.Value"));
-    assert!(chunks.iter().all(|c| c.strategy == ChunkStrategyTag::AstSymbolGo));
+    assert!(chunks
+        .iter()
+        .all(|c| c.strategy == ChunkStrategyTag::AstSymbolGo));
 }
 
 #[test]
@@ -129,19 +134,19 @@ fn parse_fail_fallback_scanner_rust() {
     let text = "fn broken( { let x = ;";
     let chunks = chunk_autodetect(&PathBuf::from("broken.rs"), text);
     assert!(!chunks.is_empty(), "fallback must produce chunks");
-    assert!(chunks.iter().all(|c| c.strategy == ChunkStrategyTag::Scanner));
+    assert!(chunks
+        .iter()
+        .all(|c| c.strategy == ChunkStrategyTag::Scanner));
 }
 
 #[test]
 fn oversized_rust_splits_with_shared_symbol_name() {
-    let many_lets: String = (0..300).map(|i| format!("    let var_{i} = {i};\n")).collect();
+    let many_lets: String = (0..300)
+        .map(|i| format!("    let var_{i} = {i};\n"))
+        .collect();
     let source = format!("fn big_fn() {{\n{many_lets}}}\n");
     let chunks = chunk_autodetect(&PathBuf::from("big.rs"), &source);
-    assert!(
-        chunks.len() > 1,
-        "expected splits, len={}",
-        chunks.len()
-    );
+    assert!(chunks.len() > 1, "expected splits, len={}", chunks.len());
     for c in &chunks {
         assert_eq!(c.symbol_name.as_deref(), Some("big_fn"));
         assert_eq!(c.strategy, ChunkStrategyTag::AstSymbolRust);
@@ -157,5 +162,9 @@ fn tiny_fn_merges_undersized() {
     body_b.push_str("    t\n");
     let source = format!("fn b(x: u32) -> u32 {{\n{body_b}}}\n");
     let chunks = chunk_autodetect(&PathBuf::from("merge.rs"), &source);
-    assert_eq!(chunks.len(), 1, "oversized single symbol should coalesce to one named chunk");
+    assert_eq!(
+        chunks.len(),
+        1,
+        "oversized single symbol should coalesce to one named chunk"
+    );
 }

@@ -22,14 +22,14 @@ impl TestApp {
     pub fn new() -> Self {
         let tmp = TempDir::new().expect("tempdir");
         let app = make_test_app(tmp.path());
-        let webview = WebviewWindowBuilder::new(
-            &app,
-            "main",
-            WebviewUrl::App("index.html".into()),
-        )
-        .build()
-        .expect("build test webview");
-        TestApp { tmp, _app: app, webview }
+        let webview = WebviewWindowBuilder::new(&app, "main", WebviewUrl::App("index.html".into()))
+            .build()
+            .expect("build test webview");
+        TestApp {
+            tmp,
+            _app: app,
+            webview,
+        }
     }
 
     /// Invoke a Tauri command and unwrap the result. Panics if the command returns an error.
@@ -47,7 +47,8 @@ impl TestApp {
             },
         );
         match result {
-            Ok(body) => body.deserialize::<T>()
+            Ok(body) => body
+                .deserialize::<T>()
                 .unwrap_or_else(|e| panic!("invoke '{cmd}' deserialize failed: {e}")),
             Err(e) => panic!("invoke '{cmd}' failed: {e}"),
         }
