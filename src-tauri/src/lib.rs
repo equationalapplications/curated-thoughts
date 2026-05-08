@@ -593,12 +593,20 @@ fn get_proposed_content(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault set".to_string())?;
-    let proposed_path = std::path::Path::new(&vault)
-        .join(".brain")
-        .join("proposed")
-        .join(&page_path);
-    Ok(std::fs::read_to_string(&proposed_path)
-        .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)))
+    let vault_root = std::path::PathBuf::from(&vault);
+
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &format!(".brain/proposed/{}", page_path),
+        &[".brain/proposed"],
+        crate::vault::PathMode::MustExist,
+    );
+
+    Ok(match safe {
+        Ok(p) => std::fs::read_to_string(&p)
+            .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)),
+        Err(_) => format!("# {}\n\n*Proposed wiki page — content not available.*", page_path),
+    })
 }
 
 #[tauri::command]
