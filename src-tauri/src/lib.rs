@@ -476,9 +476,19 @@ fn approve_wiki_page(
     let page_path: String = conn
         .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    let wiki_dir = std::path::Path::new(&vault_path).join("wiki");
-    std::fs::create_dir_all(&wiki_dir).map_err(|e| e.to_string())?;
-    std::fs::write(wiki_dir.join(&page_path), &content).map_err(|e| e.to_string())?;
+
+    let vault_root = std::path::PathBuf::from(&vault_path);
+    std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
+
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &page_path,
+        &["wiki"],
+        crate::vault::PathMode::MayCreate,
+    )
+    .map_err(|e| e.to_string())?;
+
+    std::fs::write(&safe, &content).map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE wiki_pages SET status = 'approved', last_synced = unixepoch() WHERE id = ?1",
         [id],
