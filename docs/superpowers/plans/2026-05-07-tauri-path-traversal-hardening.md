@@ -663,8 +663,8 @@ git commit -m "fix(tauri): close delete_vault_file path-traversal (Vuln 3)"
 fn approve_wiki_page(
     id: i64,
     content: String,
-    vault_path: String,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
 ) -> Result<(), String> {
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
@@ -672,6 +672,13 @@ fn approve_wiki_page(
         .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
 
+    let vault_path = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
 
@@ -770,12 +777,20 @@ The destination is built from `src.file_name()`, which already strips directory 
 
 ```rust
 #[tauri::command]
-fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String> {
+fn copy_to_vault(src_path: String, vault_state: State<VaultConfigState>) -> Result<String, String> {
     let src = std::path::Path::new(&src_path);
     let file_name = src
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "invalid filename".to_string())?;
+
+    let vault_path = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
 
