@@ -676,7 +676,7 @@ fn approve_wiki_page(
 
     let safe = crate::vault::safe_vault_path(
         &vault_root,
-        &page_path,
+        &format!("wiki/{}", page_path),
         &["wiki"],
         crate::vault::PathMode::MayCreate,
     )
