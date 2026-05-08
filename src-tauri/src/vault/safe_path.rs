@@ -20,6 +20,8 @@ pub enum SafePathError {
     Outside,
     #[error("path component contains invalid characters")]
     InvalidName,
+    #[error("path exists but is not a regular file")]
+    NotARegularFile,
     #[error("path or parent directory not found: {0}")]
     NotFound(String),
     #[error("io error: {0}")]
@@ -234,7 +236,7 @@ pub fn safe_vault_path(
                     return Err(SafePathError::InvalidName);
                 }
                 if metadata.is_dir() || !metadata.is_file() {
-                    return Err(SafePathError::InvalidName);
+                    return Err(SafePathError::NotARegularFile);
                 }
                 // Target exists and is a regular file — verify final canonical containment.
                 let target_canonical = target_path.canonicalize().map_err(SafePathError::Io)?;
@@ -372,7 +374,7 @@ mod tests {
         fs::create_dir_all(root.join("wiki").join("nested-dir")).unwrap();
         let err =
             safe_vault_path(&root, "wiki/nested-dir", allowed(), PathMode::MayCreate).unwrap_err();
-        assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
+        assert!(matches!(err, SafePathError::NotARegularFile), "got {err:?}");
     }
 
     #[test]
