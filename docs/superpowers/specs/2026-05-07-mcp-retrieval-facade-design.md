@@ -1,7 +1,7 @@
 # MCP server + retrieval façade (agent use)
 
 **Date:** 2026-05-08  
-**Status:** Draft → implementation via `writing-plans`  
+**Status:** Implemented  
 **Depends on:** Existing `search::{semantic_search, related_chunks}` and `VaultConfig` (`config.json`) + `brain.db` layout (`2026-05-07-v2-code-rag-chunking-design.md` alignment).
 
 ## 1. Summary

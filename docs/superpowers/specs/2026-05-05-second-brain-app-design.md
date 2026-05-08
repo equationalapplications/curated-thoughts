@@ -1,5 +1,6 @@
 # Curated Thoughts — Design Spec
-**Date:** 2026-05-05  
+**Date:** 2026-05-05
+**Status:** Implemented  
 **Stack:** Tauri + React + BlockNote + Rust + Ollama + FastEmbed + SQLite/sqlite-vec
 
 ---

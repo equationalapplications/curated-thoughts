@@ -2,6 +2,8 @@
 
 **Goal:** Catch regressions in the Tauri IPC contract and core business logic. Tests invoke commands exactly as the frontend does, using a real SQLite database and a headless Tauri app. A gated SciFact benchmark asserts semantic search quality using pre-computed AllMiniLML6V2 embeddings.
 
+**Status:** Implemented
+
 ---
 
 ## Approach
