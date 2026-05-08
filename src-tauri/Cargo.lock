@@ -889,6 +889,7 @@ dependencies = [
  "tauri-plugin-shell",
  "temp-env",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tree-sitter",
  "tree-sitter-go",
