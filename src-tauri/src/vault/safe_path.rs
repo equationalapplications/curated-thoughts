@@ -88,7 +88,7 @@ fn rename_replace(temp: &Path, target: &Path) -> Result<(), SafePathError> {
 pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError> {
     // If we're replacing an existing regular file, preserve its permission bits so
     // temp-file + rename doesn't reset mode/readonly unexpectedly.
-    let old_permissions = std::fs::metadata(target)
+    let old_permissions = std::fs::symlink_metadata(target)
         .ok()
         .filter(|m| m.is_file())
         .map(|m| m.permissions());
