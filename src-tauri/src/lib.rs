@@ -397,7 +397,13 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             });
 
         for entry in walker {
-            let path = entry.path().to_string_lossy().to_string();
+            // Return vault-relative paths for safe_vault_path compatibility
+            let path = entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .to_string();
             let name = entry.file_name().to_string_lossy().to_string();
             files.push(VaultFile { path, name, tier: tier.to_string() });
         }
@@ -625,11 +631,17 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault set".to_string())?;
-    let file = std::path::Path::new(&path);
-    if !file.starts_with(std::path::Path::new(&root).join("documents")) {
-        return Err("path outside documents folder".to_string());
-    }
-    std::fs::remove_file(file).map_err(|e| e.to_string())
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &path,
+        &["documents"],
+        crate::vault::PathMode::MustExist,
+    )
+    .map_err(|e| e.to_string())?;
+
+    std::fs::remove_file(&safe).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
