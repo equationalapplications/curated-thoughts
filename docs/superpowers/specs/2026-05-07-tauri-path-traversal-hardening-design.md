@@ -48,6 +48,8 @@ pub enum SafePathError {
     Outside,
     #[error("path component contains invalid characters")]
     InvalidName,
+    #[error("path exists but is not a regular file")]
+    NotARegularFile,
     #[error("path or parent directory not found: {0}")]
     NotFound(String),
     #[error("io error: {0}")]
