@@ -117,8 +117,12 @@ fn start_file_watcher(
             {
                 let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
                 if should_ingest_extension(ext) {
+                    let normalized = std::fs::canonicalize(entry.path())
+                        .unwrap_or_else(|_| entry.path().to_path_buf())
+                        .to_string_lossy()
+                        .into_owned();
                     let _ = tx.try_send(PipelineJob::ingest(
-                        entry.path().to_string_lossy().into_owned(),
+                        normalized,
                     ));
                 }
             }
@@ -137,11 +141,12 @@ fn start_file_watcher(
         if !canonical.starts_with(&documents_root) {
             return;
         }
+        let normalized = canonical.to_string_lossy().into_owned();
         let job = match &event {
-            VaultEvent::Added(p) | VaultEvent::Modified(p) => {
-                Some(PipelineJob::ingest(p.clone()))
+            VaultEvent::Added(_) | VaultEvent::Modified(_) => {
+                Some(PipelineJob::ingest(normalized.clone()))
             }
-            VaultEvent::Deleted(p) => Some(PipelineJob::Delete(p.clone())),
+            VaultEvent::Deleted(_) => Some(PipelineJob::Delete(normalized.clone())),
         };
         if let Some(j) = job {
             let _ = tx.try_send(j);
