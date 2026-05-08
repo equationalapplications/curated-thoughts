@@ -40,6 +40,7 @@ fn get_vault_path(state: State<VaultConfigState>) -> Result<Option<String>, Stri
 
 #[tauri::command]
 fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), String> {
+    // trusted: vault root from Tauri file picker dialog (user selects directory)
     state.0.lock().unwrap().set_vault_path(&path).map_err(|e| e.to_string())?;
     let root = std::path::Path::new(&path);
     for subdir in &["documents", "wiki"] {
@@ -53,7 +54,7 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
 
 #[tauri::command]
 fn start_file_watcher(
-    vault_path: String,
+    vault_path: String,  // trusted: vault root from Tauri file picker dialog (canonicalize before use)
     app: AppHandle,
     pipeline: State<PipelineTx>,
     db_state: State<DbState>,
