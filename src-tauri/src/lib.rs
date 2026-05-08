@@ -1,5 +1,5 @@
 pub mod chunker;
-mod db;
+pub mod db;
 pub mod embedder;
 mod hasher;
 pub mod librarian;
@@ -101,7 +101,7 @@ fn start_file_watcher(
             {
                 let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
                 if should_ingest_extension(ext) {
-                    let _ = tx.try_send(PipelineJob::Ingest(
+                    let _ = tx.try_send(PipelineJob::ingest(
                         entry.path().to_string_lossy().into_owned(),
                     ));
                 }
@@ -122,7 +122,9 @@ fn start_file_watcher(
             return;
         }
         let job = match &event {
-            VaultEvent::Added(p) | VaultEvent::Modified(p) => Some(PipelineJob::Ingest(p.clone())),
+            VaultEvent::Added(p) | VaultEvent::Modified(p) => {
+                Some(PipelineJob::ingest(p.clone()))
+            }
             VaultEvent::Deleted(p) => Some(PipelineJob::Delete(p.clone())),
         };
         if let Some(j) = job {
@@ -147,6 +149,37 @@ fn get_indexing_status(db_state: State<DbState>) -> Result<IndexingStatus, Strin
     let indexed = db::count_indexed_documents(conn).map_err(|e| e.to_string())?;
     let pending = db::count_pending_documents(conn).map_err(|e| e.to_string())?;
     Ok(IndexingStatus { indexed, pending })
+}
+
+/// Enqueue ingestion for every indexed user document. After chunk strategy (`ast_*`) or
+/// embedding model changes, pass `force_rechunk: true` so work runs even when bytes are
+/// unchanged (`Ingest` alone would no-op on matching hash).
+#[tauri::command]
+fn queue_full_reindex(
+    force_rechunk: bool,
+    pipeline: State<PipelineTx>,
+    db_state: State<DbState>,
+) -> Result<usize, String> {
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let paths =
+        crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+    let tx = pipeline.0.lock().unwrap();
+    let mut queued = 0usize;
+    for path in paths {
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[queue_full_reindex] skip missing file: {path}");
+            continue;
+        }
+        let job = if force_rechunk {
+            PipelineJob::rechunk(path)
+        } else {
+            PipelineJob::ingest(path)
+        };
+        tx.send(job).map_err(|e| format!("pipeline channel closed: {e}"))?;
+        queued += 1;
+    }
+    Ok(queued)
 }
 
 // ── Wiki SQL bridge ───────────────────────────────────────────────────────────
@@ -613,6 +646,8 @@ fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String>
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
+pub use pipeline::ingest_document;
+
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 
@@ -641,6 +676,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             search_vault,
             get_related_chunks,
             save_wiki_page,
+            queue_full_reindex,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -670,6 +706,7 @@ pub fn run() {
             set_vault_path,
             start_file_watcher,
             get_indexing_status,
+            queue_full_reindex,
             wiki_exec,
             wiki_run,
             wiki_get_all,
