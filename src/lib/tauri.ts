@@ -112,8 +112,5 @@ export const getProposedContent = (pageId: number): Promise<string> =>
 export const saveWikiPage = (path: string, content: string): Promise<void> =>
   invoke("save_wiki_page", { path, content });
 
-export const copyToVault = (srcPath: string): Promise<string> =>
-  invoke("copy_to_vault", { srcPath });
-
 export const deleteVaultFile = (path: string): Promise<void> =>
   invoke("delete_vault_file", { path });

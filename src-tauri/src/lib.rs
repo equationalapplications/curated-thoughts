@@ -12,13 +12,13 @@ mod setup;
 pub mod vault;
 mod watcher;
 
+use std::ffi::OsStr;
+use std::path::{Component, Path};
 use std::sync::{mpsc::SyncSender, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use db::AppDb;
 use chunker::should_ingest_extension;
 use pipeline::start_pipeline;
-#[cfg(not(feature = "test-utils"))]
-use pipeline::PipelineJob;
 use rusqlite::types::Value as SqlVal;
 use serde_json::Value as JsonVal;
 use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
@@ -30,6 +30,31 @@ use watcher::{start_watcher, VaultEvent};
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
+
+fn to_forward_slash_relative(path: &Path) -> String {
+    path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(seg) => Some(seg.to_string_lossy().into_owned()),
+            Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn normalize_wiki_relative_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let already_wiki = matches!(
+        Path::new(&normalized).components().next(),
+        Some(Component::Normal(seg)) if seg == OsStr::new("wiki")
+    );
+    if already_wiki {
+        normalized
+    } else {
+        format!("wiki/{}", normalized)
+    }
+}
 
 // ── Vault commands ────────────────────────────────────────────────────────────
 
@@ -451,7 +476,7 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             let Some(relative) = entry.path().strip_prefix(&root).ok() else {
                 continue;
             };
-            let path = relative.to_string_lossy().to_string();
+            let path = to_forward_slash_relative(relative);
             let name = entry.file_name().to_string_lossy().to_string();
             files.push(VaultFile { path, name, tier: tier.to_string() });
         }
@@ -567,12 +592,8 @@ fn approve_wiki_page(
         return Err("absolute paths not allowed".to_string());
     }
 
-    // Normalize path: if it doesn't start with "wiki/", prepend it for backward compatibility
-    let normalized_path = if page_path.starts_with("wiki/") {
-        page_path.clone()
-    } else {
-        format!("wiki/{}", page_path)
-    };
+    // Normalize separators and ensure a wiki/ prefix for backward compatibility.
+    let normalized_path = normalize_wiki_relative_path(&page_path);
 
     let safe = crate::vault::safe_vault_path(
         &vault_root,
@@ -725,12 +746,8 @@ fn save_wiki_page(
         return Err("absolute paths not allowed".to_string());
     }
 
-    // Normalize path: if it doesn't start with "wiki/", prepend it for backward compatibility
-    let normalized_path = if path.starts_with("wiki/") {
-        path.clone()
-    } else {
-        format!("wiki/{}", path)
-    };
+    // Normalize separators and ensure a wiki/ prefix for backward compatibility.
+    let normalized_path = normalize_wiki_relative_path(&path);
 
     let safe = crate::vault::safe_vault_path(
         &vault_root,
@@ -795,15 +812,12 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
     std::fs::remove_file(&safe).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn copy_to_vault(src_path: String, vault_state: State<VaultConfigState>) -> Result<String, String> {
-    let src = std::path::Path::new(&src_path);
-    let file_name = src
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| "invalid filename".to_string())?;
-
-    let vault_path = vault_state
+fn copy_os_drop_paths_to_vault(
+    app: &AppHandle,
+    paths: &[std::path::PathBuf],
+) -> Result<Vec<String>, String> {
+    let vault_path = app
+        .state::<VaultConfigState>()
         .0
         .lock()
         .unwrap()
@@ -813,16 +827,36 @@ fn copy_to_vault(src_path: String, vault_state: State<VaultConfigState>) -> Resu
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
 
-    let dest = crate::vault::safe_vault_path(
-        &vault_root,
-        &format!("documents/{}", file_name),
-        &["documents"],
-        crate::vault::PathMode::MayCreate,
-    )
-    .map_err(|e| e.to_string())?;
+    let tx = app.state::<PipelineTx>().0.lock().unwrap().clone();
+    let mut copied_paths = Vec::new();
 
-    std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
-    Ok(dest.to_string_lossy().into_owned())
+    for src in paths {
+        if !src.is_file() {
+            continue;
+        }
+
+        let file_name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "invalid filename".to_string())?;
+
+        let dest = crate::vault::safe_vault_path(
+            &vault_root,
+            &format!("documents/{}", file_name),
+            &["documents"],
+            crate::vault::PathMode::MayCreate,
+        )
+        .map_err(|e| e.to_string())?;
+
+        std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+
+        let copied = dest.to_string_lossy().into_owned();
+        let _ = tx.try_send(PipelineJob::ingest(copied.clone()));
+        let _ = app.emit("vault-event", VaultEvent::Added(copied.clone()));
+        copied_paths.push(copied);
+    }
+
+    Ok(copied_paths)
 }
 
 // ── Test utilities ────────────────────────────────────────────────────────────
@@ -879,6 +913,15 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
+        // Handle file-drop in Rust so source paths come from OS drop events,
+        // not from attacker-controlled webview command arguments.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if let Err(e) = copy_os_drop_paths_to_vault(&window.app_handle(), paths) {
+                    eprintln!("[drop-copy] failed: {e}");
+                }
+            }
+        })
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineTx(Mutex::new(pipeline_tx)))
@@ -911,7 +954,6 @@ pub fn run() {
             delete_folder_rule,
             get_proposed_content,
             save_wiki_page,
-            copy_to_vault,
             delete_vault_file,
         ])
         .run(tauri::generate_context!())

@@ -5,7 +5,6 @@ import { SearchResults } from "./SearchResults";
 import { FolderTree } from "./FolderTree";
 import { useSearch } from "../../hooks/useSearch";
 import { useVaultFiles } from "../../hooks/useVaultFiles";
-import { copyToVault } from "../../lib/tauri";
 
 interface Props {
   vaultPath: string;
@@ -38,12 +37,6 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
           setDragging(overSidebar);
         } else if (payload.type === "drop") {
           setDragging(false);
-          if (!overSidebar) return;
-          for (const src of payload.paths) {
-            copyToVault(src).catch((e) =>
-              console.error("copy_to_vault failed:", e)
-            );
-          }
         }
       })
       .then((fn) => { unlisten = fn; });
