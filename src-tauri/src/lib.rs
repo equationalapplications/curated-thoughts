@@ -23,7 +23,11 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path};
-use std::sync::{mpsc::SyncSender, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::SyncSender,
+    Mutex,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{start_watcher, VaultEvent};
@@ -31,6 +35,7 @@ use watcher::{start_watcher, VaultEvent};
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
+struct WatcherStarted(AtomicBool);
 
 fn to_forward_slash_relative(path: &Path) -> String {
     path.components()
@@ -93,7 +98,16 @@ fn start_file_watcher(
     pipeline: State<PipelineTx>,
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
+    watcher_started: State<WatcherStarted>,
 ) -> Result<(), String> {
+    // Idempotency guard: prevent duplicate watcher threads on repeated invocations.
+    if watcher_started
+        .0
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(());
+    }
     // Get configured vault root from state (trusted source)
     let configured_vault = vault_state
         .0
@@ -470,10 +484,10 @@ fn get_related_chunks(
     let normalized_path = {
         let path = std::path::Path::new(&doc_path);
         if path.is_absolute() {
-            // Already absolute - canonicalize to match DB format
-            path.canonicalize()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or(doc_path)
+            // Already absolute — trust the value and use it directly for the DB
+            // lookup. Calling canonicalize() on attacker-controlled absolute paths
+            // can perform unnecessary filesystem I/O on paths outside the vault.
+            doc_path
         } else {
             // Convert relative to absolute, then canonicalize to match DB format
             let root = vault_state
@@ -924,10 +938,13 @@ fn copy_os_drop_paths_to_vault(
             continue;
         }
 
-        let file_name = src
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| "invalid filename".to_string())?;
+        let file_name = match src.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => {
+                eprintln!("[drop-copy] skipping file with invalid filename: {:?}", src);
+                continue;
+            }
+        };
 
         let dest = crate::vault::safe_vault_path(
             &vault_root,
@@ -1014,6 +1031,7 @@ pub fn run() {
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineTx(Mutex::new(pipeline_tx)))
+        .manage(WatcherStarted(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
