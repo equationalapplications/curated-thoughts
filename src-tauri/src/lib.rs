@@ -1012,7 +1012,16 @@ fn unique_drop_destination(
                 )
                 .map_err(|e| e.to_string());
             }
-            Err(e) => return Err(e.to_string()),
+            // Directory, symlink escape, or other non-file collision: treat as "name taken"
+            // and try the next ` (n)` suffix instead of failing the whole drop batch.
+            Err(
+                crate::vault::SafePathError::NotARegularFile
+                | crate::vault::SafePathError::Outside
+                | crate::vault::SafePathError::InvalidName
+                | crate::vault::SafePathError::Absolute
+                | crate::vault::SafePathError::Traversal,
+            ) => continue,
+            Err(crate::vault::SafePathError::Io(e)) => return Err(e.to_string()),
         }
     }
     Err(format!(
@@ -1243,6 +1252,16 @@ mod drop_destination_tests {
         let root = tmp.path();
         fs::create_dir_all(root.join("documents")).unwrap();
         fs::write(root.join("documents").join("dup.md"), b"x").unwrap();
+        let p = unique_drop_destination(root, "dup.md").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
+    }
+
+    #[test]
+    fn unique_drop_skips_directory_with_same_basename() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("documents")).unwrap();
+        fs::create_dir_all(root.join("documents").join("dup.md")).unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
     }
