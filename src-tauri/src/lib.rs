@@ -667,10 +667,19 @@ fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String>
     let src = std::path::Path::new(&src_path);
     let file_name = src
         .file_name()
+        .and_then(|n| n.to_str())
         .ok_or_else(|| "invalid filename".to_string())?;
-    let dest_dir = std::path::Path::new(&vault_path).join("documents");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let dest = dest_dir.join(file_name);
+    let vault_root = std::path::PathBuf::from(&vault_path);
+    std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
+
+    let dest = crate::vault::safe_vault_path(
+        &vault_root,
+        &format!("documents/{}", file_name),
+        &["documents"],
+        crate::vault::PathMode::MayCreate,
+    )
+    .map_err(|e| e.to_string())?;
+
     std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().into_owned())
 }
