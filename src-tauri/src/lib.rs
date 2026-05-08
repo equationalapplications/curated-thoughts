@@ -413,18 +413,15 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
         None => return Err("no vault path set".to_string()),
     };
 
-    let doc_path = std::path::Path::new(&path);
+    let safe = crate::vault::safe_vault_path(
+        &root,
+        &path,
+        &["documents", "wiki"],
+        crate::vault::PathMode::MustExist,
+    )
+    .map_err(|e| e.to_string())?;
 
-    if !doc_path.starts_with(&root) {
-        return Err("path outside vault".to_string());
-    }
-    let in_documents = doc_path.starts_with(root.join("documents"));
-    let in_wiki = doc_path.starts_with(root.join("wiki"));
-    if !in_documents && !in_wiki {
-        return Err("path not in documents/ or wiki/".to_string());
-    }
-
-    std::fs::read_to_string(doc_path).map_err(|e| e.to_string())
+    std::fs::read_to_string(&safe).map_err(|e| e.to_string())
 }
 
 // ── Review queue ──────────────────────────────────────────────────────────────
