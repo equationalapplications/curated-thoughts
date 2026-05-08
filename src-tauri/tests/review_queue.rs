@@ -60,8 +60,7 @@ fn approve_wiki_page_writes_file_and_marks_approved() {
 
     app.invoke::<()>("approve_wiki_page", json!({
         "id": id,
-        "content": content,
-        "vaultPath": vault
+        "content": content
     }));
 
     // File written to vault/wiki/

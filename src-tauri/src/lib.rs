@@ -385,9 +385,33 @@ fn get_related_chunks(
     doc_path: String,
     limit: usize,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
 ) -> Result<Vec<search::SearchResult>, String> {
+    // DB stores absolute paths (from watcher), but frontend may send relative paths
+    // (from list_vault_files). Normalize to absolute for DB query.
+    let normalized_path = {
+        let path = std::path::Path::new(&doc_path);
+        if path.is_absolute() {
+            doc_path
+        } else {
+            // Convert relative to absolute
+            let root = vault_state
+                .0
+                .lock()
+                .unwrap()
+                .get_vault_path()
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "no vault path set".to_string())?;
+            let vault_root = std::path::PathBuf::from(&root);
+            vault_root
+                .join(path)
+                .canonicalize()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(doc_path)
+        }
+    };
     let guard = db_state.0.lock().unwrap();
-    retrieval::related_chunks_facade(&guard.0, &doc_path, limit).map_err(|e| e.to_string())
+    retrieval::related_chunks_facade(&guard.0, &normalized_path, limit).map_err(|e| e.to_string())
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────
