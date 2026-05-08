@@ -80,6 +80,28 @@ fn approve_wiki_page_writes_file_and_marks_approved() {
 }
 
 #[test]
+fn approve_wiki_page_accepts_backslash_wiki_path() {
+    let app = TestApp::new();
+    let vault = app.tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    app.invoke::<()>("set_vault_path", json!({ "path": vault }));
+
+    // Simulate a DB row whose path uses backslash separators (possible on Windows).
+    // After normalization: "wiki/bs-approved.md" — must not double-prefix.
+    let id = seed_pending_page(&app, "wiki\\bs-approved.md", "# Wiki");
+    let content = "# Approved";
+
+    app.invoke::<()>("approve_wiki_page", json!({
+        "id": id,
+        "content": content
+    }));
+
+    let wiki_file = vault.join("wiki").join("bs-approved.md");
+    assert!(wiki_file.exists(), "wiki file not written at normalized path");
+    assert_eq!(std::fs::read_to_string(&wiki_file).unwrap(), content);
+}
+
+#[test]
 fn reject_wiki_page_does_not_write_file_and_marks_rejected() {
     let app = TestApp::new();
     let vault = app.tmp.path().join("vault");
