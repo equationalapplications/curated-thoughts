@@ -1002,50 +1002,6 @@ fn copy_os_drop_paths_to_vault(
     Ok(copied_paths)
 }
 
-#[cfg(test)]
-mod normalize_path_tests {
-    use super::normalize_path_argument_to_vault_relative;
-    use std::fs;
-    use std::path::Path;
-
-    #[test]
-    fn absolute_path_inside_vault_nonexistent_target_normalizes_without_canonicalize() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let vault = tmp.path();
-        fs::create_dir_all(vault.join("documents")).unwrap();
-        let canon = vault.canonicalize().unwrap();
-        let missing = canon.join("documents").join("not_created_yet.md");
-        let rel =
-            normalize_path_argument_to_vault_relative(&missing.to_string_lossy(), vault).unwrap();
-        assert_eq!(rel, "documents/not_created_yet.md");
-    }
-
-    /// When the configured vault path and an absolute argument use different spellings for the
-    /// same directory (symlink), normalization must still produce a vault-relative path.
-    #[test]
-    #[cfg(unix)]
-    fn absolute_path_normalizes_when_vault_is_symlink_alias() {
-        use std::os::unix::fs::symlink;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let real_vault = tmp.path().join("real_vault");
-        fs::create_dir_all(real_vault.join("documents")).unwrap();
-        let link = tmp.path().join("link_vault");
-        symlink(&real_vault, &link).unwrap();
-
-        let file = real_vault.join("documents").join("note.md");
-        fs::write(&file, b"x").unwrap();
-
-        let abs_via_real = file.canonicalize().unwrap();
-        let rel = normalize_path_argument_to_vault_relative(
-            &abs_via_real.to_string_lossy(),
-            Path::new(&link),
-        )
-        .unwrap();
-        assert_eq!(rel, "documents/note.md");
-    }
-}
-
 // ── Test utilities ────────────────────────────────────────────────────────────
 
 pub use pipeline::ingest_document;
@@ -1148,4 +1104,48 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
+}
+
+#[cfg(test)]
+mod normalize_path_tests {
+    use super::normalize_path_argument_to_vault_relative;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn absolute_path_inside_vault_nonexistent_target_normalizes_without_canonicalize() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        fs::create_dir_all(vault.join("documents")).unwrap();
+        let canon = vault.canonicalize().unwrap();
+        let missing = canon.join("documents").join("not_created_yet.md");
+        let rel =
+            normalize_path_argument_to_vault_relative(&missing.to_string_lossy(), vault).unwrap();
+        assert_eq!(rel, "documents/not_created_yet.md");
+    }
+
+    /// When the configured vault path and an absolute argument use different spellings for the
+    /// same directory (symlink), normalization must still produce a vault-relative path.
+    #[test]
+    #[cfg(unix)]
+    fn absolute_path_normalizes_when_vault_is_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real_vault = tmp.path().join("real_vault");
+        fs::create_dir_all(real_vault.join("documents")).unwrap();
+        let link = tmp.path().join("link_vault");
+        symlink(&real_vault, &link).unwrap();
+
+        let file = real_vault.join("documents").join("note.md");
+        fs::write(&file, b"x").unwrap();
+
+        let abs_via_real = file.canonicalize().unwrap();
+        let rel = normalize_path_argument_to_vault_relative(
+            &abs_via_real.to_string_lossy(),
+            Path::new(&link),
+        )
+        .unwrap();
+        assert_eq!(rel, "documents/note.md");
+    }
 }
