@@ -541,11 +541,14 @@ fn get_related_chunks(
     let vault_root = std::path::PathBuf::from(&root);
 
     let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
+    // `related_chunks_facade` only queries SQLite; the document row may still exist after the
+    // file was removed from disk. MayCreate validates containment via the parent dir without
+    // requiring the target file to exist.
     let safe = crate::vault::safe_vault_path(
         &vault_root,
         &normalized_rel,
         &["documents", "wiki"],
-        crate::vault::PathMode::MustExist,
+        crate::vault::PathMode::MayCreate,
     )
     .map_err(|e| e.to_string())?;
     let normalized_path = safe.to_string_lossy().to_string();

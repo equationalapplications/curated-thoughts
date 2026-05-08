@@ -354,6 +354,25 @@ mod tests {
     }
 
     #[test]
+    fn may_create_succeeds_when_target_file_missing() {
+        let (_g, root) = vault();
+        let out = safe_vault_path(
+            &root,
+            "documents/no-such-file.md",
+            allowed(),
+            PathMode::MayCreate,
+        )
+        .unwrap();
+        assert!(!out.exists());
+        let expected = root
+            .join("documents")
+            .canonicalize()
+            .unwrap()
+            .join("no-such-file.md");
+        assert_eq!(out, expected);
+    }
+
+    #[test]
     fn may_create_rejects_dot_filename() {
         let (_g, root) = vault();
         let err = safe_vault_path(&root, "wiki/.", allowed(), PathMode::MayCreate).unwrap_err();
