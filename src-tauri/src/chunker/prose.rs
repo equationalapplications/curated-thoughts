@@ -69,10 +69,7 @@ fn ends_sentence(text: &str, punct_byte: usize, punct: char) -> bool {
         return true;
     }
 
-    match rest.trim_start().chars().next() {
-        Some(c) if c.is_uppercase() => true,
-        _ => false,
-    }
+    matches!(rest.trim_start().chars().next(), Some(c) if c.is_uppercase())
 }
 
 /// Sentence boundary: `.`, `!`, or `?` per design spec (abbreviation and decimal skips for `.`).

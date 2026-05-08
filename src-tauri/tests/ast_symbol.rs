@@ -70,8 +70,8 @@ fn go_method_names_use_receiver_form() {
         .filter_map(|c| c.symbol_name.as_deref())
         .collect();
     names.sort_unstable();
-    assert!(names.iter().any(|n| *n == "(*Counter).Increment"));
-    assert!(names.iter().any(|n| *n == "Counter.Value"));
+    assert!(names.contains(&"(*Counter).Increment"));
+    assert!(names.contains(&"Counter.Value"));
     assert!(chunks.iter().all(|c| c.strategy == ChunkStrategyTag::AstSymbolGo));
 }
 

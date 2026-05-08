@@ -7,6 +7,7 @@ use tauri::{test::MockRuntime, WebviewUrl, WebviewWindowBuilder};
 use tauri_app_lib::make_test_app;
 use tempfile::TempDir;
 
+#[allow(dead_code)]
 pub struct TestApp {
     pub tmp: TempDir,
     pub _app: tauri::App<MockRuntime>,
@@ -16,6 +17,7 @@ pub struct TestApp {
 // Drop order (reverse of declaration): webview first, _app second, tmp last.
 // This ensures the SQLite connection closes before TempDir deletes the directory.
 
+#[allow(dead_code)]
 impl TestApp {
     pub fn new() -> Self {
         let tmp = TempDir::new().expect("tempdir");
