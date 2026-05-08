@@ -5,6 +5,7 @@
 //! semi-trusted (it loads LLM-generated wiki content that may be prompt-injected),
 //! so path arguments are treated as if they came from a remote attacker.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -32,6 +33,113 @@ pub enum PathMode {
     /// The target file may not yet exist; canonicalize the parent directory
     /// and require the final component to be a single plain filename.
     MayCreate,
+}
+
+fn tmp_sibling_path(target: &Path) -> Result<PathBuf, SafePathError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| SafePathError::NotFound("parent directory not found".to_string()))?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(SafePathError::InvalidName)?;
+
+    let pid = std::process::id();
+    for attempt in 0..64u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let candidate = parent.join(format!(".{file_name}.tmp-{pid}-{nanos}-{attempt}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(SafePathError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "failed to allocate unique temp path",
+    )))
+}
+
+fn rename_replace(temp: &Path, target: &Path) -> Result<(), SafePathError> {
+    match std::fs::rename(temp, target) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Windows rename does not replace existing targets. Remove and retry.
+            std::fs::remove_file(target)?;
+            std::fs::rename(temp, target).map_err(SafePathError::Io)
+        }
+        Err(e) => Err(SafePathError::Io(e)),
+    }
+}
+
+pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError> {
+    let temp = tmp_sibling_path(target)?;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+    {
+        Ok(f) => f,
+        Err(e) => return Err(SafePathError::Io(e)),
+    };
+
+    if let Err(e) = file.write_all(bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(SafePathError::Io(e));
+    }
+
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(SafePathError::Io(e));
+    }
+
+    drop(file);
+
+    if let Err(e) = rename_replace(&temp, target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+pub fn safe_copy_file(src: &Path, target: &Path) -> Result<u64, SafePathError> {
+    let temp = tmp_sibling_path(target)?;
+
+    let mut input = std::fs::File::open(src)?;
+    let mut output = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+    {
+        Ok(f) => f,
+        Err(e) => return Err(SafePathError::Io(e)),
+    };
+
+    let copied = match std::io::copy(&mut input, &mut output) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(SafePathError::Io(e));
+        }
+    };
+
+    if let Err(e) = output.sync_all() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(SafePathError::Io(e));
+    }
+
+    drop(output);
+
+    if let Err(e) = rename_replace(&temp, target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+
+    Ok(copied)
 }
 
 pub fn safe_vault_path(
@@ -75,7 +183,10 @@ pub fn safe_vault_path(
             let canonical = joined
                 .canonicalize()
                 .map_err(|_| SafePathError::NotFound(format!("file not found: {}", user_path)))?;
-            if allowed_canonical.iter().any(|sub| canonical.starts_with(sub)) {
+            if allowed_canonical
+                .iter()
+                .any(|sub| canonical.starts_with(sub))
+            {
                 Ok(canonical)
             } else {
                 Err(SafePathError::Outside)
@@ -106,9 +217,9 @@ pub fn safe_vault_path(
             }
             let parent = candidate.parent().unwrap_or_else(|| Path::new(""));
             let joined_parent = root_canonical.join(parent);
-            let canonical_parent = joined_parent
-                .canonicalize()
-                .map_err(|_| SafePathError::NotFound(format!("parent directory not found: {}", user_path)))?;
+            let canonical_parent = joined_parent.canonicalize().map_err(|_| {
+                SafePathError::NotFound(format!("parent directory not found: {}", user_path))
+            })?;
             if !allowed_canonical
                 .iter()
                 .any(|sub| canonical_parent.starts_with(sub))
@@ -125,7 +236,7 @@ pub fn safe_vault_path(
                 // Target exists and is not a symlink — verify final canonical containment.
                 let target_canonical = target_path
                     .canonicalize()
-                    .map_err(|e| SafePathError::Io(e))?;
+                    .map_err(SafePathError::Io)?;
                 if !allowed_canonical
                     .iter()
                     .any(|sub| target_canonical.starts_with(sub))
@@ -164,21 +275,29 @@ mod tests {
     #[test]
     fn rejects_absolute_path() {
         let (_g, root) = vault();
-        let err = safe_vault_path(&root, "/etc/passwd", allowed(), PathMode::MustExist).unwrap_err();
+        let err =
+            safe_vault_path(&root, "/etc/passwd", allowed(), PathMode::MustExist).unwrap_err();
         assert!(matches!(err, SafePathError::Absolute), "got {err:?}");
     }
 
     #[test]
     fn rejects_parent_dir_component() {
         let (_g, root) = vault();
-        let err = safe_vault_path(&root, "documents/../../etc/passwd", allowed(), PathMode::MustExist).unwrap_err();
+        let err = safe_vault_path(
+            &root,
+            "documents/../../etc/passwd",
+            allowed(),
+            PathMode::MustExist,
+        )
+        .unwrap_err();
         assert!(matches!(err, SafePathError::Traversal), "got {err:?}");
     }
 
     #[test]
     fn rejects_nul_byte_in_filename() {
         let (_g, root) = vault();
-        let err = safe_vault_path(&root, "documents/foo\0.md", allowed(), PathMode::MustExist).unwrap_err();
+        let err = safe_vault_path(&root, "documents/foo\0.md", allowed(), PathMode::MustExist)
+            .unwrap_err();
         assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
     }
 
@@ -195,7 +314,8 @@ mod tests {
         let (_g, root) = vault();
         let target = root.join("documents").join("foo.md");
         fs::write(&target, b"hi").unwrap();
-        let out = safe_vault_path(&root, "documents/foo.md", allowed(), PathMode::MustExist).unwrap();
+        let out =
+            safe_vault_path(&root, "documents/foo.md", allowed(), PathMode::MustExist).unwrap();
         assert_eq!(out, target.canonicalize().unwrap());
     }
 
@@ -220,8 +340,13 @@ mod tests {
     #[test]
     fn may_create_returns_parent_canonical_join_filename() {
         let (_g, root) = vault();
-        let out = safe_vault_path(&root, "wiki/new-page.md", allowed(), PathMode::MayCreate).unwrap();
-        let expected = root.join("wiki").canonicalize().unwrap().join("new-page.md");
+        let out =
+            safe_vault_path(&root, "wiki/new-page.md", allowed(), PathMode::MayCreate).unwrap();
+        let expected = root
+            .join("wiki")
+            .canonicalize()
+            .unwrap()
+            .join("new-page.md");
         assert_eq!(out, expected);
     }
 
@@ -235,14 +360,16 @@ mod tests {
     #[test]
     fn may_create_rejects_missing_parent() {
         let (_g, root) = vault();
-        let err = safe_vault_path(&root, "wiki/never/x.md", allowed(), PathMode::MayCreate).unwrap_err();
+        let err =
+            safe_vault_path(&root, "wiki/never/x.md", allowed(), PathMode::MayCreate).unwrap_err();
         assert!(matches!(err, SafePathError::NotFound(_)), "got {err:?}");
     }
 
     #[test]
     fn rejects_absolute_md_path_vuln1_regression() {
         let (_g, root) = vault();
-        let err = safe_vault_path(&root, "/tmp/pwn.md", &["wiki"], PathMode::MayCreate).unwrap_err();
+        let err =
+            safe_vault_path(&root, "/tmp/pwn.md", &["wiki"], PathMode::MayCreate).unwrap_err();
         assert!(matches!(err, SafePathError::Absolute), "got {err:?}");
     }
 
@@ -251,7 +378,8 @@ mod tests {
         let (_g, root) = vault();
         fs::create_dir_all(root.join("other")).unwrap();
         fs::write(root.join("other").join("foo.md"), b"x").unwrap();
-        let err = safe_vault_path(&root, "other/foo.md", allowed(), PathMode::MustExist).unwrap_err();
+        let err =
+            safe_vault_path(&root, "other/foo.md", allowed(), PathMode::MustExist).unwrap_err();
         assert!(matches!(err, SafePathError::Outside), "got {err:?}");
     }
 
@@ -266,7 +394,13 @@ mod tests {
         fs::remove_dir(root.join("documents")).unwrap();
         symlink(outside.path(), root.join("documents")).unwrap();
         // Now "documents" canonicalizes to outside the vault, so it should be filtered out.
-        let err = safe_vault_path(&root, "documents/target.md", &["documents"], PathMode::MustExist).unwrap_err();
+        let err = safe_vault_path(
+            &root,
+            "documents/target.md",
+            &["documents"],
+            PathMode::MustExist,
+        )
+        .unwrap_err();
         assert!(matches!(err, SafePathError::Outside), "got {err:?}");
     }
 
@@ -278,9 +412,72 @@ mod tests {
         let outside = TempDir::new().unwrap();
         fs::write(outside.path().join("target.md"), b"pwned").unwrap();
         // Create symlink in wiki/ pointing outside vault
-        symlink(outside.path().join("target.md"), root.join("wiki").join("evil.md")).unwrap();
+        symlink(
+            outside.path().join("target.md"),
+            root.join("wiki").join("evil.md"),
+        )
+        .unwrap();
         // Attempt to write to evil.md should be rejected (symlink escape)
-        let err = safe_vault_path(&root, "wiki/evil.md", &["wiki"], PathMode::MayCreate).unwrap_err();
+        let err =
+            safe_vault_path(&root, "wiki/evil.md", &["wiki"], PathMode::MayCreate).unwrap_err();
         assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_write_bytes_replaces_raced_symlink_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let (_g, root) = vault();
+        let outside = TempDir::new().unwrap();
+        let outside_target = outside.path().join("outside.md");
+        fs::write(&outside_target, b"outside").unwrap();
+
+        let target =
+            safe_vault_path(&root, "wiki/race.md", &["wiki"], PathMode::MayCreate).unwrap();
+
+        // Simulate attacker creating a symlink after path validation but before write.
+        symlink(&outside_target, &target).unwrap();
+
+        safe_write_bytes(&target, b"inside").unwrap();
+
+        let written = fs::read_to_string(&target).unwrap();
+        let outside_read = fs::read_to_string(&outside_target).unwrap();
+        assert_eq!(written, "inside");
+        assert_eq!(outside_read, "outside");
+        assert!(!target.symlink_metadata().unwrap().is_symlink());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_copy_file_replaces_raced_symlink_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let (_g, root) = vault();
+        let outside = TempDir::new().unwrap();
+        let outside_target = outside.path().join("outside.md");
+        let src = root.join("documents").join("src.md");
+
+        fs::write(&outside_target, b"outside").unwrap();
+        fs::write(&src, b"inside").unwrap();
+
+        let target = safe_vault_path(
+            &root,
+            "documents/race.md",
+            &["documents"],
+            PathMode::MayCreate,
+        )
+        .unwrap();
+
+        // Simulate attacker creating a symlink after path validation but before copy.
+        symlink(&outside_target, &target).unwrap();
+
+        safe_copy_file(&src, &target).unwrap();
+
+        let copied = fs::read_to_string(&target).unwrap();
+        let outside_read = fs::read_to_string(&outside_target).unwrap();
+        assert_eq!(copied, "inside");
+        assert_eq!(outside_read, "outside");
+        assert!(!target.symlink_metadata().unwrap().is_symlink());
     }
 }

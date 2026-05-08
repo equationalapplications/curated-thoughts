@@ -32,9 +32,9 @@ fn ram_gb() -> u64 {
 
 pub fn recommended_model() -> &'static str {
     match ram_gb() {
-        0..=7  => "qwen2.5:0.5b",
+        0..=7 => "qwen2.5:0.5b",
         8..=15 => "llama3.2:1b",
-        _      => "llama3.2:3b",
+        _ => "llama3.2:3b",
     }
 }
 
@@ -47,8 +47,8 @@ pub fn parse_models_response(json: &str) -> Result<Vec<String>> {
 // binaries at /opt/homebrew/bin are invisible to Command::new("ollama").
 fn find_ollama() -> Option<std::path::PathBuf> {
     let known = [
-        "/opt/homebrew/bin/ollama",  // Apple Silicon Homebrew
-        "/usr/local/bin/ollama",     // Intel Homebrew / manual install
+        "/opt/homebrew/bin/ollama", // Apple Silicon Homebrew
+        "/usr/local/bin/ollama",    // Intel Homebrew / manual install
         "/Applications/Ollama.app/Contents/Resources/ollama",
     ];
     // Try shell PATH first (works in terminal-launched dev builds)
@@ -60,23 +60,39 @@ fn find_ollama() -> Option<std::path::PathBuf> {
             }
         }
     }
-    known.iter().map(std::path::Path::new).find(|p| p.exists()).map(|p| p.to_path_buf())
+    known
+        .iter()
+        .map(std::path::Path::new)
+        .find(|p| p.exists())
+        .map(|p| p.to_path_buf())
 }
 
 pub fn check_ollama() -> OllamaStatus {
     let Some(bin) = find_ollama() else {
-        return OllamaStatus { installed: false, running: false, models: vec![] };
+        return OllamaStatus {
+            installed: false,
+            running: false,
+            models: vec![],
+        };
     };
 
     match reqwest::blocking::get("http://localhost:11434/api/tags") {
         Ok(resp) if resp.status().is_success() => {
             let text = resp.text().unwrap_or_default();
             let models = parse_models_response(&text).unwrap_or_default();
-            OllamaStatus { installed: true, running: true, models }
+            OllamaStatus {
+                installed: true,
+                running: true,
+                models,
+            }
         }
         _ => {
             let _ = bin; // binary found but server not up yet
-            OllamaStatus { installed: true, running: false, models: vec![] }
+            OllamaStatus {
+                installed: true,
+                running: false,
+                models: vec![],
+            }
         }
     }
 }

@@ -45,7 +45,10 @@ fn get_proposed_content_returns_file_contents() {
     std::fs::write(vault_proposed.join("doc.md"), "# Generated Content").unwrap();
 
     let content: String = app.invoke("get_proposed_content", json!({ "pageId": id }));
-    assert!(content.contains("Generated Content"), "expected content, got: {content}");
+    assert!(
+        content.contains("Generated Content"),
+        "expected content, got: {content}"
+    );
 }
 
 #[test]
@@ -58,10 +61,13 @@ fn approve_wiki_page_writes_file_and_marks_approved() {
     let id = seed_pending_page(&app, "page.md", "# Wiki");
     let content = "# Approved Wiki Page\n\nContent.";
 
-    app.invoke::<()>("approve_wiki_page", json!({
-        "id": id,
-        "content": content
-    }));
+    app.invoke::<()>(
+        "approve_wiki_page",
+        json!({
+            "id": id,
+            "content": content
+        }),
+    );
 
     // File written to vault/wiki/
     let wiki_file = vault.join("wiki").join("page.md");
@@ -74,7 +80,9 @@ fn approve_wiki_page_writes_file_and_marks_approved() {
 
     let conn = app.open_db();
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(status, "approved");
 }
@@ -91,13 +99,19 @@ fn approve_wiki_page_accepts_backslash_wiki_path() {
     let id = seed_pending_page(&app, "wiki\\bs-approved.md", "# Wiki");
     let content = "# Approved";
 
-    app.invoke::<()>("approve_wiki_page", json!({
-        "id": id,
-        "content": content
-    }));
+    app.invoke::<()>(
+        "approve_wiki_page",
+        json!({
+            "id": id,
+            "content": content
+        }),
+    );
 
     let wiki_file = vault.join("wiki").join("bs-approved.md");
-    assert!(wiki_file.exists(), "wiki file not written at normalized path");
+    assert!(
+        wiki_file.exists(),
+        "wiki file not written at normalized path"
+    );
     assert_eq!(std::fs::read_to_string(&wiki_file).unwrap(), content);
 }
 
@@ -113,7 +127,10 @@ fn reject_wiki_page_does_not_write_file_and_marks_rejected() {
     app.invoke::<()>("reject_wiki_page", json!({ "id": id }));
 
     // No file written
-    assert!(!vault.join("wiki").join("reject.md").exists(), "file should not exist after reject");
+    assert!(
+        !vault.join("wiki").join("reject.md").exists(),
+        "file should not exist after reject"
+    );
 
     // No longer in queue
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
@@ -121,7 +138,9 @@ fn reject_wiki_page_does_not_write_file_and_marks_rejected() {
 
     let conn = app.open_db();
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(status, "rejected");
 }

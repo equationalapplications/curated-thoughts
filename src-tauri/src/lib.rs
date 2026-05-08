@@ -4,26 +4,27 @@ pub mod embedder;
 mod hasher;
 pub mod librarian;
 mod pipeline;
-pub mod search;
+pub mod recall_bench_fixture;
 pub mod retrieval;
 pub mod scifact_fixture;
-pub mod recall_bench_fixture;
+pub mod search;
 mod setup;
 pub mod vault;
 mod watcher;
 
+use chunker::should_ingest_extension;
+use db::AppDb;
+use pipeline::start_pipeline;
+use rusqlite::types::Value as SqlVal;
+use serde_json::Value as JsonVal;
+use setup::{
+    check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
+    recommended_model as ollama_recommended, start_ollama_server as ollama_start, OllamaStatus,
+};
 use std::ffi::OsStr;
 use std::path::{Component, Path};
 use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
-use db::AppDb;
-use chunker::should_ingest_extension;
-use pipeline::start_pipeline;
-use rusqlite::types::Value as SqlVal;
-use serde_json::Value as JsonVal;
-use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
-            pull_model as ollama_pull, recommended_model as ollama_recommended,
-            start_ollama_server as ollama_start, OllamaStatus};
 use vault::VaultConfig;
 use watcher::{start_watcher, VaultEvent};
 
@@ -32,8 +33,7 @@ struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
 
 fn to_forward_slash_relative(path: &Path) -> String {
-    path
-        .components()
+    path.components()
         .filter_map(|component| match component {
             Component::Normal(seg) => Some(seg.to_string_lossy().into_owned()),
             Component::CurDir => None,
@@ -60,13 +60,23 @@ fn normalize_wiki_relative_path(path: &str) -> String {
 
 #[tauri::command]
 fn get_vault_path(state: State<VaultConfigState>) -> Result<Option<String>, String> {
-    state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())
+    state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), String> {
     // trusted: vault root from Tauri file picker dialog (user selects directory)
-    state.0.lock().unwrap().set_vault_path(&path).map_err(|e| e.to_string())?;
+    state
+        .0
+        .lock()
+        .unwrap()
+        .set_vault_path(&path)
+        .map_err(|e| e.to_string())?;
     let root = std::path::Path::new(&path);
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
@@ -140,15 +150,17 @@ fn start_file_watcher(
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
             {
-                let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = entry
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
                 if should_ingest_extension(ext) {
                     let normalized = std::fs::canonicalize(entry.path())
                         .unwrap_or_else(|_| entry.path().to_path_buf())
                         .to_string_lossy()
                         .into_owned();
-                    let _ = tx.try_send(PipelineJob::ingest(
-                        normalized,
-                    ));
+                    let _ = tx.try_send(PipelineJob::ingest(normalized));
                 }
             }
         }
@@ -161,8 +173,8 @@ fn start_file_watcher(
         };
         // For existing files, canonicalize to match documents_root.
         // For deleted files (don't exist), fall back to the raw path.
-        let canonical = std::fs::canonicalize(path_str)
-            .unwrap_or_else(|_| std::path::PathBuf::from(path_str));
+        let canonical =
+            std::fs::canonicalize(path_str).unwrap_or_else(|_| std::path::PathBuf::from(path_str));
         if !canonical.starts_with(&documents_root) {
             return;
         }
@@ -208,8 +220,7 @@ fn queue_full_reindex(
 ) -> Result<usize, String> {
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
-    let paths =
-        crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+    let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
     let tx = pipeline.0.lock().unwrap();
     let mut queued = 0usize;
     for path in paths {
@@ -222,7 +233,8 @@ fn queue_full_reindex(
         } else {
             PipelineJob::ingest(path)
         };
-        tx.send(job).map_err(|e| format!("pipeline channel closed: {e}"))?;
+        tx.send(job)
+            .map_err(|e| format!("pipeline channel closed: {e}"))?;
         queued += 1;
     }
     Ok(queued)
@@ -236,12 +248,17 @@ fn json_to_sql(v: &JsonVal) -> SqlVal {
         JsonVal::Null => SqlVal::Null,
         JsonVal::Bool(b) => SqlVal::Integer(if *b { 1 } else { 0 }),
         JsonVal::Number(n) => {
-            if let Some(i) = n.as_i64() { SqlVal::Integer(i) }
-            else { SqlVal::Real(n.as_f64().unwrap_or(0.0)) }
+            if let Some(i) = n.as_i64() {
+                SqlVal::Integer(i)
+            } else {
+                SqlVal::Real(n.as_f64().unwrap_or(0.0))
+            }
         }
         JsonVal::String(s) => SqlVal::Text(s.clone()),
         JsonVal::Array(a) => SqlVal::Blob(
-            a.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect(),
         ),
         JsonVal::Object(_) => SqlVal::Null,
     }
@@ -256,10 +273,12 @@ fn row_to_json(
         let val = match row.get_ref(i)? {
             rusqlite::types::ValueRef::Null => JsonVal::Null,
             rusqlite::types::ValueRef::Integer(n) => JsonVal::Number(n.into()),
-            rusqlite::types::ValueRef::Real(f) => {
-                serde_json::Number::from_f64(f).map(JsonVal::Number).unwrap_or(JsonVal::Null)
+            rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                .map(JsonVal::Number)
+                .unwrap_or(JsonVal::Null),
+            rusqlite::types::ValueRef::Text(s) => {
+                JsonVal::String(String::from_utf8_lossy(s).into())
             }
-            rusqlite::types::ValueRef::Text(s) => JsonVal::String(String::from_utf8_lossy(s).into()),
             rusqlite::types::ValueRef::Blob(b) => {
                 JsonVal::Array(b.iter().map(|&n| JsonVal::Number(n.into())).collect())
             }
@@ -275,7 +294,10 @@ fn query_rows(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<serde_json::Map<String, JsonVal>>, String> {
     let sql_params: Vec<SqlVal> = params.iter().map(json_to_sql).collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
     let mut out = Vec::new();
     {
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
@@ -290,30 +312,61 @@ fn query_rows(
 
 #[tauri::command]
 fn wiki_exec(sql: String, db_state: State<DbState>) -> Result<(), String> {
-    db_state.0.lock().unwrap().0.execute_batch(&sql).map_err(|e| e.to_string())
+    db_state
+        .0
+        .lock()
+        .unwrap()
+        .0
+        .execute_batch(&sql)
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
-struct WikiRunResult { changes: i64, last_insert_row_id: i64 }
-
-#[tauri::command]
-fn wiki_run(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -> Result<WikiRunResult, String> {
-    let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let sql_params: Vec<SqlVal> = params.iter().map(json_to_sql).collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    let changes = conn.execute(&sql, refs.as_slice()).map_err(|e| e.to_string())?;
-    Ok(WikiRunResult { changes: changes as i64, last_insert_row_id: conn.last_insert_rowid() })
+struct WikiRunResult {
+    changes: i64,
+    last_insert_row_id: i64,
 }
 
 #[tauri::command]
-fn wiki_get_all(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -> Result<Vec<serde_json::Map<String, JsonVal>>, String> {
+fn wiki_run(
+    sql: String,
+    params: Vec<JsonVal>,
+    db_state: State<DbState>,
+) -> Result<WikiRunResult, String> {
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let sql_params: Vec<SqlVal> = params.iter().map(json_to_sql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
+    let changes = conn
+        .execute(&sql, refs.as_slice())
+        .map_err(|e| e.to_string())?;
+    Ok(WikiRunResult {
+        changes: changes as i64,
+        last_insert_row_id: conn.last_insert_rowid(),
+    })
+}
+
+#[tauri::command]
+fn wiki_get_all(
+    sql: String,
+    params: Vec<JsonVal>,
+    db_state: State<DbState>,
+) -> Result<Vec<serde_json::Map<String, JsonVal>>, String> {
     query_rows(&sql, &params, &db_state.0.lock().unwrap().0)
 }
 
 #[tauri::command]
-fn wiki_get_first(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -> Result<Option<serde_json::Map<String, JsonVal>>, String> {
-    Ok(query_rows(&sql, &params, &db_state.0.lock().unwrap().0)?.into_iter().next())
+fn wiki_get_first(
+    sql: String,
+    params: Vec<JsonVal>,
+    db_state: State<DbState>,
+) -> Result<Option<serde_json::Map<String, JsonVal>>, String> {
+    Ok(query_rows(&sql, &params, &db_state.0.lock().unwrap().0)?
+        .into_iter()
+        .next())
 }
 
 // ── Embed text (for wiki llmProvider.embed) ───────────────────────────────────
@@ -356,7 +409,9 @@ async fn ollama_generate(system_prompt: String, user_prompt: String) -> Result<S
 // ── Ollama commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn check_ollama() -> OllamaStatus { ollama_check() }
+fn check_ollama() -> OllamaStatus {
+    ollama_check()
+}
 
 #[tauri::command]
 fn list_local_models() -> Result<Vec<String>, String> {
@@ -364,7 +419,9 @@ fn list_local_models() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn get_recommended_model() -> String { ollama_recommended().to_string() }
+fn get_recommended_model() -> String {
+    ollama_recommended().to_string()
+}
 
 #[tauri::command]
 fn start_ollama_server() -> Result<(), String> {
@@ -449,7 +506,13 @@ pub struct VaultFile {
 
 #[tauri::command]
 fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, String> {
-    let root = match state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())? {
+    let root = match state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => return Ok(vec![]),
     };
@@ -458,7 +521,9 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
 
     for (subdir, tier) in &[("documents", "user_doc"), ("wiki", "wiki")] {
         let dir = root.join(subdir);
-        if !dir.exists() { continue; }
+        if !dir.exists() {
+            continue;
+        }
         let walker = walkdir::WalkDir::new(&dir)
             .min_depth(1)
             .into_iter()
@@ -478,7 +543,11 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             };
             let path = to_forward_slash_relative(relative);
             let name = entry.file_name().to_string_lossy().to_string();
-            files.push(VaultFile { path, name, tier: tier.to_string() });
+            files.push(VaultFile {
+                path,
+                name,
+                tier: tier.to_string(),
+            });
         }
     }
 
@@ -487,7 +556,13 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
 
 #[tauri::command]
 fn read_document(path: String, state: State<VaultConfigState>) -> Result<String, String> {
-    let root = match state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())? {
+    let root = match state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => return Err("no vault path set".to_string()),
     };
@@ -500,12 +575,10 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
         if candidate.is_absolute() {
             // Try canonical normalization for robust symlink/casing handling
             match (candidate.canonicalize(), root.canonicalize()) {
-                (Ok(can_candidate), Ok(can_root)) => {
-                    can_candidate
-                        .strip_prefix(&can_root)
-                        .map(|rel| rel.to_string_lossy().to_string())
-                        .unwrap_or(path.clone())
-                }
+                (Ok(can_candidate), Ok(can_root)) => can_candidate
+                    .strip_prefix(&can_root)
+                    .map(|rel| rel.to_string_lossy().to_string())
+                    .unwrap_or(path.clone()),
                 _ => {
                     // Fall back to non-canonical strip_prefix
                     candidate
@@ -574,7 +647,9 @@ fn approve_wiki_page(
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
     let page_path: String = conn
-        .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .map_err(|e| e.to_string())?;
 
     let vault_path = vault_state
@@ -603,7 +678,8 @@ fn approve_wiki_page(
     )
     .map_err(|e| e.to_string())?;
 
-    std::fs::write(&safe, &content).map_err(|e| e.to_string())?;
+    crate::vault::safe_path::safe_write_bytes(&safe, content.as_bytes())
+        .map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE wiki_pages SET status = 'approved', last_synced = unixepoch() WHERE id = ?1",
         [id],
@@ -619,7 +695,10 @@ fn reject_wiki_page(id: i64, db_state: State<DbState>) -> Result<(), String> {
         .lock()
         .unwrap()
         .0
-        .execute("UPDATE wiki_pages SET status = 'rejected' WHERE id = ?1", [id])
+        .execute(
+            "UPDATE wiki_pages SET status = 'rejected' WHERE id = ?1",
+            [id],
+        )
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -697,8 +776,13 @@ fn get_proposed_content(
 ) -> Result<String, String> {
     let page_path: String = {
         let guard = db_state.0.lock().unwrap();
-        guard.0
-            .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [page_id], |r| r.get(0))
+        guard
+            .0
+            .query_row(
+                "SELECT path FROM wiki_pages WHERE id = ?1",
+                [page_id],
+                |r| r.get(0),
+            )
             .map_err(|e| e.to_string())?
     };
     let vault = vault_state
@@ -718,9 +802,16 @@ fn get_proposed_content(
     );
 
     Ok(match safe {
-        Ok(p) => std::fs::read_to_string(&p)
-            .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)),
-        Err(_) => format!("# {}\n\n*Proposed wiki page — content not available.*", page_path),
+        Ok(p) => std::fs::read_to_string(&p).unwrap_or_else(|_| {
+            format!(
+                "# {}\n\n*Proposed wiki page — content not available.*",
+                page_path
+            )
+        }),
+        Err(_) => format!(
+            "# {}\n\n*Proposed wiki page — content not available.*",
+            page_path
+        ),
     })
 }
 
@@ -757,7 +848,8 @@ fn save_wiki_page(
     )
     .map_err(|e| e.to_string())?;
 
-    std::fs::write(&safe, &content).map_err(|e| e.to_string())?;
+    crate::vault::safe_path::safe_write_bytes(&safe, content.as_bytes())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -782,12 +874,10 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
         if candidate.is_absolute() {
             // Try canonical normalization for robust symlink/casing handling
             match (candidate.canonicalize(), vault_root.canonicalize()) {
-                (Ok(can_candidate), Ok(can_root)) => {
-                    can_candidate
-                        .strip_prefix(&can_root)
-                        .map(|rel| rel.to_string_lossy().to_string())
-                        .unwrap_or(path.clone())
-                }
+                (Ok(can_candidate), Ok(can_root)) => can_candidate
+                    .strip_prefix(&can_root)
+                    .map(|rel| rel.to_string_lossy().to_string())
+                    .unwrap_or(path.clone()),
                 _ => {
                     // Fall back to non-canonical strip_prefix
                     candidate
@@ -847,7 +937,7 @@ fn copy_os_drop_paths_to_vault(
         )
         .map_err(|e| e.to_string())?;
 
-        std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        crate::vault::safe_path::safe_copy_file(src, &dest).map_err(|e| e.to_string())?;
 
         // Ingest and vault-event are emitted by the filesystem watcher; no
         // manual enqueue/emit here to avoid duplicated pipeline jobs and UI

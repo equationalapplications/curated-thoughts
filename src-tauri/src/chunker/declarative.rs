@@ -57,7 +57,11 @@ fn strip_brackets_title(t: &str) -> String {
 
 fn first_yaml_key_symbol(line: &str) -> Option<String> {
     let trimmed_line = line.trim_start();
-    let t = trimmed_line.split_once(':').map(|x| x.0).unwrap_or(trimmed_line).trim();
+    let t = trimmed_line
+        .split_once(':')
+        .map(|x| x.0)
+        .unwrap_or(trimmed_line)
+        .trim();
     if t.starts_with('"') || t.starts_with('\'') {
         return Some(t.trim_matches(|c| c == '"' || c == '\'').to_string());
     }
@@ -226,7 +230,10 @@ fn yaml_documents(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut rest = text;
     if rest.starts_with("---") {
-        rest = rest.strip_prefix("---").unwrap_or(rest).trim_start_matches(['\n', '\r']);
+        rest = rest
+            .strip_prefix("---")
+            .unwrap_or(rest)
+            .trim_start_matches(['\n', '\r']);
     }
     while let Some(idx) = rest.find(marker) {
         parts.push(rest[..idx].trim());
@@ -323,10 +330,7 @@ fn yaml_top_level_blocks(doc: &str) -> Vec<String> {
     }
     let mut out = Vec::new();
     for (wi, &start) in starts.iter().enumerate() {
-        let end = starts
-            .get(wi + 1)
-            .copied()
-            .unwrap_or(lines.len());
+        let end = starts.get(wi + 1).copied().unwrap_or(lines.len());
         let slice = lines[start..end].join("\n");
         let t = slice.trim();
         if !t.is_empty() {
@@ -534,9 +538,7 @@ fn chunk_toml(text: &str) -> Vec<String> {
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        if (t.starts_with('[') && t.ends_with(']'))
-            || (t.starts_with("[[") && t.ends_with("]]"))
-        {
+        if (t.starts_with('[') && t.ends_with(']')) || (t.starts_with("[[") && t.ends_with("]]")) {
             starts.push(i);
         }
     }
@@ -597,7 +599,10 @@ fn chunk_xml(text: &str) -> Vec<String> {
             }
         }
 
-        if ch == '<' && bytes.get(i + 1) != Some(&b'/') && bytes.get(i + 1) != Some(&b'!') && bytes.get(i + 1) != Some(&b'?')
+        if ch == '<'
+            && bytes.get(i + 1) != Some(&b'/')
+            && bytes.get(i + 1) != Some(&b'!')
+            && bytes.get(i + 1) != Some(&b'?')
         {
             if depth == 0 && i > buf_start {
                 let slice = text[buf_start..i].trim();
@@ -656,10 +661,12 @@ mod tests {
         let t = "  a: 1\n  b: 2\n    nested: x\n  c: 3\n";
         let p = PathBuf::from("/x/i.yaml");
         let c = chunk_declarative(&p, t);
-        assert_eq!(c.len(), 1, "short YAML sections may merge after size-aware join");
-        assert!(
-            c[0].contains("a: 1") && c[0].contains("nested: x") && c[0].contains("c: 3")
+        assert_eq!(
+            c.len(),
+            1,
+            "short YAML sections may merge after size-aware join"
         );
+        assert!(c[0].contains("a: 1") && c[0].contains("nested: x") && c[0].contains("c: 3"));
     }
 
     #[test]

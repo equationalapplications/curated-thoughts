@@ -26,11 +26,7 @@ fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
     ("summarize".to_string(), false)
 }
 
-pub fn generate_summary(
-    conn: &Connection,
-    source_path: &str,
-    model: &str,
-) -> Result<()> {
+pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Result<()> {
     let (mode, auto_approve) = get_folder_mode(conn, source_path);
 
     if mode == "index" {
@@ -65,8 +61,8 @@ pub fn generate_summary(
     let truncated = &source_text[..byte_limit];
 
     let client = reqwest::blocking::Client::new();
-    let base_url = std::env::var("OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let base_url =
+        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
     let resp = client
         .post(format!("{}/api/generate", base_url))
         .json(&serde_json::json!({
@@ -89,7 +85,11 @@ pub fn generate_summary(
         .unwrap_or("summary.md")
         .to_string();
 
-    let initial_status = if auto_approve { "approved" } else { "pending_review" };
+    let initial_status = if auto_approve {
+        "approved"
+    } else {
+        "pending_review"
+    };
     let source_ids = serde_json::json!([source_path]).to_string();
 
     conn.execute(

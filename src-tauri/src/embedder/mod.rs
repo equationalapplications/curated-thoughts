@@ -17,7 +17,9 @@ pub enum CloudProvider {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmbedProfile {
-    Local { model: String },
+    Local {
+        model: String,
+    },
     Cloud {
         provider: CloudProvider,
         model: String,

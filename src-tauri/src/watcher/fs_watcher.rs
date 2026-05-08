@@ -48,11 +48,16 @@ mod tests {
     fn test_watcher_detects_new_file() {
         let tmp = TempDir::new().unwrap();
         let (tx, rx) = mpsc::channel::<VaultEvent>();
-        start_watcher(tmp.path().to_path_buf(), move |e| { tx.send(e).ok(); }).unwrap();
+        start_watcher(tmp.path().to_path_buf(), move |e| {
+            tx.send(e).ok();
+        })
+        .unwrap();
 
         fs::write(tmp.path().join("note.md"), "hello").unwrap();
 
-        let event = rx.recv_timeout(Duration::from_secs(5)).expect("no event received");
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no event received");
         assert!(matches!(event, VaultEvent::Added(_)));
     }
 
@@ -63,7 +68,10 @@ mod tests {
         fs::write(&path, "hello").unwrap();
 
         let (tx, rx) = mpsc::channel::<VaultEvent>();
-        start_watcher(tmp.path().to_path_buf(), move |e| { tx.send(e).ok(); }).unwrap();
+        start_watcher(tmp.path().to_path_buf(), move |e| {
+            tx.send(e).ok();
+        })
+        .unwrap();
 
         std::thread::sleep(Duration::from_millis(200));
         fs::remove_file(&path).unwrap();

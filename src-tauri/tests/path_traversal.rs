@@ -24,7 +24,13 @@ fn read_document_benign_documents_path() {
     let (_g, root) = vault();
     let target = root.join("documents").join("note.md");
     fs::write(&target, b"x").unwrap();
-    let out = safe_vault_path(&root, "documents/note.md", &["documents", "wiki"], PathMode::MustExist).unwrap();
+    let out = safe_vault_path(
+        &root,
+        "documents/note.md",
+        &["documents", "wiki"],
+        PathMode::MustExist,
+    )
+    .unwrap();
     assert_eq!(out, target.canonicalize().unwrap());
 }
 
@@ -61,7 +67,13 @@ fn delete_vault_file_benign_documents_path() {
     let (_g, root) = vault();
     let target = root.join("documents").join("gone.md");
     fs::write(&target, b"x").unwrap();
-    let out = safe_vault_path(&root, "documents/gone.md", &["documents"], PathMode::MustExist).unwrap();
+    let out = safe_vault_path(
+        &root,
+        "documents/gone.md",
+        &["documents"],
+        PathMode::MustExist,
+    )
+    .unwrap();
     assert_eq!(out, target.canonicalize().unwrap());
 }
 
@@ -82,15 +94,26 @@ fn delete_vault_file_rejects_traversal() {
 fn approve_wiki_page_rejects_traversal_in_db_path() {
     let (_g, root) = vault();
     // Simulates a malicious wiki_pages.path row.
-    let err = safe_vault_path(&root, "../etc/escape.md", &["wiki"], PathMode::MayCreate).unwrap_err();
+    let err =
+        safe_vault_path(&root, "../etc/escape.md", &["wiki"], PathMode::MayCreate).unwrap_err();
     assert!(matches!(err, SafePathError::Traversal), "got {err:?}");
 }
 
 #[test]
 fn copy_to_vault_filename_only_under_documents() {
     let (_g, root) = vault();
-    let out = safe_vault_path(&root, "documents/incoming.txt", &["documents"], PathMode::MayCreate).unwrap();
-    let expected = root.join("documents").canonicalize().unwrap().join("incoming.txt");
+    let out = safe_vault_path(
+        &root,
+        "documents/incoming.txt",
+        &["documents"],
+        PathMode::MayCreate,
+    )
+    .unwrap();
+    let expected = root
+        .join("documents")
+        .canonicalize()
+        .unwrap()
+        .join("incoming.txt");
     assert_eq!(out, expected);
 }
 
@@ -126,14 +149,24 @@ fn get_proposed_content_rejects_traversal_in_db_path() {
 fn approve_wiki_page_benign_wiki_path() {
     let (_g, root) = vault();
     let out = safe_vault_path(&root, "wiki/approved.md", &["wiki"], PathMode::MayCreate).unwrap();
-    let expected = root.join("wiki").canonicalize().unwrap().join("approved.md");
+    let expected = root
+        .join("wiki")
+        .canonicalize()
+        .unwrap()
+        .join("approved.md");
     assert_eq!(out, expected);
 }
 
 #[test]
 fn approve_wiki_page_rejects_traversal_after_normalization() {
     let (_g, root) = vault();
-    let err = safe_vault_path(&root, "wiki/../etc/escape.md", &["wiki"], PathMode::MayCreate).unwrap_err();
+    let err = safe_vault_path(
+        &root,
+        "wiki/../etc/escape.md",
+        &["wiki"],
+        PathMode::MayCreate,
+    )
+    .unwrap_err();
     assert!(matches!(err, SafePathError::Traversal), "got {err:?}");
 }
 

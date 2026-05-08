@@ -83,5 +83,8 @@ fn main() {
     )
     .unwrap();
 
-    println!("Wrote YAML synthetic bench fixtures under {}", dir.display());
+    println!(
+        "Wrote YAML synthetic bench fixtures under {}",
+        dir.display()
+    );
 }

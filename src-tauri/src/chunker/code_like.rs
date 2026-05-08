@@ -122,7 +122,15 @@ pub(super) fn statement_boundary_offsets(text: &str) -> Vec<usize> {
                         .rfind('\n')
                         .map(|p| p + 1)
                         .unwrap_or(0);
-                    consider_boundary(text, line_start, prev_line_end, brace, paren, bracket, &mut out);
+                    consider_boundary(
+                        text,
+                        line_start,
+                        prev_line_end,
+                        brace,
+                        paren,
+                        bracket,
+                        &mut out,
+                    );
                 }
 
                 i += ch.len_utf8();
@@ -227,7 +235,11 @@ pub(super) fn chunk_code_like_chunks(text: &str) -> Vec<Chunk> {
 
     let boundaries = statement_boundary_offsets(trimmed);
     let mut cuts: Vec<usize> = vec![0];
-    cuts.extend(boundaries.into_iter().filter(|&p| p > 0 && p <= trimmed.len()));
+    cuts.extend(
+        boundaries
+            .into_iter()
+            .filter(|&p| p > 0 && p <= trimmed.len()),
+    );
     if cuts.last().copied().unwrap_or(0) < trimmed.len() {
         cuts.push(trimmed.len());
     }
@@ -257,11 +269,7 @@ pub(super) fn chunk_code_like_chunks(text: &str) -> Vec<Chunk> {
     for (piece, lo, hi) in raw {
         match &mut cur {
             None => {
-                cur = Some(SegmentAcc {
-                    buf: piece,
-                    lo,
-                    hi,
-                });
+                cur = Some(SegmentAcc { buf: piece, lo, hi });
             }
             Some(acc) => {
                 if acc.buf.len() + 2 + piece.len() <= max_c {
@@ -271,11 +279,7 @@ pub(super) fn chunk_code_like_chunks(text: &str) -> Vec<Chunk> {
                 } else {
                     let done = cur.take().unwrap();
                     merged.push((done.buf, done.lo, done.hi));
-                    cur = Some(SegmentAcc {
-                        buf: piece,
-                        lo,
-                        hi,
-                    });
+                    cur = Some(SegmentAcc { buf: piece, lo, hi });
                 }
             }
         }
@@ -309,8 +313,7 @@ pub(super) fn chunk_code_like_chunks(text: &str) -> Vec<Chunk> {
         }
 
         if chunk_s.len() > max_c.saturating_mul(2) {
-            let pieces =
-                split_oversized_block_spans(&chunk_s, lo.max(base), max_c, ov);
+            let pieces = split_oversized_block_spans(&chunk_s, lo.max(base), max_c, ov);
             let split_merged_gap = merged_gap && pieces.len() > 1;
             for (p, pl, ph) in pieces {
                 out.push((p, pl, ph, split_merged_gap));

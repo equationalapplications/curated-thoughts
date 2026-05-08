@@ -1,7 +1,7 @@
+use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
-use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4};
 
 /// Apply bundled migrations exactly once each. `ALTER TABLE` migrations are **not**
 /// idempotent, so bodies after V3 must be gated by `schema_version`.

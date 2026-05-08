@@ -16,11 +16,7 @@ fn main() {
     for i in 0..52 {
         let id = format!("code-cur-{i:03}");
         let text = if i % 2 == 0 {
-            let stream_tag = format!(
-                "{}{}",
-                (b'a' + (i % 26) as u8) as char,
-                i % 997
-            );
+            let stream_tag = format!("{}{}", (b'a' + (i % 26) as u8) as char, i % 997);
             format!(
                 "/** CuratedThoughts bench — ledger surface */\n\
                  export async function LedgerWindow{i}(ctx: LedgerCtx{i}) {{\n\
@@ -64,11 +60,7 @@ fn main() {
         let qid = format!("c-cur-{q:03}");
 
         let query_text = if doc_ix % 2 == 0 {
-            let stream_tag = format!(
-                "{}{}",
-                (b'a' + (doc_ix % 26) as u8) as char,
-                doc_ix % 997
-            );
+            let stream_tag = format!("{}{}", (b'a' + (doc_ix % 26) as u8) as char, doc_ix % 997);
             format!(
                 "TypeScript LedgerWindow{doc_ix} redis xadd ledger:{stream_tag} article ledger-{doc_ix}",
             )

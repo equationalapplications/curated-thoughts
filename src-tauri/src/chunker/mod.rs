@@ -130,11 +130,7 @@ pub fn chunk_prose_chunks(text: &str) -> Vec<Chunk> {
 pub fn chunk_autodetect(path: &Path, text: &str) -> Vec<Chunk> {
     let strategy = classify(path);
     if cfg!(debug_assertions) {
-        eprintln!(
-            "[ingest-chunk] {} strategy={:?}",
-            path.display(),
-            strategy
-        );
+        eprintln!("[ingest-chunk] {} strategy={:?}", path.display(), strategy);
     }
 
     match strategy {
@@ -163,7 +159,10 @@ mod integration_tests {
     fn md_matches_legacy_chunk_text() {
         let p = PathBuf::from("/v/note.md");
         let text = "Aa bb cc. Dd ee ff.";
-        let a: Vec<String> = chunk_autodetect(&p, text).into_iter().map(|c| c.text).collect();
+        let a: Vec<String> = chunk_autodetect(&p, text)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
         assert_eq!(a, chunk_text(text));
     }
 
@@ -171,7 +170,10 @@ mod integration_tests {
     fn txt_matches_legacy_chunk_text() {
         let p = PathBuf::from("/v/readme.txt");
         let text = "One two. Three four.";
-        let a: Vec<String> = chunk_autodetect(&p, text).into_iter().map(|c| c.text).collect();
+        let a: Vec<String> = chunk_autodetect(&p, text)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
         assert_eq!(a, chunk_text(text));
     }
 

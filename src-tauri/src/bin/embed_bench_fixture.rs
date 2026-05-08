@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use tauri_app_lib::chunker::chunk_text;
 use tauri_app_lib::embedder::Embedder;
 use tauri_app_lib::recall_bench_fixture::{
-    CODE_CURATED_EMBEDDINGS_GZIP, CODE_SYNTHETIC_EMBEDDINGS_GZIP,
-    YAML_K8S_CURATED_EMBEDDINGS_GZIP, YAML_SYNTHETIC_EMBEDDINGS_GZIP,
+    CODE_CURATED_EMBEDDINGS_GZIP, CODE_SYNTHETIC_EMBEDDINGS_GZIP, YAML_K8S_CURATED_EMBEDDINGS_GZIP,
+    YAML_SYNTHETIC_EMBEDDINGS_GZIP,
 };
 
 const EMBED_BATCH: usize = 128;
@@ -98,8 +98,7 @@ fn main() {
         })
         .collect();
 
-    let mut chunks_out: HashMap<String, Vec<Vec<f32>>> =
-        HashMap::with_capacity(doc_chunks.len());
+    let mut chunks_out: HashMap<String, Vec<Vec<f32>>> = HashMap::with_capacity(doc_chunks.len());
     for (id, chunks) in &doc_chunks {
         chunks_out.insert(id.clone(), vec![Vec::new(); chunks.len()]);
     }

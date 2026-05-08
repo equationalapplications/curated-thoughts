@@ -154,9 +154,7 @@ pub(super) fn sentence_byte_spans(inner: &str) -> Vec<(usize, usize)> {
         let tail = text.get(sent_start..).unwrap_or("").trim();
         if !tail.is_empty() {
             let raw = text.get(sent_start..).unwrap_or("");
-            let off = raw
-                .find(tail)
-                .expect("trimmed tail must appear in slice");
+            let off = raw.find(tail).expect("trimmed tail must appear in slice");
             spans.push((sent_start + off, sent_start + off + tail.len()));
         }
     }

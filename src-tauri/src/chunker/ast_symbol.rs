@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use tree_sitter::{Language, Node, Parser, Query, QueryCapture, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{
+    Language, Node, Parser, Query, QueryCapture, QueryCursor, StreamingIterator, Tree,
+};
 
 use super::classify::AstLang;
 use super::code_like::statement_boundary_offsets;
@@ -55,7 +57,9 @@ const MAX_WORDS: usize = 400;
 const MIN_WORDS: usize = 20;
 
 pub(super) fn chunk(lang: AstLang, text: &str, use_tsx: bool) -> Vec<Chunk> {
-    try_chunk(lang, text, use_tsx).filter(|v| !v.is_empty()).unwrap_or_default()
+    try_chunk(lang, text, use_tsx)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default()
 }
 
 fn try_chunk(lang: AstLang, text: &str, use_tsx: bool) -> Option<Vec<Chunk>> {
@@ -199,7 +203,12 @@ fn rust_impl_preamble(impl_item: Node<'_>, text: &str, first_method: Node<'_>) -
     }
 }
 
-fn collect_rust(lang: &Language, tree: &Tree, text: &str, tag: ChunkStrategyTag) -> Option<Vec<Chunk>> {
+fn collect_rust(
+    lang: &Language,
+    tree: &Tree,
+    text: &str,
+    tag: ChunkStrategyTag,
+) -> Option<Vec<Chunk>> {
     let q = query_named(lang, RUST_QUERY)?;
     let rows = run_query(&q, tree, text.as_bytes());
     let mut first_method: HashMap<usize, Node<'_>> = HashMap::new();
@@ -229,12 +238,14 @@ fn collect_rust(lang: &Language, tree: &Tree, text: &str, tag: ChunkStrategyTag)
         let sym_text = nt(text, sym)?;
         let start_line = sym.start_position().row as u32 + 1;
         let end_line = sym.end_position().row as u32 + 1;
-        let (symbol_name_opt, mut body) =
-            qualify_rust_fn(sym, raw_name, sym_text, text)?;
+        let (symbol_name_opt, mut body) = qualify_rust_fn(sym, raw_name, sym_text, text)?;
 
         if sym.kind() == "function_item" {
             if let Some(im) = impl_parent_of_method(sym) {
-                if first_method.get(&im.id()).is_some_and(|fm| fm.id() == sym.id()) {
+                if first_method
+                    .get(&im.id())
+                    .is_some_and(|fm| fm.id() == sym.id())
+                {
                     if let Some(pre) = rust_impl_preamble(im, text, sym) {
                         body = format!("{pre}\n{body}");
                     }
@@ -266,10 +277,7 @@ fn qualify_rust_fn(
             let type_node = impl_n.child_by_field_name("type")?;
             let ty = type_node.utf8_text(text.as_bytes()).ok()?.trim();
             if ty.is_empty() {
-                return Some((
-                    None,
-                    format!("// impl\n{}", sym_text),
-                ));
+                return Some((None, format!("// impl\n{}", sym_text)));
             }
             let qualified = format!("{}::{}", ty, raw_name);
             let prefix = format!("// impl {}", ty);
@@ -365,7 +373,12 @@ fn collect_python(
     Some(out)
 }
 
-fn chunk_simple(text: String, sym: Node<'_>, name: Option<String>, tag: &ChunkStrategyTag) -> Chunk {
+fn chunk_simple(
+    text: String,
+    sym: Node<'_>,
+    name: Option<String>,
+    tag: &ChunkStrategyTag,
+) -> Chunk {
     Chunk {
         text,
         start_line: sym.start_position().row as u32 + 1,
@@ -396,7 +409,12 @@ fn go_method_qualify(
     Some((q, format!("{}\n{}", prefix, sym_text)))
 }
 
-fn collect_go(lang: &Language, tree: &Tree, text: &str, tag: ChunkStrategyTag) -> Option<Vec<Chunk>> {
+fn collect_go(
+    lang: &Language,
+    tree: &Tree,
+    text: &str,
+    tag: ChunkStrategyTag,
+) -> Option<Vec<Chunk>> {
     let q = query_named(lang, GO_QUERY)?;
     let mut out = Vec::new();
     for (sym, nm, _) in run_query(&q, tree, text.as_bytes()) {
@@ -517,7 +535,10 @@ fn split_fallback_newline_words_chunk(chunk: Chunk) -> Vec<Chunk> {
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut a = 0usize;
     while a < full.len() {
-        let b = full[a..].find('\n').map(|i| a + i + 1).unwrap_or(full.len());
+        let b = full[a..]
+            .find('\n')
+            .map(|i| a + i + 1)
+            .unwrap_or(full.len());
         spans.push((a, b));
         if b == full.len() {
             break;
@@ -606,7 +627,13 @@ fn split_oversized_ast(chunk: Chunk) -> Vec<Chunk> {
         cursor = hi;
     }
     if cursor < body.len() {
-        pieces.extend(subchunk_trimmed_slice(body, base_sl, cursor, body.len(), &chunk));
+        pieces.extend(subchunk_trimmed_slice(
+            body,
+            base_sl,
+            cursor,
+            body.len(),
+            &chunk,
+        ));
     }
 
     if pieces.len() <= 1 {
@@ -788,8 +815,7 @@ fn merge_undersized(mut chunks: Vec<Chunk>) -> Vec<Chunk> {
             i += 1;
             continue;
         }
-        let can_fwd =
-            i + 1 < chunks.len() && chunks[i].symbol_name == chunks[i + 1].symbol_name;
+        let can_fwd = i + 1 < chunks.len() && chunks[i].symbol_name == chunks[i + 1].symbol_name;
         let can_back = i > 0 && chunks[i].symbol_name == chunks[i - 1].symbol_name;
         if can_fwd {
             let tiny = chunks.remove(i);
