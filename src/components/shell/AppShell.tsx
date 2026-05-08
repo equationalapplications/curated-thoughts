@@ -38,7 +38,6 @@ export function AppShell({ vaultPath }: Props) {
       {showReview && (
         <ReviewModal
           queue={queue}
-          vaultPath={vaultPath}
           onClose={() => setShowReview(false)}
           onAction={() => { refresh(); }}
         />
