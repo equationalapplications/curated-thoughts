@@ -55,7 +55,8 @@ fn to_forward_slash_relative(path: &Path) -> Result<String, String> {
 }
 
 /// Convert an absolute path under the vault into a vault-relative forward-slash path.
-/// Avoids `canonicalize()` on attacker-controlled absolute paths outside the vault.
+/// Uses canonical prefixes so DB/search paths still work when spellings differ (symlinks,
+/// `/var` vs `/private/var` on macOS, etc.). Paths that canonicalize outside the vault are rejected.
 fn normalize_path_argument_to_vault_relative(
     path: &str,
     vault_root: &Path,
@@ -69,30 +70,50 @@ fn normalize_path_argument_to_vault_relative(
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize vault root: {}", e))?;
 
-    if candidate.starts_with(&canon_root) {
-        if let Ok(canon_candidate) = candidate.canonicalize() {
-            if !canon_candidate.starts_with(&canon_root) {
-                return Err("path resolves outside vault".to_string());
-            }
-            let rel = canon_candidate
-                .strip_prefix(&canon_root)
-                .map_err(|_| "path strip failed".to_string())?;
-            return to_forward_slash_relative(rel);
+    if let Ok(canon_candidate) = candidate.canonicalize() {
+        if !canon_candidate.starts_with(&canon_root) {
+            return Err("absolute path outside vault".to_string());
         }
-        let rel = candidate
+        let rel = canon_candidate
             .strip_prefix(&canon_root)
             .map_err(|_| "path strip failed".to_string())?;
         return to_forward_slash_relative(rel);
     }
 
-    if candidate.starts_with(vault_root) {
-        let rel = candidate
-            .strip_prefix(vault_root)
-            .map_err(|_| "path strip failed".to_string())?;
-        return to_forward_slash_relative(rel);
+    // Path may not exist yet, or the vault root spelling may differ from the path prefix until
+    // an ancestor canonicalizes. Walk up until some prefix resolves under `canon_root`.
+    let mut cur = candidate.to_path_buf();
+    let mut tail = PathBuf::new();
+    loop {
+        match cur.canonicalize() {
+            Ok(canon_prefix) => {
+                if !canon_prefix.starts_with(&canon_root) {
+                    return Err("absolute path outside vault".to_string());
+                }
+                let inside = canon_prefix
+                    .strip_prefix(&canon_root)
+                    .map_err(|_| "path strip failed".to_string())?;
+                let combined = if inside.as_os_str().is_empty() {
+                    tail
+                } else if tail.as_os_str().is_empty() {
+                    inside.to_path_buf()
+                } else {
+                    inside.join(&tail)
+                };
+                return to_forward_slash_relative(&combined);
+            }
+            Err(_) => {
+                let name = cur
+                    .file_name()
+                    .ok_or_else(|| "absolute path outside vault".to_string())?
+                    .to_owned();
+                tail = Path::new(&name).join(&tail);
+                if !cur.pop() {
+                    return Err("absolute path outside vault".to_string());
+                }
+            }
+        }
     }
-
-    Err("absolute path outside vault".to_string())
 }
 
 fn normalize_wiki_relative_path(path: &str) -> String {
@@ -582,6 +603,10 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
         None => return Ok(vec![]),
     };
 
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("vault path not accessible: {}", e))?;
+
     let mut files = Vec::new();
 
     for (subdir, tier) in &[("documents", "user_doc"), ("wiki", "wiki")] {
@@ -981,6 +1006,7 @@ fn copy_os_drop_paths_to_vault(
 mod normalize_path_tests {
     use super::normalize_path_argument_to_vault_relative;
     use std::fs;
+    use std::path::Path;
 
     #[test]
     fn absolute_path_inside_vault_nonexistent_target_normalizes_without_canonicalize() {
@@ -992,6 +1018,31 @@ mod normalize_path_tests {
         let rel =
             normalize_path_argument_to_vault_relative(&missing.to_string_lossy(), vault).unwrap();
         assert_eq!(rel, "documents/not_created_yet.md");
+    }
+
+    /// When the configured vault path and an absolute argument use different spellings for the
+    /// same directory (symlink), normalization must still produce a vault-relative path.
+    #[test]
+    #[cfg(unix)]
+    fn absolute_path_normalizes_when_vault_is_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real_vault = tmp.path().join("real_vault");
+        fs::create_dir_all(real_vault.join("documents")).unwrap();
+        let link = tmp.path().join("link_vault");
+        symlink(&real_vault, &link).unwrap();
+
+        let file = real_vault.join("documents").join("note.md");
+        fs::write(&file, b"x").unwrap();
+
+        let abs_via_real = file.canonicalize().unwrap();
+        let rel = normalize_path_argument_to_vault_relative(
+            &abs_via_real.to_string_lossy(),
+            Path::new(&link),
+        )
+        .unwrap();
+        assert_eq!(rel, "documents/note.md");
     }
 }
 
