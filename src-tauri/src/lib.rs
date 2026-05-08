@@ -972,6 +972,54 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
     std::fs::remove_file(&safe).map_err(|e| e.to_string())
 }
 
+/// `n == 0` returns `original`; larger `n` inserts ` (n)` before the extension (Windows/macOS style).
+fn drop_destination_filename(original: &str, n: u32) -> String {
+    if n == 0 {
+        return original.to_string();
+    }
+    let p = std::path::Path::new(original);
+    let stem = p.file_stem().and_then(|s| s.to_str());
+    let ext = p.extension().and_then(|e| e.to_str());
+    match (stem, ext) {
+        (Some(stem), Some(ext)) if !stem.is_empty() => {
+            format!("{} ({}).{}", stem, n, ext)
+        }
+        _ => format!("{} ({})", original, n),
+    }
+}
+
+fn unique_drop_destination(
+    vault_root: &std::path::Path,
+    original_file_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    const MAX_TRIES: u32 = 10_000;
+    for n in 0..MAX_TRIES {
+        let candidate_name = drop_destination_filename(original_file_name, n);
+        let rel = format!("documents/{candidate_name}");
+        match crate::vault::safe_vault_path(
+            vault_root,
+            &rel,
+            &["documents"],
+            crate::vault::PathMode::MustExist,
+        ) {
+            Ok(_) => continue,
+            Err(crate::vault::SafePathError::NotFound(_)) => {
+                return crate::vault::safe_vault_path(
+                    vault_root,
+                    &rel,
+                    &["documents"],
+                    crate::vault::PathMode::MayCreate,
+                )
+                .map_err(|e| e.to_string());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(format!(
+        "could not find a free filename under documents/ for {original_file_name}"
+    ))
+}
+
 fn copy_os_drop_paths_to_vault(
     app: &AppHandle,
     paths: &[std::path::PathBuf],
@@ -1002,13 +1050,7 @@ fn copy_os_drop_paths_to_vault(
             }
         };
 
-        let dest = crate::vault::safe_vault_path(
-            &vault_root,
-            &format!("documents/{}", file_name),
-            &["documents"],
-            crate::vault::PathMode::MayCreate,
-        )
-        .map_err(|e| e.to_string())?;
+        let dest = unique_drop_destination(&vault_root, file_name)?;
 
         crate::vault::safe_path::safe_copy_file(src, &dest).map_err(|e| e.to_string())?;
 
@@ -1166,5 +1208,42 @@ mod normalize_path_tests {
         )
         .unwrap();
         assert_eq!(rel, "documents/note.md");
+    }
+}
+
+#[cfg(test)]
+mod drop_destination_tests {
+    use super::drop_destination_filename;
+    use super::unique_drop_destination;
+    use std::fs;
+
+    #[test]
+    fn drop_destination_filename_zero_is_unchanged() {
+        assert_eq!(drop_destination_filename("note.md", 0), "note.md");
+    }
+
+    #[test]
+    fn drop_destination_filename_inserts_counter_before_extension() {
+        assert_eq!(drop_destination_filename("note.md", 1), "note (1).md");
+        assert_eq!(drop_destination_filename("note.md", 2), "note (2).md");
+    }
+
+    #[test]
+    fn unique_drop_uses_original_when_unused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("documents")).unwrap();
+        let p = unique_drop_destination(root, "fresh.txt").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("fresh.txt"));
+    }
+
+    #[test]
+    fn unique_drop_avoids_overwriting_existing_basename() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("documents")).unwrap();
+        fs::write(root.join("documents").join("dup.md"), b"x").unwrap();
+        let p = unique_drop_destination(root, "dup.md").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
     }
 }
