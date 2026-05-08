@@ -1,4 +1,4 @@
-// embeddings table is omitted here — added in Sub-project 2 when sqlite-vec is integrated.
+// `embeddings` BLOB table (V2). Vector ANN (e.g. sqlite-vec) is a future perf path; see `search` module docs.
 pub const MIGRATION_V1: &str = "
 PRAGMA foreign_keys = ON;
 

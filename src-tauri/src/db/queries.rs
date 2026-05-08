@@ -37,6 +37,18 @@ pub fn get_document_by_path(conn: &Connection, path: &str) -> Result<Option<DocR
     }
 }
 
+pub fn list_indexed_user_doc_paths(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM documents WHERE tier = 'user_doc' AND status = 'indexed' ORDER BY path",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get(0)?);
+    }
+    Ok(out)
+}
+
 pub fn delete_document_chunks(conn: &Connection, doc_id: i64) -> Result<()> {
     conn.execute("DELETE FROM chunks WHERE doc_id = ?1", [doc_id])?;
     Ok(())
@@ -174,6 +186,19 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
             .unwrap();
         assert_eq!(emb_count, 0);
+    }
+
+    #[test]
+    fn list_indexed_user_doc_paths_orders_results() {
+        let conn = open_in_memory().unwrap();
+        let id_a = upsert_document(&conn, "/documents/a.md", "ha").unwrap();
+        let id_b = upsert_document(&conn, "/documents/b.md", "hb").unwrap();
+        mark_document_indexed(&conn, id_b).unwrap();
+        mark_document_indexed(&conn, id_a).unwrap();
+        assert_eq!(
+            list_indexed_user_doc_paths(&conn).unwrap(),
+            vec!["/documents/a.md", "/documents/b.md"],
+        );
     }
 
     #[test]
