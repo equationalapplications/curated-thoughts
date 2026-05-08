@@ -403,11 +403,7 @@ fn get_related_chunks(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "no vault path set".to_string())?;
             let vault_root = std::path::PathBuf::from(&root);
-            vault_root
-                .join(path)
-                .canonicalize()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or(doc_path)
+            vault_root.join(path).to_string_lossy().to_string()
         }
     };
     let guard = db_state.0.lock().unwrap();
@@ -563,6 +559,11 @@ fn approve_wiki_page(
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
 
+    // Reject absolute paths before normalization
+    if std::path::Path::new(&page_path).is_absolute() {
+        return Err("absolute paths not allowed".to_string());
+    }
+
     // Normalize path: if it doesn't start with "wiki/", prepend it for backward compatibility
     let normalized_path = if page_path.starts_with("wiki/") {
         page_path.clone()
@@ -715,6 +716,11 @@ fn save_wiki_page(
     let vault_root = std::path::PathBuf::from(&vault);
     // Ensure the allowed subdir exists before resolving the user path.
     std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
+
+    // Reject absolute paths before normalization
+    if std::path::Path::new(&path).is_absolute() {
+        return Err("absolute paths not allowed".to_string());
+    }
 
     // Normalize path: if it doesn't start with "wiki/", prepend it for backward compatibility
     let normalized_path = if path.starts_with("wiki/") {
