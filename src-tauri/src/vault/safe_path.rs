@@ -86,6 +86,13 @@ fn rename_replace(temp: &Path, target: &Path) -> Result<(), SafePathError> {
 }
 
 pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError> {
+    // If we're replacing an existing regular file, preserve its permission bits so
+    // temp-file + rename doesn't reset mode/readonly unexpectedly.
+    let old_permissions = std::fs::metadata(target)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.permissions());
+
     let (temp, mut file) = create_temp_sibling_file(target)?;
 
     if let Err(e) = file.write_all(bytes) {
@@ -100,6 +107,13 @@ pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError
 
     drop(file);
 
+    if let Some(perms) = old_permissions {
+        if let Err(e) = std::fs::set_permissions(&temp, perms) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(SafePathError::Io(e));
+        }
+    }
+
     if let Err(e) = rename_replace(&temp, target) {
         let _ = std::fs::remove_file(&temp);
         return Err(e);
@@ -109,6 +123,8 @@ pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError
 }
 
 pub fn safe_copy_file(src: &Path, target: &Path) -> Result<u64, SafePathError> {
+    let src_permissions = std::fs::metadata(src)?.permissions();
+
     let (temp, mut output) = create_temp_sibling_file(target)?;
 
     let mut input = std::fs::File::open(src)?;
@@ -127,6 +143,11 @@ pub fn safe_copy_file(src: &Path, target: &Path) -> Result<u64, SafePathError> {
     }
 
     drop(output);
+
+    if let Err(e) = std::fs::set_permissions(&temp, src_permissions) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(SafePathError::Io(e));
+    }
 
     if let Err(e) = rename_replace(&temp, target) {
         let _ = std::fs::remove_file(&temp);
@@ -550,5 +571,44 @@ mod tests {
         assert_eq!(copied, "inside");
         assert_eq!(outside_read, "outside");
         assert!(!target.symlink_metadata().unwrap().is_symlink());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_write_bytes_preserves_existing_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_g, root) = vault();
+        let target = root.join("wiki").join("perm.md");
+        fs::write(&target, b"a").unwrap();
+        let mut perms = fs::metadata(&target).unwrap().permissions();
+        perms.set_mode(0o640);
+        fs::set_permissions(&target, perms).unwrap();
+
+        safe_write_bytes(&target, b"b").unwrap();
+
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "b");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_copy_file_sets_mode_from_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_g, root) = vault();
+        let src = root.join("documents").join("src.md");
+        let dst = root.join("documents").join("dst.md");
+        fs::write(&src, b"x").unwrap();
+        let mut perms = fs::metadata(&src).unwrap().permissions();
+        perms.set_mode(0o711);
+        fs::set_permissions(&src, perms).unwrap();
+
+        safe_copy_file(&src, &dst).unwrap();
+
+        let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o711);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "x");
     }
 }
