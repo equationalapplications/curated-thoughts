@@ -398,13 +398,13 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             });
 
         for entry in walker {
-            // Return vault-relative paths for safe_vault_path compatibility
-            let path = entry
-                .path()
-                .strip_prefix(&root)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
+            // Return vault-relative paths for safe_vault_path compatibility.
+            // Skip any entry that can't be made relative (shouldn't happen in normal operation,
+            // but could occur if the vault contains symlinks pointing outside).
+            let Some(relative) = entry.path().strip_prefix(&root).ok() else {
+                continue;
+            };
+            let path = relative.to_string_lossy().to_string();
             let name = entry.file_name().to_string_lossy().to_string();
             files.push(VaultFile { path, name, tier: tier.to_string() });
         }
@@ -634,9 +634,16 @@ fn save_wiki_page(
     // Ensure the allowed subdir exists before resolving the user path.
     std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
 
+    // Normalize path: if it doesn't start with "wiki/", prepend it for backward compatibility
+    let normalized_path = if path.starts_with("wiki/") {
+        path.clone()
+    } else {
+        format!("wiki/{}", path)
+    };
+
     let safe = crate::vault::safe_vault_path(
         &vault_root,
-        &path,
+        &normalized_path,
         &["wiki"],
         crate::vault::PathMode::MayCreate,
     )
