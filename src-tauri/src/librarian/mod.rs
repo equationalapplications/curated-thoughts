@@ -1,3 +1,8 @@
+//! Active librarian: after each successful ingest, optionally generates wiki proposals from **current**
+//! chunks in SQLite. If chunking strategy (`ast_*`, prose, …) or embeddings change, rebuild chunks with
+//! **`bulk_reindex`** (CLI) or the **`queue_full_reindex`** Tauri command (`force_rechunk: true`) before
+//! relying on refreshed summaries.
+
 use anyhow::Result;
 use rusqlite::Connection;
 

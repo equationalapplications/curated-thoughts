@@ -1,3 +1,11 @@
+//! Semantic retrieval over chunked vault notes: cosine similarity versus every stored embedding.
+//!
+//! For large vaults, **[`semantic_search`]** and document-centroid paths in **[`related_chunks`]**
+//! scan all indexed vectors (cosine in application code). That is simple and exact but **O(#chunks)**
+//! per query. If profiling shows regressions (see `semantic_search_profile` binary), typical
+//! upgrades are: **sqlite-vec** / **sqlite-vss** (SQLite loadable ANN), **[USearch](https://github.com/unum-cloud/usearch)** in-process,
+//! or an external vector DB—after validating dimensionality matches the active embedder.
+
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -34,6 +42,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
+/// Ranks every indexed chunk by cosine similarity to `query_vec` (full scan).
+///
+/// Cost grows linearly with embedding row count; see module docs for ANN migration notes.
 pub fn semantic_search(
     conn: &Connection,
     query_vec: &[f32],

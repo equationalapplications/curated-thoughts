@@ -131,6 +131,25 @@ cargo test --manifest-path src-tauri/Cargo.toml -p curated-thoughts --features m
 
 Cargo sets **`CARGO_BIN_EXE_*`** when building that test target; build the MCP binary once first if you see a missing-binary error message from the harness.
 
+### Bulk re-index (`bulk_reindex` CLI)
+
+When chunking logic (`ast_*` tags, prose heuristics) or embedding settings change, the pipeline normally **skips** files whose bytes are unchanged (`hash` matches). Re-run chunking and embeddings for every indexed doc without touching files:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin bulk_reindex -- --dry-run
+cargo run --manifest-path src-tauri/Cargo.toml --bin bulk_reindex --
+```
+
+Uses the same **`CURATED_BRAIN_*`** env vars as MCP. Flags: **`--dry-run`**, **`--limit N`**, optional path substring filter. The desktop app can also call the **`queue_full_reindex`** command with **`force_rechunk: true`** to enqueue the same work on the running pipeline.
+
+### Semantic search profiling
+
+**`semantic_search`** does a full scan over all indexed embeddings. To measure mean query latency vs. chunk count (e.g. before adopting sqlite-vec / ANN):
+
+```bash
+CURATED_EMBED_STUB=constant8 cargo run --manifest-path src-tauri/Cargo.toml --release --bin semantic_search_profile -- 5000
+```
+
 ### Security
 
 This is a **local stdio** server: any client you attach can invoke tools that return **indexed chunk text and metadata** from your brain database. Treat the MCP process and its environment as part of your **trust boundary**; do not point it at sensitive data you would not show to the agent.
