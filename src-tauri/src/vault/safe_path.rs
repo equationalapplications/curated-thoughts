@@ -5,6 +5,7 @@
 //! semi-trusted (it loads LLM-generated wiki content that may be prompt-injected),
 //! so path arguments are treated as if they came from a remote attacker.
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,9 @@ pub enum PathMode {
     MayCreate,
 }
 
-fn tmp_sibling_path(target: &Path) -> Result<PathBuf, SafePathError> {
+/// Creates a new empty temp file next to `target` using `O_EXCL` / `create_new`,
+/// retrying on contention instead of using `exists()` (TOCTOU-safe).
+fn create_temp_sibling_file(target: &Path) -> Result<(PathBuf, File), SafePathError> {
     let parent = target
         .parent()
         .ok_or_else(|| SafePathError::NotFound("parent directory not found".to_string()))?;
@@ -53,8 +56,14 @@ fn tmp_sibling_path(target: &Path) -> Result<PathBuf, SafePathError> {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let candidate = parent.join(format!(".{file_name}.tmp-{pid}-{nanos}-{attempt}"));
-        if !candidate.exists() {
-            return Ok(candidate);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(SafePathError::Io(e)),
         }
     }
 
@@ -77,16 +86,7 @@ fn rename_replace(temp: &Path, target: &Path) -> Result<(), SafePathError> {
 }
 
 pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError> {
-    let temp = tmp_sibling_path(target)?;
-
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-    {
-        Ok(f) => f,
-        Err(e) => return Err(SafePathError::Io(e)),
-    };
+    let (temp, mut file) = create_temp_sibling_file(target)?;
 
     if let Err(e) = file.write_all(bytes) {
         let _ = std::fs::remove_file(&temp);
@@ -109,17 +109,9 @@ pub fn safe_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), SafePathError
 }
 
 pub fn safe_copy_file(src: &Path, target: &Path) -> Result<u64, SafePathError> {
-    let temp = tmp_sibling_path(target)?;
+    let (temp, mut output) = create_temp_sibling_file(target)?;
 
     let mut input = std::fs::File::open(src)?;
-    let mut output = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-    {
-        Ok(f) => f,
-        Err(e) => return Err(SafePathError::Io(e)),
-    };
 
     let copied = match std::io::copy(&mut input, &mut output) {
         Ok(n) => n,
