@@ -20,30 +20,36 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
   const [dragging, setDragging] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
 
-    useEffect(() => {
-        let unlisten: (() => void) | undefined;
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
 
-        getCurrentWindow()
-            .onDragDropEvent((event) => {
-                const payload = event.payload;
-                if (payload.type === "leave") {
-                    setDragging(false);
-                    return;
-                }
-                if (payload.type === "enter" || payload.type === "over") {
-                    setDragging(true);
-                } else if (payload.type === "drop") {
-                    setDragging(false);
-                }
-            })
-            .then((fn) => {
-                unlisten = fn;
-            });
+    getCurrentWindow()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "leave") {
+          setDragging(false);
+          return;
+        }
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragging(true);
+        } else if (payload.type === "drop") {
+          setDragging(false);
+        }
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      });
 
-        return () => {
-            unlisten?.();
-        };
-    }, [vaultPath]);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [vaultPath]);
 
   return (
     <aside

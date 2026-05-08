@@ -1024,9 +1024,13 @@ pub fn run() {
         // not from attacker-controlled webview command arguments.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                if let Err(e) = copy_os_drop_paths_to_vault(&window.app_handle(), paths) {
-                    eprintln!("[drop-copy] failed: {e}");
-                }
+                let paths = paths.clone();
+                let app = window.app_handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = copy_os_drop_paths_to_vault(&app, &paths) {
+                        eprintln!("[drop-copy] failed: {e}");
+                    }
+                });
             }
         })
         .manage(DbState(Mutex::new(db)))
