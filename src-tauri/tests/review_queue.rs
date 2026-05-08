@@ -52,6 +52,31 @@ fn get_proposed_content_returns_file_contents() {
 }
 
 #[test]
+fn get_proposed_content_normalizes_backslash_in_db_path() {
+    let app = TestApp::new();
+    app.invoke::<()>("set_vault_path", json!({ "path": app.tmp.path() }));
+
+    let proposed_dir = app.tmp.path().join(".brain").join("proposed");
+    std::fs::create_dir_all(proposed_dir.join("nested")).unwrap();
+    std::fs::write(proposed_dir.join("nested").join("win.md"), "# From nested").unwrap();
+
+    let conn = app.open_db();
+    conn.execute(
+        "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
+         VALUES (?1, '[]', 'test-model', 'pending_review')",
+        ["nested\\win.md"],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+
+    let content: String = app.invoke("get_proposed_content", json!({ "pageId": id }));
+    assert!(
+        content.contains("From nested"),
+        "expected file via normalized path, got: {content}"
+    );
+}
+
+#[test]
 fn approve_wiki_page_writes_file_and_marks_approved() {
     let app = TestApp::new();
     let vault = app.tmp.path().join("vault");

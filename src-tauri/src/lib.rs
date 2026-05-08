@@ -70,13 +70,16 @@ fn normalize_path_argument_to_vault_relative(
         .map_err(|e| format!("failed to canonicalize vault root: {}", e))?;
 
     if candidate.starts_with(&canon_root) {
-        let canon_candidate = candidate
-            .canonicalize()
-            .map_err(|e| format!("failed to canonicalize path: {}", e))?;
-        if !canon_candidate.starts_with(&canon_root) {
-            return Err("path resolves outside vault".to_string());
+        if let Ok(canon_candidate) = candidate.canonicalize() {
+            if !canon_candidate.starts_with(&canon_root) {
+                return Err("path resolves outside vault".to_string());
+            }
+            let rel = canon_candidate
+                .strip_prefix(&canon_root)
+                .map_err(|_| "path strip failed".to_string())?;
+            return to_forward_slash_relative(rel);
         }
-        let rel = canon_candidate
+        let rel = candidate
             .strip_prefix(&canon_root)
             .map_err(|_| "path strip failed".to_string())?;
         return to_forward_slash_relative(rel);
@@ -835,9 +838,14 @@ fn get_proposed_content(
         .ok_or_else(|| "no vault set".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault);
 
+    if std::path::Path::new(&page_path).is_absolute() {
+        return Err("absolute paths not allowed".to_string());
+    }
+
+    let page_rel = page_path.replace('\\', "/");
     let safe = crate::vault::safe_vault_path(
         &vault_root,
-        &format!(".brain/proposed/{}", page_path),
+        &format!(".brain/proposed/{}", page_rel),
         &[".brain/proposed"],
         crate::vault::PathMode::MustExist,
     );
@@ -846,12 +854,12 @@ fn get_proposed_content(
         Ok(p) => std::fs::read_to_string(&p).unwrap_or_else(|_| {
             format!(
                 "# {}\n\n*Proposed wiki page — content not available.*",
-                page_path
+                page_rel
             )
         }),
         Err(_) => format!(
             "# {}\n\n*Proposed wiki page — content not available.*",
-            page_path
+            page_rel
         ),
     })
 }
@@ -969,6 +977,24 @@ fn copy_os_drop_paths_to_vault(
     Ok(copied_paths)
 }
 
+#[cfg(test)]
+mod normalize_path_tests {
+    use super::normalize_path_argument_to_vault_relative;
+    use std::fs;
+
+    #[test]
+    fn absolute_path_inside_vault_nonexistent_target_normalizes_without_canonicalize() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        fs::create_dir_all(vault.join("documents")).unwrap();
+        let canon = vault.canonicalize().unwrap();
+        let missing = canon.join("documents").join("not_created_yet.md");
+        let rel =
+            normalize_path_argument_to_vault_relative(&missing.to_string_lossy(), vault).unwrap();
+        assert_eq!(rel, "documents/not_created_yet.md");
+    }
+}
+
 // ── Test utilities ────────────────────────────────────────────────────────────
 
 pub use pipeline::ingest_document;
@@ -1026,6 +1052,7 @@ pub fn run() {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let paths = paths.clone();
                 let app = window.app_handle().clone();
+                // FS copies can be large; keep the wry/window event loop responsive.
                 std::thread::spawn(move || {
                     if let Err(e) = copy_os_drop_paths_to_vault(&app, &paths) {
                         eprintln!("[drop-copy] failed: {e}");
