@@ -20,29 +20,30 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
   const [dragging, setDragging] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    useEffect(() => {
+        let unlisten: (() => void) | undefined;
 
-    getCurrentWindow()
-      .onDragDropEvent((event) => {
-        const payload = event.payload;
-        if (payload.type === "leave") {
-          setDragging(false);
-          return;
-        }
-        const { x, y } = payload.position;
-        const rect = sidebarRef.current?.getBoundingClientRect();
-        const overSidebar = !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-        if (payload.type === "enter" || payload.type === "over") {
-          setDragging(overSidebar);
-        } else if (payload.type === "drop") {
-          setDragging(false);
-        }
-      })
-      .then((fn) => { unlisten = fn; });
+        getCurrentWindow()
+            .onDragDropEvent((event) => {
+                const payload = event.payload;
+                if (payload.type === "leave") {
+                    setDragging(false);
+                    return;
+                }
+                if (payload.type === "enter" || payload.type === "over") {
+                    setDragging(true);
+                } else if (payload.type === "drop") {
+                    setDragging(false);
+                }
+            })
+            .then((fn) => {
+                unlisten = fn;
+            });
 
-    return () => { unlisten?.(); };
-  }, [vaultPath]);
+        return () => {
+            unlisten?.();
+        };
+    }, [vaultPath]);
 
   return (
     <aside
@@ -68,7 +69,7 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
       )}
       {dragging && (
         <div className="drop-overlay">
-          <span>Drop to add to Documents</span>
+          <span>Drop anywhere to add to Documents</span>
         </div>
       )}
       {reviewCount > 0 && (

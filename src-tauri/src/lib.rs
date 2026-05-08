@@ -15,10 +15,10 @@ mod watcher;
 use chunker::should_ingest_extension;
 use db::AppDb;
 use pipeline::start_pipeline;
-#[cfg(feature = "test-utils")]
-pub use pipeline::{PipelineJob, PipelineWorker};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
+#[cfg(feature = "test-utils")]
+pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
 use serde_json::Value as JsonVal;
 use setup::{
@@ -26,7 +26,7 @@ use setup::{
     recommended_model as ollama_recommended, start_ollama_server as ollama_start, OllamaStatus,
 };
 use std::ffi::OsStr;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
@@ -35,17 +35,23 @@ use watcher::{start_watcher, VaultEvent};
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
-struct WatcherStarted(Mutex<bool>);
+struct WatcherStarted(Mutex<Option<PathBuf>>);
 
-fn to_forward_slash_relative(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(seg) => Some(seg.to_string_lossy().into_owned()),
-            Component::CurDir => None,
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+/// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
+fn to_forward_slash_relative(path: &Path) -> Result<String, String> {
+    let mut out = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(seg) => out.push(seg.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => return Err("path contains traversal segment".to_string()),
+            Component::Prefix(_) => {
+                return Err("path contains invalid prefix component".to_string())
+            }
+            Component::RootDir => return Err("path contains unexpected root component".to_string()),
+        }
+    }
+    Ok(out.join("/"))
 }
 
 /// Convert an absolute path under the vault into a vault-relative forward-slash path.
@@ -73,14 +79,14 @@ fn normalize_path_argument_to_vault_relative(
         let rel = canon_candidate
             .strip_prefix(&canon_root)
             .map_err(|_| "path strip failed".to_string())?;
-        return Ok(to_forward_slash_relative(rel));
+        return to_forward_slash_relative(rel);
     }
 
     if candidate.starts_with(vault_root) {
         let rel = candidate
             .strip_prefix(vault_root)
             .map_err(|_| "path strip failed".to_string())?;
-        return Ok(to_forward_slash_relative(rel));
+        return to_forward_slash_relative(rel);
     }
 
     Err("absolute path outside vault".to_string())
@@ -138,11 +144,6 @@ fn start_file_watcher(
     vault_state: State<VaultConfigState>,
     watcher_started: State<WatcherStarted>,
 ) -> Result<(), String> {
-    let mut started = watcher_started.0.lock().unwrap();
-    if *started {
-        return Ok(());
-    }
-
     // Get configured vault root from state (trusted source)
     let configured_vault = vault_state
         .0
@@ -151,12 +152,24 @@ fn start_file_watcher(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault configured".to_string())?;
-    let vault_root = std::path::PathBuf::from(&configured_vault);
+    let vault_root = PathBuf::from(&configured_vault);
 
     // Canonicalize vault root once
     let vault_canonical = vault_root
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
+
+    let mut watcher_guard = watcher_started.0.lock().unwrap();
+    if let Some(prev) = watcher_guard.as_ref() {
+        return if prev == &vault_canonical {
+            Ok(())
+        } else {
+            Err(
+                "vault path changed after file watcher started; restart the application to watch the new vault"
+                    .to_string(),
+            )
+        };
+    }
 
     let tx = pipeline.0.lock().unwrap().clone();
 
@@ -215,7 +228,8 @@ fn start_file_watcher(
         }
     }
 
-    start_watcher(vault_canonical, move |event| {
+    let vault_for_watcher = vault_canonical.clone();
+    start_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
@@ -240,7 +254,7 @@ fn start_file_watcher(
     })
     .map_err(|e| e.to_string())?;
 
-    *started = true;
+    *watcher_guard = Some(vault_canonical);
     Ok(())
 }
 
@@ -586,7 +600,9 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             let Some(relative) = entry.path().strip_prefix(&root).ok() else {
                 continue;
             };
-            let path = to_forward_slash_relative(relative);
+            let Ok(path) = to_forward_slash_relative(relative) else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().to_string();
             files.push(VaultFile {
                 path,
@@ -1013,7 +1029,7 @@ pub fn run() {
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineTx(Mutex::new(pipeline_tx)))
-        .manage(WatcherStarted(Mutex::new(false)))
+        .manage(WatcherStarted(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,

@@ -230,13 +230,14 @@ pub fn safe_vault_path(
 
             // Reject if target already exists as a symlink (or if following it escapes).
             if let Ok(metadata) = target_path.symlink_metadata() {
-                if metadata.is_symlink() {
+                if metadata.file_type().is_symlink() {
                     return Err(SafePathError::InvalidName);
                 }
-                // Target exists and is not a symlink — verify final canonical containment.
-                let target_canonical = target_path
-                    .canonicalize()
-                    .map_err(SafePathError::Io)?;
+                if metadata.is_dir() || !metadata.is_file() {
+                    return Err(SafePathError::InvalidName);
+                }
+                // Target exists and is a regular file — verify final canonical containment.
+                let target_canonical = target_path.canonicalize().map_err(SafePathError::Io)?;
                 if !allowed_canonical
                     .iter()
                     .any(|sub| target_canonical.starts_with(sub))
@@ -363,6 +364,15 @@ mod tests {
         let err =
             safe_vault_path(&root, "wiki/never/x.md", allowed(), PathMode::MayCreate).unwrap_err();
         assert!(matches!(err, SafePathError::NotFound(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn may_create_rejects_existing_directory() {
+        let (_g, root) = vault();
+        fs::create_dir_all(root.join("wiki").join("nested-dir")).unwrap();
+        let err =
+            safe_vault_path(&root, "wiki/nested-dir", allowed(), PathMode::MayCreate).unwrap_err();
+        assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
     }
 
     #[test]
