@@ -827,7 +827,6 @@ fn copy_os_drop_paths_to_vault(
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
 
-    let tx = app.state::<PipelineTx>().0.lock().unwrap().clone();
     let mut copied_paths = Vec::new();
 
     for src in paths {
@@ -850,10 +849,10 @@ fn copy_os_drop_paths_to_vault(
 
         std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
 
-        let copied = dest.to_string_lossy().into_owned();
-        let _ = tx.try_send(PipelineJob::ingest(copied.clone()));
-        let _ = app.emit("vault-event", VaultEvent::Added(copied.clone()));
-        copied_paths.push(copied);
+        // Ingest and vault-event are emitted by the filesystem watcher; no
+        // manual enqueue/emit here to avoid duplicated pipeline jobs and UI
+        // events for every dropped file.
+        copied_paths.push(dest.to_string_lossy().into_owned());
     }
 
     Ok(copied_paths)
