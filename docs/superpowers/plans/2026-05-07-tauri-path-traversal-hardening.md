@@ -304,6 +304,7 @@ cd src-tauri && cargo test -p curated-thoughts vault::safe_path::tests 2>&1 | ta
     let allowed_canonical: Vec<PathBuf> = allowed_subdirs
         .iter()
         .filter_map(|sub| root_canonical.join(sub).canonicalize().ok())
+        .filter(|canonical_sub| canonical_sub.starts_with(&root_canonical))
         .collect();
     if allowed_canonical.is_empty() {
         return Err(SafePathError::Outside);
