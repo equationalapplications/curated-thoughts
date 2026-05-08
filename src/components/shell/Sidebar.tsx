@@ -40,7 +40,7 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
           setDragging(false);
           if (!overSidebar) return;
           for (const src of payload.paths) {
-            copyToVault(src, vaultPath).catch((e) =>
+            copyToVault(src).catch((e) =>
               console.error("copy_to_vault failed:", e)
             );
           }

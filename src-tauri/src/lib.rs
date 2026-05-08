@@ -70,7 +70,16 @@ fn start_file_watcher(
         .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault_path);
     let configured_root = std::path::PathBuf::from(&configured_vault);
-    if vault_root.canonicalize().ok() != configured_root.canonicalize().ok() {
+
+    // Fail closed: both paths must canonicalize successfully for the check to pass
+    let vault_canonical = vault_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize vault_path: {}", e))?;
+    let configured_canonical = configured_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
+
+    if vault_canonical != configured_canonical {
         return Err("vault_path does not match configured vault root".to_string());
     }
 
@@ -441,10 +450,22 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
     let normalized_path = {
         let candidate = std::path::Path::new(&path);
         if candidate.is_absolute() {
-            candidate
-                .strip_prefix(&root)
-                .map(|rel| rel.to_string_lossy().to_string())
-                .unwrap_or(path.clone())
+            // Try canonical normalization for robust symlink/casing handling
+            match (candidate.canonicalize(), root.canonicalize()) {
+                (Ok(can_candidate), Ok(can_root)) => {
+                    can_candidate
+                        .strip_prefix(&can_root)
+                        .map(|rel| rel.to_string_lossy().to_string())
+                        .unwrap_or(path.clone())
+                }
+                _ => {
+                    // Fall back to non-canonical strip_prefix
+                    candidate
+                        .strip_prefix(&root)
+                        .map(|rel| rel.to_string_lossy().to_string())
+                        .unwrap_or(path.clone())
+                }
+            }
         } else {
             path.clone()
         }
@@ -499,8 +520,8 @@ fn get_review_queue(db_state: State<DbState>) -> Result<Vec<ReviewPage>, String>
 fn approve_wiki_page(
     id: i64,
     content: String,
-    vault_path: String,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
 ) -> Result<(), String> {
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
@@ -508,6 +529,13 @@ fn approve_wiki_page(
         .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
 
+    let vault_path = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
 
@@ -696,9 +724,36 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
         .ok_or_else(|| "no vault set".to_string())?;
     let vault_root = std::path::PathBuf::from(&root);
 
+    // Normalize path: if absolute and starts with vault root, make it vault-relative.
+    // Preserves backward compatibility with DB/search results (which store absolute paths)
+    // while still enforcing containment via safe_vault_path.
+    let normalized_path = {
+        let candidate = std::path::Path::new(&path);
+        if candidate.is_absolute() {
+            // Try canonical normalization for robust symlink/casing handling
+            match (candidate.canonicalize(), vault_root.canonicalize()) {
+                (Ok(can_candidate), Ok(can_root)) => {
+                    can_candidate
+                        .strip_prefix(&can_root)
+                        .map(|rel| rel.to_string_lossy().to_string())
+                        .unwrap_or(path.clone())
+                }
+                _ => {
+                    // Fall back to non-canonical strip_prefix
+                    candidate
+                        .strip_prefix(&vault_root)
+                        .map(|rel| rel.to_string_lossy().to_string())
+                        .unwrap_or(path.clone())
+                }
+            }
+        } else {
+            path.clone()
+        }
+    };
+
     let safe = crate::vault::safe_vault_path(
         &vault_root,
-        &path,
+        &normalized_path,
         &["documents"],
         crate::vault::PathMode::MustExist,
     )
@@ -708,12 +763,20 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
 }
 
 #[tauri::command]
-fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String> {
+fn copy_to_vault(src_path: String, vault_state: State<VaultConfigState>) -> Result<String, String> {
     let src = std::path::Path::new(&src_path);
     let file_name = src
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "invalid filename".to_string())?;
+
+    let vault_path = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault_path);
     std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
 
