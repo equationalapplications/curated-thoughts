@@ -21,8 +21,8 @@ export const listLocalModels = (): Promise<string[]> =>
 export const pullModel = (modelId: string): Promise<void> =>
   invoke("pull_model", { modelId });
 
-export const startFileWatcher = (vaultPath: string): Promise<void> =>
-  invoke("start_file_watcher", { vaultPath });
+export const startFileWatcher = (): Promise<void> =>
+  invoke("start_file_watcher");
 
 export const startOllamaServer = (): Promise<void> =>
   invoke("start_ollama_server");

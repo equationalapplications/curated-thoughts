@@ -54,13 +54,12 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
 
 #[tauri::command]
 fn start_file_watcher(
-    vault_path: String,
     app: AppHandle,
     pipeline: State<PipelineTx>,
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
 ) -> Result<(), String> {
-    // Validate vault_path matches configured vault root (webview is semi-trusted).
+    // Get configured vault root from state (trusted source)
     let configured_vault = vault_state
         .0
         .lock()
@@ -68,24 +67,16 @@ fn start_file_watcher(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault configured".to_string())?;
-    let vault_root = std::path::PathBuf::from(&vault_path);
-    let configured_root = std::path::PathBuf::from(&configured_vault);
+    let vault_root = std::path::PathBuf::from(&configured_vault);
 
-    // Fail closed: both paths must canonicalize successfully for the check to pass
+    // Canonicalize vault root once
     let vault_canonical = vault_root
-        .canonicalize()
-        .map_err(|e| format!("failed to canonicalize vault_path: {}", e))?;
-    let configured_canonical = configured_root
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
 
-    if vault_canonical != configured_canonical {
-        return Err("vault_path does not match configured vault root".to_string());
-    }
-
     let tx = pipeline.0.lock().unwrap().clone();
 
-    let raw_docs = vault_root.join("documents");
+    let raw_docs = vault_canonical.join("documents");
     // Canonicalize so macOS FSEvents paths (which are real paths) match correctly.
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
@@ -134,7 +125,7 @@ fn start_file_watcher(
         }
     }
 
-    start_watcher(vault_path.into(), move |event| {
+    start_watcher(vault_canonical, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
@@ -392,9 +383,12 @@ fn get_related_chunks(
     let normalized_path = {
         let path = std::path::Path::new(&doc_path);
         if path.is_absolute() {
-            doc_path
+            // Already absolute - canonicalize to match DB format
+            path.canonicalize()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(doc_path)
         } else {
-            // Convert relative to absolute
+            // Convert relative to absolute, then canonicalize to match DB format
             let root = vault_state
                 .0
                 .lock()
@@ -403,7 +397,11 @@ fn get_related_chunks(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "no vault path set".to_string())?;
             let vault_root = std::path::PathBuf::from(&root);
-            vault_root.join(path).to_string_lossy().to_string()
+            let joined = vault_root.join(path);
+            joined
+                .canonicalize()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| joined.to_string_lossy().to_string())
         }
     };
     let guard = db_state.0.lock().unwrap();
