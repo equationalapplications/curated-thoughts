@@ -62,6 +62,7 @@ pub fn safe_vault_path(
     let allowed_canonical: Vec<PathBuf> = allowed_subdirs
         .iter()
         .filter_map(|sub| root_canonical.join(sub).canonicalize().ok())
+        .filter(|canonical_sub| canonical_sub.starts_with(&root_canonical))
         .collect();
     if allowed_canonical.is_empty() {
         return Err(SafePathError::Outside);
@@ -233,6 +234,21 @@ mod tests {
         fs::create_dir_all(root.join("other")).unwrap();
         fs::write(root.join("other").join("foo.md"), b"x").unwrap();
         let err = safe_vault_path(&root, "other/foo.md", allowed(), PathMode::MustExist).unwrap_err();
+        assert!(matches!(err, SafePathError::Outside), "got {err:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_allowed_subdir_that_is_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let (_g, root) = vault();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("target.md"), b"pwned").unwrap();
+        // Replace the "documents" subdir with a symlink pointing outside the vault.
+        fs::remove_dir(root.join("documents")).unwrap();
+        symlink(outside.path(), root.join("documents")).unwrap();
+        // Now "documents" canonicalizes to outside the vault, so it should be filtered out.
+        let err = safe_vault_path(&root, "documents/target.md", &["documents"], PathMode::MustExist).unwrap_err();
         assert!(matches!(err, SafePathError::Outside), "got {err:?}");
     }
 }
