@@ -1,7 +1,7 @@
 # Tauri Path-Traversal Hardening
 
 Date: 2026-05-07
-Status: Draft
+Status: Implemented
 
 ## Background
 
