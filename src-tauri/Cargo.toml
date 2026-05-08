@@ -87,6 +87,14 @@ name = "curated-thoughts-mcp"
 path = "src/bin/curated_thoughts_mcp.rs"
 required-features = ["mcp-server"]
 
+[[bin]]
+name = "bulk_reindex"
+path = "src/bin/bulk_reindex.rs"
+
+[[bin]]
+name = "semantic_search_profile"
+path = "src/bin/semantic_search_profile.rs"
+
 [[test]]
 name = "mcp_integration"
 path = "tests/mcp_integration.rs"
