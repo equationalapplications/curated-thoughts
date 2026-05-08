@@ -31,7 +31,10 @@ pub enum SafePathError {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PathMode {
-    /// The target file must already exist; canonicalize the full path.
+    /// The target must already exist and resolve (via `canonicalize`) to a regular file
+    /// inside an allowed subdirectory. If the path's final component is a symlink to such
+    /// a file, the returned path is the non-canonical `vault_root/relative` form so callers
+    /// like `remove_file` delete the symlink rather than the resolved target.
     MustExist,
     /// The target file may not yet exist; canonicalize the parent directory
     /// and require the final component to be a single plain filename.
@@ -206,7 +209,14 @@ pub fn safe_vault_path(
                 if !meta.is_file() {
                     return Err(SafePathError::NotARegularFile);
                 }
-                Ok(canonical)
+                let leaf_is_symlink = std::fs::symlink_metadata(&joined)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if leaf_is_symlink {
+                    Ok(joined)
+                } else {
+                    Ok(canonical)
+                }
             } else {
                 Err(SafePathError::Outside)
             }
@@ -379,6 +389,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SafePathError::Outside), "got {err:?}");
+    }
+
+    /// When the user path names a symlink whose target is an allowed regular file,
+    /// return the symlink path so `remove_file` removes the link, not the target.
+    #[test]
+    #[cfg(unix)]
+    fn must_exist_returns_joined_path_when_leaf_is_symlink() {
+        use std::os::unix::fs::symlink;
+        let (_g, root) = vault();
+        let real = root.join("documents").join("real.md");
+        fs::write(&real, b"payload").unwrap();
+        let link = root.join("documents").join("link.md");
+        symlink("real.md", &link).unwrap();
+
+        let out =
+            safe_vault_path(&root, "documents/link.md", allowed(), PathMode::MustExist).unwrap();
+
+        assert!(out.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&out).unwrap(), "payload");
+        assert!(real.exists());
     }
 
     #[test]
