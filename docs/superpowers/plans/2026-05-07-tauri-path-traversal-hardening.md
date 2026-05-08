@@ -326,6 +326,8 @@ cd src-tauri && cargo test -p curated-thoughts vault::safe_path::tests 2>&1 | ta
     }
 ```
 
+**Bugbot / invariant:** The `.filter(|canonical_sub| canonical_sub.starts_with(&root_canonical))` line above is mandatory. Without it, an allowed subdir that is a symlink pointing outside the vault would still land in `allowed_canonical` and defeat containment.
+
 - [ ] **Run — expect PASS for all `MustExist` tests:**
 
 ```bash
@@ -700,6 +702,8 @@ fn approve_wiki_page(
 }
 ```
 
+**Bugbot resolution:** Vault root is loaded only from `VaultConfigState`, never from a webview-supplied `vault_path` argument. `page_path` from SQLite may be a bare filename; production code rejects absolute values, applies `normalize_wiki_relative_path` (adds `wiki/` when missing, handles backslashes), then passes the result to `safe_vault_path`, and writes via `safe_write_bytes` instead of `fs::write`. The snippet above shows the core containment pattern; see `approve_wiki_page` in `src-tauri/src/lib.rs` for the full implementation.
+
 - [ ] **Step 2: Build + commit:**
 
 ```bash
@@ -766,54 +770,16 @@ git commit -m "fix(tauri): validate get_proposed_content path through safe helpe
 
 ---
 
-## Task 9: Migrate `copy_to_vault`
+## Task 9: Copy into vault (OS file drop)
 
 **Files:**
-- Modify: `src-tauri/src/lib.rs` (function at line 635)
+- Modify: `src-tauri/src/lib.rs` (`copy_os_drop_paths_to_vault`, window `DragDrop` handler in `run()`)
 
-The destination is built from `src.file_name()`, which already strips directory components — but route through the helper anyway for the `InvalidName` checks (e.g. NUL bytes in source basename).
+**Bugbot resolution:** Do **not** ship a `#[tauri::command]` named `copy_to_vault` (or similar) that accepts both a caller-supplied destination vault root and paths over IPC. A compromised webview could choose an arbitrary `vault_root`, making every `safe_vault_path(...)` check meaningless because it validates relative to attacker-controlled state.
 
-- [ ] **Step 1: Replace function body:**
+**As implemented:** Copying into the vault happens only from the native window `DragDrop` handler. Source paths are `Vec<PathBuf>` from the OS. The vault root is read exclusively from `VaultConfigState` via `app.state::<VaultConfigState>()`. Each destination is `documents/<basename>` resolved through `safe_vault_path` and copied with `safe_copy_file`. Regression coverage remains in `src-tauri/tests/path_traversal.rs` (`copy_to_vault_*` names refer to that containment tuple, not an IPC command).
 
-```rust
-#[tauri::command]
-fn copy_to_vault(src_path: String, vault_state: State<VaultConfigState>) -> Result<String, String> {
-    let src = std::path::Path::new(&src_path);
-    let file_name = src
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| "invalid filename".to_string())?;
-
-    let vault_path = vault_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no vault configured".to_string())?;
-    let vault_root = std::path::PathBuf::from(&vault_path);
-    std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
-
-    let dest = crate::vault::safe_vault_path(
-        &vault_root,
-        &format!("documents/{}", file_name),
-        &["documents"],
-        crate::vault::PathMode::MayCreate,
-    )
-    .map_err(|e| e.to_string())?;
-
-    std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
-    Ok(dest.to_string_lossy().into_owned())
-}
-```
-
-- [ ] **Step 2: Build + commit:**
-
-```bash
-cd src-tauri && cargo build -p curated-thoughts 2>&1 | tail -5
-git add src-tauri/src/lib.rs
-git commit -m "fix(tauri): validate copy_to_vault destination through safe helper"
-```
+- [ ] **Verify:** `copy_os_drop_paths_to_vault` exists, no `copy_to_vault` command is registered in `invoke_handler`, and drops still land under `documents/` inside the configured vault.
 
 ---
 
