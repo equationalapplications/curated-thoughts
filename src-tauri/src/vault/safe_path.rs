@@ -48,9 +48,10 @@ pub fn safe_vault_path(
         return Err(SafePathError::Absolute);
     }
     use std::path::Component;
+    // Reject paths with .. or drive-prefix components (Windows C:foo attack).
     if candidate
         .components()
-        .any(|c| matches!(c, Component::ParentDir))
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
     {
         return Err(SafePathError::Traversal);
     }
@@ -114,7 +115,28 @@ pub fn safe_vault_path(
             {
                 return Err(SafePathError::Outside);
             }
-            Ok(canonical_parent.join(filename))
+            let target_path = canonical_parent.join(filename);
+
+            // Reject if target already exists as a symlink (or if following it escapes).
+            if let Ok(metadata) = target_path.symlink_metadata() {
+                if metadata.is_symlink() {
+                    return Err(SafePathError::InvalidName);
+                }
+                // Target exists and is not a symlink — verify final canonical containment.
+                let target_canonical = target_path
+                    .canonicalize()
+                    .map_err(|e| SafePathError::Io(e))?;
+                if !allowed_canonical
+                    .iter()
+                    .any(|sub| target_canonical.starts_with(sub))
+                {
+                    return Err(SafePathError::Outside);
+                }
+                Ok(target_canonical)
+            } else {
+                // Target doesn't exist yet — safe to create.
+                Ok(target_path)
+            }
         }
     }
 }
@@ -158,6 +180,14 @@ mod tests {
         let (_g, root) = vault();
         let err = safe_vault_path(&root, "documents/foo\0.md", allowed(), PathMode::MustExist).unwrap_err();
         assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn rejects_windows_drive_prefix() {
+        let (_g, root) = vault();
+        let err = safe_vault_path(&root, "C:foo.md", allowed(), PathMode::MustExist).unwrap_err();
+        assert!(matches!(err, SafePathError::Traversal), "got {err:?}");
     }
 
     #[test]
@@ -238,5 +268,19 @@ mod tests {
         // Now "documents" canonicalizes to outside the vault, so it should be filtered out.
         let err = safe_vault_path(&root, "documents/target.md", &["documents"], PathMode::MustExist).unwrap_err();
         assert!(matches!(err, SafePathError::Outside), "got {err:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn may_create_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let (_g, root) = vault();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("target.md"), b"pwned").unwrap();
+        // Create symlink in wiki/ pointing outside vault
+        symlink(outside.path().join("target.md"), root.join("wiki").join("evil.md")).unwrap();
+        // Attempt to write to evil.md should be rejected (symlink escape)
+        let err = safe_vault_path(&root, "wiki/evil.md", &["wiki"], PathMode::MayCreate).unwrap_err();
+        assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
     }
 }
