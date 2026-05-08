@@ -163,7 +163,7 @@ Single PR:
 3. Add the integration tests.
 4. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
 
-No data migration, no config changes, no API surface change visible to the frontend (the `Result<_, String>` shapes are unchanged; only error messages differ).
+No data migration, no config changes. The only deliberate frontend-visible command change is `start_file_watcher`, which no longer accepts a `vault_path` argument (the root always comes from `VaultConfigState`). Other commands keep the same `Result<_, String>` shapes; path-validation error strings are intentionally vault-relative or generic where noted under Post-implementation security review fixes.
 
 ## Threat model note
 
@@ -189,5 +189,5 @@ Copilot security review identified additional hardening opportunities:
 ### 3. get_related_chunks path normalization
 **Issue:** When converting relative paths to absolute for DB queries, the code joined paths but didn't canonicalize the result. Since the DB stores canonical paths (from the watcher), non-canonical query paths could fail to match even when the file exists.
 
-**Fix:** Canonicalize both absolute and relative paths before querying, falling back to non-canonical on error (for deleted files or edge cases).
+**Fix:** Normalize the argument to a vault-relative path, then resolve through `safe_vault_path` in `MayCreate` mode so an on-disk file yields a canonical absolute path for the SQLite lookup (matching watcher-ingested rows). When the target file is missing, the resolved path may still differ from a stale DB row; that edge case is acceptable for related-chunks (empty result).
 
