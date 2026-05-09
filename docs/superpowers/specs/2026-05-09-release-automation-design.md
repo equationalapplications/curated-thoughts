@@ -44,6 +44,7 @@ Two-workflow approach with tag-based triggering:
 - `contents: write` — for creating commits and tags
 - `issues: write` — for semantic-release GitHub plugin
 - `pull-requests: write` — for semantic-release GitHub plugin
+- (OIDC reserved for future npm/Crates publishing)
 
 **Output:** New git tag (e.g., `v0.2.0`), empty GitHub Release created, version files synchronized
 
@@ -242,7 +243,9 @@ Configuration file: `.releaserc.json`
       {
         "assets": [
           "package.json",
+          "package-lock.json",
           "src-tauri/Cargo.toml",
+          "src-tauri/Cargo.lock",
           "src-tauri/tauri.conf.json",
           "CHANGELOG.md"
         ],
@@ -264,8 +267,9 @@ permissions:
   contents: write      # Create commits and tags
   issues: write        # semantic-release GitHub plugin
   pull-requests: write # semantic-release GitHub plugin
-  id-token: write      # Reserved for future OIDC registry publishing
 ```
+
+(Note: `id-token: write` is reserved for future OIDC registry publishing but not currently used.)
 
 **Build Workflow (.github/workflows/build.yml):**
 ```yaml
