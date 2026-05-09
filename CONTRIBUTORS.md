@@ -33,7 +33,7 @@ Releases happen automatically when version-bumping commits (`feat:`, `fix:`, `BR
 2. Version bumps (if applicable)
 3. Git tag created (e.g., `v0.2.0`)
 4. GitHub Release published with changelog
-5. Desktop builds generated (macOS .dmg, Linux AppImage)
+5. **Note:** Desktop builds (Build workflow) must be manually triggered because `GITHUB_TOKEN` doesn't trigger workflows on tag push. See manual trigger steps below.
 
 Artifacts available on [Releases page](https://github.com/equationalapplications/curated-thoughts/releases).
 

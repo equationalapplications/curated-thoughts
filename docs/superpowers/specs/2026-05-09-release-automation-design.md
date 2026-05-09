@@ -174,7 +174,7 @@ Add status badges at top of README.md (before title):
 
 ```markdown
 [![GitHub Release](https://img.shields.io/github/v/release/equationalapplications/curated-thoughts)](https://github.com/equationalapplications/curated-thoughts/releases)
-[![CI](https://github.com/equationalapplications/curated-thoughts/actions/workflows/release.yml/badge.svg)](https://github.com/equationalapplications/curated-thoughts/actions/workflows/release.yml)
+[![CI](https://github.com/equationalapplications/curated-thoughts/actions/workflows/ci.yml/badge.svg)](https://github.com/equationalapplications/curated-thoughts/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/equationalapplications/curated-thoughts/total)](https://github.com/equationalapplications/curated-thoughts/releases)
 [![License](https://img.shields.io/github/license/equationalapplications/curated-thoughts)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-supported-success)](https://github.com/equationalapplications/curated-thoughts/releases)

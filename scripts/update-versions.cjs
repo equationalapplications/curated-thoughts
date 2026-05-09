@@ -24,9 +24,9 @@ try {
   fs.writeFileSync(cargoPath, updated);
   console.log(`Updated Cargo.toml to ${version}`);
 
-  // Regenerate Cargo.lock
+  // Regenerate Cargo.lock (only update curated-thoughts package, not deps)
   const cargoDir = path.join(__dirname, '..', 'src-tauri');
-  execSync('cargo update --workspace', { cwd: cargoDir, stdio: 'inherit' });
+  execSync('cargo update -p curated-thoughts', { cwd: cargoDir, stdio: 'inherit' });
   console.log(`Regenerated Cargo.lock`);
 
   // Update tauri.conf.json
