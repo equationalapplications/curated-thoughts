@@ -5,7 +5,6 @@ import { SearchResults } from "./SearchResults";
 import { FolderTree } from "./FolderTree";
 import { useSearch } from "../../hooks/useSearch";
 import { useVaultFiles } from "../../hooks/useVaultFiles";
-import { copyToVault } from "../../lib/tauri";
 
 interface Props {
   vaultPath: string;
@@ -22,6 +21,7 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
   const sidebarRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
 
     getCurrentWindow()
@@ -31,24 +31,24 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
           setDragging(false);
           return;
         }
-        const { x, y } = payload.position;
-        const rect = sidebarRef.current?.getBoundingClientRect();
-        const overSidebar = !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
         if (payload.type === "enter" || payload.type === "over") {
-          setDragging(overSidebar);
+          setDragging(true);
         } else if (payload.type === "drop") {
           setDragging(false);
-          if (!overSidebar) return;
-          for (const src of payload.paths) {
-            copyToVault(src, vaultPath).catch((e) =>
-              console.error("copy_to_vault failed:", e)
-            );
-          }
         }
       })
-      .then((fn) => { unlisten = fn; });
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      });
 
-    return () => { unlisten?.(); };
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [vaultPath]);
 
   return (
@@ -75,7 +75,7 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
       )}
       {dragging && (
         <div className="drop-overlay">
-          <span>Drop to add to Documents</span>
+          <span>Drop anywhere to add to Documents</span>
         </div>
       )}
       {reviewCount > 0 && (

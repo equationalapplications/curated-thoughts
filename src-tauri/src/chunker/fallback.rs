@@ -22,10 +22,7 @@ fn paragraph_spans(body: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut i = 0usize;
     while i < body.len() {
-        let next = body[i..]
-            .find("\n\n")
-            .map(|d| i + d)
-            .unwrap_or(body.len());
+        let next = body[i..].find("\n\n").map(|d| i + d).unwrap_or(body.len());
         let raw = &body[i..next];
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
@@ -104,8 +101,7 @@ fn drafts_to_chunks(text: &str, drafts: Vec<(String, usize, usize, bool)>) -> Ve
             let (start_line, end_line) = if merged_gap {
                 let hi_clip = hi.min(text.len());
                 let (sl, _) = lines_for_byte_span(text, lo, (lo + 1).min(text.len()));
-                let (_, el) =
-                    lines_for_byte_span(text, hi_clip.saturating_sub(1), hi_clip);
+                let (_, el) = lines_for_byte_span(text, hi_clip.saturating_sub(1), hi_clip);
                 (sl, el.max(sl))
             } else {
                 lines_for_byte_span(text, lo, hi.min(text.len()))
@@ -147,8 +143,7 @@ pub(super) fn chunk_fallback_chunks(text: &str) -> Vec<Chunk> {
         () => {
             if !buf_text.is_empty() {
                 if let Some(span) = buf_span.take() {
-                    let pieces =
-                        split_oversized_spans(&buf_text, span.start, max_c, ov);
+                    let pieces = split_oversized_spans(&buf_text, span.start, max_c, ov);
                     append_with_overlap_chunks(&mut acc, pieces, max_c, ov);
                 }
                 buf_text.clear();

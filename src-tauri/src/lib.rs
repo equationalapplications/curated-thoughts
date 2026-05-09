@@ -4,43 +4,152 @@ pub mod embedder;
 mod hasher;
 pub mod librarian;
 mod pipeline;
-pub mod search;
+pub mod recall_bench_fixture;
 pub mod retrieval;
 pub mod scifact_fixture;
-pub mod recall_bench_fixture;
+pub mod search;
 mod setup;
-mod vault;
+pub mod vault;
 mod watcher;
 
-use std::sync::{mpsc::SyncSender, Mutex};
-use tauri::{AppHandle, Emitter, State};
-use db::AppDb;
 use chunker::should_ingest_extension;
+use db::AppDb;
 use pipeline::start_pipeline;
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
+#[cfg(feature = "test-utils")]
+pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
 use serde_json::Value as JsonVal;
-use setup::{check_ollama as ollama_check, list_local_models as ollama_models,
-            pull_model as ollama_pull, recommended_model as ollama_recommended,
-            start_ollama_server as ollama_start, OllamaStatus};
+use setup::{
+    check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
+    recommended_model as ollama_recommended, start_ollama_server as ollama_start, OllamaStatus,
+};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{mpsc::SyncSender, Mutex};
+use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{start_watcher, VaultEvent};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
+struct WatcherStarted(Mutex<Option<PathBuf>>);
+
+/// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
+fn to_forward_slash_relative(path: &Path) -> Result<String, String> {
+    let mut out = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(seg) => out.push(seg.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => return Err("path contains traversal segment".to_string()),
+            Component::Prefix(_) => {
+                return Err("path contains invalid prefix component".to_string())
+            }
+            Component::RootDir => return Err("path contains unexpected root component".to_string()),
+        }
+    }
+    Ok(out.join("/"))
+}
+
+/// Convert an absolute path under the vault into a vault-relative forward-slash path.
+/// Uses canonical prefixes so DB/search paths still work when spellings differ (symlinks,
+/// `/var` vs `/private/var` on macOS, etc.). Paths that canonicalize outside the vault are rejected.
+fn normalize_path_argument_to_vault_relative(
+    path: &str,
+    vault_root: &Path,
+) -> Result<String, String> {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Ok(path.to_string());
+    }
+
+    let canon_root = vault_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize vault root: {}", e))?;
+
+    if let Ok(canon_candidate) = candidate.canonicalize() {
+        if !canon_candidate.starts_with(&canon_root) {
+            return Err("absolute path outside vault".to_string());
+        }
+        let rel = canon_candidate
+            .strip_prefix(&canon_root)
+            .map_err(|_| "path strip failed".to_string())?;
+        return to_forward_slash_relative(rel);
+    }
+
+    // Path may not exist yet, or the vault root spelling may differ from the path prefix until
+    // an ancestor canonicalizes. Walk up until some prefix resolves under `canon_root`.
+    let mut cur = candidate.to_path_buf();
+    let mut tail = PathBuf::new();
+    loop {
+        match cur.canonicalize() {
+            Ok(canon_prefix) => {
+                if !canon_prefix.starts_with(&canon_root) {
+                    return Err("absolute path outside vault".to_string());
+                }
+                let inside = canon_prefix
+                    .strip_prefix(&canon_root)
+                    .map_err(|_| "path strip failed".to_string())?;
+                let combined = if inside.as_os_str().is_empty() {
+                    tail
+                } else if tail.as_os_str().is_empty() {
+                    inside.to_path_buf()
+                } else {
+                    inside.join(&tail)
+                };
+                return to_forward_slash_relative(&combined);
+            }
+            Err(_) => {
+                let name = cur
+                    .file_name()
+                    .ok_or_else(|| "absolute path outside vault".to_string())?
+                    .to_owned();
+                tail = Path::new(&name).join(&tail);
+                if !cur.pop() {
+                    return Err("absolute path outside vault".to_string());
+                }
+            }
+        }
+    }
+}
+
+fn normalize_wiki_relative_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let already_wiki = matches!(
+        Path::new(&normalized).components().next(),
+        Some(Component::Normal(seg)) if seg == OsStr::new("wiki")
+    );
+    if already_wiki {
+        normalized
+    } else {
+        format!("wiki/{}", normalized)
+    }
+}
 
 // ── Vault commands ────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn get_vault_path(state: State<VaultConfigState>) -> Result<Option<String>, String> {
-    state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())
+    state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), String> {
-    state.0.lock().unwrap().set_vault_path(&path).map_err(|e| e.to_string())?;
+    // trusted: vault root from Tauri file picker dialog (user selects directory)
+    state
+        .0
+        .lock()
+        .unwrap()
+        .set_vault_path(&path)
+        .map_err(|e| e.to_string())?;
     let root = std::path::Path::new(&path);
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
@@ -53,14 +162,42 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
 
 #[tauri::command]
 fn start_file_watcher(
-    vault_path: String,
     app: AppHandle,
     pipeline: State<PipelineTx>,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+    watcher_started: State<WatcherStarted>,
 ) -> Result<(), String> {
+    // Get configured vault root from state (trusted source)
+    let configured_vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+    let vault_root = PathBuf::from(&configured_vault);
+
+    // Canonicalize vault root once
+    let vault_canonical = vault_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
+
+    let mut watcher_guard = watcher_started.0.lock().unwrap();
+    if let Some(prev) = watcher_guard.as_ref() {
+        return if prev == &vault_canonical {
+            Ok(())
+        } else {
+            Err(
+                "vault path changed after file watcher started; restart the application to watch the new vault"
+                    .to_string(),
+            )
+        };
+    }
+
     let tx = pipeline.0.lock().unwrap().clone();
 
-    let raw_docs = std::path::PathBuf::from(&vault_path).join("documents");
+    let raw_docs = vault_canonical.join("documents");
     // Canonicalize so macOS FSEvents paths (which are real paths) match correctly.
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
@@ -99,39 +236,50 @@ fn start_file_watcher(
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
             {
-                let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = entry
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
                 if should_ingest_extension(ext) {
-                    let _ = tx.try_send(PipelineJob::ingest(
-                        entry.path().to_string_lossy().into_owned(),
-                    ));
+                    let normalized = std::fs::canonicalize(entry.path())
+                        .unwrap_or_else(|_| entry.path().to_path_buf())
+                        .to_string_lossy()
+                        .into_owned();
+                    let _ = tx.try_send(PipelineJob::ingest(normalized));
                 }
             }
         }
     }
 
-    start_watcher(vault_path.into(), move |event| {
+    let vault_for_watcher = vault_canonical.clone();
+    start_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
         };
         // For existing files, canonicalize to match documents_root.
         // For deleted files (don't exist), fall back to the raw path.
-        let canonical = std::fs::canonicalize(path_str)
-            .unwrap_or_else(|_| std::path::PathBuf::from(path_str));
+        let canonical =
+            std::fs::canonicalize(path_str).unwrap_or_else(|_| std::path::PathBuf::from(path_str));
         if !canonical.starts_with(&documents_root) {
             return;
         }
+        let normalized = canonical.to_string_lossy().into_owned();
         let job = match &event {
-            VaultEvent::Added(p) | VaultEvent::Modified(p) => {
-                Some(PipelineJob::ingest(p.clone()))
+            VaultEvent::Added(_) | VaultEvent::Modified(_) => {
+                Some(PipelineJob::ingest(normalized.clone()))
             }
-            VaultEvent::Deleted(p) => Some(PipelineJob::Delete(p.clone())),
+            VaultEvent::Deleted(_) => Some(PipelineJob::Delete(normalized.clone())),
         };
         if let Some(j) = job {
             let _ = tx.try_send(j);
         }
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    *watcher_guard = Some(vault_canonical);
+    Ok(())
 }
 
 // ── Indexing status ───────────────────────────────────────────────────────────
@@ -162,8 +310,7 @@ fn queue_full_reindex(
 ) -> Result<usize, String> {
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
-    let paths =
-        crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+    let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
     let tx = pipeline.0.lock().unwrap();
     let mut queued = 0usize;
     for path in paths {
@@ -176,7 +323,8 @@ fn queue_full_reindex(
         } else {
             PipelineJob::ingest(path)
         };
-        tx.send(job).map_err(|e| format!("pipeline channel closed: {e}"))?;
+        tx.send(job)
+            .map_err(|e| format!("pipeline channel closed: {e}"))?;
         queued += 1;
     }
     Ok(queued)
@@ -190,12 +338,17 @@ fn json_to_sql(v: &JsonVal) -> SqlVal {
         JsonVal::Null => SqlVal::Null,
         JsonVal::Bool(b) => SqlVal::Integer(if *b { 1 } else { 0 }),
         JsonVal::Number(n) => {
-            if let Some(i) = n.as_i64() { SqlVal::Integer(i) }
-            else { SqlVal::Real(n.as_f64().unwrap_or(0.0)) }
+            if let Some(i) = n.as_i64() {
+                SqlVal::Integer(i)
+            } else {
+                SqlVal::Real(n.as_f64().unwrap_or(0.0))
+            }
         }
         JsonVal::String(s) => SqlVal::Text(s.clone()),
         JsonVal::Array(a) => SqlVal::Blob(
-            a.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect(),
         ),
         JsonVal::Object(_) => SqlVal::Null,
     }
@@ -210,10 +363,12 @@ fn row_to_json(
         let val = match row.get_ref(i)? {
             rusqlite::types::ValueRef::Null => JsonVal::Null,
             rusqlite::types::ValueRef::Integer(n) => JsonVal::Number(n.into()),
-            rusqlite::types::ValueRef::Real(f) => {
-                serde_json::Number::from_f64(f).map(JsonVal::Number).unwrap_or(JsonVal::Null)
+            rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                .map(JsonVal::Number)
+                .unwrap_or(JsonVal::Null),
+            rusqlite::types::ValueRef::Text(s) => {
+                JsonVal::String(String::from_utf8_lossy(s).into())
             }
-            rusqlite::types::ValueRef::Text(s) => JsonVal::String(String::from_utf8_lossy(s).into()),
             rusqlite::types::ValueRef::Blob(b) => {
                 JsonVal::Array(b.iter().map(|&n| JsonVal::Number(n.into())).collect())
             }
@@ -229,7 +384,10 @@ fn query_rows(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<serde_json::Map<String, JsonVal>>, String> {
     let sql_params: Vec<SqlVal> = params.iter().map(json_to_sql).collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
     let mut out = Vec::new();
     {
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
@@ -244,30 +402,61 @@ fn query_rows(
 
 #[tauri::command]
 fn wiki_exec(sql: String, db_state: State<DbState>) -> Result<(), String> {
-    db_state.0.lock().unwrap().0.execute_batch(&sql).map_err(|e| e.to_string())
+    db_state
+        .0
+        .lock()
+        .unwrap()
+        .0
+        .execute_batch(&sql)
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
-struct WikiRunResult { changes: i64, last_insert_row_id: i64 }
-
-#[tauri::command]
-fn wiki_run(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -> Result<WikiRunResult, String> {
-    let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let sql_params: Vec<SqlVal> = params.iter().map(json_to_sql).collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-    let changes = conn.execute(&sql, refs.as_slice()).map_err(|e| e.to_string())?;
-    Ok(WikiRunResult { changes: changes as i64, last_insert_row_id: conn.last_insert_rowid() })
+struct WikiRunResult {
+    changes: i64,
+    last_insert_row_id: i64,
 }
 
 #[tauri::command]
-fn wiki_get_all(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -> Result<Vec<serde_json::Map<String, JsonVal>>, String> {
+fn wiki_run(
+    sql: String,
+    params: Vec<JsonVal>,
+    db_state: State<DbState>,
+) -> Result<WikiRunResult, String> {
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let sql_params: Vec<SqlVal> = params.iter().map(json_to_sql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
+    let changes = conn
+        .execute(&sql, refs.as_slice())
+        .map_err(|e| e.to_string())?;
+    Ok(WikiRunResult {
+        changes: changes as i64,
+        last_insert_row_id: conn.last_insert_rowid(),
+    })
+}
+
+#[tauri::command]
+fn wiki_get_all(
+    sql: String,
+    params: Vec<JsonVal>,
+    db_state: State<DbState>,
+) -> Result<Vec<serde_json::Map<String, JsonVal>>, String> {
     query_rows(&sql, &params, &db_state.0.lock().unwrap().0)
 }
 
 #[tauri::command]
-fn wiki_get_first(sql: String, params: Vec<JsonVal>, db_state: State<DbState>) -> Result<Option<serde_json::Map<String, JsonVal>>, String> {
-    Ok(query_rows(&sql, &params, &db_state.0.lock().unwrap().0)?.into_iter().next())
+fn wiki_get_first(
+    sql: String,
+    params: Vec<JsonVal>,
+    db_state: State<DbState>,
+) -> Result<Option<serde_json::Map<String, JsonVal>>, String> {
+    Ok(query_rows(&sql, &params, &db_state.0.lock().unwrap().0)?
+        .into_iter()
+        .next())
 }
 
 // ── Embed text (for wiki llmProvider.embed) ───────────────────────────────────
@@ -310,7 +499,9 @@ async fn ollama_generate(system_prompt: String, user_prompt: String) -> Result<S
 // ── Ollama commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn check_ollama() -> OllamaStatus { ollama_check() }
+fn check_ollama() -> OllamaStatus {
+    ollama_check()
+}
 
 #[tauri::command]
 fn list_local_models() -> Result<Vec<String>, String> {
@@ -318,7 +509,9 @@ fn list_local_models() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn get_recommended_model() -> String { ollama_recommended().to_string() }
+fn get_recommended_model() -> String {
+    ollama_recommended().to_string()
+}
 
 #[tauri::command]
 fn start_ollama_server() -> Result<(), String> {
@@ -360,9 +553,51 @@ fn get_related_chunks(
     doc_path: String,
     limit: usize,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
 ) -> Result<Vec<search::SearchResult>, String> {
+    let root = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault path set".to_string())?;
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
+    // `related_chunks_try_paths` only reads SQLite; the document row may still exist after the
+    // file was removed from disk. MayCreate validates containment via the parent dir without
+    // requiring the target file to exist.
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_rel,
+        &["documents", "wiki"],
+        crate::vault::PathMode::MayCreate,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if !candidates.iter().any(|e| e == &s) {
+            candidates.push(s);
+        }
+    };
+    if safe.exists() {
+        if let Ok(canon) = std::fs::canonicalize(&safe) {
+            push(canon.to_string_lossy().into_owned());
+        }
+    }
+    push(safe.to_string_lossy().into_owned());
+    push(normalized_rel.clone());
+    push(
+        vault_root
+            .join(Path::new(&normalized_rel))
+            .to_string_lossy()
+            .into_owned(),
+    );
+
     let guard = db_state.0.lock().unwrap();
-    retrieval::related_chunks_facade(&guard.0, &doc_path, limit).map_err(|e| e.to_string())
+    crate::search::related_chunks_try_paths(&guard.0, &candidates, limit).map_err(|e| e.to_string())
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────
@@ -376,16 +611,28 @@ pub struct VaultFile {
 
 #[tauri::command]
 fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, String> {
-    let root = match state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())? {
+    let root = match state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => return Ok(vec![]),
     };
+
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("vault path not accessible: {}", e))?;
 
     let mut files = Vec::new();
 
     for (subdir, tier) in &[("documents", "user_doc"), ("wiki", "wiki")] {
         let dir = root.join(subdir);
-        if !dir.exists() { continue; }
+        if !dir.exists() {
+            continue;
+        }
         let walker = walkdir::WalkDir::new(&dir)
             .min_depth(1)
             .into_iter()
@@ -397,9 +644,21 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             });
 
         for entry in walker {
-            let path = entry.path().to_string_lossy().to_string();
+            // Return vault-relative paths for safe_vault_path compatibility.
+            // Skip any entry that can't be made relative (shouldn't happen in normal operation,
+            // but could occur if the vault contains symlinks pointing outside).
+            let Some(relative) = entry.path().strip_prefix(&root).ok() else {
+                continue;
+            };
+            let Ok(path) = to_forward_slash_relative(relative) else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().to_string();
-            files.push(VaultFile { path, name, tier: tier.to_string() });
+            files.push(VaultFile {
+                path,
+                name,
+                tier: tier.to_string(),
+            });
         }
     }
 
@@ -408,23 +667,28 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
 
 #[tauri::command]
 fn read_document(path: String, state: State<VaultConfigState>) -> Result<String, String> {
-    let root = match state.0.lock().unwrap().get_vault_path().map_err(|e| e.to_string())? {
+    let root = match state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => return Err("no vault path set".to_string()),
     };
 
-    let doc_path = std::path::Path::new(&path);
+    let normalized_path = normalize_path_argument_to_vault_relative(&path, &root)?;
 
-    if !doc_path.starts_with(&root) {
-        return Err("path outside vault".to_string());
-    }
-    let in_documents = doc_path.starts_with(root.join("documents"));
-    let in_wiki = doc_path.starts_with(root.join("wiki"));
-    if !in_documents && !in_wiki {
-        return Err("path not in documents/ or wiki/".to_string());
-    }
+    let safe = crate::vault::safe_vault_path(
+        &root,
+        &normalized_path,
+        &["documents", "wiki"],
+        crate::vault::PathMode::MustExist,
+    )
+    .map_err(|e| e.to_string())?;
 
-    std::fs::read_to_string(doc_path).map_err(|e| e.to_string())
+    std::fs::read_to_string(&safe).map_err(|e| e.to_string())
 }
 
 // ── Review queue ──────────────────────────────────────────────────────────────
@@ -465,17 +729,45 @@ fn get_review_queue(db_state: State<DbState>) -> Result<Vec<ReviewPage>, String>
 fn approve_wiki_page(
     id: i64,
     content: String,
-    vault_path: String,
     db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
 ) -> Result<(), String> {
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
     let page_path: String = conn
-        .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .map_err(|e| e.to_string())?;
-    let wiki_dir = std::path::Path::new(&vault_path).join("wiki");
-    std::fs::create_dir_all(&wiki_dir).map_err(|e| e.to_string())?;
-    std::fs::write(wiki_dir.join(&page_path), &content).map_err(|e| e.to_string())?;
+
+    let vault_path = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+    let vault_root = std::path::PathBuf::from(&vault_path);
+    std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
+
+    // Reject absolute paths before normalization
+    if std::path::Path::new(&page_path).is_absolute() {
+        return Err("absolute paths not allowed".to_string());
+    }
+
+    // Normalize separators and ensure a wiki/ prefix for backward compatibility.
+    let normalized_path = normalize_wiki_relative_path(&page_path);
+
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_path,
+        &["wiki"],
+        crate::vault::PathMode::MayCreate,
+    )
+    .map_err(|e| e.to_string())?;
+
+    crate::vault::safe_path::safe_write_bytes(&safe, content.as_bytes())
+        .map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE wiki_pages SET status = 'approved', last_synced = unixepoch() WHERE id = ?1",
         [id],
@@ -491,7 +783,10 @@ fn reject_wiki_page(id: i64, db_state: State<DbState>) -> Result<(), String> {
         .lock()
         .unwrap()
         .0
-        .execute("UPDATE wiki_pages SET status = 'rejected' WHERE id = ?1", [id])
+        .execute(
+            "UPDATE wiki_pages SET status = 'rejected' WHERE id = ?1",
+            [id],
+        )
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -569,8 +864,13 @@ fn get_proposed_content(
 ) -> Result<String, String> {
     let page_path: String = {
         let guard = db_state.0.lock().unwrap();
-        guard.0
-            .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [page_id], |r| r.get(0))
+        guard
+            .0
+            .query_row(
+                "SELECT path FROM wiki_pages WHERE id = ?1",
+                [page_id],
+                |r| r.get(0),
+            )
             .map_err(|e| e.to_string())?
     };
     let vault = vault_state
@@ -580,12 +880,32 @@ fn get_proposed_content(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault set".to_string())?;
-    let proposed_path = std::path::Path::new(&vault)
-        .join(".brain")
-        .join("proposed")
-        .join(&page_path);
-    Ok(std::fs::read_to_string(&proposed_path)
-        .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)))
+    let vault_root = std::path::PathBuf::from(&vault);
+    std::fs::create_dir_all(vault_root.join(".brain").join("proposed"))
+        .map_err(|e| e.to_string())?;
+
+    if std::path::Path::new(&page_path).is_absolute() {
+        return Err("absolute paths not allowed".to_string());
+    }
+
+    let page_rel = page_path.replace('\\', "/");
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &format!(".brain/proposed/{}", page_rel),
+        &[".brain/proposed"],
+        crate::vault::PathMode::MustExist,
+    );
+
+    let placeholder = || format!("# {}\n\n*Proposed wiki page — content not available.*", page_rel);
+    match safe {
+        Ok(p) => match std::fs::read_to_string(&p) {
+            Ok(content) => Ok(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(placeholder()),
+            Err(e) => Err(e.to_string()),
+        },
+        Err(crate::vault::SafePathError::NotFound(_)) => Ok(placeholder()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -601,15 +921,28 @@ fn save_wiki_page(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or("no vault set".to_string())?;
-    let wiki_dir = std::path::Path::new(&vault).join("wiki");
-    std::fs::create_dir_all(&wiki_dir).map_err(|e| e.to_string())?;
-    let full_path = std::path::Path::new(&path);
-    // Only allow writing within wiki/
-    if !full_path.starts_with(&wiki_dir) && !path.ends_with(".md") {
-        return Err("invalid wiki path".to_string());
+    let vault_root = std::path::PathBuf::from(&vault);
+    // Ensure the allowed subdir exists before resolving the user path.
+    std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
+
+    // Reject absolute paths before normalization
+    if std::path::Path::new(&path).is_absolute() {
+        return Err("absolute paths not allowed".to_string());
     }
-    let target = if full_path.is_absolute() { full_path.to_path_buf() } else { wiki_dir.join(&path) };
-    std::fs::write(&target, &content).map_err(|e| e.to_string())?;
+
+    // Normalize separators and ensure a wiki/ prefix for backward compatibility.
+    let normalized_path = normalize_wiki_relative_path(&path);
+
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_path,
+        &["wiki"],
+        crate::vault::PathMode::MayCreate,
+    )
+    .map_err(|e| e.to_string())?;
+
+    crate::vault::safe_path::safe_write_bytes(&safe, content.as_bytes())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -624,32 +957,124 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault set".to_string())?;
-    let file = std::path::Path::new(&path);
-    if !file.starts_with(std::path::Path::new(&root).join("documents")) {
-        return Err("path outside documents folder".to_string());
-    }
-    std::fs::remove_file(file).map_err(|e| e.to_string())
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let normalized_path = normalize_path_argument_to_vault_relative(&path, &vault_root)?;
+
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_path,
+        &["documents"],
+        crate::vault::PathMode::MustExist,
+    )
+    .map_err(|e| e.to_string())?;
+
+    std::fs::remove_file(&safe).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn copy_to_vault(src_path: String, vault_path: String) -> Result<String, String> {
-    let src = std::path::Path::new(&src_path);
-    let file_name = src
-        .file_name()
-        .ok_or_else(|| "invalid filename".to_string())?;
-    let dest_dir = std::path::Path::new(&vault_path).join("documents");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let dest = dest_dir.join(file_name);
-    std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
-    Ok(dest.to_string_lossy().into_owned())
+/// `n == 0` returns `original`; larger `n` inserts ` (n)` before the extension (Windows/macOS style).
+fn drop_destination_filename(original: &str, n: u32) -> String {
+    if n == 0 {
+        return original.to_string();
+    }
+    let p = std::path::Path::new(original);
+    let stem = p.file_stem().and_then(|s| s.to_str());
+    let ext = p.extension().and_then(|e| e.to_str());
+    match (stem, ext) {
+        (Some(stem), Some(ext)) if !stem.is_empty() => {
+            format!("{} ({}).{}", stem, n, ext)
+        }
+        _ => format!("{} ({})", original, n),
+    }
+}
+
+fn unique_drop_destination(
+    vault_root: &std::path::Path,
+    original_file_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    const MAX_TRIES: u32 = 10_000;
+    for n in 0..MAX_TRIES {
+        let candidate_name = drop_destination_filename(original_file_name, n);
+        let rel = format!("documents/{candidate_name}");
+        match crate::vault::safe_vault_path(
+            vault_root,
+            &rel,
+            &["documents"],
+            crate::vault::PathMode::MustExist,
+        ) {
+            Ok(_) => continue,
+            Err(crate::vault::SafePathError::NotFound(_)) => {
+                return crate::vault::safe_vault_path(
+                    vault_root,
+                    &rel,
+                    &["documents"],
+                    crate::vault::PathMode::MayCreate,
+                )
+                .map_err(|e| e.to_string());
+            }
+            // Directory, symlink escape, or other non-file collision: treat as "name taken"
+            // and try the next ` (n)` suffix instead of failing the whole drop batch.
+            Err(
+                crate::vault::SafePathError::NotARegularFile
+                | crate::vault::SafePathError::Outside
+                | crate::vault::SafePathError::InvalidName
+                | crate::vault::SafePathError::Absolute
+                | crate::vault::SafePathError::Traversal,
+            ) => continue,
+            Err(crate::vault::SafePathError::Io(e)) => return Err(e.to_string()),
+        }
+    }
+    Err(format!(
+        "could not find a free filename under documents/ for {original_file_name}"
+    ))
+}
+
+fn copy_os_drop_paths_to_vault(
+    app: &AppHandle,
+    paths: &[std::path::PathBuf],
+) -> Result<Vec<String>, String> {
+    let vault_path = app
+        .state::<VaultConfigState>()
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+    let vault_root = std::path::PathBuf::from(&vault_path);
+    std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
+
+    let mut copied_paths = Vec::new();
+
+    for src in paths {
+        if !src.is_file() {
+            continue;
+        }
+
+        let file_name = match src.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => {
+                eprintln!("[drop-copy] skipping file with invalid filename: {:?}", src);
+                continue;
+            }
+        };
+
+        let dest = unique_drop_destination(&vault_root, file_name)?;
+
+        crate::vault::safe_path::safe_copy_file(src, &dest).map_err(|e| e.to_string())?;
+
+        // Ingest and vault-event are emitted by the filesystem watcher; no
+        // manual enqueue/emit here to avoid duplicated pipeline jobs and UI
+        // events for every dropped file.
+        copied_paths.push(dest.to_string_lossy().into_owned());
+    }
+
+    Ok(copied_paths)
 }
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
 pub use pipeline::ingest_document;
-
-#[cfg(feature = "test-utils")]
-pub use pipeline::{PipelineJob, PipelineWorker};
 
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
@@ -698,9 +1123,24 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
+        // Handle file-drop in Rust so source paths come from OS drop events,
+        // not from attacker-controlled webview command arguments.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let paths = paths.clone();
+                let app = window.app_handle().clone();
+                // FS copies can be large; keep the wry/window event loop responsive.
+                std::thread::spawn(move || {
+                    if let Err(e) = copy_os_drop_paths_to_vault(&app, &paths) {
+                        eprintln!("[drop-copy] failed: {e}");
+                    }
+                });
+            }
+        })
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineTx(Mutex::new(pipeline_tx)))
+        .manage(WatcherStarted(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -730,9 +1170,99 @@ pub fn run() {
             delete_folder_rule,
             get_proposed_content,
             save_wiki_page,
-            copy_to_vault,
             delete_vault_file,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
+}
+
+#[cfg(test)]
+mod normalize_path_tests {
+    use super::normalize_path_argument_to_vault_relative;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn absolute_path_inside_vault_nonexistent_target_normalizes_without_canonicalize() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        fs::create_dir_all(vault.join("documents")).unwrap();
+        let canon = vault.canonicalize().unwrap();
+        let missing = canon.join("documents").join("not_created_yet.md");
+        let rel =
+            normalize_path_argument_to_vault_relative(&missing.to_string_lossy(), vault).unwrap();
+        assert_eq!(rel, "documents/not_created_yet.md");
+    }
+
+    /// When the configured vault path and an absolute argument use different spellings for the
+    /// same directory (symlink), normalization must still produce a vault-relative path.
+    #[test]
+    #[cfg(unix)]
+    fn absolute_path_normalizes_when_vault_is_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real_vault = tmp.path().join("real_vault");
+        fs::create_dir_all(real_vault.join("documents")).unwrap();
+        let link = tmp.path().join("link_vault");
+        symlink(&real_vault, &link).unwrap();
+
+        let file = real_vault.join("documents").join("note.md");
+        fs::write(&file, b"x").unwrap();
+
+        let abs_via_real = file.canonicalize().unwrap();
+        let rel = normalize_path_argument_to_vault_relative(
+            &abs_via_real.to_string_lossy(),
+            Path::new(&link),
+        )
+        .unwrap();
+        assert_eq!(rel, "documents/note.md");
+    }
+}
+
+#[cfg(test)]
+mod drop_destination_tests {
+    use super::drop_destination_filename;
+    use super::unique_drop_destination;
+    use std::fs;
+
+    #[test]
+    fn drop_destination_filename_zero_is_unchanged() {
+        assert_eq!(drop_destination_filename("note.md", 0), "note.md");
+    }
+
+    #[test]
+    fn drop_destination_filename_inserts_counter_before_extension() {
+        assert_eq!(drop_destination_filename("note.md", 1), "note (1).md");
+        assert_eq!(drop_destination_filename("note.md", 2), "note (2).md");
+    }
+
+    #[test]
+    fn unique_drop_uses_original_when_unused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("documents")).unwrap();
+        let p = unique_drop_destination(root, "fresh.txt").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("fresh.txt"));
+    }
+
+    #[test]
+    fn unique_drop_avoids_overwriting_existing_basename() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("documents")).unwrap();
+        fs::write(root.join("documents").join("dup.md"), b"x").unwrap();
+        let p = unique_drop_destination(root, "dup.md").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
+    }
+
+    #[test]
+    fn unique_drop_skips_directory_with_same_basename() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("documents")).unwrap();
+        fs::create_dir_all(root.join("documents").join("dup.md")).unwrap();
+        let p = unique_drop_destination(root, "dup.md").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
+    }
 }

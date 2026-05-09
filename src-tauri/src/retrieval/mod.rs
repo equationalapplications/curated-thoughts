@@ -143,12 +143,10 @@ mod hint_tests {
 
     #[test]
     fn hints_sqlite_busy() {
-        assert!(mcp_error_hint(&anyhow!(
-            rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ErrorCode::DatabaseBusy as i32),
-                Some("database is locked".into()),
-            )
-        ))
+        assert!(mcp_error_hint(&anyhow!(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ErrorCode::DatabaseBusy as i32),
+            Some("database is locked".into()),
+        )))
         .contains("Another process"));
     }
 

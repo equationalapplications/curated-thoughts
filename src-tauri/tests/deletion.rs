@@ -16,13 +16,15 @@ fn seed_document_with_embedding(conn: &rusqlite::Connection, path: &str) -> (i64
     conn.execute(
         "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, 'test chunk', 0)",
         [doc_id],
-    ).unwrap();
+    )
+    .unwrap();
     let chunk_id = conn.last_insert_rowid();
     let vector: Vec<u8> = vec![0u8; 384 * 4]; // 384 zero f32s
     conn.execute(
         "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
         rusqlite::params![chunk_id, vector],
-    ).unwrap();
+    )
+    .unwrap();
     (doc_id, chunk_id)
 }
 
@@ -69,7 +71,11 @@ fn delete_cascades_chunks_embeddings_shadow_copy_and_orphans_wiki() {
 
     // Document row gone
     let doc_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM documents WHERE id = ?1", [doc_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM documents WHERE id = ?1",
+            [doc_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(doc_count, 0, "document row not deleted");
 
@@ -86,11 +92,18 @@ fn delete_cascades_chunks_embeddings_shadow_copy_and_orphans_wiki() {
     assert_eq!(emb_count, 0, "embeddings not cascade-deleted");
 
     // Shadow copy removed
-    assert!(!shadow.exists(), "shadow copy not removed from .brain/converted/");
+    assert!(
+        !shadow.exists(),
+        "shadow copy not removed from .brain/converted/"
+    );
 
     // Wiki page orphaned
     let wiki_status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE path = 'report.md'", [], |r| r.get(0))
+        .query_row(
+            "SELECT status FROM wiki_pages WHERE path = 'report.md'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(wiki_status, "orphaned", "wiki page not marked orphaned");
 }

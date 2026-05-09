@@ -31,13 +31,10 @@ fn parse_args() -> Args {
         match a.as_str() {
             "--dry-run" => dry_run = true,
             "--limit" => {
-                let n: usize = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| {
-                        eprintln!("error: --limit requires a positive integer");
-                        std::process::exit(2);
-                    });
+                let n: usize = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("error: --limit requires a positive integer");
+                    std::process::exit(2);
+                });
                 limit = Some(n);
             }
             "--help" | "-h" => {
@@ -114,8 +111,7 @@ fn main() -> Result<()> {
             eprintln!("[{}/{}] skip missing: {}", i + 1, total, path);
             continue;
         }
-        ingest_document(conn, &profile, path, true)
-            .with_context(|| format!("reindex {}", path))?;
+        ingest_document(conn, &profile, path, true).with_context(|| format!("reindex {}", path))?;
         if (i + 1) % 25 == 0 || i + 1 == total {
             eprintln!("[{}/{}] done …", i + 1, total);
         }

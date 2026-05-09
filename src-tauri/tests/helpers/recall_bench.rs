@@ -68,7 +68,9 @@ impl RecallFixtures {
         });
         let mut decoder = GzDecoder::new(emb_gz);
         let mut json_str = String::new();
-        decoder.read_to_string(&mut json_str).expect("decompress embeddings");
+        decoder
+            .read_to_string(&mut json_str)
+            .expect("decompress embeddings");
         let raw: HashMap<String, Value> =
             serde_json::from_str(&json_str).expect("parse embeddings");
         let embeddings: HashMap<String, Vec<Vec<f32>>> = raw
@@ -102,11 +104,9 @@ pub fn seed_sentence_chunks(app: &TestApp, fixtures: &RecallFixtures) {
         )
         .unwrap();
         let db_doc_id: i64 = conn
-            .query_row(
-                "SELECT id FROM documents WHERE path = ?1",
-                [doc_id],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM documents WHERE path = ?1", [doc_id], |r| {
+                r.get(0)
+            })
             .unwrap();
 
         let chunk_texts = tauri_app_lib::chunker::chunk_text(text);
@@ -121,10 +121,8 @@ pub fn seed_sentence_chunks(app: &TestApp, fixtures: &RecallFixtures) {
             "fixture chunk count mismatch for {doc_id}",
         );
 
-        for (position, (chunk_txt, vec)) in chunk_texts
-            .iter()
-            .zip(embedding_rows.iter())
-            .enumerate()
+        for (position, (chunk_txt, vec)) in
+            chunk_texts.iter().zip(embedding_rows.iter()).enumerate()
         {
             conn.execute(
                 "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, ?2, ?3)",
@@ -173,8 +171,10 @@ pub fn run_recall_at_k(
             continue;
         }
 
-        let query_vec =
-            embedder.embed(vec![query_text.clone()]).expect("embed query")[0].clone();
+        let query_vec = embedder
+            .embed(vec![query_text.clone()])
+            .expect("embed query")[0]
+            .clone();
 
         let conn = app.open_db();
         let results =
@@ -189,10 +189,7 @@ pub fn run_recall_at_k(
     }
 
     let recall = hits as f64 / total as f64;
-    println!(
-        "[{label}] Recall@{k}: {:.3} ({hits}/{total})",
-        recall
-    );
+    println!("[{label}] Recall@{k}: {:.3} ({hits}/{total})", recall);
 
     assert!(
         recall >= min_recall,

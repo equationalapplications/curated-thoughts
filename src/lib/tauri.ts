@@ -21,8 +21,8 @@ export const listLocalModels = (): Promise<string[]> =>
 export const pullModel = (modelId: string): Promise<void> =>
   invoke("pull_model", { modelId });
 
-export const startFileWatcher = (vaultPath: string): Promise<void> =>
-  invoke("start_file_watcher", { vaultPath });
+export const startFileWatcher = (): Promise<void> =>
+  invoke("start_file_watcher");
 
 export const startOllamaServer = (): Promise<void> =>
   invoke("start_ollama_server");
@@ -79,10 +79,9 @@ export const getReviewQueue = (): Promise<ReviewPage[]> =>
 
 export const approveWikiPage = (
   id: number,
-  content: string,
-  vaultPath: string
+  content: string
 ): Promise<void> =>
-  invoke("approve_wiki_page", { id, content, vaultPath });
+  invoke("approve_wiki_page", { id, content });
 
 export const rejectWikiPage = (id: number): Promise<void> =>
   invoke("reject_wiki_page", { id });
@@ -112,9 +111,6 @@ export const getProposedContent = (pageId: number): Promise<string> =>
 
 export const saveWikiPage = (path: string, content: string): Promise<void> =>
   invoke("save_wiki_page", { path, content });
-
-export const copyToVault = (srcPath: string, vaultPath: string): Promise<string> =>
-  invoke("copy_to_vault", { srcPath, vaultPath });
 
 export const deleteVaultFile = (path: string): Promise<void> =>
   invoke("delete_vault_file", { path });

@@ -45,7 +45,35 @@ fn get_proposed_content_returns_file_contents() {
     std::fs::write(vault_proposed.join("doc.md"), "# Generated Content").unwrap();
 
     let content: String = app.invoke("get_proposed_content", json!({ "pageId": id }));
-    assert!(content.contains("Generated Content"), "expected content, got: {content}");
+    assert!(
+        content.contains("Generated Content"),
+        "expected content, got: {content}"
+    );
+}
+
+#[test]
+fn get_proposed_content_normalizes_backslash_in_db_path() {
+    let app = TestApp::new();
+    app.invoke::<()>("set_vault_path", json!({ "path": app.tmp.path() }));
+
+    let proposed_dir = app.tmp.path().join(".brain").join("proposed");
+    std::fs::create_dir_all(proposed_dir.join("nested")).unwrap();
+    std::fs::write(proposed_dir.join("nested").join("win.md"), "# From nested").unwrap();
+
+    let conn = app.open_db();
+    conn.execute(
+        "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
+         VALUES (?1, '[]', 'test-model', 'pending_review')",
+        ["nested\\win.md"],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+
+    let content: String = app.invoke("get_proposed_content", json!({ "pageId": id }));
+    assert!(
+        content.contains("From nested"),
+        "expected file via normalized path, got: {content}"
+    );
 }
 
 #[test]
@@ -58,11 +86,13 @@ fn approve_wiki_page_writes_file_and_marks_approved() {
     let id = seed_pending_page(&app, "page.md", "# Wiki");
     let content = "# Approved Wiki Page\n\nContent.";
 
-    app.invoke::<()>("approve_wiki_page", json!({
-        "id": id,
-        "content": content,
-        "vaultPath": vault
-    }));
+    app.invoke::<()>(
+        "approve_wiki_page",
+        json!({
+            "id": id,
+            "content": content
+        }),
+    );
 
     // File written to vault/wiki/
     let wiki_file = vault.join("wiki").join("page.md");
@@ -75,9 +105,39 @@ fn approve_wiki_page_writes_file_and_marks_approved() {
 
     let conn = app.open_db();
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(status, "approved");
+}
+
+#[test]
+fn approve_wiki_page_accepts_backslash_wiki_path() {
+    let app = TestApp::new();
+    let vault = app.tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    app.invoke::<()>("set_vault_path", json!({ "path": vault }));
+
+    // Simulate a DB row whose path uses backslash separators (possible on Windows).
+    // After normalization: "wiki/bs-approved.md" — must not double-prefix.
+    let id = seed_pending_page(&app, "wiki\\bs-approved.md", "# Wiki");
+    let content = "# Approved";
+
+    app.invoke::<()>(
+        "approve_wiki_page",
+        json!({
+            "id": id,
+            "content": content
+        }),
+    );
+
+    let wiki_file = vault.join("wiki").join("bs-approved.md");
+    assert!(
+        wiki_file.exists(),
+        "wiki file not written at normalized path"
+    );
+    assert_eq!(std::fs::read_to_string(&wiki_file).unwrap(), content);
 }
 
 #[test]
@@ -92,7 +152,10 @@ fn reject_wiki_page_does_not_write_file_and_marks_rejected() {
     app.invoke::<()>("reject_wiki_page", json!({ "id": id }));
 
     // No file written
-    assert!(!vault.join("wiki").join("reject.md").exists(), "file should not exist after reject");
+    assert!(
+        !vault.join("wiki").join("reject.md").exists(),
+        "file should not exist after reject"
+    );
 
     // No longer in queue
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
@@ -100,7 +163,9 @@ fn reject_wiki_page_does_not_write_file_and_marks_rejected() {
 
     let conn = app.open_db();
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(status, "rejected");
 }

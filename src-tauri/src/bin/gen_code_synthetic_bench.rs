@@ -63,5 +63,8 @@ fn main() {
     )
     .unwrap();
 
-    println!("Wrote code synthetic bench fixtures under {}", dir.display());
+    println!(
+        "Wrote code synthetic bench fixtures under {}",
+        dir.display()
+    );
 }
