@@ -11,12 +11,14 @@ permissions:
 
 jobs:
   build:
+    # Only upload to release when triggered by a tag push
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
-            build_cmd: npm run tauri build
+            build_cmd: npm run tauri build -- --target universal-apple-darwin
           - os: ubuntu-22.04
             build_cmd: npm run tauri build
 
@@ -35,10 +37,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add x86_64 target for universal build
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
 
       - name: Install npm dependencies
         run: npm ci
