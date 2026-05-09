@@ -198,6 +198,18 @@ pub fn safe_vault_path(
     match mode {
         PathMode::MustExist => {
             let joined = root_canonical.join(candidate);
+            let joined_parent = joined
+                .parent()
+                .ok_or_else(|| SafePathError::NotFound(format!("file not found: {}", user_path)))?;
+            let joined_parent_canonical = joined_parent
+                .canonicalize()
+                .map_err(|_| SafePathError::NotFound(format!("file not found: {}", user_path)))?;
+            if !allowed_canonical
+                .iter()
+                .any(|sub| joined_parent_canonical.starts_with(sub))
+            {
+                return Err(SafePathError::Outside);
+            }
             let canonical = joined
                 .canonicalize()
                 .map_err(|_| SafePathError::NotFound(format!("file not found: {}", user_path)))?;
@@ -409,6 +421,26 @@ mod tests {
         assert!(out.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read_to_string(&out).unwrap(), "payload");
         assert!(real.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn must_exist_rejects_leaf_symlink_outside_allowed_subdir() {
+        use std::os::unix::fs::symlink;
+        let (_g, root) = vault();
+        let real = root.join("documents").join("real.md");
+        fs::write(&real, b"payload").unwrap();
+        let root_link = root.join("root-link.md");
+        symlink(root.join("documents").join("real.md"), &root_link).unwrap();
+
+        let err = safe_vault_path(
+            &root,
+            "root-link.md",
+            &["documents"],
+            PathMode::MustExist,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SafePathError::Outside), "got {err:?}");
     }
 
     #[test]

@@ -881,6 +881,8 @@ fn get_proposed_content(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault set".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault);
+    std::fs::create_dir_all(vault_root.join(".brain").join("proposed"))
+        .map_err(|e| e.to_string())?;
 
     if std::path::Path::new(&page_path).is_absolute() {
         return Err("absolute paths not allowed".to_string());
