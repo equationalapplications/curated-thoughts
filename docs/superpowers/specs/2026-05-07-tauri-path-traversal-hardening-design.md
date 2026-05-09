@@ -1,7 +1,7 @@
 # Tauri Path-Traversal Hardening
 
 Date: 2026-05-07
-Status: Draft
+Status: Implemented
 
 ## Background
 
@@ -48,6 +48,8 @@ pub enum SafePathError {
     Outside,
     #[error("path component contains invalid characters")]
     InvalidName,
+    #[error("path exists but is not a regular file")]
+    NotARegularFile,
     #[error("path or parent directory not found: {0}")]
     NotFound(String),
     #[error("io error: {0}")]
@@ -116,7 +118,7 @@ For `copy_to_vault`, the destination is computed from `src.file_name()`. Validat
 
 Grep for every `#[tauri::command]` whose signature includes a `String` that is later used as a path. For each one, route through `safe_vault_path` or document in code why the value is trusted. Acceptable trusted sources:
 
-- `vault_path` returned from the Tauri file picker dialog (still canonicalize before use).
+- `vault_path` (vault root) from `VaultConfigState`, which stores the user's file-picker selection. **NEVER accept `vault_path` as a command parameter** — a compromised webview could control both the path being validated and the root it's validated against, bypassing containment.
 - Paths derived purely from constants and the canonicalized `vault_root`.
 
 Anything else routes through the helper.
@@ -161,8 +163,31 @@ Single PR:
 3. Add the integration tests.
 4. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
 
-No data migration, no config changes, no API surface change visible to the frontend (the `Result<_, String>` shapes are unchanged; only error messages differ).
+No data migration, no config changes. Frontend-visible command surface changes include: `start_file_watcher` no longer accepts `vault_path` (the root always comes from `VaultConfigState`); `approve_wiki_page` no longer takes a caller `vault_path` and uses the configured vault only; webview-initiated `copy_to_vault` was removed in favor of OS drop paths handled in Rust (`copy_os_drop_paths_to_vault` / window events), so arbitrary `src_path` is not accepted from the webview. Other commands keep the same `Result<_, String>` shapes where applicable; path-validation error strings are intentionally vault-relative or generic where noted under Post-implementation security review fixes.
 
 ## Threat model note
 
 The webview is treated as semi-trusted. It loads local content including wiki pages generated from LLM output, which can be prompt-injected by ingested documents. Any `#[tauri::command]` reachable from the webview must validate path arguments as if they came from a remote attacker. This spec establishes the helper that enforces that invariant; future commands that touch the filesystem MUST go through it.
+
+## Post-implementation security review fixes (2026-05-08)
+
+Copilot security review identified additional hardening opportunities:
+
+### 1. SafePathError information leak
+**Issue:** `SafePathError::NotFound` included absolute filesystem paths in error messages (via `.display()`), which were returned to the webview and exposed the user's vault location.
+
+**Fix:** Changed error messages to only include vault-relative paths or generic messages:
+- Vault root canonicalization failure: `"vault root not found"`
+- MustExist file not found: `"file not found: {user_path}"`
+- MayCreate parent not found: `"parent directory not found: {user_path}"`
+
+### 2. start_file_watcher vault_path parameter
+**Issue:** `start_file_watcher` accepted `vault_path` as a command parameter from the webview, violating the spec rule "NEVER accept vault_path as a command parameter". While the implementation validated that the parameter matched `VaultConfigState`, the parameter was unnecessary attack surface.
+
+**Fix:** Removed `vault_path` parameter entirely. Command now derives vault root solely from `VaultConfigState`, eliminating any webview control over the watcher root path.
+
+### 3. get_related_chunks path normalization
+**Issue:** When converting relative paths to absolute for DB queries, the code joined paths but didn't canonicalize the result. Since the DB stores canonical paths (from the watcher), non-canonical query paths could fail to match even when the file exists.
+
+**Fix:** Normalize the argument to a vault-relative path, then resolve through `safe_vault_path` in `MayCreate` mode so an on-disk file yields a canonical absolute path for the SQLite lookup (matching watcher-ingested rows). When the target file is missing, the resolved path may still differ from a stale DB row; that edge case is acceptable for related-chunks (empty result).
+

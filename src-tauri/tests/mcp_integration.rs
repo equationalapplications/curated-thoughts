@@ -48,22 +48,19 @@ fn first_text_hit(r: &CallToolResult) -> String {
 
 async fn spawn_mcp(
     brain_root: impl AsRef<Path>,
-) -> anyhow::Result<
-    rmcp::service::RunningService<rmcp::RoleClient, ()>,
-> {
+) -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
     let brain = brain_root.as_ref().to_path_buf();
     let exe = mcp_exe();
-    let transport =
-        TokioChildProcess::new(tokio::process::Command::new(&exe).configure(|cmd| {
-            cmd.stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::inherit())
-                .env(
-                    "CURATED_BRAIN_DIR",
-                    brain.as_os_str().to_str().expect("UTF-8 brain path"),
-                )
-                .env("CURATED_EMBED_STUB", "constant8");
-        }))?;
+    let transport = TokioChildProcess::new(tokio::process::Command::new(&exe).configure(|cmd| {
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .env(
+                "CURATED_BRAIN_DIR",
+                brain.as_os_str().to_str().expect("UTF-8 brain path"),
+            )
+            .env("CURATED_EMBED_STUB", "constant8");
+    }))?;
     let client = ().serve(transport).await?;
     Ok(client)
 }
@@ -107,10 +104,7 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
     with_vars(
         [
             ("CURATED_EMBED_STUB", Some("constant8")),
-            (
-                "CURATED_BRAIN_DIR",
-                brain.to_str(),
-            ),
+            ("CURATED_BRAIN_DIR", brain.to_str()),
         ],
         || {
             let paths = retrieval::resolve_brain_paths();
@@ -128,10 +122,7 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
 
     let client = spawn_mcp(brain).await.expect("mcp handshake");
 
-    let tools = client
-        .list_all_tools()
-        .await
-        .expect("list_all_tools");
+    let tools = client.list_all_tools().await.expect("list_all_tools");
     let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(names.iter().any(|n| *n == "vault_semantic_search"));
     assert!(names.iter().any(|n| *n == "vault_related_chunks"));
@@ -145,16 +136,16 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
     .clone();
     let res = client
         .peer()
-        .call_tool(
-            CallToolRequestParams::new("vault_semantic_search").with_arguments(args),
-        )
+        .call_tool(CallToolRequestParams::new("vault_semantic_search").with_arguments(args))
         .await
         .expect("call_tool semantic");
     let text = first_text_hit(&res);
-    let parsed: Vec<SearchResult> =
-        serde_json::from_str(&text).expect("tool returns JSON SearchResult array (Tauri/MCP contract)");
+    let parsed: Vec<SearchResult> = serde_json::from_str(&text)
+        .expect("tool returns JSON SearchResult array (Tauri/MCP contract)");
     assert!(
-        parsed.iter().any(|row| row.symbol_name.as_deref() == Some("mcp_sym")),
+        parsed
+            .iter()
+            .any(|row| row.symbol_name.as_deref() == Some("mcp_sym")),
         "semantic JSON missing mcp_sym: {text:?}"
     );
     assert!(
@@ -171,14 +162,12 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
     .clone();
     let rel = client
         .peer()
-        .call_tool(
-            CallToolRequestParams::new("vault_related_chunks").with_arguments(rel_args),
-        )
+        .call_tool(CallToolRequestParams::new("vault_related_chunks").with_arguments(rel_args))
         .await
         .expect("call_tool related");
     let rel_text = first_text_hit(&rel);
-    let rel_parsed: Vec<SearchResult> =
-        serde_json::from_str(&rel_text).expect("related returns SearchResult array (Tauri/MCP contract)");
+    let rel_parsed: Vec<SearchResult> = serde_json::from_str(&rel_text)
+        .expect("related returns SearchResult array (Tauri/MCP contract)");
     assert!(
         rel_parsed
             .iter()

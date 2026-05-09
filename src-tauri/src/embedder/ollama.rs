@@ -60,8 +60,8 @@ impl OllamaEmbedder {
 
 #[cfg(test)]
 mod tests {
-    use crate::embedder::{CloudProvider, EmbedProfile};
     use super::*;
+    use crate::embedder::{CloudProvider, EmbedProfile};
 
     #[test]
     fn rejects_cloud_profile() {
@@ -75,9 +75,7 @@ mod tests {
 
     #[test]
     fn from_profile_local_ok() {
-        let profile = EmbedProfile::Local {
-            model: "m".into(),
-        };
+        let profile = EmbedProfile::Local { model: "m".into() };
         assert!(OllamaEmbedder::from_profile(&profile).is_ok());
     }
 }

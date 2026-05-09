@@ -17,7 +17,9 @@ pub enum CloudProvider {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmbedProfile {
-    Local { model: String },
+    Local {
+        model: String,
+    },
     Cloud {
         provider: CloudProvider,
         model: String,
@@ -79,7 +81,7 @@ impl Embedder {
     }
 
     pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        Ok(self.model.embed(texts, None)?)
+        self.model.embed(texts, None)
     }
 
     pub fn dimensions() -> usize {

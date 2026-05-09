@@ -2,13 +2,9 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rmcp::{
-    handler::server::wrapper::Parameters,
-    tool, tool_router,
-    ServiceExt,
-};
-use schemars::JsonSchema;
+use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt};
 use rusqlite::Connection;
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 use tauri_app_lib::embedder::EmbedProfile;
@@ -35,9 +31,8 @@ struct VaultRelatedChunksParams {
 }
 
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
-    conn.lock().map_err(|_| {
-        rmcp::ErrorData::internal_error("database mutex poisoned", None)
-    })
+    conn.lock()
+        .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
 
 #[tool_router(server_handler)]
@@ -54,12 +49,9 @@ impl VaultMcpServer {
         let limit = limit.unwrap_or(10);
         let conn = lock_conn(&self.conn)?;
         let hits = retrieval::semantic_search_chunks(&conn, &self.profile, &query, limit)
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
-            })?;
-        serde_json::to_string(&hits).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("json encode: {e}"), None)
-        })
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&hits)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 
     #[tool(
@@ -74,12 +66,9 @@ impl VaultMcpServer {
         let limit = limit.unwrap_or(5);
         let conn = lock_conn(&self.conn)?;
         let hits = retrieval::related_chunks_facade(&conn, &doc_path, limit)
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
-            })?;
-        serde_json::to_string(&hits).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("json encode: {e}"), None)
-        })
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&hits)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 }
 
@@ -87,7 +76,10 @@ impl VaultMcpServer {
 async fn main() -> anyhow::Result<()> {
     let p = retrieval::resolve_brain_paths();
     let profile = retrieval::load_embed_profile(&p.config_path).map_err(|e| {
-        eprintln!("curated-thoughts-mcp: failed to load embed profile from {}: {e}", p.config_path.display());
+        eprintln!(
+            "curated-thoughts-mcp: failed to load embed profile from {}: {e}",
+            p.config_path.display()
+        );
         e
     })?;
     let conn = retrieval::open_brain_readonly(&p.db_path).map_err(|e| {
@@ -105,8 +97,9 @@ async fn main() -> anyhow::Result<()> {
         .serve(transport)
         .await
         .map_err(|e| anyhow::anyhow!("MCP server failed to start: {e}"))?;
-    handle.waiting().await.map_err(|e| {
-        anyhow::anyhow!("MCP server task ended with error: {e}")
-    })?;
+    handle
+        .waiting()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server task ended with error: {e}"))?;
     Ok(())
 }

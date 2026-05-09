@@ -25,10 +25,39 @@ pub fn should_ingest_extension(raw_ext: &str) -> bool {
     let ext = raw_ext.to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "md" | "markdown" | "txt" | "rst" | "org" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
-            | "rs" | "py" | "go" | "java" | "kt" | "swift" | "c" | "h" | "cpp" | "hpp" | "cs"
-            | "rb" | "php" | "vue" | "svelte" | "yaml" | "yml" | "json" | "jsonc" | "toml"
-            | "xml" | "pdf" | "docx"
+        "md" | "markdown"
+            | "txt"
+            | "rst"
+            | "org"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "rs"
+            | "py"
+            | "go"
+            | "java"
+            | "kt"
+            | "swift"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "php"
+            | "vue"
+            | "svelte"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "jsonc"
+            | "toml"
+            | "xml"
+            | "pdf"
+            | "docx"
     )
 }
 
@@ -79,7 +108,10 @@ mod tests {
 
     #[test]
     fn ast_symbol_extensions() {
-        assert_eq!(classify(&p("main.rs")), ChunkStrategy::AstSymbol(AstLang::Rust));
+        assert_eq!(
+            classify(&p("main.rs")),
+            ChunkStrategy::AstSymbol(AstLang::Rust)
+        );
         assert_eq!(
             classify(&p("app.ts")),
             ChunkStrategy::AstSymbol(AstLang::TypeScript)
@@ -108,7 +140,10 @@ mod tests {
             classify(&p("script.py")),
             ChunkStrategy::AstSymbol(AstLang::Python)
         );
-        assert_eq!(classify(&p("service.go")), ChunkStrategy::AstSymbol(AstLang::Go));
+        assert_eq!(
+            classify(&p("service.go")),
+            ChunkStrategy::AstSymbol(AstLang::Go)
+        );
     }
 
     #[test]
@@ -137,7 +172,10 @@ mod tests {
         assert_eq!(classify(&p("Makefile")), ChunkStrategy::Fallback);
         assert_eq!(classify(&p("Dockerfile")), ChunkStrategy::Fallback);
         assert_eq!(classify(&p("bin/tool")), ChunkStrategy::Fallback);
-        assert_eq!(classify(Path::new("/no/extension")), ChunkStrategy::Fallback);
+        assert_eq!(
+            classify(Path::new("/no/extension")),
+            ChunkStrategy::Fallback
+        );
         assert_eq!(classify(&p("doc.pdf")), ChunkStrategy::Fallback);
         assert_eq!(classify(&p("paper.docx")), ChunkStrategy::Fallback);
     }

@@ -20,11 +20,14 @@ fn seed_chunks(app: &TestApp, source_path: &str) {
 fn set_and_get_folder_rules_round_trip() {
     let app = TestApp::new();
 
-    app.invoke::<()>("set_folder_rule", json!({
-        "folderPath": "/vault/research",
-        "librarianMode": "summarize",
-        "autoApprove": false
-    }));
+    app.invoke::<()>(
+        "set_folder_rule",
+        json!({
+            "folderPath": "/vault/research",
+            "librarianMode": "summarize",
+            "autoApprove": false
+        }),
+    );
 
     let rules: Vec<serde_json::Value> = app.invoke("get_folder_rules", json!({}));
     assert_eq!(rules.len(), 1);
@@ -37,11 +40,14 @@ fn set_and_get_folder_rules_round_trip() {
 fn delete_folder_rule_removes_row() {
     let app = TestApp::new();
 
-    app.invoke::<()>("set_folder_rule", json!({
-        "folderPath": "/vault/docs",
-        "librarianMode": "index",
-        "autoApprove": false
-    }));
+    app.invoke::<()>(
+        "set_folder_rule",
+        json!({
+            "folderPath": "/vault/docs",
+            "librarianMode": "index",
+            "autoApprove": false
+        }),
+    );
 
     let rules: Vec<serde_json::Value> = app.invoke("get_folder_rules", json!({}));
     let id = rules[0]["id"].as_i64().unwrap();
@@ -119,11 +125,18 @@ fn auto_approve_writes_directly_to_wiki() {
 
     // Status should be approved, not pending_review
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE path = 'auto.md'", [], |r| r.get(0))
+        .query_row(
+            "SELECT status FROM wiki_pages WHERE path = 'auto.md'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(status, "approved");
 
     // Should NOT appear in review queue (already approved)
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
-    assert!(queue.is_empty(), "auto-approved page should not be in review queue");
+    assert!(
+        queue.is_empty(),
+        "auto-approved page should not be in review queue"
+    );
 }

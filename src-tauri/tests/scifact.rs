@@ -1,8 +1,8 @@
 #![cfg(feature = "slow-tests")]
 
 mod helpers;
-use helpers::TestApp;
 use flate2::read::GzDecoder;
+use helpers::TestApp;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -24,8 +24,8 @@ struct ScifactFixtures {
     corpus: Vec<(String, String)>, // (doc_id, combined text)
     /// Per-doc: one outer vec per preset; legacy has len 1, sentence-chunk has N chunk vectors.
     embeddings: HashMap<String, Vec<Vec<f32>>>,
-    queries: HashMap<String, String>,      // claim_id → query text
-    qrels: HashMap<String, Vec<String>>,   // claim_id → [relevant doc_ids]
+    queries: HashMap<String, String>,    // claim_id → query text
+    qrels: HashMap<String, Vec<String>>, // claim_id → [relevant doc_ids]
 }
 
 fn parse_embedding_entry(v: Value) -> Vec<Vec<f32>> {
@@ -77,7 +77,9 @@ impl ScifactFixtures {
         });
         let mut decoder = GzDecoder::new(emb_gz);
         let mut json_str = String::new();
-        decoder.read_to_string(&mut json_str).expect("decompress embeddings");
+        decoder
+            .read_to_string(&mut json_str)
+            .expect("decompress embeddings");
         let raw: HashMap<String, Value> =
             serde_json::from_str(&json_str).expect("parse embeddings");
         let embeddings: HashMap<String, Vec<Vec<f32>>> = raw
@@ -91,7 +93,12 @@ impl ScifactFixtures {
         let qr_bytes = std::fs::read(format!("{FIXTURES}/qrels.json")).expect("qrels.json");
         let qrels: HashMap<String, Vec<String>> = serde_json::from_slice(&qr_bytes).expect("qrels");
 
-        ScifactFixtures { corpus, embeddings, queries, qrels }
+        ScifactFixtures {
+            corpus,
+            embeddings,
+            queries,
+            qrels,
+        }
     }
 }
 
@@ -106,11 +113,9 @@ fn seed_corpus(app: &TestApp, fixtures: &ScifactFixtures, strategy: SeedStrategy
         )
         .unwrap();
         let db_doc_id: i64 = conn
-            .query_row(
-                "SELECT id FROM documents WHERE path = ?1",
-                [doc_id],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM documents WHERE path = ?1", [doc_id], |r| {
+                r.get(0)
+            })
             .unwrap();
 
         let embedding_rows = fixtures
@@ -146,10 +151,8 @@ fn seed_corpus(app: &TestApp, fixtures: &ScifactFixtures, strategy: SeedStrategy
                     embedding_rows.len(),
                     "fixture chunk count mismatch for {doc_id}"
                 );
-                for (position, (chunk_txt, vec)) in chunk_texts
-                    .iter()
-                    .zip(embedding_rows.iter())
-                    .enumerate()
+                for (position, (chunk_txt, vec)) in
+                    chunk_texts.iter().zip(embedding_rows.iter()).enumerate()
                 {
                     conn.execute(
                         "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, ?2, ?3)",
@@ -170,11 +173,7 @@ fn seed_corpus(app: &TestApp, fixtures: &ScifactFixtures, strategy: SeedStrategy
     }
 }
 
-fn run_recall_benchmark(
-    label: &str,
-    embeddings_gzip_filename: &str,
-    strategy: SeedStrategy,
-) {
+fn run_recall_benchmark(label: &str, embeddings_gzip_filename: &str, strategy: SeedStrategy) {
     let fixtures = ScifactFixtures::load(embeddings_gzip_filename);
     let app = TestApp::new();
     println!("[{label}] Seeding {} corpus docs…", fixtures.corpus.len());
@@ -197,7 +196,10 @@ fn run_recall_benchmark(
             continue;
         }
 
-        let query_vec = embedder.embed(vec![query_text.clone()]).expect("embed query")[0].clone();
+        let query_vec = embedder
+            .embed(vec![query_text.clone()])
+            .expect("embed query")[0]
+            .clone();
 
         let conn = app.open_db();
         let results =

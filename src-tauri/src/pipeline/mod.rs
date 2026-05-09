@@ -8,18 +8,21 @@ use std::{
 
 use crate::chunker::{chunk_autodetect, should_ingest_extension};
 use crate::db::queries::{
-    delete_document, delete_document_chunks, get_document_by_path, insert_chunk,
-    insert_embedding, mark_document_error, mark_document_indexed, upsert_document,
+    delete_document, delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
+    mark_document_error, mark_document_indexed, upsert_document,
 };
 use crate::embedder::{embed_batch, EmbedProfile};
-use crate::vault::VaultConfig;
 use crate::hasher::hash_bytes;
+use crate::vault::VaultConfig;
 
 #[derive(Debug, Clone)]
 pub enum PipelineJob {
     /// Chunk + embed path. With `force: true`, re-runs chunking even when content hash unchanged
     /// (chunk strategy upgrades, embedding model swaps).
-    Ingest { path: String, force: bool },
+    Ingest {
+        path: String,
+        force: bool,
+    },
     Delete(String),
 }
 
@@ -158,8 +161,8 @@ fn extract_text(path: &str) -> Result<Option<String>> {
 
 fn extract_docx_text(path: &str) -> Result<String> {
     let file = std::fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| anyhow::anyhow!("DOCX open failed: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| anyhow::anyhow!("DOCX open failed: {e}"))?;
     let mut xml = String::new();
     archive
         .by_name("word/document.xml")
@@ -281,9 +284,8 @@ fn ingest_file(
 
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
 
-    let embeddings = embed_batch(profile, texts).map_err(|e| {
+    let embeddings = embed_batch(profile, texts).inspect_err(|_| {
         let _ = mark_document_error(conn, doc_id);
-        e
     })?;
 
     for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {
@@ -318,7 +320,9 @@ mod tests {
 
     #[test]
     fn test_extract_text_skips_unknown() {
-        assert!(extract_text("/vault/documents/image.png").unwrap().is_none());
+        assert!(extract_text("/vault/documents/image.png")
+            .unwrap()
+            .is_none());
         assert!(extract_text("/vault/documents/data.csv").unwrap().is_none());
     }
 

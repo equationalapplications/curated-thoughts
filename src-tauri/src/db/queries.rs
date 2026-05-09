@@ -14,17 +14,15 @@ pub fn upsert_document(conn: &Connection, path: &str, hash: &str) -> Result<i64>
          ON CONFLICT(path) DO UPDATE SET hash = ?2, status = 'pending'",
         rusqlite::params![path, hash],
     )?;
-    Ok(conn.query_row(
-        "SELECT id FROM documents WHERE path = ?1",
-        [path],
-        |r| r.get(0),
-    )?)
+    Ok(
+        conn.query_row("SELECT id FROM documents WHERE path = ?1", [path], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 pub fn get_document_by_path(conn: &Connection, path: &str) -> Result<Option<DocRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, hash, status FROM documents WHERE path = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT id, hash, status FROM documents WHERE path = ?1")?;
     let mut rows = stmt.query([path])?;
     if let Some(row) = rows.next()? {
         Ok(Some(DocRow {
@@ -77,10 +75,7 @@ pub fn insert_chunk(
 }
 
 pub fn insert_embedding(conn: &Connection, chunk_id: i64, vector: &[f32]) -> Result<()> {
-    let bytes: Vec<u8> = vector
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    let bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
     conn.execute(
         "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
         rusqlite::params![chunk_id, bytes],
@@ -137,7 +132,9 @@ mod tests {
         let id1 = upsert_document(&conn, "/docs/note.md", "abc123").unwrap();
         let id2 = upsert_document(&conn, "/docs/note.md", "def456").unwrap();
         assert_eq!(id1, id2, "upsert must return same id");
-        let doc = get_document_by_path(&conn, "/docs/note.md").unwrap().unwrap();
+        let doc = get_document_by_path(&conn, "/docs/note.md")
+            .unwrap()
+            .unwrap();
         assert_eq!(doc.hash, "def456");
     }
 
