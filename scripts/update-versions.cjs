@@ -29,8 +29,23 @@ try {
   // Update Cargo.lock to reflect new package version (without upgrading dependencies)
   // Using cargo metadata instead of cargo update to avoid semver dependency upgrades
   const cargoDir = path.join(__dirname, '..', 'src-tauri');
+  const cargoLockPath = path.join(cargoDir, 'Cargo.lock');
+
   execSync('cargo metadata --format-version 1', { cwd: cargoDir, stdio: ['ignore', 'ignore', 'inherit'] });
-  console.log(`Updated Cargo.lock package version`);
+
+  // Verify Cargo.lock was updated with the new version
+  const cargoLockContent = fs.readFileSync(cargoLockPath, 'utf8');
+  const packageMatch = cargoLockContent.match(/\[\[package\]\]\nname = "curated-thoughts"\nversion = "([^"]+)"/);
+
+  if (!packageMatch || packageMatch[1] !== version) {
+    const foundVersion = packageMatch ? packageMatch[1] : 'not found';
+    throw new Error(
+      `Cargo.lock verification failed: expected version ${version}, found ${foundVersion}. ` +
+      `cargo metadata may not have updated the lockfile correctly.`
+    );
+  }
+
+  console.log(`Updated and verified Cargo.lock package version to ${version}`);
 
   // Update tauri.conf.json
   const tauriConfPath = path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json');
