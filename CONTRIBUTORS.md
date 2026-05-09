@@ -50,7 +50,7 @@ Artifacts available on [Releases page](https://github.com/equationalapplications
 
 ## Security
 
-Release workflows use OpenID Connect (OIDC) for authentication instead of stored tokens. See [OIDC_SETUP.md](OIDC_SETUP.md) if you're interested in setting up registry publishing (npm, Crates.io).
+Release workflows use the default `secrets.GITHUB_TOKEN` for GitHub authentication. OIDC is reserved for future registry publishing (npm, Crates.io). See [OIDC_SETUP.md](OIDC_SETUP.md) if you're interested in setting up OIDC for external registries.
 
 ## Troubleshooting
 

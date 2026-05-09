@@ -38,7 +38,7 @@ Two-workflow approach with tag-based triggering:
    - `src-tauri/Cargo.toml` version field (via custom script)
    - `src-tauri/tauri.conf.json` version field (via custom script)
    - Creates/updates `CHANGELOG.md`
-5. Commit version bump changes back to main with `[skip ci]` to prevent workflow loop
+5. Commit version bump changes back to main with `[skip ci]` to prevent workflow loop (requires `if: "!contains(github.event.head_commit.message, '[skip ci]')"` guard in workflow)
 
 **Permissions required:**
 - `contents: write` — for creating commits and tags

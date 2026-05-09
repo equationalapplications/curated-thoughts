@@ -3,8 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const version = process.argv[2];
-if (!version || !/^\d+\.\d+\.\d+/.test(version)) {
-  console.error('Usage: node update-versions.cjs <version>');
+if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
+  console.error('Usage: node scripts/update-versions.cjs <version>');
   console.error('Version must be in semver format (e.g., 1.0.0)');
   process.exit(1);
 }
