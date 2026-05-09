@@ -213,5 +213,5 @@ npm publish
 ## References
 
 - [GitHub OIDC documentation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
-- [npm trusted publishing](https://docs.npmjs.com/cli/v10/using-npm/config#registry)
+- [npm trusted publishing](https://docs.npmjs.com/generating-provenance-statements)
 - [Crates.io trusted publishing](https://doc.rust-lang.org/cargo/registries.html)
