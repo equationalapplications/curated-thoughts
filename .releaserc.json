@@ -11,10 +11,9 @@
       }
     ],
     [
-      "semantic-release-cargo",
+      "@semantic-release/exec",
       {
-        "publish": false,
-        "crates": ["src-tauri"]
+        "prepareCmd": "node scripts/update-versions.cjs ${nextRelease.version}"
       }
     ],
     [
