@@ -30,13 +30,13 @@ Two-workflow approach with tag-based triggering:
    - `@semantic-release/release-notes-generator` — generate changelog
    - `@semantic-release/changelog` — update CHANGELOG.md
    - `@semantic-release/npm` — bump package.json (skip publish to npm)
+   - `@semantic-release/exec` — run custom script to sync versions across files
    - `@semantic-release/git` — commit version changes back to main
    - `@semantic-release/github` — create GitHub Release
-   - `semantic-release-cargo` — bump Cargo.toml version
 4. Run semantic-release with configuration that updates:
-   - `package.json` version field
-   - `src-tauri/Cargo.toml` version field
-   - `src-tauri/tauri.conf.json` version field
+   - `package.json` version field (via @semantic-release/npm)
+   - `src-tauri/Cargo.toml` version field (via custom script)
+   - `src-tauri/tauri.conf.json` version field (via custom script)
    - Creates/updates `CHANGELOG.md`
 5. Commit version bump changes back to main with `[skip ci]` to prevent workflow loop
 
@@ -174,7 +174,7 @@ Add status badges at top of README.md (before title):
 
 ```markdown
 [![GitHub Release](https://img.shields.io/github/v/release/equationalapplications/curated-thoughts)](https://github.com/equationalapplications/curated-thoughts/releases)
-[![CI](https://github.com/equationalapplications/curated-thoughts/actions/workflows/ci.yml/badge.svg)](https://github.com/equationalapplications/curated-thoughts/actions/workflows/ci.yml)
+[![CI](https://github.com/equationalapplications/curated-thoughts/actions/workflows/release.yml/badge.svg)](https://github.com/equationalapplications/curated-thoughts/actions/workflows/release.yml)
 [![Downloads](https://img.shields.io/github/downloads/equationalapplications/curated-thoughts/total)](https://github.com/equationalapplications/curated-thoughts/releases)
 [![License](https://img.shields.io/github/license/equationalapplications/curated-thoughts)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-supported-success)](https://github.com/equationalapplications/curated-thoughts/releases)
@@ -185,38 +185,28 @@ Badges generated using shields.io. Links point to Releases page, Actions tab, an
 
 ## Technical Details
 
-### OpenID Connect (OIDC) Authentication
+### GitHub Authentication
 
-Both workflows use OpenID Connect for token-based authentication instead of stored secrets:
+Both workflows use the default GitHub token (`secrets.GITHUB_TOKEN`) automatically provided by GitHub Actions:
 
 **Release Workflow:**
 ```yaml
-- name: Get OIDC token for GitHub
-  id: github-token
-  uses: actions/github-script@v7
-  with:
-    script: |
-      const token = await core.getIDToken('https://github.com');
-      core.setOutput('token', token);
-
 - name: Run semantic-release
   env:
-    GITHUB_TOKEN: ${{ steps.github-token.outputs.token }}
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   run: npx semantic-release
 ```
 
 **Build Workflow:**
-Same pattern for `softprops/action-gh-release` authentication.
+The `softprops/action-gh-release` action automatically uses the default token when no explicit token is provided.
 
 **Benefits:**
 - No stored secrets in repository settings
-- Tokens expire automatically (~5 minutes)
-- Scoped to specific registries/domains
-- Audit trail in GitHub Actions logs
+- Tokens are automatically scoped to the workflow run
+- No additional configuration required
+- Standard GitHub Actions pattern
 
-**Setup:** No additional configuration required. GitHub Actions automatically issues tokens when `id-token: write` permission is set.
-
-**Future extensions:** OIDC pattern extends to npm registry publishing and Crates.io. See `OIDC_SETUP.md` for npm/Crates.io setup instructions.
+**OIDC for registry publishing:** OpenID Connect tokens can be used for authenticated publishing to npm registry and Crates.io. See `OIDC_SETUP.md` for npm/Crates.io OIDC setup instructions when publishing packages.
 
 ### Semantic-Release Configuration
 
@@ -231,6 +221,12 @@ Configuration file: `.releaserc.json`
     "@semantic-release/changelog",
     ["@semantic-release/npm", { "npmPublish": false }],
     [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "node scripts/update-versions.cjs ${nextRelease.version}"
+      }
+    ],
+    [
       "@semantic-release/git",
       {
         "assets": [
@@ -242,11 +238,12 @@ Configuration file: `.releaserc.json`
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],
-    "@semantic-release/github",
-    "semantic-release-cargo"
+    "@semantic-release/github"
   ]
 }
 ```
+
+**Custom version sync script:** The `@semantic-release/exec` plugin runs a custom Node.js script (`scripts/update-versions.cjs`) to synchronize version numbers across Cargo.toml and tauri.conf.json. This approach provides more control than the `semantic-release-cargo` plugin and allows for Tauri-specific configuration updates beyond just the version field.
 
 ### CI/CD Permissions
 
@@ -256,19 +253,18 @@ permissions:
   contents: write      # Create commits and tags
   issues: write        # semantic-release GitHub plugin
   pull-requests: write # semantic-release GitHub plugin
-  id-token: write      # OIDC token generation
+  id-token: write      # Reserved for future OIDC registry publishing
 ```
 
 **Build Workflow (.github/workflows/build.yml):**
 ```yaml
 permissions:
   contents: write # Upload release artifacts
-  id-token: write # OIDC token generation
 ```
 
 **Repository Settings:**
 - No additional secrets configuration needed
-- GitHub Actions OIDC token auto-issued (requires `id-token: write`)
+- Default GitHub token (`secrets.GITHUB_TOKEN`) is automatically provided
 - Workflows are self-contained; no stored credentials to manage
 
 ### Unsigned Build Distribution
