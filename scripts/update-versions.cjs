@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const version = process.argv[2];
 if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
@@ -22,6 +23,11 @@ try {
   }
   fs.writeFileSync(cargoPath, updated);
   console.log(`Updated Cargo.toml to ${version}`);
+
+  // Regenerate Cargo.lock
+  const cargoDir = path.join(__dirname, '..', 'src-tauri');
+  execSync('cargo update --workspace', { cwd: cargoDir, stdio: 'inherit' });
+  console.log(`Regenerated Cargo.lock`);
 
   // Update tauri.conf.json
   const tauriConfPath = path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json');
