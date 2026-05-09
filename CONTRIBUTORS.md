@@ -27,7 +27,7 @@ Optional footer: BREAKING CHANGE: description
 
 ## Release Process
 
-Releases happen automatically when commits are pushed to `main`:
+Releases happen automatically when version-bumping commits (`feat:`, `fix:`, `BREAKING CHANGE:`) are pushed to `main`:
 
 1. Semantic-release analyzes your commits
 2. Version bumps (if applicable)
