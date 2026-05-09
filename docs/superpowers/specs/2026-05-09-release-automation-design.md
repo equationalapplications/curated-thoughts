@@ -185,6 +185,39 @@ Badges generated using shields.io. Links point to Releases page, Actions tab, an
 
 ## Technical Details
 
+### OpenID Connect (OIDC) Authentication
+
+Both workflows use OpenID Connect for token-based authentication instead of stored secrets:
+
+**Release Workflow:**
+```yaml
+- name: Get OIDC token for GitHub
+  id: github-token
+  uses: actions/github-script@v7
+  with:
+    script: |
+      const token = await core.getIDToken('https://github.com');
+      core.setOutput('token', token);
+
+- name: Run semantic-release
+  env:
+    GITHUB_TOKEN: ${{ steps.github-token.outputs.token }}
+  run: npx semantic-release
+```
+
+**Build Workflow:**
+Same pattern for `softprops/action-gh-release` authentication.
+
+**Benefits:**
+- No stored secrets in repository settings
+- Tokens expire automatically (~5 minutes)
+- Scoped to specific registries/domains
+- Audit trail in GitHub Actions logs
+
+**Setup:** No additional configuration required. GitHub Actions automatically issues tokens when `id-token: write` permission is set.
+
+**Future extensions:** OIDC pattern extends to npm registry publishing and Crates.io. See `OIDC_SETUP.md` for npm/Crates.io setup instructions.
+
 ### Semantic-Release Configuration
 
 Configuration file: `.releaserc.json`
@@ -217,12 +250,26 @@ Configuration file: `.releaserc.json`
 
 ### CI/CD Permissions
 
-Both workflows require GitHub Actions write permissions:
+**Semantic Release Workflow (.github/workflows/release.yml):**
+```yaml
+permissions:
+  contents: write      # Create commits and tags
+  issues: write        # semantic-release GitHub plugin
+  pull-requests: write # semantic-release GitHub plugin
+  id-token: write      # OIDC token generation
+```
+
+**Build Workflow (.github/workflows/build.yml):**
+```yaml
+permissions:
+  contents: write # Upload release artifacts
+  id-token: write # OIDC token generation
+```
 
 **Repository Settings:**
-- Go to Settings → Actions → General
-- Set "Workflow permissions" to "Read and write permissions"
-- Enable "Allow GitHub Actions to create and approve pull requests"
+- No additional secrets configuration needed
+- GitHub Actions OIDC token auto-issued (requires `id-token: write`)
+- Workflows are self-contained; no stored credentials to manage
 
 ### Unsigned Build Distribution
 
