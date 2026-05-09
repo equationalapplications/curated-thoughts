@@ -42,9 +42,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Add x86_64 target for universal build
+      - name: Add targets for universal build
         if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin
+        run: |
+          rustup target add x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
 
       - name: Install npm dependencies
         run: npm ci
