@@ -750,11 +750,13 @@ fn get_proposed_content(
         crate::vault::PathMode::MustExist,
     );
 
-    Ok(match safe {
-        Ok(p) => std::fs::read_to_string(&p)
-            .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)),
-        Err(_) => format!("# {}\n\n*Proposed wiki page — content not available.*", page_path),
-    })
+match safe {
+    Ok(p) => Ok(std::fs::read_to_string(&p)
+        .unwrap_or_else(|_| format!("# {}\n\n*Proposed wiki page — content not available.*", page_path))),
+    Err(crate::vault::SafePathError::NotFound { .. }) =>
+        Ok(format!("# {}\n\n*Proposed wiki page — content not available.*", page_path)),
+    Err(e) => Err(e.to_string()),
+}
 }
 ```
 
