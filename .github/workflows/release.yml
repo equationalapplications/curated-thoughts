@@ -14,6 +14,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-main
+      cancel-in-progress: false
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && !contains(github.event.workflow_run.head_commit.message, '[skip ci]')
     steps:
       - uses: actions/checkout@v4

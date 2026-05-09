@@ -34,8 +34,9 @@ try {
   execSync('cargo metadata --format-version 1', { cwd: cargoDir, stdio: ['ignore', 'ignore', 'inherit'] });
 
   // Verify Cargo.lock was updated with the new version
+  // Tolerant to CRLF and whitespace variations
   const cargoLockContent = fs.readFileSync(cargoLockPath, 'utf8');
-  const packageMatch = cargoLockContent.match(/\[\[package\]\]\nname = "curated-thoughts"\nversion = "([^"]+)"/);
+  const packageMatch = cargoLockContent.match(/\[\[package\]\]\r?\n\s*name\s*=\s*"curated-thoughts"\r?\n\s*version\s*=\s*"([^"]+)"/);
 
   if (!packageMatch || packageMatch[1] !== version) {
     const foundVersion = packageMatch ? packageMatch[1] : 'not found';
