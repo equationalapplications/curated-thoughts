@@ -14,12 +14,21 @@ function isAbsolutePath(norm: string): boolean {
   return norm.startsWith("/") || /^[A-Za-z]:\//.test(norm);
 }
 
-/** Strip configured vault root (case-insensitive) when `p` is absolute; otherwise null. */
+/** Strip configured vault root from an absolute path; otherwise null. */
 function vaultRelative(norm: string, vaultRoot: string): string | null {
   const n = norm.replace(/\\/g, "/");
   const root = vaultRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   if (!root) return null;
-  if (n.length >= root.length && n.slice(0, root.length).toLowerCase() === root.toLowerCase()) {
+
+  // Windows paths are case-insensitive; Unix paths are case-sensitive.
+  const caseInsensitive = /^[A-Za-z]:\//.test(root);
+  const lhs = n.slice(0, root.length);
+  const rhs = root;
+  const matchesPrefix = caseInsensitive
+    ? lhs.toLowerCase() === rhs.toLowerCase()
+    : lhs === rhs;
+
+  if (n.length >= root.length && matchesPrefix) {
     if (n.length === root.length) return "";
     const sep = n[root.length];
     if (sep === "/" || sep === "\\") {
