@@ -1,61 +1,64 @@
 # OpenID Connect (OIDC) Setup for GitHub Actions
 
-This guide explains how OIDC works in your release and build workflows, and how to configure it. OIDC replaces stored credentials with short-lived, token-based authentication.
+This guide explains OIDC token authentication for GitHub Actions and how to use it for secure publishing to npm and Crates.io registries.
+
+## Token Strategy Overview
+
+**Current workflows use `secrets.GITHUB_TOKEN`** (the default, auto-provided token):
+- `release.yml`: Uses `secrets.GITHUB_TOKEN` for semantic-release
+- `build.yml`: Uses `softprops/action-gh-release@v3` (handles authentication internally)
+- Simple, no extra configuration needed, suitable for GitHub releases
+
+**OIDC pattern (shown below)**: For future publishing to npm and Crates.io registries where you want short-lived, registry-specific tokens instead of persistent credentials.
 
 ## Why OIDC?
 
-**Before OIDC:**
+**Before OIDC (for external registries):**
 ```
-Workflow needs to upload to GitHub → Store GITHUB_TOKEN secret in repo → Anyone with repo access can see/misuse token
+Workflow needs to publish to npm → Store npm access token secret in repo → Anyone with repo access can see/misuse token
 ```
 
-**With OIDC:**
+**With OIDC (for external registries):**
 ```
 Workflow requests token from GitHub → GitHub issues short-lived token → Token auto-expires → Safer
 ```
 
-No secrets stored. No token rotation needed.
+No secrets stored. No token rotation needed. Registry-scoped tokens (only work for npm, or only for Crates.io).
 
-## How It Works in Your Workflows
+## GitHub Releases (Current Workflow)
 
-### Current Setup
+Your release and build workflows already handle GitHub authentication:
 
-Both workflows now include an OIDC token step:
-
+**release.yml:**
 ```yaml
-- name: Get OIDC token for GitHub
-  id: github-token
-  uses: actions/github-script@v7
-  with:
-    script: |
-      const token = await core.getIDToken('https://github.com');
-      core.setOutput('token', token);
-
 - name: Run semantic-release
   env:
-    GITHUB_TOKEN: ${{ steps.github-token.outputs.token }}
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   run: npx semantic-release
 ```
 
-**What happens:**
-1. Workflow requests token for `https://github.com`
-2. GitHub issues short-lived OIDC token (valid ~5 minutes)
-3. Token passed to semantic-release via `GITHUB_TOKEN` env var
-4. semantic-release authenticates with GitHub using token
-5. Token auto-expires, no cleanup needed
+**build.yml:**
+```yaml
+- uses: softprops/action-gh-release@v3
+  with:
+    files: |
+      src-tauri/target/release/bundle/dmg/*.dmg
+      src-tauri/target/release/bundle/appimage/*.AppImage
+```
 
-## No Setup Required for GitHub Releases
+Both use the default auto-provided `secrets.GITHUB_TOKEN` — no OIDC setup needed. This token works fine for creating releases and uploading artifacts within the GitHub repository.
 
-Your workflows already work. GitHub Actions automatically:
-- Recognizes `id-token: write` permission
-- Issues tokens on request
-- Validates them
+## OIDC for External Registries (npm and Crates.io)
 
-**You're done.** Workflows use OIDC now.
+To publish packages to npm or Crates.io registries using OIDC instead of stored credentials, follow these steps:
 
-## Future: Publishing to npm or Crates.io
+### Why Use OIDC for Registries?
 
-To publish packages to npm or Crates.io registries using OIDC, follow these steps:
+External registries (npm, Crates.io) benefit from OIDC because:
+- **Audience-scoped tokens**: A token that only works for npm, never for GitHub or anywhere else
+- **No stored secrets**: No permanent tokens sitting in GitHub repo settings
+- **Short-lived**: Tokens auto-expire in ~5 minutes after use
+- **Simpler than PATs**: Personal Access Tokens require manual rotation; OIDC tokens rotate automatically
 
 ### Step 1: Configure npm Trust Relationship
 
