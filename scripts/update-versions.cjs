@@ -27,8 +27,9 @@ try {
   console.log(`Updated Cargo.toml to ${version}`);
 
   // Update Cargo.lock to reflect new package version (without upgrading dependencies)
+  // Using cargo metadata instead of cargo update to avoid semver dependency upgrades
   const cargoDir = path.join(__dirname, '..', 'src-tauri');
-  execSync('cargo update -p curated-thoughts', { cwd: cargoDir, stdio: 'inherit' });
+  execSync('cargo metadata --format-version 1', { cwd: cargoDir, stdio: ['ignore', 'ignore', 'inherit'] });
   console.log(`Updated Cargo.lock package version`);
 
   // Update tauri.conf.json
