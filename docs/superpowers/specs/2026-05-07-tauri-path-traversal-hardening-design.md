@@ -163,7 +163,7 @@ Single PR:
 3. Add the integration tests.
 4. Run `cargo test --all` and `cargo clippy --all-targets -- -D warnings`.
 
-No data migration, no config changes. The only deliberate frontend-visible command change is `start_file_watcher`, which no longer accepts a `vault_path` argument (the root always comes from `VaultConfigState`). Other commands keep the same `Result<_, String>` shapes; path-validation error strings are intentionally vault-relative or generic where noted under Post-implementation security review fixes.
+No data migration, no config changes. Frontend-visible command surface changes include: `start_file_watcher` no longer accepts `vault_path` (the root always comes from `VaultConfigState`); `approve_wiki_page` no longer takes a caller `vault_path` and uses the configured vault only; webview-initiated `copy_to_vault` was removed in favor of OS drop paths handled in Rust (`copy_os_drop_paths_to_vault` / window events), so arbitrary `src_path` is not accepted from the webview. Other commands keep the same `Result<_, String>` shapes where applicable; path-validation error strings are intentionally vault-relative or generic where noted under Post-implementation security review fixes.
 
 ## Threat model note
 
