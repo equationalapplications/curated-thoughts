@@ -10,7 +10,13 @@
         "npmPublish": false
       }
     ],
-    "semantic-release-cargo",
+    [
+      "semantic-release-cargo",
+      {
+        "publish": false,
+        "crates": ["src-tauri"]
+      }
+    ],
     [
       "@semantic-release/git",
       {
