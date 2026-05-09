@@ -894,18 +894,16 @@ fn get_proposed_content(
         crate::vault::PathMode::MustExist,
     );
 
-    Ok(match safe {
-        Ok(p) => std::fs::read_to_string(&p).unwrap_or_else(|_| {
-            format!(
-                "# {}\n\n*Proposed wiki page — content not available.*",
-                page_rel
-            )
-        }),
-        Err(_) => format!(
-            "# {}\n\n*Proposed wiki page — content not available.*",
-            page_rel
-        ),
-    })
+    let placeholder = || format!("# {}\n\n*Proposed wiki page — content not available.*", page_rel);
+    match safe {
+        Ok(p) => match std::fs::read_to_string(&p) {
+            Ok(content) => Ok(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(placeholder()),
+            Err(e) => Err(e.to_string()),
+        },
+        Err(crate::vault::SafePathError::NotFound(_)) => Ok(placeholder()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]
