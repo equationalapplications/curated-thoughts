@@ -567,7 +567,12 @@ mod tests {
         let outside_read = fs::read_to_string(&outside_target).unwrap();
         assert_eq!(written, "inside");
         assert_eq!(outside_read, "outside");
-        assert!(!target.symlink_metadata().unwrap().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
@@ -600,7 +605,12 @@ mod tests {
         let outside_read = fs::read_to_string(&outside_target).unwrap();
         assert_eq!(copied, "inside");
         assert_eq!(outside_read, "outside");
-        assert!(!target.symlink_metadata().unwrap().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
