@@ -64,8 +64,9 @@ jobs:
         run: ${{ matrix.build_cmd }}
 
       - name: Upload artifacts
-        # Upload only when running on a tag (via push or manual workflow_dispatch)
-        if: startsWith(github.ref, 'refs/tags/')
+        # Upload when running on a tag push, or when manually dispatched with a tag input
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: ${{ matrix.artifact_path }}
