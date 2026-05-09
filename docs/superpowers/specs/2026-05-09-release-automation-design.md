@@ -18,7 +18,7 @@ Two-workflow approach with tag-based triggering:
 
 ### Workflow 1: Semantic Release (`.github/workflows/release.yml`)
 
-**Trigger:** Push to `main` branch
+**Trigger:** `workflow_run` after CI workflow completes successfully on `main` branch
 
 **Purpose:** Analyze conventional commits, bump versions, create git tag and GitHub Release
 
