@@ -49,7 +49,9 @@ Two-workflow approach with tag-based triggering:
 
 ### Workflow 2: Build & Upload (`.github/workflows/build.yml`)
 
-**Trigger:** Tag push matching pattern `v*`
+**Trigger:** 
+- Tag push matching pattern `v*` (note: tags created by `GITHUB_TOKEN` don't trigger this)
+- Manual `workflow_dispatch` (required in practice)
 
 **Purpose:** Build unsigned Tauri desktop applications and upload to GitHub Release
 
@@ -78,6 +80,8 @@ Two-workflow approach with tag-based triggering:
 
 ## Release Flow
 
+**Note:** Due to GitHub's security restrictions, tags created by workflows using `secrets.GITHUB_TOKEN` do not trigger other workflows. This means the Build workflow must be manually triggered after the Release workflow creates a tag.
+
 ```
 Developer commits to main
         ↓
@@ -89,12 +93,19 @@ Git tag created (e.g., v0.2.0)
         ↓
 Empty GitHub Release published
         ↓
-Tag push triggers build workflow
+Maintainer manually triggers build workflow for the tag
         ↓
 macOS + Linux builds run in parallel
         ↓
 Artifacts uploaded to existing GitHub Release
 ```
+
+**Alternatives to manual triggering:**
+- Use a Personal Access Token (PAT) or GitHub App token for semantic-release instead of `GITHUB_TOKEN`
+- Use `workflow_run` trigger in build.yml to run after release workflow completes
+- Dispatch build workflow programmatically from release workflow (requires `actions: write` permission)
+
+Current implementation uses manual triggering for simplicity and transparency.
 
 ## Conventional Commits & Versioning
 

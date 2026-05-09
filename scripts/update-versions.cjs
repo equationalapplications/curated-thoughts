@@ -4,9 +4,11 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const version = process.argv[2];
-if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
+// Accept full semver: x.y.z with optional pre-release and build metadata
+// Examples: 1.0.0, 1.0.0-beta.1, 1.0.0+build.5, 1.0.0-rc.1+build.123
+if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version)) {
   console.error('Usage: node scripts/update-versions.cjs <version>');
-  console.error('Version must be in semver format (e.g., 1.0.0)');
+  console.error('Version must be in semver format (e.g., 1.0.0, 1.0.0-beta.1, 1.0.0+build.5)');
   process.exit(1);
 }
 
