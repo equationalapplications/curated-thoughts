@@ -1,3 +1,9 @@
+## [1.0.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.1...v1.0.2) (2026-05-10)
+
+### Bug Fixes
+
+* **build:** gate utility bins behind required-features so Tauri skips them ([aac5b41](https://github.com/equationalapplications/curated-thoughts/commit/aac5b410067c38d55527306f82f2f0091dee6c88))
+
 ## [1.0.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.0...v1.0.1) (2026-05-10)
 
 ### Bug Fixes
