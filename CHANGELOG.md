@@ -1,3 +1,9 @@
+## [1.0.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.0...v1.0.1) (2026-05-10)
+
+### Bug Fixes
+
+* **tauri:** set default-run for release builds ([4a6c77c](https://github.com/equationalapplications/curated-thoughts/commit/4a6c77c8c720aa74feb365004494bf00db761525))
+
 ## 1.0.0 (2026-05-10)
 
 ### Features
