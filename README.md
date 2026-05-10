@@ -1,3 +1,10 @@
+[![GitHub Release](https://img.shields.io/github/v/release/equationalapplications/curated-thoughts)](https://github.com/equationalapplications/curated-thoughts/releases)
+[![CI](https://github.com/equationalapplications/curated-thoughts/actions/workflows/ci.yml/badge.svg)](https://github.com/equationalapplications/curated-thoughts/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/equationalapplications/curated-thoughts/total)](https://github.com/equationalapplications/curated-thoughts/releases)
+[![License](https://img.shields.io/github/license/equationalapplications/curated-thoughts)](LICENSE)
+[![macOS](https://img.shields.io/badge/macOS-supported-success)](https://github.com/equationalapplications/curated-thoughts/releases)
+[![Linux](https://img.shields.io/badge/Linux-supported-success)](https://github.com/equationalapplications/curated-thoughts/releases)
+
 # Curated Thoughts
 
 Curated Thoughts is a privacy-first, local-first desktop second brain built with Tauri, React, and Rust.

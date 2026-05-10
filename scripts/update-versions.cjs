@@ -1,0 +1,62 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+
+const version = process.argv[2];
+// Accept full semver: x.y.z with optional pre-release and build metadata
+// Examples: 1.0.0, 1.0.0-beta.1, 1.0.0+build.5, 1.0.0-rc.1+build.123
+if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version)) {
+  console.error('Usage: node scripts/update-versions.cjs <version>');
+  console.error('Version must be in semver format (e.g., 1.0.0, 1.0.0-beta.1, 1.0.0+build.5)');
+  process.exit(1);
+}
+
+try {
+  // Update Cargo.toml
+  const cargoPath = path.join(__dirname, '..', 'src-tauri', 'Cargo.toml');
+  let cargoContent = fs.readFileSync(cargoPath, 'utf8');
+  const updated = cargoContent.replace(
+    /^version\s*=\s*"[^"]*"/m,
+    `version = "${version}"`
+  );
+  if (updated === cargoContent) {
+    throw new Error('Failed to update version in Cargo.toml - no match found');
+  }
+  fs.writeFileSync(cargoPath, updated);
+  console.log(`Updated Cargo.toml to ${version}`);
+
+  // Update Cargo.lock to reflect new package version (without upgrading dependencies)
+  // Using cargo metadata instead of cargo update to avoid semver dependency upgrades
+  const cargoDir = path.join(__dirname, '..', 'src-tauri');
+  const cargoLockPath = path.join(cargoDir, 'Cargo.lock');
+
+  execSync('cargo metadata --format-version 1', { cwd: cargoDir, stdio: ['ignore', 'ignore', 'inherit'] });
+
+  // Verify Cargo.lock was updated with the new version
+  // Tolerant to CRLF and whitespace variations
+  const cargoLockContent = fs.readFileSync(cargoLockPath, 'utf8');
+  const packageMatch = cargoLockContent.match(/\[\[package\]\]\r?\n\s*name\s*=\s*"curated-thoughts"\r?\n\s*version\s*=\s*"([^"]+)"/);
+
+  if (!packageMatch || packageMatch[1] !== version) {
+    const foundVersion = packageMatch ? packageMatch[1] : 'not found';
+    throw new Error(
+      `Cargo.lock verification failed: expected version ${version}, found ${foundVersion}. ` +
+      `cargo metadata may not have updated the lockfile correctly.`
+    );
+  }
+
+  console.log(`Updated and verified Cargo.lock package version to ${version}`);
+
+  // Update tauri.conf.json
+  const tauriConfPath = path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json');
+  const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, 'utf8'));
+  tauriConf.version = version;
+  fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + '\n');
+  console.log(`Updated tauri.conf.json to ${version}`);
+
+  process.exit(0);
+} catch (error) {
+  console.error(`Error updating versions: ${error.message}`);
+  process.exit(1);
+}
