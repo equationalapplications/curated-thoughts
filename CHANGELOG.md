@@ -1,3 +1,9 @@
+## [1.0.4](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.3...v1.0.4) (2026-05-10)
+
+### Bug Fixes
+
+* trigger release to validate tauri-action build pipeline ([2f22577](https://github.com/equationalapplications/curated-thoughts/commit/2f2257718a5dc9586585ef7a12e34f6e32e27d9c))
+
 ## [1.0.3](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.2...v1.0.3) (2026-05-10)
 
 ### Bug Fixes
