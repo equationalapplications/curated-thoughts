@@ -12,11 +12,12 @@ Optional body explaining the change.
 Optional footer: BREAKING CHANGE: description
 ```
 
-**Commit types and effects:**
+**Commit types and effects** (see `.releaserc.json`: `conventionalcommits` preset plus explicit `releaseRules`):
+
 - `feat:` → minor version bump
 - `fix:` → patch version bump
-- `BREAKING CHANGE:` → major version bump
-- `chore:`, `docs:`, `style:`, `refactor:`, `test:` → no release
+- `BREAKING CHANGE:` in the footer (or other breaking notes the parser picks up) → major version bump
+- `perf:`, `revert:`, `chore:`, `docs:`, `style:`, `refactor:`, `test:`, `build:`, `ci:` → no release
 
 **Examples:**
 - ✅ `feat: add wiki fact extraction to chunking pipeline`
@@ -27,7 +28,7 @@ Optional footer: BREAKING CHANGE: description
 
 ## Release Process
 
-Releases happen automatically when version-bumping commits (`feat:`, `fix:`, `BREAKING CHANGE:`) are pushed to `main`:
+Releases happen automatically when version-bumping commits (`feat:`, `fix:`, or breaking-change footers) are pushed to `main`:
 
 1. Semantic-release analyzes your commits
 2. Version bumps (if applicable)
