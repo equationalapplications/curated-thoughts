@@ -60,14 +60,6 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build Rust binaries used by bundler
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            cargo build --manifest-path src-tauri/Cargo.toml --release --target universal-apple-darwin --features mcp-server --bins
-          else
-            cargo build --manifest-path src-tauri/Cargo.toml --release --features mcp-server --bins
-          fi
-
       - name: Build Tauri app
         run: ${{ matrix.build_cmd }}
 

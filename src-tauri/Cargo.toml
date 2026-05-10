@@ -59,30 +59,37 @@ rmcp = { version = "1.6", features = ["client", "transport-child-process"] }
 test-utils = ["tauri/test"]
 slow-tests = []
 mcp-server = ["dep:rmcp", "dep:schemars"]
+dev-tools = []
 
 [[bin]]
 name = "embed_scifact"
 path = "src/bin/embed_scifact.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "embed_bench_fixture"
 path = "src/bin/embed_bench_fixture.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "gen_yaml_synthetic_bench"
 path = "src/bin/gen_yaml_synthetic_bench.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "gen_yaml_k8s_curated_bench"
 path = "src/bin/gen_yaml_k8s_curated_bench.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "gen_code_synthetic_bench"
 path = "src/bin/gen_code_synthetic_bench.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "gen_code_curated_bench"
 path = "src/bin/gen_code_curated_bench.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "curated-thoughts-mcp"
@@ -92,10 +99,12 @@ required-features = ["mcp-server"]
 [[bin]]
 name = "bulk_reindex"
 path = "src/bin/bulk_reindex.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "semantic_search_profile"
 path = "src/bin/semantic_search_profile.rs"
+required-features = ["dev-tools"]
 
 [[test]]
 name = "mcp_integration"
