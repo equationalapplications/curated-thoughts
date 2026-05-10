@@ -26,7 +26,6 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
 
       - name: Guard release to current main HEAD
         id: release_guard
