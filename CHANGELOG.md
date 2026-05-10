@@ -1,3 +1,9 @@
+## [1.0.3](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.2...v1.0.3) (2026-05-10)
+
+### Bug Fixes
+
+* **build:** give dev-tools feature an optional dep so Tauri skips those bins ([abba76f](https://github.com/equationalapplications/curated-thoughts/commit/abba76f1e8a2e251226772cce37ffa39ca763332))
+
 ## [1.0.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.1...v1.0.2) (2026-05-10)
 
 ### Bug Fixes
