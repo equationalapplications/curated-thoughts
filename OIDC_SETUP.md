@@ -108,6 +108,7 @@ jobs:
         with:
           script: |
             const token = await core.getIDToken('https://registry.npmjs.org/');
+            core.setSecret(token);
             core.setOutput('token', token);
 
       - name: Publish to npm
@@ -119,6 +120,7 @@ jobs:
 **Key parts:**
 - `registry-url: https://registry.npmjs.org/` — tells Node to use npm registry
 - `core.getIDToken('https://registry.npmjs.org/')` — requests token scoped to npm
+- `core.setSecret(token)` before `core.setOutput` — registers the token for log masking (step outputs are not masked like `secrets.*` unless marked secret)
 - `NODE_AUTH_TOKEN` — npm recognizes this env var for authentication
 
 ### Step 3: Configure Crates.io Trust Relationship (for Rust)
@@ -163,6 +165,7 @@ jobs:
         with:
           script: |
             const token = await core.getIDToken('https://crates.io');
+            core.setSecret(token);
             core.setOutput('token', token);
 
       - name: Publish to Crates.io
@@ -173,6 +176,7 @@ jobs:
 
 **Key parts:**
 - `core.getIDToken('https://crates.io')` — token scoped to Crates.io
+- `core.setSecret(token)` before `core.setOutput` — registers the token for log masking when passing it via step outputs
 - `CARGO_REGISTRY_TOKEN` — Cargo recognizes this env var
 
 ## Troubleshooting
