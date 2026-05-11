@@ -238,6 +238,17 @@ fn validated_new_vault_root(path: &str) -> Result<PathBuf, String> {
     Ok(p.to_path_buf())
 }
 
+/// Returns true when `new_root` is the same directory as the configured vault (symlinks resolved).
+fn switching_to_same_vault_as_configured(current: &str, new_root: &Path) -> bool {
+    match (
+        Path::new(current).canonicalize(),
+        new_root.canonicalize(),
+    ) {
+        (Ok(cur), Ok(next)) => cur == next,
+        _ => false,
+    }
+}
+
 fn start_file_watcher_inner(
     app: &AppHandle,
     pipeline: &PipelineHolder,
@@ -395,6 +406,12 @@ fn switch_vault(
     let db_path = brain_dir.join("brain.db");
 
     let new_root = validated_new_vault_root(&new_path)?;
+
+    if let Ok(Some(ref current)) = vault_state.0.lock().unwrap().get_vault_path() {
+        if switching_to_same_vault_as_configured(current, new_root.as_path()) {
+            return Ok(());
+        }
+    }
 
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
