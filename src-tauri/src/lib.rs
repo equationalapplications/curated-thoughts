@@ -1386,7 +1386,7 @@ pub fn run() {
 
     let db_path = brain_dir.join("brain.db");
 
-    let config = VaultConfig::new(brain_dir.join("config.json"));
+    let config = VaultConfig::new(VaultConfig::default_config_path());
     if config.get_vault_path().ok().flatten().is_none() {
         let default_vault = VaultConfig::default_vault_path();
         for subdir in &["documents", "wiki"] {
