@@ -4,7 +4,7 @@ import { StepOllama } from "./StepOllama";
 import { StepDone } from "./StepDone";
 
 interface Props {
-  onComplete: () => void;
+  onComplete: () => void | Promise<void>;
   initialStep?: number;
 }
 
