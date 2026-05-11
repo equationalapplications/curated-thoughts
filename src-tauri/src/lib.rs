@@ -230,6 +230,149 @@ fn validated_new_vault_root(path: &str) -> Result<PathBuf, String> {
     Ok(p.to_path_buf())
 }
 
+fn start_file_watcher_inner(
+    app: &AppHandle,
+    pipeline: &PipelineHolder,
+    db_state: &DbState,
+    vault_state: &VaultConfigState,
+    watcher_started: &WatcherStarted,
+) -> Result<(), String> {
+    let configured_vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+    let vault_root = PathBuf::from(&configured_vault);
+
+    let vault_canonical = vault_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
+
+    let mut watcher_guard = watcher_started.0.lock().unwrap();
+    if let Some((prev_path, handle)) = watcher_guard.take() {
+        if prev_path == vault_canonical {
+            *watcher_guard = Some((prev_path, handle));
+            return Ok(());
+        }
+        handle.stop();
+    }
+
+    let pipeline_tx = pipeline
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .ok_or_else(|| "pipeline not running".to_string())?
+        .0
+        .clone();
+
+    let raw_docs = vault_canonical.join("documents");
+    let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
+
+    {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+
+        let db_paths: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut v = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+            }
+            v
+        };
+        for path in db_paths {
+            if !std::path::Path::new(&path).exists() {
+                eprintln!("[reconcile] purging deleted file from index: {}", path);
+                let _ = pipeline_tx.try_send(PipelineJob::Delete(path));
+            }
+        }
+
+        if raw_docs.exists() {
+            for entry in walkdir::WalkDir::new(&raw_docs)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let ext = entry
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if should_ingest_extension(ext) {
+                    let normalized = std::fs::canonicalize(entry.path())
+                        .unwrap_or_else(|_| entry.path().to_path_buf())
+                        .to_string_lossy()
+                        .into_owned();
+                    let _ = pipeline_tx.try_send(PipelineJob::ingest(normalized));
+                }
+            }
+        }
+    }
+
+    let app = app.clone();
+    let vault_for_watcher = vault_canonical.clone();
+    let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
+        let _ = app.emit("vault-event", &event);
+        let path_str = match &event {
+            VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
+        };
+        let canonical =
+            std::fs::canonicalize(path_str).unwrap_or_else(|_| std::path::PathBuf::from(path_str));
+        if !canonical.starts_with(&documents_root) {
+            return;
+        }
+        let normalized = canonical.to_string_lossy().into_owned();
+        let job = match &event {
+            VaultEvent::Added(_) | VaultEvent::Modified(_) => {
+                Some(PipelineJob::ingest(normalized.clone()))
+            }
+            VaultEvent::Deleted(_) => Some(PipelineJob::Delete(normalized.clone())),
+        };
+        if let Some(j) = job {
+            let _ = pipeline_tx.try_send(j);
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    *watcher_guard = Some((vault_canonical, handle));
+    Ok(())
+}
+
+/// Best-effort restore of DB handle, pipeline, and file watcher after a failed `switch_vault`.
+fn recover_after_failed_switch_vault(
+    app: &AppHandle,
+    db_path: &Path,
+    db_state: &DbState,
+    pipeline: &PipelineHolder,
+    vault_state: &VaultConfigState,
+    watcher_started: &WatcherStarted,
+) {
+    if let Err(e) = (|| -> Result<(), String> {
+        let mut guard = db_state.0.lock().map_err(|_| "db mutex poisoned".to_string())?;
+        *guard = AppDb::open(db_path).map_err(|e| e.to_string())?;
+        Ok(())
+    })() {
+        eprintln!("[switch_vault] recovery: failed to reopen {db_path:?}: {e}");
+    }
+    if let Ok(mut g) = pipeline.0.lock() {
+        if g.is_none() {
+            *g = Some(start_pipeline(db_path.to_path_buf()));
+        }
+    }
+    if let Err(e) =
+        start_file_watcher_inner(app, pipeline, db_state, vault_state, watcher_started)
+    {
+        eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
+    }
+}
+
 #[tauri::command]
 fn switch_vault(
     new_path: String,
@@ -244,6 +387,12 @@ fn switch_vault(
     let db_path = brain_dir.join("brain.db");
 
     let new_root = validated_new_vault_root(&new_path)?;
+
+    for subdir in &["documents", "wiki"] {
+        std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(new_root.join(".brain").join("converted"))
+        .map_err(|e| e.to_string())?;
 
     {
         let mut g = watcher_started.0.lock().unwrap();
@@ -260,46 +409,59 @@ fn switch_vault(
         }
     }
 
-    for subdir in &["documents", "wiki"] {
-        std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
+    let switch_result = (|| -> Result<(), String> {
+        let backup_path = new_root.join(".brain").join("brain.db.bak");
+        let has_backup = backup_path.exists();
+
+        release_global_db_lock(&db_state)?;
+
+        remove_sqlite_sidecars(&db_path);
+
+        if restore_backup && has_backup {
+            std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
+        } else {
+            let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+            db::clear_vault_tables(&conn).map_err(|e| e.to_string())?;
+        }
+
+        {
+            let mut guard = db_state.0.lock().unwrap();
+            *guard = AppDb::open(&db_path).map_err(|e| e.to_string())?;
+        }
+
+        {
+            let mut g = pipeline.0.lock().unwrap();
+            *g = Some(start_pipeline(db_path.clone()));
+        }
+
+        vault_state
+            .0
+            .lock()
+            .unwrap()
+            .set_vault_path(&new_path)
+            .map_err(|e| e.to_string())?;
+
+        let _ = app.emit("vault-switched", &new_path);
+
+        Ok(())
+    })();
+
+    if switch_result.is_err() {
+        eprintln!(
+            "[switch_vault] switch failed ({:?}); attempting recovery for configured vault",
+            switch_result.as_ref().err()
+        );
+        recover_after_failed_switch_vault(
+            &app,
+            &db_path,
+            &db_state,
+            &pipeline,
+            &vault_state,
+            &watcher_started,
+        );
     }
-    std::fs::create_dir_all(new_root.join(".brain").join("converted"))
-        .map_err(|e| e.to_string())?;
 
-    let backup_path = new_root.join(".brain").join("brain.db.bak");
-    let has_backup = backup_path.exists();
-
-    release_global_db_lock(&db_state)?;
-
-    remove_sqlite_sidecars(&db_path);
-
-    if restore_backup && has_backup {
-        std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
-    } else {
-        let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-        db::clear_vault_tables(&conn).map_err(|e| e.to_string())?;
-    }
-
-    {
-        let mut guard = db_state.0.lock().unwrap();
-        *guard = AppDb::open(&db_path).map_err(|e| e.to_string())?;
-    }
-
-    {
-        let mut g = pipeline.0.lock().unwrap();
-        *g = Some(start_pipeline(db_path.clone()));
-    }
-
-    vault_state
-        .0
-        .lock()
-        .unwrap()
-        .set_vault_path(&new_path)
-        .map_err(|e| e.to_string())?;
-
-    let _ = app.emit("vault-switched", &new_path);
-
-    Ok(())
+    switch_result
 }
 
 #[tauri::command]
@@ -361,122 +523,7 @@ fn start_file_watcher(
     vault_state: State<VaultConfigState>,
     watcher_started: State<WatcherStarted>,
 ) -> Result<(), String> {
-    // Get configured vault root from state (trusted source)
-    let configured_vault = vault_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no vault configured".to_string())?;
-    let vault_root = PathBuf::from(&configured_vault);
-
-    // Canonicalize vault root once
-    let vault_canonical = vault_root
-        .canonicalize()
-        .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
-
-    let mut watcher_guard = watcher_started.0.lock().unwrap();
-    if let Some((prev_path, handle)) = watcher_guard.take() {
-        if prev_path == vault_canonical {
-            *watcher_guard = Some((prev_path, handle));
-            return Ok(());
-        }
-        handle.stop();
-    }
-
-    let pipeline_tx = pipeline
-        .0
-        .lock()
-        .unwrap()
-        .as_ref()
-        .ok_or_else(|| "pipeline not running".to_string())?
-        .0
-        .clone();
-
-    let raw_docs = vault_canonical.join("documents");
-    // Canonicalize so macOS FSEvents paths (which are real paths) match correctly.
-    let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
-
-    // ── Startup reconciliation ────────────────────────────────────────────────
-    // Purge DB entries whose files no longer exist on disk, and queue ingest for
-    // files on disk that aren't yet indexed. Handles changes made while the app
-    // was closed and any path-format drift.
-    {
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
-
-        // 1. DB paths that no longer exist on disk → delete
-        let db_paths: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
-                .map_err(|e| e.to_string())?;
-            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            let mut v = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
-            }
-            v
-        };
-        for path in db_paths {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[reconcile] purging deleted file from index: {}", path);
-                let _ = pipeline_tx.try_send(PipelineJob::Delete(path));
-            }
-        }
-
-        // 2. Files on disk → queue ingest (pipeline skips if hash unchanged)
-        if raw_docs.exists() {
-            for entry in walkdir::WalkDir::new(&raw_docs)
-                .min_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let ext = entry
-                    .path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if should_ingest_extension(ext) {
-                    let normalized = std::fs::canonicalize(entry.path())
-                        .unwrap_or_else(|_| entry.path().to_path_buf())
-                        .to_string_lossy()
-                        .into_owned();
-                    let _ = pipeline_tx.try_send(PipelineJob::ingest(normalized));
-                }
-            }
-        }
-    }
-
-    let vault_for_watcher = vault_canonical.clone();
-    let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
-        let _ = app.emit("vault-event", &event);
-        let path_str = match &event {
-            VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
-        };
-        // For existing files, canonicalize to match documents_root.
-        // For deleted files (don't exist), fall back to the raw path.
-        let canonical =
-            std::fs::canonicalize(path_str).unwrap_or_else(|_| std::path::PathBuf::from(path_str));
-        if !canonical.starts_with(&documents_root) {
-            return;
-        }
-        let normalized = canonical.to_string_lossy().into_owned();
-        let job = match &event {
-            VaultEvent::Added(_) | VaultEvent::Modified(_) => {
-                Some(PipelineJob::ingest(normalized.clone()))
-            }
-            VaultEvent::Deleted(_) => Some(PipelineJob::Delete(normalized.clone())),
-        };
-        if let Some(j) = job {
-            let _ = pipeline_tx.try_send(j);
-        }
-    })
-    .map_err(|e| e.to_string())?;
-
-    *watcher_guard = Some((vault_canonical, handle));
-    Ok(())
+    start_file_watcher_inner(&app, &pipeline, &db_state, &vault_state, &watcher_started)
 }
 
 // ── Indexing status ───────────────────────────────────────────────────────────

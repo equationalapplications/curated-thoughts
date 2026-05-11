@@ -38,23 +38,25 @@ export function VaultPanel({ vaultPath }: Props) {
 
     const hasBackup = await checkVaultBackup(selected);
 
-    const backupYes = "Back up and continue";
-    const backupNo = "Continue without backup";
-    const backupCancel = "Cancel";
     const backupChoice = await message(
       "Back up your current index before switching?\n\n" +
         `This saves your indexed data to ${backupHintPath} so it can be restored if you switch back.`,
       {
         title: "Switch vault",
         kind: "info",
-        buttons: { yes: backupYes, no: backupNo, cancel: backupCancel },
+        buttons: {
+          yes: "Back up and continue",
+          no: "Continue without backup",
+          cancel: "Cancel",
+        },
       },
     );
-    if (backupChoice === backupCancel) return;
+    // Tauri `message()` returns button *roles* ("Yes" / "No" / "Cancel"), not custom labels.
+    if (backupChoice === "Cancel") return;
 
     setSwitching(true);
     try {
-      if (backupChoice === backupYes) {
+      if (backupChoice === "Yes") {
         await backupVaultDb();
       }
 
