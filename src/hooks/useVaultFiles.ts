@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { listVaultFiles, VaultFile } from "../lib/tauri";
 
-export function useVaultFiles() {
+export function useVaultFiles(vaultPath: string) {
   const [files, setFiles] = useState<VaultFile[]>([]);
 
   const refresh = useCallback(() => {
@@ -12,8 +12,10 @@ export function useVaultFiles() {
   useEffect(() => {
     refresh();
     const unlisten = listen("vault-event", refresh);
-    return () => { unlisten.then((fn) => fn()); };
-  }, [refresh]);
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [refresh, vaultPath]);
 
   return files;
 }

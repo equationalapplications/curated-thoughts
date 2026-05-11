@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useSetupStatus } from "./hooks/useSetupStatus";
 import { SetupWizard } from "./components/setup/SetupWizard";
 import { AppShell } from "./components/shell/AppShell";
@@ -6,7 +6,11 @@ import { AppShell } from "./components/shell/AppShell";
 export function App() {
   const { loading, needsSetup, vaultPath } = useSetupStatus();
   const [setupComplete, setSetupComplete] = useState(false);
-  const [resolvedVaultPath, setResolvedVaultPath] = useState<string | null>(null);
+  const [currentVaultPath, setCurrentVaultPath] = useState<string | null>(null);
+
+  const handleVaultChanged = useCallback((newPath: string) => {
+    setCurrentVaultPath(newPath);
+  }, []);
 
   if (loading) {
     return (
@@ -19,16 +23,17 @@ export function App() {
   if (needsSetup && !setupComplete) {
     return (
       <SetupWizard
-        onComplete={(path: string) => {
-          setResolvedVaultPath(path);
+        onComplete={() => {
           setSetupComplete(true);
         }}
       />
     );
   }
 
-  const activePath = resolvedVaultPath ?? vaultPath!;
-  return <AppShell vaultPath={activePath} />;
+  const activePath = currentVaultPath ?? vaultPath!;
+  return (
+    <AppShell vaultPath={activePath} onVaultChanged={handleVaultChanged} />
+  );
 }
 
 export default App;

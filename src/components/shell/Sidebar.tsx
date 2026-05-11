@@ -15,8 +15,8 @@ interface Props {
 }
 
 export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onReviewOpen }: Props) {
-  const { query, setQuery, results, searching } = useSearch();
-  const files = useVaultFiles();
+  const { query, setQuery, results, searching } = useSearch(vaultPath);
+  const files = useVaultFiles(vaultPath);
   const [dragging, setDragging] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
 
@@ -69,7 +69,7 @@ export function Sidebar({ vaultPath, reviewCount, selectedDoc, onDocSelect, onRe
         <SearchResults results={results} onSelect={onDocSelect} />
       ) : (
         <>
-          <IndexingStatus />
+          <IndexingStatus vaultPath={vaultPath} />
           <FolderTree files={files} selectedPath={selectedDoc} onSelect={onDocSelect} />
         </>
       )}

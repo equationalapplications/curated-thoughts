@@ -30,12 +30,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc::SyncSender, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
-use watcher::{start_watcher, VaultEvent};
+use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
-struct PipelineTx(Mutex<SyncSender<PipelineJob>>);
-struct WatcherStarted(Mutex<Option<PathBuf>>);
+struct PipelineHolder(Mutex<Option<(SyncSender<PipelineJob>, std::thread::JoinHandle<()>)>>);
+struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
 fn to_forward_slash_relative(path: &Path) -> Result<String, String> {
@@ -158,12 +158,172 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     Ok(())
 }
 
+fn release_global_db_lock(db_state: &DbState) -> Result<(), String> {
+    let stub_path = std::env::temp_dir().join(format!(
+        "curated-thoughts-db-stub-{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&stub_path);
+    let stub = AppDb::open(&stub_path).map_err(|e| e.to_string())?;
+    let mut guard = db_state.0.lock().unwrap();
+    let prev = std::mem::replace(&mut *guard, stub);
+    drop(guard);
+    drop(prev);
+    let _ = std::fs::remove_file(&stub_path);
+    Ok(())
+}
+
+#[tauri::command]
+fn backup_vault_db(vault_state: State<VaultConfigState>) -> Result<String, String> {
+    let vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+
+    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
+    let src = brain_dir.join("brain.db");
+    if !src.exists() {
+        return Err("no database to back up".to_string());
+    }
+
+    let dest_dir = PathBuf::from(&vault).join(".brain");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join("brain.db.bak");
+    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn switch_vault(
+    new_path: String,
+    restore_backup: bool,
+    app: AppHandle,
+    db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+    pipeline: State<PipelineHolder>,
+    watcher_started: State<WatcherStarted>,
+) -> Result<(), String> {
+    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
+    let db_path = brain_dir.join("brain.db");
+
+    {
+        let mut g = watcher_started.0.lock().unwrap();
+        if let Some((_p, h)) = g.take() {
+            h.stop();
+        }
+    }
+
+    {
+        let mut g = pipeline.0.lock().unwrap();
+        if let Some((tx, join)) = g.take() {
+            drop(tx);
+            let _ = join.join();
+        }
+    }
+
+    let new_root = PathBuf::from(&new_path);
+    for subdir in &["documents", "wiki"] {
+        std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(new_root.join(".brain").join("converted"))
+        .map_err(|e| e.to_string())?;
+
+    let backup_path = new_root.join(".brain").join("brain.db.bak");
+    let has_backup = backup_path.exists();
+
+    release_global_db_lock(&db_state)?;
+
+    if restore_backup && has_backup {
+        std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
+    } else {
+        let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+        db::clear_vault_tables(&conn).map_err(|e| e.to_string())?;
+    }
+
+    {
+        let mut guard = db_state.0.lock().unwrap();
+        *guard = AppDb::open(&db_path).map_err(|e| e.to_string())?;
+    }
+
+    {
+        let mut g = pipeline.0.lock().unwrap();
+        *g = Some(start_pipeline(db_path.clone()));
+    }
+
+    vault_state
+        .0
+        .lock()
+        .unwrap()
+        .set_vault_path(&new_path)
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit("vault-switched", &new_path);
+
+    Ok(())
+}
+
+#[tauri::command]
+fn check_vault_backup(path: String) -> bool {
+    PathBuf::from(&path)
+        .join(".brain")
+        .join("brain.db.bak")
+        .exists()
+}
+
+#[tauri::command]
+fn reveal_vault(vault_state: State<VaultConfigState>) -> Result<(), String> {
+    let vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&vault)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open")
+        .arg(&vault)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(&vault)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
+    {
+        let _ = vault;
+        return Err("reveal_vault is not supported on this platform".to_string());
+    }
+
+    Ok(())
+}
+
 // ── Watcher + pipeline ────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn start_file_watcher(
     app: AppHandle,
-    pipeline: State<PipelineTx>,
+    pipeline: State<PipelineHolder>,
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
     watcher_started: State<WatcherStarted>,
@@ -184,18 +344,22 @@ fn start_file_watcher(
         .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
 
     let mut watcher_guard = watcher_started.0.lock().unwrap();
-    if let Some(prev) = watcher_guard.as_ref() {
-        return if prev == &vault_canonical {
-            Ok(())
-        } else {
-            Err(
-                "vault path changed after file watcher started; restart the application to watch the new vault"
-                    .to_string(),
-            )
-        };
+    if let Some((prev_path, handle)) = watcher_guard.take() {
+        if prev_path == vault_canonical {
+            *watcher_guard = Some((prev_path, handle));
+            return Ok(());
+        }
+        handle.stop();
     }
 
-    let tx = pipeline.0.lock().unwrap().clone();
+    let pipeline_tx = pipeline
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .ok_or_else(|| "pipeline not running".to_string())?
+        .0
+        .clone();
 
     let raw_docs = vault_canonical.join("documents");
     // Canonicalize so macOS FSEvents paths (which are real paths) match correctly.
@@ -224,7 +388,7 @@ fn start_file_watcher(
         for path in db_paths {
             if !std::path::Path::new(&path).exists() {
                 eprintln!("[reconcile] purging deleted file from index: {}", path);
-                let _ = tx.try_send(PipelineJob::Delete(path));
+                let _ = pipeline_tx.try_send(PipelineJob::Delete(path));
             }
         }
 
@@ -246,14 +410,14 @@ fn start_file_watcher(
                         .unwrap_or_else(|_| entry.path().to_path_buf())
                         .to_string_lossy()
                         .into_owned();
-                    let _ = tx.try_send(PipelineJob::ingest(normalized));
+                    let _ = pipeline_tx.try_send(PipelineJob::ingest(normalized));
                 }
             }
         }
     }
 
     let vault_for_watcher = vault_canonical.clone();
-    start_watcher(vault_for_watcher, move |event| {
+    let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
@@ -273,12 +437,12 @@ fn start_file_watcher(
             VaultEvent::Deleted(_) => Some(PipelineJob::Delete(normalized.clone())),
         };
         if let Some(j) = job {
-            let _ = tx.try_send(j);
+            let _ = pipeline_tx.try_send(j);
         }
     })
     .map_err(|e| e.to_string())?;
 
-    *watcher_guard = Some(vault_canonical);
+    *watcher_guard = Some((vault_canonical, handle));
     Ok(())
 }
 
@@ -305,13 +469,17 @@ fn get_indexing_status(db_state: State<DbState>) -> Result<IndexingStatus, Strin
 #[tauri::command]
 fn queue_full_reindex(
     force_rechunk: bool,
-    pipeline: State<PipelineTx>,
+    pipeline: State<PipelineHolder>,
     db_state: State<DbState>,
 ) -> Result<usize, String> {
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
     let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
-    let tx = pipeline.0.lock().unwrap();
+    let pipeline_guard = pipeline.0.lock().unwrap();
+    let tx = &pipeline_guard
+        .as_ref()
+        .ok_or_else(|| "pipeline not running".to_string())?
+        .0;
     let mut queued = 0usize;
     for path in paths {
         if !std::path::Path::new(&path).exists() {
@@ -1078,13 +1246,14 @@ pub use pipeline::ingest_document;
 
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
-    let db = db::AppDb::open(&tmp_path.join("brain.db")).expect("open test db");
+    let db_path = tmp_path.join("brain.db");
+    let db = db::AppDb::open(&db_path).expect("open test db");
     let config = vault::VaultConfig::new(tmp_path.join("config.json"));
-    let (tx, _rx) = std::sync::mpsc::sync_channel::<PipelineJob>(1);
+    let pipeline = start_pipeline(db_path);
     tauri::test::mock_builder()
         .manage(DbState(std::sync::Mutex::new(db)))
         .manage(VaultConfigState(std::sync::Mutex::new(config)))
-        .manage(PipelineTx(std::sync::Mutex::new(tx)))
+        .manage(PipelineHolder(std::sync::Mutex::new(Some(pipeline))))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -1115,9 +1284,21 @@ pub fn run() {
     std::fs::create_dir_all(&brain_dir).ok();
 
     let db_path = brain_dir.join("brain.db");
-    let db = AppDb::open(&db_path).expect("failed to open database");
+
     let config = VaultConfig::new(brain_dir.join("config.json"));
-    let pipeline_tx = start_pipeline(db_path);
+    if config.get_vault_path().ok().flatten().is_none() {
+        let default_vault = VaultConfig::default_vault_path();
+        for subdir in &["documents", "wiki"] {
+            std::fs::create_dir_all(default_vault.join(subdir)).ok();
+        }
+        std::fs::create_dir_all(default_vault.join(".brain").join("converted")).ok();
+        config
+            .set_vault_path(default_vault.to_str().unwrap_or_default())
+            .expect("failed to persist default vault path");
+    }
+
+    let db = AppDb::open(&db_path).expect("failed to open database");
+    let pipeline = start_pipeline(db_path.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1139,11 +1320,15 @@ pub fn run() {
         })
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
-        .manage(PipelineTx(Mutex::new(pipeline_tx)))
+        .manage(PipelineHolder(Mutex::new(Some(pipeline))))
         .manage(WatcherStarted(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
+            backup_vault_db,
+            switch_vault,
+            check_vault_backup,
+            reveal_vault,
             start_file_watcher,
             get_indexing_status,
             queue_full_reindex,

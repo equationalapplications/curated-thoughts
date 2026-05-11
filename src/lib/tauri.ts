@@ -114,3 +114,15 @@ export const saveWikiPage = (path: string, content: string): Promise<void> =>
 
 export const deleteVaultFile = (path: string): Promise<void> =>
   invoke("delete_vault_file", { path });
+
+export const switchVault = (newPath: string, restoreBackup: boolean): Promise<void> =>
+  invoke("switch_vault", { newPath, restoreBackup });
+
+export const backupVaultDb = (): Promise<string> =>
+  invoke("backup_vault_db");
+
+export const checkVaultBackup = (path: string): Promise<boolean> =>
+  invoke("check_vault_backup", { path });
+
+export const revealVault = (): Promise<void> =>
+  invoke("reveal_vault");
