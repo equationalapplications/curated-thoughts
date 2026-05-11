@@ -209,6 +209,27 @@ fn backup_vault_db(
     Ok(dest.to_string_lossy().into_owned())
 }
 
+/// Remove SQLite `-wal` / `-shm` siblings so a restored or reused `brain.db` is not paired with stale journals.
+fn remove_sqlite_sidecars(db_path: &Path) {
+    let base = db_path.to_string_lossy();
+    let _ = std::fs::remove_file(format!("{base}-wal"));
+    let _ = std::fs::remove_file(format!("{base}-shm"));
+}
+
+fn validated_new_vault_root(path: &str) -> Result<PathBuf, String> {
+    if path.is_empty() {
+        return Err("vault path is empty".to_string());
+    }
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err("vault path must be an absolute directory path".to_string());
+    }
+    if p.components().any(|c| c == Component::ParentDir) {
+        return Err("vault path must not contain '..'".to_string());
+    }
+    Ok(p.to_path_buf())
+}
+
 #[tauri::command]
 fn switch_vault(
     new_path: String,
@@ -221,6 +242,8 @@ fn switch_vault(
 ) -> Result<(), String> {
     let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
     let db_path = brain_dir.join("brain.db");
+
+    let new_root = validated_new_vault_root(&new_path)?;
 
     {
         let mut g = watcher_started.0.lock().unwrap();
@@ -237,7 +260,6 @@ fn switch_vault(
         }
     }
 
-    let new_root = PathBuf::from(&new_path);
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
     }
@@ -248,6 +270,8 @@ fn switch_vault(
     let has_backup = backup_path.exists();
 
     release_global_db_lock(&db_state)?;
+
+    remove_sqlite_sidecars(&db_path);
 
     if restore_backup && has_backup {
         std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
@@ -1298,9 +1322,13 @@ pub fn run() {
     if config.get_vault_path().ok().flatten().is_none() {
         let default_vault = VaultConfig::default_vault_path();
         for subdir in &["documents", "wiki"] {
-            std::fs::create_dir_all(default_vault.join(subdir)).ok();
+            std::fs::create_dir_all(default_vault.join(subdir)).unwrap_or_else(|e| {
+                panic!("failed to create default vault subdirectory {subdir}: {e}");
+            });
         }
-        std::fs::create_dir_all(default_vault.join(".brain").join("converted")).ok();
+        std::fs::create_dir_all(default_vault.join(".brain").join("converted")).unwrap_or_else(|e| {
+            panic!("failed to create default vault .brain/converted: {e}");
+        });
         config
             .set_vault_path(default_vault.to_str().unwrap_or_default())
             .expect("failed to persist default vault path");

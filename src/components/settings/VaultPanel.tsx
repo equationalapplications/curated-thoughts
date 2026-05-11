@@ -1,4 +1,4 @@
-import { open } from "@tauri-apps/plugin-dialog";
+import { message, open } from "@tauri-apps/plugin-dialog";
 import { useMemo, useState } from "react";
 import {
   backupVaultDb,
@@ -9,7 +9,6 @@ import {
 
 interface Props {
   vaultPath: string;
-  onVaultChanged: (newPath: string) => void;
 }
 
 function revealLabel(): string {
@@ -20,7 +19,7 @@ function revealLabel(): string {
   return "Reveal in file manager";
 }
 
-export function VaultPanel({ vaultPath, onVaultChanged }: Props) {
+export function VaultPanel({ vaultPath }: Props) {
   const [switching, setSwitching] = useState(false);
 
   const backupHintPath = useMemo(() => {
@@ -39,27 +38,37 @@ export function VaultPanel({ vaultPath, onVaultChanged }: Props) {
 
     const hasBackup = await checkVaultBackup(selected);
 
-    const doBackup = window.confirm(
+    const backupYes = "Back up and continue";
+    const backupNo = "Continue without backup";
+    const backupCancel = "Cancel";
+    const backupChoice = await message(
       "Back up your current index before switching?\n\n" +
         `This saves your indexed data to ${backupHintPath} so it can be restored if you switch back.`,
+      {
+        title: "Switch vault",
+        kind: "info",
+        buttons: { yes: backupYes, no: backupNo, cancel: backupCancel },
+      },
     );
+    if (backupChoice === backupCancel) return;
 
     setSwitching(true);
     try {
-      if (doBackup) {
+      if (backupChoice === backupYes) {
         await backupVaultDb();
       }
 
       let restore = false;
       if (hasBackup) {
-        restore = window.confirm(
-          "Found a previous index for this vault. Restore it?\n\n" +
-            "(Files changed since the backup will be re-indexed.)",
+        const r = await message(
+          "Found a previous index backup for this vault. Restore it?\n\n" +
+            "(Documents changed since the backup will be re-indexed.)",
+          { title: "Restore backup?", kind: "info", buttons: "YesNo" },
         );
+        restore = r === "Yes";
       }
 
       await switchVault(selected, restore);
-      onVaultChanged(selected);
     } catch (e) {
       window.alert("Failed to switch vault: " + String(e));
     } finally {
