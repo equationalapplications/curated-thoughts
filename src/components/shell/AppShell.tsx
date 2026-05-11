@@ -73,6 +73,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
       setSelectedDoc(null);
+      setShowSettings(false);
       onVaultChanged(newPath);
     });
     return () => {
@@ -107,10 +108,6 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
         <SettingsModal
           onClose={() => setShowSettings(false)}
           vaultPath={vaultPath}
-          onVaultChanged={(newPath) => {
-            onVaultChanged(newPath);
-            setShowSettings(false);
-          }}
         />
       )}
     </div>
