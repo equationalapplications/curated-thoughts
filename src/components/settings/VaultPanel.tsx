@@ -36,7 +36,17 @@ export function VaultPanel({ vaultPath }: Props) {
     });
     if (typeof selected !== "string" || selected === vaultPath) return;
 
-    const hasBackup = await checkVaultBackup(selected);
+    let hasBackup = false;
+    try {
+      hasBackup = await checkVaultBackup(selected);
+    } catch (e) {
+      await message(String(e), {
+        title: "Invalid vault path",
+        kind: "error",
+        okLabel: "OK",
+      });
+      return;
+    }
 
     const backupChoice = await message(
       "Back up your current index before switching?\n\n" +

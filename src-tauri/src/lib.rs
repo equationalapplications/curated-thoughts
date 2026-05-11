@@ -158,7 +158,10 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     Ok(())
 }
 
-fn release_global_db_lock(db_state: &DbState) -> Result<(), String> {
+/// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
+/// Returns the temp stub path; callers must call [`cleanup_temp_stub_db`] after the stub
+/// connection is dropped (otherwise `-wal` / `-shm` sidecars and the file may remain, especially on Windows).
+fn release_global_db_lock(db_state: &DbState) -> Result<PathBuf, String> {
     let stub_path = std::env::temp_dir().join(format!(
         "curated-thoughts-db-stub-{}.db",
         std::time::SystemTime::now()
@@ -166,14 +169,19 @@ fn release_global_db_lock(db_state: &DbState) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .as_nanos()
     ));
+    remove_sqlite_sidecars(&stub_path);
     let _ = std::fs::remove_file(&stub_path);
     let stub = AppDb::open(&stub_path).map_err(|e| e.to_string())?;
     let mut guard = db_state.0.lock().unwrap();
     let prev = std::mem::replace(&mut *guard, stub);
     drop(guard);
     drop(prev);
-    let _ = std::fs::remove_file(&stub_path);
-    Ok(())
+    Ok(stub_path)
+}
+
+fn cleanup_temp_stub_db(stub_path: &Path) {
+    remove_sqlite_sidecars(stub_path);
+    let _ = std::fs::remove_file(stub_path);
 }
 
 #[tauri::command]
@@ -409,19 +417,22 @@ fn switch_vault(
         }
     }
 
+    let stub_path = release_global_db_lock(&db_state)?;
+    let mut pending_config_align_to: Option<String> = None;
+
     let switch_result = (|| -> Result<(), String> {
         let backup_path = new_root.join(".brain").join("brain.db.bak");
         let has_backup = backup_path.exists();
-
-        release_global_db_lock(&db_state)?;
 
         remove_sqlite_sidecars(&db_path);
 
         if restore_backup && has_backup {
             std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
+            pending_config_align_to = Some(new_path.clone());
         } else {
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
             db::clear_vault_tables(&conn).map_err(|e| e.to_string())?;
+            pending_config_align_to = Some(new_path.clone());
         }
 
         {
@@ -441,12 +452,21 @@ fn switch_vault(
             .set_vault_path(&new_path)
             .map_err(|e| e.to_string())?;
 
+        pending_config_align_to = None;
+
         let _ = app.emit("vault-switched", &new_path);
 
         Ok(())
     })();
 
     if switch_result.is_err() {
+        if let Some(ref p) = pending_config_align_to {
+            if let Err(e) = vault_state.0.lock().unwrap().set_vault_path(p) {
+                eprintln!(
+                    "[switch_vault] failed to align vault config with on-disk DB after error: {e}"
+                );
+            }
+        }
         eprintln!(
             "[switch_vault] switch failed ({:?}); attempting recovery for configured vault",
             switch_result.as_ref().err()
@@ -461,15 +481,15 @@ fn switch_vault(
         );
     }
 
+    cleanup_temp_stub_db(&stub_path);
+
     switch_result
 }
 
 #[tauri::command]
-fn check_vault_backup(path: String) -> bool {
-    PathBuf::from(&path)
-        .join(".brain")
-        .join("brain.db.bak")
-        .exists()
+fn check_vault_backup(path: String) -> Result<bool, String> {
+    let root = validated_new_vault_root(&path)?;
+    Ok(root.join(".brain").join("brain.db.bak").exists())
 }
 
 #[tauri::command]
