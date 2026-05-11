@@ -1329,11 +1329,12 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
     let db_path = tmp_path.join("brain.db");
     let db = db::AppDb::open(&db_path).expect("open test db");
     let config = vault::VaultConfig::new(tmp_path.join("config.json"));
-    let pipeline = start_pipeline(db_path);
     tauri::test::mock_builder()
         .manage(DbState(std::sync::Mutex::new(db)))
         .manage(VaultConfigState(std::sync::Mutex::new(config)))
-        .manage(PipelineHolder(std::sync::Mutex::new(Some(pipeline))))
+        // No background pipeline thread: integration tests invoke DB-only commands;
+        // pipeline work is covered by `PipelineWorker` tests in `tests/pipeline.rs`.
+        .manage(PipelineHolder(std::sync::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
