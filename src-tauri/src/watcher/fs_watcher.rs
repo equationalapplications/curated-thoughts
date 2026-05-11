@@ -1,5 +1,5 @@
 use anyhow::Result;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     path::PathBuf,
     sync::{
@@ -34,7 +34,7 @@ pub fn spawn_vault_watcher<F>(vault_path: PathBuf, callback: F) -> Result<Watche
 where
     F: Fn(VaultEvent) + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(&vault_path, RecursiveMode::Recursive)?;
 
