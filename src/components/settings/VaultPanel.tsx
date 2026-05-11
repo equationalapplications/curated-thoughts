@@ -81,9 +81,11 @@ export function VaultPanel({ vaultPath }: Props) {
             buttons: {
               yes: "Restore backup",
               no: "Don't restore",
+              cancel: "Cancel switch",
             },
           },
         );
+        if (r === "Cancel") return;
         restore = r === "Yes";
       }
 
