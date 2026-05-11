@@ -177,7 +177,10 @@ fn release_global_db_lock(db_state: &DbState) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn backup_vault_db(vault_state: State<VaultConfigState>) -> Result<String, String> {
+fn backup_vault_db(
+    vault_state: State<VaultConfigState>,
+    db_state: State<DbState>,
+) -> Result<String, String> {
     let vault = vault_state
         .0
         .lock()
@@ -195,7 +198,13 @@ fn backup_vault_db(vault_state: State<VaultConfigState>) -> Result<String, Strin
     let dest_dir = PathBuf::from(&vault).join(".brain");
     std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join("brain.db.bak");
-    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&dest);
+
+    let guard = db_state.0.lock().unwrap();
+    guard
+        .0
+        .backup(rusqlite::DatabaseName::Main, &dest, None)
+        .map_err(|e| e.to_string())?;
 
     Ok(dest.to_string_lossy().into_owned())
 }

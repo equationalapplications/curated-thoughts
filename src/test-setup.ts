@@ -5,7 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "check_ollama") {
       return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
     }
-    if (cmd === "getVaultPath") {
+    if (cmd === "get_vault_path") {
       return Promise.resolve("/Users/test/Curated-Thoughts");
     }
     if (cmd === "get_recommended_model") {
