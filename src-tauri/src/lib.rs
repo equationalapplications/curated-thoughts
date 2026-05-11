@@ -500,6 +500,20 @@ fn switch_vault(
 
     cleanup_temp_stub_db(&stub_path);
 
+    if switch_result.is_ok() {
+        if let Err(e) = start_file_watcher_inner(
+            &app,
+            &pipeline,
+            &db_state,
+            &vault_state,
+            &watcher_started,
+        ) {
+            eprintln!(
+                "[switch_vault] failed to restart file watcher after successful switch: {e}"
+            );
+        }
+    }
+
     switch_result
 }
 

@@ -75,7 +75,14 @@ export function VaultPanel({ vaultPath }: Props) {
         const r = await message(
           "Found a previous index backup for this vault. Restore it?\n\n" +
             "(Documents changed since the backup will be re-indexed.)",
-          { title: "Restore backup?", kind: "info", buttons: "YesNo" },
+          {
+            title: "Restore backup?",
+            kind: "info",
+            buttons: {
+              yes: "Restore backup",
+              no: "Don't restore",
+            },
+          },
         );
         restore = r === "Yes";
       }
