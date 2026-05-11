@@ -19,3 +19,8 @@ export const onPullProgress = (
   cb: (progress: PullProgress) => void
 ): Promise<UnlistenFn> =>
   listen<PullProgress>("ollama-pull-progress", (e) => cb(e.payload));
+
+export const onVaultSwitched = (
+  cb: (newPath: string) => void
+): Promise<UnlistenFn> =>
+  listen<string>("vault-switched", (e) => cb(e.payload));
