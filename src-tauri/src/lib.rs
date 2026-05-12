@@ -197,13 +197,28 @@ fn backup_vault_db(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault configured".to_string())?;
 
+    let vault_root = validated_new_vault_root(&vault)?;
+    let vault_meta = std::fs::metadata(&vault_root).map_err(|e| {
+        format!(
+            "configured vault is not accessible ({}): {}",
+            vault_root.display(),
+            e
+        )
+    })?;
+    if !vault_meta.is_dir() {
+        return Err(format!(
+            "configured vault path is not a directory: {}",
+            vault_root.display()
+        ));
+    }
+
     let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
     let src = brain_dir.join("brain.db");
     if !src.exists() {
         return Err("no database to back up".to_string());
     }
 
-    let dest_dir = PathBuf::from(&vault).join(".brain");
+    let dest_dir = vault_root.join(".brain");
     std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join("brain.db.bak");
     let _ = std::fs::remove_file(&dest);
