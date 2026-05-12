@@ -1481,16 +1481,20 @@ pub fn run() {
     if config.get_vault_path().ok().flatten().is_none() {
         let default_vault = VaultConfig::default_vault_path();
         for subdir in &["documents", "wiki"] {
-            std::fs::create_dir_all(default_vault.join(subdir)).unwrap_or_else(|e| {
-                panic!("failed to create default vault subdirectory {subdir}: {e}");
-            });
+            if let Err(e) = std::fs::create_dir_all(default_vault.join(subdir)) {
+                eprintln!("warning: failed to create default vault subdirectory {subdir}: {e}");
+            }
         }
-        std::fs::create_dir_all(default_vault.join(".brain").join("converted")).unwrap_or_else(|e| {
-            panic!("failed to create default vault .brain/converted: {e}");
-        });
-        config
-            .set_vault_path(default_vault.to_str().unwrap_or_default())
-            .expect("failed to persist default vault path");
+        if let Err(e) = std::fs::create_dir_all(default_vault.join(".brain").join("converted")) {
+            eprintln!("warning: failed to create default vault .brain/converted: {e}");
+        }
+        if let Some(vault_str) = default_vault.to_str() {
+            if let Err(e) = config.set_vault_path(vault_str) {
+                eprintln!("warning: failed to persist default vault path: {e}");
+            }
+        } else {
+            eprintln!("warning: default vault path contains invalid UTF-8");
+        }
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
