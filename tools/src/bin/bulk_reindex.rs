@@ -5,8 +5,8 @@
 //!
 //! Examples (repo root):
 //! ```text
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin bulk_reindex -- --dry-run
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin bulk_reindex -- --limit 500
+//! cargo run --manifest-path tools/Cargo.toml --bin bulk_reindex -- --dry-run
+//! cargo run --manifest-path tools/Cargo.toml --bin bulk_reindex -- --limit 500
 //! ```
 
 use anyhow::{Context as _, Result};
