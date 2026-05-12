@@ -297,14 +297,14 @@ fn ingest_file(
     Ok(())
 }
 
-pub fn start_pipeline(db_path: PathBuf) -> mpsc::SyncSender<PipelineJob> {
+pub fn start_pipeline(db_path: PathBuf) -> (mpsc::SyncSender<PipelineJob>, std::thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(256);
     let worker = PipelineWorker::new(db_path, rx);
-    std::thread::Builder::new()
+    let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
-    tx
+    (tx, join)
 }
 
 #[cfg(test)]

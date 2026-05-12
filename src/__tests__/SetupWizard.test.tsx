@@ -15,7 +15,7 @@ test("clicking Get Started advances to Ollama step", () => {
 
 test("calls onComplete when done step button clicked", () => {
   const onComplete = vi.fn();
-  render(<SetupWizard onComplete={onComplete} initialStep={3} />);
+  render(<SetupWizard onComplete={onComplete} initialStep={2} />);
   fireEvent.click(screen.getByRole("button", { name: /open my brain/i }));
   expect(onComplete).toHaveBeenCalledTimes(1);
 });

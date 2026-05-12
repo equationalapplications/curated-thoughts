@@ -3,7 +3,7 @@ import { getIndexingStatus, IndexingStatus } from "../lib/tauri";
 
 const POLL_MS = 2000;
 
-export function useIndexingStatus(): IndexingStatus {
+export function useIndexingStatus(vaultPath: string): IndexingStatus {
   const [status, setStatus] = useState<IndexingStatus>({ indexed: 0, pending: 0 });
 
   useEffect(() => {
@@ -11,7 +11,7 @@ export function useIndexingStatus(): IndexingStatus {
     tick();
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [vaultPath]);
 
   return status;
 }

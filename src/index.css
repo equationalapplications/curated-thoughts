@@ -678,6 +678,59 @@ button.review-badge:hover { opacity: 0.85; }
 .model-success { font-size: 13px; color: #2d6a2d; }
 .model-error { font-size: 13px; color: var(--error); }
 .settings-divider { border: none; border-top: 1px solid var(--outline-var); margin: 4px 0; }
+
+.vault-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vault-path {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.vault-full-path {
+  font-size: 11px;
+  color: var(--outline);
+  word-break: break-all;
+}
+
+.vault-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.vault-actions button {
+  padding: 6px 14px;
+  border: 1px solid var(--outline-var);
+  border-radius: var(--r-md);
+  background: var(--elev-2);
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--on-surface);
+}
+
+.vault-actions button:hover {
+  background: var(--elev-1);
+}
+
+.vault-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vault-reveal-btn {
+  color: var(--primary);
+  border-color: var(--primary) !important;
+}
+
+.vault-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--outline);
+}
 .editor-toolbar { padding: 6px 16px; background: var(--elev-1); border-bottom: 1px solid var(--outline-var); display: flex; gap: 8px; flex-shrink: 0; }
 .editor-save-btn { padding: 4px 14px; background: var(--primary); color: var(--on-primary); border: none; border-radius: var(--r-pill); font-size: 12px; font-weight: 600; cursor: pointer; }
 .editor-save-btn:hover { background: var(--primary-hover); }

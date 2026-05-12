@@ -1,6 +1,14 @@
 use anyhow::Result;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::{path::PathBuf, sync::mpsc, thread};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "path")]
@@ -10,32 +18,55 @@ pub enum VaultEvent {
     Deleted(String),
 }
 
-pub fn start_watcher<F>(vault_path: PathBuf, callback: F) -> Result<()>
+pub struct WatcherHandle {
+    cancel: Arc<AtomicBool>,
+    join: thread::JoinHandle<()>,
+}
+
+impl WatcherHandle {
+    pub fn stop(self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        let _ = self.join.join();
+    }
+}
+
+pub fn spawn_vault_watcher<F>(vault_path: PathBuf, callback: F) -> Result<WatcherHandle>
 where
     F: Fn(VaultEvent) + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(&vault_path, RecursiveMode::Recursive)?;
 
-    thread::spawn(move || {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_thread = cancel.clone();
+    let join = thread::spawn(move || {
         let _keep = watcher;
-        for result in rx {
-            let Ok(event) = result else { continue };
-            for path in event.paths {
-                let path_str = path.to_string_lossy().to_string();
-                let vault_event = match event.kind {
-                    EventKind::Create(_) => VaultEvent::Added(path_str),
-                    EventKind::Modify(_) => VaultEvent::Modified(path_str),
-                    EventKind::Remove(_) => VaultEvent::Deleted(path_str),
-                    _ => continue,
-                };
-                callback(vault_event);
+        loop {
+            if cancel_thread.load(Ordering::SeqCst) {
+                break;
+            }
+            match rx.recv_timeout(Duration::from_millis(150)) {
+                Ok(Ok(event)) => {
+                    for path in event.paths {
+                        let path_str = path.to_string_lossy().to_string();
+                        let vault_event = match event.kind {
+                            EventKind::Create(_) => VaultEvent::Added(path_str),
+                            EventKind::Modify(_) => VaultEvent::Modified(path_str),
+                            EventKind::Remove(_) => VaultEvent::Deleted(path_str),
+                            _ => continue,
+                        };
+                        callback(vault_event);
+                    }
+                }
+                Ok(Err(_)) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });
 
-    Ok(())
+    Ok(WatcherHandle { cancel, join })
 }
 
 #[cfg(test)]
@@ -48,7 +79,7 @@ mod tests {
     fn test_watcher_detects_new_file() {
         let tmp = TempDir::new().unwrap();
         let (tx, rx) = mpsc::channel::<VaultEvent>();
-        start_watcher(tmp.path().to_path_buf(), move |e| {
+        let handle = spawn_vault_watcher(tmp.path().to_path_buf(), move |e| {
             tx.send(e).ok();
         })
         .unwrap();
@@ -59,6 +90,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("no event received");
         assert!(matches!(event, VaultEvent::Added(_)));
+        handle.stop();
     }
 
     #[test]
@@ -68,7 +100,7 @@ mod tests {
         fs::write(&path, "hello").unwrap();
 
         let (tx, rx) = mpsc::channel::<VaultEvent>();
-        start_watcher(tmp.path().to_path_buf(), move |e| {
+        let handle = spawn_vault_watcher(tmp.path().to_path_buf(), move |e| {
             tx.send(e).ok();
         })
         .unwrap();
@@ -76,8 +108,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         fs::remove_file(&path).unwrap();
 
-        // Drain events until Deleted is found — macOS FSEvents may emit spurious
-        // Modify events before the Remove event arrives.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut found = false;
         while std::time::Instant::now() < deadline {
@@ -90,5 +120,6 @@ mod tests {
             }
         }
         assert!(found, "no Deleted event received within timeout");
+        handle.stop();
     }
 }

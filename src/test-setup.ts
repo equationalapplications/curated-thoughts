@@ -5,6 +5,9 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "check_ollama") {
       return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
     }
+    if (cmd === "get_vault_path") {
+      return Promise.resolve("/Users/test/Curated-Thoughts");
+    }
     if (cmd === "get_recommended_model") {
       return Promise.resolve("llama3.2:3b");
     }
@@ -29,6 +32,11 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "delete_folder_rule") return Promise.resolve();
     if (cmd === "get_proposed_content") return Promise.resolve("# Test Wiki Page\n\nTest content.");
     if (cmd === "save_wiki_page") return Promise.resolve();
+    if (cmd === "delete_vault_file") return Promise.resolve();
+    if (cmd === "switch_vault") return Promise.resolve();
+    if (cmd === "backup_vault_db") return Promise.resolve("/test/backup.db");
+    if (cmd === "check_vault_backup") return Promise.resolve(false);
+    if (cmd === "reveal_vault") return Promise.resolve();
     return Promise.resolve(null);
   }),
 }));
@@ -40,6 +48,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+  message: vi.fn().mockResolvedValue("No"),
 }));
 
 vi.mock("@tauri-apps/plugin-shell", () => ({

@@ -1,7 +1,11 @@
 import { useIndexingStatus } from "../../hooks/useIndexingStatus";
 
-export function IndexingStatus() {
-  const { indexed, pending } = useIndexingStatus();
+interface Props {
+  vaultPath: string;
+}
+
+export function IndexingStatus({ vaultPath }: Props) {
+  const { indexed, pending } = useIndexingStatus(vaultPath);
 
   if (pending > 0) {
     return (
