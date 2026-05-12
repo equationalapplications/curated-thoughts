@@ -1500,7 +1500,19 @@ pub fn run() {
                 eprintln!("warning: default vault path contains invalid UTF-8");
             }
         } else {
-            eprintln!("error: failed to create default vault directory structure; vault path not persisted");
+            // Fallback: use temp directory to prevent app from getting stuck in setup
+            eprintln!("error: failed to create default vault directory structure; falling back to temporary directory");
+            let fallback_vault = std::env::temp_dir().join("Curated-Thoughts-recovery");
+            if let Err(e) = std::fs::create_dir_all(&fallback_vault) {
+                eprintln!("error: also failed to create fallback vault directory: {e}");
+            } else {
+                eprintln!("warning: using temporary recovery vault at: {}", fallback_vault.display());
+                if let Some(vault_str) = fallback_vault.to_str() {
+                    if let Err(e) = config.set_vault_path(vault_str) {
+                        eprintln!("warning: failed to persist fallback vault path: {e}");
+                    }
+                }
+            }
         }
     }
 
