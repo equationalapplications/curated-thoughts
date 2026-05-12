@@ -36,7 +36,7 @@ export function VaultPanel({ vaultPath }: Props) {
     });
     if (typeof selected !== "string" || selected === vaultPath) return;
 
-    let hasBackup = false;
+    let hasBackup: boolean;
     try {
       hasBackup = await checkVaultBackup(selected);
     } catch (e) {
