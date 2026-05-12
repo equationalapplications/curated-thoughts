@@ -1,5 +1,5 @@
 //! Writes `tests/fixtures/yaml-bench-synthetic/{corpus.jsonl,queries.json,qrels.json}`.
-//! Run: cargo run --bin gen_yaml_synthetic_bench
+//! Run: cargo run --example gen_yaml_synthetic_bench --features dev-tools
 
 use serde_json::{json, Map};
 use std::fs::{self, File};

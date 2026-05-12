@@ -59,11 +59,15 @@ jobs:
         if: steps.release_guard.outputs.should_release == 'true'
         with:
           node-version: 22
-          cache: npm
+
+      - uses: pnpm/action-setup@v4
+        if: steps.release_guard.outputs.should_release == 'true'
+        with:
+          run_install: false
 
       - name: Install dependencies
         if: steps.release_guard.outputs.should_release == 'true'
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Run semantic-release
         if: steps.release_guard.outputs.should_release == 'true'

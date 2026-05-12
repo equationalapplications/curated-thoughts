@@ -1480,17 +1480,51 @@ pub fn run() {
     let config = VaultConfig::new(VaultConfig::default_config_path());
     if config.get_vault_path().ok().flatten().is_none() {
         let default_vault = VaultConfig::default_vault_path();
+        let mut all_dirs_created = true;
         for subdir in &["documents", "wiki"] {
-            std::fs::create_dir_all(default_vault.join(subdir)).unwrap_or_else(|e| {
-                panic!("failed to create default vault subdirectory {subdir}: {e}");
-            });
+            if let Err(e) = std::fs::create_dir_all(default_vault.join(subdir)) {
+                eprintln!("warning: failed to create default vault subdirectory {subdir}: {e}");
+                all_dirs_created = false;
+            }
         }
-        std::fs::create_dir_all(default_vault.join(".brain").join("converted")).unwrap_or_else(|e| {
-            panic!("failed to create default vault .brain/converted: {e}");
-        });
-        config
-            .set_vault_path(default_vault.to_str().unwrap_or_default())
-            .expect("failed to persist default vault path");
+        if let Err(e) = std::fs::create_dir_all(default_vault.join(".brain").join("converted")) {
+            eprintln!("warning: failed to create default vault .brain/converted: {e}");
+            all_dirs_created = false;
+        }
+        if all_dirs_created {
+            if let Some(vault_str) = default_vault.to_str() {
+                if let Err(e) = config.set_vault_path(vault_str) {
+                    eprintln!("warning: failed to persist default vault path: {e}");
+                }
+            } else {
+                eprintln!("warning: default vault path contains invalid UTF-8");
+            }
+        } else {
+            // Fallback: use temp directory to prevent app from getting stuck in setup
+            eprintln!("error: failed to create default vault directory structure; falling back to temporary directory");
+            let fallback_vault = std::env::temp_dir().join("Curated-Thoughts-recovery");
+            let mut fallback_dirs_created = true;
+            for subdir in &["documents", "wiki"] {
+                if let Err(e) = std::fs::create_dir_all(fallback_vault.join(subdir)) {
+                    eprintln!("error: failed to create fallback vault subdir {subdir}: {e}");
+                    fallback_dirs_created = false;
+                }
+            }
+            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted")) {
+                eprintln!("error: failed to create fallback vault subdir .brain/converted: {e}");
+                fallback_dirs_created = false;
+            }
+            if fallback_dirs_created {
+                eprintln!("warning: using temporary recovery vault at: {}", fallback_vault.display());
+                if let Some(vault_str) = fallback_vault.to_str() {
+                    if let Err(e) = config.set_vault_path(vault_str) {
+                        eprintln!("warning: failed to persist fallback vault path: {e}");
+                    }
+                }
+            } else {
+                eprintln!("error: also failed to create fallback vault directory structure");
+            }
+        }
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
