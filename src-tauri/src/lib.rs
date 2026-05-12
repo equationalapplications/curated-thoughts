@@ -447,8 +447,8 @@ fn switch_vault(
             std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
         } else {
-            let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-            db::clear_vault_tables(&conn).map_err(|e| e.to_string())?;
+            let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+            db::clear_vault_tables(&mut conn).map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
         }
 

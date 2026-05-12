@@ -129,5 +129,5 @@ This is optional for v1 but recommended for discoverability since users may not 
 - `dirs::home_dir()` must be available; if it returns `None` on an unusual system, fall back to the current working directory.
 - The global DB stays at `~/.brain/brain.db` — no runtime connection swapping needed. Clear + re-index is the switch mechanism.
 - Backup files use `.brain/brain.db.bak` inside the vault — a single file copy, not a complex export.
-- The `set_vault_path` Tauri command must trigger the full backend switch sequence, not just write config.
+- Vault changes that must clear or restore the global DB, stop/restart the watcher and pipeline, and reconcile state go through the `switch_vault` Tauri command. `set_vault_path` only updates persisted config and ensures the vault directory layout exists; callers must not use it as a substitute for `switch_vault`.
 - Existing path-traversal hardening still applies: all file ops validate against the active vault root.

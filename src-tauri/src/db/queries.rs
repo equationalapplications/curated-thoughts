@@ -120,14 +120,16 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
     )?)
 }
 
-pub fn clear_vault_tables(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
+pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(
         "DELETE FROM embeddings;
          DELETE FROM chunks;
          DELETE FROM documents;
          DELETE FROM wiki_pages;
          DELETE FROM folder_rules;",
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -263,7 +265,7 @@ mod clear_vault_tables_tests {
 
     #[test]
     fn clear_vault_tables_empties_all_vault_data() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         upsert_document(&conn, "/test/doc.md", "abc123").unwrap();
         let doc_id: i64 = conn
             .query_row("SELECT id FROM documents LIMIT 1", [], |r| r.get(0))
@@ -284,7 +286,7 @@ mod clear_vault_tables_tests {
         )
         .unwrap();
 
-        clear_vault_tables(&conn).unwrap();
+        clear_vault_tables(&mut conn).unwrap();
 
         let doc_count: i64 = conn
             .query_row("SELECT count(*) FROM documents", [], |r| r.get(0))
