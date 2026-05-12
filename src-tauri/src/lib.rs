@@ -409,6 +409,7 @@ fn start_file_watcher_inner(
 }
 
 /// Best-effort restore of DB handle, pipeline, and file watcher after a failed `switch_vault`.
+/// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
 fn recover_after_failed_switch_vault(
     app: &AppHandle,
     db_path: &Path,
@@ -416,13 +417,15 @@ fn recover_after_failed_switch_vault(
     pipeline: &PipelineHolder,
     vault_state: &VaultConfigState,
     watcher_started: &WatcherStarted,
-) {
-    if let Err(e) = (|| -> Result<(), String> {
+) -> bool {
+    let reopened = (|| -> Result<(), String> {
         let mut guard = db_state.0.lock().map_err(|_| "db mutex poisoned".to_string())?;
         *guard = AppDb::open(db_path).map_err(|e| e.to_string())?;
         Ok(())
-    })() {
+    })();
+    if let Err(e) = &reopened {
         eprintln!("[switch_vault] recovery: failed to reopen {db_path:?}: {e}");
+        return false;
     }
     if let Ok(mut g) = pipeline.0.lock() {
         if g.is_none() {
@@ -434,6 +437,7 @@ fn recover_after_failed_switch_vault(
     {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
     }
+    true
 }
 
 #[tauri::command]
@@ -520,6 +524,7 @@ fn switch_vault(
         Ok(())
     })();
 
+    let mut recovery_reopened_db = false;
     if switch_result.is_err() {
         if let Some(ref p) = pending_config_align_to {
             if let Err(e) = vault_state.0.lock().unwrap().set_vault_path(p) {
@@ -532,7 +537,7 @@ fn switch_vault(
             "[switch_vault] switch failed ({:?}); attempting recovery for configured vault",
             switch_result.as_ref().err()
         );
-        recover_after_failed_switch_vault(
+        recovery_reopened_db = recover_after_failed_switch_vault(
             &app,
             &db_path,
             &db_state,
@@ -542,7 +547,15 @@ fn switch_vault(
         );
     }
 
-    cleanup_temp_stub_db(&stub_path);
+    // Only delete stub files after `db_state` no longer holds an open connection to `stub_path`.
+    if switch_result.is_ok() || recovery_reopened_db {
+        cleanup_temp_stub_db(&stub_path);
+    } else {
+        eprintln!(
+            "[switch_vault] skipping temp stub cleanup; real DB reopen failed and db_state may still reference {:?}",
+            stub_path
+        );
+    }
 
     if switch_result.is_ok() {
         if let Err(e) = start_file_watcher_inner(
