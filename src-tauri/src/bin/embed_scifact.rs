@@ -34,7 +34,7 @@ fn parse_preset(arg: Option<String>) -> Preset {
         Some(other) => {
             eprintln!(
                 "Unknown preset {other:?}.\n\
-                 "Usage: cargo run --example embed_scifact --features dev-tools -- [fulltext-single|sentence-chunk]\n\
+                 Usage: cargo run --example embed_scifact --features dev-tools -- [fulltext-single|sentence-chunk]\n\
                  \n\
                  Presets correspond to filenames in scifact_fixture:\n\
                  - fulltext-single — {}\n\
