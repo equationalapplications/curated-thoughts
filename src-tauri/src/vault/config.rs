@@ -20,8 +20,13 @@ impl VaultConfig {
         VaultConfig { config_path }
     }
 
-    #[allow(dead_code)]
-    pub fn default_path() -> PathBuf {
+    pub fn default_vault_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .join("Curated-Thoughts")
+    }
+
+    pub fn default_config_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_default()
             .join(".brain")
@@ -139,6 +144,13 @@ mod tests {
         let p = EmbedProfile::Local { model: "mx".into() };
         cfg.set_embed_profile(p.clone()).unwrap();
         assert_eq!(cfg.get_embed_profile().unwrap(), p);
+    }
+
+    #[test]
+    fn test_default_vault_path_ends_with_curated_thoughts() {
+        let p = VaultConfig::default_vault_path();
+        assert_eq!(p.file_name().unwrap().to_str().unwrap(), "Curated-Thoughts");
+        assert!(p.is_absolute());
     }
 
     #[test]

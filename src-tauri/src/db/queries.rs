@@ -120,6 +120,19 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
     )?)
 }
 
+pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DELETE FROM embeddings;
+         DELETE FROM chunks;
+         DELETE FROM documents;
+         DELETE FROM wiki_pages;
+         DELETE FROM folder_rules;",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +255,58 @@ mod tests {
         assert_eq!(row.3, 20);
         assert_eq!(row.4.as_deref(), Some("root_key"));
         assert_eq!(row.5, "declarative");
+    }
+}
+
+#[cfg(test)]
+mod clear_vault_tables_tests {
+    use super::*;
+    use crate::db::connection::open_in_memory;
+
+    #[test]
+    fn clear_vault_tables_empties_all_vault_data() {
+        let mut conn = open_in_memory().unwrap();
+        upsert_document(&conn, "/test/doc.md", "abc123").unwrap();
+        let doc_id: i64 = conn
+            .query_row("SELECT id FROM documents LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let chunk = crate::chunker::Chunk {
+            text: "hello".into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: None,
+            strategy: crate::chunker::ChunkStrategyTag::Prose,
+        };
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0).unwrap();
+        insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
+
+        conn.execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('test', 'index', 0)",
+            [],
+        )
+        .unwrap();
+
+        clear_vault_tables(&mut conn).unwrap();
+
+        let doc_count: i64 = conn
+            .query_row("SELECT count(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        let chunk_count: i64 = conn
+            .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        let embed_count: i64 = conn
+            .query_row("SELECT count(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        let wiki_count: i64 = conn
+            .query_row("SELECT count(*) FROM wiki_pages", [], |r| r.get(0))
+            .unwrap();
+        let rule_count: i64 = conn
+            .query_row("SELECT count(*) FROM folder_rules", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(doc_count, 0);
+        assert_eq!(chunk_count, 0);
+        assert_eq!(embed_count, 0);
+        assert_eq!(wiki_count, 0);
+        assert_eq!(rule_count, 0);
     }
 }
