@@ -1,5 +1,5 @@
 //! Precompute sentence-chunk embeddings for a recall bench fixture directory.
-//! Usage: `cargo run --example embed_bench_fixture -- <subdir>`
+//! Usage: `cargo run --example embed_bench_fixture --features dev-tools -- <subdir>`
 //!
 //! Writes the **canonical gzip JSON basename** from `recall_bench_fixture`; commit that file next
 //! to `corpus.jsonl` after regenerating so others can reuse embeddings without FastEmbed.

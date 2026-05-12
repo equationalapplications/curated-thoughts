@@ -1503,15 +1503,26 @@ pub fn run() {
             // Fallback: use temp directory to prevent app from getting stuck in setup
             eprintln!("error: failed to create default vault directory structure; falling back to temporary directory");
             let fallback_vault = std::env::temp_dir().join("Curated-Thoughts-recovery");
-            if let Err(e) = std::fs::create_dir_all(&fallback_vault) {
-                eprintln!("error: also failed to create fallback vault directory: {e}");
-            } else {
+            let mut fallback_dirs_created = true;
+            for subdir in &["documents", "wiki"] {
+                if let Err(e) = std::fs::create_dir_all(fallback_vault.join(subdir)) {
+                    eprintln!("error: failed to create fallback vault subdir {subdir}: {e}");
+                    fallback_dirs_created = false;
+                }
+            }
+            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted")) {
+                eprintln!("error: failed to create fallback vault subdir .brain/converted: {e}");
+                fallback_dirs_created = false;
+            }
+            if fallback_dirs_created {
                 eprintln!("warning: using temporary recovery vault at: {}", fallback_vault.display());
                 if let Some(vault_str) = fallback_vault.to_str() {
                     if let Err(e) = config.set_vault_path(vault_str) {
                         eprintln!("warning: failed to persist fallback vault path: {e}");
                     }
                 }
+            } else {
+                eprintln!("error: also failed to create fallback vault directory structure");
             }
         }
     }
