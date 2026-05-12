@@ -1,3 +1,24 @@
+## [1.2.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.1.0...v1.2.0) (2026-05-12)
+
+### Features
+
+* add default_vault_path() returning ~/Curated-Thoughts ([c965621](https://github.com/equationalapplications/curated-thoughts/commit/c965621f561e9a681f6edf5237c54a67943399d2))
+* add VaultPanel CSS styles ([b98eecc](https://github.com/equationalapplications/curated-thoughts/commit/b98eecc1e5d7e27dc28a631a3ad47b75ae409b02))
+
+### Bug Fixes
+
+* add core-llm-wiki as direct dependency ([a4a154a](https://github.com/equationalapplications/curated-thoughts/commit/a4a154a18f71f63eeafaa5249cf8cc57e1e2ba3d))
+* address PR review feedback ([28e3931](https://github.com/equationalapplications/curated-thoughts/commit/28e3931d1a0c9887e7c6c8634a5d7f7a4127d4ac))
+* **ci:** add packageManager field to satisfy pnpm/action-setup@v4 ([e3cbffa](https://github.com/equationalapplications/curated-thoughts/commit/e3cbffad5530b8b6d77018aef1c7758b9ddb17e7))
+* configure cargo binaries to fix multiplatform builds ([5a383b1](https://github.com/equationalapplications/curated-thoughts/commit/5a383b1851a71f01042c85b2977498ec91767c68))
+* default vault initialization — only persist vault path if all directories created successfully ([1cb35d8](https://github.com/equationalapplications/curated-thoughts/commit/1cb35d85d5facfe7e9785eb76efa2a440e66a756))
+* **deps:** downgrade eslint to v9 to resolve peer dependency conflict ([18d614f](https://github.com/equationalapplications/curated-thoughts/commit/18d614f511a7c6725671f0500f893eb155e0a8e8))
+* fallback vault subdirs + --features dev-tools in bin doc comments ([62b290e](https://github.com/equationalapplications/curated-thoughts/commit/62b290e18e17c23e3129b77232c1424dc49d1c7c))
+* remove duplicate test_default_vault_path_ends_with_curated_thoughts ([0543de5](https://github.com/equationalapplications/curated-thoughts/commit/0543de52557a5dc89398cad08e2cbb334268984e))
+* remove package-lock.json and add vault recovery fallback ([03506a1](https://github.com/equationalapplications/curated-thoughts/commit/03506a1bf938b650e6be80d67fb0de12163ea80b))
+* remove stray quote in embed_scifact parse_preset usage string ([17b7785](https://github.com/equationalapplications/curated-thoughts/commit/17b7785e93e25a75bcecfc9eaca67fce900b575e))
+* workflows use pnpm, add rust cache, optimize build ([6dfa1e5](https://github.com/equationalapplications/curated-thoughts/commit/6dfa1e546aa877d9176f09c40e7a1b49f665dac4))
+
 ## [1.1.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.4...v1.1.0) (2026-05-12)
 
 ### Features
