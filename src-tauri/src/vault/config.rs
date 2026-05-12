@@ -22,7 +22,7 @@ impl VaultConfig {
 
     pub fn default_vault_path() -> PathBuf {
         dirs::home_dir()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .unwrap_or_else(|| std::env::temp_dir())
             .join("Curated-Thoughts")
     }
 
