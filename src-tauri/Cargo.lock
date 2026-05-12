@@ -874,7 +874,6 @@ dependencies = [
  "hex",
  "mockito",
  "notify",
- "once_cell",
  "pdf-extract",
  "reqwest 0.12.28",
  "rmcp",
