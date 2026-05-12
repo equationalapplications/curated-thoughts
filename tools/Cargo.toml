@@ -1,0 +1,52 @@
+[package]
+name = "curated-thoughts-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Developer and maintenance tools for Curated Thoughts (not bundled with the app)"
+
+[dependencies]
+tauri_app_lib = { path = "../src-tauri" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+rmcp = { version = "1.6", features = ["macros", "transport-io", "schemars"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+schemars = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "embed_scifact"
+path = "src/bin/embed_scifact.rs"
+
+[[bin]]
+name = "embed_bench_fixture"
+path = "src/bin/embed_bench_fixture.rs"
+
+[[bin]]
+name = "gen_yaml_synthetic_bench"
+path = "src/bin/gen_yaml_synthetic_bench.rs"
+
+[[bin]]
+name = "gen_yaml_k8s_curated_bench"
+path = "src/bin/gen_yaml_k8s_curated_bench.rs"
+
+[[bin]]
+name = "gen_code_synthetic_bench"
+path = "src/bin/gen_code_synthetic_bench.rs"
+
+[[bin]]
+name = "gen_code_curated_bench"
+path = "src/bin/gen_code_curated_bench.rs"
+
+[[bin]]
+name = "curated-thoughts-mcp"
+path = "src/bin/curated_thoughts_mcp.rs"
+
+[[bin]]
+name = "bulk_reindex"
+path = "src/bin/bulk_reindex.rs"
+
+[[bin]]
+name = "semantic_search_profile"
+path = "src/bin/semantic_search_profile.rs"
