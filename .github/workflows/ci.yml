@@ -29,10 +29,17 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: |
+            ./src-tauri -> target
+            ./tools -> target
+
+      - name: Build MCP binary
+        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
 
       - name: Tests + MCP integration
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features mcp-server,test-utils
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
+        env:
+          CURATED_MCP_INTEGRATION_TESTS: "1"
 
   frontend:
     runs-on: ubuntu-latest

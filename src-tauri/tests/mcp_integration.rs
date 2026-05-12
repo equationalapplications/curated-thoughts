@@ -1,5 +1,8 @@
 //! Spawns **`curated-thoughts-mcp`** over stdio and exercises MCP tool calls (**`rmcp`** client).
-//! Run with: **`cargo test -p curated-thoughts --features mcp-server --test mcp_integration`**.
+//! Build the binary first: `cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp`
+//! Then run: `CURATED_MCP_INTEGRATION_TESTS=1 cargo test --manifest-path src-tauri/Cargo.toml --test mcp_integration`
+//!
+//! Skipped unless `CURATED_MCP_INTEGRATION_TESTS=1` is set (binary not available in default CI).
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +32,9 @@ fn mcp_exe() -> PathBuf {
     }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri has parent")
+        .join("tools")
         .join("target")
         .join(profile)
         .join(if cfg!(windows) {
@@ -97,6 +103,10 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
+    if std::env::var("CURATED_MCP_INTEGRATION_TESTS").is_err() {
+        eprintln!("Skipping MCP integration test — set CURATED_MCP_INTEGRATION_TESTS=1 to run");
+        return;
+    }
     let root = tempdir().expect("tempdir");
     let brain = root.path();
     std::fs::write(brain.join("config.json"), b"{}\n").unwrap();
@@ -116,7 +126,7 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
 
     assert!(
         mcp_exe().exists(),
-        "MCP binary missing: {:?}\nbuild with:\n  cargo build -p curated-thoughts --features mcp-server --bin curated-thoughts-mcp\nor from repo root:\n  cargo build --manifest-path src-tauri/Cargo.toml -p curated-thoughts --features mcp-server --bin curated-thoughts-mcp",
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp",
         mcp_exe()
     );
 
