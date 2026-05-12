@@ -1,3 +1,9 @@
+## [1.2.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.2.0...v1.2.1) (2026-05-12)
+
+### Bug Fixes
+
+* resolve merge conflicts and address Copilot review feedback ([659abb9](https://github.com/equationalapplications/curated-thoughts/commit/659abb9c998793b55776a3126e632985295be590))
+
 ## [1.2.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.1.0...v1.2.0) (2026-05-12)
 
 ### Features
