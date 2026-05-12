@@ -249,13 +249,7 @@ fn switching_to_same_vault_as_configured(current: &str, new_root: &Path) -> bool
     }
 }
 
-fn start_file_watcher_inner(
-    app: &AppHandle,
-    pipeline: &PipelineHolder,
-    db_state: &DbState,
-    vault_state: &VaultConfigState,
-    watcher_started: &WatcherStarted,
-) -> Result<(), String> {
+fn canonical_vault_from_config(vault_state: &VaultConfigState) -> Result<PathBuf, String> {
     let configured_vault = vault_state
         .0
         .lock()
@@ -264,18 +258,35 @@ fn start_file_watcher_inner(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = PathBuf::from(&configured_vault);
-
-    let vault_canonical = vault_root
+    vault_root
         .canonicalize()
-        .map_err(|e| format!("failed to canonicalize configured vault: {}", e))?;
+        .map_err(|e| format!("failed to canonicalize configured vault: {}", e))
+}
 
-    let mut watcher_guard = watcher_started.0.lock().unwrap();
-    if let Some((prev_path, handle)) = watcher_guard.take() {
-        if prev_path == vault_canonical {
-            *watcher_guard = Some((prev_path, handle));
-            return Ok(());
+fn start_file_watcher_inner(
+    app: &AppHandle,
+    pipeline: &PipelineHolder,
+    db_state: &DbState,
+    vault_state: &VaultConfigState,
+    watcher_started: &WatcherStarted,
+) -> Result<(), String> {
+    let target_canonical = canonical_vault_from_config(vault_state)?;
+
+    let old_handle_to_stop = {
+        let mut watcher_guard = watcher_started.0.lock().unwrap();
+        if let Some((prev_path, handle)) = watcher_guard.take() {
+            if prev_path == target_canonical {
+                *watcher_guard = Some((prev_path, handle));
+                return Ok(());
+            }
+            Some(handle)
+        } else {
+            None
         }
-        handle.stop();
+    };
+
+    if let Some(h) = old_handle_to_stop {
+        h.stop();
     }
 
     let pipeline_tx = pipeline
@@ -287,7 +298,7 @@ fn start_file_watcher_inner(
         .0
         .clone();
 
-    let raw_docs = vault_canonical.join("documents");
+    let raw_docs = target_canonical.join("documents");
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
     {
@@ -336,7 +347,7 @@ fn start_file_watcher_inner(
     }
 
     let app = app.clone();
-    let vault_for_watcher = vault_canonical.clone();
+    let vault_for_watcher = target_canonical.clone();
     let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
@@ -360,7 +371,25 @@ fn start_file_watcher_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    *watcher_guard = Some((vault_canonical, handle));
+    let mut watcher_guard = watcher_started.0.lock().unwrap();
+    let still_canonical = match canonical_vault_from_config(vault_state) {
+        Ok(p) => p,
+        Err(e) => {
+            drop(watcher_guard);
+            handle.stop();
+            return Err(e);
+        }
+    };
+    if still_canonical != target_canonical {
+        drop(watcher_guard);
+        handle.stop();
+        return Ok(());
+    }
+
+    if let Some((_p, old)) = watcher_guard.take() {
+        old.stop();
+    }
+    *watcher_guard = Some((still_canonical, handle));
     Ok(())
 }
 
@@ -606,11 +635,14 @@ fn queue_full_reindex(
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
     let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
-    let pipeline_guard = pipeline.0.lock().unwrap();
-    let tx = &pipeline_guard
-        .as_ref()
-        .ok_or_else(|| "pipeline not running".to_string())?
-        .0;
+    let tx = {
+        let pipeline_guard = pipeline.0.lock().unwrap();
+        pipeline_guard
+            .as_ref()
+            .ok_or_else(|| "pipeline not running".to_string())?
+            .0
+            .clone()
+    };
     let mut queued = 0usize;
     for path in paths {
         if !std::path::Path::new(&path).exists() {
