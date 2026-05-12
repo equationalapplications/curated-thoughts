@@ -14,6 +14,7 @@ export function useSearch(vaultPath: string) {
   useEffect(() => {
     setQuery("");
     setResults([]);
+    setSearching(false);
   }, [vaultPath]);
 
   useEffect(() => {
