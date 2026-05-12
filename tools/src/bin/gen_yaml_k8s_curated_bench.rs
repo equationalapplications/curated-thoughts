@@ -1,6 +1,6 @@
 //! Kubernetes-style **curated** bench (richer than synthetic): Services, Ingress rules, ConfigMap data.
 //! Writes `tests/fixtures/yaml-bench-k8s-curated/`.
-//! Run: cargo run --example gen_yaml_k8s_curated_bench --features dev-tools
+//! Run: cargo run --bin gen_yaml_k8s_curated_bench
 
 use serde_json::{json, Map};
 use std::fs::{self, File};

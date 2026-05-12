@@ -46,8 +46,6 @@ tree-sitter-typescript = { version = "0.23.2", default-features = false }
 tree-sitter-javascript = { version = "0.25.0", default-features = false }
 tree-sitter-python = { version = "0.25.0", default-features = false }
 tree-sitter-go = { version = "0.25.0", default-features = false }
-rmcp = { version = "1.6", optional = true, features = ["macros", "transport-io", "schemars"] }
-schemars = { version = "1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -59,60 +57,7 @@ rmcp = { version = "1.6", features = ["client", "transport-child-process"] }
 [features]
 test-utils = ["tauri/test"]
 slow-tests = []
-mcp-server = ["dep:rmcp", "dep:schemars"]
-dev-tools = []
 
 [[bin]]
 name = "curated-thoughts"
 path = "src/main.rs"
-
-[[example]]
-name = "embed_scifact"
-path = "src/bin/embed_scifact.rs"
-required-features = ["dev-tools"]
-
-[[example]]
-name = "embed_bench_fixture"
-path = "src/bin/embed_bench_fixture.rs"
-required-features = ["dev-tools"]
-
-[[example]]
-name = "gen_yaml_synthetic_bench"
-path = "src/bin/gen_yaml_synthetic_bench.rs"
-required-features = ["dev-tools"]
-
-[[example]]
-name = "gen_yaml_k8s_curated_bench"
-path = "src/bin/gen_yaml_k8s_curated_bench.rs"
-required-features = ["dev-tools"]
-
-[[example]]
-name = "gen_code_synthetic_bench"
-path = "src/bin/gen_code_synthetic_bench.rs"
-required-features = ["dev-tools"]
-
-[[example]]
-name = "gen_code_curated_bench"
-path = "src/bin/gen_code_curated_bench.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
-name = "curated-thoughts-mcp"
-path = "src/bin/curated_thoughts_mcp.rs"
-required-features = ["mcp-server"]
-
-[[example]]
-name = "bulk_reindex"
-path = "src/bin/bulk_reindex.rs"
-required-features = ["dev-tools"]
-
-[[example]]
-name = "semantic_search_profile"
-path = "src/bin/semantic_search_profile.rs"
-required-features = ["dev-tools"]
-
-[[test]]
-name = "mcp_integration"
-path = "tests/mcp_integration.rs"
-required-features = ["mcp-server"]
-

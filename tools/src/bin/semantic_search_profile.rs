@@ -5,7 +5,7 @@
 //! so embeddings need no network (same as MCP integration tests).
 //!
 //! ```text
-//! CURATED_EMBED_STUB=constant8 cargo run --manifest-path src-tauri/Cargo.toml --release --bin semantic_search_profile -- 8000
+//! CURATED_EMBED_STUB=constant8 cargo run --manifest-path tools/Cargo.toml --release --bin semantic_search_profile -- 8000
 //! ```
 
 use std::path::PathBuf;
