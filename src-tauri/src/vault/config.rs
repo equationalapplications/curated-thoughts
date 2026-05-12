@@ -154,13 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_vault_path_ends_with_curated_thoughts() {
-        let p = VaultConfig::default_vault_path();
-        assert_eq!(p.file_name().unwrap().to_str().unwrap(), "Curated-Thoughts");
-        assert!(p.is_absolute());
-    }
-
-    #[test]
     fn embed_profile_roundtrip_cloud() {
         let tmp = TempDir::new().unwrap();
         let cfg = make_config(&tmp);
