@@ -1480,20 +1480,27 @@ pub fn run() {
     let config = VaultConfig::new(VaultConfig::default_config_path());
     if config.get_vault_path().ok().flatten().is_none() {
         let default_vault = VaultConfig::default_vault_path();
+        let mut all_dirs_created = true;
         for subdir in &["documents", "wiki"] {
             if let Err(e) = std::fs::create_dir_all(default_vault.join(subdir)) {
                 eprintln!("warning: failed to create default vault subdirectory {subdir}: {e}");
+                all_dirs_created = false;
             }
         }
         if let Err(e) = std::fs::create_dir_all(default_vault.join(".brain").join("converted")) {
             eprintln!("warning: failed to create default vault .brain/converted: {e}");
+            all_dirs_created = false;
         }
-        if let Some(vault_str) = default_vault.to_str() {
-            if let Err(e) = config.set_vault_path(vault_str) {
-                eprintln!("warning: failed to persist default vault path: {e}");
+        if all_dirs_created {
+            if let Some(vault_str) = default_vault.to_str() {
+                if let Err(e) = config.set_vault_path(vault_str) {
+                    eprintln!("warning: failed to persist default vault path: {e}");
+                }
+            } else {
+                eprintln!("warning: default vault path contains invalid UTF-8");
             }
         } else {
-            eprintln!("warning: default vault path contains invalid UTF-8");
+            eprintln!("error: failed to create default vault directory structure; vault path not persisted");
         }
     }
 
