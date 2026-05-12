@@ -17,6 +17,9 @@ importers:
       '@blocknote/react':
         specifier: ^0.50.0
         version: 0.50.0(@floating-ui/dom@1.7.6)(@types/hast@3.0.4)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      '@equationalapplications/core-llm-wiki':
+        specifier: ^3.0.0
+        version: 3.2.0
       '@equationalapplications/react-llm-wiki':
         specifier: ^3.0.0
         version: 3.2.0(react@19.2.6)
