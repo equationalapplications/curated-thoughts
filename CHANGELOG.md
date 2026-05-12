@@ -1,3 +1,25 @@
+## [1.1.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.4...v1.1.0) (2026-05-12)
+
+### Features
+
+* default vault path and settings vault switching ([780c6a0](https://github.com/equationalapplications/curated-thoughts/commit/780c6a02f001984c059ad6bc331e9f43dba51b77))
+
+### Bug Fixes
+
+* address PR review — spec, search state, atomic DB clear ([82a8415](https://github.com/equationalapplications/curated-thoughts/commit/82a8415ec7f49654906c45a23b7c0c153306b930))
+* dialog restore prompt and watcher after vault switch ([92f4876](https://github.com/equationalapplications/curated-thoughts/commit/92f4876c0d5e752605f23d97195b84e3066552c5))
+* guard same-vault switch and tidy notify import ([4325892](https://github.com/equationalapplications/curated-thoughts/commit/4325892d315521fce8cca6fa33e683838c35630f))
+* restore prompt uses yes/no/cancel for plugin-dialog types ([6bd022a](https://github.com/equationalapplications/curated-thoughts/commit/6bd022ab239e96354364c52f210c14908361eea4))
+* **tauri:** shorten locks in watcher start and full reindex ([2d3c53a](https://github.com/equationalapplications/curated-thoughts/commit/2d3c53abe52d024a2d82a69ed6a3f171bab7cd95))
+* **tauri:** skip stub cleanup when recovery leaves stub DB open ([35beb4b](https://github.com/equationalapplications/curated-thoughts/commit/35beb4b51de1d10bbcab6f6449c76e73d4c5d0f6))
+* **tauri:** validate vault path before DB backup ([6b76652](https://github.com/equationalapplications/curated-thoughts/commit/6b766520745fc663aa39cf7ee058321a2b0f6d13))
+* use default_config_path in app startup ([572e955](https://github.com/equationalapplications/curated-thoughts/commit/572e95598f2e41afc2168185ba2f02d4bdb5ef58))
+* vault backup dialog roles and switch_vault recovery ([e75d989](https://github.com/equationalapplications/curated-thoughts/commit/e75d9893a5b041d526101c197c3c660794ef3e55))
+* vault path fallbacks, search stale guard, test app pipeline ([01842b4](https://github.com/equationalapplications/curated-thoughts/commit/01842b456bb995cbb77dccbcd48142bead18626a))
+* vault switch UX, path validation, and SQLite sidecars ([d42cd0b](https://github.com/equationalapplications/curated-thoughts/commit/d42cd0b726b5b3ba519d537c72c4b3f1bb39334c))
+* vault test mock and WAL-safe brain.db backup ([e1e89c7](https://github.com/equationalapplications/curated-thoughts/commit/e1e89c74a9bd29f8b3716e22b6dcc2f0f3c51920))
+* **vault:** stub cleanup, validate backup path, align config on switch error ([3757f13](https://github.com/equationalapplications/curated-thoughts/commit/3757f136e02ee08a7485569046591bb0c95e40a7))
+
 ## [1.0.4](https://github.com/equationalapplications/curated-thoughts/compare/v1.0.3...v1.0.4) (2026-05-10)
 
 ### Bug Fixes
