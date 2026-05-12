@@ -1,10 +1,11 @@
 [package]
 name = "curated-thoughts"
 default-run = "curated-thoughts"
-version = "1.0.4"
+version = "1.2.0"
 description = "Curated Thoughts Tauri backend"
 authors = ["you"]
 edition = "2021"
+autobins = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -25,7 +26,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 notify = "6"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
@@ -57,3 +58,6 @@ rmcp = { version = "1.6", features = ["client", "transport-child-process"] }
 test-utils = ["tauri/test"]
 slow-tests = []
 
+[[bin]]
+name = "curated-thoughts"
+path = "src/main.rs"

@@ -1,4 +1,6 @@
-interface Props { onComplete: () => void }
+interface Props {
+  onComplete: () => void | Promise<void>;
+}
 
 export function StepDone({ onComplete }: Props) {
   return (

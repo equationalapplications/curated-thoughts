@@ -27,8 +27,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./tools -> target
+
+      - name: Build MCP binary
+        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
+
       - name: Tests + MCP integration
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features mcp-server,test-utils
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
+        env:
+          CURATED_MCP_INTEGRATION_TESTS: "1"
 
   frontend:
     runs-on: ubuntu-latest
@@ -38,13 +49,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
 
-      - name: Install npm dependencies
-        run: npm ci
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck + Vite build
-        run: npm run build
+        run: pnpm run build
 
       - name: Vitest
-        run: npm test
+        run: pnpm test

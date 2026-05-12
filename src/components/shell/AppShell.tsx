@@ -6,9 +6,13 @@ import { RelatedNotes } from "./RelatedNotes";
 import { ReviewModal } from "../review/ReviewModal";
 import { SettingsModal } from "../settings/SettingsModal";
 import { startFileWatcher } from "../../lib/tauri";
+import { onVaultSwitched } from "../../lib/events";
 import { useReviewQueue } from "../../hooks/useReviewQueue";
 
-interface Props { vaultPath: string }
+interface Props {
+  vaultPath: string;
+  onVaultChanged: (newPath: string) => void;
+}
 
 function isAbsolutePath(norm: string): boolean {
   return norm.startsWith("/") || /^[A-Za-z]:\//.test(norm);
@@ -55,16 +59,27 @@ function isWikiDocPath(p: string | null | undefined, vaultRoot: string): boolean
   return first === "wiki";
 }
 
-export function AppShell({ vaultPath }: Props) {
+export function AppShell({ vaultPath, onVaultChanged }: Props) {
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const [showReview, setShowReview] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const isWiki = isWikiDocPath(selectedDoc, vaultPath);
-  const { queue, refresh } = useReviewQueue();
+  const { queue, refresh } = useReviewQueue(vaultPath);
 
   useEffect(() => {
     startFileWatcher().catch(console.error);
   }, [vaultPath]);
+
+  useEffect(() => {
+    const promise = onVaultSwitched((newPath) => {
+      setSelectedDoc(null);
+      setShowSettings(false);
+      onVaultChanged(newPath);
+    });
+    return () => {
+      promise.then((unlisten) => unlisten());
+    };
+  }, [onVaultChanged]);
 
   return (
     <div className="app-root">
@@ -84,10 +99,17 @@ export function AppShell({ vaultPath }: Props) {
         <ReviewModal
           queue={queue}
           onClose={() => setShowReview(false)}
-          onAction={() => { refresh(); }}
+          onAction={() => {
+            refresh();
+          }}
         />
       )}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          vaultPath={vaultPath}
+        />
+      )}
     </div>
   );
 }
