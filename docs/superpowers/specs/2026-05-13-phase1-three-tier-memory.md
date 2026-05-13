@@ -481,7 +481,7 @@ Individual source references live in a collapsible `<details>` block. This way a
 
 ## Out of Scope (Phase 2+)
 
-- **CodeGraph / Edge Extraction** — `curated_relationships` table, tree-sitter call-site extraction, hop-based retrieval expansion.
+- **Code graph / Edge Extraction** — `curated_relationships` table, tree-sitter call-site extraction, hop-based retrieval expansion.
 - **Native vector ranker** — `sqlite-vec` / `sqlite-vss` adapter for sub-millisecond ANN search.
 - **Contextual aging** — score decay for working-memory chunks not accessed recently.
 - **Librarian re-weighting** — dynamic tier weight adjustment based on Review Queue ignore patterns.
