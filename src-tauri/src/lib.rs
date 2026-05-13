@@ -2,6 +2,7 @@ pub mod chunker;
 pub mod db;
 pub mod embedder;
 mod hasher;
+pub mod indexer;
 pub mod librarian;
 mod pipeline;
 pub mod recall_bench_fixture;
