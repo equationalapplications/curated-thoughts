@@ -1,4 +1,4 @@
-use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4};
+use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -19,6 +19,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     if version < 4 {
         conn.execute_batch(MIGRATION_V4)?;
+    }
+    if version < 5 {
+        conn.execute_batch(MIGRATION_V5)?;
     }
 
     Ok(())
@@ -53,13 +56,19 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 4);
+        assert_eq!(max_version, 5);
     }
 
     #[test]
     fn test_all_tables_exist() {
         let conn = open_in_memory().unwrap();
-        for table in &["documents", "chunks", "wiki_pages", "folder_rules"] {
+        for table in &[
+            "documents",
+            "chunks",
+            "wiki_pages",
+            "folder_rules",
+            "curated_relationships",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
@@ -85,12 +94,36 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_4() {
+    fn test_schema_version_is_5() {
         let conn = open_in_memory().unwrap();
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 4);
+        assert_eq!(max_version, 5);
+    }
+
+    #[test]
+    fn migration_v5_adds_defined_symbol_and_entity_id_columns() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = crate::db::queries::upsert_document(&conn, "/x/b.md", "h2").unwrap();
+        let chunk = crate::chunker::Chunk {
+            text: "body".into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: Some("MyStruct".into()),
+            defined_symbol: Some("mystruct".into()),
+            strategy: crate::chunker::ChunkStrategyTag::AstSymbolRust,
+        };
+        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+        let (def_sym, eid): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT defined_symbol, entity_id FROM chunks WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(def_sym.as_deref(), Some("mystruct"));
+        assert_eq!(eid.as_deref(), Some("tier_fact"));
     }
 
     #[test]
@@ -102,9 +135,10 @@ mod tests {
             start_line: 3,
             end_line: 7,
             symbol_name: Some("foo".into()),
+            defined_symbol: None,
             strategy: crate::chunker::ChunkStrategyTag::Declarative,
         };
-        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0).unwrap();
+        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_working").unwrap();
         let (sl, el, sym, strat): (i64, i64, Option<String>, String) = conn
             .query_row(
                 "SELECT start_line, end_line, symbol_name, strategy FROM chunks WHERE id = ?1",

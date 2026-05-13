@@ -336,6 +336,7 @@ pub(super) fn chunk_code_like_chunks(text: &str) -> Vec<Chunk> {
                 start_line,
                 end_line,
                 symbol_name: None,
+                defined_symbol: None,
                 strategy: ChunkStrategyTag::Scanner,
             }
         })
@@ -360,6 +361,7 @@ fn split_by_chars_chunks(
                 start_line,
                 end_line,
                 symbol_name: None,
+                defined_symbol: None,
                 strategy: ChunkStrategyTag::Scanner,
             }
         })

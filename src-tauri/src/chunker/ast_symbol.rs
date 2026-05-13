@@ -253,11 +253,18 @@ fn collect_rust(
             }
         }
 
+        let defined_symbol = Some(
+            symbol_name_opt
+                .as_deref()
+                .unwrap_or(raw_name)
+                .to_lowercase(),
+        );
         out.push(Chunk {
             text: body,
             start_line,
             end_line,
             symbol_name: symbol_name_opt.or_else(|| Some(raw_name.to_string())),
+            defined_symbol,
             strategy: tag.clone(),
         });
     }
@@ -379,11 +386,13 @@ fn chunk_simple(
     name: Option<String>,
     tag: &ChunkStrategyTag,
 ) -> Chunk {
+    let defined_symbol = name.as_ref().map(|s| s.to_lowercase());
     Chunk {
         text,
         start_line: sym.start_position().row as u32 + 1,
         end_line: sym.end_position().row as u32 + 1,
         symbol_name: name,
+        defined_symbol,
         strategy: tag.clone(),
     }
 }
@@ -431,11 +440,13 @@ fn collect_go(
             (Some(id.to_string()), sym_text.to_string())
         };
 
+        let defined_symbol = qualified.as_ref().map(|s| s.to_lowercase());
         out.push(Chunk {
             text: body,
             start_line,
             end_line,
             symbol_name: qualified,
+            defined_symbol,
             strategy: tag.clone(),
         });
     }
@@ -620,6 +631,7 @@ fn split_oversized_ast(chunk: Chunk) -> Vec<Chunk> {
                     start_line: sl,
                     end_line: el.max(sl),
                     symbol_name: chunk.symbol_name.clone(),
+                    defined_symbol: chunk.defined_symbol.clone(),
                     strategy: chunk.strategy.clone(),
                 });
             }
@@ -723,6 +735,7 @@ fn subchunk_trimmed_slice(
         start_line: line_in_symbol(full, base_sl, abs_lo),
         end_line: line_in_symbol(full, base_sl, abs_hi.saturating_sub(1)),
         symbol_name: parent.symbol_name.clone(),
+        defined_symbol: parent.defined_symbol.clone(),
         strategy: parent.strategy.clone(),
     })
 }
@@ -797,6 +810,7 @@ fn push_trimmed_chunk_slice(
         start_line: sl,
         end_line: el.max(sl),
         symbol_name: parent.symbol_name.clone(),
+        defined_symbol: parent.defined_symbol.clone(),
         strategy: parent.strategy.clone(),
     });
 }

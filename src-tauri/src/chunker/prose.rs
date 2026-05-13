@@ -272,6 +272,7 @@ pub(super) fn chunk_prose_chunks(text: &str) -> Vec<Chunk> {
             start_line,
             end_line,
             symbol_name: None,
+            defined_symbol: None,
             strategy: ChunkStrategyTag::Prose,
         });
     }
