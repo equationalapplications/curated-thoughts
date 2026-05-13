@@ -47,6 +47,9 @@ export interface SearchResult {
   end_line: number;
   symbol_name: string | null;
   strategy: string;
+  // Phase 2: structural graph neighbors
+  structural?: boolean;
+  rel_type?: string;
 }
 
 export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> =>
