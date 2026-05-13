@@ -1,4 +1,5 @@
 import { createWiki, WikiBusyError } from "@equationalapplications/react-llm-wiki";
+import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
@@ -61,17 +62,22 @@ export async function setupWiki() {
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */
-export async function tieredRead(query: string) {
+export async function tieredRead(
+  query: string,
+  opts: { graphExpansion?: GraphExpansionOptions } = {}
+) {
   return wiki.read(
     ['tier_fact', 'tier_wisdom', _workspaceId],
     query,
     {
       tierWeights: {
-        tier_fact: 1.5,
-        tier_wisdom: 1.0,
+        tier_fact:     1.5,
+        tier_wisdom:   1.0,
         [_workspaceId]: 0.6,
       },
-    }
+      // graphExpansion passed through; handled by host-app layer when supported
+      ...(opts.graphExpansion !== undefined && { graphExpansion: opts.graphExpansion }),
+    } as any
   );
 }
 

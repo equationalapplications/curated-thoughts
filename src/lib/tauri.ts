@@ -126,3 +126,17 @@ export const checkVaultBackup = (path: string): Promise<boolean> =>
 
 export const revealVault = (): Promise<void> =>
   invoke("reveal_vault");
+
+export interface NeighborRow {
+  chunk_id: number;
+  depth: number;
+  rel_type: string;
+}
+
+export const getImpactRadius = (
+  rootChunkId: number,
+  entityId: string,
+  direction: 'callers' | 'callees' | 'both',
+  maxHops: number,
+): Promise<NeighborRow[]> =>
+  invoke('get_impact_radius', { rootChunkId, entityId, direction, maxHops });
