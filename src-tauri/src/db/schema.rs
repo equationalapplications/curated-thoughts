@@ -83,3 +83,42 @@ ALTER TABLE chunks ADD COLUMN strategy     TEXT NOT NULL DEFAULT 'prose';
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (4);
 ";
+
+pub const MIGRATION_V5: &str = "
+ALTER TABLE chunks ADD COLUMN defined_symbol TEXT DEFAULT NULL;
+ALTER TABLE chunks ADD COLUMN entity_id TEXT;
+
+UPDATE chunks SET entity_id = (
+  SELECT CASE d.tier
+    WHEN 'user_doc' THEN 'tier_fact'
+    WHEN 'wiki' THEN 'tier_wisdom'
+    ELSE 'tier_working'
+  END
+  FROM documents d WHERE d.id = chunks.doc_id
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_defined_symbol
+    ON chunks (defined_symbol, entity_id)
+    WHERE defined_symbol IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS curated_relationships (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id     INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    to_id       INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    rel_type    TEXT    NOT NULL,
+    symbol      TEXT    NOT NULL,
+    entity_id   TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_rel_symbol
+    ON curated_relationships (symbol, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_rel_to_id
+    ON curated_relationships (to_id, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_rel_from_id
+    ON curated_relationships (from_id, entity_id);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+";

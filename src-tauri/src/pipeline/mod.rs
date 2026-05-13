@@ -254,6 +254,36 @@ pub fn ingest_document(
     ingest_file(conn, profile, path, force_rechunk)
 }
 
+fn entity_id_for_path(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        let parent_name = parent
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if parent_name == "documents" {
+            return "tier_fact".to_string();
+        }
+        if parent_name == "wiki" {
+            return "tier_wisdom".to_string();
+        }
+        // Walk up one more level for nested paths
+        if let Some(grandparent) = parent.parent() {
+            let gp_name = grandparent
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if gp_name == "documents" {
+                return "tier_fact".to_string();
+            }
+            if gp_name == "wiki" {
+                return "tier_wisdom".to_string();
+            }
+        }
+    }
+    "tier_working".to_string()
+}
+
 fn ingest_file(
     conn: &Connection,
     profile: &EmbedProfile,
@@ -284,6 +314,7 @@ fn ingest_file(
     };
 
     let doc_id = upsert_document(conn, path, &hash)?;
+    let eid = entity_id_for_path(path);
 
     let chunks = chunk_autodetect(Path::new(path), &text);
     if chunks.is_empty() {
@@ -298,7 +329,7 @@ fn ingest_file(
     })?;
 
     for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-        let chunk_id = insert_chunk(conn, doc_id, chunk, i)?;
+        let chunk_id = insert_chunk(conn, doc_id, chunk, i, &eid)?;
         insert_embedding(conn, chunk_id, vector)?;
     }
 

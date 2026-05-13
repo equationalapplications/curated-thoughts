@@ -133,6 +133,7 @@ pub(super) fn chunk_declarative_chunks(path: &Path, text: &str) -> Vec<Chunk> {
             start_line,
             end_line,
             symbol_name: sym,
+            defined_symbol: None,
             strategy: ChunkStrategyTag::Declarative,
         });
     }

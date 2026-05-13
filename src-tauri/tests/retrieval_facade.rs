@@ -36,9 +36,10 @@ fn retrieval_facade_semantic_search_readonly_stub() {
                     start_line: 1,
                     end_line: 2,
                     symbol_name: Some("foo".into()),
+                    defined_symbol: None,
                     strategy: ChunkStrategyTag::Prose,
                 };
-                let chunk_id = insert_chunk(&db.0, doc_id, &chunk, 0).unwrap();
+                let chunk_id = insert_chunk(&db.0, doc_id, &chunk, 0, "tier_fact").unwrap();
                 let profile = retrieval::load_embed_profile(&paths.config_path).unwrap();
                 let v = embed_one(&profile, chunk.text.clone()).unwrap();
                 insert_embedding(&db.0, chunk_id, &v).unwrap();

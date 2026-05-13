@@ -111,6 +111,7 @@ pub struct Chunk {
     pub start_line: u32,
     pub end_line: u32,
     pub symbol_name: Option<String>,
+    pub defined_symbol: Option<String>,
     pub strategy: ChunkStrategyTag,
 }
 

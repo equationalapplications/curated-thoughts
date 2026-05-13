@@ -57,10 +57,11 @@ pub fn insert_chunk(
     doc_id: i64,
     chunk: &crate::chunker::Chunk,
     position: usize,
+    entity_id: &str,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, defined_symbol, entity_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
             doc_id,
             chunk.text,
@@ -69,6 +70,8 @@ pub fn insert_chunk(
             chunk.end_line as i64,
             chunk.symbol_name,
             chunk.strategy.as_db_str(),
+            chunk.defined_symbol,
+            entity_id,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -123,13 +126,74 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
 pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
-        "DELETE FROM embeddings;
+        "DELETE FROM curated_relationships;
+         DELETE FROM embeddings;
          DELETE FROM chunks;
          DELETE FROM documents;
          DELETE FROM wiki_pages;
          DELETE FROM folder_rules;",
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Delete stale relationships for chunks that were re-indexed at or after `since_epoch`.
+pub fn delete_stale_relationships(
+    conn: &Connection,
+    entity_id: &str,
+    since_epoch: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM curated_relationships
+         WHERE from_id IN (
+             SELECT id FROM chunks
+             WHERE entity_id = ?1
+               AND rowid IN (
+                   SELECT c.rowid FROM chunks c
+                   JOIN documents d ON d.id = c.doc_id
+                   WHERE d.last_indexed >= ?2 AND c.entity_id = ?1
+               )
+         )
+         AND entity_id = ?1",
+        rusqlite::params![entity_id, since_epoch],
+    )?;
+    Ok(())
+}
+
+/// Insert a relationship edge between two chunks.
+pub fn insert_relationship(
+    conn: &Connection,
+    from_id: i64,
+    to_id: i64,
+    rel_type: &str,
+    symbol: &str,
+    entity_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO curated_relationships (from_id, to_id, rel_type, symbol, entity_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![from_id, to_id, rel_type, symbol, entity_id],
+    )?;
+    Ok(())
+}
+
+/// Delete relationships where chunk_id appears as from_id or to_id (orphan cleanup for runHeal).
+pub fn delete_relationships_for_chunk(conn: &Connection, chunk_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM curated_relationships WHERE from_id = ?1 OR to_id = ?1",
+        [chunk_id],
+    )?;
+    Ok(())
+}
+
+/// Delete all relationships for a document's chunks (called when doc is re-indexed).
+pub fn delete_doc_relationships(conn: &Connection, doc_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM curated_relationships
+         WHERE from_id IN (SELECT id FROM chunks WHERE doc_id = ?1)
+            OR to_id   IN (SELECT id FROM chunks WHERE doc_id = ?1)",
+        [doc_id],
+    )?;
     Ok(())
 }
 
@@ -160,9 +224,10 @@ mod tests {
             start_line: 1,
             end_line: 1,
             symbol_name: None,
+            defined_symbol: None,
             strategy: ChunkStrategyTag::Prose,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0).unwrap();
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
         insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
 
         let bytes: Vec<u8> = conn
@@ -184,9 +249,10 @@ mod tests {
             start_line: 2,
             end_line: 2,
             symbol_name: Some("sym".into()),
+            defined_symbol: None,
             strategy: ChunkStrategyTag::Scanner,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0).unwrap();
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
         insert_embedding(&conn, chunk_id, &[1.0_f32]).unwrap();
         delete_document(&conn, "/docs/b.md").unwrap();
 
@@ -230,12 +296,13 @@ mod tests {
             start_line: 10,
             end_line: 20,
             symbol_name: Some("root_key".into()),
+            defined_symbol: None,
             strategy: ChunkStrategyTag::Declarative,
         };
-        insert_chunk(&conn, doc_id, &chunk, 2).unwrap();
-        let row: (String, i64, i64, i64, Option<String>, String) = conn
+        insert_chunk(&conn, doc_id, &chunk, 2, "tier_fact").unwrap();
+        let row: (String, i64, i64, i64, Option<String>, String, Option<String>) = conn
             .query_row(
-                "SELECT chunk_text, position, start_line, end_line, symbol_name, strategy FROM chunks WHERE doc_id = ?1 AND position = 2",
+                "SELECT chunk_text, position, start_line, end_line, symbol_name, strategy, entity_id FROM chunks WHERE doc_id = ?1 AND position = 2",
                 [doc_id],
                 |r| {
                     Ok((
@@ -245,6 +312,7 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
@@ -255,6 +323,7 @@ mod tests {
         assert_eq!(row.3, 20);
         assert_eq!(row.4.as_deref(), Some("root_key"));
         assert_eq!(row.5, "declarative");
+        assert_eq!(row.6.as_deref(), Some("tier_fact"));
     }
 }
 
@@ -275,9 +344,10 @@ mod clear_vault_tables_tests {
             start_line: 1,
             end_line: 1,
             symbol_name: None,
+            defined_symbol: None,
             strategy: crate::chunker::ChunkStrategyTag::Prose,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0).unwrap();
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
         insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
 
         conn.execute(
@@ -303,10 +373,14 @@ mod clear_vault_tables_tests {
         let rule_count: i64 = conn
             .query_row("SELECT count(*) FROM folder_rules", [], |r| r.get(0))
             .unwrap();
+        let rel_count: i64 = conn
+            .query_row("SELECT count(*) FROM curated_relationships", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(doc_count, 0);
         assert_eq!(chunk_count, 0);
         assert_eq!(embed_count, 0);
         assert_eq!(wiki_count, 0);
         assert_eq!(rule_count, 0);
+        assert_eq!(rel_count, 0);
     }
 }
