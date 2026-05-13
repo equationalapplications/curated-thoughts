@@ -1,5 +1,6 @@
 import { message, open } from "@tauri-apps/plugin-dialog";
 import { useMemo, useState } from "react";
+import { useWikiStatus } from "../../hooks/useWikiStatus";
 import {
   backupVaultDb,
   checkVaultBackup,
@@ -21,6 +22,8 @@ function revealLabel(): string {
 
 export function VaultPanel({ vaultPath }: Props) {
   const [switching, setSwitching] = useState(false);
+  const wikiStatus = useWikiStatus();
+  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal;
 
   const backupHintPath = useMemo(() => {
     const sep = vaultPath.includes("\\") ? "\\" : "/";
@@ -110,7 +113,7 @@ export function VaultPanel({ vaultPath }: Props) {
         <span className="vault-full-path">{vaultPath}</span>
       </div>
       <div className="vault-actions">
-        <button type="button" onClick={handleChangeVault} disabled={switching}>
+        <button type="button" onClick={handleChangeVault} disabled={switching || isSystemBusy}>
           {switching ? "Switching…" : "Change vault…"}
         </button>
         <button
@@ -121,6 +124,12 @@ export function VaultPanel({ vaultPath }: Props) {
           {revealLabel()}
         </button>
       </div>
+      {isSystemBusy && (
+        <p className="vault-hint vault-busy-hint">
+          Background wiki maintenance is active. Wait for it to finish before
+          switching vaults.
+        </p>
+      )}
       <p className="vault-hint">
         Switching vaults closes the current document and re-indexes the new
         folder.

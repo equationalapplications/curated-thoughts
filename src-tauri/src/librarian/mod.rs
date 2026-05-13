@@ -73,24 +73,55 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
     }
 
     let chunks: Vec<ChunkRow> = {
-        let mut stmt = conn.prepare(
-            "SELECT c.chunk_text, c.symbol_name, c.start_line, c.end_line, d.tier, d.path
-             FROM chunks c
-             JOIN documents d ON d.id = c.doc_id
-             WHERE d.path = ?1
-             ORDER BY c.position",
-        )?;
-        let mut rows = stmt.query([source_path])?;
-        let mut v = Vec::new();
+        let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
+        let mut rows = stmt.query([])?;
+        let mut column_names = Vec::new();
         while let Some(row) = rows.next()? {
-            v.push(ChunkRow {
-                text: row.get(0)?,
-                symbol_name: row.get(1)?,
-                start_line: row.get(2)?,
-                end_line: row.get(3)?,
-                tier: row.get(4)?,
-                path: row.get(5)?,
-            });
+            column_names.push(row.get::<_, String>(1)?);
+        }
+        let has_extended_columns = column_names.iter().any(|name| name == "symbol_name")
+            && column_names.iter().any(|name| name == "start_line")
+            && column_names.iter().any(|name| name == "end_line");
+
+        let mut v = Vec::new();
+        if has_extended_columns {
+            let mut stmt = conn.prepare(
+                "SELECT c.chunk_text, c.symbol_name, c.start_line, c.end_line, d.tier, d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE d.path = ?1
+                 ORDER BY c.position",
+            )?;
+            let mut rows = stmt.query([source_path])?;
+            while let Some(row) = rows.next()? {
+                v.push(ChunkRow {
+                    text: row.get(0)?,
+                    symbol_name: row.get(1)?,
+                    start_line: row.get(2)?,
+                    end_line: row.get(3)?,
+                    tier: row.get(4)?,
+                    path: row.get(5)?,
+                });
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT c.chunk_text, d.tier, d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE d.path = ?1
+                 ORDER BY c.position",
+            )?;
+            let mut rows = stmt.query([source_path])?;
+            while let Some(row) = rows.next()? {
+                v.push(ChunkRow {
+                    text: row.get(0)?,
+                    symbol_name: None,
+                    start_line: 1,
+                    end_line: 1,
+                    tier: row.get(1)?,
+                    path: row.get(2)?,
+                });
+            }
         }
         v
     };

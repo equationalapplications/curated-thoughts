@@ -23,7 +23,7 @@ vi.mock('../lib/wikiAdapter', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, wiki } from '../lib/wiki';
+import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki } from '../lib/wiki';
 
 describe('initWorkspaceId', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -63,11 +63,31 @@ describe('tieredRead', () => {
       }
     );
   });
+
+  it('routes vault-relative paths through entityIdForPath for ingestion routing', () => {
+    vi.mocked(invoke).mockResolvedValue('tier_working::abc123deadbeef01');
+    return initWorkspaceId('/Users/foo/Vault').then(() => {
+      expect(getEntityRoutingForPath('documents/api-ref.md')).toEqual({
+        entityId: 'tier_fact',
+        sourceType: 'immutable_document',
+      });
+      expect(getEntityRoutingForPath('wiki/auth-patterns.md')).toEqual({
+        entityId: 'tier_wisdom',
+        sourceType: 'user_confirmed',
+      });
+      expect(getEntityRoutingForPath('src/db/init.rs')).toEqual({
+        entityId: 'tier_working::abc123deadbeef01',
+        sourceType: 'librarian_inferred',
+      });
+    });
+  });
 });
 
 describe('startAutoHeal', () => {
-  it('subscribes to vault-file-changed event', () => {
-    startAutoHeal();
+  it('subscribes to vault-event and vault-file-changed events and returns cleanup', () => {
+    const cleanup = startAutoHeal();
+    expect(listen).toHaveBeenCalledWith('vault-event', expect.any(Function));
     expect(listen).toHaveBeenCalledWith('vault-file-changed', expect.any(Function));
+    expect(typeof cleanup).toBe('function');
   });
 });

@@ -25,9 +25,9 @@ export function App() {
   }, [activePath]);
 
   useEffect(() => {
-    startAutoHeal();
-    // startAutoHeal registers a Tauri event listener; cleanup happens via the
-    // returned unsubscribe function, which is handled inside startAutoHeal's listen() call.
+    const cleanup = startAutoHeal();
+    // startAutoHeal registers Tauri event listeners and returns an unsubscribe function.
+    return cleanup;
   }, []);
 
   if (loading) {

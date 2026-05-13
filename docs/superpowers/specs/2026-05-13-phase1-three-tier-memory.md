@@ -1,7 +1,7 @@
 # Phase 1: Three-Tier Memory Foundation — Design Spec
 
 **Date:** 2026-05-13
-**Status:** Approved
+**Status:** Implemented
 **Branch:** `kv/fixes` (target: `main`)
 **Stack:** Tauri 2.x (Rust), React 19 frontend, `@equationalapplications/core-llm-wiki` v3.x, `@equationalapplications/react-llm-wiki` v3.x
 
