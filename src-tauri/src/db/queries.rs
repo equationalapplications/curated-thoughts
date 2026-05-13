@@ -137,24 +137,22 @@ pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Delete stale relationships for chunks that were re-indexed at or after `since_epoch`.
 pub fn delete_stale_relationships(
     conn: &Connection,
     entity_id: &str,
     since_epoch: i64,
 ) -> Result<()> {
+    // Only purge outgoing (from_id) edges; ON DELETE CASCADE handles to_id cleanup
+    // when definition chunks are later removed.
     conn.execute(
         "DELETE FROM curated_relationships
-         WHERE from_id IN (
-             SELECT id FROM chunks
-             WHERE entity_id = ?1
-               AND rowid IN (
-                   SELECT c.rowid FROM chunks c
-                   JOIN documents d ON d.id = c.doc_id
-                   WHERE d.last_indexed >= ?2 AND c.entity_id = ?1
-               )
-         )
-         AND entity_id = ?1",
+         WHERE entity_id = ?1
+           AND from_id IN (
+               SELECT c.id FROM chunks c
+               JOIN documents d ON d.id = c.doc_id
+               WHERE d.last_indexed >= ?2
+                 AND c.entity_id = ?1
+           )",
         rusqlite::params![entity_id, since_epoch],
     )?;
     Ok(())

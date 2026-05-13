@@ -21,7 +21,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(MIGRATION_V4)?;
     }
     if version < 5 {
-        conn.execute_batch(MIGRATION_V5)?;
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))?;
     }
 
     Ok(())
