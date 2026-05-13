@@ -266,7 +266,7 @@ ORDER  BY min_depth;
 
 ---
 
-## Component 5: `core-llm-wiki` v3.4.0 — Graph-Expanded `read()`
+## Component 5: `core-llm-wiki` v4.6.0 — Graph-Expanded `read()`
 
 **Package:** `@equationalapplications/core-llm-wiki`
 
