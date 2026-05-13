@@ -48,7 +48,7 @@ describe('tieredRead', () => {
     vi.mocked(invoke).mockResolvedValue('tier_working::abc123deadbeef01');
     await initWorkspaceId('/Users/foo/Vault');
 
-    const mockRead = vi.spyOn(wiki, 'read').mockResolvedValue({ facts: [] } as any);
+    const mockRead = vi.spyOn(wiki, 'read').mockResolvedValue({ facts: [], tasks: [], events: [] });
     await tieredRead('test query');
 
     expect(mockRead).toHaveBeenCalledWith(

@@ -20,9 +20,12 @@ use crate::vault::VaultConfig;
 pub enum PipelineJob {
     /// Chunk + embed path. With `force: true`, re-runs chunking even when content hash unchanged
     /// (chunk strategy upgrades, embedding model swaps).
+    /// `count_pending: true` means this job was counted in the reembed pending counter and the
+    /// worker must decrement it on completion.
     Ingest {
         path: String,
         force: bool,
+        count_pending: bool,
     },
     Delete(String),
 }
@@ -32,6 +35,7 @@ impl PipelineJob {
         Self::Ingest {
             path: path.into(),
             force: false,
+            count_pending: false,
         }
     }
 
@@ -39,6 +43,7 @@ impl PipelineJob {
         Self::Ingest {
             path: path.into(),
             force: true,
+            count_pending: true,
         }
     }
 }
@@ -82,9 +87,10 @@ impl PipelineWorker {
                 PipelineJob::Ingest { path, .. } => path.clone(),
                 PipelineJob::Delete(path) => path.clone(),
             };
+            let count_pending = matches!(&job, PipelineJob::Ingest { count_pending: true, .. });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job {
-                    PipelineJob::Ingest { path, force } => {
+                    PipelineJob::Ingest { path, force, .. } => {
                         let vault_root = std::path::Path::new(&path)
                             .parent()
                             .and_then(|p| p.parent())
@@ -149,13 +155,15 @@ impl PipelineWorker {
                 eprintln!("[pipeline] {}", msg);
             }
 
-            let _ = self.pending.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                if current == 0 {
-                    Some(0)
-                } else {
-                    Some(current - 1)
-                }
-            });
+            if count_pending {
+                let _ = self.pending.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    if current == 0 {
+                        Some(0)
+                    } else {
+                        Some(current - 1)
+                    }
+                });
+            }
         }
     }
 }
@@ -271,7 +279,18 @@ fn entity_id_for_path(path: &str) -> String {
     } else if normalized.contains("/wiki/") {
         "tier_wisdom".to_string()
     } else {
-        "tier_working".to_string()
+        // Derive vault root (2 levels up) and hash it to match get_workspace_id on the frontend.
+        let vault_root = std::path::Path::new(path)
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_string_lossy().replace('\\', "/"));
+        match vault_root {
+            Some(root) => {
+                let hash = hash_bytes(root.as_bytes());
+                format!("tier_working::{}", &hash[..16])
+            }
+            None => "tier_working".to_string(),
+        }
     }
 }
 

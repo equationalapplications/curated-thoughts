@@ -1,4 +1,4 @@
-import { createWiki, WikiBusyError } from "@equationalapplications/react-llm-wiki";
+import { createWiki, WikiBusyError, type WikiOptions } from "@equationalapplications/react-llm-wiki";
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
@@ -57,7 +57,7 @@ export const wiki = createWiki(tauriWikiAdapter, {
     console.warn("[wiki] embed unavailable, using keyword search:", err.message);
   },
   graphAdapter: tauriGraphAdapter,
-} as any);
+} as WikiOptions & Record<string, unknown>);
 
 export async function setupWiki() {
   await wiki.setup();
