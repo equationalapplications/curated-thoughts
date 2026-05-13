@@ -56,16 +56,16 @@ export function SearchResults({ results, onSelect }: Props) {
 
   return (
     <div className="search-results">
-      {semanticResults.map((r, i) => (
-        <ResultItem key={i} r={r} onSelect={onSelect} />
+      {semanticResults.map((r) => (
+        <ResultItem key={`${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
       ))}
       {structuralResults.length > 0 && (
         <>
           <div className="search-results-divider">
             <span>Structural context</span>
           </div>
-          {structuralResults.map((r, i) => (
-            <ResultItem key={`structural-${i}`} r={r} onSelect={onSelect} />
+          {structuralResults.map((r) => (
+            <ResultItem key={`structural:${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
           ))}
         </>
       )}
