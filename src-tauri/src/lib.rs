@@ -752,12 +752,17 @@ async fn run_wiki_heal(
         };
 
         for (rowid, source_ref) in entries {
-            let abs_path = if std::path::Path::new(&source_ref).is_absolute() {
-                std::path::PathBuf::from(&source_ref)
-            } else {
-                vault_root.join(&source_ref)
-            };
-            if !abs_path.exists() {
+            // Only accept vault-relative refs. Absolute paths or `..` traversal refs are
+            // treated as missing to prevent heal from probing outside the vault.
+            let ref_path = std::path::Path::new(&source_ref);
+            let is_safe = !ref_path.is_absolute()
+                && !ref_path.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                    )
+                });
+            if !is_safe || !vault_root.join(&source_ref).exists() {
                 conn.execute(
                     "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
                     [rowid],
