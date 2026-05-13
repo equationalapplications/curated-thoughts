@@ -38,10 +38,11 @@ WHERE  ref.defined_symbol IS NULL
 /// Entity-scoped: only chunks within the given `entity_id` are linked,
 /// preventing cross-vault symbol contamination.
 pub fn run_linker(conn: &Connection, entity_id: &str, since_epoch: i64) -> Result<()> {
-    crate::db::queries::delete_stale_relationships(conn, entity_id, since_epoch)?;
+    let tx = conn.unchecked_transaction()?;
+    crate::db::queries::delete_stale_relationships(&tx, entity_id, since_epoch)?;
 
     let edges: Vec<ResolvedEdge> = {
-        let mut stmt = conn.prepare(RESOLVER_SQL)?;
+        let mut stmt = tx.prepare(RESOLVER_SQL)?;
         let mut rows = stmt.query([entity_id])?;
         let mut v = Vec::new();
         while let Some(row) = rows.next()? {
@@ -58,7 +59,7 @@ pub fn run_linker(conn: &Connection, entity_id: &str, since_epoch: i64) -> Resul
 
     for edge in &edges {
         crate::db::queries::insert_relationship(
-            conn,
+            &tx,
             edge.ref_chunk_id,
             edge.def_chunk_id,
             &edge.rel_type,
@@ -67,6 +68,7 @@ pub fn run_linker(conn: &Connection, entity_id: &str, since_epoch: i64) -> Resul
         )?;
     }
 
+    tx.commit()?;
     Ok(())
 }
 
