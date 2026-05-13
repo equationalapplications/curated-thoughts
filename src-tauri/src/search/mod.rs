@@ -20,6 +20,10 @@ pub struct SearchResult {
     pub end_line: i64,
     pub symbol_name: Option<String>,
     pub strategy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_type: Option<String>,
 }
 
 pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -89,6 +93,8 @@ pub fn semantic_search(
                 end_line,
                 symbol_name,
                 strategy,
+                structural: None,
+                rel_type: None,
             },
         ));
     }
@@ -171,6 +177,8 @@ pub fn related_chunks(
                 end_line,
                 symbol_name,
                 strategy,
+                structural: None,
+                rel_type: None,
             },
         ));
     }
@@ -362,6 +370,8 @@ mod tests {
             end_line: 3,
             symbol_name: Some("foo".into()),
             strategy: "prose".into(),
+            structural: None,
+            rel_type: None,
         };
         let v = serde_json::to_value(&r).expect("serialize");
         for key in [

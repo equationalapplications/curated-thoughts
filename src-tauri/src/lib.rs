@@ -442,7 +442,10 @@ fn recover_after_failed_switch_vault(
     }
     if let Ok(mut g) = pipeline.0.lock() {
         if g.is_none() {
-            *g = Some(start_pipeline(db_path.to_path_buf()));
+            let vault_root = vault_state.0.lock().ok()
+                .and_then(|vc| vc.get_vault_path().ok().flatten())
+                .map(PathBuf::from);
+            *g = Some(start_pipeline(db_path.to_path_buf(), vault_root));
         }
     }
     if let Err(e) =
@@ -520,7 +523,7 @@ fn switch_vault(
 
         {
             let mut g = pipeline.0.lock().unwrap();
-            *g = Some(start_pipeline(db_path.clone()));
+            *g = Some(start_pipeline(db_path.clone(), Some(new_root.clone())));
         }
 
         vault_state
@@ -1182,6 +1185,101 @@ fn get_impact_radius(
     .map_err(|e| e.to_string())
 }
 
+/// Returns graph-adjacent chunks for `doc_path` with `structural: true` and `rel_type` set,
+/// so the frontend can display them as "Connected" results alongside semantic hits.
+#[tauri::command]
+fn get_structural_neighbors(
+    doc_path: String,
+    max_hops: u32,
+    db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+) -> Result<Vec<search::SearchResult>, String> {
+    let root = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault path set".to_string())?;
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_rel,
+        &["documents", "wiki"],
+        crate::vault::PathMode::MayCreate,
+    )
+    .map_err(|e| e.to_string())?;
+    let abs_path = safe.to_string_lossy().into_owned();
+    let entity_id = pipeline::entity_id_for_path(&abs_path, Some(&root));
+
+    let max_hops = max_hops.min(5);
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+
+    let source_chunk_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE d.path = ?1 AND d.status = 'indexed'",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&abs_path], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for id in &source_chunk_ids {
+        seen_ids.insert(*id);
+    }
+
+    let mut neighbor_pairs: Vec<(i64, String)> = Vec::new();
+    for chunk_id in source_chunk_ids {
+        if let Ok(neighbors) = crate::graph::get_both(conn, chunk_id, &entity_id, max_hops) {
+            for n in neighbors {
+                if seen_ids.insert(n.chunk_id) {
+                    neighbor_pairs.push((n.chunk_id, n.rel_type));
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for (chunk_id, rel_type) in neighbor_pairs {
+        let row = conn.query_row(
+            "SELECT d.path, c.chunk_text, c.position, c.start_line, c.end_line,
+             COALESCE(c.symbol_name, '') AS symbol_name, c.strategy
+             FROM chunks c JOIN documents d ON d.id = c.doc_id
+             WHERE c.id = ?1 AND d.status = 'indexed'",
+            [chunk_id],
+            |row| {
+                let sym: String = row.get(5)?;
+                Ok(search::SearchResult {
+                    doc_path: row.get(0)?,
+                    chunk_text: row.get(1)?,
+                    chunk_position: row.get(2)?,
+                    score: 0.0,
+                    start_line: row.get(3)?,
+                    end_line: row.get(4)?,
+                    symbol_name: if sym.is_empty() { None } else { Some(sym) },
+                    strategy: row.get(6)?,
+                    structural: Some(true),
+                    rel_type: Some(rel_type.clone()),
+                })
+            },
+        );
+        if let Ok(r) = row {
+            results.push(r);
+        }
+    }
+
+    Ok(results)
+}
+
 // ── Vault file listing ────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, Clone)]
@@ -1752,7 +1850,8 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
-    let pipeline = start_pipeline(db_path.clone());
+    let initial_vault_root = config.get_vault_path().ok().flatten().map(PathBuf::from);
+    let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1815,6 +1914,7 @@ pub fn run() {
             run_wiki_prune,
             run_wiki_reembed,
             get_impact_radius,
+            get_structural_neighbors,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

@@ -52,11 +52,16 @@ pub struct PipelineWorker {
     db_path: PathBuf,
     rx: mpsc::Receiver<PipelineJob>,
     pending: Arc<AtomicUsize>,
+    vault_root: Option<PathBuf>,
 }
 
 impl PipelineWorker {
     pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>) -> Self {
-        PipelineWorker { db_path, rx, pending }
+        PipelineWorker { db_path, rx, pending, vault_root: None }
+    }
+
+    pub fn new_with_vault(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>, vault_root: Option<PathBuf>) -> Self {
+        PipelineWorker { db_path, rx, pending, vault_root }
     }
 
     pub fn run(self) {
@@ -88,16 +93,20 @@ impl PipelineWorker {
                 PipelineJob::Delete(path) => path.clone(),
             };
             let count_pending = matches!(&job, PipelineJob::Ingest { count_pending: true, .. });
+            let worker_vault_root = self.vault_root.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job {
                     PipelineJob::Ingest { path, force, .. } => {
-                        let vault_root = std::path::Path::new(&path)
-                            .parent()
-                            .and_then(|p| p.parent())
-                            .map(|p| p.to_path_buf());
-                        match ingest_document(&conn, &profile, &path, force) {
+                        let vault_root = worker_vault_root.as_deref().or_else(|| {
+                            std::path::Path::new(&path)
+                                .parent()
+                                .and_then(|p| p.parent())
+                        }).map(|p| p.to_path_buf());
+                        let vault_root_str = worker_vault_root.as_deref()
+                            .and_then(|p| p.to_str());
+                        match ingest_file(&conn, &profile, &path, force, vault_root_str) {
                             Ok(()) => {
-                                let eid = entity_id_for_path(&path);
+                                let eid = entity_id_for_path(&path, vault_root_str);
                                 let since = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map(|d| d.as_secs() as i64)
@@ -126,10 +135,12 @@ impl PipelineWorker {
                     PipelineJob::Delete(path) => {
                         // Remove shadow copy from .brain/converted/ (PDF/DOCX conversion artifact)
                         if let Some(original) = std::path::Path::new(&path).file_stem() {
-                            if let Some(vault_root) = std::path::Path::new(&path)
-                                .parent()
-                                .and_then(|p| p.parent())
-                            {
+                            let shadow_root = worker_vault_root.as_deref().or_else(|| {
+                                std::path::Path::new(&path)
+                                    .parent()
+                                    .and_then(|p| p.parent())
+                            });
+                            if let Some(vault_root) = shadow_root {
                                 let shadow = vault_root
                                     .join(".brain")
                                     .join("converted")
@@ -269,24 +280,28 @@ pub fn ingest_document(
     path: &str,
     force_rechunk: bool,
 ) -> Result<()> {
-    ingest_file(conn, profile, path, force_rechunk)
+    ingest_file(conn, profile, path, force_rechunk, None)
 }
 
-fn entity_id_for_path(path: &str) -> String {
+pub(crate) fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
     let normalized = path.replace('\\', "/");
     if normalized.contains("/documents/") {
         "tier_fact".to_string()
     } else if normalized.contains("/wiki/") {
         "tier_wisdom".to_string()
     } else {
-        // Derive vault root (2 levels up) and hash it to match get_workspace_id on the frontend.
-        let vault_root = std::path::Path::new(path)
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_string_lossy().replace('\\', "/"));
-        match vault_root {
-            Some(root) => {
-                let hash = hash_bytes(root.as_bytes());
+        let root = vault_root
+            .map(|r| r.replace('\\', "/"))
+            .or_else(|| {
+                // Fallback: infer 2 levels up (correct only for files directly in vault root).
+                std::path::Path::new(path)
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            });
+        match root {
+            Some(r) => {
+                let hash = hash_bytes(r.as_bytes());
                 format!("tier_working::{}", &hash[..16])
             }
             None => "tier_working".to_string(),
@@ -299,6 +314,7 @@ fn ingest_file(
     profile: &EmbedProfile,
     path: &str,
     force_rechunk: bool,
+    vault_root: Option<&str>,
 ) -> Result<()> {
     let ext = Path::new(path)
         .extension()
@@ -324,7 +340,7 @@ fn ingest_file(
     };
 
     let doc_id = upsert_document(conn, path, &hash)?;
-    let eid = entity_id_for_path(path);
+    let eid = entity_id_for_path(path, vault_root);
 
     let mut chunks = chunk_autodetect(Path::new(path), &text);
 
@@ -362,10 +378,10 @@ fn ingest_file(
     Ok(())
 }
 
-pub fn start_pipeline(db_path: PathBuf) -> (mpsc::SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
+pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> (mpsc::SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(256);
     let pending = Arc::new(AtomicUsize::new(0));
-    let worker = PipelineWorker::new(db_path, rx, pending.clone());
+    let worker = PipelineWorker::new_with_vault(db_path, rx, pending.clone(), vault_root);
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
@@ -401,7 +417,7 @@ fn connect() {}
         let doc_id = upsert_document(&conn, &path_str, "testhash").unwrap();
 
         let text = std::fs::read_to_string(&rust_file).unwrap();
-        let eid = entity_id_for_path(&path_str);
+        let eid = entity_id_for_path(&path_str, None);
 
         let mut chunks = crate::chunker::chunk_autodetect(&rust_file, &text);
 

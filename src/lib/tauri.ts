@@ -58,6 +58,9 @@ export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> 
 export const getRelatedChunks = (docPath: string, limit = 5): Promise<SearchResult[]> =>
   invoke("get_related_chunks", { docPath, limit });
 
+export const getStructuralNeighbors = (docPath: string, maxHops = 2): Promise<SearchResult[]> =>
+  invoke("get_structural_neighbors", { docPath, maxHops });
+
 export interface VaultFile {
   path: string;
   name: string;
