@@ -91,6 +91,15 @@ impl PipelineWorker {
                             .map(|p| p.to_path_buf());
                         match ingest_document(&conn, &profile, &path, force) {
                             Ok(()) => {
+                                let eid = entity_id_for_path(&path);
+                                let since = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0)
+                                    .saturating_sub(300);
+                                if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
+                                    eprintln!("[linker] run_linker error ({}): {}", eid, e);
+                                }
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &conn,
                                     &path,

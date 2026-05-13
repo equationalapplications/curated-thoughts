@@ -2,6 +2,8 @@
 //! Pass 1 (symbol definitions) is handled by `chunker::ast_symbol`.
 //! Pass 3 (global resolver / linker) is in `indexer::linker`.
 
+pub mod linker;
+
 use crate::chunker::{Chunk, ChunkStrategyTag};
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
