@@ -64,6 +64,15 @@ describe('tieredRead', () => {
     );
   });
 
+  it('forwards graphExpansion option when provided', async () => {
+    await tieredRead('test query', { graphExpansion: { hops: 1 } });
+    expect(wiki.read).toHaveBeenCalledWith(
+      expect.any(Array),
+      'test query',
+      expect.objectContaining({ graphExpansion: { hops: 1 } })
+    );
+  });
+
   it('routes vault-relative paths through entityIdForPath for ingestion routing', () => {
     vi.mocked(invoke).mockResolvedValue('tier_working::abc123deadbeef01');
     return initWorkspaceId('/Users/foo/Vault').then(() => {
