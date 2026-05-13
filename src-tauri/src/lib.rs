@@ -129,6 +129,15 @@ fn normalize_wiki_relative_path(path: &str) -> String {
     }
 }
 
+// ── Workspace identity ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_workspace_id(path: String) -> String {
+    // hash_bytes returns hex::encode(sha256) — 64 lowercase hex chars — safe to slice to 16.
+    let hash = crate::hasher::hash_bytes(path.as_bytes());
+    format!("tier_working::{}", &hash[..16])
+}
+
 // ── Vault commands ────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1449,6 +1458,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
+            get_workspace_id,
             get_review_queue,
             approve_wiki_page,
             reject_wiki_page,
@@ -1555,6 +1565,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
+            get_workspace_id,
             backup_vault_db,
             switch_vault,
             check_vault_backup,
@@ -1679,5 +1690,43 @@ mod drop_destination_tests {
         fs::create_dir_all(root.join("documents").join("dup.md")).unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_id_tests {
+    use super::get_workspace_id;
+
+    #[test]
+    fn has_tier_working_prefix() {
+        let id = get_workspace_id("/Users/foo/Vault".to_string());
+        assert!(id.starts_with("tier_working::"), "got: {id}");
+    }
+
+    #[test]
+    fn hash_segment_is_16_lowercase_hex_chars() {
+        let id = get_workspace_id("/Users/foo/Vault".to_string());
+        let hash = id.strip_prefix("tier_working::").unwrap();
+        assert_eq!(hash.len(), 16, "hash segment should be 16 chars, got: {hash}");
+        assert!(
+            hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "hash should be lowercase hex, got: {hash}"
+        );
+    }
+
+    #[test]
+    fn is_deterministic() {
+        assert_eq!(
+            get_workspace_id("/Users/foo/Vault".to_string()),
+            get_workspace_id("/Users/foo/Vault".to_string())
+        );
+    }
+
+    #[test]
+    fn different_vaults_produce_different_ids() {
+        assert_ne!(
+            get_workspace_id("/Users/foo/VaultA".to_string()),
+            get_workspace_id("/Users/foo/VaultB".to_string())
+        );
     }
 }
