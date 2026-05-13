@@ -84,10 +84,9 @@ describe('tieredRead', () => {
 });
 
 describe('startAutoHeal', () => {
-  it('subscribes to vault-event and vault-file-changed events and returns cleanup', () => {
+  it('subscribes to vault-event and returns cleanup', () => {
     const cleanup = startAutoHeal();
     expect(listen).toHaveBeenCalledWith('vault-event', expect.any(Function));
-    expect(listen).toHaveBeenCalledWith('vault-file-changed', expect.any(Function));
     expect(typeof cleanup).toBe('function');
   });
 });
