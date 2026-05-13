@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{mpsc, Arc, atomic::{AtomicUsize, Ordering}},
 };
 
 use crate::chunker::{chunk_autodetect, should_ingest_extension};
@@ -45,11 +45,12 @@ impl PipelineJob {
 pub struct PipelineWorker {
     db_path: PathBuf,
     rx: mpsc::Receiver<PipelineJob>,
+    pending: Arc<AtomicUsize>,
 }
 
 impl PipelineWorker {
-    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>) -> Self {
-        PipelineWorker { db_path, rx }
+    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>) -> Self {
+        PipelineWorker { db_path, rx, pending }
     }
 
     pub fn run(self) {
@@ -137,6 +138,14 @@ impl PipelineWorker {
                 let msg = format!("panic processing {}: {:?}", job_path, e);
                 eprintln!("[pipeline] {}", msg);
             }
+
+            let _ = self.pending.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current == 0 {
+                    Some(0)
+                } else {
+                    Some(current - 1)
+                }
+            });
         }
     }
 }
@@ -297,14 +306,15 @@ fn ingest_file(
     Ok(())
 }
 
-pub fn start_pipeline(db_path: PathBuf) -> (mpsc::SyncSender<PipelineJob>, std::thread::JoinHandle<()>) {
+pub fn start_pipeline(db_path: PathBuf) -> (mpsc::SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(256);
-    let worker = PipelineWorker::new(db_path, rx);
+    let pending = Arc::new(AtomicUsize::new(0));
+    let worker = PipelineWorker::new(db_path, rx, pending.clone());
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
-    (tx, join)
+    (tx, join, pending)
 }
 
 #[cfg(test)]

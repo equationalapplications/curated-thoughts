@@ -2,6 +2,7 @@ import { createWiki, WikiBusyError } from "@equationalapplications/react-llm-wik
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
+import { entityIdForPath } from "./wikiTiers";
 
 let _workspaceId: string = 'tier_working::default';
 
@@ -11,6 +12,34 @@ export async function initWorkspaceId(vaultPath: string): Promise<void> {
 
 export function getWorkspaceId(): string {
   return _workspaceId;
+}
+
+export function getEntityRoutingForPath(vaultRelativePath: string) {
+  return entityIdForPath(vaultRelativePath, _workspaceId);
+}
+
+/**
+ * Ingest a vault-relative documents/ path using canonical tier routing.
+ * This helper should be the public path for document ingestion.
+ */
+export async function ingestDocumentByPath(
+  vaultRelativePath: string,
+  params: {
+    sourceRef: string;
+    sourceHash: string;
+    documentChunk: string;
+    maxChunkLength?: number;
+    chunkOverlap?: number;
+    chunkConcurrency?: number;
+  },
+) {
+  const { entityId } = getEntityRoutingForPath(vaultRelativePath);
+  if (entityId !== "tier_fact") {
+    throw new Error(
+      `ingestDocumentByPath only supports documents/ paths, got ${vaultRelativePath}`
+    );
+  }
+  return wiki.ingestDocument(entityId, params);
 }
 
 export const wiki = createWiki(tauriWikiAdapter, {
@@ -50,9 +79,9 @@ export async function tieredRead(query: string) {
   );
 }
 
-export function startAutoHeal(): void {
+export function startAutoHeal(): () => void {
   let debounce: ReturnType<typeof setTimeout> | null = null;
-  listen('vault-file-changed', () => {
+  const scheduleHeal = () => {
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(async () => {
       try {
@@ -63,7 +92,20 @@ export function startAutoHeal(): void {
         if (!(err instanceof WikiBusyError)) console.error('[auto-heal]', err);
       }
     }, 3000);
-  });
+  };
+
+  const unsubscribers = [
+    listen('vault-event', scheduleHeal),
+    listen('vault-file-changed', scheduleHeal),
+  ];
+
+  return () => {
+    if (debounce) {
+      clearTimeout(debounce);
+      debounce = null;
+    }
+    void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
+  };
 }
 
 export { WikiBusyError };

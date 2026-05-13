@@ -27,14 +27,16 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc::SyncSender, Mutex};
+use std::sync::{mpsc::SyncSender, Arc, Mutex};
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
-struct PipelineHolder(Mutex<Option<(SyncSender<PipelineJob>, std::thread::JoinHandle<()>)>>);
+struct PipelineHolder(Mutex<Option<(SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>)>>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
@@ -485,7 +487,7 @@ fn switch_vault(
 
     {
         let mut g = pipeline.0.lock().unwrap();
-        if let Some((tx, join)) = g.take() {
+        if let Some((tx, join, _pending)) = g.take() {
             drop(tx);
             let _ = join.join();
         }
@@ -778,7 +780,7 @@ async fn run_wiki_prune(
 ) -> Result<(), String> {
     app.emit(
         "wiki-status-change",
-        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+        serde_json::json!({"heal": false, "ingesting": false, "librarian": true}),
     )
     .ok();
 
@@ -818,38 +820,64 @@ async fn run_wiki_reembed(
     )
     .ok();
 
+    let (tx, pending) = {
+        let pipeline_guard = pipeline.0.lock().unwrap();
+        let p = pipeline_guard
+            .as_ref()
+            .ok_or_else(|| "pipeline not running".to_string())?;
+        (p.0.clone(), p.2.clone())
+    };
+
     let result = (|| -> Result<usize, String> {
         let guard = db_state.0.lock().unwrap();
         let conn = &guard.0;
         let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
-        let tx = {
-            let pipeline_guard = pipeline.0.lock().unwrap();
-            pipeline_guard
-                .as_ref()
-                .ok_or_else(|| "pipeline not running".to_string())?
-                .0
-                .clone()
-        };
         drop(guard);
         let mut queued = 0usize;
         for path in paths {
             if !std::path::Path::new(&path).exists() {
                 continue;
             }
+            pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tx.send(PipelineJob::rechunk(path))
-                .map_err(|e| format!("pipeline channel closed: {e}"))?;
+                .map_err(|e| {
+                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    format!("pipeline channel closed: {e}")
+                })?;
             queued += 1;
         }
         Ok(queued)
     })();
 
-    // Jobs are queued; pipeline processes them asynchronously.
-    // Emit idle after queuing since pipeline progress is tracked via get_indexing_status.
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-    )
-    .ok();
+    if let Ok(queued) = result {
+        if queued > 0 {
+            let app_handle = app.clone();
+            let pending = pending.clone();
+            std::thread::spawn(move || {
+                while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                app_handle
+                    .emit(
+                        "wiki-status-change",
+                        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+                    )
+                    .ok();
+            });
+        } else {
+            app.emit(
+                "wiki-status-change",
+                serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+            )
+            .ok();
+        }
+    } else {
+        app.emit(
+            "wiki-status-change",
+            serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+        )
+        .ok();
+    }
 
     result
 }
