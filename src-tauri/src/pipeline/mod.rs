@@ -272,7 +272,6 @@ fn ingest_file(
     path: &str,
     force_rechunk: bool,
 ) -> Result<()> {
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

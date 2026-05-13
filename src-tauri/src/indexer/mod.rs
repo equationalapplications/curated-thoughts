@@ -42,12 +42,21 @@ pub fn extract_references(lang: RefLang, text: &str, base_line: u32) -> Vec<Chun
             if name.is_empty() {
                 continue;
             }
-            let start_byte = node.parent()
-                .map(|p| p.start_byte())
-                .unwrap_or(node.start_byte());
-            let end_byte = node.parent()
-                .map(|p| p.end_byte())
-                .unwrap_or(node.end_byte());
+            let context_node = node.parent()
+                .and_then(|p| {
+                    // For nested captures (e.g. field_identifier inside field_expression inside
+                    // call_expression, or identifier inside import_specifier inside import_statement),
+                    // walk two levels up to include the full call/import context.
+                    p.parent().filter(|gp| {
+                        matches!(gp.kind(),
+                            "call_expression" | "call" | "import_statement" |
+                            "use_declaration" | "import_declaration"
+                        )
+                    }).or(Some(p))
+                })
+                .unwrap_or(node);
+            let start_byte = context_node.start_byte();
+            let end_byte = context_node.end_byte();
             let snippet = text.get(start_byte..end_byte)
                 .unwrap_or("")
                 .trim()
