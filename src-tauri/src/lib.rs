@@ -824,10 +824,17 @@ async fn run_wiki_reembed(
 
     let (tx, pending) = {
         let pipeline_guard = pipeline.0.lock().unwrap();
-        let p = pipeline_guard
-            .as_ref()
-            .ok_or_else(|| "pipeline not running".to_string())?;
-        (p.0.clone(), p.2.clone())
+        match pipeline_guard.as_ref() {
+            Some(p) => (p.0.clone(), p.2.clone()),
+            None => {
+                app.emit(
+                    "wiki-status-change",
+                    serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+                )
+                .ok();
+                return Err("pipeline not running".to_string());
+            }
+        }
     };
 
     let result = (|| -> Result<usize, String> {
