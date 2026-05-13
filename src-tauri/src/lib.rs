@@ -1154,6 +1154,27 @@ fn get_related_chunks(
     crate::search::related_chunks_try_paths(&guard.0, &candidates, limit).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_impact_radius(
+    root_chunk_id: i64,
+    entity_id: String,
+    direction: String,
+    max_hops: u32,
+    db_state: State<DbState>,
+) -> Result<Vec<graph::NeighborRow>, String> {
+    let max_hops = max_hops.min(5);
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+
+    match direction.as_str() {
+        "callees" => graph::get_callees(conn, root_chunk_id, &entity_id, max_hops),
+        "callers" => graph::get_callers(conn, root_chunk_id, &entity_id, max_hops),
+        "both"    => graph::get_both(conn, root_chunk_id, &entity_id, max_hops),
+        other     => Err(anyhow::anyhow!("unknown direction: {}", other)),
+    }
+    .map_err(|e| e.to_string())
+}
+
 // ── Vault file listing ────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, Clone)]
@@ -1786,6 +1807,7 @@ pub fn run() {
             run_wiki_heal,
             run_wiki_prune,
             run_wiki_reembed,
+            get_impact_radius,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
