@@ -120,5 +120,8 @@ CREATE INDEX IF NOT EXISTS idx_rel_to_id
 CREATE INDEX IF NOT EXISTS idx_rel_from_id
     ON curated_relationships (from_id, entity_id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_unique
+    ON curated_relationships (from_id, to_id, rel_type);
+
 INSERT OR IGNORE INTO schema_version (version) VALUES (5);
 ";
