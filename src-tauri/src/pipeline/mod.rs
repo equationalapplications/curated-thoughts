@@ -285,27 +285,34 @@ pub fn ingest_document(
 
 pub(crate) fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
     let normalized = path.replace('\\', "/");
+
+    if let Some(root) = vault_root {
+        // Strip vault root prefix and inspect only the first vault-relative component so
+        // ancestor folders named "documents" or "wiki" (e.g. /Users/me/documents/vault/)
+        // or nested sub-folders (e.g. vault/src/wiki/) don't misroute.
+        let root_norm = root.replace('\\', "/");
+        let root_prefix = root_norm.trim_end_matches('/');
+        let rel = normalized
+            .strip_prefix(&format!("{}/", root_prefix))
+            .unwrap_or(&normalized);
+        let first = rel.split('/').next().unwrap_or("");
+        return match first {
+            "documents" => "tier_fact".to_string(),
+            "wiki" => "tier_wisdom".to_string(),
+            _ => {
+                let hash = hash_bytes(root_prefix.as_bytes());
+                format!("tier_working::{}", &hash[..16])
+            }
+        };
+    }
+
+    // No vault root: fall back to substring heuristics (approximate).
     if normalized.contains("/documents/") {
         "tier_fact".to_string()
     } else if normalized.contains("/wiki/") {
         "tier_wisdom".to_string()
     } else {
-        let root = vault_root
-            .map(|r| r.replace('\\', "/"))
-            .or_else(|| {
-                // Fallback: infer 2 levels up (correct only for files directly in vault root).
-                std::path::Path::new(path)
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-            });
-        match root {
-            Some(r) => {
-                let hash = hash_bytes(r.as_bytes());
-                format!("tier_working::{}", &hash[..16])
-            }
-            None => "tier_working".to_string(),
-        }
+        "tier_working".to_string()
     }
 }
 

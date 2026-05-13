@@ -21,8 +21,8 @@ importers:
         specifier: ^4.6.0
         version: 4.6.0
       '@equationalapplications/react-llm-wiki':
-        specifier: ^4.5.1
-        version: 4.5.1(react@19.2.6)
+        specifier: ^4.6.0
+        version: 4.6.0(react@19.2.6)
       '@mantine/core':
         specifier: ^9.1.1
         version: 9.1.1(@mantine/hooks@9.1.1(react@19.2.6))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -238,16 +238,12 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@4.5.1':
-    resolution: {integrity: sha512-ghFqN7HAoOMPWOsjCnsI/ZyWJafS40G6bddtvd6fhmWf1w0E+TKw270UXSmknhz8GDhQ0uAIzB2diEJPd3rwUA==}
-    engines: {node: '>=20'}
-
   '@equationalapplications/core-llm-wiki@4.6.0':
     resolution: {integrity: sha512-EfxLwRrX0QBn6M+wjuIFNAHM+2mO4ktzlkr6XsZcM7KItRtHCBxo+cKPrpGzp57Wxwvxf0Jp73eXIVxfVJCTTA==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@4.5.1':
-    resolution: {integrity: sha512-VRhxouYRkkTsfwpOgV1dbLynqUqbY9+9NQWz1OTw30YxYja0T8a+fqq9r5rL0IfkVgmvMI8zR/UYtFCKZLjTgg==}
+  '@equationalapplications/react-llm-wiki@4.6.0':
+    resolution: {integrity: sha512-WOYxhiWfrM98fta1AjFvURN0u9gvscQ1d9hWUiNU11qOWzCVVfy9nkPL+Zc2PQ6BGbwaSfdeAaSTb167ZSK/jw==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
@@ -3829,17 +3825,13 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@4.5.1':
-    dependencies:
-      minisearch: 7.2.0
-
   '@equationalapplications/core-llm-wiki@4.6.0':
     dependencies:
       minisearch: 7.2.0
 
-  '@equationalapplications/react-llm-wiki@4.5.1(react@19.2.6)':
+  '@equationalapplications/react-llm-wiki@4.6.0(react@19.2.6)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 4.5.1
+      '@equationalapplications/core-llm-wiki': 4.6.0
       react: 19.2.6
 
   '@eslint-community/eslint-utils@4.9.1(eslint@9.39.4)':
