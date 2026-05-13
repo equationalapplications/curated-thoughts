@@ -77,7 +77,7 @@ export async function tieredRead(
       },
       // graphExpansion passed through; handled by host-app layer when supported
       ...(opts.graphExpansion !== undefined && { graphExpansion: opts.graphExpansion }),
-    } as any
+    } as Parameters<typeof wiki.read>[2] & { graphExpansion?: GraphExpansionOptions }
   );
 }
 
