@@ -184,16 +184,6 @@ pub fn delete_relationships_for_chunk(conn: &Connection, chunk_id: i64) -> Resul
     Ok(())
 }
 
-/// Delete all relationships for a document's chunks (called when doc is re-indexed).
-pub fn delete_doc_relationships(conn: &Connection, doc_id: i64) -> Result<()> {
-    conn.execute(
-        "DELETE FROM curated_relationships
-         WHERE from_id IN (SELECT id FROM chunks WHERE doc_id = ?1)
-            OR to_id   IN (SELECT id FROM chunks WHERE doc_id = ?1)",
-        [doc_id],
-    )?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

@@ -199,5 +199,6 @@ mod integration_tests {
             "ast_symbol_python"
         );
         assert_eq!(ChunkStrategyTag::AstSymbolGo.as_db_str(), "ast_symbol_go");
+        assert_eq!(ChunkStrategyTag::AstRef.as_db_str(), "ast_ref");
     }
 }
