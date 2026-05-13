@@ -6,7 +6,8 @@ use std::{
     sync::{mpsc, Arc, atomic::{AtomicUsize, Ordering}},
 };
 
-use crate::chunker::{chunk_autodetect, should_ingest_extension};
+use crate::chunker::{chunk_autodetect, AstLang, ChunkStrategy, should_ingest_extension};
+use crate::indexer::{extract_references, RefLang};
 use crate::db::queries::{
     delete_document, delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
     mark_document_error, mark_document_indexed, upsert_document,
@@ -297,7 +298,22 @@ fn ingest_file(
     let doc_id = upsert_document(conn, path, &hash)?;
     let eid = entity_id_for_path(path);
 
-    let chunks = chunk_autodetect(Path::new(path), &text);
+    let mut chunks = chunk_autodetect(Path::new(path), &text);
+
+    // Pass 2: extract reference/call-site chunks for supported code files
+    let strategy = crate::chunker::classify(Path::new(path));
+    if let ChunkStrategy::AstSymbol(ast_lang) = strategy {
+        let ref_lang = match ast_lang {
+            AstLang::Rust => RefLang::Rust,
+            AstLang::TypeScript => RefLang::TypeScript,
+            AstLang::JavaScript => RefLang::JavaScript,
+            AstLang::Python => RefLang::Python,
+            AstLang::Go => RefLang::Go,
+        };
+        let refs = extract_references(ref_lang, &text, 0);
+        chunks.extend(refs);
+    }
+
     if chunks.is_empty() {
         mark_document_indexed(conn, doc_id)?;
         return Ok(());
