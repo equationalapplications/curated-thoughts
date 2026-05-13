@@ -76,7 +76,7 @@ pub(super) fn split_oversized_block_spans(
     out
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ChunkStrategyTag {
     AstSymbolRust,
     AstSymbolTypeScript,
@@ -84,6 +84,7 @@ pub enum ChunkStrategyTag {
     AstSymbolPython,
     AstSymbolGo,
     AstRef,
+    AstRefUse,
     Prose,
     Scanner,
     Declarative,
@@ -99,6 +100,7 @@ impl ChunkStrategyTag {
             ChunkStrategyTag::AstSymbolPython => "ast_symbol_python",
             ChunkStrategyTag::AstSymbolGo => "ast_symbol_go",
             ChunkStrategyTag::AstRef => "ast_ref",
+            ChunkStrategyTag::AstRefUse => "ast_ref_use",
             ChunkStrategyTag::Prose => "prose",
             ChunkStrategyTag::Scanner => "scanner",
             ChunkStrategyTag::Declarative => "declarative",
@@ -200,5 +202,6 @@ mod integration_tests {
         );
         assert_eq!(ChunkStrategyTag::AstSymbolGo.as_db_str(), "ast_symbol_go");
         assert_eq!(ChunkStrategyTag::AstRef.as_db_str(), "ast_ref");
+        assert_eq!(ChunkStrategyTag::AstRefUse.as_db_str(), "ast_ref_use");
     }
 }

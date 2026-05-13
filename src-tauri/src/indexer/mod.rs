@@ -7,11 +7,41 @@ pub mod linker;
 use crate::chunker::{Chunk, ChunkStrategyTag};
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
+/// Languages supported by the reference extractor.
+#[derive(Clone, Copy)]
+pub enum RefLang {
+    Rust,
+    TypeScript,
+    JavaScript,
+    Python,
+    Go,
+}
+
+#[derive(Clone, Copy)]
+enum PatternKind {
+    Calls,
+    Imports,
+}
+
 /// Extract reference chunks from source text for a given language.
 /// Returns chunks with `symbol_name` set to the called/imported symbol (lowercase),
 /// and `defined_symbol = None`.
+/// Call sites get `AstRef` strategy; import/use declarations get `AstRefUse`.
 pub fn extract_references(lang: RefLang, text: &str, base_line: u32) -> Vec<Chunk> {
-    let (ts_lang, pattern) = lang_query(lang);
+    let mut all = extract_by_pattern(lang, text, base_line, PatternKind::Calls);
+    all.extend(extract_by_pattern(lang, text, base_line, PatternKind::Imports));
+    deduplicate_by_symbol_and_strategy(all)
+}
+
+fn extract_by_pattern(lang: RefLang, text: &str, base_line: u32, kind: PatternKind) -> Vec<Chunk> {
+    let Some((ts_lang, pattern)) = lang_query(lang, kind) else {
+        return vec![];
+    };
+    let strategy = match kind {
+        PatternKind::Calls => ChunkStrategyTag::AstRef,
+        PatternKind::Imports => ChunkStrategyTag::AstRefUse,
+    };
+
     let mut parser = Parser::new();
     if parser.set_language(&ts_lang).is_err() {
         return vec![];
@@ -78,40 +108,28 @@ pub fn extract_references(lang: RefLang, text: &str, base_line: u32) -> Vec<Chun
                 end_line,
                 symbol_name: Some(name),
                 defined_symbol: None,
-                strategy: ChunkStrategyTag::AstRef,
+                strategy: strategy.clone(),
             });
         }
     }
-    deduplicate_by_symbol(chunks)
+    chunks
 }
 
-/// Collapse multiple reference chunks with the same symbol into one per file
+/// Collapse multiple reference chunks with the same (symbol, strategy) into one per file
 /// (keeps the first occurrence to avoid flooding the index with repeated call sites).
-fn deduplicate_by_symbol(mut chunks: Vec<Chunk>) -> Vec<Chunk> {
+/// A symbol that is both called and imported will produce two distinct chunks.
+fn deduplicate_by_symbol_and_strategy(mut chunks: Vec<Chunk>) -> Vec<Chunk> {
     let mut seen = std::collections::HashSet::new();
     chunks.retain(|c| {
-        if let Some(sym) = &c.symbol_name {
-            seen.insert(sym.clone())
-        } else {
-            true
-        }
+        let key = (c.symbol_name.clone(), c.strategy.clone());
+        seen.insert(key)
     });
     chunks
 }
 
-/// Languages supported by the reference extractor.
-#[derive(Clone, Copy)]
-pub enum RefLang {
-    Rust,
-    TypeScript,
-    JavaScript,
-    Python,
-    Go,
-}
-
-fn lang_query(lang: RefLang) -> (Language, &'static str) {
-    match lang {
-        RefLang::Rust => (
+fn lang_query(lang: RefLang, kind: PatternKind) -> Option<(Language, &'static str)> {
+    match (lang, kind) {
+        (RefLang::Rust, PatternKind::Calls) => Some((
             tree_sitter_rust::LANGUAGE.into(),
             r#"
 [
@@ -120,13 +138,20 @@ fn lang_query(lang: RefLang) -> (Language, &'static str) {
   (call_expression
      function: (field_expression
        field: (field_identifier) @ref.name))
+]
+"#,
+        )),
+        (RefLang::Rust, PatternKind::Imports) => Some((
+            tree_sitter_rust::LANGUAGE.into(),
+            r#"
+[
   (use_declaration
      argument: (scoped_identifier
        name: (identifier) @ref.name))
 ]
 "#,
-        ),
-        RefLang::TypeScript => (
+        )),
+        (RefLang::TypeScript, PatternKind::Calls) => Some((
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             r#"
 [
@@ -135,14 +160,21 @@ fn lang_query(lang: RefLang) -> (Language, &'static str) {
   (call_expression
      function: (member_expression
        property: (property_identifier) @ref.name))
+]
+"#,
+        )),
+        (RefLang::TypeScript, PatternKind::Imports) => Some((
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            r#"
+[
   (import_statement
      (import_clause
        (named_imports
          (import_specifier name: (identifier) @ref.name))))
 ]
 "#,
-        ),
-        RefLang::JavaScript => (
+        )),
+        (RefLang::JavaScript, PatternKind::Calls) => Some((
             tree_sitter_javascript::LANGUAGE.into(),
             r#"
 [
@@ -153,8 +185,9 @@ fn lang_query(lang: RefLang) -> (Language, &'static str) {
        property: (property_identifier) @ref.name))
 ]
 "#,
-        ),
-        RefLang::Python => (
+        )),
+        (RefLang::JavaScript, PatternKind::Imports) => None,
+        (RefLang::Python, PatternKind::Calls) => Some((
             tree_sitter_python::LANGUAGE.into(),
             r#"
 [
@@ -165,8 +198,9 @@ fn lang_query(lang: RefLang) -> (Language, &'static str) {
        attribute: (identifier) @ref.name))
 ]
 "#,
-        ),
-        RefLang::Go => (
+        )),
+        (RefLang::Python, PatternKind::Imports) => None,
+        (RefLang::Go, PatternKind::Calls) => Some((
             tree_sitter_go::LANGUAGE.into(),
             r#"
 [
@@ -177,7 +211,8 @@ fn lang_query(lang: RefLang) -> (Language, &'static str) {
        field: (field_identifier) @ref.name))
 ]
 "#,
-        ),
+        )),
+        (RefLang::Go, PatternKind::Imports) => None,
     }
 }
 
@@ -248,5 +283,48 @@ mod tests {
     #[test]
     fn ast_ref_strategy_tag_serializes() {
         assert_eq!(ChunkStrategyTag::AstRef.as_db_str(), "ast_ref");
+    }
+
+    #[test]
+    fn ast_ref_use_strategy_tag_serializes() {
+        assert_eq!(ChunkStrategyTag::AstRefUse.as_db_str(), "ast_ref_use");
+    }
+
+    #[test]
+    fn rust_call_gets_ast_ref_strategy() {
+        let src = r#"fn main() { foo(); }"#;
+        let refs = extract_references(RefLang::Rust, src, 0);
+        let call = refs.iter().find(|c| c.symbol_name.as_deref() == Some("foo")).unwrap();
+        assert_eq!(call.strategy, ChunkStrategyTag::AstRef);
+    }
+
+    #[test]
+    fn rust_use_declaration_gets_ast_ref_use_strategy() {
+        let src = r#"use crate::db::init_db;"#;
+        let refs = extract_references(RefLang::Rust, src, 0);
+        let import = refs.iter().find(|c| c.symbol_name.as_deref() == Some("init_db")).unwrap();
+        assert_eq!(import.strategy, ChunkStrategyTag::AstRefUse);
+    }
+
+    #[test]
+    fn typescript_import_gets_ast_ref_use_strategy() {
+        let src = r#"import { useState } from 'react';"#;
+        let refs = extract_references(RefLang::TypeScript, src, 0);
+        let import = refs.iter().find(|c| c.symbol_name.as_deref() == Some("usestate")).unwrap();
+        assert_eq!(import.strategy, ChunkStrategyTag::AstRefUse);
+    }
+
+    #[test]
+    fn same_symbol_call_and_import_both_survive_dedup() {
+        let src = r#"use crate::db::init_db; fn main() { init_db(); }"#;
+        let refs = extract_references(RefLang::Rust, src, 0);
+        let call_chunk = refs.iter().find(|c| {
+            c.symbol_name.as_deref() == Some("init_db") && c.strategy == ChunkStrategyTag::AstRef
+        });
+        let import_chunk = refs.iter().find(|c| {
+            c.symbol_name.as_deref() == Some("init_db") && c.strategy == ChunkStrategyTag::AstRefUse
+        });
+        assert!(call_chunk.is_some(), "init_db CALLS chunk should survive dedup");
+        assert!(import_chunk.is_some(), "init_db IMPORTS chunk should survive dedup");
     }
 }
