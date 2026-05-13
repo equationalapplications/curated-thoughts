@@ -1,6 +1,7 @@
 pub mod chunker;
 pub mod db;
 pub mod embedder;
+pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
