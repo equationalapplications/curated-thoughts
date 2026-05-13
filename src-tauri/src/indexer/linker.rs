@@ -18,7 +18,8 @@ SELECT ref.id          AS ref_chunk_id,
        ref.entity_id,
        def.id          AS def_chunk_id,
        CASE ref.strategy
-         WHEN 'ast_ref' THEN 'CALLS'
+         WHEN 'ast_ref'     THEN 'CALLS'
+         WHEN 'ast_ref_use' THEN 'IMPORTS'
          ELSE 'CALLS'
        END             AS rel_type
 FROM   chunks AS ref
@@ -114,6 +115,17 @@ mod tests {
         }
     }
 
+    fn import_ref_chunk(symbol: &str) -> Chunk {
+        Chunk {
+            text: format!("use crate::{};", symbol),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: Some(symbol.to_lowercase()),
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::AstRefUse,
+        }
+    }
+
     #[test]
     fn linker_creates_calls_edge() {
         let conn = open_in_memory().unwrap();
@@ -137,6 +149,32 @@ mod tests {
         assert_eq!(from_id, ref_id);
         assert_eq!(to_id, def_id);
         assert_eq!(rel_type, "CALLS");
+        assert_eq!(symbol, "init_db");
+    }
+
+    #[test]
+    fn linker_creates_imports_edge() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash2").unwrap();
+        mark_document_indexed(&conn, doc_id).unwrap();
+
+        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact").unwrap();
+        let ref_id = insert_chunk(&conn, doc_id, &import_ref_chunk("init_db"), 1, "tier_fact").unwrap();
+
+        run_linker(&conn, "tier_fact", 0).unwrap();
+
+        let (from_id, to_id, rel_type, symbol): (i64, i64, String, String) = conn
+            .query_row(
+                "SELECT from_id, to_id, rel_type, symbol FROM curated_relationships WHERE entity_id = 'tier_fact'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(from_id, ref_id);
+        assert_eq!(to_id, def_id);
+        assert_eq!(rel_type, "IMPORTS");
         assert_eq!(symbol, "init_db");
     }
 

@@ -25,7 +25,7 @@ WITH RECURSIVE callee_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT DISTINCT chunk_id, MIN(depth) AS min_depth, rel_type
+SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
 FROM   callee_walk
 GROUP  BY chunk_id
 ORDER  BY min_depth
@@ -48,7 +48,7 @@ WITH RECURSIVE caller_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT DISTINCT chunk_id, MIN(depth) AS min_depth, rel_type
+SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
 FROM   caller_walk
 GROUP  BY chunk_id
 ORDER  BY min_depth
