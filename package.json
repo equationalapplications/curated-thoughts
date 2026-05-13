@@ -18,7 +18,7 @@
     "@blocknote/core": "^0.50.0",
     "@blocknote/mantine": "^0.50.0",
     "@blocknote/react": "^0.50.0",
-    "@equationalapplications/core-llm-wiki": "^4.5.1",
+    "@equationalapplications/core-llm-wiki": "^4.6.0",
     "@equationalapplications/react-llm-wiki": "^4.5.1",
     "@mantine/core": "^9.1.1",
     "@mantine/hooks": "^9.1.1",
@@ -30,11 +30,11 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.0.0",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^10.0.1",
-    "@eslint/js": "^9.0.0",
     "@semantic-release/github": "^12.0.8",
     "@semantic-release/npm": "^13.1.5",
     "@semantic-release/release-notes-generator": "^14.1.1",
@@ -49,9 +49,9 @@
     "eslint": "^9.0.0",
     "eslint-plugin-react": "^7.35.2",
     "jsdom": "^29.1.1",
-    "typescript-eslint": "^8.0.0",
     "semantic-release": "^25.0.3",
     "typescript": "~6.0.3",
+    "typescript-eslint": "^8.0.0",
     "vite": "^8.0.10",
     "vitest": "^4.1.5"
   }
