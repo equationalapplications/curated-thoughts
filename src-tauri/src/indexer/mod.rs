@@ -211,4 +211,31 @@ mod tests {
             "expected usestate in refs"
         );
     }
+
+    #[test]
+    fn rust_method_call_extracted() {
+        let src = r#"fn main() { self.init_db(); }"#;
+        let refs = extract_references(RefLang::Rust, src, 0);
+        assert!(
+            refs.iter().any(|c| c.symbol_name.as_deref() == Some("init_db")),
+            "expected init_db in refs from method call, got: {:?}",
+            refs.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rust_use_declaration_extracted() {
+        let src = r#"use crate::db::init_db;"#;
+        let refs = extract_references(RefLang::Rust, src, 0);
+        assert!(
+            refs.iter().any(|c| c.symbol_name.as_deref() == Some("init_db")),
+            "expected init_db in refs from use declaration, got: {:?}",
+            refs.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ast_ref_strategy_tag_serializes() {
+        assert_eq!(ChunkStrategyTag::AstRef.as_db_str(), "ast_ref");
+    }
 }

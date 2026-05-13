@@ -272,6 +272,7 @@ fn ingest_file(
     path: &str,
     force_rechunk: bool,
 ) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -343,6 +344,74 @@ pub fn start_pipeline(db_path: PathBuf) -> (mpsc::SyncSender<PipelineJob>, std::
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
     (tx, join, pending)
+}
+
+#[cfg(test)]
+mod pass_integration_tests {
+    use super::*;
+    use crate::db::connection::open_in_memory;
+    use crate::db::queries::{insert_chunk, upsert_document};
+
+    #[test]
+    fn ingest_rust_file_produces_def_and_ref_chunks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rust_file = tmp.path().join("documents").join("init.rs");
+        std::fs::create_dir_all(rust_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rust_file,
+            r#"
+fn init_db() {
+    connect();
+}
+fn connect() {}
+"#,
+        )
+        .unwrap();
+
+        let conn = open_in_memory().unwrap();
+        let path_str = rust_file.to_string_lossy().to_string();
+
+        let doc_id = upsert_document(&conn, &path_str, "testhash").unwrap();
+
+        let text = std::fs::read_to_string(&rust_file).unwrap();
+        let eid = entity_id_for_path(&path_str);
+
+        let mut chunks = crate::chunker::chunk_autodetect(&rust_file, &text);
+
+        let strategy = crate::chunker::classify(&rust_file);
+        if let crate::chunker::ChunkStrategy::AstSymbol(ast_lang) = strategy {
+            let ref_lang = match ast_lang {
+                crate::chunker::AstLang::Rust => crate::indexer::RefLang::Rust,
+                _ => return,
+            };
+            chunks.extend(crate::indexer::extract_references(ref_lang, &text, 0));
+        }
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            insert_chunk(&conn, doc_id, chunk, i, &eid).unwrap();
+        }
+
+        let def_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE defined_symbol IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(def_count > 0, "expected at least one definition chunk");
+
+        let ref_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE strategy = 'ast_ref' AND symbol_name IS NOT NULL AND defined_symbol IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            ref_count > 0,
+            "expected at least one reference chunk from Pass 2"
+        );
+    }
 }
 
 #[cfg(test)]
