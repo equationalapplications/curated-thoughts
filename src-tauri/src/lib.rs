@@ -698,6 +698,162 @@ fn queue_full_reindex(
     Ok(queued)
 }
 
+// ── Maintenance commands ──────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn run_wiki_heal(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+    vault_state: State<'_, VaultConfigState>,
+) -> Result<(), String> {
+    app.emit(
+        "wiki-status-change",
+        serde_json::json!({"heal": true, "ingesting": false, "librarian": false}),
+    )
+    .ok();
+
+    let result = (|| -> Result<(), String> {
+        let vault = vault_state
+            .0
+            .lock()
+            .unwrap()
+            .get_vault_path()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no vault configured".to_string())?;
+        let vault_root = std::path::PathBuf::from(&vault);
+
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+
+        // Fetch non-deleted entries that have a source reference.
+        let entries: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT rowid, source_ref FROM llm_wiki_entries
+                     WHERE deleted_at IS NULL AND source_ref IS NOT NULL",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut v = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                v.push((
+                    row.get::<_, i64>(0).map_err(|e| e.to_string())?,
+                    row.get::<_, String>(1).map_err(|e| e.to_string())?,
+                ));
+            }
+            v
+        };
+
+        for (rowid, source_ref) in entries {
+            let abs_path = if std::path::Path::new(&source_ref).is_absolute() {
+                std::path::PathBuf::from(&source_ref)
+            } else {
+                vault_root.join(&source_ref)
+            };
+            if !abs_path.exists() {
+                conn.execute(
+                    "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
+                    [rowid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        Ok(())
+    })();
+
+    app.emit(
+        "wiki-status-change",
+        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+    )
+    .ok();
+
+    result
+}
+
+#[tauri::command]
+async fn run_wiki_prune(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+) -> Result<(), String> {
+    app.emit(
+        "wiki-status-change",
+        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+    )
+    .ok();
+
+    let result = (|| -> Result<(), String> {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        // Hard-delete librarian_inferred entries soft-deleted more than 7 days ago.
+        conn.execute(
+            "DELETE FROM llm_wiki_entries
+             WHERE source_type = 'librarian_inferred'
+               AND deleted_at IS NOT NULL
+               AND deleted_at < (unixepoch() - 7 * 86400)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    app.emit(
+        "wiki-status-change",
+        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+    )
+    .ok();
+
+    result
+}
+
+#[tauri::command]
+async fn run_wiki_reembed(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+    pipeline: State<'_, PipelineHolder>,
+) -> Result<usize, String> {
+    app.emit(
+        "wiki-status-change",
+        serde_json::json!({"heal": false, "ingesting": true, "librarian": false}),
+    )
+    .ok();
+
+    let result = (|| -> Result<usize, String> {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+        let tx = {
+            let pipeline_guard = pipeline.0.lock().unwrap();
+            pipeline_guard
+                .as_ref()
+                .ok_or_else(|| "pipeline not running".to_string())?
+                .0
+                .clone()
+        };
+        drop(guard);
+        let mut queued = 0usize;
+        for path in paths {
+            if !std::path::Path::new(&path).exists() {
+                continue;
+            }
+            tx.send(PipelineJob::rechunk(path))
+                .map_err(|e| format!("pipeline channel closed: {e}"))?;
+            queued += 1;
+        }
+        Ok(queued)
+    })();
+
+    // Jobs are queued; pipeline processes them asynchronously.
+    // Emit idle after queuing since pipeline progress is tracked via get_indexing_status.
+    app.emit(
+        "wiki-status-change",
+        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+    )
+    .ok();
+
+    result
+}
+
 // ── Wiki SQL bridge ───────────────────────────────────────────────────────────
 // Implements SQLiteAdapter interface for @equationalapplications/react-llm-wiki
 
@@ -1597,6 +1753,9 @@ pub fn run() {
             get_proposed_content,
             save_wiki_page,
             delete_vault_file,
+            run_wiki_heal,
+            run_wiki_prune,
+            run_wiki_reembed,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
