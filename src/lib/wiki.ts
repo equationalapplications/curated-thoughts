@@ -19,8 +19,9 @@ export function getEntityRoutingForPath(vaultRelativePath: string) {
 }
 
 /**
- * Ingest a vault-relative documents/ path using canonical tier routing.
- * This helper should be the public path for document ingestion.
+ * Ingest any vault-relative path using canonical tier routing.
+ * entityId is derived from the path: documents/ → tier_fact, wiki/ → tier_wisdom,
+ * everything else → tier_working::<hash>. The package infers source_type from entityId.
  */
 export async function ingestDocumentByPath(
   vaultRelativePath: string,
@@ -34,11 +35,6 @@ export async function ingestDocumentByPath(
   },
 ) {
   const { entityId } = getEntityRoutingForPath(vaultRelativePath);
-  if (entityId !== "tier_fact") {
-    throw new Error(
-      `ingestDocumentByPath only supports documents/ paths, got ${vaultRelativePath}`
-    );
-  }
   return wiki.ingestDocument(entityId, params);
 }
 
@@ -96,7 +92,6 @@ export function startAutoHeal(): () => void {
 
   const unsubscribers = [
     listen('vault-event', scheduleHeal),
-    listen('vault-file-changed', scheduleHeal),
   ];
 
   return () => {
