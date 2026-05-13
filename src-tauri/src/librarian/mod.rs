@@ -6,6 +6,45 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+pub struct ChunkRow {
+    pub text: String,
+    pub symbol_name: Option<String>,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub tier: String,
+    pub path: String,
+}
+
+pub fn assemble_librarian_context(chunks: &[ChunkRow]) -> String {
+    let mut body = String::new();
+
+    for chunk in chunks {
+        let tier_label = match chunk.tier.as_str() {
+            "user_doc" => "ANCHOR TRUTH — do not propose modifications to these facts:\n",
+            "wiki" => "CURATED WISDOM — may be updated via Wisdom proposals:\n",
+            _ => "WORKING CONTEXT — summarize patterns and flag contradictions only:\n",
+        };
+
+        let header = match &chunk.symbol_name {
+            Some(sym) => format!(
+                "[source: {} | symbol: {} | lines {}-{}]\n",
+                chunk.path, sym, chunk.start_line, chunk.end_line
+            ),
+            None => format!(
+                "[source: {} | lines {}-{}]\n",
+                chunk.path, chunk.start_line, chunk.end_line
+            ),
+        };
+
+        body.push_str(tier_label);
+        body.push_str(&header);
+        body.push_str(&chunk.text);
+        body.push_str("\n\n");
+    }
+
+    body
+}
+
 fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
     let mut p = std::path::Path::new(source_path);
     loop {
@@ -33,26 +72,34 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
         return Ok(());
     }
 
-    let chunks: Vec<String> = {
+    let chunks: Vec<ChunkRow> = {
         let mut stmt = conn.prepare(
-            "SELECT c.chunk_text FROM chunks c
+            "SELECT c.chunk_text, c.symbol_name, c.start_line, c.end_line, d.tier, d.path
+             FROM chunks c
              JOIN documents d ON d.id = c.doc_id
              WHERE d.path = ?1
              ORDER BY c.position",
         )?;
         let mut rows = stmt.query([source_path])?;
-        let mut texts = Vec::new();
+        let mut v = Vec::new();
         while let Some(row) = rows.next()? {
-            texts.push(row.get::<_, String>(0)?);
+            v.push(ChunkRow {
+                text: row.get(0)?,
+                symbol_name: row.get(1)?,
+                start_line: row.get(2)?,
+                end_line: row.get(3)?,
+                tier: row.get(4)?,
+                path: row.get(5)?,
+            });
         }
-        texts
+        v
     };
 
     if chunks.is_empty() {
         return Ok(());
     }
 
-    let source_text = chunks.join("\n\n");
+    let source_text = assemble_librarian_context(&chunks);
     let byte_limit = source_text
         .char_indices()
         .nth(4000)
@@ -67,7 +114,7 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
         .post(format!("{}/api/generate", base_url))
         .json(&serde_json::json!({
             "model": model,
-            "system": "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.",
+            "system": "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.\n\nCONFLICT RESOLUTION DIRECTIVE: If Working Context contradicts Anchor Truth, do not harmonize or modify the Anchor Truth. Instead, create a new Wisdom entry titled 'Architectural Inconsistency' that states: which Working file and symbol introduced the deviation (cite source: metadata), which Anchor Truth document it violates (cite source: metadata), and a one-sentence description of the conflict. Do not emit a Wisdom proposal for any content that is consistent with the Anchor Truth.",
             "prompt": format!("Document to summarize:\n\n{}", truncated),
             "stream": false
         }))
@@ -162,5 +209,81 @@ mod tests {
         let (mode, auto) = get_folder_mode(&conn, "/vault/documents/note.md");
         assert_eq!(mode, "summarize");
         assert!(!auto);
+    }
+
+    #[test]
+    fn assemble_context_labels_user_doc_as_anchor_truth() {
+        let chunks = vec![
+            ChunkRow {
+                text: "fn init_db() {}".to_string(),
+                symbol_name: Some("init_db".to_string()),
+                start_line: 1,
+                end_line: 3,
+                tier: "user_doc".to_string(),
+                path: "documents/sqlite_docs.md".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("ANCHOR TRUTH"),
+            "expected ANCHOR TRUTH label, got:\n{context}"
+        );
+    }
+
+    #[test]
+    fn assemble_context_labels_wiki_as_curated_wisdom() {
+        let chunks = vec![
+            ChunkRow {
+                text: "Auth patterns overview".to_string(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 10,
+                tier: "wiki".to_string(),
+                path: "wiki/auth-patterns.md".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("CURATED WISDOM"),
+            "expected CURATED WISDOM label, got:\n{context}"
+        );
+    }
+
+    #[test]
+    fn assemble_context_includes_source_header_with_line_range() {
+        let chunks = vec![
+            ChunkRow {
+                text: "body text".to_string(),
+                symbol_name: None,
+                start_line: 12,
+                end_line: 34,
+                tier: "user_doc".to_string(),
+                path: "documents/api-ref.md".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("[source: documents/api-ref.md | lines 12-34]"),
+            "expected source header, got:\n{context}"
+        );
+    }
+
+    #[test]
+    fn assemble_context_includes_symbol_name_when_present() {
+        let chunks = vec![
+            ChunkRow {
+                text: "fn foo() {}".to_string(),
+                symbol_name: Some("foo".to_string()),
+                start_line: 22,
+                end_line: 45,
+                tier: "wiki".to_string(),
+                path: "src/db/init.rs".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("[source: src/db/init.rs | symbol: foo | lines 22-45]"),
+            "expected symbol in header, got:\n{context}"
+        );
     }
 }
