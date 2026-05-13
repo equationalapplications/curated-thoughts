@@ -1,4 +1,5 @@
 import { FolderRulesPanel } from "./FolderRulesPanel";
+import { MaintenanceDashboard } from "./MaintenanceDashboard";
 import { ModelPanel } from "./ModelPanel";
 import { VaultPanel } from "./VaultPanel";
 
@@ -25,6 +26,8 @@ export function SettingsModal({
         <ModelPanel />
         <hr className="settings-divider" />
         <FolderRulesPanel />
+        <hr className="settings-divider" />
+        <MaintenanceDashboard />
       </div>
     </div>
   );
