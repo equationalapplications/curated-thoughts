@@ -1,5 +1,6 @@
 import { createWiki, WikiBusyError } from "@equationalapplications/react-llm-wiki";
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
+import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
@@ -41,7 +42,7 @@ export async function ingestDocumentByPath(
 
 export const wiki = createWiki(tauriWikiAdapter, {
   llmProvider: {
-    async generateText({ systemPrompt, userPrompt }) {
+    async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
       return invoke<string>("ollama_generate", { systemPrompt, userPrompt });
     },
     async embed(text: string): Promise<number[]> {
@@ -52,10 +53,11 @@ export const wiki = createWiki(tauriWikiAdapter, {
     hybridWeight: 0.7,
     preFilterLimit: 50,
   },
-  onRetrievalFallback: (err) => {
+  onRetrievalFallback: (err: Error) => {
     console.warn("[wiki] embed unavailable, using keyword search:", err.message);
   },
-});
+  graphAdapter: tauriGraphAdapter,
+} as any);
 
 export async function setupWiki() {
   await wiki.setup();
