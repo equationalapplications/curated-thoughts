@@ -121,8 +121,13 @@ impl PipelineWorker {
                                     .map(|d| d.as_secs() as i64)
                                     .unwrap_or(0)
                                     .saturating_sub(300);
-                                if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
-                                    eprintln!("[linker] run_linker error ({}): {}", eid, e);
+                                let should_link = crate::indexer::linker::entity_ids_needing_link(&conn)
+                                    .map(|ids| ids.contains(&eid))
+                                    .unwrap_or(true);
+                                if should_link {
+                                    if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
+                                        eprintln!("[linker] run_linker error ({}): {}", eid, e);
+                                    }
                                 }
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &conn,

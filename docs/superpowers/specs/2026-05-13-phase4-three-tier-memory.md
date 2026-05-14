@@ -4,7 +4,7 @@
 
 This is the final check of the [Code Graph](https://github.com/equationalapplications/curated-thoughts#bulk-re-index-bulk_reindex-cli) logic. You use the [MCP agent server](https://github.com/equationalapplications/curated-thoughts#mcp-agent-server-experimental) to verify that a change in a **Fact** (e.g., an API spec) correctly identifies all affected **Working Memory** (code chunks) up to 5 levels deep.
 
-* **Tooling:** Run the [integration tests](https://www.google.com/search?q=https://github.com/equationalapplications/curated-thoughts%23integration-tests-stdio--vault_tools) to verify that the Rust backend's recursive CTE is tracing dependencies correctly.
+* **Tooling:** Run the [integration tests](https://github.com/equationalapplications/curated-thoughts#integration-tests-stdio--vault_tools) to verify that the Rust backend's recursive CTE is tracing dependencies correctly.
 * **Goal:** Ensure the [Librarian](https://github.com/equationalapplications/curated-thoughts#architecture) can cite exact file and line references when flagging architectural inconsistencies.
 
 ### 2. Database "Heal" and "Prune" Automation
@@ -33,6 +33,6 @@ As your knowledge base grows, local [semantic search profiling](https://github.c
 | **Phase 1** | **Hierarchy** | [Tiered Weights](https://github.com/equationalapplications/curated-thoughts#architecture) (Fact vs. Working). |
 | **Phase 2** | **Structure** | [Code Graph](https://github.com/equationalapplications/curated-thoughts#bulk-re-index-bulk_reindex-cli) (Symbol & Edge extraction). |
 | **Phase 3** | **UX & Status** | [Reactive Hooks](https://github.com/equationalapplications/curated-thoughts#package-links) & Emoji-safe rendering. |
-| **Phase 4** | **Validation** | [Integration Tests](https://www.google.com/search?q=https://github.com/equationalapplications/curated-thoughts%23integration-tests-stdio--vault_tools) & Maintenance Automation. |
+| **Phase 4** | **Validation** | [Integration Tests](https://github.com/equationalapplications/curated-thoughts#integration-tests-stdio--vault_tools) & Maintenance Automation. |
 
 With Phase 4 complete, your [Curated Thoughts](https://github.com/equationalapplications/curated-thoughts) instance is a fully autonomous, structurally aware "Second Brain."

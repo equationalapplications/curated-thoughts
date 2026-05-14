@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
+import type { WikiStatus } from "../hooks/useWikiStatus";
 
 let _workspaceId: string = 'tier_working::default';
 
@@ -114,7 +115,21 @@ export function startAutoHeal(): () => void {
 }
 
 export function startAutoMaintenance(): () => void {
+  let isBusy = false;
+  const handleStatusChange = (event: { payload: WikiStatus }) => {
+    isBusy =
+      event.payload.ingesting ||
+      event.payload.librarian ||
+      event.payload.heal ||
+      event.payload.prune;
+  };
+
   const runPrune = async () => {
+    if (isBusy) {
+      console.info('[auto-maintenance] skipping prune while system is busy');
+      return;
+    }
+
     try {
       await invoke('run_wiki_prune');
     } catch (err) {
@@ -122,12 +137,15 @@ export function startAutoMaintenance(): () => void {
     }
   };
 
+  const unsubscribers = [listen('wiki-status-change', handleStatusChange)];
+
   // Run a prune once at startup, then every 24 hours.
   void runPrune();
   const interval = window.setInterval(runPrune, 24 * 60 * 60 * 1000);
 
   return () => {
     window.clearInterval(interval);
+    void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
   };
 }
 
