@@ -29,12 +29,7 @@ impl EntityVectorCache {
     }
 
     fn get(&mut self, chunk_id: i64) -> Option<Arc<[f32]>> {
-        let result = self.vectors.get(&chunk_id).cloned();
-        if result.is_some() {
-            self.order.retain(|id| *id != chunk_id);
-            self.order.push_back(chunk_id);
-        }
-        result
+        self.vectors.get(&chunk_id).cloned()
     }
 
     fn insert(&mut self, chunk_id: i64, vector: Arc<[f32]>) {
@@ -65,16 +60,7 @@ impl EntityVectorCacheStore {
     }
 
     fn get(&mut self, entity_id: &str, chunk_id: i64) -> Option<Arc<[f32]>> {
-        if let Some(entity) = self.entities.get_mut(entity_id) {
-            let result = entity.get(chunk_id);
-            if result.is_some() {
-                self.order.retain(|id| id.as_str() != entity_id);
-                self.order.push_back(entity_id.to_string());
-            }
-            result
-        } else {
-            None
-        }
+        self.entities.get_mut(entity_id)?.get(chunk_id)
     }
 
     fn insert(&mut self, entity_id: &str, chunk_id: i64, vector: Arc<[f32]>) {
@@ -103,16 +89,6 @@ static VECTOR_CACHE: OnceLock<Mutex<EntityVectorCacheStore>> = OnceLock::new();
 fn acquire_cache_lock() -> std::sync::MutexGuard<'static, EntityVectorCacheStore> {
     let cache = VECTOR_CACHE.get_or_init(|| Mutex::new(EntityVectorCacheStore::new()));
     cache.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn get_cached_embedding(entity_id: &str, chunk_id: i64) -> Option<Arc<[f32]>> {
-    let mut cache = acquire_cache_lock();
-    cache.get(entity_id, chunk_id)
-}
-
-fn insert_cached_embedding(entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
-    let mut cache = acquire_cache_lock();
-    cache.insert(entity_id, chunk_id, Arc::from(vector));
 }
 
 fn get_or_insert_cached_embedding(entity_id: &str, chunk_id: i64, bytes: &[u8]) -> Arc<[f32]> {
