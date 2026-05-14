@@ -1848,7 +1848,7 @@ fn copy_os_drop_paths_to_vault(
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
-pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root, PipelineJob};
+pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root};
 
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
