@@ -24,21 +24,21 @@ describe('useWikiStatus', () => {
 
   it('returns initial idle status', () => {
     const { result } = renderHook(() => useWikiStatus());
-    expect(result.current).toEqual({ ingesting: false, librarian: false, heal: false });
+    expect(result.current).toEqual({ ingesting: false, librarian: false, heal: false, prune: false });
   });
 
   it('updates when wiki-status-change fires with ingesting true', async () => {
     const { result } = renderHook(() => useWikiStatus());
     await act(async () => {
-      capturedCallback?.({ payload: { ingesting: true, librarian: false, heal: false } });
+      capturedCallback?.({ payload: { ingesting: true, librarian: false, heal: false, prune: false } });
     });
-    expect(result.current).toEqual({ ingesting: true, librarian: false, heal: false });
+    expect(result.current).toEqual({ ingesting: true, librarian: false, heal: false, prune: false });
   });
 
   it('updates when wiki-status-change fires with heal true', async () => {
     const { result } = renderHook(() => useWikiStatus());
     await act(async () => {
-      capturedCallback?.({ payload: { ingesting: false, librarian: false, heal: true } });
+      capturedCallback?.({ payload: { ingesting: false, librarian: false, heal: true, prune: false } });
     });
     expect(result.current.heal).toBe(true);
   });

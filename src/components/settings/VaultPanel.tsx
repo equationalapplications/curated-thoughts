@@ -23,7 +23,7 @@ function revealLabel(): string {
 export function VaultPanel({ vaultPath }: Props) {
   const [switching, setSwitching] = useState(false);
   const wikiStatus = useWikiStatus();
-  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal;
+  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal || wikiStatus.prune;
 
   const backupHintPath = useMemo(() => {
     const sep = vaultPath.includes("\\") ? "\\" : "/";

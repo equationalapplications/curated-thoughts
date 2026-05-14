@@ -1,4 +1,6 @@
+import * as React from 'react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
 
 vi.mock('@equationalapplications/react-llm-wiki', () => ({
   createWiki: vi.fn().mockReturnValue({
@@ -7,6 +9,10 @@ vi.mock('@equationalapplications/react-llm-wiki', () => ({
     runHeal: vi.fn().mockResolvedValue(undefined),
   }),
   WikiBusyError: class WikiBusyError extends Error {},
+}));
+
+vi.mock('../hooks/useWikiStatus', () => ({
+  useWikiStatus: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -23,7 +29,10 @@ vi.mock('../lib/wikiAdapter', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { useWikiStatus } from '../hooks/useWikiStatus';
+import { VaultPanel } from '../components/settings/VaultPanel';
 import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki } from '../lib/wiki';
+import { runWikiReindex } from '../lib/tauri';
 
 describe('initWorkspaceId', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -93,25 +102,62 @@ describe('tieredRead', () => {
 });
 
 describe('startAutoHeal', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('subscribes to vault-event and returns cleanup', () => {
     const cleanup = startAutoHeal();
     expect(listen).toHaveBeenCalledWith('vault-event', expect.any(Function));
     expect(typeof cleanup).toBe('function');
   });
 
-  it('invokes the Rust auto-heal command', async () => {
+  it('invokes the Rust auto-heal command only for deleted vault events', async () => {
     vi.useFakeTimers();
     vi.mocked(invoke).mockResolvedValue(undefined);
 
     const cleanup = startAutoHeal();
-    const callback = vi.mocked(listen).mock.calls[0][1] as () => void;
+    const callback = vi.mocked(listen).mock.calls[0][1] as (event: { payload: { kind?: string } }) => void;
 
-    callback();
+    callback({ payload: { kind: 'Modified' } });
     await vi.advanceTimersByTimeAsync(3000);
+    expect(vi.mocked(invoke)).not.toHaveBeenCalled();
 
+    callback({ payload: { kind: 'Deleted' } });
+    await vi.advanceTimersByTimeAsync(3000);
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('run_wiki_heal');
 
     cleanup();
     vi.useRealTimers();
+  });
+});
+
+describe('VaultPanel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useWikiStatus).mockReturnValue({
+      ingesting: false,
+      librarian: false,
+      heal: false,
+      prune: true,
+    });
+  });
+
+  it('blocks Change vault when a prune job is active', () => {
+    render(React.createElement(VaultPanel, { vaultPath: '/Users/test/vault' }));
+    expect(screen.getByRole('button', { name: /Change vault/i })).toBeDisabled();
+  });
+});
+
+describe('runWikiReindex', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('forwards the command to Tauri', async () => {
+    vi.mocked(invoke).mockResolvedValue(7);
+    const result = await runWikiReindex();
+    expect(invoke).toHaveBeenCalledWith('run_wiki_reindex');
+    expect(result).toBe(7);
   });
 });

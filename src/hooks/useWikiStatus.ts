@@ -5,6 +5,7 @@ export interface WikiStatus {
   ingesting: boolean;
   librarian: boolean;
   heal: boolean;
+  prune: boolean;
 }
 
 export function useWikiStatus(): WikiStatus {
@@ -12,6 +13,7 @@ export function useWikiStatus(): WikiStatus {
     ingesting: false,
     librarian: false,
     heal: false,
+    prune: false,
   });
 
   useEffect(() => {
