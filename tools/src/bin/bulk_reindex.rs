@@ -95,6 +95,9 @@ fn main() -> Result<()> {
         .vault_root()
         .context("read vault root")?
         .ok_or_else(|| anyhow!("vault root missing"))?;
+    // Canonicalize so entity_id_for_path can strip the vault prefix from the
+    // canonical document paths stored by the watcher (matches pipeline startup logic).
+    let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
     let vault_root_str = vault_root
         .to_str()
         .ok_or_else(|| anyhow!("invalid vault root path"))?;

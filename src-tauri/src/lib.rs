@@ -150,8 +150,16 @@ fn normalize_workspace_path(path: &str) -> String {
 
 #[tauri::command]
 fn get_workspace_id(path: String) -> String {
-    let normalized_path = normalize_workspace_path(&path);
+    // Canonicalize so a symlinked vault hashes consistently with the Rust pipeline
+    // (which canonicalizes before starting). Fall back to the raw path when the
+    // path doesn't exist yet (e.g. unit tests with fictional paths).
+    let pb = std::path::PathBuf::from(&path);
+    let canonical_str = pb
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(path);
     // hash_bytes returns hex::encode(sha256) — 64 lowercase hex chars — safe to slice to 16.
+    let normalized_path = normalize_workspace_path(&canonical_str);
     let hash = crate::hasher::hash_bytes(normalized_path.as_bytes());
     format!("tier_working::{}", &hash[..16])
 }
