@@ -47,6 +47,9 @@ export interface SearchResult {
   end_line: number;
   symbol_name: string | null;
   strategy: string;
+  // Phase 2: structural graph neighbors
+  structural?: boolean;
+  rel_type?: string;
 }
 
 export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> =>
@@ -54,6 +57,9 @@ export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> 
 
 export const getRelatedChunks = (docPath: string, limit = 5): Promise<SearchResult[]> =>
   invoke("get_related_chunks", { docPath, limit });
+
+export const getStructuralNeighbors = (docPath: string, maxHops = 2): Promise<SearchResult[]> =>
+  invoke("get_structural_neighbors", { docPath, maxHops });
 
 export interface VaultFile {
   path: string;
@@ -126,3 +132,23 @@ export const checkVaultBackup = (path: string): Promise<boolean> =>
 
 export const revealVault = (): Promise<void> =>
   invoke("reveal_vault");
+
+export interface NeighborRow {
+  chunk_id: number;
+  depth: number;
+  rel_type: string;
+}
+
+export const getChunkIdsForWikiEntry = (
+  entryId: number,
+  entityId: string,
+): Promise<number[]> =>
+  invoke('get_chunk_ids_for_wiki_entry', { entryId, entityId });
+
+export const getImpactRadius = (
+  rootChunkId: number,
+  entityId: string,
+  direction: 'callers' | 'callees' | 'both',
+  maxHops: number,
+): Promise<NeighborRow[]> =>
+  invoke('get_impact_radius', { rootChunkId, entityId, direction, maxHops });

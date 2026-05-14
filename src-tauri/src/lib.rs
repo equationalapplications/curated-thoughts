@@ -1,7 +1,9 @@
 pub mod chunker;
 pub mod db;
 pub mod embedder;
+pub mod graph;
 mod hasher;
+pub mod indexer;
 pub mod librarian;
 mod pipeline;
 pub mod recall_bench_fixture;
@@ -20,6 +22,7 @@ use pipeline::PipelineJob;
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
+use rusqlite::OptionalExtension;
 use serde_json::Value as JsonVal;
 use setup::{
     check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
@@ -27,14 +30,16 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc::SyncSender, Mutex};
+use std::sync::{mpsc::SyncSender, Arc, Mutex};
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
-struct PipelineHolder(Mutex<Option<(SyncSender<PipelineJob>, std::thread::JoinHandle<()>)>>);
+struct PipelineHolder(Mutex<Option<(SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>)>>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
@@ -127,6 +132,38 @@ fn normalize_wiki_relative_path(path: &str) -> String {
     } else {
         format!("wiki/{}", normalized)
     }
+}
+
+// ── Workspace identity ────────────────────────────────────────────────────────
+
+fn normalize_workspace_path(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+    if normalized != "/" {
+        normalized = normalized.trim_end_matches('/').to_string();
+        if normalized.ends_with(':') {
+            normalized.push('/');
+        }
+        if normalized.is_empty() {
+            normalized = "/".to_string();
+        }
+    }
+    normalized
+}
+
+#[tauri::command]
+fn get_workspace_id(path: String) -> String {
+    // Canonicalize so a symlinked vault hashes consistently with the Rust pipeline
+    // (which canonicalizes before starting). Fall back to the raw path when the
+    // path doesn't exist yet (e.g. unit tests with fictional paths).
+    let pb = std::path::PathBuf::from(&path);
+    let canonical_str = pb
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(path);
+    // hash_bytes returns hex::encode(sha256) — 64 lowercase hex chars — safe to slice to 16.
+    let normalized_path = normalize_workspace_path(&canonical_str);
+    let hash = crate::hasher::hash_bytes(normalized_path.as_bytes());
+    format!("tier_working::{}", &hash[..16])
 }
 
 // ── Vault commands ────────────────────────────────────────────────────────────
@@ -429,7 +466,13 @@ fn recover_after_failed_switch_vault(
     }
     if let Ok(mut g) = pipeline.0.lock() {
         if g.is_none() {
-            *g = Some(start_pipeline(db_path.to_path_buf()));
+            let vault_root = vault_state.0.lock().ok()
+                .and_then(|vc| vc.get_vault_path().ok().flatten())
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    p.canonicalize().unwrap_or(p)
+                });
+            *g = Some(start_pipeline(db_path.to_path_buf(), vault_root));
         }
     }
     if let Err(e) =
@@ -476,7 +519,7 @@ fn switch_vault(
 
     {
         let mut g = pipeline.0.lock().unwrap();
-        if let Some((tx, join)) = g.take() {
+        if let Some((tx, join, _pending)) = g.take() {
             drop(tx);
             let _ = join.join();
         }
@@ -507,7 +550,8 @@ fn switch_vault(
 
         {
             let mut g = pipeline.0.lock().unwrap();
-            *g = Some(start_pipeline(db_path.clone()));
+            let canon_root = new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
+            *g = Some(start_pipeline(db_path.clone(), Some(canon_root)));
         }
 
         vault_state
@@ -687,6 +731,170 @@ fn queue_full_reindex(
         queued += 1;
     }
     Ok(queued)
+}
+
+// ── Maintenance commands ──────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn run_wiki_heal(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+    vault_state: State<'_, VaultConfigState>,
+) -> Result<(), String> {
+    app.emit("wiki-status-change", serde_json::json!({"heal": true})).ok();
+
+    let result = (|| -> Result<(), String> {
+        let vault = vault_state
+            .0
+            .lock()
+            .unwrap()
+            .get_vault_path()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no vault configured".to_string())?;
+        let vault_root = std::path::PathBuf::from(&vault);
+
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+
+        // Fetch non-deleted entries that have a source reference.
+        let entries: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT rowid, source_ref FROM llm_wiki_entries
+                     WHERE deleted_at IS NULL AND source_ref IS NOT NULL",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut v = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                v.push((
+                    row.get::<_, i64>(0).map_err(|e| e.to_string())?,
+                    row.get::<_, String>(1).map_err(|e| e.to_string())?,
+                ));
+            }
+            v
+        };
+
+        for (rowid, source_ref) in entries {
+            // Only accept vault-relative refs. Absolute paths, traversal segments,
+            // symlink escapes, or missing files are treated as missing to prevent
+            // heal from probing outside the vault.
+            let safe = crate::vault::safe_vault_path(
+                &vault_root,
+                &source_ref,
+                &["."],
+                crate::vault::PathMode::MustExist,
+            );
+            if safe.is_err() {
+                conn.execute(
+                    "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
+                    [rowid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        Ok(())
+    })();
+
+    app.emit("wiki-status-change", serde_json::json!({"heal": false})).ok();
+
+    result
+}
+
+#[tauri::command]
+async fn run_wiki_prune(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+) -> Result<(), String> {
+    app.emit("wiki-status-change", serde_json::json!({"librarian": true})).ok();
+
+    let result = (|| -> Result<(), String> {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        // Hard-delete librarian_inferred entries soft-deleted more than 7 days ago.
+        conn.execute(
+            "DELETE FROM llm_wiki_entries
+             WHERE source_type = 'librarian_inferred'
+               AND deleted_at IS NOT NULL
+               AND deleted_at < (unixepoch() - 7 * 86400)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    app.emit("wiki-status-change", serde_json::json!({"librarian": false})).ok();
+
+    result
+}
+
+#[tauri::command]
+async fn run_wiki_reembed(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+    pipeline: State<'_, PipelineHolder>,
+) -> Result<usize, String> {
+    app.emit("wiki-status-change", serde_json::json!({"ingesting": true})).ok();
+
+    let (tx, pending) = {
+        let pipeline_guard = pipeline.0.lock().unwrap();
+        match pipeline_guard.as_ref() {
+            Some(p) => (p.0.clone(), p.2.clone()),
+            None => {
+                app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
+                return Err("pipeline not running".to_string());
+            }
+        }
+    };
+
+    let result = (|| -> Result<usize, String> {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+        drop(guard);
+        let mut queued = 0usize;
+        for path in paths {
+            if !std::path::Path::new(&path).exists() {
+                continue;
+            }
+            pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tx.send(PipelineJob::rechunk_for_reembed(path))
+                .map_err(|e| {
+                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    format!("pipeline channel closed: {e}")
+                })?;
+            queued += 1;
+        }
+        Ok(queued)
+    })();
+
+    match &result {
+        Ok(queued) => {
+            if *queued > 0 {
+                let app_handle = app.clone();
+                let pending = pending.clone();
+                std::thread::spawn(move || {
+                    while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    app_handle
+                        .emit(
+                            "wiki-status-change",
+                            serde_json::json!({"ingesting": false}),
+                        )
+                        .ok();
+                });
+            } else {
+                app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
+            }
+        }
+        Err(_) => {
+            app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
+        }
+    }
+
+    result
 }
 
 // ── Wiki SQL bridge ───────────────────────────────────────────────────────────
@@ -957,6 +1165,199 @@ fn get_related_chunks(
 
     let guard = db_state.0.lock().unwrap();
     crate::search::related_chunks_try_paths(&guard.0, &candidates, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_impact_radius(
+    root_chunk_id: i64,
+    entity_id: String,
+    direction: String,
+    max_hops: u32,
+    db_state: State<DbState>,
+) -> Result<Vec<graph::NeighborRow>, String> {
+    let max_hops = max_hops.min(5);
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+
+    match direction.as_str() {
+        "callees" => graph::get_callees(conn, root_chunk_id, &entity_id, max_hops),
+        "callers" => graph::get_callers(conn, root_chunk_id, &entity_id, max_hops),
+        "both"    => graph::get_both(conn, root_chunk_id, &entity_id, max_hops),
+        other     => Err(anyhow::anyhow!("unknown direction: {}", other)),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Returns graph-adjacent chunks for `doc_path` with `structural: true` and `rel_type` set,
+/// so the frontend can display them as "Connected" results alongside semantic hits.
+#[tauri::command]
+fn get_structural_neighbors(
+    doc_path: String,
+    max_hops: u32,
+    db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+) -> Result<Vec<search::SearchResult>, String> {
+    let root = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault path set".to_string())?;
+    let vault_root = {
+        let p = std::path::PathBuf::from(&root);
+        p.canonicalize().unwrap_or(p)
+    };
+
+    let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
+    let safe = crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_rel,
+        &["."],
+        crate::vault::PathMode::MustExist,
+    )
+    .map_err(|e| e.to_string())?;
+    let abs_path = safe.to_string_lossy().into_owned();
+    let canonical_root = vault_root.to_string_lossy().into_owned();
+    let entity_id = pipeline::entity_id_for_path(&abs_path, Some(&canonical_root));
+
+    let max_hops = max_hops.min(5);
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+
+    let source_chunk_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE d.path = ?1 AND d.status = 'indexed'",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&abs_path], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for id in &source_chunk_ids {
+        seen_ids.insert(*id);
+    }
+
+    let mut neighbor_pairs: Vec<(i64, String)> = Vec::new();
+    for chunk_id in source_chunk_ids {
+        if let Ok(neighbors) = crate::graph::get_both(conn, chunk_id, &entity_id, max_hops) {
+            for n in neighbors {
+                if seen_ids.insert(n.chunk_id) {
+                    neighbor_pairs.push((n.chunk_id, n.rel_type));
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for (chunk_id, rel_type) in neighbor_pairs {
+        let row = conn.query_row(
+            "SELECT d.path, c.chunk_text, c.position, c.start_line, c.end_line,
+             COALESCE(c.symbol_name, '') AS symbol_name, c.strategy
+             FROM chunks c JOIN documents d ON d.id = c.doc_id
+             WHERE c.id = ?1 AND d.status = 'indexed'",
+            [chunk_id],
+            |row| {
+                let sym: String = row.get(5)?;
+                Ok(search::SearchResult {
+                    doc_path: row.get(0)?,
+                    chunk_text: row.get(1)?,
+                    chunk_position: row.get(2)?,
+                    score: 0.0,
+                    start_line: row.get(3)?,
+                    end_line: row.get(4)?,
+                    symbol_name: if sym.is_empty() { None } else { Some(sym) },
+                    strategy: row.get(6)?,
+                    structural: Some(true),
+                    rel_type: Some(rel_type.clone()),
+                })
+            },
+        );
+        if let Ok(r) = row {
+            results.push(r);
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+fn get_chunk_ids_for_wiki_entry(
+    entry_id: i64,
+    entity_id: String,
+    db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+) -> Result<Vec<i64>, String> {
+    let root = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault path set".to_string())?;
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let source_ref: Option<String> = {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        conn.query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE rowid = ?1 OR id = ?1",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten()
+    };
+
+    let source_ref = match source_ref {
+        Some(r) => r,
+        None => return Ok(Vec::new()),
+    };
+
+    let normalized_rel = match normalize_path_argument_to_vault_relative(&source_ref, &vault_root) {
+        Ok(r) => r,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let safe = match crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_rel,
+        &["."],
+        crate::vault::PathMode::MustExist,
+    ) {
+        Ok(p) => p,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let abs_path = safe.to_string_lossy().into_owned();
+
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.path = ?1 AND c.entity_id = ?2 AND d.status = 'indexed'",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&abs_path, &entity_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        if let Ok(id) = row {
+            ids.push(id);
+        }
+    }
+
+    Ok(ids)
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────
@@ -1433,7 +1834,7 @@ fn copy_os_drop_paths_to_vault(
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
-pub use pipeline::ingest_document;
+pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root};
 
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
@@ -1449,6 +1850,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
+            get_workspace_id,
             get_review_queue,
             approve_wiki_page,
             reject_wiki_page,
@@ -1463,6 +1865,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_related_chunks,
             save_wiki_page,
             queue_full_reindex,
+            get_impact_radius,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -1528,7 +1931,11 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
-    let pipeline = start_pipeline(db_path.clone());
+    let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
+        let pb = PathBuf::from(&p);
+        pb.canonicalize().unwrap_or(pb)
+    });
+    let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1555,6 +1962,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
+            get_workspace_id,
             backup_vault_db,
             switch_vault,
             check_vault_backup,
@@ -1586,6 +1994,12 @@ pub fn run() {
             get_proposed_content,
             save_wiki_page,
             delete_vault_file,
+            run_wiki_heal,
+            run_wiki_prune,
+            run_wiki_reembed,
+            get_chunk_ids_for_wiki_entry,
+            get_impact_radius,
+            get_structural_neighbors,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
@@ -1679,5 +2093,55 @@ mod drop_destination_tests {
         fs::create_dir_all(root.join("documents").join("dup.md")).unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_id_tests {
+    use super::get_workspace_id;
+
+    #[test]
+    fn has_tier_working_prefix() {
+        let id = get_workspace_id("/Users/foo/Vault".to_string());
+        assert!(id.starts_with("tier_working::"), "got: {id}");
+    }
+
+    #[test]
+    fn hash_segment_is_16_lowercase_hex_chars() {
+        let id = get_workspace_id("/Users/foo/Vault".to_string());
+        let hash = id.strip_prefix("tier_working::").unwrap();
+        assert_eq!(hash.len(), 16, "hash segment should be 16 chars, got: {hash}");
+        assert!(
+            hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "hash should be lowercase hex, got: {hash}"
+        );
+    }
+
+    #[test]
+    fn is_deterministic() {
+        assert_eq!(
+            get_workspace_id("/Users/foo/Vault".to_string()),
+            get_workspace_id("/Users/foo/Vault".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_trailing_slashes_and_windows_paths() {
+        assert_eq!(
+            get_workspace_id("/Users/foo/Vault".to_string()),
+            get_workspace_id("/Users/foo/Vault/".to_string())
+        );
+        assert_eq!(
+            get_workspace_id("C:\\Users\\foo\\Vault".to_string()),
+            get_workspace_id("C:/Users/foo/Vault".to_string())
+        );
+    }
+
+    #[test]
+    fn different_vaults_produce_different_ids() {
+        assert_ne!(
+            get_workspace_id("/Users/foo/VaultA".to_string()),
+            get_workspace_id("/Users/foo/VaultB".to_string())
+        );
     }
 }

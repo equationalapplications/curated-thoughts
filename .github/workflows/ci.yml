@@ -36,6 +36,12 @@ jobs:
       - name: Build MCP binary
         run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
 
+      # Phase 4 regression tests run here:
+      #   graph_integration.rs  — recursive impact radius (5-hop CTE via Tauri command)
+      #   wiki_maintenance.rs   — DB-level prune/heal SQL contract
+      # Before addressing PR review comments that touch graph.rs CTEs, lib.rs
+      # run_wiki_heal/run_wiki_prune SQL, or the max_hops cap: run this step
+      # locally first to confirm no regression.
       - name: Tests + MCP integration
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
         env:

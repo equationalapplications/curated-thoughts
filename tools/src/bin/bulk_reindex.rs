@@ -9,12 +9,14 @@
 //! cargo run --manifest-path tools/Cargo.toml --bin bulk_reindex -- --limit 500
 //! ```
 
-use anyhow::{Context as _, Result};
-use std::path::Path;
+use anyhow::{anyhow, Context as _, Result};
+use std::{collections::HashSet, path::Path};
 
 use tauri_app_lib::db::{list_indexed_user_doc_paths, AppDb};
-use tauri_app_lib::ingest_document;
+use tauri_app_lib::indexer::linker::run_linker;
+use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
 use tauri_app_lib::retrieval;
+use tauri_app_lib::vault::VaultConfig;
 
 struct Args {
     dry_run: bool,
@@ -88,6 +90,17 @@ fn main() -> Result<()> {
 
     let db = AppDb::open(&paths_b.db_path).context("open brain database")?;
     let conn = &db.0;
+    let config = VaultConfig::new(paths_b.config_path.clone());
+    let vault_root = config
+        .vault_root()
+        .context("read vault root")?
+        .ok_or_else(|| anyhow!("vault root missing"))?;
+    // Canonicalize so entity_id_for_path can strip the vault prefix from the
+    // canonical document paths stored by the watcher (matches pipeline startup logic).
+    let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
+    let vault_root_str = vault_root
+        .to_str()
+        .ok_or_else(|| anyhow!("invalid vault root path"))?;
 
     let mut paths = list_indexed_user_doc_paths(conn).context("list indexed paths")?;
     if let Some(ref sub) = args.path_contains {
@@ -106,14 +119,23 @@ fn main() -> Result<()> {
     }
 
     let total = paths.len();
+    let mut entity_ids = HashSet::new();
     for (i, path) in paths.iter().enumerate() {
         if !Path::new(path).exists() {
             eprintln!("[{}/{}] skip missing: {}", i + 1, total, path);
             continue;
         }
-        ingest_document(conn, &profile, path, true).with_context(|| format!("reindex {}", path))?;
+        ingest_document_with_vault_root(conn, &profile, path, true, Some(vault_root_str))
+            .with_context(|| format!("reindex {}", path))?;
+        entity_ids.insert(entity_id_for_path(path, Some(vault_root_str)));
         if (i + 1) % 25 == 0 || i + 1 == total {
             eprintln!("[{}/{}] done …", i + 1, total);
+        }
+    }
+
+    for entity_id in entity_ids {
+        if let Err(e) = run_linker(conn, &entity_id, 0) {
+            eprintln!("[linker] run_linker error ({}): {}", entity_id, e);
         }
     }
     println!("Reindexed {} document(s).", total);

@@ -76,13 +76,15 @@ pub(super) fn split_oversized_block_spans(
     out
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ChunkStrategyTag {
     AstSymbolRust,
     AstSymbolTypeScript,
     AstSymbolJavaScript,
     AstSymbolPython,
     AstSymbolGo,
+    AstRef,
+    AstRefUse,
     Prose,
     Scanner,
     Declarative,
@@ -97,6 +99,8 @@ impl ChunkStrategyTag {
             ChunkStrategyTag::AstSymbolJavaScript => "ast_symbol_javascript",
             ChunkStrategyTag::AstSymbolPython => "ast_symbol_python",
             ChunkStrategyTag::AstSymbolGo => "ast_symbol_go",
+            ChunkStrategyTag::AstRef => "ast_ref",
+            ChunkStrategyTag::AstRefUse => "ast_ref_use",
             ChunkStrategyTag::Prose => "prose",
             ChunkStrategyTag::Scanner => "scanner",
             ChunkStrategyTag::Declarative => "declarative",
@@ -111,6 +115,7 @@ pub struct Chunk {
     pub start_line: u32,
     pub end_line: u32,
     pub symbol_name: Option<String>,
+    pub defined_symbol: Option<String>,
     pub strategy: ChunkStrategyTag,
 }
 
@@ -196,5 +201,7 @@ mod integration_tests {
             "ast_symbol_python"
         );
         assert_eq!(ChunkStrategyTag::AstSymbolGo.as_db_str(), "ast_symbol_go");
+        assert_eq!(ChunkStrategyTag::AstRef.as_db_str(), "ast_ref");
+        assert_eq!(ChunkStrategyTag::AstRefUse.as_db_str(), "ast_ref_use");
     }
 }

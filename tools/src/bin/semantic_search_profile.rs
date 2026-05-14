@@ -48,10 +48,11 @@ fn main() {
         end_line: 4,
         symbol_name: Some("profile_sym".into()),
         strategy: ChunkStrategyTag::AstSymbolRust,
+        defined_symbol: None,
     };
 
     for i in 0..n {
-        let cid = insert_chunk(conn, doc_id, &proto, i).expect("chunk");
+        let cid = insert_chunk(conn, doc_id, &proto, i, "tier_working").expect("chunk");
         insert_embedding(conn, cid, &query_vec).expect("embedding");
     }
     mark_document_indexed(conn, doc_id).expect("indexed");
