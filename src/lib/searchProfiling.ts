@@ -13,6 +13,8 @@ export async function profileSearchLatency(
   limit = 10,
   rounds = 3,
 ): Promise<SearchProfileResult> {
+  if (rounds < 1) throw new Error('rounds must be >= 1');
+  if (limit < 1) throw new Error('limit must be >= 1');
   const latenciesMs: number[] = [];
 
   for (let i = 0; i < rounds; i += 1) {

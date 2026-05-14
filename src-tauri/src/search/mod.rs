@@ -29,7 +29,12 @@ impl EntityVectorCache {
     }
 
     fn get(&mut self, chunk_id: i64) -> Option<Vec<f32>> {
-        self.vectors.get(&chunk_id).cloned()
+        let result = self.vectors.get(&chunk_id).cloned();
+        if result.is_some() {
+            self.order.retain(|id| *id != chunk_id);
+            self.order.push_back(chunk_id);
+        }
+        result
     }
 
     fn insert(&mut self, chunk_id: i64, vector: Vec<f32>) {
@@ -60,12 +65,23 @@ impl EntityVectorCacheStore {
     }
 
     fn get(&mut self, entity_id: &str, chunk_id: i64) -> Option<Vec<f32>> {
-        self.entities.get_mut(entity_id).and_then(|entity| entity.get(chunk_id))
+        if let Some(entity) = self.entities.get_mut(entity_id) {
+            let result = entity.get(chunk_id);
+            if result.is_some() {
+                self.order.retain(|id| id.as_str() != entity_id);
+                self.order.push_back(entity_id.to_string());
+            }
+            result
+        } else {
+            None
+        }
     }
 
     fn insert(&mut self, entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
         if let Some(entity_cache) = self.entities.get_mut(entity_id) {
             entity_cache.insert(chunk_id, vector);
+            self.order.retain(|id| id.as_str() != entity_id);
+            self.order.push_back(entity_id.to_string());
             return;
         }
 

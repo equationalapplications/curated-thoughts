@@ -26,7 +26,7 @@ describe('startAutoMaintenance', () => {
     vi.spyOn(globalThis, 'setInterval');
     vi.spyOn(globalThis, 'clearInterval');
     vi.mocked(invoke).mockResolvedValue(undefined);
-    vi.mocked(listen).mockResolvedValue(() => Promise.resolve());
+    vi.mocked(listen).mockResolvedValue(() => {});
   });
 
   afterEach(() => {
@@ -80,7 +80,7 @@ describe('startAutoMaintenance', () => {
     let statusCallback: (event: StatusEvent) => void = () => {};
     vi.mocked(listen).mockImplementation(async (_event, cb: (event: StatusEvent) => void) => {
       statusCallback = cb;
-      return () => Promise.resolve();
+      return () => {};
     });
 
     const cleanup = startAutoMaintenance();
