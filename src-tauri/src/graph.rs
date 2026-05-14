@@ -25,10 +25,15 @@ WITH RECURSIVE callee_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
-FROM   callee_walk
-GROUP  BY chunk_id
-ORDER  BY min_depth
+SELECT cw.chunk_id, mc.min_depth, MAX(cw.rel_type) AS rel_type
+FROM   callee_walk cw
+JOIN   (
+    SELECT chunk_id, MIN(depth) AS min_depth
+    FROM   callee_walk
+    GROUP  BY chunk_id
+) mc ON cw.chunk_id = mc.chunk_id AND cw.depth = mc.min_depth
+GROUP  BY cw.chunk_id
+ORDER  BY mc.min_depth
 ";
 
 const CALLER_CTE: &str = "
@@ -48,10 +53,15 @@ WITH RECURSIVE caller_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
-FROM   caller_walk
-GROUP  BY chunk_id
-ORDER  BY min_depth
+SELECT cw.chunk_id, mc.min_depth, MAX(cw.rel_type) AS rel_type
+FROM   caller_walk cw
+JOIN   (
+    SELECT chunk_id, MIN(depth) AS min_depth
+    FROM   caller_walk
+    GROUP  BY chunk_id
+) mc ON cw.chunk_id = mc.chunk_id AND cw.depth = mc.min_depth
+GROUP  BY cw.chunk_id
+ORDER  BY mc.min_depth
 ";
 
 pub fn get_callees(
@@ -85,6 +95,7 @@ pub fn get_both(
         if let Some(existing) = callees.iter_mut().find(|c| c.chunk_id == caller.chunk_id) {
             if caller.depth < existing.depth {
                 existing.depth = caller.depth;
+                existing.rel_type = caller.rel_type;
             }
         } else {
             callees.push(caller);
