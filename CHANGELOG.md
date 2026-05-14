@@ -1,3 +1,16 @@
+## [1.3.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.3.1...v1.3.2) (2026-05-14)
+
+### Bug Fixes
+
+* LRU eviction, listen mock type, and search profiler guard ([c4c3b3c](https://github.com/equationalapplications/curated-thoughts/commit/c4c3b3c0534b50e1587362d03ec9658f0eaa1201))
+* normalize legacy event keys in startAutoMaintenance, add partial-payload regression tests, reduce cache lock acquisitions ([af5d36d](https://github.com/equationalapplications/curated-thoughts/commit/af5d36d94fc944c24b79998119ad8dd36f0eff7f))
+* **phase4:** address review findings for maintenance, graph, cache, and docs ([36b07fa](https://github.com/equationalapplications/curated-thoughts/commit/36b07faa9c7e2a99f18bbf68b9b79c3cf8e37042))
+* **search:** Arc<[f32]> cache storage, isolate eviction tests from global state ([9554956](https://github.com/equationalapplications/curated-thoughts/commit/9554956db9e0419b8e2774868b777e3b23f791d7))
+
+### Performance Improvements
+
+* **search:** drop O(n) retain on cache hits, remove dead helpers ([29c0be0](https://github.com/equationalapplications/curated-thoughts/commit/29c0be0311a4b64cfeda5e4b09ef1bdec3ef574d))
+
 ## [1.3.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.3.0...v1.3.1) (2026-05-14)
 
 ### Bug Fixes
