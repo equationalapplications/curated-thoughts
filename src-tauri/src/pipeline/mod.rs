@@ -292,6 +292,16 @@ pub fn ingest_document(
     ingest_file(conn, profile, path, force_rechunk, None)
 }
 
+pub fn ingest_document_with_vault_root(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    path: &str,
+    force_rechunk: bool,
+    vault_root: Option<&str>,
+) -> Result<()> {
+    ingest_file(conn, profile, path, force_rechunk, vault_root)
+}
+
 pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
     let normalized = path.replace('\\', "/");
 

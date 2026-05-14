@@ -14,10 +14,9 @@ use std::path::Path;
 
 use tauri_app_lib::db::{list_indexed_user_doc_paths, AppDb};
 use tauri_app_lib::indexer::linker::run_linker;
-use tauri_app_lib::pipeline::entity_id_for_path;
-use tauri_app_lib::vault::VaultConfig;
-use tauri_app_lib::ingest_document;
+use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
 use tauri_app_lib::retrieval;
+use tauri_app_lib::vault::VaultConfig;
 
 struct Args {
     dry_run: bool,
@@ -91,7 +90,7 @@ fn main() -> Result<()> {
 
     let db = AppDb::open(&paths_b.db_path).context("open brain database")?;
     let conn = &db.0;
-    let config = VaultConfig::new(&paths_b.config_path).context("open vault config")?;
+    let config = VaultConfig::new(paths_b.config_path.clone());
     let vault_root = config
         .vault_root()
         .context("read vault root")?
@@ -122,7 +121,8 @@ fn main() -> Result<()> {
             eprintln!("[{}/{}] skip missing: {}", i + 1, total, path);
             continue;
         }
-        ingest_document(conn, &profile, path, true).with_context(|| format!("reindex {}", path))?;
+        ingest_document_with_vault_root(conn, &profile, path, true, Some(vault_root_str))
+            .with_context(|| format!("reindex {}", path))?;
         let entity_id = entity_id_for_path(path, Some(vault_root_str));
         if let Err(e) = run_linker(conn, &entity_id, 0) {
             eprintln!("[linker] run_linker error ({}): {}", entity_id, e);

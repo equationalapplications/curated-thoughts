@@ -17,8 +17,6 @@ mod watcher;
 use chunker::should_ingest_extension;
 use db::AppDb;
 use pipeline::start_pipeline;
-#[cfg(not(feature = "test-utils"))]
-use pipeline::PipelineJob;
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
@@ -881,34 +879,37 @@ async fn run_wiki_reembed(
         Ok(queued)
     })();
 
-    if let Ok(queued) = result {
-        if queued > 0 {
-            let app_handle = app.clone();
-            let pending = pending.clone();
-            std::thread::spawn(move || {
-                while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                app_handle
-                    .emit(
-                        "wiki-status-change",
-                        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-                    )
-                    .ok();
-            });
-        } else {
+    match &result {
+        Ok(queued) => {
+            if *queued > 0 {
+                let app_handle = app.clone();
+                let pending = pending.clone();
+                std::thread::spawn(move || {
+                    while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    app_handle
+                        .emit(
+                            "wiki-status-change",
+                            serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+                        )
+                        .ok();
+                });
+            } else {
+                app.emit(
+                    "wiki-status-change",
+                    serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+                )
+                .ok();
+            }
+        }
+        Err(_) => {
             app.emit(
                 "wiki-status-change",
                 serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
             )
             .ok();
         }
-    } else {
-        app.emit(
-            "wiki-status-change",
-            serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-        )
-        .ok();
     }
 
     result
@@ -1847,7 +1848,7 @@ fn copy_os_drop_paths_to_vault(
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
-pub use pipeline::ingest_document;
+pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root, PipelineJob};
 
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
