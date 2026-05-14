@@ -91,7 +91,7 @@ export function MaintenanceDashboard() {
           Forget Source
         </button>
         <p className="maintenance-description">
-          Remove all indexed chunks for a specific vault source file.
+          Remove wiki memory entries for a specific vault source file.
         </p>
 
         <button

@@ -1089,10 +1089,10 @@ async fn run_wiki_reembed(
     pipeline: State<'_, PipelineHolder>,
     status_state: State<'_, WikiStatusState>,
 ) -> Result<usize, String> {
-    let (tx, pending) = {
+    let tx = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         match pipeline_guard.as_ref() {
-            Some(p) => (p.0.clone(), p.2.clone()),
+            Some(p) => p.0.clone(),
             None => {
                 update_wiki_status(&app, &status_state, |flags| {
                     flags.ingesting = false;
@@ -1112,12 +1112,8 @@ async fn run_wiki_reembed(
             if !std::path::Path::new(&path).exists() {
                 continue;
             }
-            pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tx.send(PipelineJob::rechunk_for_reembed(path))
-                .map_err(|e| {
-                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    format!("pipeline channel closed: {e}")
-                })?;
+                .map_err(|e| format!("pipeline channel closed: {e}"))?;
             queued += 1;
         }
         Ok(queued)
