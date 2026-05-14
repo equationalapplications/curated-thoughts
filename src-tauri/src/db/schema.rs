@@ -89,9 +89,9 @@ ALTER TABLE chunks ADD COLUMN defined_symbol TEXT DEFAULT NULL;
 ALTER TABLE chunks ADD COLUMN entity_id TEXT;
 
 UPDATE chunks SET entity_id = (
-  SELECT CASE d.tier
-    WHEN 'user_doc' THEN 'tier_fact'
-    WHEN 'wiki' THEN 'tier_wisdom'
+  SELECT CASE
+    WHEN d.path LIKE '%/documents/%' THEN 'tier_fact'
+    WHEN d.path LIKE '%/wiki/%' THEN 'tier_wisdom'
     ELSE 'tier_working'
   END
   FROM documents d WHERE d.id = chunks.doc_id
