@@ -1,3 +1,12 @@
+## [1.3.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.3.0...v1.3.1) (2026-05-14)
+
+### Bug Fixes
+
+* **reembed:** remove double pending.fetch_add in run_wiki_reembed ([4c50b46](https://github.com/equationalapplications/curated-thoughts/commit/4c50b465cd4ec60f1604a2b080519132728a8fab))
+* **review:** resolve PR [#9](https://github.com/equationalapplications/curated-thoughts/issues/9) review threads and race conditions ([ae4ce21](https://github.com/equationalapplications/curated-thoughts/commit/ae4ce219ecb95a6cf66b34f4c6aa880c55b6a0dd))
+* **run_wiki_reembed:** avoid manual ingesting state toggles and rely on pipeline PendingCount ([f5c9614](https://github.com/equationalapplications/curated-thoughts/commit/f5c9614d2e158240341839d5f21e5a434add79d5))
+* **search:** plumb entity_id tier through SearchResult; remove score cap ([2b84211](https://github.com/equationalapplications/curated-thoughts/commit/2b84211f608bb1448cdb97e50512e13debbbc48e))
+
 ## [1.3.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.2.1...v1.3.0) (2026-05-14)
 
 ### Features
