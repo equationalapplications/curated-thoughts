@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use std::{
+    collections::HashSet,
     io::Read,
     path::{Path, PathBuf},
     sync::{mpsc, Arc, atomic::{AtomicUsize, Ordering}},
@@ -96,13 +97,18 @@ impl PipelineWorker {
             eprintln!("[pipeline] failed to enable FK: {e}");
         }
 
-        for job in self.rx {
+        let mut pending_linkers = HashSet::new();
+        let mut next_job: Option<PipelineJob> = None;
+
+        while let Some(job) = next_job.take().or_else(|| self.rx.recv().ok()) {
             let job_path = match &job {
                 PipelineJob::Ingest { path, .. } => path.clone(),
                 PipelineJob::Delete(path) => path.clone(),
             };
             let count_pending = matches!(&job, PipelineJob::Ingest { count_pending: true, .. });
             let worker_vault_root = self.vault_root.clone();
+            let mut current_entity: Option<String> = None;
+
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job {
                     PipelineJob::Ingest { path, force, .. } => {
@@ -116,14 +122,8 @@ impl PipelineWorker {
                         match ingest_file(&conn, &profile, &path, force, vault_root_str) {
                             Ok(()) => {
                                 let eid = entity_id_for_path(&path, vault_root_str);
-                                let since = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() as i64)
-                                    .unwrap_or(0)
-                                    .saturating_sub(300);
-                                if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
-                                    eprintln!("[linker] run_linker error ({}): {}", eid, e);
-                                }
+                                current_entity = Some(eid.clone());
+                                pending_linkers.insert(eid.clone());
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &conn,
                                     &path,
@@ -183,6 +183,59 @@ impl PipelineWorker {
                         Some(current - 1)
                     }
                 });
+            }
+
+            let flush_pending_linkers = |conn: &Connection, pending_linkers: &mut HashSet<String>| {
+                if pending_linkers.is_empty() {
+                    return;
+                }
+                let since = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0)
+                    .saturating_sub(300);
+                for eid in pending_linkers.drain() {
+                    if let Err(e) = crate::indexer::linker::run_linker(conn, &eid, since) {
+                        eprintln!("[linker] run_linker error ({}): {}", eid, e);
+                    }
+                }
+            };
+
+            match self.rx.try_recv() {
+                Ok(next) => {
+                    let should_flush = match (&current_entity, &next) {
+                        (Some(current_eid), PipelineJob::Ingest { path: next_path, .. }) => {
+                            let next_vault_root = worker_vault_root.as_deref().and_then(|p| p.to_str());
+                            let next_eid = entity_id_for_path(next_path, next_vault_root);
+                            &next_eid != current_eid
+                        }
+                        _ => true,
+                    };
+                    if should_flush {
+                        flush_pending_linkers(&conn, &mut pending_linkers);
+                    }
+                    next_job = Some(next);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    flush_pending_linkers(&conn, &mut pending_linkers);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    flush_pending_linkers(&conn, &mut pending_linkers);
+                    break;
+                }
+            }
+        }
+
+        if !pending_linkers.is_empty() {
+            let since = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+                .saturating_sub(300);
+            for eid in pending_linkers.drain() {
+                if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
+                    eprintln!("[linker] run_linker error ({}): {}", eid, e);
+                }
             }
         }
     }
