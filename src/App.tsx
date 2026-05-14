@@ -28,7 +28,14 @@ export function App() {
     if (import.meta.env.DEV) {
       import('./lib/searchProfiling')
         .then(({ profileSearchLatency, logSearchProfile }) => {
-          (window as any).__searchProfiling = {
+          interface SearchProfilingWindow extends Window {
+            __searchProfiling?: {
+              profileSearchLatency: typeof profileSearchLatency;
+              logSearchProfile: typeof logSearchProfile;
+            };
+          }
+
+          (window as SearchProfilingWindow).__searchProfiling = {
             profileSearchLatency,
             logSearchProfile,
           };
