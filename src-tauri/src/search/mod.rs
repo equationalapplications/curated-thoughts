@@ -24,6 +24,10 @@ pub struct SearchResult {
     pub structural: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rel_type: Option<String>,
+    /// Tier label from `chunks.entity_id`: `tier_fact`, `tier_wisdom`, or `tier_working`.
+    /// Authoritative source for frontend tier styling/weighting — avoids path heuristics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
 }
 
 pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -56,7 +60,8 @@ pub fn semantic_search(
 ) -> Result<Vec<SearchResult>> {
     let mut stmt = conn.prepare(
         "SELECT e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
-         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path
+         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path, \
+         COALESCE(c.entity_id, '') as entity_id
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -75,6 +80,7 @@ pub fn semantic_search(
         let symbol_str: String = row.get(5)?;
         let strategy: String = row.get(6)?;
         let doc_path: String = row.get(7)?;
+        let entity_id_str: String = row.get(8)?;
         let vec = bytes_to_f32(&bytes);
         let score = cosine_similarity(query_vec, &vec);
         let symbol_name = if symbol_str.is_empty() {
@@ -82,6 +88,7 @@ pub fn semantic_search(
         } else {
             Some(symbol_str)
         };
+        let entity_id = if entity_id_str.is_empty() { None } else { Some(entity_id_str) };
         results.push((
             score,
             SearchResult {
@@ -95,6 +102,7 @@ pub fn semantic_search(
                 strategy,
                 structural: None,
                 rel_type: None,
+                entity_id,
             },
         ));
     }
@@ -140,7 +148,8 @@ pub fn related_chunks(
 
     let mut stmt = conn.prepare(
         "SELECT e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
-         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path
+         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path, \
+         COALESCE(c.entity_id, '') as entity_id
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -159,6 +168,7 @@ pub fn related_chunks(
         let symbol_str: String = row.get(5)?;
         let strategy: String = row.get(6)?;
         let doc_path_r: String = row.get(7)?;
+        let entity_id_str: String = row.get(8)?;
         let vec = bytes_to_f32(&bytes);
         let score = cosine_similarity(&avg, &vec);
         let symbol_name = if symbol_str.is_empty() {
@@ -166,6 +176,7 @@ pub fn related_chunks(
         } else {
             Some(symbol_str)
         };
+        let entity_id = if entity_id_str.is_empty() { None } else { Some(entity_id_str) };
         results.push((
             score,
             SearchResult {
@@ -179,6 +190,7 @@ pub fn related_chunks(
                 strategy,
                 structural: None,
                 rel_type: None,
+                entity_id,
             },
         ));
     }
@@ -372,6 +384,7 @@ mod tests {
             strategy: "prose".into(),
             structural: None,
             rel_type: None,
+            entity_id: Some("tier_fact".into()),
         };
         let v = serde_json::to_value(&r).expect("serialize");
         for key in [
