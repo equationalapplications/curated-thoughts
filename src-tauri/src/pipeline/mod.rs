@@ -292,7 +292,7 @@ pub fn ingest_document(
     ingest_file(conn, profile, path, force_rechunk, None)
 }
 
-pub(crate) fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
+pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
     let normalized = path.replace('\\', "/");
 
     if let Some(root) = vault_root {

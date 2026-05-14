@@ -525,7 +525,7 @@ With Phase 2, the Active Librarian can perform **Contextual Validation** with st
 
 ## Acceptance Criteria
 
-1. Schema V5 migration runs cleanly on an existing V4 database; no existing rows are modified.
+1. Schema V5 migration runs cleanly on an existing V4 database; existing rows may be updated to populate `entity_id` and backfill schema metadata, but no data is deleted.
 2. After a full re-index, `defined_symbol` is populated for all function/class definition chunks; reference chunks have `defined_symbol = NULL`.
 3. After indexing `main.rs` (which calls `init_db`) and `init_db.rs` (which defines `init_db`), `curated_relationships` contains at least one `CALLS` edge with `symbol = 'init_db'` and `entity_id` matching both chunks.
 4. Editing `main.rs` and triggering a re-index deletes the old relationships for `main.rs` chunks before inserting new ones. A no-op edit produces the same edge count before and after (graph rot test).
