@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
-import type { WikiStatusPayload } from "./tauri";
+import type { WikiStatusEventPayload } from "./tauri";
 
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
@@ -131,13 +131,15 @@ export function startAutoHeal(): () => void {
 
 export function startAutoMaintenance(): () => void {
   let isBusy = false;
-  const handleStatusChange = (event: { payload: WikiStatusPayload }) => {
-    isBusy =
-      event.payload.ingesting ||
-      event.payload.librarian ||
-      event.payload.healing ||
-      event.payload.pruning ||
-      event.payload.forgetting;
+  const handleStatusChange = (event: { payload: WikiStatusEventPayload }) => {
+    const p = event.payload;
+    isBusy = !!(
+      p.ingesting ||
+      p.librarian ||
+      (p.healing ?? p.heal) ||
+      (p.pruning ?? p.prune) ||
+      p.forgetting
+    );
   };
 
   const runPrune = async () => {
