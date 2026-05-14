@@ -85,7 +85,11 @@ export async function tieredRead(
 
 export function startAutoHeal(): () => void {
   let debounce: ReturnType<typeof setTimeout> | null = null;
-  const scheduleHeal = () => {
+  const scheduleHeal = (event: { payload: { kind: string } }) => {
+    const kind = event?.payload?.kind;
+    if (kind !== 'Deleted') {
+      return;
+    }
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(async () => {
       try {
@@ -106,6 +110,24 @@ export function startAutoHeal(): () => void {
       debounce = null;
     }
     void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
+  };
+}
+
+export function startAutoMaintenance(): () => void {
+  const runPrune = async () => {
+    try {
+      await invoke('run_wiki_prune');
+    } catch (err) {
+      console.error('[auto-maintenance] prune failed', err);
+    }
+  };
+
+  // Run a prune once at startup, then every 24 hours.
+  void runPrune();
+  const interval = window.setInterval(runPrune, 24 * 60 * 60 * 1000);
+
+  return () => {
+    window.clearInterval(interval);
   };
 }
 

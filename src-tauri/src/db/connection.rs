@@ -39,7 +39,6 @@ impl AppDb {
     }
 }
 
-#[cfg(test)]
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     migrate(&conn)?;

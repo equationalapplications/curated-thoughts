@@ -4,7 +4,7 @@ import { useWikiStatus } from '../../hooks/useWikiStatus';
 
 export function MaintenanceDashboard() {
   const wikiStatus = useWikiStatus();
-  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal;
+  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal || wikiStatus.prune;
   const [lastError, setLastError] = useState<string | null>(null);
 
   async function runCommand(command: string) {
@@ -27,9 +27,16 @@ export function MaintenanceDashboard() {
       )}
 
       {isSystemBusy && (
-        <p className="maintenance-busy" aria-live="polite">
-          Database busy — please wait…
-        </p>
+        <>
+          <p className="maintenance-busy" aria-live="polite">
+            Database busy — please wait…
+          </p>
+          {wikiStatus.prune && (
+            <p className="maintenance-description">
+              Purging stale inferred entries from the database.
+            </p>
+          )}
+        </>
       )}
 
       <div className="maintenance-actions">
@@ -54,6 +61,9 @@ export function MaintenanceDashboard() {
         <p className="maintenance-description">
           Permanently deletes inferred entries soft-deleted more than 7 days ago.
           <strong> This cannot be undone.</strong>
+        </p>
+        <p className="maintenance-description">
+          Automatic prune runs daily to keep inferred trash from growing unbounded.
         </p>
 
         <button

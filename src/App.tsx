@@ -3,7 +3,7 @@ import { useSetupStatus } from "./hooks/useSetupStatus";
 import { SetupWizard } from "./components/setup/SetupWizard";
 import { AppShell } from "./components/shell/AppShell";
 import { getVaultPath } from "./lib/tauri";
-import { initWorkspaceId, startAutoHeal } from "./lib/wiki";
+import { initWorkspaceId, startAutoHeal, startAutoMaintenance } from "./lib/wiki";
 
 export function App() {
   const { loading, needsSetup, vaultPath } = useSetupStatus();
@@ -25,9 +25,29 @@ export function App() {
   }, [activePath]);
 
   useEffect(() => {
-    const cleanup = startAutoHeal();
+    if (import.meta.env.DEV) {
+      import('./lib/searchProfiling')
+        .then(({ profileSearchLatency, logSearchProfile }) => {
+          (window as any).__searchProfiling = {
+            profileSearchLatency,
+            logSearchProfile,
+          };
+          console.info(
+            '[searchProfiling] dev helper available on window.__searchProfiling',
+          );
+        })
+        .catch((err) => {
+          console.warn('[searchProfiling] failed to expose dev helper', err);
+        });
+    }
+
+    const cleanupHeal = startAutoHeal();
+    const cleanupMaintenance = startAutoMaintenance();
     // startAutoHeal registers Tauri event listeners and returns an unsubscribe function.
-    return cleanup;
+    return () => {
+      cleanupHeal();
+      cleanupMaintenance();
+    };
   }, []);
 
   if (loading) {

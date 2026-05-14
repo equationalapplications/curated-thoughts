@@ -24,6 +24,9 @@ export const pullModel = (modelId: string): Promise<void> =>
 export const startFileWatcher = (): Promise<void> =>
   invoke("start_file_watcher");
 
+export const runWikiReindex = (): Promise<number> =>
+  invoke("run_wiki_reindex");
+
 export const startOllamaServer = (): Promise<void> =>
   invoke("start_ollama_server");
 
