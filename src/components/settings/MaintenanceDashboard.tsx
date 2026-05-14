@@ -71,6 +71,9 @@ export function MaintenanceDashboard() {
           Permanently deletes inferred entries soft-deleted more than 7 days ago.
           <strong> This cannot be undone.</strong>
         </p>
+        <p className="maintenance-description">
+          Automatic prune runs daily to keep inferred trash from growing unbounded.
+        </p>
 
         <label htmlFor="forget-path" className="maintenance-label">
           Forget source file path
@@ -80,7 +83,7 @@ export function MaintenanceDashboard() {
           type="text"
           value={forgetPath}
           onChange={(e) => setForgetPath(e.target.value)}
-          placeholder="vault-relative or absolute path"
+          placeholder="vault-relative path (typically under documents/ or wiki/)"
           disabled={isSystemBusy}
         />
         <button

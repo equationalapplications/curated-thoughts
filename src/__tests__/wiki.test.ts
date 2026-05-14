@@ -1,4 +1,6 @@
+import * as React from 'react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
 
 vi.mock('@equationalapplications/react-llm-wiki', () => ({
   createWiki: vi.fn().mockReturnValue({
@@ -7,6 +9,10 @@ vi.mock('@equationalapplications/react-llm-wiki', () => ({
     runHeal: vi.fn().mockResolvedValue(undefined),
   }),
   WikiBusyError: class WikiBusyError extends Error {},
+}));
+
+vi.mock('../hooks/useWikiStatus', () => ({
+  useWikiStatus: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -23,7 +29,10 @@ vi.mock('../lib/wikiAdapter', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { useWikiStatus } from '../hooks/useWikiStatus';
+import { VaultPanel } from '../components/settings/VaultPanel';
 import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki } from '../lib/wiki';
+import { runWikiReindex } from '../lib/tauri';
 
 describe('initWorkspaceId', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -138,5 +147,39 @@ describe('startAutoHeal', () => {
 
     cleanup();
     vi.useRealTimers();
+  });
+});
+
+describe('VaultPanel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useWikiStatus).mockReturnValue({
+      ingesting: false,
+      librarian: false,
+      healing: false,
+      pruning: true,
+      forgetting: false,
+      busy: true,
+      activeJob: 'pruning',
+      activeJobLabel: 'Pruning',
+    });
+  });
+
+  it('blocks Change vault when a prune job is active', () => {
+    render(React.createElement(VaultPanel, { vaultPath: '/Users/test/vault' }));
+    expect(screen.getByRole('button', { name: /Change vault/i })).toBeDisabled();
+  });
+});
+
+describe('runWikiReindex', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('forwards the command to Tauri', async () => {
+    vi.mocked(invoke).mockResolvedValue(7);
+    const result = await runWikiReindex();
+    expect(invoke).toHaveBeenCalledWith('run_wiki_reindex');
+    expect(result).toBe(7);
   });
 });
