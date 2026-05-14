@@ -25,24 +25,11 @@ WITH RECURSIVE callee_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT chunk_id, depth, rel_type
-FROM (
-    SELECT cw.chunk_id,
-           cw.depth,
-           cw.rel_type,
-           ROW_NUMBER() OVER (
-               PARTITION BY cw.chunk_id
-               ORDER BY cw.depth,
-                        CASE cw.rel_type
-                            WHEN 'CALLS' THEN 0
-                            WHEN 'IMPORTS' THEN 1
-                            ELSE 2
-                        END
-           ) AS rownum
-    FROM callee_walk cw
-)
-WHERE rownum = 1
-ORDER BY depth
+SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
+FROM   callee_walk
+WHERE  chunk_id != ?1
+GROUP  BY chunk_id
+ORDER  BY min_depth
 ";
 
 const CALLER_CTE: &str = "
@@ -62,24 +49,11 @@ WITH RECURSIVE caller_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT chunk_id, depth, rel_type
-FROM (
-    SELECT cw.chunk_id,
-           cw.depth,
-           cw.rel_type,
-           ROW_NUMBER() OVER (
-               PARTITION BY cw.chunk_id
-               ORDER BY cw.depth,
-                        CASE cw.rel_type
-                            WHEN 'CALLS' THEN 0
-                            WHEN 'IMPORTS' THEN 1
-                            ELSE 2
-                        END
-           ) AS rownum
-    FROM caller_walk cw
-)
-WHERE rownum = 1
-ORDER BY depth
+SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
+FROM   caller_walk
+WHERE  chunk_id != ?1
+GROUP  BY chunk_id
+ORDER  BY min_depth
 ";
 
 pub fn get_callees(

@@ -1,4 +1,4 @@
-use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5};
+use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -22,6 +22,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 5 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))?;
+    }
+    if version < 6 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))?;
     }
 
     Ok(())
@@ -55,7 +58,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 5);
+        assert_eq!(max_version, 6);
     }
 
     #[test]
@@ -93,12 +96,12 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_5() {
+    fn test_schema_version_is_6() {
         let conn = open_in_memory().unwrap();
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 5);
+        assert_eq!(max_version, 6);
     }
 
     #[test]

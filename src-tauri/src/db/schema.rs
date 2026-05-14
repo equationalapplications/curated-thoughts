@@ -125,3 +125,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_unique
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (5);
 ";
+
+pub const MIGRATION_V6: &str = "
+INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+";

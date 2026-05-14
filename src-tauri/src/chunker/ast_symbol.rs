@@ -253,12 +253,7 @@ fn collect_rust(
             }
         }
 
-        let defined_symbol = Some(
-            symbol_name_opt
-                .as_deref()
-                .unwrap_or(raw_name)
-                .to_lowercase(),
-        );
+        let defined_symbol = Some(raw_name.to_lowercase());
         out.push(Chunk {
             text: body,
             start_line,
