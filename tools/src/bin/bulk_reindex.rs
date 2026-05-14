@@ -10,7 +10,7 @@
 //! ```
 
 use anyhow::{anyhow, Context as _, Result};
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use tauri_app_lib::db::{list_indexed_user_doc_paths, AppDb};
 use tauri_app_lib::indexer::linker::run_linker;
@@ -119,6 +119,7 @@ fn main() -> Result<()> {
     }
 
     let total = paths.len();
+    let mut entity_ids = HashSet::new();
     for (i, path) in paths.iter().enumerate() {
         if !Path::new(path).exists() {
             eprintln!("[{}/{}] skip missing: {}", i + 1, total, path);
@@ -126,12 +127,15 @@ fn main() -> Result<()> {
         }
         ingest_document_with_vault_root(conn, &profile, path, true, Some(vault_root_str))
             .with_context(|| format!("reindex {}", path))?;
-        let entity_id = entity_id_for_path(path, Some(vault_root_str));
-        if let Err(e) = run_linker(conn, &entity_id, 0) {
-            eprintln!("[linker] run_linker error ({}): {}", entity_id, e);
-        }
+        entity_ids.insert(entity_id_for_path(path, Some(vault_root_str)));
         if (i + 1) % 25 == 0 || i + 1 == total {
             eprintln!("[{}/{}] done …", i + 1, total);
+        }
+    }
+
+    for entity_id in entity_ids {
+        if let Err(e) = run_linker(conn, &entity_id, 0) {
+            eprintln!("[linker] run_linker error ({}): {}", entity_id, e);
         }
     }
     println!("Reindexed {} document(s).", total);
