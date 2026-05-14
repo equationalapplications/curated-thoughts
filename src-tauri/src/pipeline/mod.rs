@@ -331,15 +331,34 @@ pub fn ingest_document_with_vault_root(
     ingest_file(conn, profile, path, force_rechunk, vault_root)
 }
 
+fn normalize_workspace_root(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+    if normalized != "/" {
+        normalized = normalized.trim_end_matches('/').to_string();
+        if normalized.ends_with(':') {
+            normalized.push('/');
+        }
+        if normalized.is_empty() {
+            normalized = "/".to_string();
+        }
+    }
+    normalized
+}
+
 pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
-    let normalized = path.replace('\\', "/");
+    let normalized = std::path::Path::new(path)
+        .canonicalize()
+        .map(|p| normalize_workspace_root(&p.to_string_lossy()))
+        .unwrap_or_else(|_| normalize_workspace_root(path));
 
     if let Some(root) = vault_root {
         // Strip vault root prefix and inspect only the first vault-relative component so
         // ancestor folders named "documents" or "wiki" (e.g. /Users/me/documents/vault/)
         // or nested sub-folders (e.g. vault/src/wiki/) don't misroute.
-        let root_norm = root.replace('\\', "/");
-        let root_prefix = root_norm.trim_end_matches('/');
+        let root_prefix = std::path::Path::new(root)
+            .canonicalize()
+            .map(|p| normalize_workspace_root(&p.to_string_lossy()))
+            .unwrap_or_else(|_| normalize_workspace_root(root));
         let rel = normalized
             .strip_prefix(&format!("{}/", root_prefix))
             .unwrap_or(&normalized);
@@ -563,5 +582,18 @@ mod tests {
         assert!(text.contains("Hello"));
         assert!(text.contains("world"));
         assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn entity_id_for_path_normalizes_vault_root_like_workspace_id() {
+        let id_a = entity_id_for_path(
+            "/Users/foo/Vault/src/db.rs",
+            Some("/Users/foo/Vault"),
+        );
+        let id_b = entity_id_for_path(
+            "/Users/foo/Vault/src/db.rs",
+            Some("/Users/foo/Vault/"),
+        );
+        assert_eq!(id_a, id_b);
     }
 }
