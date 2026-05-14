@@ -51,6 +51,8 @@ export interface SearchResult {
   // Phase 2: structural graph neighbors
   structural?: boolean;
   rel_type?: string;
+  // Phase 3: authoritative tier from chunks.entity_id (tier_fact | tier_wisdom | tier_working)
+  entity_id?: string;
 }
 
 export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> =>
