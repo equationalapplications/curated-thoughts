@@ -890,26 +890,13 @@ async fn run_wiki_reembed(
                 while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                app_handle
-                    .emit(
-                        "wiki-status-change",
-                        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-                    )
-                    .ok();
+                emit_wiki_status(&app_handle, false, false, false, false);
             });
         } else {
-            app.emit(
-                "wiki-status-change",
-                serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-            )
-            .ok();
+            emit_wiki_status(&app, false, false, false, false);
         }
     } else {
-        app.emit(
-            "wiki-status-change",
-            serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-        )
-        .ok();
+        emit_wiki_status(&app, false, false, false, false);
     }
 
     result
