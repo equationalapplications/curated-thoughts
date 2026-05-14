@@ -24,9 +24,15 @@ export function RelatedNotes({ selectedDoc }: Props) {
               </span>
               <span className="related-chunk-meta" aria-label="chunk metadata">
                 <span className="result-chip result-chip--strategy">{chunk.strategy}</span>
-                <span className="result-chip result-chip--score">
-                  {Math.round(chunk.score * 100)}% similar
-                </span>
+                {chunk.structural ? (
+                  <span className="result-chip result-chip--connected" title="structurally connected">
+                    {chunk.rel_type ?? "connected"}
+                  </span>
+                ) : (
+                  <span className="result-chip result-chip--score">
+                    {Math.round(chunk.score * 100)}% similar
+                  </span>
+                )}
                 {chunk.symbol_name ? (
                   <span className="result-chip result-chip--symbol" title={chunk.symbol_name}>
                     {chunk.symbol_name}
