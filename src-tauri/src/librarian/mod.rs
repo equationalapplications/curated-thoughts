@@ -21,9 +21,9 @@ pub fn assemble_librarian_context(chunks: &[ChunkRow]) -> String {
     let mut body = String::new();
 
     for chunk in chunks {
-        let tier_label = match chunk.tier.as_str() {
-            "user_doc" => "ANCHOR TRUTH — do not propose modifications to these facts:\n",
-            "wiki" => "CURATED WISDOM — may be updated via Wisdom proposals:\n",
+        let tier_label = match chunk.entity_id.as_str() {
+            "tier_fact" => "ANCHOR TRUTH — do not propose modifications to these facts:\n",
+            "tier_wisdom" => "CURATED WISDOM — may be updated via Wisdom proposals:\n",
             _ => "WORKING CONTEXT — summarize patterns and flag contradictions only:\n",
         };
 
