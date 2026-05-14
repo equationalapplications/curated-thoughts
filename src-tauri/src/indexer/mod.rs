@@ -186,7 +186,17 @@ fn lang_query(lang: RefLang, kind: PatternKind) -> Option<(Language, &'static st
 ]
 "#,
         )),
-        (RefLang::JavaScript, PatternKind::Imports) => None,
+        (RefLang::JavaScript, PatternKind::Imports) => Some((
+            tree_sitter_javascript::LANGUAGE.into(),
+            r#"
+[
+  (import_statement
+     (import_clause
+       (named_imports
+         (import_specifier name: (identifier) @ref.name))))
+]
+"#,
+        )),
         (RefLang::Python, PatternKind::Calls) => Some((
             tree_sitter_python::LANGUAGE.into(),
             r#"

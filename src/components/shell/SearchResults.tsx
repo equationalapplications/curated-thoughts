@@ -8,7 +8,6 @@ interface Props {
 function relTypeLabel(relType?: string): string {
   if (relType === 'CALLS')      return 'Calls this symbol';
   if (relType === 'IMPORTS')    return 'Imports this module';
-  if (relType === 'IMPLEMENTS') return 'Implements this interface';
   return 'Structurally linked';
 }
 

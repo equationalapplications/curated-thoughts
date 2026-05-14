@@ -16,9 +16,11 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use pipeline::{start_pipeline, PipelineJob};
+use pipeline::start_pipeline;
+#[cfg(not(feature = "test-utils"))]
+use pipeline::PipelineJob;
 #[cfg(feature = "test-utils")]
-pub use pipeline::PipelineWorker;
+pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
 use rusqlite::OptionalExtension;
 use serde_json::Value as JsonVal;
@@ -466,7 +468,10 @@ fn recover_after_failed_switch_vault(
         if g.is_none() {
             let vault_root = vault_state.0.lock().ok()
                 .and_then(|vc| vc.get_vault_path().ok().flatten())
-                .map(PathBuf::from);
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    p.canonicalize().unwrap_or(p)
+                });
             *g = Some(start_pipeline(db_path.to_path_buf(), vault_root));
         }
     }
@@ -736,11 +741,7 @@ async fn run_wiki_heal(
     db_state: State<'_, DbState>,
     vault_state: State<'_, VaultConfigState>,
 ) -> Result<(), String> {
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({"heal": true, "ingesting": false, "librarian": false}),
-    )
-    .ok();
+    app.emit("wiki-status-change", serde_json::json!({"heal": true})).ok();
 
     let result = (|| -> Result<(), String> {
         let vault = vault_state
@@ -796,11 +797,7 @@ async fn run_wiki_heal(
         Ok(())
     })();
 
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-    )
-    .ok();
+    app.emit("wiki-status-change", serde_json::json!({"heal": false})).ok();
 
     result
 }
@@ -810,11 +807,7 @@ async fn run_wiki_prune(
     app: AppHandle,
     db_state: State<'_, DbState>,
 ) -> Result<(), String> {
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({"heal": false, "ingesting": false, "librarian": true}),
-    )
-    .ok();
+    app.emit("wiki-status-change", serde_json::json!({"librarian": true})).ok();
 
     let result = (|| -> Result<(), String> {
         let guard = db_state.0.lock().unwrap();
@@ -831,11 +824,7 @@ async fn run_wiki_prune(
         Ok(())
     })();
 
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-    )
-    .ok();
+    app.emit("wiki-status-change", serde_json::json!({"librarian": false})).ok();
 
     result
 }
@@ -846,22 +835,14 @@ async fn run_wiki_reembed(
     db_state: State<'_, DbState>,
     pipeline: State<'_, PipelineHolder>,
 ) -> Result<usize, String> {
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({"heal": false, "ingesting": true, "librarian": false}),
-    )
-    .ok();
+    app.emit("wiki-status-change", serde_json::json!({"ingesting": true})).ok();
 
     let (tx, pending) = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         match pipeline_guard.as_ref() {
             Some(p) => (p.0.clone(), p.2.clone()),
             None => {
-                app.emit(
-                    "wiki-status-change",
-                    serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-                )
-                .ok();
+                app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
                 return Err("pipeline not running".to_string());
             }
         }
@@ -900,24 +881,16 @@ async fn run_wiki_reembed(
                     app_handle
                         .emit(
                             "wiki-status-change",
-                            serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
+                            serde_json::json!({"ingesting": false}),
                         )
                         .ok();
                 });
             } else {
-                app.emit(
-                    "wiki-status-change",
-                    serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-                )
-                .ok();
+                app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
             }
         }
         Err(_) => {
-            app.emit(
-                "wiki-status-change",
-                serde_json::json!({"heal": false, "ingesting": false, "librarian": false}),
-            )
-            .ok();
+            app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
         }
     }
 
@@ -1231,7 +1204,10 @@ fn get_structural_neighbors(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault path set".to_string())?;
-    let vault_root = std::path::PathBuf::from(&root);
+    let vault_root = {
+        let p = std::path::PathBuf::from(&root);
+        p.canonicalize().unwrap_or(p)
+    };
 
     let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
     let safe = crate::vault::safe_vault_path(
@@ -1242,7 +1218,8 @@ fn get_structural_neighbors(
     )
     .map_err(|e| e.to_string())?;
     let abs_path = safe.to_string_lossy().into_owned();
-    let entity_id = pipeline::entity_id_for_path(&abs_path, Some(&root));
+    let canonical_root = vault_root.to_string_lossy().into_owned();
+    let entity_id = pipeline::entity_id_for_path(&abs_path, Some(&canonical_root));
 
     let max_hops = max_hops.min(5);
     let guard = db_state.0.lock().unwrap();
@@ -1888,6 +1865,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_related_chunks,
             save_wiki_page,
             queue_full_reindex,
+            get_impact_radius,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
