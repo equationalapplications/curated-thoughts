@@ -3,11 +3,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { startAutoMaintenance } from '../lib/wiki';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useWikiStatus } from '../hooks/useWikiStatus';
 import { MaintenanceDashboard } from '../components/settings/MaintenanceDashboard';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(),
 }));
 
 vi.mock('../hooks/useWikiStatus', () => ({
@@ -21,6 +26,7 @@ describe('startAutoMaintenance', () => {
     vi.spyOn(globalThis, 'setInterval');
     vi.spyOn(globalThis, 'clearInterval');
     vi.mocked(invoke).mockResolvedValue(undefined);
+    vi.mocked(listen).mockResolvedValue(() => Promise.resolve());
   });
 
   afterEach(() => {
@@ -59,6 +65,24 @@ describe('startAutoMaintenance', () => {
     cleanup();
 
     expect(invoke).toHaveBeenCalledWith('run_wiki_prune');
+  });
+
+  it('skips scheduled prune while the system is busy', async () => {
+    type StatusEvent = { payload: { ingesting: boolean; librarian: boolean; heal: boolean; prune: boolean } };
+    let statusCallback: (event: StatusEvent) => void = () => {};
+    vi.mocked(listen).mockImplementation(async (_event, cb: (event: StatusEvent) => void) => {
+      statusCallback = cb;
+      return () => Promise.resolve();
+    });
+
+    const cleanup = startAutoMaintenance();
+    statusCallback({ payload: { ingesting: true, librarian: false, heal: false, prune: false } });
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    cleanup();
   });
 });
 

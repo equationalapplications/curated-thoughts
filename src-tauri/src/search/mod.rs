@@ -13,6 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
 const VECTOR_CACHE_CAPACITY_PER_ENTITY: usize = 500;
+const VECTOR_CACHE_CAPACITY_ENTITY_IDS: usize = 64;
 
 struct EntityVectorCache {
     order: VecDeque<i64>,
@@ -28,11 +29,7 @@ impl EntityVectorCache {
     }
 
     fn get(&mut self, chunk_id: i64) -> Option<Vec<f32>> {
-        if let Some(vec) = self.vectors.get(&chunk_id) {
-            Some(vec.clone())
-        } else {
-            None
-        }
+        self.vectors.get(&chunk_id).cloned()
     }
 
     fn insert(&mut self, chunk_id: i64, vector: Vec<f32>) {
@@ -49,19 +46,57 @@ impl EntityVectorCache {
     }
 }
 
-static VECTOR_CACHE: OnceLock<Mutex<HashMap<String, EntityVectorCache>>> = OnceLock::new();
+struct EntityVectorCacheStore {
+    order: VecDeque<String>,
+    entities: HashMap<String, EntityVectorCache>,
+}
+
+impl EntityVectorCacheStore {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            entities: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, entity_id: &str, chunk_id: i64) -> Option<Vec<f32>> {
+        self.entities.get_mut(entity_id).and_then(|entity| entity.get(chunk_id))
+    }
+
+    fn insert(&mut self, entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
+        if let Some(entity_cache) = self.entities.get_mut(entity_id) {
+            entity_cache.insert(chunk_id, vector);
+            return;
+        }
+
+        if self.entities.len() >= VECTOR_CACHE_CAPACITY_ENTITY_IDS {
+            if let Some(old_entity_id) = self.order.pop_front() {
+                self.entities.remove(&old_entity_id);
+            }
+        }
+
+        self.order.push_back(entity_id.to_string());
+        let mut entity_cache = EntityVectorCache::new();
+        entity_cache.insert(chunk_id, vector);
+        self.entities.insert(entity_id.to_string(), entity_cache);
+    }
+}
+
+static VECTOR_CACHE: OnceLock<Mutex<EntityVectorCacheStore>> = OnceLock::new();
+
+fn acquire_cache_lock() -> std::sync::MutexGuard<'static, EntityVectorCacheStore> {
+    let cache = VECTOR_CACHE.get_or_init(|| Mutex::new(EntityVectorCacheStore::new()));
+    cache.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn get_cached_embedding(entity_id: &str, chunk_id: i64) -> Option<Vec<f32>> {
-    let cache = VECTOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap();
-    cache.get_mut(entity_id).and_then(|entity| entity.get(chunk_id))
+    let mut cache = acquire_cache_lock();
+    cache.get(entity_id, chunk_id)
 }
 
 fn insert_cached_embedding(entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
-    let cache = VECTOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap();
-    let entity_cache = cache.entry(entity_id.to_string()).or_insert_with(EntityVectorCache::new);
-    entity_cache.insert(chunk_id, vector);
+    let mut cache = acquire_cache_lock();
+    cache.insert(entity_id, chunk_id, vector);
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -1204,6 +1204,8 @@ fn get_impact_radius(
 
 /// Returns graph-adjacent chunks for `doc_path` with `structural: true` and `rel_type` set,
 /// so the frontend can display them as "Connected" results alongside semantic hits.
+const MAX_STRUCTURAL_NEIGHBORS: usize = 100;
+
 #[tauri::command]
 fn get_structural_neighbors(
     doc_path: String,
@@ -1256,8 +1258,14 @@ fn get_structural_neighbors(
 
     let mut neighbor_pairs: Vec<(i64, String)> = Vec::new();
     for chunk_id in source_chunk_ids {
+        if neighbor_pairs.len() >= MAX_STRUCTURAL_NEIGHBORS {
+            break;
+        }
         if let Ok(neighbors) = crate::graph::get_both(conn, chunk_id, &entity_id, max_hops) {
             for n in neighbors {
+                if neighbor_pairs.len() >= MAX_STRUCTURAL_NEIGHBORS {
+                    break;
+                }
                 if seen_ids.insert(n.chunk_id) {
                     neighbor_pairs.push((n.chunk_id, n.rel_type));
                 }

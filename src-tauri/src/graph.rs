@@ -25,15 +25,24 @@ WITH RECURSIVE callee_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT cw.chunk_id, mc.min_depth, MAX(cw.rel_type) AS rel_type
-FROM   callee_walk cw
-JOIN   (
-    SELECT chunk_id, MIN(depth) AS min_depth
-    FROM   callee_walk
-    GROUP  BY chunk_id
-) mc ON cw.chunk_id = mc.chunk_id AND cw.depth = mc.min_depth
-GROUP  BY cw.chunk_id
-ORDER  BY mc.min_depth
+SELECT chunk_id, depth, rel_type
+FROM (
+    SELECT cw.chunk_id,
+           cw.depth,
+           cw.rel_type,
+           ROW_NUMBER() OVER (
+               PARTITION BY cw.chunk_id
+               ORDER BY cw.depth,
+                        CASE cw.rel_type
+                            WHEN 'CALLS' THEN 0
+                            WHEN 'IMPORTS' THEN 1
+                            ELSE 2
+                        END
+           ) AS rownum
+    FROM callee_walk cw
+)
+WHERE rownum = 1
+ORDER BY depth
 ";
 
 const CALLER_CTE: &str = "
@@ -53,15 +62,24 @@ WITH RECURSIVE caller_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT cw.chunk_id, mc.min_depth, MAX(cw.rel_type) AS rel_type
-FROM   caller_walk cw
-JOIN   (
-    SELECT chunk_id, MIN(depth) AS min_depth
-    FROM   caller_walk
-    GROUP  BY chunk_id
-) mc ON cw.chunk_id = mc.chunk_id AND cw.depth = mc.min_depth
-GROUP  BY cw.chunk_id
-ORDER  BY mc.min_depth
+SELECT chunk_id, depth, rel_type
+FROM (
+    SELECT cw.chunk_id,
+           cw.depth,
+           cw.rel_type,
+           ROW_NUMBER() OVER (
+               PARTITION BY cw.chunk_id
+               ORDER BY cw.depth,
+                        CASE cw.rel_type
+                            WHEN 'CALLS' THEN 0
+                            WHEN 'IMPORTS' THEN 1
+                            ELSE 2
+                        END
+           ) AS rownum
+    FROM caller_walk cw
+)
+WHERE rownum = 1
+ORDER BY depth
 ";
 
 pub fn get_callees(
@@ -131,6 +149,23 @@ mod tests {
     use crate::chunker::{Chunk, ChunkStrategyTag};
     use crate::db::connection::open_in_memory;
     use crate::db::queries::{insert_chunk, insert_relationship, mark_document_indexed, upsert_document};
+
+    #[test]
+    fn min_depth_rel_type_priority_prefers_calls() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let doc = upsert_document(&conn, "/vault/documents/priority.rs", "h").unwrap();
+        mark_document_indexed(&conn, doc).unwrap();
+        let root = insert_chunk(&conn, doc, &make_def_chunk("root"), 0, "tier_fact").unwrap();
+        let target = insert_chunk(&conn, doc, &make_def_chunk("target"), 1, "tier_fact").unwrap();
+        insert_relationship(&conn, root, target, "CALLS", "target", "tier_fact").unwrap();
+        insert_relationship(&conn, root, target, "IMPORTS", "target", "tier_fact").unwrap();
+
+        let callees = get_callees(&conn, root, "tier_fact", 5).unwrap();
+        let target_rows: Vec<_> = callees.iter().filter(|r| r.chunk_id == target).collect();
+        assert_eq!(target_rows.len(), 1, "target chunk should appear once");
+        assert_eq!(target_rows[0].rel_type, "CALLS", "CALLS should be preferred over IMPORTS at equal depth");
+    }
 
     fn make_def_chunk(name: &str) -> Chunk {
         Chunk {
