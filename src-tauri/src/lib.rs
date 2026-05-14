@@ -928,19 +928,6 @@ fn queue_full_reindex(
 
 // ── Maintenance commands ──────────────────────────────────────────────────────
 
-fn emit_wiki_status(app: &AppHandle, ingesting: bool, librarian: bool, heal: bool, prune: bool) {
-    app.emit(
-        "wiki-status-change",
-        serde_json::json!({
-            "ingesting": ingesting,
-            "librarian": librarian,
-            "heal": heal,
-            "prune": prune,
-        }),
-    )
-    .ok();
-}
-
 fn heal_lost_librarian_inferred(
     conn: &rusqlite::Connection,
     vault_root: &Path,
@@ -1106,7 +1093,6 @@ async fn run_wiki_forget(
         flags.forgetting = false;
     });
 
->>>>>>> origin/phase-3-plan-implementation
     result
 }
 
@@ -1161,8 +1147,9 @@ async fn run_wiki_reindex(
     app: AppHandle,
     db_state: State<'_, DbState>,
     pipeline: State<'_, PipelineHolder>,
+    status_state: State<'_, WikiStatusState>,
 ) -> Result<usize, String> {
-    run_wiki_reembed(app, db_state, pipeline).await
+    run_wiki_reembed(app, db_state, pipeline, status_state).await
 }
 
 // ── Wiki SQL bridge ───────────────────────────────────────────────────────────
