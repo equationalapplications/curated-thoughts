@@ -1129,19 +1129,8 @@ async fn run_wiki_reembed(
 
     if let Ok(queued) = result {
         if queued > 0 {
-            let app_handle = app.clone();
-            let pending = pending.clone();
-            std::thread::spawn(move || {
-                while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                update_wiki_status_from_app(&app_handle, |flags| {
-                    flags.ingesting = false;
-                });
-            });
-        } else {
             update_wiki_status(&app, &status_state, |flags| {
-                flags.ingesting = false;
+                flags.ingesting = true;
             });
         }
     } else {
@@ -2254,7 +2243,6 @@ pub fn run() {
             delete_vault_file,
             run_wiki_heal,
             run_wiki_prune,
-            run_wiki_forget,
             run_wiki_forget,
             run_wiki_reembed,
             get_chunk_ids_for_wiki_entry,
