@@ -15,7 +15,9 @@ export function useWikiStatus(): WikiStatus {
   });
 
   useEffect(() => {
-    const unsub = listen<WikiStatus>('wiki-status-change', (e) => setStatus(e.payload));
+    const unsub = listen<Partial<WikiStatus>>('wiki-status-change', (e) =>
+      setStatus((prev) => ({ ...prev, ...e.payload })),
+    );
     return () => {
       unsub.then((f) => f());
     };
