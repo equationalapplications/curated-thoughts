@@ -20,7 +20,7 @@ use crate::vault::VaultConfig;
 pub enum PipelineJob {
     /// Chunk + embed path. With `force: true`, re-runs chunking even when content hash unchanged
     /// (chunk strategy upgrades, embedding model swaps).
-    /// `count_pending: true` means this job was counted in the reembed pending counter and the
+    /// `count_pending: true` means this job contributes to the active ingesting counter and the
     /// worker must decrement it on completion.
     Ingest {
         path: String,
@@ -30,12 +30,24 @@ pub enum PipelineJob {
     Delete(String),
 }
 
+pub enum PipelineStatusEvent {
+    PendingCount(usize),
+}
+
 impl PipelineJob {
     pub fn ingest(path: impl Into<String>) -> Self {
         Self::Ingest {
             path: path.into(),
             force: false,
             count_pending: false,
+        }
+    }
+
+    pub fn ingest_counted(path: impl Into<String>) -> Self {
+        Self::Ingest {
+            path: path.into(),
+            force: false,
+            count_pending: true,
         }
     }
 
@@ -62,15 +74,23 @@ pub struct PipelineWorker {
     rx: mpsc::Receiver<PipelineJob>,
     pending: Arc<AtomicUsize>,
     vault_root: Option<PathBuf>,
+    status_tx: mpsc::Sender<PipelineStatusEvent>,
 }
 
 impl PipelineWorker {
-    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>) -> Self {
-        PipelineWorker { db_path, rx, pending, vault_root: None }
+    #[allow(dead_code)]
+    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>, status_tx: mpsc::Sender<PipelineStatusEvent>) -> Self {
+        PipelineWorker { db_path, rx, pending, vault_root: None, status_tx }
     }
 
-    pub fn new_with_vault(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>, vault_root: Option<PathBuf>) -> Self {
-        PipelineWorker { db_path, rx, pending, vault_root }
+    pub fn new_with_vault(
+        db_path: PathBuf,
+        rx: mpsc::Receiver<PipelineJob>,
+        pending: Arc<AtomicUsize>,
+        vault_root: Option<PathBuf>,
+        status_tx: mpsc::Sender<PipelineStatusEvent>,
+    ) -> Self {
+        PipelineWorker { db_path, rx, pending, vault_root, status_tx }
     }
 
     pub fn run(self) {
@@ -102,6 +122,10 @@ impl PipelineWorker {
                 PipelineJob::Delete(path) => path.clone(),
             };
             let count_pending = matches!(&job, PipelineJob::Ingest { count_pending: true, .. });
+            if count_pending {
+                let previous = self.pending.fetch_add(1, Ordering::SeqCst);
+                let _ = self.status_tx.send(PipelineStatusEvent::PendingCount(previous + 1));
+            }
             let worker_vault_root = self.vault_root.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job {
@@ -176,13 +200,18 @@ impl PipelineWorker {
             }
 
             if count_pending {
-                let _ = self.pending.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                    if current == 0 {
-                        Some(0)
-                    } else {
-                        Some(current - 1)
-                    }
-                });
+                let updated = self
+                    .pending
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                        if current == 0 {
+                            Some(0)
+                        } else {
+                            Some(current - 1)
+                        }
+                    })
+                    .unwrap_or(0);
+                let current = updated.saturating_sub(1);
+                let _ = self.status_tx.send(PipelineStatusEvent::PendingCount(current));
             }
         }
     }
@@ -394,15 +423,24 @@ fn ingest_file(
     Ok(())
 }
 
-pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> (mpsc::SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
+pub fn start_pipeline(
+    db_path: PathBuf,
+    vault_root: Option<PathBuf>,
+) -> (
+    mpsc::SyncSender<PipelineJob>,
+    std::thread::JoinHandle<()>,
+    Arc<AtomicUsize>,
+    Option<mpsc::Receiver<PipelineStatusEvent>>,
+) {
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(256);
+    let (status_tx, status_rx) = mpsc::channel();
     let pending = Arc::new(AtomicUsize::new(0));
-    let worker = PipelineWorker::new_with_vault(db_path, rx, pending.clone(), vault_root);
+    let worker = PipelineWorker::new_with_vault(db_path, rx, pending.clone(), vault_root, status_tx);
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
-    (tx, join, pending)
+    (tx, join, pending, Some(status_rx))
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface OllamaStatus {
   installed: boolean;
@@ -152,3 +153,21 @@ export const getImpactRadius = (
   maxHops: number,
 ): Promise<NeighborRow[]> =>
   invoke('get_impact_radius', { rootChunkId, entityId, direction, maxHops });
+
+export interface WikiStatusPayload {
+  ingesting: boolean;
+  librarian: boolean;
+  healing: boolean;
+  pruning: boolean;
+  forgetting: boolean;
+}
+
+export const subscribeEntityStatus = (
+  callback: (event: { payload: WikiStatusPayload }) => void,
+): Promise<UnlistenFn> => listen<WikiStatusPayload>('wiki-status-change', callback);
+
+export const runWikiHeal = (): Promise<void> => invoke('run_wiki_heal');
+export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');
+export const runWikiReembed = (): Promise<number> => invoke('run_wiki_reembed');
+export const forgetWikiSource = (sourcePath: string): Promise<void> =>
+  invoke('run_wiki_forget', { sourcePath });
