@@ -7,9 +7,14 @@ import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
 
 let _workspaceId: string = 'tier_working::default';
+let _workspaceIdRequest = 0;
 
 export async function initWorkspaceId(vaultPath: string): Promise<void> {
-  _workspaceId = await invoke<string>('get_workspace_id', { path: vaultPath });
+  const requestId = ++_workspaceIdRequest;
+  const id = await invoke<string>('get_workspace_id', { path: vaultPath });
+  if (requestId === _workspaceIdRequest) {
+    _workspaceId = id;
+  }
 }
 
 export function getWorkspaceId(): string {

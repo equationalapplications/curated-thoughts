@@ -130,6 +130,75 @@ mod tests {
     }
 
     #[test]
+    fn migration_v5_backfills_entity_id_from_document_path_prefix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4
+        ))
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES (?1, ?2, ?3, 'indexed')",
+            ["/vault/documents/doc.md", "h1", "user_doc"],
+        )
+        .unwrap();
+        let doc_id: i64 = conn
+            .query_row(
+                "SELECT id FROM documents WHERE path = ?1",
+                ["/vault/documents/doc.md"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy) VALUES (?1, ?2, ?3, 1, 1, NULL, 'prose')",
+            rusqlite::params![doc_id, "body", 0],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES (?1, ?2, ?3, 'indexed')",
+            ["/vault/src/init.rs", "h2", "user_doc"],
+        )
+        .unwrap();
+        let working_doc_id: i64 = conn
+            .query_row(
+                "SELECT id FROM documents WHERE path = ?1",
+                ["/vault/src/init.rs"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy) VALUES (?1, ?2, ?3, 1, 1, NULL, 'prose')",
+            rusqlite::params![working_doc_id, "body", 0],
+        )
+        .unwrap();
+
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))
+            .unwrap();
+
+        let entity_id_fact: String = conn
+            .query_row(
+                "SELECT entity_id FROM chunks WHERE doc_id = ?1",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let entity_id_working: String = conn
+            .query_row(
+                "SELECT entity_id FROM chunks WHERE doc_id = ?1",
+                [working_doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(entity_id_fact, "tier_fact");
+        assert_eq!(entity_id_working, "tier_working");
+    }
+
+    #[test]
     fn migration_v4_chunk_columns_roundtrip() {
         let conn = open_in_memory().unwrap();
         let doc_id = crate::db::queries::upsert_document(&conn, "/x/a.md", "h1").unwrap();
