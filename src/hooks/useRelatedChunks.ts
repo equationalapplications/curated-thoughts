@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getRelatedChunks, SearchResult } from "../lib/tauri";
+import { getRelatedChunks, getStructuralNeighbors, SearchResult } from "../lib/tauri";
 
 export function useRelatedChunks(docPath: string | null): SearchResult[] {
   const [chunks, setChunks] = useState<SearchResult[]>([]);
@@ -9,7 +9,16 @@ export function useRelatedChunks(docPath: string | null): SearchResult[] {
       setChunks([]);
       return;
     }
-    getRelatedChunks(docPath).then(setChunks).catch(() => setChunks([]));
+    Promise.all([
+      getRelatedChunks(docPath).catch((): SearchResult[] => []),
+      getStructuralNeighbors(docPath).catch((): SearchResult[] => []),
+    ]).then(([semantic, structural]) => {
+      const seenPositions = new Set(semantic.map((r) => `${r.doc_path}:${r.chunk_position}`));
+      const uniqueStructural = structural.filter(
+        (r) => !seenPositions.has(`${r.doc_path}:${r.chunk_position}`)
+      );
+      setChunks([...semantic, ...uniqueStructural]);
+    });
   }, [docPath]);
 
   return chunks;

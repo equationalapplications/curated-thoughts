@@ -1,8 +1,9 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSetupStatus } from "./hooks/useSetupStatus";
 import { SetupWizard } from "./components/setup/SetupWizard";
 import { AppShell } from "./components/shell/AppShell";
 import { getVaultPath } from "./lib/tauri";
+import { initWorkspaceId, startAutoHeal } from "./lib/wiki";
 
 export function App() {
   const { loading, needsSetup, vaultPath } = useSetupStatus();
@@ -12,6 +13,21 @@ export function App() {
 
   const handleVaultChanged = useCallback((newPath: string) => {
     setCurrentVaultPath(newPath);
+  }, []);
+
+  const activePath = currentVaultPath ?? vaultPath;
+
+  useEffect(() => {
+    if (!activePath) return;
+    initWorkspaceId(activePath).catch((err) =>
+      console.error('[wiki] initWorkspaceId failed:', err)
+    );
+  }, [activePath]);
+
+  useEffect(() => {
+    const cleanup = startAutoHeal();
+    // startAutoHeal registers Tauri event listeners and returns an unsubscribe function.
+    return cleanup;
   }, []);
 
   if (loading) {
@@ -44,7 +60,6 @@ export function App() {
     );
   }
 
-  const activePath = currentVaultPath ?? vaultPath;
   if (!activePath) {
     return (
       <div className="loading-screen">

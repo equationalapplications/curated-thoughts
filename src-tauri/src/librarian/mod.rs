@@ -6,6 +6,143 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+pub struct ChunkRow {
+    pub id: i64,
+    pub entity_id: String,
+    pub text: String,
+    pub symbol_name: Option<String>,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub tier: String,
+    pub path: String,
+}
+
+pub fn assemble_librarian_context(chunks: &[ChunkRow]) -> String {
+    let mut body = String::new();
+
+    for chunk in chunks {
+        let label_key = if chunk.entity_id.is_empty() {
+            match chunk.tier.as_str() {
+                "user_doc" => "tier_fact",
+                "wiki" => "tier_wisdom",
+                _ => "",
+            }
+        } else {
+            chunk.entity_id.as_str()
+        };
+
+        let tier_label = match label_key {
+            "tier_fact" => "ANCHOR TRUTH — do not propose modifications to these facts:\n",
+            "tier_wisdom" => "CURATED WISDOM — may be updated via Wisdom proposals:\n",
+            _ => "WORKING CONTEXT — summarize patterns and flag contradictions only:\n",
+        };
+
+        let header = match &chunk.symbol_name {
+            Some(sym) => format!(
+                "[source: {} | symbol: {} | lines {}-{}]\n",
+                chunk.path, sym, chunk.start_line, chunk.end_line
+            ),
+            None => format!(
+                "[source: {} | lines {}-{}]\n",
+                chunk.path, chunk.start_line, chunk.end_line
+            ),
+        };
+
+        body.push_str(tier_label);
+        body.push_str(&header);
+        body.push_str(&chunk.text);
+        body.push_str("\n\n");
+    }
+
+    body
+}
+
+struct StructuralNeighbor {
+    chunk_text: String,
+    symbol_name: Option<String>,
+    path: String,
+    rel_type: String,
+    depth: i64,
+}
+
+fn build_structural_context(conn: &Connection, source_chunks: &[ChunkRow]) -> String {
+    let source_ids: Vec<i64> = source_chunks.iter().map(|c| c.id).collect();
+    if source_ids.is_empty() {
+        return String::new();
+    }
+
+    let entity_id = source_chunks.first()
+        .map(|c| c.entity_id.as_str())
+        .unwrap_or("");
+    if entity_id.is_empty() {
+        return String::new();
+    }
+
+    let mut neighbor_map: std::collections::HashMap<i64, (String, i64)> = std::collections::HashMap::new();
+    for chunk_id in &source_ids {
+        if let Ok(neighbors) = crate::graph::get_both(conn, *chunk_id, entity_id, 1) {
+            for n in neighbors {
+                let entry = neighbor_map.entry(n.chunk_id).or_insert((n.rel_type.clone(), n.depth));
+                if n.depth < entry.1 {
+                    *entry = (n.rel_type, n.depth);
+                }
+            }
+        }
+    }
+
+    let source_id_set: std::collections::HashSet<i64> = source_ids.into_iter().collect();
+    neighbor_map.retain(|id, _| !source_id_set.contains(id));
+
+    if neighbor_map.is_empty() {
+        return String::new();
+    }
+
+    let mut sorted_ids: Vec<(i64, String, i64)> = neighbor_map
+        .into_iter()
+        .map(|(id, (rel, depth))| (id, rel, depth))
+        .collect();
+    sorted_ids.sort_by_key(|(_, _, depth)| *depth);
+    sorted_ids.truncate(5);
+
+    let mut neighbors: Vec<StructuralNeighbor> = Vec::new();
+    for (chunk_id, rel_type, depth) in sorted_ids {
+        let result = conn.query_row(
+            "SELECT c.chunk_text, c.symbol_name, d.path
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE c.id = ?1",
+            rusqlite::params![chunk_id],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            )),
+        );
+        if let Ok((text, sym, path)) = result {
+            neighbors.push(StructuralNeighbor { chunk_text: text, symbol_name: sym, path, rel_type, depth });
+        }
+    }
+
+    if neighbors.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from(
+        "STRUCTURAL CONTEXT — linked via call graph (do not modify; use for impact analysis only):\n"
+    );
+    for n in &neighbors {
+        let header = match &n.symbol_name {
+            Some(sym) => format!("[source: {} | symbol: {} | rel: {} | depth: {}]\n", n.path, sym, n.rel_type, n.depth),
+            None => format!("[source: {} | rel: {} | depth: {}]\n", n.path, n.rel_type, n.depth),
+        };
+        section.push_str(&header);
+        section.push_str(&n.chunk_text);
+        section.push_str("\n\n");
+    }
+
+    section
+}
+
 fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
     let mut p = std::path::Path::new(source_path);
     loop {
@@ -33,32 +170,82 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
         return Ok(());
     }
 
-    let chunks: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT c.chunk_text FROM chunks c
-             JOIN documents d ON d.id = c.doc_id
-             WHERE d.path = ?1
-             ORDER BY c.position",
-        )?;
-        let mut rows = stmt.query([source_path])?;
-        let mut texts = Vec::new();
+    let chunks: Vec<ChunkRow> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
+        let mut rows = stmt.query([])?;
+        let mut column_names = Vec::new();
         while let Some(row) = rows.next()? {
-            texts.push(row.get::<_, String>(0)?);
+            column_names.push(row.get::<_, String>(1)?);
         }
-        texts
+        let has_extended_columns = column_names.iter().any(|name| name == "symbol_name")
+            && column_names.iter().any(|name| name == "start_line")
+            && column_names.iter().any(|name| name == "end_line");
+
+        let mut v = Vec::new();
+        if has_extended_columns {
+            let mut stmt = conn.prepare(
+                "SELECT c.id, c.entity_id, c.chunk_text, c.symbol_name, c.start_line, c.end_line, d.tier, d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE d.path = ?1
+                 ORDER BY c.position",
+            )?;
+            let mut rows = stmt.query([source_path])?;
+            while let Some(row) = rows.next()? {
+                v.push(ChunkRow {
+                    id: row.get(0)?,
+                    entity_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    text: row.get(2)?,
+                    symbol_name: row.get(3)?,
+                    start_line: row.get(4)?,
+                    end_line: row.get(5)?,
+                    tier: row.get(6)?,
+                    path: row.get(7)?,
+                });
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT c.id, c.entity_id, c.chunk_text, d.tier, d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE d.path = ?1
+                 ORDER BY c.position",
+            )?;
+            let mut rows = stmt.query([source_path])?;
+            while let Some(row) = rows.next()? {
+                v.push(ChunkRow {
+                    id: row.get(0)?,
+                    entity_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    text: row.get(2)?,
+                    symbol_name: None,
+                    start_line: 1,
+                    end_line: 1,
+                    tier: row.get(3)?,
+                    path: row.get(4)?,
+                });
+            }
+        }
+        v
     };
 
     if chunks.is_empty() {
         return Ok(());
     }
 
-    let source_text = chunks.join("\n\n");
-    let byte_limit = source_text
+    let source_text = assemble_librarian_context(&chunks);
+    // Build structural context section
+    let structural_text = build_structural_context(conn, &chunks);
+    let full_text = if structural_text.is_empty() {
+        source_text
+    } else {
+        format!("{}\n{}", source_text, structural_text)
+    };
+    let byte_limit = full_text
         .char_indices()
         .nth(4000)
         .map(|(i, _)| i)
-        .unwrap_or(source_text.len());
-    let truncated = &source_text[..byte_limit];
+        .unwrap_or(full_text.len());
+    let truncated = &full_text[..byte_limit];
 
     let client = reqwest::blocking::Client::new();
     let base_url =
@@ -67,7 +254,7 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
         .post(format!("{}/api/generate", base_url))
         .json(&serde_json::json!({
             "model": model,
-            "system": "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.",
+            "system": "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.\n\nCONFLICT RESOLUTION DIRECTIVE: If Working Context contradicts Anchor Truth, do not harmonize or modify the Anchor Truth. Instead, create a new Wisdom entry titled 'Architectural Inconsistency' that states: which Working file and symbol introduced the deviation (cite source: metadata), which Anchor Truth document it violates (cite source: metadata), and a one-sentence description of the conflict. Do not emit a Wisdom proposal for any content that is consistent with the Anchor Truth.\n\nCASCADING VIOLATION DIRECTIVE: If a Structural Context chunk reveals that a violation in Working Context propagates to multiple callers, enumerate each caller file and symbol in the Wisdom proposal. Title the proposal 'Cascading Violation' and list each impacted call site under an 'Affected callers' section. Do not emit separate proposals per caller — consolidate into one.",
             "prompt": format!("Document to summarize:\n\n{}", truncated),
             "stream": false
         }))
@@ -130,22 +317,18 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::schema::{MIGRATION_V1, MIGRATION_V2};
+    use crate::db::connection::open_in_memory;
 
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(MIGRATION_V1).unwrap();
-        conn.execute_batch(MIGRATION_V2).unwrap();
+        let conn = open_in_memory().unwrap();
         let result = generate_summary(&conn, "/vault/documents/nonexistent.md", "llama3.2:1b");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_index_mode_skips_librarian() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(MIGRATION_V1).unwrap();
-        conn.execute_batch(MIGRATION_V2).unwrap();
+        let conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('/vault/documents', 'index', 0)",
             [],
@@ -156,11 +339,93 @@ mod tests {
 
     #[test]
     fn test_get_folder_mode_defaults_to_summarize() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(MIGRATION_V1).unwrap();
-        conn.execute_batch(MIGRATION_V2).unwrap();
+        let conn = open_in_memory().unwrap();
         let (mode, auto) = get_folder_mode(&conn, "/vault/documents/note.md");
         assert_eq!(mode, "summarize");
         assert!(!auto);
+    }
+
+    #[test]
+    fn assemble_context_labels_user_doc_as_anchor_truth() {
+        let chunks = vec![
+            ChunkRow {
+                id: 0,
+                entity_id: String::new(),
+                text: "fn init_db() {}".to_string(),
+                symbol_name: Some("init_db".to_string()),
+                start_line: 1,
+                end_line: 3,
+                tier: "user_doc".to_string(),
+                path: "documents/sqlite_docs.md".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("ANCHOR TRUTH"),
+            "expected ANCHOR TRUTH label, got:\n{context}"
+        );
+    }
+
+    #[test]
+    fn assemble_context_labels_wiki_as_curated_wisdom() {
+        let chunks = vec![
+            ChunkRow {
+                id: 0,
+                entity_id: String::new(),
+                text: "Auth patterns overview".to_string(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 10,
+                tier: "wiki".to_string(),
+                path: "wiki/auth-patterns.md".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("CURATED WISDOM"),
+            "expected CURATED WISDOM label, got:\n{context}"
+        );
+    }
+
+    #[test]
+    fn assemble_context_includes_source_header_with_line_range() {
+        let chunks = vec![
+            ChunkRow {
+                id: 0,
+                entity_id: String::new(),
+                text: "body text".to_string(),
+                symbol_name: None,
+                start_line: 12,
+                end_line: 34,
+                tier: "user_doc".to_string(),
+                path: "documents/api-ref.md".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("[source: documents/api-ref.md | lines 12-34]"),
+            "expected source header, got:\n{context}"
+        );
+    }
+
+    #[test]
+    fn assemble_context_includes_symbol_name_when_present() {
+        let chunks = vec![
+            ChunkRow {
+                id: 0,
+                entity_id: String::new(),
+                text: "fn foo() {}".to_string(),
+                symbol_name: Some("foo".to_string()),
+                start_line: 22,
+                end_line: 45,
+                tier: "wiki".to_string(),
+                path: "src/db/init.rs".to_string(),
+            },
+        ];
+        let context = assemble_librarian_context(&chunks);
+        assert!(
+            context.contains("[source: src/db/init.rs | symbol: foo | lines 22-45]"),
+            "expected symbol in header, got:\n{context}"
+        );
     }
 }
