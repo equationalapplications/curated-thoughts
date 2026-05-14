@@ -1507,6 +1507,7 @@ fn get_structural_neighbors(
                     strategy: row.get(6)?,
                     structural: Some(true),
                     rel_type: Some(rel_type.clone()),
+                    entity_id: None,
                 })
             },
         );

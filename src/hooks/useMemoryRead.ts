@@ -5,8 +5,12 @@ const DEBOUNCE_MS = 300;
 const MAX_CACHE_ENTRIES = 500;
 const STRUCTURAL_HOPS = 1;
 
-function getTierWeight(docPath: string): number {
-  const normalized = docPath.replace(/\\/g, "/").toLowerCase();
+function getTierWeight(result: SearchResult): number {
+  if (result.entity_id === "tier_fact") return 1.5;
+  if (result.entity_id === "tier_wisdom") return 1.0;
+  if (result.entity_id === "tier_working") return 0.6;
+  // fallback: path heuristic for results without entity_id (e.g. structural neighbors)
+  const normalized = result.doc_path.replace(/\\/g, "/").toLowerCase();
   if (normalized.includes("/documents/")) return 1.5;
   if (normalized.includes("/wiki/")) return 1.0;
   return 0.6;
@@ -15,7 +19,7 @@ function getTierWeight(docPath: string): number {
 function applyTierWeights(results: SearchResult[]): SearchResult[] {
   return results.map((result) => ({
     ...result,
-    score: Math.min(1, result.score * getTierWeight(result.doc_path)),
+    score: result.score * getTierWeight(result),
   }));
 }
 

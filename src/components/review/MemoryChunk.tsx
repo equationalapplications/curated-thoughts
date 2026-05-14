@@ -15,7 +15,11 @@ function emojiSafeSlice(text: string, maxLength: number): string {
   return text.slice(0, end);
 }
 
-function getTierClass(docPath?: string) {
+function getTierClass(tier?: string, docPath?: string) {
+  if (tier === 'tier_fact') return 'memory-chunk--fact';
+  if (tier === 'tier_wisdom') return 'memory-chunk--wisdom';
+  if (tier === 'tier_working') return 'memory-chunk--working';
+  // fallback: path heuristic for callers without entity_id
   if (!docPath) return 'memory-chunk--working';
   const normalized = docPath.replace(/\\/g, '/').toLowerCase();
   if (normalized.includes('/documents/')) return 'memory-chunk--fact';
@@ -26,6 +30,7 @@ function getTierClass(docPath?: string) {
 interface Props {
   chunkText: string;
   docPath?: string;
+  tier?: string;
   maxLength?: number;
   className?: string;
 }
@@ -33,11 +38,12 @@ interface Props {
 export function MemoryChunk({
   chunkText,
   docPath,
+  tier,
   maxLength = 120,
   className = '',
 }: Props) {
   return (
-    <span className={`memory-chunk ${getTierClass(docPath)} ${className}`.trim()}>
+    <span className={`memory-chunk ${getTierClass(tier, docPath)} ${className}`.trim()}>
       {emojiSafeSlice(chunkText, maxLength)}
       {chunkText.length > maxLength ? '…' : ''}
     </span>
