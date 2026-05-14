@@ -9,6 +9,97 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
+
+const VECTOR_CACHE_CAPACITY_PER_ENTITY: usize = 500;
+const VECTOR_CACHE_CAPACITY_ENTITY_IDS: usize = 64;
+
+struct EntityVectorCache {
+    order: VecDeque<i64>,
+    vectors: HashMap<i64, Arc<[f32]>>,
+}
+
+impl EntityVectorCache {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            vectors: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, chunk_id: i64) -> Option<Arc<[f32]>> {
+        self.vectors.get(&chunk_id).cloned()
+    }
+
+    fn insert(&mut self, chunk_id: i64, vector: Arc<[f32]>) {
+        if self.vectors.contains_key(&chunk_id) {
+            return;
+        }
+        self.order.push_back(chunk_id);
+        self.vectors.insert(chunk_id, vector);
+        while self.order.len() > VECTOR_CACHE_CAPACITY_PER_ENTITY {
+            if let Some(old_id) = self.order.pop_front() {
+                self.vectors.remove(&old_id);
+            }
+        }
+    }
+}
+
+struct EntityVectorCacheStore {
+    order: VecDeque<String>,
+    entities: HashMap<String, EntityVectorCache>,
+}
+
+impl EntityVectorCacheStore {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            entities: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, entity_id: &str, chunk_id: i64) -> Option<Arc<[f32]>> {
+        self.entities.get_mut(entity_id)?.get(chunk_id)
+    }
+
+    fn insert(&mut self, entity_id: &str, chunk_id: i64, vector: Arc<[f32]>) {
+        if let Some(entity_cache) = self.entities.get_mut(entity_id) {
+            entity_cache.insert(chunk_id, vector);
+            self.order.retain(|id| id.as_str() != entity_id);
+            self.order.push_back(entity_id.to_string());
+            return;
+        }
+
+        if self.entities.len() >= VECTOR_CACHE_CAPACITY_ENTITY_IDS {
+            if let Some(old_entity_id) = self.order.pop_front() {
+                self.entities.remove(&old_entity_id);
+            }
+        }
+
+        self.order.push_back(entity_id.to_string());
+        let mut entity_cache = EntityVectorCache::new();
+        entity_cache.insert(chunk_id, vector);
+        self.entities.insert(entity_id.to_string(), entity_cache);
+    }
+}
+
+static VECTOR_CACHE: OnceLock<Mutex<EntityVectorCacheStore>> = OnceLock::new();
+
+fn acquire_cache_lock() -> std::sync::MutexGuard<'static, EntityVectorCacheStore> {
+    let cache = VECTOR_CACHE.get_or_init(|| Mutex::new(EntityVectorCacheStore::new()));
+    cache.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn get_or_insert_cached_embedding(entity_id: &str, chunk_id: i64, bytes: &[u8]) -> Arc<[f32]> {
+    let mut cache = acquire_cache_lock();
+    if let Some(cached) = cache.get(entity_id, chunk_id) {
+        return cached;
+    }
+    let decoded: Arc<[f32]> = bytes_to_f32(bytes).into();
+    cache.insert(entity_id, chunk_id, Arc::clone(&decoded));
+    decoded
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchResult {
@@ -59,9 +150,8 @@ pub fn semantic_search(
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
     let mut stmt = conn.prepare(
-        "SELECT e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
-         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path, \
-         COALESCE(c.entity_id, '') as entity_id
+        "SELECT e.chunk_id, e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
+         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, c.entity_id, d.path
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -72,23 +162,24 @@ pub fn semantic_search(
     let mut rows = stmt.query([])?;
 
     while let Some(row) = rows.next()? {
-        let bytes: Vec<u8> = row.get(0)?;
-        let chunk_text: String = row.get(1)?;
-        let chunk_position: i64 = row.get(2)?;
-        let start_line: i64 = row.get(3)?;
-        let end_line: i64 = row.get(4)?;
-        let symbol_str: String = row.get(5)?;
-        let strategy: String = row.get(6)?;
-        let doc_path: String = row.get(7)?;
-        let entity_id_str: String = row.get(8)?;
-        let vec = bytes_to_f32(&bytes);
+        let chunk_id: i64 = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        let chunk_text: String = row.get(2)?;
+        let chunk_position: i64 = row.get(3)?;
+        let start_line: i64 = row.get(4)?;
+        let end_line: i64 = row.get(5)?;
+        let symbol_str: String = row.get(6)?;
+        let strategy: String = row.get(7)?;
+        let entity_id: Option<String> = row.get(8)?;
+        let doc_path: String = row.get(9)?;
+        let cache_key = entity_id.as_deref().unwrap_or("unknown");
+        let vec = get_or_insert_cached_embedding(cache_key, chunk_id, &bytes);
         let score = cosine_similarity(query_vec, &vec);
         let symbol_name = if symbol_str.is_empty() {
             None
         } else {
             Some(symbol_str)
         };
-        let entity_id = if entity_id_str.is_empty() { None } else { Some(entity_id_str) };
         results.push((
             score,
             SearchResult {
@@ -147,9 +238,8 @@ pub fn related_chunks(
     avg.iter_mut().for_each(|x| *x /= n);
 
     let mut stmt = conn.prepare(
-        "SELECT e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
-         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, d.path, \
-         COALESCE(c.entity_id, '') as entity_id
+        "SELECT e.chunk_id, e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
+         COALESCE(c.symbol_name, '') as symbol_name, c.strategy, c.entity_id, d.path
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -160,23 +250,24 @@ pub fn related_chunks(
     let mut rows = stmt.query([doc_path])?;
 
     while let Some(row) = rows.next()? {
-        let bytes: Vec<u8> = row.get(0)?;
-        let chunk_text: String = row.get(1)?;
-        let chunk_position: i64 = row.get(2)?;
-        let start_line: i64 = row.get(3)?;
-        let end_line: i64 = row.get(4)?;
-        let symbol_str: String = row.get(5)?;
-        let strategy: String = row.get(6)?;
-        let doc_path_r: String = row.get(7)?;
-        let entity_id_str: String = row.get(8)?;
-        let vec = bytes_to_f32(&bytes);
+        let chunk_id: i64 = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        let chunk_text: String = row.get(2)?;
+        let chunk_position: i64 = row.get(3)?;
+        let start_line: i64 = row.get(4)?;
+        let end_line: i64 = row.get(5)?;
+        let symbol_str: String = row.get(6)?;
+        let strategy: String = row.get(7)?;
+        let entity_id: Option<String> = row.get(8)?;
+        let doc_path_r: String = row.get(9)?;
+        let cache_key = entity_id.as_deref().unwrap_or("unknown");
+        let vec = get_or_insert_cached_embedding(cache_key, chunk_id, &bytes);
         let score = cosine_similarity(&avg, &vec);
         let symbol_name = if symbol_str.is_empty() {
             None
         } else {
             Some(symbol_str)
         };
-        let entity_id = if entity_id_str.is_empty() { None } else { Some(entity_id_str) };
         results.push((
             score,
             SearchResult {
@@ -222,6 +313,7 @@ pub fn related_chunks_try_paths(
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
+
 
     fn vec_blob2(x: f32, y: f32) -> Vec<u8> {
         [x.to_le_bytes(), y.to_le_bytes()]
@@ -326,6 +418,28 @@ mod tests {
             assert_eq!(m.chunk_position, e.chunk_position);
             assert!((m.score - e.score).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn vector_cache_respects_capacity_per_entity() {
+        let mut cache = EntityVectorCache::new();
+        for chunk_id in 1..=501_i64 {
+            cache.insert(chunk_id, Arc::from(vec![chunk_id as f32]));
+        }
+        assert!(cache.get(1).is_none(), "chunk 1 should be evicted");
+        assert!(cache.get(2).is_some(), "chunk 2 should be retained");
+        assert!(cache.get(501).is_some(), "chunk 501 should be retained");
+    }
+
+    #[test]
+    fn vector_cache_respects_capacity_entity_ids() {
+        let mut store = EntityVectorCacheStore::new();
+        for id_index in 0..(VECTOR_CACHE_CAPACITY_ENTITY_IDS + 1) {
+            let entity_id = format!("entity_{id_index}");
+            store.insert(&entity_id, 1, Arc::from(vec![id_index as f32]));
+        }
+        assert!(store.get("entity_0", 1).is_none(), "entity_0 should be evicted");
+        assert!(store.get("entity_1", 1).is_some(), "entity_1 should be retained");
     }
 
     #[test]

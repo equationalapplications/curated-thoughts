@@ -1,8 +1,8 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { WikiStatus } from '../hooks/useWikiStatus';
+import type { WikiStatusEventPayload } from '../lib/tauri';
 
-type EventCallback = (e: { payload: Omit<WikiStatus, 'busy'> }) => void;
+type EventCallback = (e: { payload: WikiStatusEventPayload }) => void;
 let capturedCallback: EventCallback | null = null;
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -102,4 +102,30 @@ describe('useWikiStatus', () => {
     const { ingesting, librarian, healing, pruning, forgetting } = result.current;
     expect(ingesting || librarian || healing || pruning || forgetting).toBe(true);
   });
+
+  it('merges partial payload preserving prior state', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingesting: true, librarian: false, healing: false, pruning: false, forgetting: false },
+      });
+    });
+    await act(async () => {
+      capturedCallback?.({ payload: { pruning: true } });
+    });
+    expect(result.current.ingesting).toBe(true);
+    expect(result.current.pruning).toBe(true);
+    expect(result.current.busy).toBe(true);
+  });
+
+  it('normalizes legacy heal/prune keys', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      capturedCallback?.({ payload: { heal: true, prune: false } });
+    });
+    expect(result.current.healing).toBe(true);
+    expect(result.current.pruning).toBe(false);
+    expect(result.current.busy).toBe(true);
+  });
+
 });

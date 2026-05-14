@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
+import type { WikiStatusEventPayload } from "./tauri";
 
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
@@ -124,6 +125,44 @@ export function startAutoHeal(): () => void {
       clearTimeout(debounce);
       debounce = null;
     }
+    void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
+  };
+}
+
+export function startAutoMaintenance(): () => void {
+  let isBusy = false;
+  const handleStatusChange = (event: { payload: WikiStatusEventPayload }) => {
+    const p = event.payload;
+    isBusy = !!(
+      p.ingesting ||
+      p.librarian ||
+      (p.healing ?? p.heal) ||
+      (p.pruning ?? p.prune) ||
+      p.forgetting
+    );
+  };
+
+  const runPrune = async () => {
+    if (isBusy) {
+      console.info('[auto-maintenance] skipping prune while system is busy');
+      return;
+    }
+
+    try {
+      await invoke('run_wiki_prune');
+    } catch (err) {
+      console.error('[auto-maintenance] prune failed', err);
+    }
+  };
+
+  const unsubscribers = [listen('wiki-status-change', handleStatusChange)];
+
+  // Run a prune once at startup, then every 24 hours.
+  void runPrune();
+  const interval = window.setInterval(runPrune, 24 * 60 * 60 * 1000);
+
+  return () => {
+    window.clearInterval(interval);
     void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
   };
 }

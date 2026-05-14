@@ -25,6 +25,9 @@ export const pullModel = (modelId: string): Promise<void> =>
 export const startFileWatcher = (): Promise<void> =>
   invoke("start_file_watcher");
 
+export const runWikiReindex = (): Promise<number> =>
+  invoke("run_wiki_reindex");
+
 export const startOllamaServer = (): Promise<void> =>
   invoke("start_ollama_server");
 
@@ -164,9 +167,14 @@ export interface WikiStatusPayload {
   forgetting: boolean;
 }
 
+export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {
+  heal?: boolean;
+  prune?: boolean;
+};
+
 export const subscribeEntityStatus = (
-  callback: (event: { payload: WikiStatusPayload }) => void,
-): Promise<UnlistenFn> => listen<WikiStatusPayload>('wiki-status-change', callback);
+  callback: (event: { payload: WikiStatusEventPayload }) => void,
+): Promise<UnlistenFn> => listen<WikiStatusEventPayload>('wiki-status-change', callback);
 
 export const runWikiHeal = (): Promise<void> => invoke('run_wiki_heal');
 export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');

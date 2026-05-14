@@ -928,6 +928,61 @@ fn queue_full_reindex(
 
 // ── Maintenance commands ──────────────────────────────────────────────────────
 
+fn heal_lost_librarian_inferred(
+    conn: &rusqlite::Connection,
+    vault_root: &Path,
+) -> Result<usize, String> {
+    let entries: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, source_ref FROM llm_wiki_entries
+                     WHERE deleted_at IS NULL
+                       AND source_ref IS NOT NULL
+                       AND source_type = 'librarian_inferred'",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            v.push((
+                row.get::<_, i64>(0).map_err(|e| e.to_string())?,
+                row.get::<_, String>(1).map_err(|e| e.to_string())?,
+            ));
+        }
+        v
+    };
+
+    let mut updated = 0;
+    for (rowid, source_ref) in entries {
+        let safe = crate::vault::safe_vault_path(
+            vault_root,
+            &source_ref,
+            &["."],
+            crate::vault::PathMode::MustExist,
+        );
+        if safe.is_err() {
+            updated += conn
+                .execute(
+                    "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
+                    [rowid],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(updated)
+}
+
+fn prune_old_librarian_inferred(conn: &rusqlite::Connection, current_unix: i64) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM llm_wiki_entries
+             WHERE source_type = 'librarian_inferred'
+               AND deleted_at IS NOT NULL
+               AND deleted_at < ?1",
+        [current_unix - 7 * 86400],
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn run_wiki_heal(
     app: AppHandle,
@@ -952,44 +1007,7 @@ async fn run_wiki_heal(
         let guard = db_state.0.lock().unwrap();
         let conn = &guard.0;
 
-        // Fetch non-deleted entries that have a source reference.
-        let entries: Vec<(i64, String)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT rowid, source_ref FROM llm_wiki_entries
-                     WHERE deleted_at IS NULL AND source_ref IS NOT NULL",
-                )
-                .map_err(|e| e.to_string())?;
-            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            let mut v = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                v.push((
-                    row.get::<_, i64>(0).map_err(|e| e.to_string())?,
-                    row.get::<_, String>(1).map_err(|e| e.to_string())?,
-                ));
-            }
-            v
-        };
-
-        for (rowid, source_ref) in entries {
-            // Only accept vault-relative refs. Absolute paths, traversal segments,
-            // symlink escapes, or missing files are treated as missing to prevent
-            // heal from probing outside the vault.
-            let safe = crate::vault::safe_vault_path(
-                &vault_root,
-                &source_ref,
-                &["."],
-                crate::vault::PathMode::MustExist,
-            );
-            if safe.is_err() {
-                conn.execute(
-                    "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
-                    [rowid],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
-
+        heal_lost_librarian_inferred(conn, &vault_root)?;
         Ok(())
     })();
 
@@ -1013,15 +1031,11 @@ async fn run_wiki_prune(
     let result = (|| -> Result<(), String> {
         let guard = db_state.0.lock().unwrap();
         let conn = &guard.0;
-        // Hard-delete librarian_inferred entries soft-deleted more than 7 days ago.
-        conn.execute(
-            "DELETE FROM llm_wiki_entries
-             WHERE source_type = 'librarian_inferred'
-               AND deleted_at IS NOT NULL
-               AND deleted_at < (unixepoch() - 7 * 86400)",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs() as i64;
+        prune_old_librarian_inferred(conn, now)?;
         Ok(())
     })();
 
@@ -1126,6 +1140,16 @@ async fn run_wiki_reembed(
     }
 
     result
+}
+
+#[tauri::command]
+async fn run_wiki_reindex(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+    pipeline: State<'_, PipelineHolder>,
+    status_state: State<'_, WikiStatusState>,
+) -> Result<usize, String> {
+    run_wiki_reembed(app, db_state, pipeline, status_state).await
 }
 
 // ── Wiki SQL bridge ───────────────────────────────────────────────────────────
@@ -1421,6 +1445,8 @@ fn get_impact_radius(
 
 /// Returns graph-adjacent chunks for `doc_path` with `structural: true` and `rel_type` set,
 /// so the frontend can display them as "Connected" results alongside semantic hits.
+const MAX_STRUCTURAL_NEIGHBORS: usize = 100;
+
 #[tauri::command]
 fn get_structural_neighbors(
     doc_path: String,
@@ -1477,8 +1503,14 @@ fn get_structural_neighbors(
 
     let mut neighbor_pairs: Vec<(i64, String)> = Vec::new();
     for chunk_id in source_chunk_ids {
+        if neighbor_pairs.len() >= MAX_STRUCTURAL_NEIGHBORS {
+            break;
+        }
         if let Ok(neighbors) = crate::graph::get_both(conn, chunk_id, &entity_id, max_hops) {
             for n in neighbors {
+                if neighbor_pairs.len() >= MAX_STRUCTURAL_NEIGHBORS {
+                    break;
+                }
                 if seen_ids.insert(n.chunk_id) {
                     neighbor_pairs.push((n.chunk_id, n.rel_type));
                 }
@@ -2232,6 +2264,7 @@ pub fn run() {
             run_wiki_prune,
             run_wiki_forget,
             run_wiki_reembed,
+            run_wiki_reindex,
             get_chunk_ids_for_wiki_entry,
             get_impact_radius,
             get_structural_neighbors,
@@ -2447,5 +2480,139 @@ mod workspace_id_tests {
             get_workspace_id("/Users/foo/VaultA".to_string()),
             get_workspace_id("/Users/foo/VaultB".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod maintenance_command_tests {
+    use super::{heal_lost_librarian_inferred, prune_old_librarian_inferred};
+    use crate::db::connection::open_in_memory;
+    use rusqlite::Connection;
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn create_llm_wiki_entries_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS llm_wiki_entries (
+                entity_id TEXT,
+                source_type TEXT,
+                source_ref TEXT,
+                deleted_at INTEGER
+            );",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn prune_only_removes_old_librarian_inferred_rows() {
+        let conn = open_in_memory().unwrap();
+        create_llm_wiki_entries_table(&conn);
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let old = now - Duration::from_secs(7 * 86400 + 1);
+        let fresh = now - Duration::from_secs(7 * 86400 - 1);
+
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, ?4)",
+            ("tier_fact", "librarian_inferred", "documents/old.md", Some(old.as_secs() as i64)),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, ?4)",
+            ("tier_fact", "librarian_inferred", "documents/fresh.md", Some(fresh.as_secs() as i64)),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, ?4)",
+            ("tier_fact", "immutable_document", "documents/immutable.md", Some(old.as_secs() as i64)),
+        )
+        .unwrap();
+
+        let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
+        assert_eq!(deleted, 1, "only the old librarian_inferred row should be deleted");
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2, "immutable or fresh rows must remain");
+
+        let types: Vec<String> = conn
+            .prepare("SELECT source_type FROM llm_wiki_entries ORDER BY source_type")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(types, vec!["immutable_document".to_string(), "librarian_inferred".to_string()]);
+    }
+
+    #[test]
+    fn heal_soft_deletes_missing_librarian_inferred_entries_only() {
+        let conn = open_in_memory().unwrap();
+        create_llm_wiki_entries_table(&conn);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        fs::create_dir_all(vault_root.join("documents")).unwrap();
+        fs::write(vault_root.join("documents/existing.md"), b"x").unwrap();
+
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, NULL)",
+            ("tier_fact", "librarian_inferred", "documents/existing.md"),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, NULL)",
+            ("tier_fact", "librarian_inferred", "documents/missing.md"),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, NULL)",
+            ("tier_fact", "immutable_document", "documents/missing.md"),
+        )
+        .unwrap();
+
+        let updated = heal_lost_librarian_inferred(&conn, vault_root).unwrap();
+        assert_eq!(updated, 1, "only the missing inferred row should be soft-deleted");
+
+        let statuses: Vec<(String, Option<i64>, String)> = conn
+            .prepare("SELECT source_type, deleted_at, source_ref FROM llm_wiki_entries ORDER BY source_type, source_ref")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let inferred_existing = statuses.iter().find(|(t, deleted_at, source_ref)| {
+            t == "librarian_inferred" && source_ref == "documents/existing.md" && deleted_at.is_none()
+        });
+        let inferred_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
+            t == "librarian_inferred" && source_ref == "documents/missing.md" && deleted_at.is_some()
+        });
+        let immutable_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
+            t == "immutable_document" && source_ref == "documents/missing.md" && deleted_at.is_none()
+        });
+
+        assert!(inferred_existing.is_some(), "existing inferred rows should be preserved without deleted_at");
+        assert!(inferred_missing.is_some(), "missing inferred rows should be marked deleted");
+        assert!(immutable_missing.is_some(), "immutable_document rows should not be soft-deleted by heal");
+
+        let missing_deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE source_type = 'librarian_inferred' AND source_ref = 'documents/missing.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(missing_deleted_at.is_some(), "missing inferred entries should be marked deleted");
+
+        let existing_deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE source_type = 'librarian_inferred' AND source_ref = 'documents/existing.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(existing_deleted_at.is_none(), "existing source_ref should not be marked deleted");
     }
 }
