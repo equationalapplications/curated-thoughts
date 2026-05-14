@@ -26,6 +26,16 @@ fn open_migrated_db(tmp: &TempDir) -> Connection {
     drop(tauri_app_lib::make_test_app(tmp.path()));
     let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    // llm_wiki_entries is owned by core-llm-wiki in production; create a minimal
+    // test-only schema matching the columns heal/prune operate on.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_wiki_entries (
+            source_ref  TEXT,
+            source_type TEXT NOT NULL DEFAULT 'librarian_inferred',
+            deleted_at  INTEGER
+        );",
+    )
+    .unwrap();
     conn
 }
 

@@ -71,7 +71,6 @@ mod tests {
             "wiki_pages",
             "folder_rules",
             "curated_relationships",
-            "llm_wiki_entries",
         ] {
             let count: i64 = conn
                 .query_row(
