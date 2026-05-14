@@ -752,17 +752,16 @@ async fn run_wiki_heal(
         };
 
         for (rowid, source_ref) in entries {
-            // Only accept vault-relative refs. Absolute paths or `..` traversal refs are
-            // treated as missing to prevent heal from probing outside the vault.
-            let ref_path = std::path::Path::new(&source_ref);
-            let is_safe = !ref_path.is_absolute()
-                && !ref_path.components().any(|c| {
-                    matches!(
-                        c,
-                        std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                    )
-                });
-            if !is_safe || !vault_root.join(&source_ref).exists() {
+            // Only accept vault-relative refs. Absolute paths, traversal segments,
+            // symlink escapes, or missing files are treated as missing to prevent
+            // heal from probing outside the vault.
+            let safe = crate::vault::safe_vault_path(
+                &vault_root,
+                &source_ref,
+                &["."],
+                crate::vault::PathMode::MustExist,
+            );
+            if safe.is_err() {
                 conn.execute(
                     "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
                     [rowid],
@@ -1212,8 +1211,8 @@ fn get_structural_neighbors(
     let safe = crate::vault::safe_vault_path(
         &vault_root,
         &normalized_rel,
-        &["documents", "wiki"],
-        crate::vault::PathMode::MayCreate,
+        &["."],
+        crate::vault::PathMode::MustExist,
     )
     .map_err(|e| e.to_string())?;
     let abs_path = safe.to_string_lossy().into_owned();
