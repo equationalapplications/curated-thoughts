@@ -24,7 +24,7 @@ fn run_pipeline_job(tmp: &TempDir, jobs: Vec<PipelineJob>) {
 
     let db_path = tmp.path().join("brain.db");
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(64);
-    let (status_tx, _status_rx) = mpsc::channel::<tauri_app_lib::pipeline::PipelineStatusEvent>();
+    let (status_tx, _status_rx) = mpsc::channel();
     let worker = PipelineWorker::new(db_path, rx, Arc::new(AtomicUsize::new(0)), status_tx);
     let handle = std::thread::spawn(move || worker.run());
     for job in jobs {
