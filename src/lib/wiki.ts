@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
-import type { WikiStatus } from "../hooks/useWikiStatus";
+import type { WikiStatusPayload } from "./tauri";
 
 let _workspaceId: string = 'tier_working::default';
 
@@ -109,7 +109,7 @@ export function startAutoHeal(): () => void {
   const unsubscribers = [
     listen<VaultEventPayload>('vault-event', (event) => {
       if (event.payload.kind === 'Deleted') {
-        scheduleHeal();
+        scheduleHeal(event);
       }
     }),
   ];
@@ -125,12 +125,13 @@ export function startAutoHeal(): () => void {
 
 export function startAutoMaintenance(): () => void {
   let isBusy = false;
-  const handleStatusChange = (event: { payload: WikiStatus }) => {
+  const handleStatusChange = (event: { payload: WikiStatusPayload }) => {
     isBusy =
       event.payload.ingesting ||
       event.payload.librarian ||
-      event.payload.heal ||
-      event.payload.prune;
+      event.payload.healing ||
+      event.payload.pruning ||
+      event.payload.forgetting;
   };
 
   const runPrune = async () => {

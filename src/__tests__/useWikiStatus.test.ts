@@ -103,5 +103,4 @@ describe('useWikiStatus', () => {
     expect(ingesting || librarian || healing || pruning || forgetting).toBe(true);
   });
 
-  });
 });

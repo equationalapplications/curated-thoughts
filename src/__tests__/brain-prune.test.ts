@@ -68,7 +68,15 @@ describe('startAutoMaintenance', () => {
   });
 
   it('skips scheduled prune while the system is busy', async () => {
-    type StatusEvent = { payload: { ingesting: boolean; librarian: boolean; heal: boolean; prune: boolean } };
+    type StatusEvent = {
+      payload: {
+        ingesting: boolean;
+        librarian: boolean;
+        healing: boolean;
+        pruning: boolean;
+        forgetting: boolean;
+      };
+    };
     let statusCallback: (event: StatusEvent) => void = () => {};
     vi.mocked(listen).mockImplementation(async (_event, cb: (event: StatusEvent) => void) => {
       statusCallback = cb;
@@ -76,7 +84,9 @@ describe('startAutoMaintenance', () => {
     });
 
     const cleanup = startAutoMaintenance();
-    statusCallback({ payload: { ingesting: true, librarian: false, heal: false, prune: false } });
+    statusCallback({
+      payload: { ingesting: true, librarian: false, healing: false, pruning: false, forgetting: false },
+    });
 
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
 
@@ -91,8 +101,12 @@ describe('MaintenanceDashboard', () => {
     vi.mocked(useWikiStatus).mockReturnValue({
       ingesting: false,
       librarian: false,
-      heal: false,
-      prune: false,
+      healing: false,
+      pruning: false,
+      forgetting: false,
+      busy: false,
+      activeJob: 'idle',
+      activeJobLabel: null,
     });
   });
 

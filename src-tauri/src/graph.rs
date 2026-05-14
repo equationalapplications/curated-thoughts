@@ -25,10 +25,21 @@ WITH RECURSIVE callee_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
-FROM   callee_walk
-WHERE  chunk_id != ?1
-GROUP  BY chunk_id
+,
+ranked AS (
+    SELECT chunk_id, depth, rel_type,
+           ROW_NUMBER() OVER (
+               PARTITION BY chunk_id
+               ORDER BY depth,
+                        CASE rel_type WHEN 'CALLS' THEN 0 WHEN 'IMPORTS' THEN 1 ELSE 2 END,
+                        rel_type
+           ) AS rn
+    FROM callee_walk
+    WHERE chunk_id != ?1
+)
+SELECT chunk_id, depth AS min_depth, rel_type
+FROM   ranked
+WHERE  rn = 1
 ORDER  BY min_depth
 ";
 
@@ -49,10 +60,21 @@ WITH RECURSIVE caller_walk(chunk_id, depth, rel_type) AS (
       AND  r.rel_type  IN ('CALLS', 'IMPORTS')
       AND  r.entity_id = ?2
 )
-SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
-FROM   caller_walk
-WHERE  chunk_id != ?1
-GROUP  BY chunk_id
+,
+ranked AS (
+    SELECT chunk_id, depth, rel_type,
+           ROW_NUMBER() OVER (
+               PARTITION BY chunk_id
+               ORDER BY depth,
+                        CASE rel_type WHEN 'CALLS' THEN 0 WHEN 'IMPORTS' THEN 1 ELSE 2 END,
+                        rel_type
+           ) AS rn
+    FROM caller_walk
+    WHERE chunk_id != ?1
+)
+SELECT chunk_id, depth AS min_depth, rel_type
+FROM   ranked
+WHERE  rn = 1
 ORDER  BY min_depth
 ";
 
