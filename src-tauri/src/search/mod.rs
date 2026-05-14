@@ -10,14 +10,14 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const VECTOR_CACHE_CAPACITY_PER_ENTITY: usize = 500;
 const VECTOR_CACHE_CAPACITY_ENTITY_IDS: usize = 64;
 
 struct EntityVectorCache {
     order: VecDeque<i64>,
-    vectors: HashMap<i64, Vec<f32>>,
+    vectors: HashMap<i64, Arc<[f32]>>,
 }
 
 impl EntityVectorCache {
@@ -28,7 +28,7 @@ impl EntityVectorCache {
         }
     }
 
-    fn get(&mut self, chunk_id: i64) -> Option<Vec<f32>> {
+    fn get(&mut self, chunk_id: i64) -> Option<Arc<[f32]>> {
         let result = self.vectors.get(&chunk_id).cloned();
         if result.is_some() {
             self.order.retain(|id| *id != chunk_id);
@@ -37,7 +37,7 @@ impl EntityVectorCache {
         result
     }
 
-    fn insert(&mut self, chunk_id: i64, vector: Vec<f32>) {
+    fn insert(&mut self, chunk_id: i64, vector: Arc<[f32]>) {
         if self.vectors.contains_key(&chunk_id) {
             return;
         }
@@ -64,7 +64,7 @@ impl EntityVectorCacheStore {
         }
     }
 
-    fn get(&mut self, entity_id: &str, chunk_id: i64) -> Option<Vec<f32>> {
+    fn get(&mut self, entity_id: &str, chunk_id: i64) -> Option<Arc<[f32]>> {
         if let Some(entity) = self.entities.get_mut(entity_id) {
             let result = entity.get(chunk_id);
             if result.is_some() {
@@ -77,7 +77,7 @@ impl EntityVectorCacheStore {
         }
     }
 
-    fn insert(&mut self, entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
+    fn insert(&mut self, entity_id: &str, chunk_id: i64, vector: Arc<[f32]>) {
         if let Some(entity_cache) = self.entities.get_mut(entity_id) {
             entity_cache.insert(chunk_id, vector);
             self.order.retain(|id| id.as_str() != entity_id);
@@ -105,23 +105,23 @@ fn acquire_cache_lock() -> std::sync::MutexGuard<'static, EntityVectorCacheStore
     cache.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn get_cached_embedding(entity_id: &str, chunk_id: i64) -> Option<Vec<f32>> {
+fn get_cached_embedding(entity_id: &str, chunk_id: i64) -> Option<Arc<[f32]>> {
     let mut cache = acquire_cache_lock();
     cache.get(entity_id, chunk_id)
 }
 
 fn insert_cached_embedding(entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
     let mut cache = acquire_cache_lock();
-    cache.insert(entity_id, chunk_id, vector);
+    cache.insert(entity_id, chunk_id, Arc::from(vector));
 }
 
-fn get_or_insert_cached_embedding(entity_id: &str, chunk_id: i64, bytes: &[u8]) -> Vec<f32> {
+fn get_or_insert_cached_embedding(entity_id: &str, chunk_id: i64, bytes: &[u8]) -> Arc<[f32]> {
     let mut cache = acquire_cache_lock();
     if let Some(cached) = cache.get(entity_id, chunk_id) {
         return cached;
     }
-    let decoded = bytes_to_f32(bytes);
-    cache.insert(entity_id, chunk_id, decoded.clone());
+    let decoded: Arc<[f32]> = bytes_to_f32(bytes).into();
+    cache.insert(entity_id, chunk_id, Arc::clone(&decoded));
     decoded
 }
 
@@ -338,6 +338,7 @@ mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
 
+
     fn vec_blob2(x: f32, y: f32) -> Vec<u8> {
         [x.to_le_bytes(), y.to_le_bytes()]
             .into_iter()
@@ -445,28 +446,24 @@ mod tests {
 
     #[test]
     fn vector_cache_respects_capacity_per_entity() {
-        let entity_id = "tier_fact";
-        for chunk_id in 1..=501 {
-            insert_cached_embedding(entity_id, chunk_id, vec![chunk_id as f32]);
+        let mut cache = EntityVectorCache::new();
+        for chunk_id in 1..=501_i64 {
+            cache.insert(chunk_id, Arc::from(vec![chunk_id as f32]));
         }
-
-        assert!(get_cached_embedding(entity_id, 1).is_none());
-        assert!(get_cached_embedding(entity_id, 2).is_some());
-        assert!(get_cached_embedding(entity_id, 501).is_some());
+        assert!(cache.get(1).is_none(), "chunk 1 should be evicted");
+        assert!(cache.get(2).is_some(), "chunk 2 should be retained");
+        assert!(cache.get(501).is_some(), "chunk 501 should be retained");
     }
 
     #[test]
     fn vector_cache_respects_capacity_entity_ids() {
+        let mut store = EntityVectorCacheStore::new();
         for id_index in 0..(VECTOR_CACHE_CAPACITY_ENTITY_IDS + 1) {
-            let entity_id = format!("tier_working::entity_{id_index}");
-            insert_cached_embedding(&entity_id, 1, vec![id_index as f32]);
+            let entity_id = format!("entity_{id_index}");
+            store.insert(&entity_id, 1, Arc::from(vec![id_index as f32]));
         }
-
-        let evicted_entity = format!("tier_working::entity_0");
-        assert!(get_cached_embedding(&evicted_entity, 1).is_none());
-
-        let retained_entity = format!("tier_working::entity_1");
-        assert!(get_cached_embedding(&retained_entity, 1).is_some());
+        assert!(store.get("entity_0", 1).is_none(), "entity_0 should be evicted");
+        assert!(store.get("entity_1", 1).is_some(), "entity_1 should be retained");
     }
 
     #[test]
