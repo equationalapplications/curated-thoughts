@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
-import { subscribeEntityStatus, type WikiStatusPayload } from '../lib/tauri';
+import {
+  subscribeEntityStatus,
+  type WikiStatusEventPayload,
+  type WikiStatusPayload,
+} from '../lib/tauri';
 
 export interface WikiStatus extends WikiStatusPayload {
   busy: boolean;
@@ -52,19 +56,37 @@ export function useWikiStatus(): WikiStatus {
 
   useEffect(() => {
     let cleanup: (() => void) | null = null;
+
+    const normalizePayload = (
+      payload: WikiStatusEventPayload,
+    ): Partial<WikiStatusPayload> => ({
+      ...payload,
+      healing: payload.healing ?? payload.heal,
+      pruning: payload.pruning ?? payload.prune,
+    });
+
     subscribeEntityStatus((e) => {
-      const payload = e.payload;
-      const activeJob = getActiveJob(payload);
-      setStatus({
-        ...payload,
-        busy:
-          payload.ingesting ||
-          payload.librarian ||
-          payload.healing ||
-          payload.pruning ||
-          payload.forgetting,
-        activeJob,
-        activeJobLabel: jobLabels[activeJob],
+      setStatus((prev) => {
+        const normalized = normalizePayload(e.payload);
+        const payload: WikiStatusPayload = {
+          ingesting: normalized.ingesting ?? prev.ingesting,
+          librarian: normalized.librarian ?? prev.librarian,
+          healing: normalized.healing ?? prev.healing,
+          pruning: normalized.pruning ?? prev.pruning,
+          forgetting: normalized.forgetting ?? prev.forgetting,
+        };
+        const activeJob = getActiveJob(payload);
+        return {
+          ...payload,
+          busy:
+            payload.ingesting ||
+            payload.librarian ||
+            payload.healing ||
+            payload.pruning ||
+            payload.forgetting,
+          activeJob,
+          activeJobLabel: jobLabels[activeJob],
+        };
       });
     })
       .then((unlisten) => {

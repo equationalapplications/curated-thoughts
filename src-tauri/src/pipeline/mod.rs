@@ -79,7 +79,13 @@ pub struct PipelineWorker {
 
 impl PipelineWorker {
     #[allow(dead_code)]
-    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>, status_tx: mpsc::Sender<PipelineStatusEvent>) -> Self {
+    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>) -> Self {
+        let (status_tx, _status_rx) = mpsc::channel();
+        PipelineWorker { db_path, rx, pending, vault_root: None, status_tx }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_with_status(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>, status_tx: mpsc::Sender<PipelineStatusEvent>) -> Self {
         PipelineWorker { db_path, rx, pending, vault_root: None, status_tx }
     }
 

@@ -83,7 +83,7 @@ export function MaintenanceDashboard() {
           type="text"
           value={forgetPath}
           onChange={(e) => setForgetPath(e.target.value)}
-          placeholder="vault-relative or absolute path"
+          placeholder="vault-relative path (typically under documents/ or wiki/)"
           disabled={isSystemBusy}
         />
         <button

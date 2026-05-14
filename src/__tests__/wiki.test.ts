@@ -136,8 +136,12 @@ describe('VaultPanel', () => {
     vi.mocked(useWikiStatus).mockReturnValue({
       ingesting: false,
       librarian: false,
-      heal: false,
-      prune: true,
+      healing: false,
+      pruning: true,
+      forgetting: false,
+      busy: true,
+      activeJob: 'pruning',
+      activeJobLabel: 'Pruning',
     });
   });
 

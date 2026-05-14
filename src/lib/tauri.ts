@@ -165,9 +165,14 @@ export interface WikiStatusPayload {
   forgetting: boolean;
 }
 
+export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {
+  heal?: boolean;
+  prune?: boolean;
+};
+
 export const subscribeEntityStatus = (
-  callback: (event: { payload: WikiStatusPayload }) => void,
-): Promise<UnlistenFn> => listen<WikiStatusPayload>('wiki-status-change', callback);
+  callback: (event: { payload: WikiStatusEventPayload }) => void,
+): Promise<UnlistenFn> => listen<WikiStatusEventPayload>('wiki-status-change', callback);
 
 export const runWikiHeal = (): Promise<void> => invoke('run_wiki_heal');
 export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');
