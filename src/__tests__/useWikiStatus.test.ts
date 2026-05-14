@@ -46,9 +46,18 @@ describe('useWikiStatus', () => {
   it('isSystemBusy is true when any field is active', async () => {
     const { result } = renderHook(() => useWikiStatus());
     await act(async () => {
-      capturedCallback?.({ payload: { ingesting: false, librarian: true, heal: false } });
+      capturedCallback?.({ payload: { ingesting: false, librarian: true, heal: false, prune: false } });
     });
-    const { ingesting, librarian, heal } = result.current;
-    expect(ingesting || librarian || heal).toBe(true);
+    const { ingesting, librarian, heal, prune } = result.current;
+    expect(ingesting || librarian || heal || prune).toBe(true);
+    expect(prune).toBe(false);
+  });
+
+  it('merges partial wiki-status-change payloads', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      capturedCallback?.({ payload: { ingesting: false, librarian: true, heal: false } as unknown as WikiStatus });
+    });
+    expect(result.current).toEqual({ ingesting: false, librarian: true, heal: false, prune: false });
   });
 });
