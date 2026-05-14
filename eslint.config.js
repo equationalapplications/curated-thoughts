@@ -4,7 +4,7 @@ import react from "eslint-plugin-react";
 
 export default [
   {
-    ignores: ["node_modules", "dist", "build", "**/target", ".git", "pnpm-lock.yaml"],
+    ignores: ["node_modules", "dist", "build", "**/target", ".git", "pnpm-lock.yaml", ".worktree"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
