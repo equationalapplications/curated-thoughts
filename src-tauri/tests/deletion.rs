@@ -1,5 +1,5 @@
 mod helpers;
-use std::sync::{Arc, atomic::AtomicUsize};
+use std::sync::{Arc, mpsc, atomic::AtomicUsize};
 use tauri_app_lib::{PipelineJob, PipelineWorker};
 use tempfile::TempDir;
 
@@ -60,8 +60,9 @@ fn delete_cascades_chunks_embeddings_shadow_copy_and_orphans_wiki() {
     drop(conn); // release before pipeline opens its own connection
 
     let db_path = tmp.path().join("brain.db");
-    let (tx, rx) = std::sync::mpsc::sync_channel::<PipelineJob>(4);
-    let worker = PipelineWorker::new(db_path.clone(), rx, Arc::new(AtomicUsize::new(0)));
+    let (tx, rx) = mpsc::sync_channel::<PipelineJob>(4);
+    let (status_tx, _status_rx) = mpsc::channel::<tauri_app_lib::pipeline::PipelineStatusEvent>();
+    let worker = PipelineWorker::new(db_path.clone(), rx, Arc::new(AtomicUsize::new(0)), status_tx);
     let handle = std::thread::spawn(move || worker.run());
     tx.send(PipelineJob::Delete(doc_path_str.clone())).unwrap();
     drop(tx);
