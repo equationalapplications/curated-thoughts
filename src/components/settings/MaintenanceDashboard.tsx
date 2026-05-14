@@ -1,16 +1,32 @@
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import {
+  runWikiHeal,
+  runWikiPrune,
+  runWikiReembed,
+  forgetWikiSource,
+} from '../../lib/tauri';
 import { useWikiStatus } from '../../hooks/useWikiStatus';
 
 export function MaintenanceDashboard() {
   const wikiStatus = useWikiStatus();
-  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal || wikiStatus.prune;
+  const isSystemBusy = wikiStatus.busy;
+  const statusLabel = wikiStatus.activeJobLabel ?? 'Idle';
   const [lastError, setLastError] = useState<string | null>(null);
+  const [forgetPath, setForgetPath] = useState('');
 
-  async function runCommand(command: string) {
+  async function runCommand(command: 'heal' | 'prune' | 'reembed' | 'forget') {
     setLastError(null);
     try {
-      await invoke(command);
+      if (command === 'heal') {
+        await runWikiHeal();
+      } else if (command === 'prune') {
+        await runWikiPrune();
+      } else if (command === 'forget') {
+        await forgetWikiSource(forgetPath.trim());
+        setForgetPath('');
+      } else {
+        await runWikiReembed();
+      }
     } catch (err) {
       setLastError(String(err));
     }
@@ -26,24 +42,17 @@ export function MaintenanceDashboard() {
         </p>
       )}
 
-      {isSystemBusy && (
-        <>
-          <p className="maintenance-busy" aria-live="polite">
-            Database busy — please wait…
-          </p>
-          {wikiStatus.prune && (
-            <p className="maintenance-description">
-              Purging stale inferred entries from the database.
-            </p>
-          )}
-        </>
-      )}
+      <p className="maintenance-status" aria-live="polite">
+        {isSystemBusy
+          ? `Background job active: ${statusLabel}. Please wait…`
+          : 'No active wiki jobs. Maintenance commands are available.'}
+      </p>
 
       <div className="maintenance-actions">
         <button
           type="button"
           disabled={isSystemBusy}
-          onClick={() => runCommand('run_wiki_heal')}
+          onClick={() => runCommand('heal')}
         >
           Heal Database
         </button>
@@ -54,7 +63,7 @@ export function MaintenanceDashboard() {
         <button
           type="button"
           disabled={isSystemBusy}
-          onClick={() => runCommand('run_wiki_prune')}
+          onClick={() => runCommand('prune')}
         >
           Prune Trash
         </button>
@@ -66,10 +75,32 @@ export function MaintenanceDashboard() {
           Automatic prune runs daily to keep inferred trash from growing unbounded.
         </p>
 
+        <label htmlFor="forget-path" className="maintenance-label">
+          Forget source file path
+        </label>
+        <input
+          id="forget-path"
+          type="text"
+          value={forgetPath}
+          onChange={(e) => setForgetPath(e.target.value)}
+          placeholder="vault-relative or absolute path"
+          disabled={isSystemBusy}
+        />
+        <button
+          type="button"
+          disabled={isSystemBusy || !forgetPath.trim()}
+          onClick={() => runCommand('forget')}
+        >
+          Forget Source
+        </button>
+        <p className="maintenance-description">
+          Remove all indexed chunks for a specific vault source file.
+        </p>
+
         <button
           type="button"
           disabled={isSystemBusy}
-          onClick={() => runCommand('run_wiki_reembed')}
+          onClick={() => runCommand('reembed')}
         >
           Full Re-index
         </button>

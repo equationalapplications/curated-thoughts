@@ -102,9 +102,7 @@ describe('tieredRead', () => {
 });
 
 describe('startAutoHeal', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+  beforeEach(() => vi.clearAllMocks());
 
   it('subscribes to vault-event and returns cleanup', () => {
     const cleanup = startAutoHeal();
@@ -112,18 +110,18 @@ describe('startAutoHeal', () => {
     expect(typeof cleanup).toBe('function');
   });
 
-  it('invokes the Rust auto-heal command only for deleted vault events', async () => {
+  it('invokes the Rust auto-heal command only on Deleted events', async () => {
     vi.useFakeTimers();
     vi.mocked(invoke).mockResolvedValue(undefined);
 
     const cleanup = startAutoHeal();
-    const callback = vi.mocked(listen).mock.calls[0][1] as (event: { payload: { kind?: string } }) => void;
+    const callback = vi.mocked(listen).mock.calls[0][1] as (event: { payload: { kind: string; path: string } }) => void;
 
-    callback({ payload: { kind: 'Modified' } });
+    callback({ payload: { kind: 'Added', path: '/Users/foo/documents/note.md' } });
     await vi.advanceTimersByTimeAsync(3000);
     expect(vi.mocked(invoke)).not.toHaveBeenCalled();
 
-    callback({ payload: { kind: 'Deleted' } });
+    callback({ payload: { kind: 'Deleted', path: '/Users/foo/documents/note.md' } });
     await vi.advanceTimersByTimeAsync(3000);
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('run_wiki_heal');
 

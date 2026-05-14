@@ -23,7 +23,8 @@ function revealLabel(): string {
 export function VaultPanel({ vaultPath }: Props) {
   const [switching, setSwitching] = useState(false);
   const wikiStatus = useWikiStatus();
-  const isSystemBusy = wikiStatus.ingesting || wikiStatus.librarian || wikiStatus.heal || wikiStatus.prune;
+  const isSystemBusy = wikiStatus.busy;
+  const activeJobLabel = wikiStatus.activeJobLabel;
 
   const backupHintPath = useMemo(() => {
     const sep = vaultPath.includes("\\") ? "\\" : "/";
@@ -126,8 +127,7 @@ export function VaultPanel({ vaultPath }: Props) {
       </div>
       {isSystemBusy && (
         <p className="vault-hint vault-busy-hint">
-          Background wiki maintenance is active. Wait for it to finish before
-          switching vaults.
+          Background wiki maintenance is active{activeJobLabel ? `: ${activeJobLabel}` : ''}. Wait for it to finish before switching vaults.
         </p>
       )}
       <p className="vault-hint">

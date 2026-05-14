@@ -1,4 +1,5 @@
 import type { SearchResult } from "../../lib/tauri";
+import { MemoryChunk } from "../review/MemoryChunk";
 
 interface Props {
   results: SearchResult[];
@@ -8,7 +9,6 @@ interface Props {
 function relTypeLabel(relType?: string): string {
   if (relType === 'CALLS')      return 'Calls this symbol';
   if (relType === 'IMPORTS')    return 'Imports this module';
-  if (relType === 'IMPLEMENTS') return 'Implements this interface';
   return 'Structurally linked';
 }
 
@@ -42,7 +42,7 @@ function ResultItem({ r, onSelect }: { r: SearchResult; onSelect: (path: string)
         ) : null}
       </span>
       <span className="search-result-snippet">
-        {r.chunk_text.slice(0, 120)}…
+        <MemoryChunk chunkText={r.chunk_text} docPath={r.doc_path} maxLength={120} />
       </span>
     </button>
   );

@@ -84,6 +84,11 @@ export async function tieredRead(
   );
 }
 
+type VaultEventPayload = {
+  kind: 'Added' | 'Modified' | 'Deleted';
+  path: string;
+};
+
 export function startAutoHeal(): () => void {
   let debounce: ReturnType<typeof setTimeout> | null = null;
   const scheduleHeal = (event: { payload: { kind: string } }) => {
@@ -102,7 +107,11 @@ export function startAutoHeal(): () => void {
   };
 
   const unsubscribers = [
-    listen('vault-event', scheduleHeal),
+    listen<VaultEventPayload>('vault-event', (event) => {
+      if (event.payload.kind === 'Deleted') {
+        scheduleHeal();
+      }
+    }),
   ];
 
   return () => {
