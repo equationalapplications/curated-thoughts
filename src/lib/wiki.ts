@@ -8,9 +8,14 @@ import { entityIdForPath } from "./wikiTiers";
 import type { WikiStatusPayload } from "./tauri";
 
 let _workspaceId: string = 'tier_working::default';
+let _workspaceIdRequest = 0;
 
 export async function initWorkspaceId(vaultPath: string): Promise<void> {
-  _workspaceId = await invoke<string>('get_workspace_id', { path: vaultPath });
+  const requestId = ++_workspaceIdRequest;
+  const id = await invoke<string>('get_workspace_id', { path: vaultPath });
+  if (requestId === _workspaceIdRequest) {
+    _workspaceId = id;
+  }
 }
 
 export function getWorkspaceId(): string {
@@ -91,13 +96,12 @@ type VaultEventPayload = {
 
 export function startAutoHeal(): () => void {
   let debounce: ReturnType<typeof setTimeout> | null = null;
-  const scheduleHeal = (event: { payload: { kind: string } }) => {
-    const kind = event?.payload?.kind;
-    if (kind !== 'Deleted') {
-      return;
-    }
+  let active = true;
+  const scheduleHeal = () => {
+    if (!active) return;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(async () => {
+      if (!active) return;
       try {
         await invoke('run_wiki_heal');
       } catch (err) {
@@ -108,13 +112,15 @@ export function startAutoHeal(): () => void {
 
   const unsubscribers = [
     listen<VaultEventPayload>('vault-event', (event) => {
+      if (!active) return;
       if (event.payload.kind === 'Deleted') {
-        scheduleHeal(event);
+        scheduleHeal();
       }
     }),
   ];
 
   return () => {
+    active = false;
     if (debounce) {
       clearTimeout(debounce);
       debounce = null;
