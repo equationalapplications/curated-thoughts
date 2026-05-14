@@ -99,6 +99,16 @@ fn insert_cached_embedding(entity_id: &str, chunk_id: i64, vector: Vec<f32>) {
     cache.insert(entity_id, chunk_id, vector);
 }
 
+fn get_or_insert_cached_embedding(entity_id: &str, chunk_id: i64, bytes: &[u8]) -> Vec<f32> {
+    let mut cache = acquire_cache_lock();
+    if let Some(cached) = cache.get(entity_id, chunk_id) {
+        return cached;
+    }
+    let decoded = bytes_to_f32(bytes);
+    cache.insert(entity_id, chunk_id, decoded.clone());
+    decoded
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchResult {
     pub doc_path: String,
@@ -171,13 +181,7 @@ pub fn semantic_search(
         let entity_id: Option<String> = row.get(8)?;
         let doc_path: String = row.get(9)?;
         let cache_key = entity_id.as_deref().unwrap_or("unknown");
-        let vec = if let Some(cached) = get_cached_embedding(cache_key, chunk_id) {
-            cached
-        } else {
-            let decoded = bytes_to_f32(&bytes);
-            insert_cached_embedding(cache_key, chunk_id, decoded.clone());
-            decoded
-        };
+        let vec = get_or_insert_cached_embedding(cache_key, chunk_id, &bytes);
         let score = cosine_similarity(query_vec, &vec);
         let symbol_name = if symbol_str.is_empty() {
             None
@@ -265,13 +269,7 @@ pub fn related_chunks(
         let entity_id: Option<String> = row.get(8)?;
         let doc_path_r: String = row.get(9)?;
         let cache_key = entity_id.as_deref().unwrap_or("unknown");
-        let vec = if let Some(cached) = get_cached_embedding(cache_key, chunk_id) {
-            cached
-        } else {
-            let decoded = bytes_to_f32(&bytes);
-            insert_cached_embedding(cache_key, chunk_id, decoded.clone());
-            decoded
-        };
+        let vec = get_or_insert_cached_embedding(cache_key, chunk_id, &bytes);
         let score = cosine_similarity(&avg, &vec);
         let symbol_name = if symbol_str.is_empty() {
             None
