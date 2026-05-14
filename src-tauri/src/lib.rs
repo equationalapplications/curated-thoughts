@@ -16,31 +16,75 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use pipeline::start_pipeline;
+use pipeline::{start_pipeline, PipelineStatusEvent};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
 use rusqlite::OptionalExtension;
-use serde_json::Value as JsonVal;
+use serde_json::{json, Value as JsonVal};
 use setup::{
     check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
     recommended_model as ollama_recommended, start_ollama_server as ollama_start, OllamaStatus,
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc::SyncSender, Arc, Mutex};
+use std::sync::{mpsc::{self, Sender, SyncSender}, Arc, Mutex};
 use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
-struct PipelineHolder(Mutex<Option<(SyncSender<PipelineJob>, std::thread::JoinHandle<()>, Arc<AtomicUsize>)>>);
+struct PipelineHolder(
+    Mutex<
+        Option<(
+            SyncSender<PipelineJob>,
+            std::thread::JoinHandle<()>,
+            Arc<AtomicUsize>,
+            Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
+        )>,
+    >,
+);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
+struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
+struct WikiStatusState(Mutex<WikiStatusFlags>);
+
+#[derive(Clone, Copy, Default)]
+struct WikiStatusFlags {
+    ingesting: bool,
+    librarian: bool,
+    healing: bool,
+    pruning: bool,
+    forgetting: bool,
+}
+
+fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
+    let _ = app.emit(
+        "wiki-status-change",
+        json!({
+            "ingesting": current.ingesting,
+            "librarian": current.librarian,
+            "healing": current.healing,
+            "pruning": current.pruning,
+            "forgetting": current.forgetting,
+        }),
+    );
+}
+
+fn update_wiki_status(app: &AppHandle, state: &State<'_, WikiStatusState>, updater: impl FnOnce(&mut WikiStatusFlags)) {
+    let mut guard = state.0.lock().unwrap();
+    updater(&mut guard);
+    emit_wiki_status(app, &guard);
+}
+
+fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiStatusFlags)) {
+    let state = app.state::<WikiStatusState>();
+    update_wiki_status(app, &state, updater);
+}
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
 fn to_forward_slash_relative(path: &Path) -> Result<String, String> {
@@ -119,6 +163,94 @@ fn normalize_path_argument_to_vault_relative(
             }
         }
     }
+}
+
+fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> Result<(), String> {
+    let vault = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault configured".to_string())?;
+    let vault_root = std::path::PathBuf::from(&vault);
+
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+
+    let entries: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, source_ref FROM llm_wiki_entries
+                 WHERE deleted_at IS NULL AND source_ref IS NOT NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            v.push((
+                row.get::<_, i64>(0).map_err(|e| e.to_string())?,
+                row.get::<_, String>(1).map_err(|e| e.to_string())?,
+            ));
+        }
+        v
+    };
+
+    for (rowid, source_ref) in entries {
+        let safe = crate::vault::safe_vault_path(
+            &vault_root,
+            &source_ref,
+            &["."],
+            crate::vault::PathMode::MustExist,
+        );
+        if safe.is_err() {
+            conn.execute(
+                "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
+                [rowid],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn spawn_heal_scheduler(app: AppHandle) -> (Sender<()>, std::thread::JoinHandle<()>) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let db_state = app.state::<DbState>();
+        let vault_state = app.state::<VaultConfigState>();
+
+        loop {
+            if rx.recv().is_err() {
+                break;
+            }
+
+            let mut deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let now = Instant::now();
+                let timeout = deadline.saturating_duration_since(now);
+                match rx.recv_timeout(timeout) {
+                    Ok(()) => {
+                        deadline = Instant::now() + Duration::from_secs(3);
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(_) => return,
+                }
+            }
+
+            update_wiki_status_from_app(&app, |flags| {
+                flags.healing = true;
+            });
+            let _ = heal_invalid_sources(&db_state, &vault_state);
+            update_wiki_status_from_app(&app, |flags| {
+                flags.healing = false;
+            });
+        }
+    });
+
+    (tx, handle)
 }
 
 fn normalize_wiki_relative_path(path: &str) -> String {
@@ -317,12 +449,14 @@ fn canonical_vault_from_config(vault_state: &VaultConfigState) -> Result<PathBuf
 
 fn start_file_watcher_inner(
     app: &AppHandle,
-    pipeline: &PipelineHolder,
-    db_state: &DbState,
-    vault_state: &VaultConfigState,
-    watcher_started: &WatcherStarted,
+    pipeline: State<'_, PipelineHolder>,
+    db_state: State<'_, DbState>,
+    vault_state: State<'_, VaultConfigState>,
+    watcher_started: State<'_, WatcherStarted>,
+    heal_scheduler: State<'_, HealScheduler>,
+    status_state: State<'_, WikiStatusState>,
 ) -> Result<(), String> {
-    let target_canonical = canonical_vault_from_config(vault_state)?;
+    let target_canonical = canonical_vault_from_config(&vault_state)?;
 
     let old_handle_to_stop = {
         let mut watcher_guard = watcher_started.0.lock().unwrap();
@@ -341,14 +475,36 @@ fn start_file_watcher_inner(
         h.stop();
     }
 
-    let pipeline_tx = pipeline
-        .0
-        .lock()
-        .unwrap()
-        .as_ref()
-        .ok_or_else(|| "pipeline not running".to_string())?
-        .0
-        .clone();
+    let old_heal_scheduler = {
+        let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
+        scheduler_guard.take()
+    };
+    if let Some((sender, handle)) = old_heal_scheduler {
+        drop(sender);
+        let _ = handle.join();
+    }
+
+    let (pipeline_tx, status_rx) = {
+        let mut guard = pipeline.0.lock().unwrap();
+        let tuple = guard
+            .as_mut()
+            .ok_or_else(|| "pipeline not running".to_string())?;
+        let tx = tuple.0.clone();
+        let status_rx = tuple.3.take();
+        (tx, status_rx)
+    };
+
+    if let Some(status_rx) = status_rx {
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            for event in status_rx {
+                let PipelineStatusEvent::PendingCount(count) = event;
+                update_wiki_status_from_app(&app_handle, |flags| {
+                    flags.ingesting = count > 0;
+                });
+            }
+        });
+    }
 
     let raw_docs = target_canonical.join("documents");
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
@@ -392,11 +548,18 @@ fn start_file_watcher_inner(
                         .unwrap_or_else(|_| entry.path().to_path_buf())
                         .to_string_lossy()
                         .into_owned();
-                    let _ = pipeline_tx.try_send(PipelineJob::ingest(normalized));
+                    update_wiki_status(app, &status_state, |flags| {
+                        flags.ingesting = true;
+                    });
+                    let _ = pipeline_tx.try_send(PipelineJob::ingest_counted(normalized));
                 }
             }
         }
     }
+
+    let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
+    let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
+    *scheduler_guard = Some((heal_tx.clone(), heal_thread));
 
     let app = app.clone();
     let vault_for_watcher = target_canonical.clone();
@@ -413,9 +576,15 @@ fn start_file_watcher_inner(
         let normalized = canonical.to_string_lossy().into_owned();
         let job = match &event {
             VaultEvent::Added(_) | VaultEvent::Modified(_) => {
-                Some(PipelineJob::ingest(normalized.clone()))
+                update_wiki_status_from_app(&app, |flags| {
+                    flags.ingesting = true;
+                });
+                Some(PipelineJob::ingest_counted(normalized.clone()))
             }
-            VaultEvent::Deleted(_) => Some(PipelineJob::Delete(normalized.clone())),
+            VaultEvent::Deleted(_) => {
+                let _ = heal_tx.send(());
+                Some(PipelineJob::Delete(normalized.clone()))
+            }
         };
         if let Some(j) = job {
             let _ = pipeline_tx.try_send(j);
@@ -424,7 +593,7 @@ fn start_file_watcher_inner(
     .map_err(|e| e.to_string())?;
 
     let mut watcher_guard = watcher_started.0.lock().unwrap();
-    let still_canonical = match canonical_vault_from_config(vault_state) {
+    let still_canonical = match canonical_vault_from_config(&vault_state) {
         Ok(p) => p,
         Err(e) => {
             drop(watcher_guard);
@@ -450,10 +619,12 @@ fn start_file_watcher_inner(
 fn recover_after_failed_switch_vault(
     app: &AppHandle,
     db_path: &Path,
-    db_state: &DbState,
-    pipeline: &PipelineHolder,
-    vault_state: &VaultConfigState,
-    watcher_started: &WatcherStarted,
+    db_state: State<'_, DbState>,
+    pipeline: State<'_, PipelineHolder>,
+    vault_state: State<'_, VaultConfigState>,
+    watcher_started: State<'_, WatcherStarted>,
+    heal_scheduler: State<'_, HealScheduler>,
+    status_state: State<'_, WikiStatusState>,
 ) -> bool {
     let reopened = (|| -> Result<(), String> {
         let mut guard = db_state.0.lock().map_err(|_| "db mutex poisoned".to_string())?;
@@ -475,9 +646,15 @@ fn recover_after_failed_switch_vault(
             *g = Some(start_pipeline(db_path.to_path_buf(), vault_root));
         }
     }
-    if let Err(e) =
-        start_file_watcher_inner(app, pipeline, db_state, vault_state, watcher_started)
-    {
+    if let Err(e) = start_file_watcher_inner(
+        app,
+        pipeline,
+        db_state.clone(),
+        vault_state.clone(),
+        watcher_started.clone(),
+        heal_scheduler.clone(),
+        status_state.clone(),
+    ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
     }
     true
@@ -492,6 +669,8 @@ fn switch_vault(
     vault_state: State<VaultConfigState>,
     pipeline: State<PipelineHolder>,
     watcher_started: State<WatcherStarted>,
+    heal_scheduler: State<HealScheduler>,
+    status_state: State<WikiStatusState>,
 ) -> Result<(), String> {
     let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
     let db_path = brain_dir.join("brain.db");
@@ -519,7 +698,7 @@ fn switch_vault(
 
     {
         let mut g = pipeline.0.lock().unwrap();
-        if let Some((tx, join, _pending)) = g.take() {
+        if let Some((tx, join, _pending, _status_rx)) = g.take() {
             drop(tx);
             let _ = join.join();
         }
@@ -584,10 +763,12 @@ fn switch_vault(
         recovery_reopened_db = recover_after_failed_switch_vault(
             &app,
             &db_path,
-            &db_state,
-            &pipeline,
-            &vault_state,
-            &watcher_started,
+            db_state.clone(),
+            pipeline.clone(),
+            vault_state.clone(),
+            watcher_started.clone(),
+            heal_scheduler.clone(),
+            status_state.clone(),
         );
     }
 
@@ -604,10 +785,12 @@ fn switch_vault(
     if switch_result.is_ok() {
         if let Err(e) = start_file_watcher_inner(
             &app,
-            &pipeline,
-            &db_state,
-            &vault_state,
-            &watcher_started,
+            pipeline.clone(),
+            db_state.clone(),
+            vault_state.clone(),
+            watcher_started.clone(),
+            heal_scheduler.clone(),
+            status_state.clone(),
         ) {
             eprintln!(
                 "[switch_vault] failed to restart file watcher after successful switch: {e}"
@@ -674,8 +857,18 @@ fn start_file_watcher(
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
     watcher_started: State<WatcherStarted>,
+    heal_scheduler: State<HealScheduler>,
+    status_state: State<WikiStatusState>,
 ) -> Result<(), String> {
-    start_file_watcher_inner(&app, &pipeline, &db_state, &vault_state, &watcher_started)
+    start_file_watcher_inner(
+        &app,
+        pipeline.clone(),
+        db_state.clone(),
+        vault_state.clone(),
+        watcher_started.clone(),
+        heal_scheduler.clone(),
+        status_state.clone(),
+    )
 }
 
 // ── Indexing status ───────────────────────────────────────────────────────────
@@ -740,8 +933,11 @@ async fn run_wiki_heal(
     app: AppHandle,
     db_state: State<'_, DbState>,
     vault_state: State<'_, VaultConfigState>,
+    status_state: State<'_, WikiStatusState>,
 ) -> Result<(), String> {
-    app.emit("wiki-status-change", serde_json::json!({"heal": true})).ok();
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.healing = true;
+    });
 
     let result = (|| -> Result<(), String> {
         let vault = vault_state
@@ -797,7 +993,9 @@ async fn run_wiki_heal(
         Ok(())
     })();
 
-    app.emit("wiki-status-change", serde_json::json!({"heal": false})).ok();
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.healing = false;
+    });
 
     result
 }
@@ -806,8 +1004,11 @@ async fn run_wiki_heal(
 async fn run_wiki_prune(
     app: AppHandle,
     db_state: State<'_, DbState>,
+    status_state: State<'_, WikiStatusState>,
 ) -> Result<(), String> {
-    app.emit("wiki-status-change", serde_json::json!({"librarian": true})).ok();
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.pruning = true;
+    });
 
     let result = (|| -> Result<(), String> {
         let guard = db_state.0.lock().unwrap();
@@ -824,7 +1025,59 @@ async fn run_wiki_prune(
         Ok(())
     })();
 
-    app.emit("wiki-status-change", serde_json::json!({"librarian": false})).ok();
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.pruning = false;
+    });
+
+    result
+}
+
+#[tauri::command]
+async fn run_wiki_forget(
+    app: AppHandle,
+    db_state: State<'_, DbState>,
+    vault_state: State<'_, VaultConfigState>,
+    status_state: State<'_, WikiStatusState>,
+    source_path: String,
+) -> Result<(), String> {
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.forgetting = true;
+    });
+
+    let result = (|| -> Result<(), String> {
+        let root = vault_state
+            .0
+            .lock()
+            .unwrap()
+            .get_vault_path()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no vault path configured".to_string())?;
+        let vault_root = std::path::PathBuf::from(&root);
+        let normalized_rel = normalize_path_argument_to_vault_relative(&source_path, &vault_root)?;
+
+        let safe = crate::vault::safe_vault_path(
+            &vault_root,
+            &normalized_rel,
+            &["documents", "wiki"],
+            crate::vault::PathMode::MayCreate,
+        )
+        .map_err(|e| e.to_string())?;
+        let safe_string = safe.to_string_lossy().into_owned();
+
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        conn.execute(
+            "DELETE FROM llm_wiki_entries
+             WHERE source_ref = ?1 OR source_ref = ?2",
+            [normalized_rel, safe_string],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.forgetting = false;
+    });
 
     result
 }
@@ -834,15 +1087,16 @@ async fn run_wiki_reembed(
     app: AppHandle,
     db_state: State<'_, DbState>,
     pipeline: State<'_, PipelineHolder>,
+    status_state: State<'_, WikiStatusState>,
 ) -> Result<usize, String> {
-    app.emit("wiki-status-change", serde_json::json!({"ingesting": true})).ok();
-
-    let (tx, pending) = {
+    let tx = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         match pipeline_guard.as_ref() {
-            Some(p) => (p.0.clone(), p.2.clone()),
+            Some(p) => p.0.clone(),
             None => {
-                app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
+                update_wiki_status(&app, &status_state, |flags| {
+                    flags.ingesting = false;
+                });
                 return Err("pipeline not running".to_string());
             }
         }
@@ -858,40 +1112,17 @@ async fn run_wiki_reembed(
             if !std::path::Path::new(&path).exists() {
                 continue;
             }
-            pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tx.send(PipelineJob::rechunk_for_reembed(path))
-                .map_err(|e| {
-                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    format!("pipeline channel closed: {e}")
-                })?;
+                .map_err(|e| format!("pipeline channel closed: {e}"))?;
             queued += 1;
         }
         Ok(queued)
     })();
 
-    match &result {
-        Ok(queued) => {
-            if *queued > 0 {
-                let app_handle = app.clone();
-                let pending = pending.clone();
-                std::thread::spawn(move || {
-                    while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                        std::thread::sleep(Duration::from_millis(250));
-                    }
-                    app_handle
-                        .emit(
-                            "wiki-status-change",
-                            serde_json::json!({"ingesting": false}),
-                        )
-                        .ok();
-                });
-            } else {
-                app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
-            }
-        }
-        Err(_) => {
-            app.emit("wiki-status-change", serde_json::json!({"ingesting": false})).ok();
-        }
+    if result.is_err() {
+        update_wiki_status(&app, &status_state, |flags| {
+            flags.ingesting = false;
+        });
     }
 
     result
@@ -1276,6 +1507,7 @@ fn get_structural_neighbors(
                     strategy: row.get(6)?,
                     structural: Some(true),
                     rel_type: Some(rel_type.clone()),
+                    entity_id: None,
                 })
             },
         );
@@ -1958,7 +2190,9 @@ pub fn run() {
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineHolder(Mutex::new(Some(pipeline))))
+        .manage(WikiStatusState(Mutex::new(WikiStatusFlags::default())))
         .manage(WatcherStarted(Mutex::new(None)))
+        .manage(HealScheduler(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -1996,6 +2230,7 @@ pub fn run() {
             delete_vault_file,
             run_wiki_heal,
             run_wiki_prune,
+            run_wiki_forget,
             run_wiki_reembed,
             get_chunk_ids_for_wiki_entry,
             get_impact_radius,
@@ -2046,6 +2281,75 @@ mod normalize_path_tests {
         )
         .unwrap();
         assert_eq!(rel, "documents/note.md");
+    }
+}
+
+#[cfg(test)]
+mod heal_invalid_sources_tests {
+    use super::{heal_invalid_sources, DbState, VaultConfigState};
+    use rusqlite::params;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+    use crate::db::AppDb;
+    use crate::vault::VaultConfig;
+
+    #[test]
+    fn missing_vault_sources_are_marked_deleted() {
+        let tmp = TempDir::new().unwrap();
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_root.join("documents")).unwrap();
+
+        let config = VaultConfig::new(tmp.path().join("config.json"));
+        config
+            .set_vault_path(vault_root.to_str().unwrap())
+            .unwrap();
+
+        let db_path = tmp.path().join("brain.db");
+        let db = AppDb::open(&db_path).unwrap();
+        let db_state = DbState(Mutex::new(db));
+        let vault_state = VaultConfigState(Mutex::new(config));
+
+        {
+            let guard = db_state.0.lock().unwrap();
+            let conn = &guard.0;
+            conn.execute_batch(
+                "CREATE TABLE llm_wiki_entries (
+                    source_ref TEXT,
+                    source_type TEXT,
+                    deleted_at INTEGER
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at) VALUES (?1, 'librarian_inferred', NULL)",
+                params!["documents/missing.md"],
+            )
+            .unwrap();
+
+            let before: Option<i64> = conn
+                .query_row(
+                    "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(before.is_none());
+        }
+
+        heal_invalid_sources(&db_state, &vault_state).unwrap();
+
+        let after: Option<i64> = db_state
+            .0
+            .lock()
+            .unwrap()
+            .0
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(after.is_some());
     }
 }
 

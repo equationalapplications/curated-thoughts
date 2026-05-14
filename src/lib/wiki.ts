@@ -88,11 +88,19 @@ export async function tieredRead(
   );
 }
 
+type VaultEventPayload = {
+  kind: 'Added' | 'Modified' | 'Deleted';
+  path: string;
+};
+
 export function startAutoHeal(): () => void {
   let debounce: ReturnType<typeof setTimeout> | null = null;
+  let active = true;
   const scheduleHeal = () => {
+    if (!active) return;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(async () => {
+      if (!active) return;
       try {
         await invoke('run_wiki_heal');
       } catch (err) {
@@ -102,10 +110,16 @@ export function startAutoHeal(): () => void {
   };
 
   const unsubscribers = [
-    listen('vault-event', scheduleHeal),
+    listen<VaultEventPayload>('vault-event', (event) => {
+      if (!active) return;
+      if (event.payload.kind === 'Deleted') {
+        scheduleHeal();
+      }
+    }),
   ];
 
   return () => {
+    active = false;
     if (debounce) {
       clearTimeout(debounce);
       debounce = null;
