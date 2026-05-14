@@ -1089,10 +1089,6 @@ async fn run_wiki_reembed(
     pipeline: State<'_, PipelineHolder>,
     status_state: State<'_, WikiStatusState>,
 ) -> Result<usize, String> {
-    update_wiki_status(&app, &status_state, |flags| {
-        flags.ingesting = true;
-    });
-
     let (tx, pending) = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         match pipeline_guard.as_ref() {
@@ -1127,13 +1123,7 @@ async fn run_wiki_reembed(
         Ok(queued)
     })();
 
-    if let Ok(queued) = result {
-        if queued > 0 {
-            update_wiki_status(&app, &status_state, |flags| {
-                flags.ingesting = true;
-            });
-        }
-    } else {
+    if result.is_err() {
         update_wiki_status(&app, &status_state, |flags| {
             flags.ingesting = false;
         });
