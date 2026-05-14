@@ -12,6 +12,7 @@ This is the final check of the [Code Graph](https://github.com/equationalapplica
 In Phase 4, you move from manual controls to automated [background ingestion pipeline](https://github.com/equationalapplications/curated-thoughts#architecture) maintenance.
 
 * **Auto-Heal:** The [file watcher](https://github.com/equationalapplications/curated-thoughts#architecture) triggers a debounced `runHeal` to remove "ghost notes" (references to deleted files).
+* **Immutable fact protection:** `runHeal` and the prune pipeline must never remove `immutable_document` facts; only disconnected or stale `librarian_inferred` entries may be cleaned up.
 * **Hard-Pruning:** The system automatically scrubs soft-deleted notes from the SQLite `brain.db` after 7 days to manage disk space and performance.
 
 ### 3. Semantic Search Profiling
