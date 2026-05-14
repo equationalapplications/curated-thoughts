@@ -48,6 +48,26 @@ describe('initWorkspaceId', () => {
     await initWorkspaceId('/Users/foo/Vault');
     expect(getWorkspaceId()).toBe('tier_working::abc123deadbeef01');
   });
+
+  it('ignores stale initWorkspaceId results when active path changes', async () => {
+    let resolveOld!: (value: string) => void;
+    const oldWorkspaceId = new Promise<string>((resolve) => {
+      resolveOld = resolve;
+    });
+
+    vi.mocked(invoke)
+      .mockImplementationOnce(() => oldWorkspaceId)
+      .mockImplementationOnce(() => Promise.resolve('tier_working::newid'));
+
+    const first = initWorkspaceId('/Users/foo/OldVault');
+    const second = initWorkspaceId('/Users/foo/NewVault');
+
+    await second;
+    resolveOld('tier_working::oldid');
+    await first;
+
+    expect(getWorkspaceId()).toBe('tier_working::newid');
+  });
 });
 
 describe('tieredRead', () => {

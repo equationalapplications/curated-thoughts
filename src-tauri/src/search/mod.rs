@@ -113,6 +113,10 @@ pub struct SearchResult {
     pub structural: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rel_type: Option<String>,
+    /// Tier label from `chunks.entity_id`: `tier_fact`, `tier_wisdom`, or `tier_working`.
+    /// Authoritative source for frontend tier styling/weighting — avoids path heuristics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
 }
 
 pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -166,12 +170,12 @@ pub fn semantic_search(
         let strategy: String = row.get(7)?;
         let entity_id: Option<String> = row.get(8)?;
         let doc_path: String = row.get(9)?;
-        let entity_id = entity_id.unwrap_or_else(|| "unknown".into());
-        let vec = if let Some(cached) = get_cached_embedding(&entity_id, chunk_id) {
+        let cache_key = entity_id.as_deref().unwrap_or("unknown");
+        let vec = if let Some(cached) = get_cached_embedding(cache_key, chunk_id) {
             cached
         } else {
             let decoded = bytes_to_f32(&bytes);
-            insert_cached_embedding(&entity_id, chunk_id, decoded.clone());
+            insert_cached_embedding(cache_key, chunk_id, decoded.clone());
             decoded
         };
         let score = cosine_similarity(query_vec, &vec);
@@ -193,6 +197,7 @@ pub fn semantic_search(
                 strategy,
                 structural: None,
                 rel_type: None,
+                entity_id,
             },
         ));
     }
@@ -258,13 +263,13 @@ pub fn related_chunks(
         let symbol_str: String = row.get(6)?;
         let strategy: String = row.get(7)?;
         let entity_id: Option<String> = row.get(8)?;
-        let entity_id = entity_id.unwrap_or_else(|| "unknown".into());
         let doc_path_r: String = row.get(9)?;
-        let vec = if let Some(cached) = get_cached_embedding(&entity_id, chunk_id) {
+        let cache_key = entity_id.as_deref().unwrap_or("unknown");
+        let vec = if let Some(cached) = get_cached_embedding(cache_key, chunk_id) {
             cached
         } else {
             let decoded = bytes_to_f32(&bytes);
-            insert_cached_embedding(&entity_id, chunk_id, decoded.clone());
+            insert_cached_embedding(cache_key, chunk_id, decoded.clone());
             decoded
         };
         let score = cosine_similarity(&avg, &vec);
@@ -286,6 +291,7 @@ pub fn related_chunks(
                 strategy,
                 structural: None,
                 rel_type: None,
+                entity_id,
             },
         ));
     }
@@ -505,6 +511,7 @@ mod tests {
             strategy: "prose".into(),
             structural: None,
             rel_type: None,
+            entity_id: Some("tier_fact".into()),
         };
         let v = serde_json::to_value(&r).expect("serialize");
         for key in [

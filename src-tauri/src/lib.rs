@@ -1117,14 +1117,10 @@ async fn run_wiki_reembed(
     pipeline: State<'_, PipelineHolder>,
     status_state: State<'_, WikiStatusState>,
 ) -> Result<usize, String> {
-    update_wiki_status(&app, &status_state, |flags| {
-        flags.ingesting = true;
-    });
-
-    let (tx, pending) = {
+    let tx = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         match pipeline_guard.as_ref() {
-            Some(p) => (p.0.clone(), p.2.clone()),
+            Some(p) => p.0.clone(),
             None => {
                 update_wiki_status(&app, &status_state, |flags| {
                     flags.ingesting = false;
@@ -1144,35 +1140,14 @@ async fn run_wiki_reembed(
             if !std::path::Path::new(&path).exists() {
                 continue;
             }
-            pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tx.send(PipelineJob::rechunk_for_reembed(path))
-                .map_err(|e| {
-                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    format!("pipeline channel closed: {e}")
-                })?;
+                .map_err(|e| format!("pipeline channel closed: {e}"))?;
             queued += 1;
         }
         Ok(queued)
     })();
 
-    if let Ok(queued) = result {
-        if queued > 0 {
-            let app_handle = app.clone();
-            let pending = pending.clone();
-            std::thread::spawn(move || {
-                while pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                update_wiki_status_from_app(&app_handle, |flags| {
-                    flags.ingesting = false;
-                });
-            });
-        } else {
-            update_wiki_status(&app, &status_state, |flags| {
-                flags.ingesting = false;
-            });
-        }
-    } else {
+    if result.is_err() {
         update_wiki_status(&app, &status_state, |flags| {
             flags.ingesting = false;
         });
@@ -1577,6 +1552,7 @@ fn get_structural_neighbors(
                     strategy: row.get(6)?,
                     structural: Some(true),
                     rel_type: Some(rel_type.clone()),
+                    entity_id: None,
                 })
             },
         );
@@ -2299,7 +2275,6 @@ pub fn run() {
             delete_vault_file,
             run_wiki_heal,
             run_wiki_prune,
-            run_wiki_forget,
             run_wiki_forget,
             run_wiki_reembed,
             run_wiki_reindex,

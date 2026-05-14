@@ -67,7 +67,7 @@ describe('useMemoryRead', () => {
   });
 
   it('appends structural neighbors without duplicating semantic results', async () => {
-    const searchVault = vi.spyOn(tauri, 'searchVault').mockResolvedValue([semanticResult]);
+    vi.spyOn(tauri, 'searchVault').mockResolvedValue([semanticResult]);
     vi.spyOn(tauri, 'getStructuralNeighbors').mockResolvedValue([
       {
         ...semanticResult,
@@ -106,7 +106,7 @@ describe('useMemoryRead', () => {
       doc_path: '/Users/test/Vault/src/app.ts',
       chunk_position: 2,
     };
-    const searchVault = vi.spyOn(tauri, 'searchVault').mockResolvedValue([
+    vi.spyOn(tauri, 'searchVault').mockResolvedValue([
       semanticResult,
       secondResult,
     ]);
