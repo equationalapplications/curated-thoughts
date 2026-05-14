@@ -416,6 +416,30 @@ body {
   overflow: hidden;
 }
 
+.memory-chunk {
+  display: inline-block;
+  background: var(--elev-1);
+  border-radius: 10px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.memory-chunk--fact {
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.memory-chunk--wisdom {
+  border: 1px solid rgba(79, 70, 229, 0.2);
+  background: rgba(79, 70, 229, 0.08);
+}
+
+.memory-chunk--working {
+  border: 1px solid rgba(107, 114, 128, 0.2);
+  background: rgba(107, 114, 128, 0.08);
+}
+
 .search-spinner {
   font-size: 13px;
   color: var(--outline);
