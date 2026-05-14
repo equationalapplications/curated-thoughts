@@ -15,6 +15,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
+  emit: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../lib/wikiAdapter', () => ({
@@ -22,7 +23,7 @@ vi.mock('../lib/wikiAdapter', () => ({
 }));
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki } from '../lib/wiki';
 
 describe('initWorkspaceId', () => {
@@ -97,5 +98,28 @@ describe('startAutoHeal', () => {
     const cleanup = startAutoHeal();
     expect(listen).toHaveBeenCalledWith('vault-event', expect.any(Function));
     expect(typeof cleanup).toBe('function');
+  });
+
+  it('emits wiki-status-change events for auto-heal', async () => {
+    vi.useFakeTimers();
+    const cleanup = startAutoHeal();
+    const callback = vi.mocked(listen).mock.calls[0][1] as () => void;
+
+    callback();
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(vi.mocked(emit)).toHaveBeenNthCalledWith(1, 'wiki-status-change', {
+      heal: true,
+      ingesting: false,
+      librarian: false,
+    });
+    expect(vi.mocked(emit)).toHaveBeenNthCalledWith(2, 'wiki-status-change', {
+      heal: false,
+      ingesting: false,
+      librarian: false,
+    });
+
+    cleanup();
+    vi.useRealTimers();
   });
 });

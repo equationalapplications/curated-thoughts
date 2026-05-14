@@ -2,7 +2,7 @@ import { createWiki, WikiBusyError, type WikiOptions } from "@equationalapplicat
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
 
@@ -85,15 +85,26 @@ export async function tieredRead(
 
 export function startAutoHeal(): () => void {
   let debounce: ReturnType<typeof setTimeout> | null = null;
+  const emitWikiStatus = async (payload: { heal: boolean; ingesting: boolean; librarian: boolean }) => {
+    try {
+      await emit('wiki-status-change', payload);
+    } catch (err) {
+      console.warn('[auto-heal] status emit failed', err);
+    }
+  };
+
   const scheduleHeal = () => {
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(async () => {
+      await emitWikiStatus({ heal: true, ingesting: false, librarian: false });
       try {
         await wiki.runHeal('tier_fact');
         await wiki.runHeal('tier_wisdom');
         await wiki.runHeal(_workspaceId);
       } catch (err) {
         if (!(err instanceof WikiBusyError)) console.error('[auto-heal]', err);
+      } finally {
+        await emitWikiStatus({ heal: false, ingesting: false, librarian: false });
       }
     }, 3000);
   };

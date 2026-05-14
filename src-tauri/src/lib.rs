@@ -135,10 +135,25 @@ fn normalize_wiki_relative_path(path: &str) -> String {
 
 // ── Workspace identity ────────────────────────────────────────────────────────
 
+fn normalize_workspace_path(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+    if normalized != "/" {
+        normalized = normalized.trim_end_matches('/').to_string();
+        if normalized.ends_with(':') {
+            normalized.push('/');
+        }
+        if normalized.is_empty() {
+            normalized = "/".to_string();
+        }
+    }
+    normalized
+}
+
 #[tauri::command]
 fn get_workspace_id(path: String) -> String {
+    let normalized_path = normalize_workspace_path(&path);
     // hash_bytes returns hex::encode(sha256) — 64 lowercase hex chars — safe to slice to 16.
-    let hash = crate::hasher::hash_bytes(path.as_bytes());
+    let hash = crate::hasher::hash_bytes(normalized_path.as_bytes());
     format!("tier_working::{}", &hash[..16])
 }
 
@@ -855,7 +870,7 @@ async fn run_wiki_reembed(
                 continue;
             }
             pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tx.send(PipelineJob::rechunk(path))
+            tx.send(PipelineJob::rechunk_for_reembed(path))
                 .map_err(|e| {
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     format!("pipeline channel closed: {e}")
@@ -2041,6 +2056,18 @@ mod workspace_id_tests {
         assert_eq!(
             get_workspace_id("/Users/foo/Vault".to_string()),
             get_workspace_id("/Users/foo/Vault".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_trailing_slashes_and_windows_paths() {
+        assert_eq!(
+            get_workspace_id("/Users/foo/Vault".to_string()),
+            get_workspace_id("/Users/foo/Vault/".to_string())
+        );
+        assert_eq!(
+            get_workspace_id("C:\\Users\\foo\\Vault".to_string()),
+            get_workspace_id("C:/Users/foo/Vault".to_string())
         );
     }
 
