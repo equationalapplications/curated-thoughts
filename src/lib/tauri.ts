@@ -139,6 +139,12 @@ export interface NeighborRow {
   rel_type: string;
 }
 
+export const getChunkIdsForWikiEntry = (
+  entryId: number,
+  entityId: string,
+): Promise<number[]> =>
+  invoke('get_chunk_ids_for_wiki_entry', { entryId, entityId });
+
 export const getImpactRadius = (
   rootChunkId: number,
   entityId: string,

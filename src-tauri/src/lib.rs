@@ -22,6 +22,7 @@ use pipeline::PipelineJob;
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
+use rusqlite::OptionalExtension;
 use serde_json::Value as JsonVal;
 use setup::{
     check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
@@ -1299,6 +1300,79 @@ fn get_structural_neighbors(
     Ok(results)
 }
 
+#[tauri::command]
+fn get_chunk_ids_for_wiki_entry(
+    entry_id: i64,
+    entity_id: String,
+    db_state: State<DbState>,
+    vault_state: State<VaultConfigState>,
+) -> Result<Vec<i64>, String> {
+    let root = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no vault path set".to_string())?;
+    let vault_root = std::path::PathBuf::from(&root);
+
+    let source_ref: Option<String> = {
+        let guard = db_state.0.lock().unwrap();
+        let conn = &guard.0;
+        conn.query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE rowid = ?1 OR id = ?1",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten()
+    };
+
+    let source_ref = match source_ref {
+        Some(r) => r,
+        None => return Ok(Vec::new()),
+    };
+
+    let normalized_rel = match normalize_path_argument_to_vault_relative(&source_ref, &vault_root) {
+        Ok(r) => r,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let safe = match crate::vault::safe_vault_path(
+        &vault_root,
+        &normalized_rel,
+        &["."],
+        crate::vault::PathMode::MustExist,
+    ) {
+        Ok(p) => p,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let abs_path = safe.to_string_lossy().into_owned();
+
+    let guard = db_state.0.lock().unwrap();
+    let conn = &guard.0;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.path = ?1 AND c.entity_id = ?2 AND d.status = 'indexed'",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&abs_path, &entity_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        if let Ok(id) = row {
+            ids.push(id);
+        }
+    }
+
+    Ok(ids)
+}
+
 // ── Vault file listing ────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, Clone)]
@@ -1932,6 +2006,7 @@ pub fn run() {
             run_wiki_heal,
             run_wiki_prune,
             run_wiki_reembed,
+            get_chunk_ids_for_wiki_entry,
             get_impact_radius,
             get_structural_neighbors,
         ])
