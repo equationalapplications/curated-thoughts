@@ -127,13 +127,5 @@ INSERT OR IGNORE INTO schema_version (version) VALUES (5);
 ";
 
 pub const MIGRATION_V6: &str = "
-CREATE TABLE IF NOT EXISTS llm_wiki_entries (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_ref  TEXT,
-    source_type TEXT    NOT NULL DEFAULT 'librarian_inferred',
-    content     TEXT,
-    deleted_at  INTEGER
-);
-
 INSERT OR IGNORE INTO schema_version (version) VALUES (6);
 ";

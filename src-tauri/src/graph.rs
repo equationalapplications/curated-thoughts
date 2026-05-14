@@ -27,6 +27,7 @@ WITH RECURSIVE callee_walk(chunk_id, depth, rel_type) AS (
 )
 SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
 FROM   callee_walk
+WHERE  chunk_id != ?1
 GROUP  BY chunk_id
 ORDER  BY min_depth
 ";
@@ -50,6 +51,7 @@ WITH RECURSIVE caller_walk(chunk_id, depth, rel_type) AS (
 )
 SELECT chunk_id, MIN(depth) AS min_depth, MAX(rel_type) AS rel_type
 FROM   caller_walk
+WHERE  chunk_id != ?1
 GROUP  BY chunk_id
 ORDER  BY min_depth
 ";
