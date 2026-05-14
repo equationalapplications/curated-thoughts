@@ -284,8 +284,16 @@ fn normalize_workspace_path(path: &str) -> String {
 
 #[tauri::command]
 fn get_workspace_id(path: String) -> String {
-    let normalized_path = normalize_workspace_path(&path);
+    // Canonicalize so a symlinked vault hashes consistently with the Rust pipeline
+    // (which canonicalizes before starting). Fall back to the raw path when the
+    // path doesn't exist yet (e.g. unit tests with fictional paths).
+    let pb = std::path::PathBuf::from(&path);
+    let canonical_str = pb
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(path);
     // hash_bytes returns hex::encode(sha256) — 64 lowercase hex chars — safe to slice to 16.
+    let normalized_path = normalize_workspace_path(&canonical_str);
     let hash = crate::hasher::hash_bytes(normalized_path.as_bytes());
     format!("tier_working::{}", &hash[..16])
 }
@@ -631,7 +639,10 @@ fn recover_after_failed_switch_vault(
         if g.is_none() {
             let vault_root = vault_state.0.lock().ok()
                 .and_then(|vc| vc.get_vault_path().ok().flatten())
-                .map(PathBuf::from);
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    p.canonicalize().unwrap_or(p)
+                });
             *g = Some(start_pipeline(db_path.to_path_buf(), vault_root));
         }
     }
@@ -718,7 +729,8 @@ fn switch_vault(
 
         {
             let mut g = pipeline.0.lock().unwrap();
-            *g = Some(start_pipeline(db_path.clone(), Some(new_root.clone())));
+            let canon_root = new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
+            *g = Some(start_pipeline(db_path.clone(), Some(canon_root)));
         }
 
         vault_state
@@ -1448,7 +1460,10 @@ fn get_structural_neighbors(
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault path set".to_string())?;
-    let vault_root = std::path::PathBuf::from(&root);
+    let vault_root = {
+        let p = std::path::PathBuf::from(&root);
+        p.canonicalize().unwrap_or(p)
+    };
 
     let normalized_rel = normalize_path_argument_to_vault_relative(&doc_path, &vault_root)?;
     let safe = crate::vault::safe_vault_path(
@@ -1459,7 +1474,8 @@ fn get_structural_neighbors(
     )
     .map_err(|e| e.to_string())?;
     let abs_path = safe.to_string_lossy().into_owned();
-    let entity_id = pipeline::entity_id_for_path(&abs_path, Some(&root));
+    let canonical_root = vault_root.to_string_lossy().into_owned();
+    let entity_id = pipeline::entity_id_for_path(&abs_path, Some(&canonical_root));
 
     let max_hops = max_hops.min(5);
     let guard = db_state.0.lock().unwrap();
@@ -2074,7 +2090,7 @@ fn copy_os_drop_paths_to_vault(
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
-pub use pipeline::ingest_document;
+pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root};
 
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
@@ -2105,6 +2121,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_related_chunks,
             save_wiki_page,
             queue_full_reindex,
+            get_impact_radius,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -2170,7 +2187,10 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
-    let initial_vault_root = config.get_vault_path().ok().flatten().map(PathBuf::from);
+    let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
+        let pb = PathBuf::from(&p);
+        pb.canonicalize().unwrap_or(pb)
+    });
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
