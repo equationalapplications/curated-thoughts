@@ -16,9 +16,9 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use pipeline::start_pipeline;
+use pipeline::{start_pipeline, PipelineJob};
 #[cfg(feature = "test-utils")]
-pub use pipeline::{PipelineJob, PipelineWorker};
+pub use pipeline::PipelineWorker;
 use rusqlite::types::Value as SqlVal;
 use rusqlite::OptionalExtension;
 use serde_json::Value as JsonVal;
