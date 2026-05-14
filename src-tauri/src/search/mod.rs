@@ -436,6 +436,20 @@ mod tests {
     }
 
     #[test]
+    fn vector_cache_respects_capacity_entity_ids() {
+        for id_index in 0..(VECTOR_CACHE_CAPACITY_ENTITY_IDS + 1) {
+            let entity_id = format!("tier_working::entity_{id_index}");
+            insert_cached_embedding(&entity_id, 1, vec![id_index as f32]);
+        }
+
+        let evicted_entity = format!("tier_working::entity_0");
+        assert!(get_cached_embedding(&evicted_entity, 1).is_none());
+
+        let retained_entity = format!("tier_working::entity_1");
+        assert!(get_cached_embedding(&retained_entity, 1).is_some());
+    }
+
+    #[test]
     fn test_cosine_identical_vectors() {
         let v = vec![1.0_f32, 2.0, 3.0];
         assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-6);
