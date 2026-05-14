@@ -43,6 +43,15 @@ impl PipelineJob {
         Self::Ingest {
             path: path.into(),
             force: true,
+            count_pending: false,
+        }
+    }
+
+    /// Rechunk job counted by run_wiki_reembed so the pending counter is decremented only for those jobs.
+    pub fn rechunk_for_reembed(path: impl Into<String>) -> Self {
+        Self::Ingest {
+            path: path.into(),
+            force: true,
             count_pending: true,
         }
     }
@@ -481,6 +490,22 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(extract_text("/vault/documents/data.csv").unwrap().is_none());
+    }
+
+    #[test]
+    fn rechunk_does_not_count_pending_by_default() {
+        match PipelineJob::rechunk("/vault/documents/note.md") {
+            PipelineJob::Ingest { count_pending, .. } => assert!(!count_pending),
+            _ => panic!("expected PipelineJob::Ingest variant"),
+        }
+    }
+
+    #[test]
+    fn rechunk_for_reembed_counts_pending() {
+        match PipelineJob::rechunk_for_reembed("/vault/documents/note.md") {
+            PipelineJob::Ingest { count_pending, .. } => assert!(count_pending),
+            _ => panic!("expected PipelineJob::Ingest variant"),
+        }
     }
 
     #[test]
