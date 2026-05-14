@@ -537,7 +537,8 @@ fn switch_vault(
 
         {
             let mut g = pipeline.0.lock().unwrap();
-            *g = Some(start_pipeline(db_path.clone(), Some(new_root.clone())));
+            let canon_root = new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
+            *g = Some(start_pipeline(db_path.clone(), Some(canon_root)));
         }
 
         vault_state
@@ -1944,7 +1945,10 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
-    let initial_vault_root = config.get_vault_path().ok().flatten().map(PathBuf::from);
+    let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
+        let pb = PathBuf::from(&p);
+        pb.canonicalize().unwrap_or(pb)
+    });
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
