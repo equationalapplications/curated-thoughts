@@ -46,27 +46,35 @@ export async function ingestDocumentByPath(
   return wiki.ingestDocument(entityId, params);
 }
 
-export const wiki = createWiki(tauriWikiAdapter, {
-  llmProvider: {
-    async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
-      return invoke<string>("ollama_generate", { systemPrompt, userPrompt });
+function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, unknown> {
+  return {
+    llmProvider: {
+      async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
+        return invoke<string>("ollama_generate", { systemPrompt, userPrompt });
+      },
+      async embed(text: string): Promise<number[]> {
+        return invoke<number[]>("embed_text", { text });
+      },
     },
-    async embed(text: string): Promise<number[]> {
-      return invoke<number[]>("embed_text", { text });
+    config: {
+      hybridWeight: 0.7,
+      preFilterLimit: 50,
+      ...(enableOutbox && { enableOutbox: true }),
     },
-  },
-  config: {
-    hybridWeight: 0.7,
-    preFilterLimit: 50,
-    enableOutbox: true,
-  },
-  onRetrievalFallback: (err: Error) => {
-    console.warn("[wiki] embed unavailable, using keyword search:", err.message);
-  },
-  graphAdapter: tauriGraphAdapter,
-} as WikiOptions & Record<string, unknown>);
+    onRetrievalFallback: (err: Error) => {
+      console.warn("[wiki] embed unavailable, using keyword search:", err.message);
+    },
+    graphAdapter: tauriGraphAdapter,
+  } as WikiOptions & Record<string, unknown>;
+}
+
+// Initialized in setupWiki(). The live binding is updated before the app renders,
+// so all callers that access `wiki` after setupWiki() resolves see the correct instance.
+export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
 
 export async function setupWiki() {
+  const outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
+  wiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
   await wiki.setup();
 }
 

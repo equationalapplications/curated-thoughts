@@ -91,7 +91,7 @@ pub fn spawn_postgres_worker(
                 match PgSink::new(&config.db_url).await {
                     Ok(s) => break s,
                     Err(e) => {
-                        eprintln!("[outbox] Postgres connect failed: {e}; retrying in {delay_ms}ms");
+                        emit(&app_handle, format!("Postgres connect failed: {e}; retrying in {delay_ms}ms"), false);
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         delay_ms = (delay_ms * 2).min(30_000);
                     }
