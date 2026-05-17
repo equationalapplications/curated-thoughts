@@ -201,7 +201,8 @@ impl OutboxWorker {
         Ok(!halted && full_batch)
     }
 
-    /// Long-running poll loop. Call via `tokio::spawn`.
+    /// Long-running poll loop. Call via `tokio::spawn`; stop via `JoinHandle::abort`.
+    /// Sleeps before the first poll intentionally — avoids thundering herd on startup.
     pub async fn run<S: Sink>(self, sink: S, config: OutboxConfig) {
         let interval = std::time::Duration::from_millis(config.poll_interval_ms);
         loop {
