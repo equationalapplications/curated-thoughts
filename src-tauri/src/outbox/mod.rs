@@ -21,8 +21,6 @@ pub enum ErrorPolicy {
 pub struct OutboxConfig {
     pub sqlite_path: PathBuf,
     pub db_url: String,
-    /// Optional Tauri app handle for desktop error event emission.
-    pub event_handle: Option<tauri::AppHandle>,
     /// SQLite table name written by core-llm-wiki. Default: "outbox".
     pub outbox_table: String,
     pub poll_interval_ms: u64,
@@ -36,7 +34,6 @@ impl Default for OutboxConfig {
         Self {
             sqlite_path: PathBuf::new(),
             db_url: String::new(),
-            event_handle: None,
             outbox_table: "outbox".into(),
             poll_interval_ms: 5000,
             batch_size: 100,
@@ -180,7 +177,7 @@ impl OutboxWorker {
 
         let full_batch = events.len() == config.batch_size;
         let mut processed_ids: Vec<String> = Vec::with_capacity(events.len());
-        let mut halted = false;
+        let mut halt_error: Option<anyhow::Error> = None;
 
         for event in events {
             let id = event.id.clone();
@@ -188,12 +185,13 @@ impl OutboxWorker {
                 Ok(()) => {
                     processed_ids.push(id);
                 }
-                Err(_) => match config.on_error {
+                Err(e) => match config.on_error {
                     ErrorPolicy::Skip => {
+                        eprintln!("[outbox] skip event {id}: {e}");
                         processed_ids.push(id);
                     }
                     ErrorPolicy::Halt => {
-                        halted = true;
+                        halt_error = Some(e);
                         break;
                     }
                 },
@@ -201,7 +199,10 @@ impl OutboxWorker {
         }
 
         acknowledge(self.conn.clone(), &config.outbox_table, processed_ids).await?;
-        Ok(!halted && full_batch)
+        if let Some(e) = halt_error {
+            return Err(e);
+        }
+        Ok(full_batch)
     }
 
     /// Long-running poll loop. Call via `tokio::spawn`; stop via `JoinHandle::abort`.
@@ -341,8 +342,9 @@ mod sync_batch_tests {
             ..Default::default()
         };
         let worker = OutboxWorker::new(conn);
-        // Fails after first successful insert
-        worker.sync_batch(&FailAfterSink { after: 1, count: count.clone() }, &config).await.unwrap();
+        // Fails after first successful insert — Halt returns Err, prior events are acked
+        let result = worker.sync_batch(&FailAfterSink { after: 1, count: count.clone() }, &config).await;
+        assert!(result.is_err(), "Halt policy must propagate the insert error");
         // "a" was acked, "b" and "c" remain
         assert_eq!(count_remaining(&worker.conn), 2);
     }
