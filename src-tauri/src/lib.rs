@@ -17,7 +17,7 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use outbox::{postgres::spawn_postgres_worker, OutboxConfig};
+use outbox::{postgres::{spawn_postgres_worker, OutboxWorkerHandle}, OutboxConfig};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
@@ -57,7 +57,7 @@ struct PipelineHolder(
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
-struct OutboxWorkerState(Mutex<Option<tokio::task::JoinHandle<()>>>);
+struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
 
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
@@ -744,8 +744,7 @@ async fn switch_vault(
         g.take()
     };
     if let Some(handle) = maybe_handle {
-        handle.abort();
-        let _ = handle.await;
+        handle.stop().await;
     }
 
     let stub_path = release_global_db_lock(&db_state)?;
@@ -847,6 +846,16 @@ async fn switch_vault(
             status_state.clone(),
         ) {
             eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
+        }
+    } else if recovery_reopened_db {
+        if let Some(db_url) = configured_database_url() {
+            let config = OutboxConfig {
+                sqlite_path: db_path.clone(),
+                db_url,
+                ..OutboxConfig::default()
+            };
+            *outbox_state.0.lock().unwrap() =
+                Some(spawn_postgres_worker(config, Some(app.clone())));
         }
     }
 
@@ -2411,8 +2420,7 @@ async fn stop_outbox_worker(state: tauri::State<'_, OutboxWorkerState>) -> Resul
         guard.take()
     };
     if let Some(handle) = handle {
-        handle.abort();
-        let _ = handle.await;
+        handle.stop().await;
     }
     Ok(())
 }
