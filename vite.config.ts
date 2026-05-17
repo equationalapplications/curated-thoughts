@@ -5,6 +5,9 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: { port: 1420, strictPort: true },
+  build: {
+    chunkSizeWarningLimit: 1500,
+  },
   test: {
     globals: true,
     environment: "jsdom",
