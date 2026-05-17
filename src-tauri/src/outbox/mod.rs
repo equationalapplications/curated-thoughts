@@ -53,13 +53,28 @@ pub trait Sink: Send + Sync + 'static {
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
+fn validate_outbox_table_name(table: &str) -> anyhow::Result<&str> {
+    if table.is_empty() {
+        return Err(anyhow::anyhow!("outbox table name cannot be empty"));
+    }
+    let mut chars = table.chars();
+    let first = chars.next().unwrap();
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(anyhow::anyhow!("invalid outbox table name: {table}"));
+    }
+    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return Err(anyhow::anyhow!("invalid outbox table name: {table}"));
+    }
+    Ok(table)
+}
+
 /// `table` must be an app-controlled identifier, not user-supplied input.
 pub(crate) async fn fetch_pending(
     conn: Arc<Mutex<Connection>>,
     table: &str,
     batch_size: usize,
 ) -> anyhow::Result<Vec<OutboxEvent>> {
-    let table = table.to_string();
+    let table = validate_outbox_table_name(table)?.to_string();
     tokio::task::spawn_blocking(move || {
         let guard = conn.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
         let sql = format!(
@@ -100,7 +115,7 @@ pub(crate) async fn acknowledge(
     if ids.is_empty() {
         return Ok(());
     }
-    let table = table.to_string();
+    let table = validate_outbox_table_name(table)?.to_string();
     tokio::task::spawn_blocking(move || {
         let guard = conn.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
         let chunk_size = 500;
