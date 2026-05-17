@@ -1,4 +1,6 @@
-use crate::db::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6};
+use crate::db::schema::{
+    MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+};
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
 use anyhow::Result;
@@ -188,8 +190,7 @@ mod tests {
     #[test]
     fn migration_v5_backfills_entity_id_from_document_path_prefix() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;")
-            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         conn.execute_batch(&format!(
             "BEGIN;\n{}\n{}\n{}\n{}\nCOMMIT;",
             MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4
@@ -317,7 +318,8 @@ mod tests {
             defined_symbol: None,
             strategy: crate::chunker::ChunkStrategyTag::Declarative,
         };
-        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_working").unwrap();
+        let id =
+            crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_working").unwrap();
         let (sl, el, sym, strat): (i64, i64, Option<String>, String) = conn
             .query_row(
                 "SELECT start_line, end_line, symbol_name, strategy FROM chunks WHERE id = ?1",

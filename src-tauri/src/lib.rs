@@ -17,10 +17,10 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use outbox::{OutboxConfig, postgres::spawn_postgres_worker};
-use pipeline::{start_pipeline, PipelineStatusEvent};
+use outbox::{postgres::spawn_postgres_worker, OutboxConfig};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
+use pipeline::{start_pipeline, PipelineStatusEvent};
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
@@ -32,8 +32,11 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc::{self, Sender, SyncSender}, Arc, Mutex};
 use std::sync::atomic::AtomicUsize;
+use std::sync::{
+    mpsc::{self, Sender, SyncSender},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
@@ -78,7 +81,11 @@ fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
     );
 }
 
-fn update_wiki_status(app: &AppHandle, state: &State<'_, WikiStatusState>, updater: impl FnOnce(&mut WikiStatusFlags)) {
+fn update_wiki_status(
+    app: &AppHandle,
+    state: &State<'_, WikiStatusState>,
+    updater: impl FnOnce(&mut WikiStatusFlags),
+) {
     let mut guard = state.0.lock().unwrap();
     updater(&mut guard);
     emit_wiki_status(app, &guard);
@@ -427,10 +434,7 @@ fn validated_new_vault_root(path: &str) -> Result<PathBuf, String> {
 
 /// Returns true when `new_root` is the same directory as the configured vault (symlinks resolved).
 fn switching_to_same_vault_as_configured(current: &str, new_root: &Path) -> bool {
-    match (
-        Path::new(current).canonicalize(),
-        new_root.canonicalize(),
-    ) {
+    match (Path::new(current).canonicalize(), new_root.canonicalize()) {
         (Ok(cur), Ok(next)) => cur == next,
         _ => false,
     }
@@ -631,7 +635,10 @@ fn recover_after_failed_switch_vault(
     outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
     let reopened = (|| -> Result<(), String> {
-        let mut guard = db_state.0.lock().map_err(|_| "db mutex poisoned".to_string())?;
+        let mut guard = db_state
+            .0
+            .lock()
+            .map_err(|_| "db mutex poisoned".to_string())?;
         *guard = AppDb::open(db_path).map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -641,7 +648,10 @@ fn recover_after_failed_switch_vault(
     }
     if let Ok(mut g) = pipeline.0.lock() {
         if g.is_none() {
-            let vault_root = vault_state.0.lock().ok()
+            let vault_root = vault_state
+                .0
+                .lock()
+                .ok()
                 .and_then(|vc| vc.get_vault_path().ok().flatten())
                 .map(|s| {
                     let p = PathBuf::from(s);
@@ -667,8 +677,7 @@ fn recover_after_failed_switch_vault(
             db_url,
             ..OutboxConfig::default()
         };
-        *outbox_state.0.lock().unwrap() =
-            Some(spawn_postgres_worker(config, Some(app.clone())));
+        *outbox_state.0.lock().unwrap() = Some(spawn_postgres_worker(config, Some(app.clone())));
     }
     true
 }
@@ -825,9 +834,7 @@ fn switch_vault(
             heal_scheduler.clone(),
             status_state.clone(),
         ) {
-            eprintln!(
-                "[switch_vault] failed to restart file watcher after successful switch: {e}"
-            );
+            eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
         }
     }
 
@@ -868,11 +875,7 @@ fn reveal_vault(vault_state: State<VaultConfigState>) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
 
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = vault;
         return Err("reveal_vault is not supported on this platform".to_string());
@@ -1005,7 +1008,10 @@ fn heal_lost_librarian_inferred(
     Ok(updated)
 }
 
-fn prune_old_librarian_inferred(conn: &rusqlite::Connection, current_unix: i64) -> Result<usize, String> {
+fn prune_old_librarian_inferred(
+    conn: &rusqlite::Connection,
+    current_unix: i64,
+) -> Result<usize, String> {
     conn.execute(
         "DELETE FROM llm_wiki_entries
              WHERE source_type = 'librarian_inferred'
@@ -1470,8 +1476,8 @@ fn get_impact_radius(
     match direction.as_str() {
         "callees" => graph::get_callees(conn, root_chunk_id, &entity_id, max_hops),
         "callers" => graph::get_callers(conn, root_chunk_id, &entity_id, max_hops),
-        "both"    => graph::get_both(conn, root_chunk_id, &entity_id, max_hops),
-        other     => Err(anyhow::anyhow!("unknown direction: {}", other)),
+        "both" => graph::get_both(conn, root_chunk_id, &entity_id, max_hops),
+        other => Err(anyhow::anyhow!("unknown direction: {}", other)),
     }
     .map_err(|e| e.to_string())
 }
@@ -1953,7 +1959,12 @@ fn get_proposed_content(
         crate::vault::PathMode::MustExist,
     );
 
-    let placeholder = || format!("# {}\n\n*Proposed wiki page — content not available.*", page_rel);
+    let placeholder = || {
+        format!(
+            "# {}\n\n*Proposed wiki page — content not available.*",
+            page_rel
+        )
+    };
     match safe {
         Ok(p) => match std::fs::read_to_string(&p) {
             Ok(content) => Ok(content),
@@ -2210,12 +2221,16 @@ pub fn run() {
                     fallback_dirs_created = false;
                 }
             }
-            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted")) {
+            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted"))
+            {
                 eprintln!("error: failed to create fallback vault subdir .brain/converted: {e}");
                 fallback_dirs_created = false;
             }
             if fallback_dirs_created {
-                eprintln!("warning: using temporary recovery vault at: {}", fallback_vault.display());
+                eprintln!(
+                    "warning: using temporary recovery vault at: {}",
+                    fallback_vault.display()
+                );
                 if let Some(vault_str) = fallback_vault.to_str() {
                     if let Err(e) = config.set_vault_path(vault_str) {
                         eprintln!("warning: failed to persist fallback vault path: {e}");
@@ -2343,8 +2358,15 @@ async fn start_outbox_worker(
 
     let sqlite_path = {
         let db_state = app_handle.state::<DbState>();
-        let guard = db_state.0.lock().map_err(|e| format!("db state lock poisoned: {e}"))?;
-        guard.0.path().ok_or_else(|| "database path unavailable".to_string()).map(PathBuf::from)?
+        let guard = db_state
+            .0
+            .lock()
+            .map_err(|e| format!("db state lock poisoned: {e}"))?;
+        guard
+            .0
+            .path()
+            .ok_or_else(|| "database path unavailable".to_string())
+            .map(PathBuf::from)?
     };
 
     let mut guard = state.0.lock().unwrap();
@@ -2369,9 +2391,7 @@ async fn start_outbox_worker(
 }
 
 #[tauri::command]
-async fn stop_outbox_worker(
-    state: tauri::State<'_, OutboxWorkerState>,
-) -> Result<(), String> {
+async fn stop_outbox_worker(state: tauri::State<'_, OutboxWorkerState>) -> Result<(), String> {
     let handle = {
         let mut guard = state.0.lock().unwrap();
         guard.take()
@@ -2445,11 +2465,11 @@ mod normalize_path_tests {
 #[cfg(test)]
 mod heal_invalid_sources_tests {
     use super::{heal_invalid_sources, DbState, VaultConfigState};
+    use crate::db::AppDb;
+    use crate::vault::VaultConfig;
     use rusqlite::params;
     use std::sync::Mutex;
     use tempfile::TempDir;
-    use crate::db::AppDb;
-    use crate::vault::VaultConfig;
 
     #[test]
     fn missing_vault_sources_are_marked_deleted() {
@@ -2458,9 +2478,7 @@ mod heal_invalid_sources_tests {
         std::fs::create_dir_all(vault_root.join("documents")).unwrap();
 
         let config = VaultConfig::new(tmp.path().join("config.json"));
-        config
-            .set_vault_path(vault_root.to_str().unwrap())
-            .unwrap();
+        config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
         let db_path = tmp.path().join("brain.db");
         let db = AppDb::open(&db_path).unwrap();
@@ -2572,7 +2590,11 @@ mod workspace_id_tests {
     fn hash_segment_is_16_lowercase_hex_chars() {
         let id = get_workspace_id("/Users/foo/Vault".to_string());
         let hash = id.strip_prefix("tier_working::").unwrap();
-        assert_eq!(hash.len(), 16, "hash segment should be 16 chars, got: {hash}");
+        assert_eq!(
+            hash.len(),
+            16,
+            "hash segment should be 16 chars, got: {hash}"
+        );
         assert!(
             hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
             "hash should be lowercase hex, got: {hash}"
@@ -2654,7 +2676,10 @@ mod maintenance_command_tests {
         .unwrap();
 
         let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
-        assert_eq!(deleted, 1, "only the old librarian_inferred row should be deleted");
+        assert_eq!(
+            deleted, 1,
+            "only the old librarian_inferred row should be deleted"
+        );
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
@@ -2668,7 +2693,13 @@ mod maintenance_command_tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(types, vec!["immutable_document".to_string(), "librarian_inferred".to_string()]);
+        assert_eq!(
+            types,
+            vec![
+                "immutable_document".to_string(),
+                "librarian_inferred".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -2698,7 +2729,10 @@ mod maintenance_command_tests {
         .unwrap();
 
         let updated = heal_lost_librarian_inferred(&conn, vault_root).unwrap();
-        assert_eq!(updated, 1, "only the missing inferred row should be soft-deleted");
+        assert_eq!(
+            updated, 1,
+            "only the missing inferred row should be soft-deleted"
+        );
 
         let statuses: Vec<(String, Option<i64>, String)> = conn
             .prepare("SELECT source_type, deleted_at, source_ref FROM llm_wiki_entries ORDER BY source_type, source_ref")
@@ -2709,18 +2743,33 @@ mod maintenance_command_tests {
             .collect();
 
         let inferred_existing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "librarian_inferred" && source_ref == "documents/existing.md" && deleted_at.is_none()
+            t == "librarian_inferred"
+                && source_ref == "documents/existing.md"
+                && deleted_at.is_none()
         });
         let inferred_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "librarian_inferred" && source_ref == "documents/missing.md" && deleted_at.is_some()
+            t == "librarian_inferred"
+                && source_ref == "documents/missing.md"
+                && deleted_at.is_some()
         });
         let immutable_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "immutable_document" && source_ref == "documents/missing.md" && deleted_at.is_none()
+            t == "immutable_document"
+                && source_ref == "documents/missing.md"
+                && deleted_at.is_none()
         });
 
-        assert!(inferred_existing.is_some(), "existing inferred rows should be preserved without deleted_at");
-        assert!(inferred_missing.is_some(), "missing inferred rows should be marked deleted");
-        assert!(immutable_missing.is_some(), "immutable_document rows should not be soft-deleted by heal");
+        assert!(
+            inferred_existing.is_some(),
+            "existing inferred rows should be preserved without deleted_at"
+        );
+        assert!(
+            inferred_missing.is_some(),
+            "missing inferred rows should be marked deleted"
+        );
+        assert!(
+            immutable_missing.is_some(),
+            "immutable_document rows should not be soft-deleted by heal"
+        );
 
         let missing_deleted_at: Option<i64> = conn
             .query_row(
@@ -2729,7 +2778,10 @@ mod maintenance_command_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(missing_deleted_at.is_some(), "missing inferred entries should be marked deleted");
+        assert!(
+            missing_deleted_at.is_some(),
+            "missing inferred entries should be marked deleted"
+        );
 
         let existing_deleted_at: Option<i64> = conn
             .query_row(
@@ -2738,6 +2790,9 @@ mod maintenance_command_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(existing_deleted_at.is_none(), "existing source_ref should not be marked deleted");
+        assert!(
+            existing_deleted_at.is_none(),
+            "existing source_ref should not be marked deleted"
+        );
     }
 }

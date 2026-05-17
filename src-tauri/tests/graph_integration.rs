@@ -13,7 +13,9 @@ mod helpers;
 use helpers::TestApp;
 use serde_json::json;
 use tauri_app_lib::chunker::{Chunk, ChunkStrategyTag};
-use tauri_app_lib::db::{insert_chunk, insert_relationship, mark_document_indexed, upsert_document};
+use tauri_app_lib::db::{
+    insert_chunk, insert_relationship, mark_document_indexed, upsert_document,
+};
 
 fn make_chunk(name: &str) -> Chunk {
     Chunk {
@@ -72,7 +74,12 @@ fn impact_radius_callees_traverses_full_five_hop_chain() {
 
     let depths: std::collections::HashMap<i64, i64> = neighbors
         .iter()
-        .map(|n| (n["chunk_id"].as_i64().unwrap(), n["depth"].as_i64().unwrap()))
+        .map(|n| {
+            (
+                n["chunk_id"].as_i64().unwrap(),
+                n["depth"].as_i64().unwrap(),
+            )
+        })
         .collect();
 
     assert_eq!(depths.get(&b), Some(&1), "b must be at depth 1");
@@ -101,7 +108,12 @@ fn impact_radius_callers_traverses_full_five_hop_chain() {
 
     let depths: std::collections::HashMap<i64, i64> = neighbors
         .iter()
-        .map(|n| (n["chunk_id"].as_i64().unwrap(), n["depth"].as_i64().unwrap()))
+        .map(|n| {
+            (
+                n["chunk_id"].as_i64().unwrap(),
+                n["depth"].as_i64().unwrap(),
+            )
+        })
         .collect();
 
     assert_eq!(depths.get(&e), Some(&1), "e must be at depth 1");
@@ -136,8 +148,14 @@ fn impact_radius_max_hops_param_limits_traversal() {
     assert!(ids.contains(&b), "b (depth 1) must appear");
     assert!(ids.contains(&c), "c (depth 2) must appear");
     assert!(ids.contains(&d), "d (depth 3) must appear");
-    assert!(!ids.contains(&e), "e (depth 4) must not appear with max_hops=3");
-    assert!(!ids.contains(&f), "f (depth 5) must not appear with max_hops=3");
+    assert!(
+        !ids.contains(&e),
+        "e (depth 4) must not appear with max_hops=3"
+    );
+    assert!(
+        !ids.contains(&f),
+        "f (depth 5) must not appear with max_hops=3"
+    );
     assert_eq!(ids.len(), 3);
 }
 

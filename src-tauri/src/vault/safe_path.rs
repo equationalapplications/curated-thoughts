@@ -433,13 +433,8 @@ mod tests {
         let root_link = root.join("root-link.md");
         symlink(root.join("documents").join("real.md"), &root_link).unwrap();
 
-        let err = safe_vault_path(
-            &root,
-            "root-link.md",
-            &["documents"],
-            PathMode::MustExist,
-        )
-        .unwrap_err();
+        let err = safe_vault_path(&root, "root-link.md", &["documents"], PathMode::MustExist)
+            .unwrap_err();
         assert!(matches!(err, SafePathError::Outside), "got {err:?}");
     }
 
@@ -599,12 +594,10 @@ mod tests {
         let outside_read = fs::read_to_string(&outside_target).unwrap();
         assert_eq!(written, "inside");
         assert_eq!(outside_read, "outside");
-        assert!(
-            !fs::symlink_metadata(&target)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(!fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
@@ -637,12 +630,10 @@ mod tests {
         let outside_read = fs::read_to_string(&outside_target).unwrap();
         assert_eq!(copied, "inside");
         assert_eq!(outside_read, "outside");
-        assert!(
-            !fs::symlink_metadata(&target)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(!fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

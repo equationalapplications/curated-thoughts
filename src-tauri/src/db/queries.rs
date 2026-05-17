@@ -184,7 +184,6 @@ pub fn delete_relationships_for_chunk(conn: &Connection, chunk_id: i64) -> Resul
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,7 +361,9 @@ mod clear_vault_tables_tests {
             .query_row("SELECT count(*) FROM folder_rules", [], |r| r.get(0))
             .unwrap();
         let rel_count: i64 = conn
-            .query_row("SELECT count(*) FROM curated_relationships", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM curated_relationships", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(doc_count, 0);
         assert_eq!(chunk_count, 0);
