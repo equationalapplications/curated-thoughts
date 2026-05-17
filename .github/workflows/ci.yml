@@ -12,8 +12,23 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
+            run_integration: true
           - os: macos-latest
+            run_integration: false
     runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: ${{ matrix.run_integration && 'postgres:16' || '' }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: outbox_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +61,7 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
+          DATABASE_URL: ${{ matrix.run_integration && 'postgresql://postgres:postgres@localhost:5432/outbox_test' || '' }}
 
   frontend:
     runs-on: ubuntu-latest
