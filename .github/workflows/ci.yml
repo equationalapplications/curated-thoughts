@@ -49,7 +49,7 @@ jobs:
       # run_wiki_heal/run_wiki_prune SQL, or the max_hops cap: run this step
       # locally first to confirm no regression.
       - name: Tests + MCP integration
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils -- --test-threads=1
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test

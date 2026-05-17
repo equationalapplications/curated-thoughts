@@ -13,7 +13,8 @@ impl PgSink {
             .max_connections(5)
             .connect(db_url)
             .await?;
-        sqlx::query(
+        execute_ddl(
+            &pool,
             "CREATE TABLE IF NOT EXISTS wiki_outbox_events (
                 id          TEXT    PRIMARY KEY,
                 entity_id   TEXT    NOT NULL,
@@ -25,19 +26,18 @@ impl PgSink {
                 synced_at   BIGINT  NOT NULL DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
             )",
         )
-        .execute(&pool)
         .await?;
-        sqlx::query(
+        execute_ddl(
+            &pool,
             "CREATE INDEX IF NOT EXISTS idx_woe_entity_created \
              ON wiki_outbox_events (entity_id, created_at)",
         )
-        .execute(&pool)
         .await?;
-        sqlx::query(
+        execute_ddl(
+            &pool,
             "CREATE INDEX IF NOT EXISTS idx_woe_table_op \
              ON wiki_outbox_events (table_name, operation)",
         )
-        .execute(&pool)
         .await?;
         Ok(Self { pool })
     }
@@ -64,6 +64,27 @@ impl Sink for PgSink {
     }
 }
 
+async fn execute_ddl(pool: &PgPool, sql: &str) -> anyhow::Result<()> {
+    match sqlx::query(sql).execute(pool).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_pg_duplicate_object(&e) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn is_pg_duplicate_object(err: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db_err) = err {
+        if let Some(code) = db_err.code() {
+            return code == "42710" || code == "23505";
+        }
+        let msg = db_err.message().to_lowercase();
+        return msg.contains(
+            "duplicate key value violates unique constraint \"pg_type_typname_nsp_index\"",
+        ) || msg.contains("already exists");
+    }
+    false
+}
+
 #[derive(serde::Serialize, Clone)]
 struct OutboxWorkerError {
     error: String,
@@ -79,7 +100,10 @@ pub fn spawn_postgres_worker(
         let emit = |app_handle: &Option<tauri::AppHandle>, msg: String, fatal: bool| {
             eprintln!("[outbox] {msg}");
             if let Some(ref handle) = app_handle {
-                let _ = handle.emit("outbox-worker-error", OutboxWorkerError { error: msg, fatal });
+                let _ = handle.emit(
+                    "outbox-worker-error",
+                    OutboxWorkerError { error: msg, fatal },
+                );
             }
         };
 
@@ -91,7 +115,11 @@ pub fn spawn_postgres_worker(
                 match PgSink::new(&config.db_url).await {
                     Ok(s) => break s,
                     Err(e) => {
-                        emit(&app_handle, format!("Postgres connect failed: {e}; retrying in {delay_ms}ms"), false);
+                        emit(
+                            &app_handle,
+                            format!("Postgres connect failed: {e}; retrying in {delay_ms}ms"),
+                            false,
+                        );
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         delay_ms = (delay_ms * 2).min(30_000);
                     }
@@ -109,7 +137,10 @@ pub fn spawn_postgres_worker(
                         if let Some(ref handle) = app_handle {
                             let _ = handle.emit(
                                 "outbox-worker-error",
-                                OutboxWorkerError { error: msg, fatal: false },
+                                OutboxWorkerError {
+                                    error: msg,
+                                    fatal: false,
+                                },
                             );
                         }
                     }
@@ -145,14 +176,18 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_new_is_idempotent() {
-        let Some(url) = db_url() else { return; };
+        let Some(url) = db_url() else {
+            return;
+        };
         PgSink::new(&url).await.unwrap();
         PgSink::new(&url).await.unwrap();
     }
 
     #[tokio::test]
     async fn pg_sink_insert_event_and_idempotency() {
-        let Some(url) = db_url() else { return; };
+        let Some(url) = db_url() else {
+            return;
+        };
         let sink = PgSink::new(&url).await.unwrap();
 
         let event = OutboxEvent {
@@ -168,13 +203,12 @@ mod tests {
         sink.insert_event(event.clone()).await.unwrap();
         sink.insert_event(event.clone()).await.unwrap();
 
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM wiki_outbox_events WHERE id = $1"
-        )
-        .bind(&event.id)
-        .fetch_one(&sink.pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wiki_outbox_events WHERE id = $1")
+                .bind(&event.id)
+                .fetch_one(&sink.pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1, "idempotent insert must produce exactly one row");
 
         sqlx::query("DELETE FROM wiki_outbox_events WHERE id = $1")
