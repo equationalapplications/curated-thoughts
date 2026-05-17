@@ -87,6 +87,15 @@ async fn main() -> anyhow::Result<()> {
         e
     })?;
 
+    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+        let config = tauri_app_lib::outbox::OutboxConfig {
+            sqlite_path: p.db_path.clone(),
+            db_url,
+            ..tauri_app_lib::outbox::OutboxConfig::default()
+        };
+        let _ = tauri_app_lib::outbox::postgres::spawn_postgres_worker(config);
+    }
+
     let server = VaultMcpServer {
         conn: Arc::new(Mutex::new(conn)),
         profile,
