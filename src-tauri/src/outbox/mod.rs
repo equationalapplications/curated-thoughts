@@ -53,6 +53,7 @@ pub trait Sink: Send + Sync + 'static {
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
+/// `table` must be an app-controlled identifier, not user-supplied input.
 pub(crate) async fn fetch_pending(
     conn: Arc<Mutex<Connection>>,
     table: &str,
@@ -104,6 +105,7 @@ pub(crate) async fn acknowledge(
         let guard = conn.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
         let chunk_size = 500;
         for chunk in ids.chunks(chunk_size) {
+            // ?1..?N bind to params[0..N-1] by index — do not replace with anonymous ?
             let placeholders = chunk.iter().enumerate()
                 .map(|(i, _)| format!("?{}", i + 1))
                 .collect::<Vec<_>>()
