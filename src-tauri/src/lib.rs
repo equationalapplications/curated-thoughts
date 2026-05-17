@@ -6,6 +6,7 @@ mod hasher;
 pub mod indexer;
 pub mod librarian;
 mod pipeline;
+pub mod outbox;
 pub mod recall_bench_fixture;
 pub mod retrieval;
 pub mod scifact_fixture;
