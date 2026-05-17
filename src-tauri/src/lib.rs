@@ -2329,12 +2329,18 @@ pub fn run() {
 #[tauri::command]
 async fn start_outbox_worker(
     app_handle: tauri::AppHandle,
-    db_url: String,
     poll_interval_ms: Option<u64>,
     batch_size: Option<usize>,
     on_error: Option<String>,
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
+    let db_url = std::env::var("DATABASE_URL").map_err(|_| {
+        "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
+    })?;
+    if db_url.is_empty() {
+        return Err("DATABASE_URL is empty; runtime outbox start is not allowed.".to_string());
+    }
+
     let sqlite_path = {
         let db_state = app_handle.state::<DbState>();
         let guard = db_state.0.lock().map_err(|e| format!("db state lock poisoned: {e}"))?;
