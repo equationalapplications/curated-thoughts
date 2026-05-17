@@ -1,7 +1,7 @@
 # Rust Outbox Worker — Prisma Adapter Design
 
 **Date:** 2026-05-17
-**Status:** Draft
+**Status:** Approved
 **Implementation:** `/subagent-driven-development` + `/test-driven-development` required on all PRs
 
 ---
@@ -10,22 +10,22 @@
 
 Add a native Rust outbox worker to Curated Thoughts that polls the `core-llm-wiki` SQLite outbox table and syncs events to a PostgreSQL database via `sqlx`. Inspired by `@equationalapplications/prisma-outbox` (TypeScript), ported to Rust. No Node.js sidecar. No npm package dependency.
 
-The worker is **opt-in** — Curated Thoughts runs normally without it. Enterprise operators enable it by supplying `DATABASE_URL` and calling `start_outbox_worker` at vault-open time. Consumer-level users are unaffected.
+The worker is **opt-in** — Curated Thoughts runs normally without it. When `DATABASE_URL` is set, both the Tauri desktop binary and the `curated-thoughts-mcp` headless binary auto-initialize the worker at startup. Consumer-level users are unaffected.
 
 ---
 
 ## Motivation
 
-`core-llm-wiki` v4.9.0 introduced `enableOutbox: true`, which writes wiki mutations atomically to a SQLite `outbox` table. This design provides a general-purpose Postgres sync path usable without recompilation or forking — operators configure via environment variable, enterprise schemas project from a `wiki_outbox_events` table using Postgres triggers or views.
+`core-llm-wiki` v4.9.0 introduced `enableOutbox: true`, which writes wiki mutations atomically to a SQLite `outbox` table. This design provides a general-purpose Postgres sync path usable without recompilation or forking — operators configure via `DATABASE_URL`, enterprise schemas project from a `wiki_outbox_events` table using Postgres triggers or views.
 
 ### Example deployment (illustrative)
 
-An enterprise runs Curated Thoughts headlessly alongside Postgres in Docker:
+An enterprise runs `curated-thoughts-mcp` headlessly alongside Postgres in Docker:
 
 ```yaml
 services:
-  curated-thoughts:
-    image: equationalapplications/curated-thoughts
+  curated-thoughts-mcp:
+    image: equationalapplications/curated-thoughts-mcp
     environment:
       DATABASE_URL: postgresql://user:pass@postgres:5432/enterprise_db
   postgres:
@@ -44,10 +44,10 @@ The enterprise DB receives all wiki events in `wiki_outbox_events`. Their team p
       ▼
 [SQLite: wiki tables + outbox table (atomic write)]
       │
-      │ poll every 5s — dedicated read connection (WAL)
+      │ poll every 5s — dedicated worker connection (WAL, busy_timeout=5000ms)
       ▼
-[OutboxWorker — tokio::spawn task]
-      │ sqlx PgPool → $DATABASE_URL
+[OutboxWorker — tokio::spawn task]         ← defined in tauri_app_lib
+      │ sqlx PgPool → $DATABASE_URL        ← used by both binaries
       ▼
 [Postgres: wiki_outbox_events]
       │ triggers / views / ETL
@@ -55,11 +55,24 @@ The enterprise DB receives all wiki events in `wiki_outbox_events`. Their team p
 [Enterprise schema / downstream consumers]
 ```
 
-SQLite runs in WAL mode (already enabled). Two connections to the same file are legal:
-- **Write conn** — existing `DbState` `Mutex<AppDb>` (used to DELETE acknowledged events)
-- **Read conn** — dedicated second connection opened by the worker for polling
+### Two entry points, one implementation
 
-`OutboxWorker` is managed as `OutboxWorkerState(Mutex<Option<tokio::task::JoinHandle<()>>>)` in Tauri state.
+`OutboxWorker` is defined in `tauri_app_lib` (`src-tauri/`). The MCP binary already depends on `tauri_app_lib`, so it gains the worker for free.
+
+| Binary | Runtime | Auto-init trigger |
+|---|---|---|
+| `curated-thoughts` (Tauri) | multi-thread Tokio | `tauri::Builder::setup` — checks `DATABASE_URL` |
+| `curated-thoughts-mcp` | `current_thread` Tokio | `main()` — checks `DATABASE_URL` |
+
+Both: if `DATABASE_URL` is absent, worker is not spawned. If present, worker starts automatically.
+
+The Tauri binary additionally exposes `start_outbox_worker` / `stop_outbox_worker` commands for runtime override (e.g., desktop user connecting to a different DB mid-session).
+
+### SQLite connection strategy
+
+The worker opens **its own dedicated SQLite connection** (read+write, WAL, `PRAGMA busy_timeout = 5000`). This connection handles both polling and ack DELETEs. It does not share or lock `DbState`. WAL mode allows concurrent connections to the same file; busy timeout handles write contention without deadlock.
+
+All SQLite operations within the worker are wrapped in `tokio::task::spawn_blocking` — correct for both `current_thread` and `multi_thread` Tokio flavors.
 
 ---
 
@@ -69,7 +82,7 @@ SQLite runs in WAL mode (already enabled). Two connections to the same file are 
 
 ```
 src-tauri/src/outbox/
-  mod.rs        — OutboxWorker, OutboxConfig, OutboxEvent, ErrorPolicy, sync_batch
+  mod.rs        — OutboxWorker, OutboxConfig, OutboxEvent, ErrorPolicy, Sink trait, sync_batch
   postgres.rs   — PgSink: wiki_outbox_events table creation, batch insert via sqlx
 ```
 
@@ -77,11 +90,10 @@ src-tauri/src/outbox/
 
 | File | Change |
 |---|---|
-| `src-tauri/src/lib.rs` | `OutboxWorkerState`, `DbPathState` (SQLite file path), `start_outbox_worker`, `stop_outbox_worker` commands |
-| `src-tauri/Cargo.toml` | Add `sqlx` with `postgres`, `runtime-tokio-native-tls`, `json` features |
+| `src-tauri/src/lib.rs` | `OutboxWorkerState`, auto-init from `DATABASE_URL` in setup, `start_outbox_worker`, `stop_outbox_worker` commands |
+| `src-tauri/Cargo.toml` | Add `sqlx` with `postgres`, `runtime-tokio-native-tls`, `json`, `macros` features |
 | `src/lib/wiki.ts` | Add `enableOutbox: true` to `createWiki` config |
-
-`DbPathState(Mutex<Option<PathBuf>>)` — new Tauri state set when a vault is opened. The outbox worker reads this to open its dedicated SQLite read connection.
+| `tools/src/bin/curated_thoughts_mcp.rs` | Auto-init `OutboxWorker` from `DATABASE_URL` in `main()` |
 
 ---
 
@@ -89,10 +101,11 @@ src-tauri/src/outbox/
 
 ```rust
 pub struct OutboxConfig {
-    pub db_url: String,
-    pub poll_interval_ms: u64,  // default: 5000
-    pub batch_size: usize,      // default: 100
-    pub on_error: ErrorPolicy,  // default: ErrorPolicy::Halt
+    pub sqlite_path: PathBuf,    // path to the SQLite file — worker opens its own connection
+    pub db_url: String,          // Postgres DATABASE_URL
+    pub poll_interval_ms: u64,   // default: 5000
+    pub batch_size: usize,       // default: 100
+    pub on_error: ErrorPolicy,   // default: ErrorPolicy::Halt
 }
 
 #[derive(Clone, Copy)]
@@ -110,13 +123,18 @@ pub struct OutboxEvent {
     pub payload: serde_json::Value,
     pub created_at: i64,
 }
+
+#[async_trait]
+pub trait Sink: Send + Sync {
+    async fn insert_event(&self, event: &OutboxEvent) -> anyhow::Result<()>;
+}
 ```
 
 ---
 
 ## Postgres Target Schema
 
-Auto-created by worker on `start()`:
+Auto-created by `PgSink::new()` on startup:
 
 ```sql
 CREATE TABLE IF NOT EXISTS wiki_outbox_events (
@@ -146,9 +164,10 @@ CREATE INDEX IF NOT EXISTS idx_woe_table_op
 Mirrors `PrismaOutboxWorker.syncBatch()`:
 
 ```
-sync_batch(db_state, sink: &dyn Sink, config):
+sync_batch(conn: &Connection, sink: &dyn Sink, config):
   if running.swap(true, SeqCst) → return  // atomic concurrency guard
 
+  // SQLite read via spawn_blocking
   events = SELECT * FROM outbox
            ORDER BY created_at ASC, rowid ASC
            LIMIT batch_size
@@ -168,7 +187,8 @@ sync_batch(db_state, sink: &dyn Sink, config):
         Skip → processed_ids.push(event.id)   // acknowledge, continue
         Halt → halted = true; break            // preserve ordering
 
-  DELETE FROM outbox WHERE id IN (processed_ids)  // via DbState write conn
+  // SQLite ack via spawn_blocking (same dedicated worker connection)
+  DELETE FROM outbox WHERE id IN (processed_ids)
 
   if !halted && events.len() == batch_size:
     spawn immediate re-poll  // backlog drain
@@ -178,9 +198,50 @@ sync_batch(db_state, sink: &dyn Sink, config):
 
 One Postgres transaction per event (not per batch). Matches JS design — partial progress on halt, per-event ordering preserved.
 
+**Throughput note:** 100 events = 100 sequential Postgres round-trips. Acceptable for background sync. Bulk reindex of a large vault will temporarily backlog; backlog drain (immediate re-poll) keeps the queue moving.
+
 ---
 
-## Tauri Commands
+## Initialization
+
+### Tauri binary (`lib.rs` setup)
+
+```rust
+tauri::Builder::default()
+    .setup(|app| {
+        // ... existing vault setup ...
+        if let Ok(db_url) = std::env::var("DATABASE_URL") {
+            if let Some(db_path) = get_current_db_path(app) {
+                let config = OutboxConfig { sqlite_path: db_path, db_url, ..Default::default() };
+                spawn_outbox_worker(app.handle(), config);
+            }
+        }
+        Ok(())
+    })
+```
+
+### MCP binary (`curated_thoughts_mcp.rs` main)
+
+```rust
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let p = retrieval::resolve_brain_paths();
+    // ... existing setup ...
+
+    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+        let config = OutboxConfig {
+            sqlite_path: p.db_path.clone(),
+            db_url,
+            ..Default::default()
+        };
+        tokio::spawn(OutboxWorker::run(config));
+    }
+
+    // ... existing MCP server start ...
+}
+```
+
+### Tauri runtime commands (desktop override)
 
 ```rust
 #[tauri::command]
@@ -188,10 +249,9 @@ async fn start_outbox_worker(
     db_url: String,
     poll_interval_ms: Option<u64>,
     batch_size: Option<usize>,
-    on_error: Option<String>,           // "halt" | "skip"
+    on_error: Option<String>,        // "halt" | "skip"
     state: State<'_, OutboxWorkerState>,
-    db_state: State<'_, DbState>,
-    db_path: State<'_, DbPathState>,    // path to SQLite file for read conn
+    vault_state: State<'_, VaultConfigState>,
 ) -> Result<(), String>
 
 #[tauri::command]
@@ -209,7 +269,7 @@ async fn stop_outbox_worker(
 | Tier | Trigger | Behaviour |
 |---|---|---|
 | Per-event | Postgres insert fails | `Halt`: stop batch, ack prior successes. `Skip`: ack event, continue. |
-| Worker-level | SQLite read/ack fails | Log to stderr + emit `outbox-worker-error` Tauri event |
+| Worker-level | SQLite read/ack fails | Log to stderr + emit `outbox-worker-error` Tauri event (desktop) or stderr only (MCP) |
 
 `outbox-worker-error` payload:
 ```json
@@ -218,9 +278,11 @@ async fn stop_outbox_worker(
 
 `fatal: true` means the worker stopped itself. Frontend may surface this in settings UI or ignore it.
 
+**Known limitation — halt on deterministic failure:** `ErrorPolicy::Halt` will retry the same failing event every poll cycle if the failure is deterministic (e.g., Postgres schema mismatch, constraint violation). This is intentional — matches JS package behaviour, preserves ordering, requires operator intervention to resolve. `max_retries` / circuit-breaker is deferred to a follow-up spec.
+
 ---
 
-## enableOutbox JS Change
+## `enableOutbox` JS Change
 
 `src/lib/wiki.ts` — one-line change to `createWiki` call:
 
@@ -246,29 +308,31 @@ All PRs require `/test-driven-development`. Tests written before implementation.
 
 | Layer | Method |
 |---|---|
-| `OutboxEvent` SQLite deserialization | Unit — `open_in_memory()`, insert raw outbox row, assert parse |
-| `sync_batch` happy path | Unit — in-memory SQLite + sqlx test pool |
-| Concurrency guard | Unit — two concurrent `sync_batch()` calls, assert one returns immediately |
-| Idempotency | Unit — deliver same event twice, assert single Postgres row |
-| Halt-on-error | Unit — inject Postgres failure mid-batch, assert ordering preserved, prior events acked |
+| `OutboxEvent` SQLite deserialization | Unit — insert raw outbox row into in-memory SQLite, assert parse |
+| `sync_batch` happy path | Unit — in-memory SQLite + `MockSink` |
+| Concurrency guard | Unit — two concurrent `sync_batch()` calls, assert second returns immediately |
+| Idempotency | Unit — deliver same event twice via `MockSink`, assert single insert attempt |
+| Halt-on-error | Unit — `MockSink` returns error mid-batch, assert ordering preserved, prior events acked |
 | Skip policy | Unit — `ErrorPolicy::Skip`, assert subsequent events processed after failure |
 | Backlog drain | Unit — full batch returned, assert immediate re-poll triggered |
-| Integration | `DATABASE_URL` env var required; skipped when absent (CI opt-in) |
+| Worker dedicated connection | Unit — assert worker opens its own connection (not DbState), busy_timeout set |
+| MCP auto-init | Unit — `DATABASE_URL` set, assert `OutboxWorker::run` called in MCP main |
+| Integration | Real SQLite + real Postgres; gated on `DATABASE_URL` env var (CI opt-in) |
 
 ---
 
 ## Parallel PR Plan
 
-Implementation uses `/subagent-driven-development`. PRs 1–3 are independent and ship in parallel. PR 4 merges after PRs 1 and 2.
+Implementation uses `/subagent-driven-development`. PRs 1, 3 are fully independent. PR 2 is semi-parallel with PR 1. PR 4 depends on PRs 1 + 2.
 
 ### PR 1 — Outbox types + SQLite polling (`src-tauri/src/outbox/mod.rs`)
 
 **Scope:**
 - `OutboxEvent`, `OutboxConfig`, `ErrorPolicy` structs
 - `Sink` trait: `async fn insert_event(&self, event: &OutboxEvent) -> anyhow::Result<()>`
-- `OutboxWorker` with `sync_batch(sink: &dyn Sink)` — no Postgres dependency, no Tauri wiring yet
-- SQLite fetch and ack helpers (`fetch_pending`, `acknowledge`)
-- Unit tests: deserialization, concurrency guard, halt/skip policies, backlog drain logic (using a `MockSink`)
+- `OutboxWorker` with `sync_batch(sink: &dyn Sink)` — no Postgres dependency, no Tauri wiring
+- Dedicated SQLite connection logic: open with `PRAGMA busy_timeout = 5000`, `spawn_blocking` wrappers for fetch and ack
+- Unit tests: deserialization, concurrency guard, halt/skip policies, backlog drain, dedicated connection isolation
 
 **No new crate dependencies.** Pure Rust + rusqlite (already in tree).
 
@@ -277,12 +341,12 @@ Implementation uses `/subagent-driven-development`. PRs 1–3 are independent an
 ### PR 2 — Postgres sink (`src-tauri/src/outbox/postgres.rs`)
 
 **Scope:**
-- `sqlx` dependency added to `Cargo.toml` (`postgres`, `runtime-tokio-native-tls`, `json`, `macros` features)
+- `sqlx` added to `src-tauri/Cargo.toml` (`postgres`, `runtime-tokio-native-tls`, `json`, `macros` features)
 - `PgSink::new(db_url)` — creates pool, runs `CREATE TABLE IF NOT EXISTS`
-- `PgSink::insert_event(pool, event)` — single-event insert with `ON CONFLICT DO NOTHING`
+- `PgSink` implements `Sink` trait — single-event insert with `ON CONFLICT DO NOTHING`
 - Unit tests: idempotency, `ON CONFLICT` behaviour, table creation is re-entrant
 
-**Semi-parallel with PR 1** — requires `OutboxEvent` and `Sink` trait from PR 1 to be merged (or developed against the PR 1 branch). Postgres logic is otherwise independent.
+**Semi-parallel with PR 1** — requires `OutboxEvent` and `Sink` trait from PR 1 merged (or developed against PR 1 branch). Postgres logic is otherwise independent.
 
 ---
 
@@ -291,17 +355,17 @@ Implementation uses `/subagent-driven-development`. PRs 1–3 are independent an
 **Scope:**
 - Add `enableOutbox: true` to `createWiki` config
 - Verify existing `wiki.test.ts` passes
-- No new tests required (behaviour owned by `core-llm-wiki`)
 
 **Fully independent.** No Rust changes. Ships any time.
 
 ---
 
-### PR 4 — Tauri wiring + integration (depends on PR 1 + PR 2)
+### PR 4 — Tauri + MCP wiring (depends on PR 1 + PR 2)
 
 **Scope:**
-- `lib.rs`: `OutboxWorkerState`, `DbPathState`, `start_outbox_worker`, `stop_outbox_worker` commands
-- Wire `OutboxWorker` + `PgSink` together inside commands
+- `lib.rs`: `OutboxWorkerState`, auto-init from `DATABASE_URL` in `tauri::Builder::setup`, `start_outbox_worker`, `stop_outbox_worker` commands
+- `curated_thoughts_mcp.rs`: auto-init from `DATABASE_URL` in `main()`
+- `tools/Cargo.toml`: add `sqlx` dependency (mirrors `src-tauri/Cargo.toml`)
 - Integration test: real SQLite + real Postgres (env-var gated)
 - `outbox-worker-error` Tauri event emission
 
@@ -309,7 +373,9 @@ Implementation uses `/subagent-driven-development`. PRs 1–3 are independent an
 
 ## Constraints
 
-- Single worker per SQLite file. No row-level locking. Documented in code and README.
-- `mapEvent` equivalent is a fixed generic passthrough — not pluggable at runtime. Enterprise projections live in Postgres, not in Rust.
-- Worker is opt-in. No impact on users who do not call `start_outbox_worker`.
-- `serde_json::Value` used for payload — no schema enforcement in Rust.
+- Single worker per SQLite file. No row-level locking or lease mechanism. Running two workers against the same file causes duplicate Postgres writes. Documented in code.
+- Generic passthrough only — no per-table mapping in Rust. Enterprise projections live in Postgres.
+- Worker is opt-in. No impact on users who do not set `DATABASE_URL`.
+- `serde_json::Value` for payload — no schema enforcement in Rust.
+- `ErrorPolicy::Halt` on deterministic failure = infinite retry loop. Operator must stop the worker and fix the root cause. `max_retries` deferred.
+- Throughput: one Postgres transaction per event. Background sync use case; not optimized for bulk throughput.
