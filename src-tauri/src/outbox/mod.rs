@@ -21,6 +21,8 @@ pub enum ErrorPolicy {
 pub struct OutboxConfig {
     pub sqlite_path: PathBuf,
     pub db_url: String,
+    /// Optional Tauri app handle for desktop error event emission.
+    pub event_handle: Option<tauri::AppHandle>,
     /// SQLite table name written by core-llm-wiki. Default: "outbox".
     pub outbox_table: String,
     pub poll_interval_ms: u64,
@@ -34,6 +36,7 @@ impl Default for OutboxConfig {
         Self {
             sqlite_path: PathBuf::new(),
             db_url: String::new(),
+            event_handle: None,
             outbox_table: "outbox".into(),
             poll_interval_ms: 5000,
             batch_size: 100,
@@ -83,8 +86,8 @@ pub(crate) async fn fetch_pending(
         events
             .into_iter()
             .map(|(id, entity_id, table_name, record_id, operation, payload_str, created_at)| {
-                let payload = serde_json::from_str(&payload_str)
-                    .unwrap_or(serde_json::Value::Null);
+                let payload: serde_json::Value = serde_json::from_str(&payload_str)
+                    .map_err(|e| anyhow::anyhow!("malformed outbox payload for id={id}: {e}"))?;
                 Ok(OutboxEvent { id, entity_id, table_name, record_id, operation, payload, created_at })
             })
             .collect()
@@ -131,7 +134,7 @@ impl OutboxWorker {
     /// Opens a dedicated SQLite connection to `sqlite_path`.
     pub fn open(sqlite_path: &std::path::Path) -> anyhow::Result<Self> {
         let conn = Connection::open(sqlite_path)?;
-        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             running: Arc::new(AtomicBool::new(false)),
@@ -203,7 +206,13 @@ impl OutboxWorker {
 
     /// Long-running poll loop. Call via `tokio::spawn`; stop via `JoinHandle::abort`.
     /// Sleeps before the first poll intentionally — avoids thundering herd on startup.
-    pub async fn run<S: Sink>(self, sink: S, config: OutboxConfig) {
+    /// `on_error` is called for every poll/drain error; use it to emit Tauri events or log.
+    pub async fn run<S: Sink, F: Fn(&anyhow::Error) + Send + 'static>(
+        self,
+        sink: S,
+        config: OutboxConfig,
+        on_error: F,
+    ) {
         let interval = std::time::Duration::from_millis(config.poll_interval_ms);
         loop {
             tokio::time::sleep(interval).await;
@@ -214,7 +223,7 @@ impl OutboxWorker {
                             Ok(true) => {}
                             Ok(false) => break,
                             Err(e) => {
-                                eprintln!("[outbox] worker error during drain: {e}");
+                                on_error(&e);
                                 break;
                             }
                         }
@@ -222,7 +231,7 @@ impl OutboxWorker {
                 }
                 Ok(false) => {}
                 Err(e) => {
-                    eprintln!("[outbox] worker error: {e}");
+                    on_error(&e);
                 }
             }
         }
@@ -447,5 +456,43 @@ mod sqlite_tests {
         acknowledge(conn.clone(), "outbox", vec![]).await.unwrap();
         let remaining = fetch_pending(conn, "outbox", 10).await.unwrap();
         assert_eq!(remaining.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_pending_errors_on_malformed_payload() {
+        let f = NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outbox (
+               id TEXT PRIMARY KEY, entity_id TEXT, table_name TEXT,
+               record_id TEXT, operation TEXT, payload TEXT, created_at INTEGER
+             );",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO outbox VALUES ('bad1','e','t','r','INSERT','NOT_VALID_JSON',0)",
+            [],
+        ).unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+        let result = fetch_pending(conn, "outbox", 10).await;
+        assert!(result.is_err(), "must fail on malformed JSON payload");
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn worker_open_enables_wal_mode() {
+        let f = NamedTempFile::new().unwrap();
+        let worker = OutboxWorker::open(f.path()).unwrap();
+        let mode: String = worker
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
     }
 }

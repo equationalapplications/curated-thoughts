@@ -1,6 +1,7 @@
 use crate::outbox::{OutboxEvent, Sink};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tauri::Emitter;
 
 pub struct PgSink {
     pool: PgPool,
@@ -63,18 +64,48 @@ impl Sink for PgSink {
     }
 }
 
-pub fn spawn_postgres_worker(config: crate::outbox::OutboxConfig) -> tokio::task::JoinHandle<()> {
+#[derive(serde::Serialize, Clone)]
+struct OutboxWorkerError {
+    error: String,
+}
+
+pub fn spawn_postgres_worker(
+    config: crate::outbox::OutboxConfig,
+    app_handle: Option<tauri::AppHandle>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let emit = |app_handle: &Option<tauri::AppHandle>, msg: String| {
+            eprintln!("[outbox] {msg}");
+            if let Some(ref handle) = app_handle {
+                let _ = handle.emit("outbox-worker-error", OutboxWorkerError { error: msg });
+            }
+        };
+
         let sink = match PgSink::new(&config.db_url).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[outbox] failed to connect to Postgres: {e}");
+                emit(&app_handle, format!("failed to connect to Postgres: {e}"));
                 return;
             }
         };
         match crate::outbox::OutboxWorker::open(&config.sqlite_path) {
-            Ok(worker) => worker.run(sink, config).await,
-            Err(e) => eprintln!("[outbox] failed to open SQLite: {e}"),
+            Ok(worker) => {
+                let on_error = {
+                    let app_handle = app_handle.clone();
+                    move |e: &anyhow::Error| {
+                        let msg = e.to_string();
+                        eprintln!("[outbox] worker error: {msg}");
+                        if let Some(ref handle) = app_handle {
+                            let _ = handle.emit(
+                                "outbox-worker-error",
+                                OutboxWorkerError { error: msg },
+                            );
+                        }
+                    }
+                };
+                worker.run(sink, config, on_error).await;
+            }
+            Err(e) => emit(&app_handle, format!("failed to open SQLite: {e}")),
         }
     })
 }

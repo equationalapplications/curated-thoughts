@@ -2214,7 +2214,7 @@ pub fn run() {
                         db_url,
                         ..OutboxConfig::default()
                     };
-                    let handle = spawn_postgres_worker(config);
+                    let handle = spawn_postgres_worker(config, Some(app.app_handle().clone()));
                     let state = app.state::<OutboxWorkerState>();
                     *state.0.lock().unwrap() = Some(handle);
                 }
@@ -2297,6 +2297,7 @@ pub fn run() {
 
 #[tauri::command]
 async fn start_outbox_worker(
+    app_handle: tauri::AppHandle,
     db_url: String,
     poll_interval_ms: Option<u64>,
     batch_size: Option<usize>,
@@ -2330,7 +2331,7 @@ async fn start_outbox_worker(
         },
         ..OutboxConfig::default()
     };
-    *guard = Some(spawn_postgres_worker(config));
+    *guard = Some(spawn_postgres_worker(config, Some(app_handle)));
     Ok(())
 }
 
