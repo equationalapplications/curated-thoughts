@@ -617,7 +617,7 @@ fn start_file_watcher_inner(
     Ok(())
 }
 
-/// Best-effort restore of DB handle, pipeline, and file watcher after a failed `switch_vault`.
+/// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
 fn recover_after_failed_switch_vault(
     app: &AppHandle,
@@ -628,6 +628,7 @@ fn recover_after_failed_switch_vault(
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
     status_state: State<'_, WikiStatusState>,
+    outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
     let reopened = (|| -> Result<(), String> {
         let mut guard = db_state.0.lock().map_err(|_| "db mutex poisoned".to_string())?;
@@ -659,6 +660,15 @@ fn recover_after_failed_switch_vault(
         status_state.clone(),
     ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
+    }
+    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+        let config = OutboxConfig {
+            sqlite_path: db_path.to_path_buf(),
+            db_url,
+            ..OutboxConfig::default()
+        };
+        *outbox_state.0.lock().unwrap() =
+            Some(spawn_postgres_worker(config, Some(app.clone())));
     }
     true
 }
@@ -782,6 +792,7 @@ fn switch_vault(
             watcher_started.clone(),
             heal_scheduler.clone(),
             status_state.clone(),
+            outbox_state.clone(),
         );
     }
 
@@ -2309,6 +2320,7 @@ pub fn run() {
             get_structural_neighbors,
             start_outbox_worker,
             stop_outbox_worker,
+            outbox_is_configured,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
@@ -2354,11 +2366,20 @@ async fn start_outbox_worker(
 async fn stop_outbox_worker(
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
-    if let Some(handle) = guard.take() {
+    let handle = {
+        let mut guard = state.0.lock().unwrap();
+        guard.take()
+    };
+    if let Some(handle) = handle {
         handle.abort();
+        let _ = handle.await;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn outbox_is_configured() -> bool {
+    std::env::var("DATABASE_URL").is_ok()
 }
 
 #[cfg(test)]

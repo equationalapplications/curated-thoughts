@@ -91,7 +91,7 @@ src-tauri/src/outbox/
 | File | Change |
 |---|---|
 | `src-tauri/src/lib.rs` | `OutboxWorkerState`, auto-init from `DATABASE_URL` in setup, `start_outbox_worker`, `stop_outbox_worker` commands |
-| `src-tauri/Cargo.toml` | Add `sqlx` with `postgres`, `runtime-tokio-native-tls`, `json`, `macros` features |
+| `src-tauri/Cargo.toml` | Add `sqlx` with `postgres`, `runtime-tokio-native-tls`, `json` features |
 | `src/lib/wiki.ts` | Add `enableOutbox: true` to `createWiki` config |
 | `tools/src/bin/curated_thoughts_mcp.rs` | Auto-init `OutboxWorker` from `DATABASE_URL` in `main()` |
 
@@ -236,8 +236,8 @@ async fn main() -> anyhow::Result<()> {
             db_url,
             ..Default::default()
         };
-        // spawn_postgres_worker is pub in tauri_app_lib::outbox — sqlx never enters tools/
-        tauri_app_lib::outbox::spawn_postgres_worker(config);
+        // spawn_postgres_worker lives in tauri_app_lib::outbox::postgres — sqlx never enters tools/
+        tauri_app_lib::outbox::postgres::spawn_postgres_worker(config, None);
     }
 
     // ... existing MCP server start ...
