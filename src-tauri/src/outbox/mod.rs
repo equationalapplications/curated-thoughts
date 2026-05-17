@@ -46,7 +46,7 @@ impl Default for OutboxConfig {
 pub trait Sink: Send + Sync + 'static {
     fn insert_event(
         &self,
-        event: OutboxEvent,
+        event: &OutboxEvent,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 
@@ -76,7 +76,9 @@ pub(crate) async fn fetch_pending(
 ) -> anyhow::Result<Vec<OutboxEvent>> {
     let table = validate_outbox_table_name(table)?.to_string();
     tokio::task::spawn_blocking(move || {
-        let guard = conn.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+        let guard = conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
         let sql = format!(
             "SELECT id, entity_id, table_name, record_id, operation, payload, created_at \
              FROM {table} ORDER BY created_at ASC, rowid ASC LIMIT ?1"
@@ -97,11 +99,23 @@ pub(crate) async fn fetch_pending(
             .collect::<Result<Vec<_>, _>>()?;
         events
             .into_iter()
-            .map(|(id, entity_id, table_name, record_id, operation, payload_str, created_at)| {
-                let payload: serde_json::Value = serde_json::from_str(&payload_str)
-                    .map_err(|e| anyhow::anyhow!("malformed outbox payload for id={id}: {e}"))?;
-                Ok(OutboxEvent { id, entity_id, table_name, record_id, operation, payload, created_at })
-            })
+            .map(
+                |(id, entity_id, table_name, record_id, operation, payload_str, created_at)| {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&payload_str).map_err(|e| {
+                            anyhow::anyhow!("malformed outbox payload for id={id}: {e}")
+                        })?;
+                    Ok(OutboxEvent {
+                        id,
+                        entity_id,
+                        table_name,
+                        record_id,
+                        operation,
+                        payload,
+                        created_at,
+                    })
+                },
+            )
             .collect()
     })
     .await?
@@ -117,11 +131,15 @@ pub(crate) async fn acknowledge(
     }
     let table = validate_outbox_table_name(table)?.to_string();
     tokio::task::spawn_blocking(move || {
-        let guard = conn.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+        let guard = conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
         let chunk_size = 500;
         for chunk in ids.chunks(chunk_size) {
             // ?1..?N bind to params[0..N-1] by index — do not replace with anonymous ?
-            let placeholders = chunk.iter().enumerate()
+            let placeholders = chunk
+                .iter()
+                .enumerate()
                 .map(|(i, _)| format!("?{}", i + 1))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -156,7 +174,10 @@ impl OutboxWorker {
     /// For tests: wrap an existing in-memory or temp connection.
     #[cfg(test)]
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn, running: Arc::new(AtomicBool::new(false)) }
+        Self {
+            conn,
+            running: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Run one poll cycle. Returns `true` if the batch was full (caller may
@@ -174,17 +195,9 @@ impl OutboxWorker {
         result
     }
 
-    async fn do_sync<S: Sink>(
-        &self,
-        sink: &S,
-        config: &OutboxConfig,
-    ) -> anyhow::Result<bool> {
-        let events = fetch_pending(
-            self.conn.clone(),
-            &config.outbox_table,
-            config.batch_size,
-        )
-        .await?;
+    async fn do_sync<S: Sink>(&self, sink: &S, config: &OutboxConfig) -> anyhow::Result<bool> {
+        let events =
+            fetch_pending(self.conn.clone(), &config.outbox_table, config.batch_size).await?;
 
         if events.is_empty() {
             return Ok(false);
@@ -196,7 +209,7 @@ impl OutboxWorker {
 
         for event in events {
             let id = event.id.clone();
-            match sink.insert_event(event).await {
+            match sink.insert_event(&event).await {
                 Ok(()) => {
                     processed_ids.push(id);
                 }
@@ -233,18 +246,16 @@ impl OutboxWorker {
         loop {
             tokio::time::sleep(interval).await;
             match self.sync_batch(&sink, &config).await {
-                Ok(true) => {
-                    loop {
-                        match self.sync_batch(&sink, &config).await {
-                            Ok(true) => {}
-                            Ok(false) => break,
-                            Err(e) => {
-                                on_error(&e);
-                                break;
-                            }
+                Ok(true) => loop {
+                    match self.sync_batch(&sink, &config).await {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(e) => {
+                            on_error(&e);
+                            break;
                         }
                     }
-                }
+                },
                 Ok(false) => {}
                 Err(e) => {
                     on_error(&e);
@@ -260,8 +271,8 @@ pub mod postgres;
 mod sync_batch_tests {
     use super::*;
     use rusqlite::Connection;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
     fn setup_outbox_db() -> (NamedTempFile, Arc<Mutex<Connection>>) {
@@ -278,19 +289,24 @@ mod sync_batch_tests {
                payload TEXT NOT NULL,
                created_at INTEGER NOT NULL
              );",
-        ).unwrap();
+        )
+        .unwrap();
         (f, Arc::new(Mutex::new(conn)))
     }
 
     fn insert_raw(conn: &Arc<Mutex<Connection>>, id: &str, created_at: i64) {
-        conn.lock().unwrap().execute(
-            "INSERT INTO outbox VALUES (?, 'tier_fact', 'entries', 'rec1', 'INSERT', '{}', ?)",
-            rusqlite::params![id, created_at],
-        ).unwrap();
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO outbox VALUES (?, 'tier_fact', 'entries', 'rec1', 'INSERT', '{}', ?)",
+                rusqlite::params![id, created_at],
+            )
+            .unwrap();
     }
 
     fn count_remaining(conn: &Arc<Mutex<Connection>>) -> i64 {
-        conn.lock().unwrap()
+        conn.lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))
             .unwrap()
     }
@@ -298,16 +314,19 @@ mod sync_batch_tests {
     /// Sink that succeeds for all events and records call count.
     struct CountingSink(Arc<AtomicUsize>);
     impl Sink for CountingSink {
-        async fn insert_event(&self, _event: OutboxEvent) -> anyhow::Result<()> {
+async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
 
     /// Sink that fails after N successful inserts.
-    struct FailAfterSink { after: usize, count: Arc<AtomicUsize> }
+    struct FailAfterSink {
+        after: usize,
+        count: Arc<AtomicUsize>,
+    }
     impl Sink for FailAfterSink {
-        async fn insert_event(&self, _event: OutboxEvent) -> anyhow::Result<()> {
+async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
             let n = self.count.fetch_add(1, Ordering::SeqCst);
             if n >= self.after {
                 anyhow::bail!("injected failure");
@@ -322,9 +341,16 @@ mod sync_batch_tests {
         insert_raw(&conn, "a", 1000);
         insert_raw(&conn, "b", 2000);
         let counter = Arc::new(AtomicUsize::new(0));
-        let config = OutboxConfig { outbox_table: "outbox".into(), batch_size: 10, ..Default::default() };
+        let config = OutboxConfig {
+            outbox_table: "outbox".into(),
+            batch_size: 10,
+            ..Default::default()
+        };
         let worker = OutboxWorker::new(conn);
-        worker.sync_batch(&CountingSink(counter.clone()), &config).await.unwrap();
+        worker
+            .sync_batch(&CountingSink(counter.clone()), &config)
+            .await
+            .unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         assert_eq!(count_remaining(&worker.conn), 0);
     }
@@ -334,12 +360,23 @@ mod sync_batch_tests {
         let (_f, conn) = setup_outbox_db();
         insert_raw(&conn, "a", 1000);
         let counter = Arc::new(AtomicUsize::new(0));
-        let config = OutboxConfig { outbox_table: "outbox".into(), batch_size: 10, ..Default::default() };
+        let config = OutboxConfig {
+            outbox_table: "outbox".into(),
+            batch_size: 10,
+            ..Default::default()
+        };
         let worker = Arc::new(OutboxWorker::new(conn));
         // Pre-set running flag to simulate in-progress call
         worker.running.store(true, Ordering::SeqCst);
-        worker.sync_batch(&CountingSink(counter.clone()), &config).await.unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "should skip when already running");
+        worker
+            .sync_batch(&CountingSink(counter.clone()), &config)
+            .await
+            .unwrap();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "should skip when already running"
+        );
         worker.running.store(false, Ordering::SeqCst);
     }
 
@@ -358,8 +395,19 @@ mod sync_batch_tests {
         };
         let worker = OutboxWorker::new(conn);
         // Fails after first successful insert — Halt returns Err, prior events are acked
-        let result = worker.sync_batch(&FailAfterSink { after: 1, count: count.clone() }, &config).await;
-        assert!(result.is_err(), "Halt policy must propagate the insert error");
+        let result = worker
+            .sync_batch(
+                &FailAfterSink {
+                    after: 1,
+                    count: count.clone(),
+                },
+                &config,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "Halt policy must propagate the insert error"
+        );
         // "a" was acked, "b" and "c" remain
         assert_eq!(count_remaining(&worker.conn), 2);
     }
@@ -379,8 +427,21 @@ mod sync_batch_tests {
         };
         let worker = OutboxWorker::new(conn);
         // Fails on second event, skip means it's still acked
-        worker.sync_batch(&FailAfterSink { after: 1, count: count.clone() }, &config).await.unwrap();
-        assert_eq!(count_remaining(&worker.conn), 0, "all events acked including skipped");
+        worker
+            .sync_batch(
+                &FailAfterSink {
+                    after: 1,
+                    count: count.clone(),
+                },
+                &config,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            count_remaining(&worker.conn),
+            0,
+            "all events acked including skipped"
+        );
     }
 
     #[tokio::test]
@@ -396,7 +457,10 @@ mod sync_batch_tests {
             ..Default::default()
         };
         let worker = OutboxWorker::new(conn);
-        let drained = worker.sync_batch(&CountingSink(counter.clone()), &config).await.unwrap();
+        let drained = worker
+            .sync_batch(&CountingSink(counter.clone()), &config)
+            .await
+            .unwrap();
         assert!(drained, "should signal backlog drain when batch was full");
     }
 }
@@ -428,10 +492,13 @@ mod sqlite_tests {
     }
 
     fn insert_raw(conn: &Arc<Mutex<Connection>>, id: &str, created_at: i64) {
-        conn.lock().unwrap().execute(
-            "INSERT INTO outbox VALUES (?, 'tier_fact', 'entries', 'rec1', 'INSERT', '{}', ?)",
-            rusqlite::params![id, created_at],
-        ).unwrap();
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO outbox VALUES (?, 'tier_fact', 'entries', 'rec1', 'INSERT', '{}', ?)",
+                rusqlite::params![id, created_at],
+            )
+            .unwrap();
     }
 
     #[tokio::test]
@@ -460,7 +527,9 @@ mod sqlite_tests {
         let (_f, conn) = setup_outbox_db();
         insert_raw(&conn, "a", 1000);
         insert_raw(&conn, "b", 2000);
-        acknowledge(conn.clone(), "outbox", vec!["a".into()]).await.unwrap();
+        acknowledge(conn.clone(), "outbox", vec!["a".into()])
+            .await
+            .unwrap();
         let remaining = fetch_pending(conn, "outbox", 10).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, "b");
@@ -484,11 +553,13 @@ mod sqlite_tests {
                id TEXT PRIMARY KEY, entity_id TEXT, table_name TEXT,
                record_id TEXT, operation TEXT, payload TEXT, created_at INTEGER
              );",
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO outbox VALUES ('bad1','e','t','r','INSERT','NOT_VALID_JSON',0)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let conn = Arc::new(Mutex::new(conn));
         let result = fetch_pending(conn, "outbox", 10).await;
         assert!(result.is_err(), "must fail on malformed JSON payload");

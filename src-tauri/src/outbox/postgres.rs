@@ -44,7 +44,7 @@ impl PgSink {
 }
 
 impl Sink for PgSink {
-    async fn insert_event(&self, event: OutboxEvent) -> anyhow::Result<()> {
+    async fn insert_event(&self, event: &OutboxEvent) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO wiki_outbox_events \
              (id, entity_id, table_name, record_id, operation, payload, created_at) \
@@ -200,8 +200,8 @@ mod tests {
             created_at: 1_000_000,
         };
 
-        sink.insert_event(event.clone()).await.unwrap();
-        sink.insert_event(event.clone()).await.unwrap();
+        sink.insert_event(&event).await.unwrap();
+        sink.insert_event(&event).await.unwrap();
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM wiki_outbox_events WHERE id = $1")
