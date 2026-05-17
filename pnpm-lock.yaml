@@ -18,8 +18,8 @@ importers:
         specifier: ^0.50.0
         version: 0.50.0(@floating-ui/dom@1.7.6)(@types/hast@3.0.4)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@equationalapplications/core-llm-wiki':
-        specifier: ^4.6.0
-        version: 4.6.0
+        specifier: ^4.9.0
+        version: 4.9.0
       '@equationalapplications/react-llm-wiki':
         specifier: ^4.6.0
         version: 4.6.0(react@19.2.6)
@@ -240,6 +240,10 @@ packages:
 
   '@equationalapplications/core-llm-wiki@4.6.0':
     resolution: {integrity: sha512-EfxLwRrX0QBn6M+wjuIFNAHM+2mO4ktzlkr6XsZcM7KItRtHCBxo+cKPrpGzp57Wxwvxf0Jp73eXIVxfVJCTTA==}
+    engines: {node: '>=20'}
+
+  '@equationalapplications/core-llm-wiki@4.9.0':
+    resolution: {integrity: sha512-hlNXH4wEkG0k1EHdCZc8SVqF6AOYYjixBDAYKviKvWjeUw59X46ww8cePnfTD/BYJYRvSc4x72274igL5YhCXg==}
     engines: {node: '>=20'}
 
   '@equationalapplications/react-llm-wiki@4.6.0':
@@ -3826,6 +3830,10 @@ snapshots:
   '@emoji-mart/data@1.2.1': {}
 
   '@equationalapplications/core-llm-wiki@4.6.0':
+    dependencies:
+      minisearch: 7.2.0
+
+  '@equationalapplications/core-llm-wiki@4.9.0':
     dependencies:
       minisearch: 7.2.0
 
