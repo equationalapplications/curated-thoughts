@@ -2303,28 +2303,23 @@ async fn start_outbox_worker(
     batch_size: Option<usize>,
     on_error: Option<String>,
     state: tauri::State<'_, OutboxWorkerState>,
-    vault_state: tauri::State<'_, VaultConfigState>,
 ) -> Result<(), String> {
-    let sqlite_path = vault_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or("no vault open")?;
-    let sqlite_path = std::path::PathBuf::from(sqlite_path)
+    let sqlite_path = dirs::home_dir()
+        .unwrap_or_default()
         .join(".brain")
         .join("brain.db");
 
     let mut guard = state.0.lock().unwrap();
-    if guard.is_some() {
-        return Ok(());
+    if let Some(ref handle) = *guard {
+        if !handle.is_finished() {
+            return Ok(());
+        }
     }
     let config = OutboxConfig {
         sqlite_path,
         db_url,
-        poll_interval_ms: poll_interval_ms.unwrap_or(5000),
-        batch_size: batch_size.unwrap_or(100),
+        poll_interval_ms: poll_interval_ms.unwrap_or(5000).max(100),
+        batch_size: batch_size.unwrap_or(100).max(1),
         on_error: match on_error.as_deref() {
             Some("skip") => outbox::ErrorPolicy::Skip,
             _ => outbox::ErrorPolicy::Halt,
