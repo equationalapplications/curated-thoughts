@@ -29,6 +29,7 @@ pub struct OutboxConfig {
 }
 
 impl Default for OutboxConfig {
+    /// Sentinel defaults only — callers must set `sqlite_path` and `db_url` before use.
     fn default() -> Self {
         Self {
             sqlite_path: PathBuf::new(),
