@@ -58,6 +58,7 @@ export const wiki = createWiki(tauriWikiAdapter, {
   config: {
     hybridWeight: 0.7,
     preFilterLimit: 50,
+    enableOutbox: true,
   },
   onRetrievalFallback: (err: Error) => {
     console.warn("[wiki] embed unavailable, using keyword search:", err.message);
