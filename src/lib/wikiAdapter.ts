@@ -21,10 +21,10 @@ export const tauriWikiAdapter: SQLiteAdapter = {
     return invoke<T | null>("wiki_get_first", { sql, params });
   },
 
-  async withTransactionAsync<T>(fn: () => Promise<T>): Promise<T> {
+  async withTransactionAsync<T>(fn: (tx: SQLiteAdapter) => Promise<T>): Promise<T> {
     await invoke("wiki_exec", { sql: "BEGIN" });
     try {
-      const result = await fn();
+      const result = await fn(this);
       await invoke("wiki_exec", { sql: "COMMIT" });
       return result;
     } catch (e) {
