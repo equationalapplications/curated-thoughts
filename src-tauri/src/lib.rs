@@ -91,6 +91,16 @@ fn update_wiki_status(
     emit_wiki_status(app, &guard);
 }
 
+fn configured_database_url() -> Option<String> {
+    let db_url = std::env::var("DATABASE_URL").ok()?;
+    let db_url = db_url.trim();
+    if db_url.is_empty() {
+        None
+    } else {
+        Some(db_url.to_string())
+    }
+}
+
 fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiStatusFlags)) {
     let state = app.state::<WikiStatusState>();
     update_wiki_status(app, &state, updater);
@@ -671,7 +681,7 @@ fn recover_after_failed_switch_vault(
     ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
     }
-    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+    if let Some(db_url) = configured_database_url() {
         let config = OutboxConfig {
             sqlite_path: db_path.to_path_buf(),
             db_url,
@@ -683,17 +693,17 @@ fn recover_after_failed_switch_vault(
 }
 
 #[tauri::command]
-fn switch_vault(
+async fn switch_vault(
     new_path: String,
     restore_backup: bool,
     app: AppHandle,
-    db_state: State<DbState>,
-    vault_state: State<VaultConfigState>,
-    pipeline: State<PipelineHolder>,
-    watcher_started: State<WatcherStarted>,
-    heal_scheduler: State<HealScheduler>,
-    status_state: State<WikiStatusState>,
-    outbox_state: State<OutboxWorkerState>,
+    db_state: State<'_, DbState>,
+    vault_state: State<'_, VaultConfigState>,
+    pipeline: State<'_, PipelineHolder>,
+    watcher_started: State<'_, WatcherStarted>,
+    heal_scheduler: State<'_, HealScheduler>,
+    status_state: State<'_, WikiStatusState>,
+    outbox_state: State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
     let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
     let db_path = brain_dir.join("brain.db");
@@ -729,11 +739,13 @@ fn switch_vault(
 
     // Stop outbox worker before WAL cleanup and DB file operations; its dedicated
     // SQLite connection would otherwise keep polling a stale/replaced file.
-    {
+    let maybe_handle = {
         let mut g = outbox_state.0.lock().unwrap();
-        if let Some(handle) = g.take() {
-            handle.abort();
-        }
+        g.take()
+    };
+    if let Some(handle) = maybe_handle {
+        handle.abort();
+        let _ = handle.await;
     }
 
     let stub_path = release_global_db_lock(&db_state)?;
@@ -816,7 +828,7 @@ fn switch_vault(
     }
 
     if switch_result.is_ok() {
-        if let Ok(db_url) = std::env::var("DATABASE_URL") {
+        if let Some(db_url) = configured_database_url() {
             let config = OutboxConfig {
                 sqlite_path: db_path.clone(),
                 db_url,
@@ -2349,12 +2361,9 @@ async fn start_outbox_worker(
     on_error: Option<String>,
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let db_url = std::env::var("DATABASE_URL").map_err(|_| {
+    let db_url = configured_database_url().ok_or_else(|| {
         "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
     })?;
-    if db_url.is_empty() {
-        return Err("DATABASE_URL is empty; runtime outbox start is not allowed.".to_string());
-    }
 
     let sqlite_path = {
         let db_state = app_handle.state::<DbState>();
@@ -2378,8 +2387,10 @@ async fn start_outbox_worker(
     let config = OutboxConfig {
         sqlite_path,
         db_url,
-        poll_interval_ms: poll_interval_ms.unwrap_or(5000).max(100),
-        batch_size: batch_size.unwrap_or(100).max(1).min(10_000),
+        poll_interval_ms: poll_interval_ms
+            .unwrap_or(5000)
+            .clamp(100, 60_000),
+        batch_size: batch_size.unwrap_or(100).clamp(1, 10_000),
         on_error: match on_error.as_deref() {
             Some("skip") => outbox::ErrorPolicy::Skip,
             _ => outbox::ErrorPolicy::Halt,
@@ -2405,7 +2416,7 @@ async fn stop_outbox_worker(state: tauri::State<'_, OutboxWorkerState>) -> Resul
 
 #[tauri::command]
 fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
-    if std::env::var("DATABASE_URL").is_ok() {
+    if configured_database_url().is_some() {
         return true;
     }
     state
