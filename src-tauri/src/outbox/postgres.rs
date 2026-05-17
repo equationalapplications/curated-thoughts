@@ -21,7 +21,7 @@ impl PgSink {
                 operation   TEXT    NOT NULL,
                 payload     JSONB,
                 created_at  BIGINT  NOT NULL,
-                synced_at   BIGINT  NOT NULL DEFAULT (extract(epoch from now()) * 1000)
+                synced_at   BIGINT  NOT NULL DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
             )",
         )
         .execute(&pool)
