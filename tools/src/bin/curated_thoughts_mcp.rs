@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
             db_url,
             ..tauri_app_lib::outbox::OutboxConfig::default()
         };
-        let _ = tauri_app_lib::outbox::postgres::spawn_postgres_worker(config);
+        let _ = tauri_app_lib::outbox::postgres::spawn_postgres_worker(config, None);
     }
 
     let server = VaultMcpServer {
