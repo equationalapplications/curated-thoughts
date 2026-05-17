@@ -2266,7 +2266,7 @@ pub fn run() {
         .setup({
             let db_path = db_path.clone();
             move |app| {
-                if let Ok(db_url) = std::env::var("DATABASE_URL") {
+                if let Some(db_url) = configured_database_url() {
                     let config = OutboxConfig {
                         sqlite_path: db_path.clone(),
                         db_url,
@@ -2393,7 +2393,10 @@ async fn start_outbox_worker(
         batch_size: batch_size.unwrap_or(100).clamp(1, 10_000),
         on_error: match on_error.as_deref() {
             Some("skip") => outbox::ErrorPolicy::Skip,
-            _ => outbox::ErrorPolicy::Halt,
+            Some("halt") | None => outbox::ErrorPolicy::Halt,
+            Some(other) => {
+                return Err(format!("unsupported on_error value: {}", other));
+            }
         },
         ..OutboxConfig::default()
     };
