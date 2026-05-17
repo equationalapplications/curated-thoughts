@@ -249,12 +249,11 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 #[tauri::command]
 async fn start_outbox_worker(
-    db_url: String,
+    app_handle: AppHandle,
     poll_interval_ms: Option<u64>,
     batch_size: Option<usize>,
     on_error: Option<String>,        // "halt" | "skip"
     state: State<'_, OutboxWorkerState>,
-    vault_state: State<'_, VaultConfigState>,
 ) -> Result<(), String>
 
 #[tauri::command]

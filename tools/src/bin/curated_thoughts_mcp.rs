@@ -87,7 +87,17 @@ async fn main() -> anyhow::Result<()> {
         e
     })?;
 
-    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+    fn configured_database_url() -> Option<String> {
+        let db_url = std::env::var("DATABASE_URL").ok()?;
+        let db_url = db_url.trim();
+        if db_url.is_empty() {
+            None
+        } else {
+            Some(db_url.to_string())
+        }
+    }
+
+    if let Some(db_url) = configured_database_url() {
         let config = tauri_app_lib::outbox::OutboxConfig {
             sqlite_path: p.db_path.clone(),
             db_url,
