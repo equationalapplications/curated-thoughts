@@ -2323,10 +2323,11 @@ async fn start_outbox_worker(
     on_error: Option<String>,
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let sqlite_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".brain")
-        .join("brain.db");
+    let sqlite_path = {
+        let db_state = app_handle.state::<DbState>();
+        let guard = db_state.0.lock().map_err(|e| format!("db state lock poisoned: {e}"))?;
+        guard.0.path().ok_or_else(|| "database path unavailable".to_string()).map(PathBuf::from)?
+    };
 
     let mut guard = state.0.lock().unwrap();
     if let Some(ref handle) = *guard {
