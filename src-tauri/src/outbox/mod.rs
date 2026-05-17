@@ -233,7 +233,7 @@ impl OutboxWorker {
         Ok(full_batch)
     }
 
-    /// Long-running poll loop. Call via `tokio::spawn`; stop via `JoinHandle::abort`.
+    /// Long-running poll loop. Stop via the provided cancellation token.
     /// Sleeps before the first poll intentionally — avoids thundering herd on startup.
     /// `on_error` is called for every poll/drain error; use it to emit Tauri events or log.
     pub async fn run<S: Sink, F: Fn(&anyhow::Error) + Send + 'static>(
@@ -241,12 +241,22 @@ impl OutboxWorker {
         sink: S,
         config: OutboxConfig,
         on_error: F,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         let interval = std::time::Duration::from_millis(config.poll_interval_ms);
-        loop {
+        'outer: loop {
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             tokio::time::sleep(interval).await;
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             match self.sync_batch(&sink, &config).await {
                 Ok(true) => loop {
+                    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                        break 'outer;
+                    }
                     match self.sync_batch(&sink, &config).await {
                         Ok(true) => {}
                         Ok(false) => break,

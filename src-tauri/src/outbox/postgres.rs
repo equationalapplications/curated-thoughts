@@ -1,6 +1,8 @@
 use crate::outbox::{OutboxEvent, Sink};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::Emitter;
 
 pub struct PgSink {
@@ -92,11 +94,33 @@ struct OutboxWorkerError {
     fatal: bool,
 }
 
+pub struct OutboxWorkerHandle {
+    cancel: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl OutboxWorkerHandle {
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn stop(self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        let _ = self.handle.await;
+    }
+}
+
 pub fn spawn_postgres_worker(
     config: crate::outbox::OutboxConfig,
     app_handle: Option<tauri::AppHandle>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> OutboxWorkerHandle {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_run = cancel.clone();
+    let handle = tokio::spawn(async move {
         let emit = |app_handle: &Option<tauri::AppHandle>, msg: String, fatal: bool| {
             eprintln!("[outbox] {msg}");
             if let Some(ref handle) = app_handle {
@@ -112,6 +136,9 @@ pub fn spawn_postgres_worker(
         let sink = {
             let mut delay_ms = 1_000u64;
             loop {
+                if cancel_for_run.load(Ordering::SeqCst) {
+                    return;
+                }
                 match PgSink::new(&config.db_url).await {
                     Ok(s) => break s,
                     Err(e) => {
@@ -126,6 +153,10 @@ pub fn spawn_postgres_worker(
                 }
             }
         };
+
+        if cancel_for_run.load(Ordering::SeqCst) {
+            return;
+        }
 
         match crate::outbox::OutboxWorker::open(&config.sqlite_path) {
             Ok(worker) => {
@@ -145,11 +176,13 @@ pub fn spawn_postgres_worker(
                         }
                     }
                 };
-                worker.run(sink, config, on_error).await;
+                worker.run(sink, config, on_error, cancel_for_run).await;
             }
             Err(e) => emit(&app_handle, format!("failed to open SQLite: {e}"), true),
         }
-    })
+    });
+
+    OutboxWorkerHandle { cancel, handle }
 }
 
 #[cfg(test)]
