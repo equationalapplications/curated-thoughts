@@ -234,7 +234,8 @@ async fn main() -> anyhow::Result<()> {
             db_url,
             ..Default::default()
         };
-        tokio::spawn(OutboxWorker::run(config));
+        // spawn_postgres_worker is pub in tauri_app_lib::outbox — sqlx never enters tools/
+        tauri_app_lib::outbox::spawn_postgres_worker(config);
     }
 
     // ... existing MCP server start ...
@@ -364,9 +365,8 @@ Implementation uses `/subagent-driven-development`. PRs 1, 3 are fully independe
 
 **Scope:**
 - `lib.rs`: `OutboxWorkerState`, auto-init from `DATABASE_URL` in `tauri::Builder::setup`, `start_outbox_worker`, `stop_outbox_worker` commands
-- `curated_thoughts_mcp.rs`: auto-init from `DATABASE_URL` in `main()`
-- `tools/Cargo.toml`: add `sqlx` dependency (mirrors `src-tauri/Cargo.toml`)
-- Integration test: real SQLite + real Postgres (env-var gated)
+- `curated_thoughts_mcp.rs`: auto-init via `tauri_app_lib::outbox::spawn_postgres_worker(config)` — no `sqlx` in `tools/Cargo.toml`; `sqlx` stays encapsulated in `src-tauri` only
+- Integration test: real SQLite + real Postgres via GitHub Actions `services: postgres:` (env-var gated, `DATABASE_URL` set in CI test step only — matches existing pattern)
 - `outbox-worker-error` Tauri event emission
 
 ---
@@ -378,4 +378,5 @@ Implementation uses `/subagent-driven-development`. PRs 1, 3 are fully independe
 - Worker is opt-in. No impact on users who do not set `DATABASE_URL`.
 - `serde_json::Value` for payload — no schema enforcement in Rust.
 - `ErrorPolicy::Halt` on deterministic failure = infinite retry loop. Operator must stop the worker and fix the root cause. `max_retries` deferred.
+- Graceful shutdown on SIGTERM not implemented. Worker task is aborted; in-flight SQLite batch may be re-delivered (idempotency handles it). `CancellationToken`-based drain deferred.
 - Throughput: one Postgres transaction per event. Background sync use case; not optimized for bulk throughput.
