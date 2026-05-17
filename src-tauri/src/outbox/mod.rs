@@ -120,7 +120,259 @@ pub(crate) async fn acknowledge(
     .await?
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub struct OutboxWorker {
+    pub conn: Arc<Mutex<Connection>>,
+    pub running: Arc<AtomicBool>,
+}
+
+impl OutboxWorker {
+    /// Opens a dedicated SQLite connection to `sqlite_path`.
+    pub fn open(sqlite_path: &std::path::Path) -> anyhow::Result<Self> {
+        let conn = Connection::open(sqlite_path)?;
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            running: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// For tests: wrap an existing in-memory or temp connection.
+    #[cfg(test)]
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn, running: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Run one poll cycle. Returns `true` if the batch was full (caller may
+    /// immediately re-poll for backlog drain).
+    pub async fn sync_batch<S: Sink>(
+        &self,
+        sink: &S,
+        config: &OutboxConfig,
+    ) -> anyhow::Result<bool> {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let result = self.do_sync(sink, config).await;
+        self.running.store(false, Ordering::SeqCst);
+        result
+    }
+
+    async fn do_sync<S: Sink>(
+        &self,
+        sink: &S,
+        config: &OutboxConfig,
+    ) -> anyhow::Result<bool> {
+        let events = fetch_pending(
+            self.conn.clone(),
+            &config.outbox_table,
+            config.batch_size,
+        )
+        .await?;
+
+        if events.is_empty() {
+            return Ok(false);
+        }
+
+        let full_batch = events.len() == config.batch_size;
+        let mut processed_ids: Vec<String> = Vec::with_capacity(events.len());
+        let mut halted = false;
+
+        for event in events {
+            let id = event.id.clone();
+            match sink.insert_event(event).await {
+                Ok(()) => {
+                    processed_ids.push(id);
+                }
+                Err(_) => match config.on_error {
+                    ErrorPolicy::Skip => {
+                        processed_ids.push(id);
+                    }
+                    ErrorPolicy::Halt => {
+                        halted = true;
+                        break;
+                    }
+                },
+            }
+        }
+
+        acknowledge(self.conn.clone(), &config.outbox_table, processed_ids).await?;
+        Ok(!halted && full_batch)
+    }
+
+    /// Long-running poll loop. Call via `tokio::spawn`.
+    pub async fn run<S: Sink>(self, sink: S, config: OutboxConfig) {
+        let interval = std::time::Duration::from_millis(config.poll_interval_ms);
+        loop {
+            tokio::time::sleep(interval).await;
+            match self.sync_batch(&sink, &config).await {
+                Ok(true) => {
+                    loop {
+                        match self.sync_batch(&sink, &config).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(e) => {
+                                eprintln!("[outbox] worker error during drain: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("[outbox] worker error: {e}");
+                }
+            }
+        }
+    }
+}
+
 pub mod postgres;
+
+#[cfg(test)]
+mod sync_batch_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::NamedTempFile;
+
+    fn setup_outbox_db() -> (NamedTempFile, Arc<Mutex<Connection>>) {
+        let f = NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             CREATE TABLE outbox (
+               id TEXT PRIMARY KEY,
+               entity_id TEXT NOT NULL,
+               table_name TEXT NOT NULL,
+               record_id TEXT NOT NULL,
+               operation TEXT NOT NULL,
+               payload TEXT NOT NULL,
+               created_at INTEGER NOT NULL
+             );",
+        ).unwrap();
+        (f, Arc::new(Mutex::new(conn)))
+    }
+
+    fn insert_raw(conn: &Arc<Mutex<Connection>>, id: &str, created_at: i64) {
+        conn.lock().unwrap().execute(
+            "INSERT INTO outbox VALUES (?, 'tier_fact', 'entries', 'rec1', 'INSERT', '{}', ?)",
+            rusqlite::params![id, created_at],
+        ).unwrap();
+    }
+
+    fn count_remaining(conn: &Arc<Mutex<Connection>>) -> i64 {
+        conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Sink that succeeds for all events and records call count.
+    struct CountingSink(Arc<AtomicUsize>);
+    impl Sink for CountingSink {
+        async fn insert_event(&self, _event: OutboxEvent) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Sink that fails after N successful inserts.
+    struct FailAfterSink { after: usize, count: Arc<AtomicUsize> }
+    impl Sink for FailAfterSink {
+        async fn insert_event(&self, _event: OutboxEvent) -> anyhow::Result<()> {
+            let n = self.count.fetch_add(1, Ordering::SeqCst);
+            if n >= self.after {
+                anyhow::bail!("injected failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_batch_processes_all_events_and_acks() {
+        let (_f, conn) = setup_outbox_db();
+        insert_raw(&conn, "a", 1000);
+        insert_raw(&conn, "b", 2000);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let config = OutboxConfig { outbox_table: "outbox".into(), batch_size: 10, ..Default::default() };
+        let worker = OutboxWorker::new(conn);
+        worker.sync_batch(&CountingSink(counter.clone()), &config).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        assert_eq!(count_remaining(&worker.conn), 0);
+    }
+
+    #[tokio::test]
+    async fn sync_batch_concurrency_guard_skips_concurrent_call() {
+        let (_f, conn) = setup_outbox_db();
+        insert_raw(&conn, "a", 1000);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let config = OutboxConfig { outbox_table: "outbox".into(), batch_size: 10, ..Default::default() };
+        let worker = Arc::new(OutboxWorker::new(conn));
+        // Pre-set running flag to simulate in-progress call
+        worker.running.store(true, Ordering::SeqCst);
+        worker.sync_batch(&CountingSink(counter.clone()), &config).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "should skip when already running");
+        worker.running.store(false, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn halt_policy_stops_on_first_failure_and_acks_prior() {
+        let (_f, conn) = setup_outbox_db();
+        insert_raw(&conn, "a", 1000);
+        insert_raw(&conn, "b", 2000);
+        insert_raw(&conn, "c", 3000);
+        let count = Arc::new(AtomicUsize::new(0));
+        let config = OutboxConfig {
+            outbox_table: "outbox".into(),
+            batch_size: 10,
+            on_error: ErrorPolicy::Halt,
+            ..Default::default()
+        };
+        let worker = OutboxWorker::new(conn);
+        // Fails after first successful insert
+        worker.sync_batch(&FailAfterSink { after: 1, count: count.clone() }, &config).await.unwrap();
+        // "a" was acked, "b" and "c" remain
+        assert_eq!(count_remaining(&worker.conn), 2);
+    }
+
+    #[tokio::test]
+    async fn skip_policy_continues_after_failure() {
+        let (_f, conn) = setup_outbox_db();
+        insert_raw(&conn, "a", 1000);
+        insert_raw(&conn, "b", 2000);
+        insert_raw(&conn, "c", 3000);
+        let count = Arc::new(AtomicUsize::new(0));
+        let config = OutboxConfig {
+            outbox_table: "outbox".into(),
+            batch_size: 10,
+            on_error: ErrorPolicy::Skip,
+            ..Default::default()
+        };
+        let worker = OutboxWorker::new(conn);
+        // Fails on second event, skip means it's still acked
+        worker.sync_batch(&FailAfterSink { after: 1, count: count.clone() }, &config).await.unwrap();
+        assert_eq!(count_remaining(&worker.conn), 0, "all events acked including skipped");
+    }
+
+    #[tokio::test]
+    async fn backlog_drain_triggered_when_full_batch_consumed() {
+        let (_f, conn) = setup_outbox_db();
+        for i in 0..3 {
+            insert_raw(&conn, &format!("id{i}"), i as i64 * 1000);
+        }
+        let counter = Arc::new(AtomicUsize::new(0));
+        let config = OutboxConfig {
+            outbox_table: "outbox".into(),
+            batch_size: 3, // exactly fills the batch
+            ..Default::default()
+        };
+        let worker = OutboxWorker::new(conn);
+        let drained = worker.sync_batch(&CountingSink(counter.clone()), &config).await.unwrap();
+        assert!(drained, "should signal backlog drain when batch was full");
+    }
+}
 
 #[cfg(test)]
 mod sqlite_tests {
