@@ -17,6 +17,7 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
+use outbox::{OutboxConfig, postgres::spawn_postgres_worker};
 use pipeline::{start_pipeline, PipelineStatusEvent};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
@@ -53,6 +54,7 @@ struct PipelineHolder(
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
+struct OutboxWorkerState(Mutex<Option<tokio::task::JoinHandle<()>>>);
 
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
@@ -2203,6 +2205,22 @@ pub fn run() {
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
+        .setup({
+            let db_path = db_path.clone();
+            move |app| {
+                if let Ok(db_url) = std::env::var("DATABASE_URL") {
+                    let config = OutboxConfig {
+                        sqlite_path: db_path.clone(),
+                        db_url,
+                        ..OutboxConfig::default()
+                    };
+                    let handle = spawn_postgres_worker(config);
+                    let state = app.state::<OutboxWorkerState>();
+                    *state.0.lock().unwrap() = Some(handle);
+                }
+                Ok(())
+            }
+        })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -2226,6 +2244,7 @@ pub fn run() {
         .manage(WikiStatusState(Mutex::new(WikiStatusFlags::default())))
         .manage(WatcherStarted(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
+        .manage(OutboxWorkerState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -2269,9 +2288,61 @@ pub fn run() {
             get_chunk_ids_for_wiki_entry,
             get_impact_radius,
             get_structural_neighbors,
+            start_outbox_worker,
+            stop_outbox_worker,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
+}
+
+#[tauri::command]
+async fn start_outbox_worker(
+    db_url: String,
+    poll_interval_ms: Option<u64>,
+    batch_size: Option<usize>,
+    on_error: Option<String>,
+    state: tauri::State<'_, OutboxWorkerState>,
+    vault_state: tauri::State<'_, VaultConfigState>,
+) -> Result<(), String> {
+    let sqlite_path = vault_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or("no vault open")?;
+    let sqlite_path = std::path::PathBuf::from(sqlite_path)
+        .join(".brain")
+        .join("brain.db");
+
+    let mut guard = state.0.lock().unwrap();
+    if guard.is_some() {
+        return Ok(());
+    }
+    let config = OutboxConfig {
+        sqlite_path,
+        db_url,
+        poll_interval_ms: poll_interval_ms.unwrap_or(5000),
+        batch_size: batch_size.unwrap_or(100),
+        on_error: match on_error.as_deref() {
+            Some("skip") => outbox::ErrorPolicy::Skip,
+            _ => outbox::ErrorPolicy::Halt,
+        },
+        ..OutboxConfig::default()
+    };
+    *guard = Some(spawn_postgres_worker(config));
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_outbox_worker(
+    state: tauri::State<'_, OutboxWorkerState>,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(handle) = guard.take() {
+        handle.abort();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
