@@ -2235,6 +2235,7 @@ pub fn run() {
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
+        .manage(OutboxWorkerState(Mutex::new(None)))
         .setup({
             let db_path = db_path.clone();
             move |app| {
@@ -2274,7 +2275,6 @@ pub fn run() {
         .manage(WikiStatusState(Mutex::new(WikiStatusFlags::default())))
         .manage(WatcherStarted(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
-        .manage(OutboxWorkerState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -2378,8 +2378,18 @@ async fn stop_outbox_worker(
 }
 
 #[tauri::command]
-fn outbox_is_configured() -> bool {
-    std::env::var("DATABASE_URL").is_ok()
+fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
+    if std::env::var("DATABASE_URL").is_ok() {
+        return true;
+    }
+    state
+        .0
+        .lock()
+        .map(|guard| match &*guard {
+            Some(handle) => !handle.is_finished(),
+            None => false,
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
