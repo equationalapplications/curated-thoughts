@@ -674,6 +674,7 @@ fn switch_vault(
     watcher_started: State<WatcherStarted>,
     heal_scheduler: State<HealScheduler>,
     status_state: State<WikiStatusState>,
+    outbox_state: State<OutboxWorkerState>,
 ) -> Result<(), String> {
     let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
     let db_path = brain_dir.join("brain.db");
@@ -704,6 +705,15 @@ fn switch_vault(
         if let Some((tx, join, _pending, _status_rx)) = g.take() {
             drop(tx);
             let _ = join.join();
+        }
+    }
+
+    // Stop outbox worker before WAL cleanup and DB file operations; its dedicated
+    // SQLite connection would otherwise keep polling a stale/replaced file.
+    {
+        let mut g = outbox_state.0.lock().unwrap();
+        if let Some(handle) = g.take() {
+            handle.abort();
         }
     }
 
@@ -786,6 +796,15 @@ fn switch_vault(
     }
 
     if switch_result.is_ok() {
+        if let Ok(db_url) = std::env::var("DATABASE_URL") {
+            let config = OutboxConfig {
+                sqlite_path: db_path.clone(),
+                db_url,
+                ..OutboxConfig::default()
+            };
+            *outbox_state.0.lock().unwrap() =
+                Some(spawn_postgres_worker(config, Some(app.clone())));
+        }
         if let Err(e) = start_file_watcher_inner(
             &app,
             pipeline.clone(),
@@ -2319,7 +2338,7 @@ async fn start_outbox_worker(
         sqlite_path,
         db_url,
         poll_interval_ms: poll_interval_ms.unwrap_or(5000).max(100),
-        batch_size: batch_size.unwrap_or(100).max(1),
+        batch_size: batch_size.unwrap_or(100).max(1).min(10_000),
         on_error: match on_error.as_deref() {
             Some("skip") => outbox::ErrorPolicy::Skip,
             _ => outbox::ErrorPolicy::Halt,

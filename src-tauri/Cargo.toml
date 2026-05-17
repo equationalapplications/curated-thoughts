@@ -40,7 +40,7 @@ flate2 = "1"
 walkdir = "2"
 pdf-extract = "0.10.0"
 zip = "8.6.0"
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-native-tls", "json", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-native-tls", "json"] }
 tree-sitter = { version = "0.26.8", default-features = false }
 tree-sitter-rust = { version = "0.24.2", default-features = false }
 tree-sitter-typescript = { version = "0.23.2", default-features = false }

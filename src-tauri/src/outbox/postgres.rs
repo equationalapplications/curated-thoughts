@@ -67,6 +67,8 @@ impl Sink for PgSink {
 #[derive(serde::Serialize, Clone)]
 struct OutboxWorkerError {
     error: String,
+    /// true when the worker stopped itself; false for per-poll errors the loop continues after.
+    fatal: bool,
 }
 
 pub fn spawn_postgres_worker(
@@ -74,20 +76,29 @@ pub fn spawn_postgres_worker(
     app_handle: Option<tauri::AppHandle>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let emit = |app_handle: &Option<tauri::AppHandle>, msg: String| {
+        let emit = |app_handle: &Option<tauri::AppHandle>, msg: String, fatal: bool| {
             eprintln!("[outbox] {msg}");
             if let Some(ref handle) = app_handle {
-                let _ = handle.emit("outbox-worker-error", OutboxWorkerError { error: msg });
+                let _ = handle.emit("outbox-worker-error", OutboxWorkerError { error: msg, fatal });
             }
         };
 
-        let sink = match PgSink::new(&config.db_url).await {
-            Ok(s) => s,
-            Err(e) => {
-                emit(&app_handle, format!("failed to connect to Postgres: {e}"));
-                return;
+        // Retry initial Postgres connection with exponential backoff so transient startup
+        // failures (Postgres not yet ready in Compose/CI) don't permanently disable the worker.
+        let sink = {
+            let mut delay_ms = 1_000u64;
+            loop {
+                match PgSink::new(&config.db_url).await {
+                    Ok(s) => break s,
+                    Err(e) => {
+                        eprintln!("[outbox] Postgres connect failed: {e}; retrying in {delay_ms}ms");
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(30_000);
+                    }
+                }
             }
         };
+
         match crate::outbox::OutboxWorker::open(&config.sqlite_path) {
             Ok(worker) => {
                 let on_error = {
@@ -98,14 +109,14 @@ pub fn spawn_postgres_worker(
                         if let Some(ref handle) = app_handle {
                             let _ = handle.emit(
                                 "outbox-worker-error",
-                                OutboxWorkerError { error: msg },
+                                OutboxWorkerError { error: msg, fatal: false },
                             );
                         }
                     }
                 };
                 worker.run(sink, config, on_error).await;
             }
-            Err(e) => emit(&app_handle, format!("failed to open SQLite: {e}")),
+            Err(e) => emit(&app_handle, format!("failed to open SQLite: {e}"), true),
         }
     })
 }

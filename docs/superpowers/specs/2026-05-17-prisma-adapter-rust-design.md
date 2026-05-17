@@ -124,9 +124,11 @@ pub struct OutboxEvent {
     pub created_at: i64,
 }
 
-#[async_trait]
-pub trait Sink: Send + Sync {
-    async fn insert_event(&self, event: &OutboxEvent) -> anyhow::Result<()>;
+pub trait Sink: Send + Sync + 'static {
+    fn insert_event(
+        &self,
+        event: OutboxEvent,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 ```
 
@@ -277,7 +279,7 @@ async fn stop_outbox_worker(
 { "error": "string", "fatal": true }
 ```
 
-`fatal: true` means the worker stopped itself. Frontend may surface this in settings UI or ignore it.
+`fatal: true` means the worker stopped itself (SQLite open failure). `fatal: false` means a per-poll error the loop continues after. Frontend may surface this in settings UI or ignore it.
 
 **Known limitation — halt on deterministic failure:** `ErrorPolicy::Halt` will retry the same failing event every poll cycle if the failure is deterministic (e.g., Postgres schema mismatch, constraint violation). This is intentional — matches JS package behaviour, preserves ordering, requires operator intervention to resolve. `max_retries` / circuit-breaker is deferred to a follow-up spec.
 
