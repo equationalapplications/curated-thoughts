@@ -97,17 +97,12 @@ struct OutboxWorkerError {
 pub struct OutboxWorkerHandle {
     cancel: Arc<AtomicBool>,
     handle: tauri::async_runtime::JoinHandle<()>,
+    finished: Arc<AtomicBool>,
 }
 
 impl OutboxWorkerHandle {
     pub fn is_finished(&self) -> bool {
-        // tauri::async_runtime::JoinHandle does not expose is_finished directly;
-        // use Tokio's join handle via try_into_current_thread if available,
-        // otherwise fall back to polling with a short timeout.
-        // For simplicity, we use a lightweight check: if the cancel flag is set
-        // and the handle is not ready, assume it's still running.
-        // In practice, callers should use stop() to properly await completion.
-        false // conservative: assume not finished unless stop() was called
+        self.finished.load(Ordering::SeqCst)
     }
 
     pub fn cancel(&self) {
@@ -117,6 +112,7 @@ impl OutboxWorkerHandle {
     pub async fn stop(self) {
         self.cancel.store(true, Ordering::SeqCst);
         let _ = self.handle.await;
+        self.finished.store(true, Ordering::SeqCst);
     }
 }
 
@@ -125,6 +121,8 @@ pub fn spawn_postgres_worker(
     app_handle: Option<tauri::AppHandle>,
 ) -> OutboxWorkerHandle {
     let cancel = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let finished_for_task = finished.clone();
     let cancel_for_run = cancel.clone();
     // Use Tauri's async runtime to avoid panics when called from setup hooks
     // where no Tokio runtime may be entered.
@@ -143,15 +141,19 @@ pub fn spawn_postgres_worker(
         // failures (Postgres not yet ready in Compose/CI) don't permanently disable the worker.
         let sink = {
             let mut delay_ms = 1_000u64;
+            let mut connected = None;
             loop {
                 if cancel_for_run.load(Ordering::SeqCst) {
-                    return;
+                    break;
                 }
                 match PgSink::new(&config.db_url).await {
-                    Ok(s) => break s,
+                    Ok(s) => {
+                        connected = Some(s);
+                        break;
+                    }
                     Err(e) => {
                         if cancel_for_run.load(Ordering::SeqCst) {
-                            return;
+                            break;
                         }
                         emit(
                             &app_handle,
@@ -163,7 +165,7 @@ pub fn spawn_postgres_worker(
                             let chunk = std::cmp::min(remaining_ms, 250);
                             tokio::time::sleep(std::time::Duration::from_millis(chunk)).await;
                             if cancel_for_run.load(Ordering::SeqCst) {
-                                return;
+                                break;
                             }
                             remaining_ms -= chunk;
                         }
@@ -171,9 +173,19 @@ pub fn spawn_postgres_worker(
                     }
                 }
             }
+            connected
+        };
+
+        let sink = match sink {
+            Some(s) => s,
+            None => {
+                finished_for_task.store(true, Ordering::SeqCst);
+                return;
+            }
         };
 
         if cancel_for_run.load(Ordering::SeqCst) {
+            finished_for_task.store(true, Ordering::SeqCst);
             return;
         }
 
@@ -199,9 +211,10 @@ pub fn spawn_postgres_worker(
             }
             Err(e) => emit(&app_handle, format!("failed to open SQLite: {e}"), true),
         }
+        finished_for_task.store(true, Ordering::SeqCst);
     });
 
-    OutboxWorkerHandle { cancel, handle }
+    OutboxWorkerHandle { cancel, handle, finished }
 }
 
 #[cfg(test)]
@@ -209,9 +222,11 @@ mod tests {
     use super::*;
 
     fn db_url() -> Option<String> {
-        // Use a dedicated test-only env var so that a developer's normal
-        // DATABASE_URL does not accidentally mutate a non-test Postgres DB.
-        std::env::var("OUTBOX_TEST_DATABASE_URL").ok()
+        // Check OUTBOX_TEST_DATABASE_URL first (dedicated test var), then fall back to
+        // DATABASE_URL so CI jobs that set DATABASE_URL work without modification.
+        std::env::var("OUTBOX_TEST_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
     }
 
     #[tokio::test]

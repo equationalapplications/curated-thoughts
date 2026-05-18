@@ -293,21 +293,33 @@ different DB mid-session).
 
 ## `enableOutbox` JS Change
 
-`src/lib/wiki.ts` — one-line change to `createWiki` call:
+`src/lib/wiki.ts` — dynamic check for `DATABASE_URL` before enabling outbox:
 
 ```typescript
-export const wiki = createWiki(tauriWikiAdapter, {
-  llmProvider: { ... },
-  config: {
-    hybridWeight: 0.7,
-    preFilterLimit: 50,
-    enableOutbox: true,   // ← new
-  },
-  ...
-} as WikiOptions & Record<string, unknown>);
+function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, unknown> {
+  return {
+    llmProvider: { ... },
+    config: {
+      hybridWeight: 0.7,
+      preFilterLimit: 50,
+      ...(enableOutbox && { enableOutbox: true }),
+    },
+    ...
+  } as WikiOptions & Record<string, unknown>;
+}
+
+export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+
+export async function setupWiki() {
+  const outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
+  wiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
+  await wiki.setup();
+}
 ```
 
-This causes `core-llm-wiki` to write every wiki mutation atomically to the `outbox` table alongside the primary write. No other JS changes required.
+**Intentional improvement:** Instead of blindly setting `enableOutbox: true`, the JS layer dynamically checks whether the outbox is configured (via the `outbox_is_configured` Tauri command, which checks `DATABASE_URL`). This prevents unnecessary SQLite writes for users who don't have Postgres configured.
+
+This causes `core-llm-wiki` to write every wiki mutation atomically to the `outbox` table alongside the primary write — but only when the outbox is actually configured. No other JS changes required.
 
 ---
 
@@ -362,8 +374,12 @@ Implementation uses `/subagent-driven-development`. PRs 1, 3 are fully independe
 ### PR 3 — JS `enableOutbox` (`src/lib/wiki.ts`)
 
 **Scope:**
-- Add `enableOutbox: true` to `createWiki` config
+- Add dynamic `enableOutbox` check via `outbox_is_configured` Tauri command
+- `makeWikiOptions(enableOutbox: boolean)` factory function with conditional `enableOutbox: true`
+- `setupWiki()` invokes `outbox_is_configured` and creates wiki instance with appropriate config
 - Verify existing `wiki.test.ts` passes
+
+**Intentional improvement:** Instead of hardcoding `enableOutbox: true`, the JS layer dynamically checks whether the outbox is configured before enabling it. This prevents unnecessary SQLite writes for users who don't have Postgres configured.
 
 **Fully independent.** No Rust changes. Ships any time.
 

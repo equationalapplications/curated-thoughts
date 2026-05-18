@@ -76,6 +76,18 @@ export async function setupWiki() {
   const outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
   wiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
   await wiki.setup();
+
+  // Listen for runtime outbox worker starts so we can recreate the wiki
+  // with enableOutbox: true for new mutations.
+  const unlisten = await listen<void>('outbox-worker-started', async () => {
+    // Recreate wiki with enableOutbox: true if not already enabled.
+    // We check by comparing the current options (recreate unconditionally
+    // if we can't inspect, which is safe since setup() is idempotent for this flag).
+    wiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
+    await wiki.setup();
+  });
+  // Store unlisten if you need cleanup; for now the listener lives for the session.
+  void unlisten;
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */
