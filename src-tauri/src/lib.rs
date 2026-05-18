@@ -642,7 +642,7 @@ fn recover_after_failed_switch_vault(
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
     status_state: State<'_, WikiStatusState>,
-    outbox_state: State<'_, OutboxWorkerState>,
+    _outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
     let reopened = (|| -> Result<(), String> {
         let mut guard = db_state
@@ -681,14 +681,8 @@ fn recover_after_failed_switch_vault(
     ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
     }
-    if let Some(db_url) = configured_database_url() {
-        let config = OutboxConfig {
-            sqlite_path: db_path.to_path_buf(),
-            db_url,
-            ..OutboxConfig::default()
-        };
-        *outbox_state.0.lock().unwrap() = Some(spawn_postgres_worker(config, Some(app.clone())));
-    }
+    // NOTE: worker spawn moved to switch_vault recovery branch to avoid
+    // duplicate workers after failed switch.
     true
 }
 
@@ -827,6 +821,13 @@ async fn switch_vault(
     }
 
     if switch_result.is_ok() {
+        // Stop any existing worker before spawning a replacement.
+        {
+            let mut g = outbox_state.0.lock().unwrap();
+            if let Some(handle) = g.take() {
+                drop(handle);
+            }
+        }
         if let Some(db_url) = configured_database_url() {
             let config = OutboxConfig {
                 sqlite_path: db_path.clone(),
@@ -848,6 +849,13 @@ async fn switch_vault(
             eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
         }
     } else if recovery_reopened_db {
+        // Stop any existing worker before spawning a replacement.
+        {
+            let mut g = outbox_state.0.lock().unwrap();
+            if let Some(handle) = g.take() {
+                drop(handle);
+            }
+        }
         if let Some(db_url) = configured_database_url() {
             let config = OutboxConfig {
                 sqlite_path: db_path.clone(),
@@ -2365,14 +2373,18 @@ pub fn run() {
 #[tauri::command]
 async fn start_outbox_worker(
     app_handle: tauri::AppHandle,
+    database_url: Option<String>,
     poll_interval_ms: Option<u64>,
     batch_size: Option<usize>,
     on_error: Option<String>,
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let db_url = configured_database_url().ok_or_else(|| {
-        "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
-    })?;
+    let db_url = match database_url {
+        Some(url) => url,
+        None => configured_database_url().ok_or_else(|| {
+            "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
+        })?,
+    };
 
     let sqlite_path = {
         let db_state = app_handle.state::<DbState>();

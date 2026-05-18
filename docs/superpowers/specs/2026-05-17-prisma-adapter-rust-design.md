@@ -90,7 +90,7 @@ src-tauri/src/outbox/
 
 | File | Change |
 |---|---|
-| `src-tauri/src/lib.rs` | `OutboxWorkerState`, auto-init from `DATABASE_URL` in setup, `start_outbox_worker`, `stop_outbox_worker` commands |
+| `src-tauri/src/lib.rs` | `OutboxWorkerState`, auto-init from `DATABASE_URL` in setup, `start_outbox_worker` (supports runtime `database_url` override), `stop_outbox_worker` commands |
 | `src-tauri/Cargo.toml` | Add `sqlx` with `postgres`, `runtime-tokio-native-tls`, `json` features |
 | `src/lib/wiki.ts` | Add `enableOutbox: true` to `createWiki` config |
 | `tools/src/bin/curated_thoughts_mcp.rs` | Auto-init `OutboxWorker` from `DATABASE_URL` in `main()` |
@@ -127,7 +127,7 @@ pub struct OutboxEvent {
 pub trait Sink: Send + Sync + 'static {
     fn insert_event(
         &self,
-        event: OutboxEvent,
+        event: &OutboxEvent,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 ```
@@ -213,9 +213,12 @@ tauri::Builder::default()
     .setup(|app| {
         // ... existing vault setup ...
         if let Ok(db_url) = std::env::var("DATABASE_URL") {
-            if let Some(db_path) = get_current_db_path(app) {
+            let db_path = get_current_db_path(app);
+            if let Some(db_path) = db_path {
                 let config = OutboxConfig { sqlite_path: db_path, db_url, ..Default::default() };
-                spawn_outbox_worker(app.handle(), config);
+                let handle = spawn_postgres_worker(config, Some(app.handle().clone()));
+                let state = app.state::<OutboxWorkerState>();
+                *state.0.lock().unwrap() = Some(handle);
             }
         }
         Ok(())
@@ -250,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
 #[tauri::command]
 async fn start_outbox_worker(
     app_handle: AppHandle,
+    database_url: Option<String>,   // runtime override; uses DATABASE_URL if None
     poll_interval_ms: Option<u64>,
     batch_size: Option<usize>,
     on_error: Option<String>,        // "halt" | "skip"
@@ -263,6 +267,9 @@ async fn stop_outbox_worker(
 ```
 
 `start_outbox_worker` is idempotent: calling it when already running is a no-op.
+If `database_url` is provided, the worker connects to that database instead of
+`DATABASE_URL`, enabling runtime override (e.g., desktop user connecting to a
+different DB mid-session).
 
 ---
 
@@ -365,7 +372,7 @@ Implementation uses `/subagent-driven-development`. PRs 1, 3 are fully independe
 ### PR 4 — Tauri + MCP wiring (depends on PR 1 + PR 2)
 
 **Scope:**
-- `lib.rs`: `OutboxWorkerState`, auto-init from `DATABASE_URL` in `tauri::Builder::setup`, `start_outbox_worker`, `stop_outbox_worker` commands
+- `lib.rs`: `OutboxWorkerState`, auto-init from `DATABASE_URL` in `tauri::Builder::setup`, `start_outbox_worker` (supports runtime `database_url` override), `stop_outbox_worker` commands
 - `curated_thoughts_mcp.rs`: auto-init via `tauri_app_lib::outbox::spawn_postgres_worker(config)` — no `sqlx` in `tools/Cargo.toml`; `sqlx` stays encapsulated in `src-tauri` only
 - Integration test: real SQLite + real Postgres via GitHub Actions `services: postgres:` (env-var gated, `DATABASE_URL` set in CI test step only — matches existing pattern)
 - `outbox-worker-error` Tauri event emission
