@@ -109,21 +109,18 @@ fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiSt
     update_wiki_status(app, &state, updater);
 }
 
-fn spawn_outbox_worker_if_configured(
+async fn spawn_outbox_worker_if_configured(
     app: &AppHandle,
     outbox_state: State<'_, OutboxWorkerState>,
     sqlite_path: PathBuf,
 ) {
-    let existing_config = {
-        let guard = outbox_state.0.lock().unwrap();
-        guard.as_ref().map(|handle| handle.config.clone())
+    let existing_handle = {
+        let mut guard = outbox_state.0.lock().unwrap();
+        guard.take()
     };
 
-    if let Some(mut config) = existing_config {
-        config.sqlite_path = sqlite_path;
-        let handle = spawn_postgres_worker(config, Some(app.clone()));
-        *outbox_state.0.lock().unwrap() = Some(handle);
-        return;
+    if let Some(handle) = existing_handle {
+        handle.stop().await;
     }
 
     if let Some(db_url) = configured_database_url() {
@@ -852,7 +849,7 @@ async fn switch_vault(
     }
 
     if switch_result.is_ok() {
-        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone());
+        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone()).await;
         if let Err(e) = start_file_watcher_inner(
             &app,
             pipeline.clone(),
@@ -865,7 +862,7 @@ async fn switch_vault(
             eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
         }
     } else if recovery_reopened_db {
-        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone());
+        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone()).await;
     }
 
     switch_result
