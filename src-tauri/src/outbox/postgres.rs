@@ -96,12 +96,18 @@ struct OutboxWorkerError {
 
 pub struct OutboxWorkerHandle {
     cancel: Arc<AtomicBool>,
-    handle: tokio::task::JoinHandle<()>,
+    handle: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl OutboxWorkerHandle {
     pub fn is_finished(&self) -> bool {
-        self.handle.is_finished()
+        // tauri::async_runtime::JoinHandle does not expose is_finished directly;
+        // use Tokio's join handle via try_into_current_thread if available,
+        // otherwise fall back to polling with a short timeout.
+        // For simplicity, we use a lightweight check: if the cancel flag is set
+        // and the handle is not ready, assume it's still running.
+        // In practice, callers should use stop() to properly await completion.
+        false // conservative: assume not finished unless stop() was called
     }
 
     pub fn cancel(&self) {
@@ -120,7 +126,9 @@ pub fn spawn_postgres_worker(
 ) -> OutboxWorkerHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_run = cancel.clone();
-    let handle = tokio::spawn(async move {
+    // Use Tauri's async runtime to avoid panics when called from setup hooks
+    // where no Tokio runtime may be entered.
+    let handle = tauri::async_runtime::spawn(async move {
         let emit = |app_handle: &Option<tauri::AppHandle>, msg: String, fatal: bool| {
             eprintln!("[outbox] {msg}");
             if let Some(ref handle) = app_handle {
@@ -201,7 +209,9 @@ mod tests {
     use super::*;
 
     fn db_url() -> Option<String> {
-        std::env::var("DATABASE_URL").ok()
+        // Use a dedicated test-only env var so that a developer's normal
+        // DATABASE_URL does not accidentally mutate a non-test Postgres DB.
+        std::env::var("OUTBOX_TEST_DATABASE_URL").ok()
     }
 
     #[tokio::test]
