@@ -918,6 +918,10 @@ async fn switch_vault(
             maybe_outbox_config,
         )
         .await;
+    } else if maybe_outbox_config.is_some() {
+        // Both switch and recovery failed; the worker was stopped and will not be
+        // restarted. Notify the frontend so it disables outbox writes.
+        let _ = app.emit("outbox-worker-stopped", ());
     }
 
     switch_result
