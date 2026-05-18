@@ -368,7 +368,7 @@ All PRs require `/test-driven-development`. Tests written before implementation.
 | Backlog drain | Unit — full batch returned, assert immediate re-poll triggered |
 | Worker dedicated connection | Unit — assert worker opens its own connection (not DbState), busy_timeout set |
 | MCP auto-init | Unit — `DATABASE_URL` set, assert `OutboxWorker::run` called in MCP main |
-| Integration | Real SQLite + real Postgres; gated on `DATABASE_URL` env var (CI opt-in) |
+| Integration | Real SQLite + real Postgres; gated on `OUTBOX_TEST_DATABASE_URL` env var (CI opt-in) |
 
 ---
 
