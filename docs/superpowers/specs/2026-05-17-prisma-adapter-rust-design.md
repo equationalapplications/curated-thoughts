@@ -103,6 +103,7 @@ src-tauri/src/outbox/
 pub struct OutboxConfig {
     pub sqlite_path: PathBuf,    // path to the SQLite file — worker opens its own connection
     pub db_url: String,          // Postgres DATABASE_URL
+    pub outbox_table: String,    // SQLite table name written by core-llm-wiki; default: "outbox"
     pub poll_interval_ms: u64,   // default: 5000
     pub batch_size: usize,       // default: 100
     pub on_error: ErrorPolicy,   // default: ErrorPolicy::Halt
@@ -367,7 +368,7 @@ Implementation uses `/subagent-driven-development`. PRs 1, 3 are fully independe
 ### PR 2 — Postgres sink (`src-tauri/src/outbox/postgres.rs`)
 
 **Scope:**
-- `sqlx` added to `src-tauri/Cargo.toml` (`postgres`, `runtime-tokio-native-tls`, `json`, `macros` features)
+- `sqlx` added to `src-tauri/Cargo.toml` (`postgres`, `runtime-tokio-native-tls`, `json` features; `default-features = false` to exclude unused MySQL/SQLite drivers)
 - `PgSink::new(db_url)` — creates pool, runs `CREATE TABLE IF NOT EXISTS`
 - `PgSink` implements `Sink` trait — single-event insert with `ON CONFLICT DO NOTHING`
 - Unit tests: idempotency, `ON CONFLICT` behaviour, table creation is re-entrant
