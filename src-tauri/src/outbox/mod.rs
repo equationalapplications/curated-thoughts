@@ -117,7 +117,7 @@ pub(crate) async fn fetch_pending(
                     // Fail loudly on null payloads from malformed data
                     if payload.is_null() && !payload_str.trim().eq_ignore_ascii_case("null") {
                         return Err(anyhow::anyhow!(
-                            "outbox payload for id={id} parsed as null from: {payload_str}"
+                            "outbox payload for id={id} parsed as unexpected null"
                         ));
                     }
                     Ok(OutboxEvent {
