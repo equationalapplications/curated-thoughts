@@ -105,6 +105,12 @@ pub(crate) async fn fetch_pending(
                         serde_json::from_str(&payload_str).map_err(|e| {
                             anyhow::anyhow!("malformed outbox payload for id={id}: {e}")
                         })?;
+                    // Fail loudly on null payloads from malformed data
+                    if payload.is_null() && !payload_str.trim().eq_ignore_ascii_case("null") {
+                        return Err(anyhow::anyhow!(
+                            "outbox payload for id={id} parsed as null from: {payload_str}"
+                        ));
+                    }
                     Ok(OutboxEvent {
                         id,
                         entity_id,
