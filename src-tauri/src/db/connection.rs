@@ -84,7 +84,7 @@ pub struct AppDb(pub Connection);
 impl AppDb {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
         let config_path = path
             .parent()
             .map(|p| p.join("config.json"))
