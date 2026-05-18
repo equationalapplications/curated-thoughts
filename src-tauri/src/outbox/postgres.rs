@@ -216,7 +216,12 @@ pub fn spawn_postgres_worker(
         finished_for_task.store(true, Ordering::SeqCst);
     });
 
-    OutboxWorkerHandle { config: config_state, cancel, handle, finished }
+    OutboxWorkerHandle {
+        config: config_state,
+        cancel,
+        handle,
+        finished,
+    }
 }
 
 #[cfg(test)]
@@ -231,11 +236,7 @@ mod tests {
         std::env::var("OUTBOX_TEST_DATABASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("DATABASE_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
+            .or_else(|| std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty()))
     }
 
     #[tokio::test]
