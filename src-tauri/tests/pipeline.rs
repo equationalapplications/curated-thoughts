@@ -1,6 +1,6 @@
 mod helpers;
 
-use std::sync::{Arc, Mutex, mpsc, atomic::AtomicUsize};
+use std::sync::{atomic::AtomicUsize, mpsc, Arc, Mutex};
 
 use tauri_app_lib::{PipelineJob, PipelineWorker};
 use tempfile::TempDir;

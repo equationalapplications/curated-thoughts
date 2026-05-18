@@ -71,18 +71,22 @@ fn build_structural_context(conn: &Connection, source_chunks: &[ChunkRow]) -> St
         return String::new();
     }
 
-    let entity_id = source_chunks.first()
+    let entity_id = source_chunks
+        .first()
         .map(|c| c.entity_id.as_str())
         .unwrap_or("");
     if entity_id.is_empty() {
         return String::new();
     }
 
-    let mut neighbor_map: std::collections::HashMap<i64, (String, i64)> = std::collections::HashMap::new();
+    let mut neighbor_map: std::collections::HashMap<i64, (String, i64)> =
+        std::collections::HashMap::new();
     for chunk_id in &source_ids {
         if let Ok(neighbors) = crate::graph::get_both(conn, *chunk_id, entity_id, 1) {
             for n in neighbors {
-                let entry = neighbor_map.entry(n.chunk_id).or_insert((n.rel_type.clone(), n.depth));
+                let entry = neighbor_map
+                    .entry(n.chunk_id)
+                    .or_insert((n.rel_type.clone(), n.depth));
                 if n.depth < entry.1 {
                     *entry = (n.rel_type, n.depth);
                 }
@@ -112,14 +116,22 @@ fn build_structural_context(conn: &Connection, source_chunks: &[ChunkRow]) -> St
              JOIN documents d ON d.id = c.doc_id
              WHERE c.id = ?1",
             rusqlite::params![chunk_id],
-            |row| Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-            )),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         );
         if let Ok((text, sym, path)) = result {
-            neighbors.push(StructuralNeighbor { chunk_text: text, symbol_name: sym, path, rel_type, depth });
+            neighbors.push(StructuralNeighbor {
+                chunk_text: text,
+                symbol_name: sym,
+                path,
+                rel_type,
+                depth,
+            });
         }
     }
 
@@ -132,8 +144,14 @@ fn build_structural_context(conn: &Connection, source_chunks: &[ChunkRow]) -> St
     );
     for n in &neighbors {
         let header = match &n.symbol_name {
-            Some(sym) => format!("[source: {} | symbol: {} | rel: {} | depth: {}]\n", n.path, sym, n.rel_type, n.depth),
-            None => format!("[source: {} | rel: {} | depth: {}]\n", n.path, n.rel_type, n.depth),
+            Some(sym) => format!(
+                "[source: {} | symbol: {} | rel: {} | depth: {}]\n",
+                n.path, sym, n.rel_type, n.depth
+            ),
+            None => format!(
+                "[source: {} | rel: {} | depth: {}]\n",
+                n.path, n.rel_type, n.depth
+            ),
         };
         section.push_str(&header);
         section.push_str(&n.chunk_text);
@@ -347,18 +365,16 @@ mod tests {
 
     #[test]
     fn assemble_context_labels_user_doc_as_anchor_truth() {
-        let chunks = vec![
-            ChunkRow {
-                id: 0,
-                entity_id: String::new(),
-                text: "fn init_db() {}".to_string(),
-                symbol_name: Some("init_db".to_string()),
-                start_line: 1,
-                end_line: 3,
-                tier: "user_doc".to_string(),
-                path: "documents/sqlite_docs.md".to_string(),
-            },
-        ];
+        let chunks = vec![ChunkRow {
+            id: 0,
+            entity_id: String::new(),
+            text: "fn init_db() {}".to_string(),
+            symbol_name: Some("init_db".to_string()),
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".to_string(),
+            path: "documents/sqlite_docs.md".to_string(),
+        }];
         let context = assemble_librarian_context(&chunks);
         assert!(
             context.contains("ANCHOR TRUTH"),
@@ -368,18 +384,16 @@ mod tests {
 
     #[test]
     fn assemble_context_labels_wiki_as_curated_wisdom() {
-        let chunks = vec![
-            ChunkRow {
-                id: 0,
-                entity_id: String::new(),
-                text: "Auth patterns overview".to_string(),
-                symbol_name: None,
-                start_line: 1,
-                end_line: 10,
-                tier: "wiki".to_string(),
-                path: "wiki/auth-patterns.md".to_string(),
-            },
-        ];
+        let chunks = vec![ChunkRow {
+            id: 0,
+            entity_id: String::new(),
+            text: "Auth patterns overview".to_string(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 10,
+            tier: "wiki".to_string(),
+            path: "wiki/auth-patterns.md".to_string(),
+        }];
         let context = assemble_librarian_context(&chunks);
         assert!(
             context.contains("CURATED WISDOM"),
@@ -389,18 +403,16 @@ mod tests {
 
     #[test]
     fn assemble_context_includes_source_header_with_line_range() {
-        let chunks = vec![
-            ChunkRow {
-                id: 0,
-                entity_id: String::new(),
-                text: "body text".to_string(),
-                symbol_name: None,
-                start_line: 12,
-                end_line: 34,
-                tier: "user_doc".to_string(),
-                path: "documents/api-ref.md".to_string(),
-            },
-        ];
+        let chunks = vec![ChunkRow {
+            id: 0,
+            entity_id: String::new(),
+            text: "body text".to_string(),
+            symbol_name: None,
+            start_line: 12,
+            end_line: 34,
+            tier: "user_doc".to_string(),
+            path: "documents/api-ref.md".to_string(),
+        }];
         let context = assemble_librarian_context(&chunks);
         assert!(
             context.contains("[source: documents/api-ref.md | lines 12-34]"),
@@ -410,18 +422,16 @@ mod tests {
 
     #[test]
     fn assemble_context_includes_symbol_name_when_present() {
-        let chunks = vec![
-            ChunkRow {
-                id: 0,
-                entity_id: String::new(),
-                text: "fn foo() {}".to_string(),
-                symbol_name: Some("foo".to_string()),
-                start_line: 22,
-                end_line: 45,
-                tier: "wiki".to_string(),
-                path: "src/db/init.rs".to_string(),
-            },
-        ];
+        let chunks = vec![ChunkRow {
+            id: 0,
+            entity_id: String::new(),
+            text: "fn foo() {}".to_string(),
+            symbol_name: Some("foo".to_string()),
+            start_line: 22,
+            end_line: 45,
+            tier: "wiki".to_string(),
+            path: "src/db/init.rs".to_string(),
+        }];
         let context = assemble_librarian_context(&chunks);
         assert!(
             context.contains("[source: src/db/init.rs | symbol: foo | lines 22-45]"),

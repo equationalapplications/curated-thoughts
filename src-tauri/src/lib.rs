@@ -5,6 +5,7 @@ pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
+pub mod outbox;
 mod pipeline;
 pub mod recall_bench_fixture;
 pub mod retrieval;
@@ -16,9 +17,13 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use pipeline::{start_pipeline, PipelineStatusEvent};
+use outbox::{
+    postgres::{spawn_postgres_worker, OutboxWorkerHandle},
+    OutboxConfig,
+};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
+use pipeline::{start_pipeline, PipelineStatusEvent};
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
@@ -30,8 +35,11 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc::{self, Sender, SyncSender}, Arc, Mutex};
 use std::sync::atomic::AtomicUsize;
+use std::sync::{
+    mpsc::{self, Sender, SyncSender},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
@@ -52,6 +60,7 @@ struct PipelineHolder(
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
+struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
 
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
@@ -75,15 +84,93 @@ fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
     );
 }
 
-fn update_wiki_status(app: &AppHandle, state: &State<'_, WikiStatusState>, updater: impl FnOnce(&mut WikiStatusFlags)) {
+fn update_wiki_status(
+    app: &AppHandle,
+    state: &State<'_, WikiStatusState>,
+    updater: impl FnOnce(&mut WikiStatusFlags),
+) {
     let mut guard = state.0.lock().unwrap();
     updater(&mut guard);
     emit_wiki_status(app, &guard);
 }
 
+fn normalize_database_url(url: String) -> Option<String> {
+    let db_url = url.trim();
+    if db_url.is_empty() {
+        None
+    } else {
+        Some(db_url.to_string())
+    }
+}
+
+fn configured_database_url() -> Option<String> {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .and_then(normalize_database_url)
+}
+
+fn validate_outbox_database_url(database_url: Option<String>) -> Result<String, String> {
+    match database_url {
+        Some(url) => {
+            let url = url.trim();
+            if url.is_empty() {
+                Err("database_url cannot be empty".to_string())
+            } else {
+                Ok(url.to_string())
+            }
+        }
+        None => configured_database_url().ok_or_else(|| {
+            "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
+        }),
+    }
+}
+
+async fn replace_outbox_worker(state: &OutboxWorkerState, new_handle: OutboxWorkerHandle) -> bool {
+    let old_handle = { state.0.lock().unwrap().take() };
+    let replaced = old_handle.is_some();
+    if let Some(handle) = old_handle {
+        handle.stop().await;
+    }
+    *state.0.lock().unwrap() = Some(new_handle);
+    replaced
+}
+
 fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiStatusFlags)) {
     let state = app.state::<WikiStatusState>();
     update_wiki_status(app, &state, updater);
+}
+
+async fn spawn_outbox_worker_if_configured(
+    app: &AppHandle,
+    outbox_state: State<'_, OutboxWorkerState>,
+    sqlite_path: PathBuf,
+    fallback_config: Option<OutboxConfig>,
+) {
+    let existing_handle = {
+        let mut guard = outbox_state.0.lock().unwrap();
+        guard.take()
+    };
+
+    if let Some(handle) = existing_handle {
+        handle.stop().await;
+    }
+
+    let config = if let Some(mut config) = fallback_config {
+        config.sqlite_path = sqlite_path;
+        config
+    } else if let Some(db_url) = configured_database_url() {
+        OutboxConfig {
+            sqlite_path,
+            db_url,
+            ..OutboxConfig::default()
+        }
+    } else {
+        return;
+    };
+
+    let handle = spawn_postgres_worker(config, Some(app.clone()));
+    *outbox_state.0.lock().unwrap() = Some(handle);
+    let _ = app.emit("outbox-worker-started", ());
 }
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
@@ -424,10 +511,7 @@ fn validated_new_vault_root(path: &str) -> Result<PathBuf, String> {
 
 /// Returns true when `new_root` is the same directory as the configured vault (symlinks resolved).
 fn switching_to_same_vault_as_configured(current: &str, new_root: &Path) -> bool {
-    match (
-        Path::new(current).canonicalize(),
-        new_root.canonicalize(),
-    ) {
+    match (Path::new(current).canonicalize(), new_root.canonicalize()) {
         (Ok(cur), Ok(next)) => cur == next,
         _ => false,
     }
@@ -614,7 +698,7 @@ fn start_file_watcher_inner(
     Ok(())
 }
 
-/// Best-effort restore of DB handle, pipeline, and file watcher after a failed `switch_vault`.
+/// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
 fn recover_after_failed_switch_vault(
     app: &AppHandle,
@@ -625,9 +709,13 @@ fn recover_after_failed_switch_vault(
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
     status_state: State<'_, WikiStatusState>,
+    _outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
     let reopened = (|| -> Result<(), String> {
-        let mut guard = db_state.0.lock().map_err(|_| "db mutex poisoned".to_string())?;
+        let mut guard = db_state
+            .0
+            .lock()
+            .map_err(|_| "db mutex poisoned".to_string())?;
         *guard = AppDb::open(db_path).map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -637,7 +725,10 @@ fn recover_after_failed_switch_vault(
     }
     if let Ok(mut g) = pipeline.0.lock() {
         if g.is_none() {
-            let vault_root = vault_state.0.lock().ok()
+            let vault_root = vault_state
+                .0
+                .lock()
+                .ok()
                 .and_then(|vc| vc.get_vault_path().ok().flatten())
                 .map(|s| {
                     let p = PathBuf::from(s);
@@ -657,20 +748,23 @@ fn recover_after_failed_switch_vault(
     ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
     }
+    // NOTE: worker spawn moved to switch_vault recovery branch to avoid
+    // duplicate workers after failed switch.
     true
 }
 
 #[tauri::command]
-fn switch_vault(
+async fn switch_vault(
     new_path: String,
     restore_backup: bool,
     app: AppHandle,
-    db_state: State<DbState>,
-    vault_state: State<VaultConfigState>,
-    pipeline: State<PipelineHolder>,
-    watcher_started: State<WatcherStarted>,
-    heal_scheduler: State<HealScheduler>,
-    status_state: State<WikiStatusState>,
+    db_state: State<'_, DbState>,
+    vault_state: State<'_, VaultConfigState>,
+    pipeline: State<'_, PipelineHolder>,
+    watcher_started: State<'_, WatcherStarted>,
+    heal_scheduler: State<'_, HealScheduler>,
+    status_state: State<'_, WikiStatusState>,
+    outbox_state: State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
     let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
     let db_path = brain_dir.join("brain.db");
@@ -702,6 +796,20 @@ fn switch_vault(
             drop(tx);
             let _ = join.join();
         }
+    }
+
+    // Stop outbox worker before WAL cleanup and DB file operations; its dedicated
+    // SQLite connection would otherwise keep polling a stale/replaced file.
+    // Do not notify the frontend here, because vault switching internally restarts
+    // the worker and emitting a stop event would race with the ongoing database swap.
+    let (maybe_outbox_config, maybe_handle) = {
+        let mut g = outbox_state.0.lock().unwrap();
+        let maybe_handle = g.take();
+        let maybe_config = maybe_handle.as_ref().map(|handle| handle.config.clone());
+        (maybe_config, maybe_handle)
+    };
+    if let Some(handle) = maybe_handle {
+        handle.stop().await;
     }
 
     let stub_path = release_global_db_lock(&db_state)?;
@@ -769,6 +877,7 @@ fn switch_vault(
             watcher_started.clone(),
             heal_scheduler.clone(),
             status_state.clone(),
+            outbox_state.clone(),
         );
     }
 
@@ -783,6 +892,13 @@ fn switch_vault(
     }
 
     if switch_result.is_ok() {
+        spawn_outbox_worker_if_configured(
+            &app,
+            outbox_state.clone(),
+            db_path.clone(),
+            maybe_outbox_config.clone(),
+        )
+        .await;
         if let Err(e) = start_file_watcher_inner(
             &app,
             pipeline.clone(),
@@ -792,10 +908,20 @@ fn switch_vault(
             heal_scheduler.clone(),
             status_state.clone(),
         ) {
-            eprintln!(
-                "[switch_vault] failed to restart file watcher after successful switch: {e}"
-            );
+            eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
         }
+    } else if recovery_reopened_db {
+        spawn_outbox_worker_if_configured(
+            &app,
+            outbox_state.clone(),
+            db_path.clone(),
+            maybe_outbox_config,
+        )
+        .await;
+    } else if maybe_outbox_config.is_some() {
+        // Both switch and recovery failed; the worker was stopped and will not be
+        // restarted. Notify the frontend so it disables outbox writes.
+        let _ = app.emit("outbox-worker-stopped", ());
     }
 
     switch_result
@@ -835,11 +961,7 @@ fn reveal_vault(vault_state: State<VaultConfigState>) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
 
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = vault;
         return Err("reveal_vault is not supported on this platform".to_string());
@@ -972,7 +1094,10 @@ fn heal_lost_librarian_inferred(
     Ok(updated)
 }
 
-fn prune_old_librarian_inferred(conn: &rusqlite::Connection, current_unix: i64) -> Result<usize, String> {
+fn prune_old_librarian_inferred(
+    conn: &rusqlite::Connection,
+    current_unix: i64,
+) -> Result<usize, String> {
     conn.execute(
         "DELETE FROM llm_wiki_entries
              WHERE source_type = 'librarian_inferred'
@@ -1437,8 +1562,8 @@ fn get_impact_radius(
     match direction.as_str() {
         "callees" => graph::get_callees(conn, root_chunk_id, &entity_id, max_hops),
         "callers" => graph::get_callers(conn, root_chunk_id, &entity_id, max_hops),
-        "both"    => graph::get_both(conn, root_chunk_id, &entity_id, max_hops),
-        other     => Err(anyhow::anyhow!("unknown direction: {}", other)),
+        "both" => graph::get_both(conn, root_chunk_id, &entity_id, max_hops),
+        other => Err(anyhow::anyhow!("unknown direction: {}", other)),
     }
     .map_err(|e| e.to_string())
 }
@@ -1920,7 +2045,12 @@ fn get_proposed_content(
         crate::vault::PathMode::MustExist,
     );
 
-    let placeholder = || format!("# {}\n\n*Proposed wiki page — content not available.*", page_rel);
+    let placeholder = || {
+        format!(
+            "# {}\n\n*Proposed wiki page — content not available.*",
+            page_rel
+        )
+    };
     match safe {
         Ok(p) => match std::fs::read_to_string(&p) {
             Ok(content) => Ok(content),
@@ -2177,12 +2307,16 @@ pub fn run() {
                     fallback_dirs_created = false;
                 }
             }
-            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted")) {
+            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted"))
+            {
                 eprintln!("error: failed to create fallback vault subdir .brain/converted: {e}");
                 fallback_dirs_created = false;
             }
             if fallback_dirs_created {
-                eprintln!("warning: using temporary recovery vault at: {}", fallback_vault.display());
+                eprintln!(
+                    "warning: using temporary recovery vault at: {}",
+                    fallback_vault.display()
+                );
                 if let Some(vault_str) = fallback_vault.to_str() {
                     if let Err(e) = config.set_vault_path(vault_str) {
                         eprintln!("warning: failed to persist fallback vault path: {e}");
@@ -2202,6 +2336,23 @@ pub fn run() {
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     tauri::Builder::default()
+        .manage(OutboxWorkerState(Mutex::new(None)))
+        .setup({
+            let db_path = db_path.clone();
+            move |app| {
+                if let Some(db_url) = configured_database_url() {
+                    let config = OutboxConfig {
+                        sqlite_path: db_path.clone(),
+                        db_url,
+                        ..OutboxConfig::default()
+                    };
+                    let handle = spawn_postgres_worker(config, Some(app.app_handle().clone()));
+                    let state = app.state::<OutboxWorkerState>();
+                    *state.0.lock().unwrap() = Some(handle);
+                }
+                Ok(())
+            }
+        })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -2268,9 +2419,106 @@ pub fn run() {
             get_chunk_ids_for_wiki_entry,
             get_impact_radius,
             get_structural_neighbors,
+            start_outbox_worker,
+            stop_outbox_worker,
+            outbox_is_configured,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
+}
+
+#[tauri::command]
+async fn start_outbox_worker(
+    app_handle: tauri::AppHandle,
+    database_url: Option<String>,
+    poll_interval_ms: Option<u64>,
+    batch_size: Option<usize>,
+    on_error: Option<String>,
+    state: tauri::State<'_, OutboxWorkerState>,
+) -> Result<(), String> {
+    let db_url = validate_outbox_database_url(database_url)?;
+
+    let sqlite_path = {
+        let db_state = app_handle.state::<DbState>();
+        let guard = db_state
+            .0
+            .lock()
+            .map_err(|e| format!("db state lock poisoned: {e}"))?;
+        guard
+            .0
+            .path()
+            .ok_or_else(|| "database path unavailable".to_string())
+            .map(PathBuf::from)?
+    };
+
+    let config = OutboxConfig {
+        sqlite_path,
+        db_url,
+        poll_interval_ms: poll_interval_ms.unwrap_or(5000).clamp(100, 60_000),
+        batch_size: batch_size.unwrap_or(100).clamp(1, 10_000),
+        on_error: match on_error.as_deref() {
+            Some("skip") => outbox::ErrorPolicy::Skip,
+            Some("halt") | None => outbox::ErrorPolicy::Halt,
+            Some(other) => {
+                return Err(format!("unsupported on_error value: {}", other));
+            }
+        },
+        ..OutboxConfig::default()
+    };
+
+    // Take the existing handle out of state before any await to avoid
+    // holding MutexGuard across await (which violates Send bounds).
+    let existing = {
+        let mut guard = state.0.lock().unwrap();
+        match &*guard {
+            Some(handle) if !handle.is_finished() && handle.config == config => return Ok(()),
+            Some(_) => guard.take(),
+            None => None,
+        }
+    };
+    if let Some(handle) = existing {
+        handle.stop().await;
+    }
+
+    let _ = replace_outbox_worker(
+        &state,
+        spawn_postgres_worker(config.clone(), Some(app_handle.clone())),
+    )
+    .await;
+
+    // Notify frontend that outbox is now active so it can recreate the wiki
+    // with enableOutbox: true for runtime worker starts.
+    let _ = app_handle.emit("outbox-worker-started", ());
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_outbox_worker(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, OutboxWorkerState>,
+) -> Result<(), String> {
+    let handle = {
+        let mut guard = state.0.lock().unwrap();
+        guard.take()
+    };
+    if let Some(handle) = handle {
+        handle.stop().await;
+        let _ = app_handle.emit("outbox-worker-stopped", ());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
+    state
+        .0
+        .lock()
+        .map(|guard| match &*guard {
+            Some(handle) => !handle.is_finished(),
+            None => false,
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -2320,11 +2568,11 @@ mod normalize_path_tests {
 #[cfg(test)]
 mod heal_invalid_sources_tests {
     use super::{heal_invalid_sources, DbState, VaultConfigState};
+    use crate::db::AppDb;
+    use crate::vault::VaultConfig;
     use rusqlite::params;
     use std::sync::Mutex;
     use tempfile::TempDir;
-    use crate::db::AppDb;
-    use crate::vault::VaultConfig;
 
     #[test]
     fn missing_vault_sources_are_marked_deleted() {
@@ -2333,9 +2581,7 @@ mod heal_invalid_sources_tests {
         std::fs::create_dir_all(vault_root.join("documents")).unwrap();
 
         let config = VaultConfig::new(tmp.path().join("config.json"));
-        config
-            .set_vault_path(vault_root.to_str().unwrap())
-            .unwrap();
+        config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
         let db_path = tmp.path().join("brain.db");
         let db = AppDb::open(&db_path).unwrap();
@@ -2434,6 +2680,28 @@ mod drop_destination_tests {
 }
 
 #[cfg(test)]
+mod outbox_runtime_tests {
+    use super::{replace_outbox_worker, validate_outbox_database_url, OutboxWorkerState};
+    use crate::outbox::postgres::dummy_outbox_handle;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn validate_outbox_database_url_rejects_empty_string() {
+        let err = validate_outbox_database_url(Some("  ".to_string())).unwrap_err();
+        assert_eq!(err, "database_url cannot be empty");
+    }
+
+    #[tokio::test]
+    async fn replace_outbox_worker_stops_existing_handle_before_inserting_new_one() {
+        let state = OutboxWorkerState(Mutex::new(Some(dummy_outbox_handle())));
+        let replaced = replace_outbox_worker(&state, dummy_outbox_handle()).await;
+
+        assert!(replaced);
+        assert!(state.0.lock().unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
 mod workspace_id_tests {
     use super::get_workspace_id;
 
@@ -2447,7 +2715,11 @@ mod workspace_id_tests {
     fn hash_segment_is_16_lowercase_hex_chars() {
         let id = get_workspace_id("/Users/foo/Vault".to_string());
         let hash = id.strip_prefix("tier_working::").unwrap();
-        assert_eq!(hash.len(), 16, "hash segment should be 16 chars, got: {hash}");
+        assert_eq!(
+            hash.len(),
+            16,
+            "hash segment should be 16 chars, got: {hash}"
+        );
         assert!(
             hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
             "hash should be lowercase hex, got: {hash}"
@@ -2529,7 +2801,10 @@ mod maintenance_command_tests {
         .unwrap();
 
         let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
-        assert_eq!(deleted, 1, "only the old librarian_inferred row should be deleted");
+        assert_eq!(
+            deleted, 1,
+            "only the old librarian_inferred row should be deleted"
+        );
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
@@ -2543,7 +2818,13 @@ mod maintenance_command_tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(types, vec!["immutable_document".to_string(), "librarian_inferred".to_string()]);
+        assert_eq!(
+            types,
+            vec![
+                "immutable_document".to_string(),
+                "librarian_inferred".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -2573,7 +2854,10 @@ mod maintenance_command_tests {
         .unwrap();
 
         let updated = heal_lost_librarian_inferred(&conn, vault_root).unwrap();
-        assert_eq!(updated, 1, "only the missing inferred row should be soft-deleted");
+        assert_eq!(
+            updated, 1,
+            "only the missing inferred row should be soft-deleted"
+        );
 
         let statuses: Vec<(String, Option<i64>, String)> = conn
             .prepare("SELECT source_type, deleted_at, source_ref FROM llm_wiki_entries ORDER BY source_type, source_ref")
@@ -2584,18 +2868,33 @@ mod maintenance_command_tests {
             .collect();
 
         let inferred_existing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "librarian_inferred" && source_ref == "documents/existing.md" && deleted_at.is_none()
+            t == "librarian_inferred"
+                && source_ref == "documents/existing.md"
+                && deleted_at.is_none()
         });
         let inferred_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "librarian_inferred" && source_ref == "documents/missing.md" && deleted_at.is_some()
+            t == "librarian_inferred"
+                && source_ref == "documents/missing.md"
+                && deleted_at.is_some()
         });
         let immutable_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "immutable_document" && source_ref == "documents/missing.md" && deleted_at.is_none()
+            t == "immutable_document"
+                && source_ref == "documents/missing.md"
+                && deleted_at.is_none()
         });
 
-        assert!(inferred_existing.is_some(), "existing inferred rows should be preserved without deleted_at");
-        assert!(inferred_missing.is_some(), "missing inferred rows should be marked deleted");
-        assert!(immutable_missing.is_some(), "immutable_document rows should not be soft-deleted by heal");
+        assert!(
+            inferred_existing.is_some(),
+            "existing inferred rows should be preserved without deleted_at"
+        );
+        assert!(
+            inferred_missing.is_some(),
+            "missing inferred rows should be marked deleted"
+        );
+        assert!(
+            immutable_missing.is_some(),
+            "immutable_document rows should not be soft-deleted by heal"
+        );
 
         let missing_deleted_at: Option<i64> = conn
             .query_row(
@@ -2604,7 +2903,10 @@ mod maintenance_command_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(missing_deleted_at.is_some(), "missing inferred entries should be marked deleted");
+        assert!(
+            missing_deleted_at.is_some(),
+            "missing inferred entries should be marked deleted"
+        );
 
         let existing_deleted_at: Option<i64> = conn
             .query_row(
@@ -2613,6 +2915,9 @@ mod maintenance_command_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(existing_deleted_at.is_none(), "existing source_ref should not be marked deleted");
+        assert!(
+            existing_deleted_at.is_none(),
+            "existing source_ref should not be marked deleted"
+        );
     }
 }

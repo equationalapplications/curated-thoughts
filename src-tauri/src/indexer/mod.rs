@@ -29,7 +29,12 @@ enum PatternKind {
 /// Call sites get `AstRef` strategy; import/use declarations get `AstRefUse`.
 pub fn extract_references(lang: RefLang, text: &str, base_line: u32) -> Vec<Chunk> {
     let mut all = extract_by_pattern(lang, text, base_line, PatternKind::Calls);
-    all.extend(extract_by_pattern(lang, text, base_line, PatternKind::Imports));
+    all.extend(extract_by_pattern(
+        lang,
+        text,
+        base_line,
+        PatternKind::Imports,
+    ));
     deduplicate_by_symbol_and_strategy(all)
 }
 
@@ -69,39 +74,47 @@ fn extract_by_pattern(lang: RefLang, text: &str, base_line: u32, kind: PatternKi
                 continue;
             }
             let node = cap.node;
-            let Ok(name) = node.utf8_text(source) else { continue };
+            let Ok(name) = node.utf8_text(source) else {
+                continue;
+            };
             let name = name.trim().to_lowercase();
             if name.is_empty() {
                 continue;
             }
-            let context_node = node.parent()
+            let context_node = node
+                .parent()
                 .and_then(|p| {
                     // For nested captures (e.g. field_identifier inside field_expression inside
                     // call_expression, or identifier inside import_specifier inside import_statement),
                     // walk two levels up to include the full call/import context.
-                    p.parent().filter(|gp| {
-                        matches!(gp.kind(),
-                            "call_expression" | "call" | "import_statement" |
-                            "use_declaration" | "import_declaration"
-                        )
-                    }).or(Some(p))
+                    p.parent()
+                        .filter(|gp| {
+                            matches!(
+                                gp.kind(),
+                                "call_expression"
+                                    | "call"
+                                    | "import_statement"
+                                    | "use_declaration"
+                                    | "import_declaration"
+                            )
+                        })
+                        .or(Some(p))
                 })
                 .unwrap_or(node);
             let start_byte = context_node.start_byte();
             let end_byte = context_node.end_byte();
-            let snippet = text.get(start_byte..end_byte)
+            let snippet = text
+                .get(start_byte..end_byte)
                 .unwrap_or("")
                 .trim()
                 .to_string();
             if snippet.is_empty() {
                 continue;
             }
-            let start_line = base_line
-                + text[..start_byte].bytes().filter(|&b| b == b'\n').count() as u32
-                + 1;
-            let end_line = base_line
-                + text[..end_byte].bytes().filter(|&b| b == b'\n').count() as u32
-                + 1;
+            let start_line =
+                base_line + text[..start_byte].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+            let end_line =
+                base_line + text[..end_byte].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
             chunks.push(Chunk {
                 text: snippet,
                 start_line,
@@ -235,7 +248,8 @@ mod tests {
         let src = r#"fn main() { init_db(); }"#;
         let refs = extract_references(RefLang::Rust, src, 0);
         assert!(
-            refs.iter().any(|c| c.symbol_name.as_deref() == Some("init_db")),
+            refs.iter()
+                .any(|c| c.symbol_name.as_deref() == Some("init_db")),
             "expected init_db in refs, got: {:?}",
             refs.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()
         );
@@ -246,7 +260,10 @@ mod tests {
         let src = r#"fn main() { do_something(); }"#;
         let refs = extract_references(RefLang::Rust, src, 0);
         for r in &refs {
-            assert!(r.defined_symbol.is_none(), "defined_symbol should be None for ref chunks");
+            assert!(
+                r.defined_symbol.is_none(),
+                "defined_symbol should be None for ref chunks"
+            );
         }
     }
 
@@ -254,7 +271,10 @@ mod tests {
     fn deduplication_keeps_first_occurrence() {
         let src = r#"fn main() { foo(); foo(); bar(); }"#;
         let refs = extract_references(RefLang::Rust, src, 0);
-        let foo_count = refs.iter().filter(|c| c.symbol_name.as_deref() == Some("foo")).count();
+        let foo_count = refs
+            .iter()
+            .filter(|c| c.symbol_name.as_deref() == Some("foo"))
+            .count();
         assert_eq!(foo_count, 1, "foo should appear exactly once after dedup");
     }
 
@@ -263,7 +283,8 @@ mod tests {
         let src = r#"import { useState } from 'react';"#;
         let refs = extract_references(RefLang::TypeScript, src, 0);
         assert!(
-            refs.iter().any(|c| c.symbol_name.as_deref() == Some("usestate")),
+            refs.iter()
+                .any(|c| c.symbol_name.as_deref() == Some("usestate")),
             "expected usestate in refs"
         );
     }
@@ -273,7 +294,8 @@ mod tests {
         let src = r#"fn main() { self.init_db(); }"#;
         let refs = extract_references(RefLang::Rust, src, 0);
         assert!(
-            refs.iter().any(|c| c.symbol_name.as_deref() == Some("init_db")),
+            refs.iter()
+                .any(|c| c.symbol_name.as_deref() == Some("init_db")),
             "expected init_db in refs from method call, got: {:?}",
             refs.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()
         );
@@ -284,7 +306,8 @@ mod tests {
         let src = r#"use crate::db::init_db;"#;
         let refs = extract_references(RefLang::Rust, src, 0);
         assert!(
-            refs.iter().any(|c| c.symbol_name.as_deref() == Some("init_db")),
+            refs.iter()
+                .any(|c| c.symbol_name.as_deref() == Some("init_db")),
             "expected init_db in refs from use declaration, got: {:?}",
             refs.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()
         );
@@ -304,7 +327,10 @@ mod tests {
     fn rust_call_gets_ast_ref_strategy() {
         let src = r#"fn main() { foo(); }"#;
         let refs = extract_references(RefLang::Rust, src, 0);
-        let call = refs.iter().find(|c| c.symbol_name.as_deref() == Some("foo")).unwrap();
+        let call = refs
+            .iter()
+            .find(|c| c.symbol_name.as_deref() == Some("foo"))
+            .unwrap();
         assert_eq!(call.strategy, ChunkStrategyTag::AstRef);
     }
 
@@ -312,7 +338,10 @@ mod tests {
     fn rust_use_declaration_gets_ast_ref_use_strategy() {
         let src = r#"use crate::db::init_db;"#;
         let refs = extract_references(RefLang::Rust, src, 0);
-        let import = refs.iter().find(|c| c.symbol_name.as_deref() == Some("init_db")).unwrap();
+        let import = refs
+            .iter()
+            .find(|c| c.symbol_name.as_deref() == Some("init_db"))
+            .unwrap();
         assert_eq!(import.strategy, ChunkStrategyTag::AstRefUse);
     }
 
@@ -320,7 +349,10 @@ mod tests {
     fn typescript_import_gets_ast_ref_use_strategy() {
         let src = r#"import { useState } from 'react';"#;
         let refs = extract_references(RefLang::TypeScript, src, 0);
-        let import = refs.iter().find(|c| c.symbol_name.as_deref() == Some("usestate")).unwrap();
+        let import = refs
+            .iter()
+            .find(|c| c.symbol_name.as_deref() == Some("usestate"))
+            .unwrap();
         assert_eq!(import.strategy, ChunkStrategyTag::AstRefUse);
     }
 
@@ -334,7 +366,13 @@ mod tests {
         let import_chunk = refs.iter().find(|c| {
             c.symbol_name.as_deref() == Some("init_db") && c.strategy == ChunkStrategyTag::AstRefUse
         });
-        assert!(call_chunk.is_some(), "init_db CALLS chunk should survive dedup");
-        assert!(import_chunk.is_some(), "init_db IMPORTS chunk should survive dedup");
+        assert!(
+            call_chunk.is_some(),
+            "init_db CALLS chunk should survive dedup"
+        );
+        assert!(
+            import_chunk.is_some(),
+            "init_db IMPORTS chunk should survive dedup"
+        );
     }
 }

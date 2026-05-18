@@ -144,7 +144,9 @@ mod tests {
     use super::*;
     use crate::chunker::{Chunk, ChunkStrategyTag};
     use crate::db::connection::open_in_memory;
-    use crate::db::queries::{insert_chunk, insert_relationship, mark_document_indexed, upsert_document};
+    use crate::db::queries::{
+        insert_chunk, insert_relationship, mark_document_indexed, upsert_document,
+    };
 
     #[test]
     fn min_depth_rel_type_priority_prefers_calls() {
@@ -160,7 +162,10 @@ mod tests {
         let callees = get_callees(&conn, root, "tier_fact", 5).unwrap();
         let target_rows: Vec<_> = callees.iter().filter(|r| r.chunk_id == target).collect();
         assert_eq!(target_rows.len(), 1, "target chunk should appear once");
-        assert_eq!(target_rows[0].rel_type, "CALLS", "CALLS should be preferred over IMPORTS at equal depth");
+        assert_eq!(
+            target_rows[0].rel_type, "CALLS",
+            "CALLS should be preferred over IMPORTS at equal depth"
+        );
     }
 
     fn make_def_chunk(name: &str) -> Chunk {
@@ -216,7 +221,10 @@ mod tests {
         let (a, _b, _c, d) = setup_diamond(&conn);
         let callees = get_callees(&conn, a, "tier_fact", 1).unwrap();
         let chunk_ids: Vec<i64> = callees.iter().map(|r| r.chunk_id).collect();
-        assert!(!chunk_ids.contains(&d), "D is at depth 2, should not appear with max_hops=1");
+        assert!(
+            !chunk_ids.contains(&d),
+            "D is at depth 2, should not appear with max_hops=1"
+        );
     }
 
     #[test]

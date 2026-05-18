@@ -1,6 +1,8 @@
 use tauri_app_lib::chunker::{Chunk, ChunkStrategyTag};
 use tauri_app_lib::db::connection::open_in_memory;
-use tauri_app_lib::db::queries::{insert_chunk, insert_relationship, mark_document_indexed, upsert_document};
+use tauri_app_lib::db::queries::{
+    insert_chunk, insert_relationship, mark_document_indexed, upsert_document,
+};
 use tauri_app_lib::graph;
 
 fn make_def_chunk(name: &str) -> Chunk {
@@ -46,9 +48,18 @@ fn impact_radius_caps_at_five_hops() {
     }
 
     let neighbors = graph::get_both(&conn, chunks[0], "tier_fact", 5).expect("impact radius query");
-    assert!(neighbors.iter().all(|n| n.depth <= 5), "no neighbors beyond 5 hops");
-    assert!(neighbors.iter().any(|n| n.chunk_id == chunks[5]), "depth-5 neighbor should be included");
-    assert!(!neighbors.iter().any(|n| n.chunk_id == chunks[6]), "depth-6 neighbor should be excluded");
+    assert!(
+        neighbors.iter().all(|n| n.depth <= 5),
+        "no neighbors beyond 5 hops"
+    );
+    assert!(
+        neighbors.iter().any(|n| n.chunk_id == chunks[5]),
+        "depth-5 neighbor should be included"
+    );
+    assert!(
+        !neighbors.iter().any(|n| n.chunk_id == chunks[6]),
+        "depth-6 neighbor should be excluded"
+    );
 }
 
 #[test]
@@ -57,46 +68,16 @@ fn impact_radius_traverses_recursive_call_graphs_in_both_directions() {
     let doc_id = upsert_document(&conn, "/vault/documents/recursive.rs", "h").expect("upsert doc");
     mark_document_indexed(&conn, doc_id).expect("mark document indexed");
 
-    let a = insert_chunk(
-        &conn,
-        doc_id,
-        &make_def_chunk("a"),
-        0,
-        "tier_fact",
-    )
-    .expect("insert chunk a");
-    let b = insert_chunk(
-        &conn,
-        doc_id,
-        &make_def_chunk("b"),
-        1,
-        "tier_fact",
-    )
-    .expect("insert chunk b");
-    let c = insert_chunk(
-        &conn,
-        doc_id,
-        &make_def_chunk("c"),
-        2,
-        "tier_fact",
-    )
-    .expect("insert chunk c");
-    let d = insert_chunk(
-        &conn,
-        doc_id,
-        &make_def_chunk("d"),
-        3,
-        "tier_fact",
-    )
-    .expect("insert chunk d");
-    let e = insert_chunk(
-        &conn,
-        doc_id,
-        &make_def_chunk("e"),
-        4,
-        "tier_fact",
-    )
-    .expect("insert chunk e");
+    let a =
+        insert_chunk(&conn, doc_id, &make_def_chunk("a"), 0, "tier_fact").expect("insert chunk a");
+    let b =
+        insert_chunk(&conn, doc_id, &make_def_chunk("b"), 1, "tier_fact").expect("insert chunk b");
+    let c =
+        insert_chunk(&conn, doc_id, &make_def_chunk("c"), 2, "tier_fact").expect("insert chunk c");
+    let d =
+        insert_chunk(&conn, doc_id, &make_def_chunk("d"), 3, "tier_fact").expect("insert chunk d");
+    let e =
+        insert_chunk(&conn, doc_id, &make_def_chunk("e"), 4, "tier_fact").expect("insert chunk e");
 
     insert_relationship(&conn, a, b, "CALLS", "b", "tier_fact").expect("insert relationship a->b");
     insert_relationship(&conn, b, c, "CALLS", "c", "tier_fact").expect("insert relationship b->c");
@@ -109,8 +90,24 @@ fn impact_radius_traverses_recursive_call_graphs_in_both_directions() {
         .map(|n| (n.chunk_id, n.depth))
         .collect();
 
-    assert_eq!(depth_by_chunk.get(&b), Some(&1), "B should be a direct callee of A");
-    assert_eq!(depth_by_chunk.get(&c), Some(&2), "C should be reachable via B at depth 2");
-    assert_eq!(depth_by_chunk.get(&d), Some(&3), "D should be reachable via C at depth 3");
-    assert_eq!(depth_by_chunk.get(&e), Some(&1), "E should be recognized as a direct caller of A");
+    assert_eq!(
+        depth_by_chunk.get(&b),
+        Some(&1),
+        "B should be a direct callee of A"
+    );
+    assert_eq!(
+        depth_by_chunk.get(&c),
+        Some(&2),
+        "C should be reachable via B at depth 2"
+    );
+    assert_eq!(
+        depth_by_chunk.get(&d),
+        Some(&3),
+        "D should be reachable via C at depth 3"
+    );
+    assert_eq!(
+        depth_by_chunk.get(&e),
+        Some(&1),
+        "E should be recognized as a direct caller of A"
+    );
 }

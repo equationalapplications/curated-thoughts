@@ -190,7 +190,8 @@ fn heal_ignores_already_soft_deleted_entries() {
 
     let conn = open_migrated_db(&tmp);
     let original_ts: i64 = 1_000_000;
-    let rowid = insert_entry_soft_deleted(&conn, Some("ghost.md"), "librarian_inferred", original_ts);
+    let rowid =
+        insert_entry_soft_deleted(&conn, Some("ghost.md"), "librarian_inferred", original_ts);
 
     run_heal(&conn, &vault);
 
@@ -244,7 +245,8 @@ fn prune_retains_recently_soft_deleted_librarian_inferred_entry() {
             .unwrap();
         ts - 6 * 86400
     };
-    let rowid = insert_entry_soft_deleted(&conn, Some("recent.md"), "librarian_inferred", six_days_ago);
+    let rowid =
+        insert_entry_soft_deleted(&conn, Some("recent.md"), "librarian_inferred", six_days_ago);
 
     run_prune(&conn);
 

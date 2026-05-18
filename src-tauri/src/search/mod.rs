@@ -314,7 +314,6 @@ mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
 
-
     fn vec_blob2(x: f32, y: f32) -> Vec<u8> {
         [x.to_le_bytes(), y.to_le_bytes()]
             .into_iter()
@@ -340,47 +339,40 @@ mod tests {
             .expect("insert doc b");
         let id_b: i64 = conn.last_insert_rowid();
 
-        conn
-            .execute(
-                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy) \
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy) \
                  VALUES (?1, 'chunk-a', 0, 1, 1, 'prose')",
-                [id_a],
-            )
-            .expect("chunk a");
+            [id_a],
+        )
+        .expect("chunk a");
         let chunk_a: i64 = conn.last_insert_rowid();
-        conn
-            .execute(
-                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy) \
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy) \
                  VALUES (?1, 'chunk-b', 0, 1, 1, 'prose')",
-                [id_b],
-            )
-            .expect("chunk b");
+            [id_b],
+        )
+        .expect("chunk b");
         let chunk_b: i64 = conn.last_insert_rowid();
 
-        conn
-            .execute(
-                "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
-                rusqlite::params![chunk_a, vec_blob2(1.0, 0.0)],
-            )
-            .expect("emb a");
-        conn
-            .execute(
-                "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
-                rusqlite::params![chunk_b, vec_blob2(0.0, 1.0)],
-            )
-            .expect("emb b");
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+            rusqlite::params![chunk_a, vec_blob2(1.0, 0.0)],
+        )
+        .expect("emb a");
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+            rusqlite::params![chunk_b, vec_blob2(0.0, 1.0)],
+        )
+        .expect("emb b");
         conn
     }
 
     #[test]
     fn related_chunks_try_paths_skips_empty_candidates() {
         let conn = seed_two_doc_fixture();
-        let hits = related_chunks_try_paths(
-            &conn,
-            &["no-such-doc-path".into(), "stored-a".into()],
-            10,
-        )
-        .expect("try_paths");
+        let hits =
+            related_chunks_try_paths(&conn, &["no-such-doc-path".into(), "stored-a".into()], 10)
+                .expect("try_paths");
         assert!(!hits.is_empty(), "expected fallback to second path");
         assert!(
             hits.iter().all(|h| h.doc_path == "stored-b"),
@@ -391,12 +383,9 @@ mod tests {
     #[test]
     fn related_chunks_try_paths_returns_empty_when_none_match() {
         let conn = seed_two_doc_fixture();
-        let hits = related_chunks_try_paths(
-            &conn,
-            &["missing-one".into(), "missing-two".into()],
-            10,
-        )
-        .expect("try_paths");
+        let hits =
+            related_chunks_try_paths(&conn, &["missing-one".into(), "missing-two".into()], 10)
+                .expect("try_paths");
         assert!(hits.is_empty());
     }
 
@@ -405,12 +394,9 @@ mod tests {
         let conn = seed_two_doc_fixture();
         let limit = 10;
         let expected = related_chunks(&conn, "stored-a", limit).expect("direct related");
-        let merged = related_chunks_try_paths(
-            &conn,
-            &["stored-a".into(), "stored-b".into()],
-            limit,
-        )
-        .expect("try_paths");
+        let merged =
+            related_chunks_try_paths(&conn, &["stored-a".into(), "stored-b".into()], limit)
+                .expect("try_paths");
         assert_eq!(merged.len(), expected.len());
         for (m, e) in merged.iter().zip(expected.iter()) {
             assert_eq!(m.doc_path, e.doc_path);
@@ -438,8 +424,14 @@ mod tests {
             let entity_id = format!("entity_{id_index}");
             store.insert(&entity_id, 1, Arc::from(vec![id_index as f32]));
         }
-        assert!(store.get("entity_0", 1).is_none(), "entity_0 should be evicted");
-        assert!(store.get("entity_1", 1).is_some(), "entity_1 should be retained");
+        assert!(
+            store.get("entity_0", 1).is_none(),
+            "entity_0 should be evicted"
+        );
+        assert!(
+            store.get("entity_1", 1).is_some(),
+            "entity_1 should be retained"
+        );
     }
 
     #[test]
