@@ -148,7 +148,15 @@ pub fn spawn_postgres_worker(
                 if cancel_for_run.load(Ordering::SeqCst) {
                     break;
                 }
-                match PgSink::new(&config.db_url).await {
+                // Bound each attempt so stop_outbox_worker / switch_vault are not
+                // forced to wait through a full TCP timeout on a slow endpoint.
+                let attempt = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    PgSink::new(&config.db_url),
+                )
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("connection timed out after 10s")));
+                match attempt {
                     Ok(s) => {
                         connected = Some(s);
                         break;
