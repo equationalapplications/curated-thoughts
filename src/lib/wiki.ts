@@ -79,15 +79,26 @@ export async function setupWiki() {
 
   // Listen for runtime outbox worker starts so we can recreate the wiki
   // with enableOutbox: true for new mutations.
-  const unlisten = await listen<void>('outbox-worker-started', async () => {
+  const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
     // Recreate wiki with enableOutbox: true if not already enabled.
-    // We check by comparing the current options (recreate unconditionally
-    // if we can't inspect, which is safe since setup() is idempotent for this flag).
     wiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
     await wiki.setup();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('wiki-updated'));
+    }
   });
-  // Store unlisten if you need cleanup; for now the listener lives for the session.
-  void unlisten;
+
+  const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
+    wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+    await wiki.setup();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('wiki-updated'));
+    }
+  });
+
+  // Store unlisten if you need cleanup; for now the listeners live for the session.
+  void startedUnlisten;
+  void stoppedUnlisten;
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */

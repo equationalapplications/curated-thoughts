@@ -95,6 +95,7 @@ struct OutboxWorkerError {
 }
 
 pub struct OutboxWorkerHandle {
+    pub config: crate::outbox::OutboxConfig,
     cancel: Arc<AtomicBool>,
     handle: tauri::async_runtime::JoinHandle<()>,
     finished: Arc<AtomicBool>,
@@ -126,6 +127,7 @@ pub fn spawn_postgres_worker(
     let cancel_for_run = cancel.clone();
     // Use Tauri's async runtime to avoid panics when called from setup hooks
     // where no Tokio runtime may be entered.
+    let config_state = config.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let emit = |app_handle: &Option<tauri::AppHandle>, msg: String, fatal: bool| {
             eprintln!("[outbox] {msg}");
@@ -214,7 +216,7 @@ pub fn spawn_postgres_worker(
         finished_for_task.store(true, Ordering::SeqCst);
     });
 
-    OutboxWorkerHandle { cancel, handle, finished }
+    OutboxWorkerHandle { config: config_state, cancel, handle, finished }
 }
 
 #[cfg(test)]
