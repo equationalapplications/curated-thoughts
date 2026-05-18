@@ -91,9 +91,8 @@ fn update_wiki_status(
     emit_wiki_status(app, &guard);
 }
 
-fn configured_database_url() -> Option<String> {
-    let db_url = std::env::var("DATABASE_URL").ok()?;
-    let db_url = db_url.trim();
+fn normalize_database_url(url: String) -> Option<String> {
+    let db_url = url.trim();
     if db_url.is_empty() {
         None
     } else {
@@ -101,9 +100,41 @@ fn configured_database_url() -> Option<String> {
     }
 }
 
+fn configured_database_url() -> Option<String> {
+    std::env::var("DATABASE_URL").ok().and_then(normalize_database_url)
+}
+
 fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiStatusFlags)) {
     let state = app.state::<WikiStatusState>();
     update_wiki_status(app, &state, updater);
+}
+
+fn spawn_outbox_worker_if_configured(
+    app: &AppHandle,
+    outbox_state: State<'_, OutboxWorkerState>,
+    sqlite_path: PathBuf,
+) {
+    let existing_config = {
+        let guard = outbox_state.0.lock().unwrap();
+        guard.as_ref().map(|handle| handle.config.clone())
+    };
+
+    if let Some(mut config) = existing_config {
+        config.sqlite_path = sqlite_path;
+        let handle = spawn_postgres_worker(config, Some(app.clone()));
+        *outbox_state.0.lock().unwrap() = Some(handle);
+        return;
+    }
+
+    if let Some(db_url) = configured_database_url() {
+        let config = OutboxConfig {
+            sqlite_path,
+            db_url,
+            ..OutboxConfig::default()
+        };
+        let handle = spawn_postgres_worker(config, Some(app.clone()));
+        *outbox_state.0.lock().unwrap() = Some(handle);
+    }
 }
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
@@ -821,22 +852,7 @@ async fn switch_vault(
     }
 
     if switch_result.is_ok() {
-        // Stop any existing worker before spawning a replacement.
-        {
-            let mut g = outbox_state.0.lock().unwrap();
-            if let Some(handle) = g.take() {
-                drop(handle);
-            }
-        }
-        if let Some(db_url) = configured_database_url() {
-            let config = OutboxConfig {
-                sqlite_path: db_path.clone(),
-                db_url,
-                ..OutboxConfig::default()
-            };
-            *outbox_state.0.lock().unwrap() =
-                Some(spawn_postgres_worker(config, Some(app.clone())));
-        }
+        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone());
         if let Err(e) = start_file_watcher_inner(
             &app,
             pipeline.clone(),
@@ -849,22 +865,7 @@ async fn switch_vault(
             eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
         }
     } else if recovery_reopened_db {
-        // Stop any existing worker before spawning a replacement.
-        {
-            let mut g = outbox_state.0.lock().unwrap();
-            if let Some(handle) = g.take() {
-                drop(handle);
-            }
-        }
-        if let Some(db_url) = configured_database_url() {
-            let config = OutboxConfig {
-                sqlite_path: db_path.clone(),
-                db_url,
-                ..OutboxConfig::default()
-            };
-            *outbox_state.0.lock().unwrap() =
-                Some(spawn_postgres_worker(config, Some(app.clone())));
-        }
+        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone());
     }
 
     switch_result
@@ -2380,7 +2381,13 @@ async fn start_outbox_worker(
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
     let db_url = match database_url {
-        Some(url) => url,
+        Some(url) => {
+            let url = url.trim();
+            if url.is_empty() {
+                return Err("database_url cannot be empty".to_string());
+            }
+            url.to_string()
+        }
         None => configured_database_url().ok_or_else(|| {
             "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
         })?,
@@ -2399,23 +2406,6 @@ async fn start_outbox_worker(
             .map(PathBuf::from)?
     };
 
-    // Take the existing handle out of state before any await to avoid
-    // holding MutexGuard across await (which violates Send bounds).
-    let existing = {
-        let mut guard = state.0.lock().unwrap();
-        if let Some(ref handle) = *guard {
-            if !handle.is_finished() {
-                guard.take()
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-    if let Some(handle) = existing {
-        handle.stop().await;
-    }
     let config = OutboxConfig {
         sqlite_path,
         db_url,
@@ -2432,7 +2422,22 @@ async fn start_outbox_worker(
         },
         ..OutboxConfig::default()
     };
-    let new_handle = spawn_postgres_worker(config, Some(app_handle.clone()));
+
+    // Take the existing handle out of state before any await to avoid
+    // holding MutexGuard across await (which violates Send bounds).
+    let existing = {
+        let mut guard = state.0.lock().unwrap();
+        match &*guard {
+            Some(handle) if !handle.is_finished() && handle.config == config => return Ok(()),
+            Some(_) => guard.take(),
+            None => None,
+        }
+    };
+    if let Some(handle) = existing {
+        handle.stop().await;
+    }
+
+    let new_handle = spawn_postgres_worker(config.clone(), Some(app_handle.clone()));
     {
         let mut guard = state.0.lock().unwrap();
         *guard = Some(new_handle);
@@ -2446,13 +2451,17 @@ async fn start_outbox_worker(
 }
 
 #[tauri::command]
-async fn stop_outbox_worker(state: tauri::State<'_, OutboxWorkerState>) -> Result<(), String> {
+async fn stop_outbox_worker(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, OutboxWorkerState>,
+) -> Result<(), String> {
     let handle = {
         let mut guard = state.0.lock().unwrap();
         guard.take()
     };
     if let Some(handle) = handle {
         handle.stop().await;
+        let _ = app_handle.emit("outbox-worker-stopped", ());
     }
     Ok(())
 }

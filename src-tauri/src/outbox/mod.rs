@@ -17,7 +17,7 @@ pub enum ErrorPolicy {
     Skip,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxConfig {
     pub sqlite_path: PathBuf,
     pub db_url: String,
@@ -239,6 +239,22 @@ impl OutboxWorker {
         Ok(full_batch)
     }
 
+    fn wait_for_cancel(cancel: &Arc<AtomicBool>, interval: std::time::Duration) -> impl std::future::Future<Output = ()> {
+        let cancel = cancel.clone();
+        async move {
+            let chunk = std::time::Duration::from_millis(250);
+            let mut remaining = interval;
+            while remaining > std::time::Duration::ZERO {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let next = std::cmp::min(chunk, remaining);
+                tokio::time::sleep(next).await;
+                remaining = remaining.saturating_sub(next);
+            }
+        }
+    }
+
     /// Long-running poll loop. Stop via the provided cancellation token.
     /// Sleeps before the first poll intentionally — avoids thundering herd on startup.
     /// `on_error` is called for every poll/drain error; use it to emit Tauri events or log.
@@ -254,7 +270,7 @@ impl OutboxWorker {
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            tokio::time::sleep(interval).await;
+            Self::wait_for_cancel(&cancel, interval).await;
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
