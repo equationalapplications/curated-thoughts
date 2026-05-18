@@ -48,7 +48,7 @@ const directAdapter: SQLiteAdapter = {
 
 export const tauriWikiAdapter: SQLiteAdapter = {
   async execAsync(sql: string) {
-    return enqueue(() => invoke("wiki_exec", { sql }));
+    return enqueue(() => invoke<void>("wiki_exec", { sql }));
   },
 
   async runAsync(sql: string, params: unknown[] = []) {
