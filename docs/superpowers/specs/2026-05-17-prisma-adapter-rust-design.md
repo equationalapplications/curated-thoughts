@@ -347,9 +347,9 @@ export async function setupWiki() {
 }
 ```
 
-**Intentional improvement:** Instead of blindly setting `enableOutbox: true`, the JS layer dynamically checks whether the outbox is configured (via the `outbox_is_configured` Tauri command, which checks `DATABASE_URL`). This prevents unnecessary SQLite writes for users who don't have Postgres configured. The event listeners handle runtime worker start/stop (e.g., desktop user calling `start_outbox_worker` mid-session).
+**Intentional improvement:** Instead of blindly setting `enableOutbox: true`, the JS layer dynamically checks whether the outbox is currently active via the `outbox_is_configured` Tauri command. That command reflects the runtime `OutboxWorkerState`, so it may return `false` if the worker has been stopped or has already finished, even when `DATABASE_URL` is present. This prevents unnecessary SQLite writes when the Postgres sync path is not actually running. The event listeners handle runtime worker start/stop (e.g., desktop user calling `start_outbox_worker` mid-session).
 
-This causes `core-llm-wiki` to write every wiki mutation atomically to the `outbox` table alongside the primary write — but only when the outbox is actually configured. No other JS changes required.
+This causes `core-llm-wiki` to write every wiki mutation atomically to the `outbox` table alongside the primary write — but only when the outbox worker is actually active. No other JS changes required.
 
 ---
 

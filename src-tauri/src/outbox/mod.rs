@@ -247,16 +247,17 @@ impl OutboxWorker {
                 break;
             }
             let id = event.id.clone();
-            let insert_result = tokio::time::timeout(
+            let insert_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 sink.insert_event(&event),
             )
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
                     "outbox event {id} insert timed out after 10 seconds"
-                )
-            })?;
+                )),
+            };
 
             match insert_result {
                 Ok(()) => {
