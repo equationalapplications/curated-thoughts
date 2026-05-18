@@ -1,3 +1,49 @@
+## [1.4.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.3.2...v1.4.0) (2026-05-18)
+
+### Features
+
+* **outbox:** add fetch_pending and acknowledge SQLite helpers ([430dec4](https://github.com/equationalapplications/curated-thoughts/commit/430dec49bc4d342720bb069bc1a836889e2ac96b))
+* **outbox:** add module skeleton — types, Sink trait, OutboxConfig ([89d6208](https://github.com/equationalapplications/curated-thoughts/commit/89d62087e09b62d6fcbfbbfdb3bead8d884d5a56))
+* **outbox:** add PgSink and spawn_postgres_worker with sqlx ([4afe786](https://github.com/equationalapplications/curated-thoughts/commit/4afe7861ae20ad2bab0601645322e40ad3de9787))
+* **outbox:** auto-init OutboxWorker in curated-thoughts-mcp from DATABASE_URL ([62451ee](https://github.com/equationalapplications/curated-thoughts/commit/62451ee541f287c0819bad4d187cdb8c23bcfe1f))
+* **outbox:** enable outbox in core-llm-wiki config ([1af0843](https://github.com/equationalapplications/curated-thoughts/commit/1af08439c842fcfe432a646bb3a9ba50a52576f3))
+* **outbox:** implement OutboxWorker and sync_batch with full test coverage ([1b91d9e](https://github.com/equationalapplications/curated-thoughts/commit/1b91d9e9dc02b64fac1caface9120a94ee9b4a63))
+* **outbox:** wire OutboxWorker into Tauri — auto-init from DATABASE_URL, runtime commands ([5c0155d](https://github.com/equationalapplications/curated-thoughts/commit/5c0155da38e3c02ffa6e43c86d8bd1dbd64a007a))
+
+### Bug Fixes
+
+* align Tauri wiki adapter transaction callback with SQLiteAdapter type ([88d138a](https://github.com/equationalapplications/curated-thoughts/commit/88d138a5c3b4a49d4760c2f5f7fe76a5b5f8def4))
+* **ci:** skip Postgres tests when DATABASE_URL is empty ([161cfc6](https://github.com/equationalapplications/curated-thoughts/commit/161cfc618429ec827bf217d03b5772175d8bf870)), closes [#10](https://github.com/equationalapplications/curated-thoughts/issues/10)
+* **ci:** stabilize Ubuntu Postgres integration tests ([61147d2](https://github.com/equationalapplications/curated-thoughts/commit/61147d27412426a84778150dff8688622072dde1))
+* cooperative outbox worker shutdown and restart on vault recovery ([defd5e6](https://github.com/equationalapplications/curated-thoughts/commit/defd5e665b45f0d61bec8ca2de821a0f98cb8032))
+* **outbox:** add ::BIGINT cast on synced_at DEFAULT expression for Postgres compatibility ([ac94779](https://github.com/equationalapplications/curated-thoughts/commit/ac94779e7ca606dd42819e8ddc8fc6420f6ada0b))
+* **outbox:** add table safety note and ?1..?N binding comment ([d6e3754](https://github.com/equationalapplications/curated-thoughts/commit/d6e375485e7ad5212ddb9aa27bf657892f293829))
+* **outbox:** address 3 unresolved Copilot review threads ([f721360](https://github.com/equationalapplications/curated-thoughts/commit/f7213608f649ff863fce82646aa729ce08ba56da))
+* **outbox:** address Copilot review — CI, sqlx deps, worker path + validation ([c312995](https://github.com/equationalapplications/curated-thoughts/commit/c31299545c64567cd7effd3bafdccf2f78545935))
+* **outbox:** address Copilot review — error propagation, vault lifecycle, retry, cleanup ([42cac63](https://github.com/equationalapplications/curated-thoughts/commit/42cac63854da0c786c137684cc39822ecbca9cfa))
+* **outbox:** address Copilot review — transaction atomicity, CI, opt-in outbox, recovery respawn ([31faf37](https://github.com/equationalapplications/curated-thoughts/commit/31faf3769966f1b20989049fdc124228a6e93f42))
+* **outbox:** address PR review issues ([c6c0d4a](https://github.com/equationalapplications/curated-thoughts/commit/c6c0d4a58f0a9d0ffdeab0014775154ae53937bd))
+* **outbox:** align Sink trait with Prisma adapter spec ([3158287](https://github.com/equationalapplications/curated-thoughts/commit/31582879af4989f47057b4c09aeb5b8f11ce7d38))
+* **outbox:** alphabetical mod ordering, sentinel defaults doc comment ([5c4fa41](https://github.com/equationalapplications/curated-thoughts/commit/5c4fa410d0c219b617b4b8faf1dd628dede3f246))
+* **outbox:** await worker shutdown on vault switch and normalize DATABASE_URL handling ([03bfbda](https://github.com/equationalapplications/curated-thoughts/commit/03bfbdad8a191dba5aa4971cb8646f2b65d46ae3))
+* **outbox:** bound PgSink connect to 10s timeout per attempt ([d0b8d42](https://github.com/equationalapplications/curated-thoughts/commit/d0b8d427c262738d6b3f23b0d99393db61ceeb7d))
+* **outbox:** derive SQLite path from live DbState in start_outbox_worker ([d7492b0](https://github.com/equationalapplications/curated-thoughts/commit/d7492b0a90c67aaccd58d47bb5c706ef1fce75d2))
+* **outbox:** document run() sleep-first behavior and JoinHandle abort contract ([6bb1881](https://github.com/equationalapplications/curated-thoughts/commit/6bb1881930e265007f3e92dd7fb8c30921480f26))
+* **outbox:** emit outbox-worker-started after recovery restart ([28611cd](https://github.com/equationalapplications/curated-thoughts/commit/28611cdb7673e3a7f2d8376240b56c7a76ddf777))
+* **outbox:** harden table name validation, improve runtime outbox state, add sqlx macros feature ([6901f86](https://github.com/equationalapplications/curated-thoughts/commit/6901f86a68f9ab6ca921b13937770d9ef7d9b67e))
+* **outbox:** make Postgres retry sleep cancelable ([f26f075](https://github.com/equationalapplications/curated-thoughts/commit/f26f075b8e46772da10c0b3352be557a30e1284c))
+* **outbox:** preserve runtime outbox config across vault switch and swap wiki instance after setup ([7ca8854](https://github.com/equationalapplications/curated-thoughts/commit/7ca8854adfefeeb8f467464349e2c77b07fe8b1e))
+* **outbox:** preserve runtime worker config, cancel promptly, and update frontend wiki provider ([933de14](https://github.com/equationalapplications/curated-thoughts/commit/933de143508e61ecfdb0f0dd23253048ba5467bf))
+* **outbox:** report skipped insert failures from sync_batch ([a1944bd](https://github.com/equationalapplications/curated-thoughts/commit/a1944bd99b3f033c9be8f0fba7cd63d0461f0fa4))
+* **outbox:** resolve PR review issues ([d04deaa](https://github.com/equationalapplications/curated-thoughts/commit/d04deaa7db74f26ff70a7dc55744658b42e654ba))
+* **outbox:** restrict runtime start to configured DATABASE_URL and remove unnecessary sqlx macros feature ([d2466bc](https://github.com/equationalapplications/curated-thoughts/commit/d2466bcef141cdfbfb09317cef7c72d92e8e3b5b))
+* **outbox:** serialize env-var tests; emit stopped on total vault-switch failure ([c4ad99e](https://github.com/equationalapplications/curated-thoughts/commit/c4ad99ef00a67cc2f223ff9f41c4461d65575e63))
+* **outbox:** stop stale worker on vault switch and remove empty DATABASE_URL from macOS CI ([ce0ecc1](https://github.com/equationalapplications/curated-thoughts/commit/ce0ecc1c7ea55b9e1dd8ca4678b3e9eba7a08f62))
+* **outbox:** tolerate missing SQLite outbox table and emit stopped event on SQLite open failure ([2474850](https://github.com/equationalapplications/curated-thoughts/commit/2474850f05096680e44569af22f764d6dcea3037))
+* **outbox:** validate DATABASE_URL in MCP, reject invalid on_error values, and sync runtime command docs ([8fffd9d](https://github.com/equationalapplications/curated-thoughts/commit/8fffd9dc88f41736d9fd0d4406fd16330faeab1a))
+* resolve PR [#10](https://github.com/equationalapplications/curated-thoughts/issues/10) review comments ([353413f](https://github.com/equationalapplications/curated-thoughts/commit/353413fc4ca4eb8969d88e2c9e33ef40af25fb96))
+* **wikiAdapter:** type invoke<void> so execAsync satisfies Promise<void> contract ([64bee1b](https://github.com/equationalapplications/curated-thoughts/commit/64bee1bc2f304322171b3d93b9a8748d1c5acf7e))
+
 ## [1.3.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.3.1...v1.3.2) (2026-05-14)
 
 ### Bug Fixes
