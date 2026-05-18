@@ -196,12 +196,31 @@ impl OutboxWorker {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(false);
         }
-        let result = self.do_sync(sink, config).await;
+        let result = self.do_sync(sink, config, None).await;
         self.running.store(false, Ordering::SeqCst);
         result
     }
 
-    async fn do_sync<S: Sink>(&self, sink: &S, config: &OutboxConfig) -> anyhow::Result<bool> {
+    async fn sync_batch_with_cancel<S: Sink>(
+        &self,
+        sink: &S,
+        config: &OutboxConfig,
+        cancel: &Arc<AtomicBool>,
+    ) -> anyhow::Result<bool> {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let result = self.do_sync(sink, config, Some(cancel)).await;
+        self.running.store(false, Ordering::SeqCst);
+        result
+    }
+
+    async fn do_sync<S: Sink>(
+        &self,
+        sink: &S,
+        config: &OutboxConfig,
+        cancel: Option<&Arc<AtomicBool>>,
+    ) -> anyhow::Result<bool> {
         let events =
             fetch_pending(self.conn.clone(), &config.outbox_table, config.batch_size).await?;
 
@@ -215,6 +234,9 @@ impl OutboxWorker {
         let mut skip_error: Option<anyhow::Error> = None;
 
         for event in events {
+            if cancel.map_or(false, |c| c.load(Ordering::SeqCst)) {
+                break;
+            }
             let id = event.id.clone();
             match sink.insert_event(&event).await {
                 Ok(()) => {
@@ -284,12 +306,12 @@ impl OutboxWorker {
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            match self.sync_batch(&sink, &config).await {
+            match self.sync_batch_with_cancel(&sink, &config, &cancel).await {
                 Ok(true) => loop {
                     if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                         break 'outer;
                     }
-                    match self.sync_batch(&sink, &config).await {
+                    match self.sync_batch_with_cancel(&sink, &config, &cancel).await {
                         Ok(true) => {}
                         Ok(false) => break,
                         Err(e) => {

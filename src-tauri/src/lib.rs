@@ -2491,9 +2491,6 @@ async fn stop_outbox_worker(
 
 #[tauri::command]
 fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
-    if configured_database_url().is_some() {
-        return true;
-    }
     state
         .0
         .lock()

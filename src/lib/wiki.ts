@@ -78,12 +78,16 @@ export async function setupWiki() {
   await newWiki.setup();
   wiki = newWiki;
 
-  // Listen for runtime outbox worker starts so we can recreate the wiki
-  // with enableOutbox: true for new mutations.
+  // Generation counter: last-writer-wins when stopped/started fire in quick
+  // succession (e.g. switch_vault). The handler that finishes setup first
+  // checks whether a newer event has already superseded it.
+  let wikiUpdateGeneration = 0;
+
   const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
-    // Recreate wiki with enableOutbox: true if not already enabled.
+    const gen = ++wikiUpdateGeneration;
     const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
     await updatedWiki.setup();
+    if (gen !== wikiUpdateGeneration) return;
     wiki = updatedWiki;
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('wiki-updated'));
@@ -91,8 +95,10 @@ export async function setupWiki() {
   });
 
   const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
+    const gen = ++wikiUpdateGeneration;
     const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
     await updatedWiki.setup();
+    if (gen !== wikiUpdateGeneration) return;
     wiki = updatedWiki;
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('wiki-updated'));
