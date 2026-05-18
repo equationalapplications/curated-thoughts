@@ -130,6 +130,9 @@ pub trait Sink: Send + Sync + 'static {
         event: &OutboxEvent,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
+
+// Implementation uses RPITIT (Return Position Impl Trait in Trait) style,
+// not async_trait. This is the correct Rust 1.75+ pattern.
 ```
 
 ---
@@ -280,10 +283,12 @@ different DB mid-session).
 | Per-event | Postgres insert fails | `Halt`: stop batch, ack prior successes. `Skip`: ack event, continue. |
 | Worker-level | SQLite read/ack fails | Log to stderr + emit `outbox-worker-error` Tauri event (desktop) or stderr only (MCP) |
 
-`outbox-worker-error` payload:
+`outbox-worker-error` payload (matches `OutboxWorkerError` struct in `postgres.rs`):
 ```json
 { "error": "string", "fatal": true }
 ```
+
+Note: The `fatal` field is included in the actual implementation.
 
 `fatal: true` means the worker stopped itself (SQLite open failure). `fatal: false` means a per-poll error the loop continues after. Frontend may surface this in settings UI or ignore it.
 
