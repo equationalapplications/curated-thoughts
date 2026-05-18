@@ -68,6 +68,11 @@ fn validate_outbox_table_name(table: &str) -> anyhow::Result<&str> {
     Ok(table)
 }
 
+fn is_missing_table_error(err: &rusqlite::Error) -> bool {
+    matches!(err, rusqlite::Error::SqliteFailure(db_err, Some(msg))
+        if db_err.code == rusqlite::ErrorCode::Unknown && msg.to_lowercase().contains("no such table"))
+}
+
 /// `table` must be an app-controlled identifier, not user-supplied input.
 pub(crate) async fn fetch_pending(
     conn: Arc<Mutex<Connection>>,
@@ -83,7 +88,11 @@ pub(crate) async fn fetch_pending(
             "SELECT id, entity_id, table_name, record_id, operation, payload, created_at \
              FROM {table} ORDER BY created_at ASC, rowid ASC LIMIT ?1"
         );
-        let mut stmt = guard.prepare(&sql)?;
+        let mut stmt = match guard.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(e) if is_missing_table_error(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
         let events = stmt
             .query_map([batch_size as i64], |row| {
                 Ok((
@@ -659,6 +668,17 @@ mod sqlite_tests {
         let conn = Arc::new(Mutex::new(conn));
         let result = fetch_pending(conn, "outbox", 10).await;
         assert!(result.is_err(), "must fail on malformed JSON payload");
+    }
+
+    #[tokio::test]
+    async fn fetch_pending_returns_empty_when_outbox_table_missing() {
+        let f = NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+        let events = fetch_pending(conn, "outbox", 10)
+            .await
+            .expect("missing outbox table should be treated as empty queue");
+        assert!(events.is_empty());
     }
 }
 
