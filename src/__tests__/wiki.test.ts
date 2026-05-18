@@ -138,6 +138,58 @@ describe('tieredRead', () => {
     );
   });
 
+  it('recreates wiki with enableOutbox true when outbox-worker-started fires', async () => {
+    vi.clearAllMocks();
+    const setupMock = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(createWiki).mockImplementation(() => ({
+      setup: setupMock,
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockResolvedValue(false);
+
+    await setupWiki();
+
+    const startedCallback = vi.mocked(listen).mock.calls[0][1] as unknown as () => Promise<void>;
+    await startedCallback();
+
+    expect(vi.mocked(createWiki).mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          enableOutbox: true,
+        }),
+      })
+    );
+    expect(setupMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('recreates wiki with enableOutbox false when outbox-worker-stopped fires', async () => {
+    vi.clearAllMocks();
+    const setupMock = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(createWiki).mockImplementation(() => ({
+      setup: setupMock,
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockResolvedValue(true);
+
+    await setupWiki();
+
+    const stoppedCallback = vi.mocked(listen).mock.calls[1][1] as unknown as () => Promise<void>;
+    await stoppedCallback();
+
+    expect(vi.mocked(createWiki).mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        config: expect.not.objectContaining({
+          enableOutbox: true,
+        }),
+      })
+    );
+    expect(setupMock).toHaveBeenCalledTimes(2);
+  });
+
   it('forwards graphExpansion option when provided', async () => {
     await tieredRead('test query', { graphExpansion: { hops: 1 } });
     expect(wiki.read).toHaveBeenCalledWith(
