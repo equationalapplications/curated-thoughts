@@ -74,23 +74,26 @@ export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
 
 export async function setupWiki() {
   const outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
-  wiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
-  await wiki.setup();
+  const newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
+  await newWiki.setup();
+  wiki = newWiki;
 
   // Listen for runtime outbox worker starts so we can recreate the wiki
   // with enableOutbox: true for new mutations.
   const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
     // Recreate wiki with enableOutbox: true if not already enabled.
-    wiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
-    await wiki.setup();
+    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
+    await updatedWiki.setup();
+    wiki = updatedWiki;
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('wiki-updated'));
     }
   });
 
   const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
-    wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
-    await wiki.setup();
+    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+    await updatedWiki.setup();
+    wiki = updatedWiki;
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('wiki-updated'));
     }

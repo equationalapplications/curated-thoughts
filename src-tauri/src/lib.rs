@@ -113,6 +113,7 @@ async fn spawn_outbox_worker_if_configured(
     app: &AppHandle,
     outbox_state: State<'_, OutboxWorkerState>,
     sqlite_path: PathBuf,
+    fallback_config: Option<OutboxConfig>,
 ) {
     let existing_handle = {
         let mut guard = outbox_state.0.lock().unwrap();
@@ -123,15 +124,21 @@ async fn spawn_outbox_worker_if_configured(
         handle.stop().await;
     }
 
-    if let Some(db_url) = configured_database_url() {
-        let config = OutboxConfig {
+    let config = if let Some(mut config) = fallback_config {
+        config.sqlite_path = sqlite_path;
+        config
+    } else if let Some(db_url) = configured_database_url() {
+        OutboxConfig {
             sqlite_path,
             db_url,
             ..OutboxConfig::default()
-        };
-        let handle = spawn_postgres_worker(config, Some(app.clone()));
-        *outbox_state.0.lock().unwrap() = Some(handle);
-    }
+        }
+    } else {
+        return;
+    };
+
+    let handle = spawn_postgres_worker(config, Some(app.clone()));
+    *outbox_state.0.lock().unwrap() = Some(handle);
 }
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
@@ -761,12 +768,15 @@ async fn switch_vault(
 
     // Stop outbox worker before WAL cleanup and DB file operations; its dedicated
     // SQLite connection would otherwise keep polling a stale/replaced file.
-    let maybe_handle = {
+    let (maybe_outbox_config, maybe_handle) = {
         let mut g = outbox_state.0.lock().unwrap();
-        g.take()
+        let maybe_handle = g.take();
+        let maybe_config = maybe_handle.as_ref().map(|handle| handle.config.clone());
+        (maybe_config, maybe_handle)
     };
     if let Some(handle) = maybe_handle {
         handle.stop().await;
+        let _ = app.emit("outbox-worker-stopped", ());
     }
 
     let stub_path = release_global_db_lock(&db_state)?;
@@ -849,7 +859,13 @@ async fn switch_vault(
     }
 
     if switch_result.is_ok() {
-        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone()).await;
+        spawn_outbox_worker_if_configured(
+            &app,
+            outbox_state.clone(),
+            db_path.clone(),
+            maybe_outbox_config.clone(),
+        )
+        .await;
         if let Err(e) = start_file_watcher_inner(
             &app,
             pipeline.clone(),
@@ -862,7 +878,13 @@ async fn switch_vault(
             eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
         }
     } else if recovery_reopened_db {
-        spawn_outbox_worker_if_configured(&app, outbox_state.clone(), db_path.clone()).await;
+        spawn_outbox_worker_if_configured(
+            &app,
+            outbox_state.clone(),
+            db_path.clone(),
+            maybe_outbox_config,
+        )
+        .await;
     }
 
     switch_result
