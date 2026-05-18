@@ -219,7 +219,12 @@ pub fn spawn_postgres_worker(
                 };
                 worker.run(sink, config, on_error, cancel_for_run).await;
             }
-            Err(e) => emit(&app_handle, format!("failed to open SQLite: {e}"), true),
+            Err(e) => {
+                emit(&app_handle, format!("failed to open SQLite: {e}"), true);
+                if let Some(ref handle) = app_handle {
+                    let _ = handle.emit("outbox-worker-stopped", ());
+                }
+            }
         }
         finished_for_task.store(true, Ordering::SeqCst);
     });
