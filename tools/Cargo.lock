@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "curated-thoughts"
-version = "1.3.2"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
