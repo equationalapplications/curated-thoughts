@@ -17,7 +17,10 @@ mod watcher;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
-use outbox::{postgres::{spawn_postgres_worker, OutboxWorkerHandle}, OutboxConfig};
+use outbox::{
+    postgres::{spawn_postgres_worker, OutboxWorkerHandle},
+    OutboxConfig,
+};
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
@@ -101,7 +104,9 @@ fn normalize_database_url(url: String) -> Option<String> {
 }
 
 fn configured_database_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().and_then(normalize_database_url)
+    std::env::var("DATABASE_URL")
+        .ok()
+        .and_then(normalize_database_url)
 }
 
 fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiStatusFlags)) {
@@ -2429,9 +2434,7 @@ async fn start_outbox_worker(
     let config = OutboxConfig {
         sqlite_path,
         db_url,
-        poll_interval_ms: poll_interval_ms
-            .unwrap_or(5000)
-            .clamp(100, 60_000),
+        poll_interval_ms: poll_interval_ms.unwrap_or(5000).clamp(100, 60_000),
         batch_size: batch_size.unwrap_or(100).clamp(1, 10_000),
         on_error: match on_error.as_deref() {
             Some("skip") => outbox::ErrorPolicy::Skip,
