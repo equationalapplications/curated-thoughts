@@ -73,14 +73,9 @@ function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, un
 export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
 
 export async function setupWiki() {
-  const outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
-  const newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
-  await newWiki.setup();
-  wiki = newWiki;
-
-  // Generation counter: last-writer-wins when stopped/started fire in quick
-  // succession (e.g. switch_vault). The handler that finishes setup first
-  // checks whether a newer event has already superseded it.
+  // Register worker lifecycle listeners before running the initial wiki setup.
+  // This prevents a race where the worker starts or stops during setup and the
+  // module keeps a stale wiki instance based on the earlier outbox status value.
   let wikiUpdateGeneration = 0;
 
   const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
@@ -104,6 +99,13 @@ export async function setupWiki() {
       window.dispatchEvent(new Event('wiki-updated'));
     }
   });
+
+  const effectiveOutboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
+  const newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(effectiveOutboxEnabled));
+  await newWiki.setup();
+  if (wikiUpdateGeneration === 0) {
+    wiki = newWiki;
+  }
 
   // Store unlisten if you need cleanup; for now the listeners live for the session.
   void startedUnlisten;

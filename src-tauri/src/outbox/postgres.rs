@@ -66,6 +66,16 @@ impl Sink for PgSink {
     }
 }
 
+#[cfg(test)]
+pub fn dummy_outbox_handle() -> OutboxWorkerHandle {
+    OutboxWorkerHandle {
+        config: crate::outbox::OutboxConfig::default(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        handle: tauri::async_runtime::spawn(async {}),
+        finished: Arc::new(AtomicBool::new(false)),
+    }
+}
+
 async fn execute_ddl(pool: &PgPool, sql: &str) -> anyhow::Result<()> {
     match sqlx::query(sql).execute(pool).await {
         Ok(_) => Ok(()),
@@ -240,22 +250,29 @@ pub fn spawn_postgres_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temp_env::with_var;
 
     fn db_url() -> Option<String> {
-        // Check OUTBOX_TEST_DATABASE_URL first (dedicated test var), then fall back to
-        // DATABASE_URL so CI jobs that set DATABASE_URL work without modification.
-        // Treat empty strings as "not set" so CI jobs that explicitly set DATABASE_URL=""
-        // will skip Postgres tests instead of attempting to connect with an empty URL.
+        // Use a dedicated OUTBOX_TEST_DATABASE_URL for outbox database tests.
+        // This avoids accidentally using a generic DATABASE_URL from CI or local env
+        // and prevents test code from mutating a non-test Postgres instance.
         std::env::var("OUTBOX_TEST_DATABASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty()))
+    }
+
+    #[test]
+    fn outbox_tests_require_dedicated_environment_variable() {
+        with_var("OUTBOX_TEST_DATABASE_URL", None::<String>, || {
+            std::env::set_var("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/outbox_test");
+            assert!(db_url().is_none());
+        });
     }
 
     #[tokio::test]
     async fn pg_sink_new_creates_table() {
         let Some(url) = db_url() else {
-            eprintln!("Skipping: DATABASE_URL not set");
+            eprintln!("Skipping: OUTBOX_TEST_DATABASE_URL not set");
             return;
         };
         let sink = PgSink::new(&url).await.expect("should connect");
