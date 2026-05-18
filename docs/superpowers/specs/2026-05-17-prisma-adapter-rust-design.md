@@ -214,18 +214,18 @@ One Postgres transaction per event (not per batch). Matches JS design — partia
 
 ```rust
 tauri::Builder::default()
-    .setup(|app| {
-        // ... existing vault setup ...
-        if let Ok(db_url) = std::env::var("DATABASE_URL") {
-            let db_path = get_current_db_path(app);
-            if let Some(db_path) = db_path {
-                let config = OutboxConfig { sqlite_path: db_path, db_url, ..Default::default() };
-                let handle = spawn_postgres_worker(config, Some(app.handle().clone()));
+    .setup({
+        let db_path = db_path.clone();
+        move |app| {
+            // configured_database_url() trims whitespace and rejects empty strings.
+            if let Some(db_url) = configured_database_url() {
+                let config = OutboxConfig { sqlite_path: db_path.clone(), db_url, ..OutboxConfig::default() };
+                let handle = spawn_postgres_worker(config, Some(app.app_handle().clone()));
                 let state = app.state::<OutboxWorkerState>();
                 *state.0.lock().unwrap() = Some(handle);
             }
+            Ok(())
         }
-        Ok(())
     })
 ```
 
@@ -237,14 +237,21 @@ async fn main() -> anyhow::Result<()> {
     let p = retrieval::resolve_brain_paths();
     // ... existing setup ...
 
-    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+    // configured_database_url() trims whitespace and rejects empty strings.
+    fn configured_database_url() -> Option<String> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let url = url.trim();
+        if url.is_empty() { None } else { Some(url.to_string()) }
+    }
+
+    if let Some(db_url) = configured_database_url() {
         let config = OutboxConfig {
             sqlite_path: p.db_path.clone(),
             db_url,
-            ..Default::default()
+            ..tauri_app_lib::outbox::OutboxConfig::default()
         };
         // spawn_postgres_worker lives in tauri_app_lib::outbox::postgres — sqlx never enters tools/
-        tauri_app_lib::outbox::postgres::spawn_postgres_worker(config, None);
+        let _ = tauri_app_lib::outbox::postgres::spawn_postgres_worker(config, None);
     }
 
     // ... existing MCP server start ...
@@ -266,14 +273,17 @@ async fn start_outbox_worker(
 
 #[tauri::command]
 async fn stop_outbox_worker(
+    app_handle: AppHandle,
     state: State<'_, OutboxWorkerState>,
 ) -> Result<(), String>
 ```
 
-`start_outbox_worker` is idempotent: calling it when already running is a no-op.
-If `database_url` is provided, the worker connects to that database instead of
-`DATABASE_URL`, enabling runtime override (e.g., desktop user connecting to a
-different DB mid-session).
+`start_outbox_worker` is idempotent with respect to config: if a worker is already
+running with identical configuration, the call is a no-op. If the config differs
+(different URL, interval, etc.), the existing worker is stopped and a new one
+started. If `database_url` is provided, the worker connects to that database instead
+of `DATABASE_URL`, enabling runtime override (e.g., desktop user connecting to a
+different DB mid-session). Unknown `on_error` values return an error.
 
 ---
 
@@ -318,12 +328,26 @@ export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
 
 export async function setupWiki() {
   const outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
-  wiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
-  await wiki.setup();
+  const newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(outboxEnabled));
+  await newWiki.setup();
+  wiki = newWiki;
+
+  // Re-create wiki when a runtime outbox worker starts or stops so that
+  // enableOutbox reflects the current worker state for all future mutations.
+  await listen<void>('outbox-worker-started', async () => {
+    const updated = createWiki(tauriWikiAdapter, makeWikiOptions(true));
+    await updated.setup();
+    wiki = updated;
+  });
+  await listen<void>('outbox-worker-stopped', async () => {
+    const updated = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+    await updated.setup();
+    wiki = updated;
+  });
 }
 ```
 
-**Intentional improvement:** Instead of blindly setting `enableOutbox: true`, the JS layer dynamically checks whether the outbox is configured (via the `outbox_is_configured` Tauri command, which checks `DATABASE_URL`). This prevents unnecessary SQLite writes for users who don't have Postgres configured.
+**Intentional improvement:** Instead of blindly setting `enableOutbox: true`, the JS layer dynamically checks whether the outbox is configured (via the `outbox_is_configured` Tauri command, which checks `DATABASE_URL`). This prevents unnecessary SQLite writes for users who don't have Postgres configured. The event listeners handle runtime worker start/stop (e.g., desktop user calling `start_outbox_worker` mid-session).
 
 This causes `core-llm-wiki` to write every wiki mutation atomically to the `outbox` table alongside the primary write — but only when the outbox is actually configured. No other JS changes required.
 
