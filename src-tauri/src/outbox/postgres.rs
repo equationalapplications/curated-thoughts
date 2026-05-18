@@ -264,8 +264,13 @@ mod tests {
     #[test]
     fn outbox_tests_require_dedicated_environment_variable() {
         with_var("OUTBOX_TEST_DATABASE_URL", None::<String>, || {
-            std::env::set_var("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/outbox_test");
-            assert!(db_url().is_none());
+            with_var(
+                "DATABASE_URL",
+                Some("postgresql://postgres:postgres@localhost:5432/outbox_test"),
+                || {
+                    assert!(db_url().is_none());
+                },
+            );
         });
     }
 
