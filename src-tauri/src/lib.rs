@@ -125,10 +125,7 @@ fn validate_outbox_database_url(database_url: Option<String>) -> Result<String, 
     }
 }
 
-async fn replace_outbox_worker(
-    state: &OutboxWorkerState,
-    new_handle: OutboxWorkerHandle,
-) -> bool {
+async fn replace_outbox_worker(state: &OutboxWorkerState, new_handle: OutboxWorkerHandle) -> bool {
     let old_handle = { state.0.lock().unwrap().take() };
     let replaced = old_handle.is_some();
     if let Some(handle) = old_handle {
@@ -803,6 +800,8 @@ async fn switch_vault(
 
     // Stop outbox worker before WAL cleanup and DB file operations; its dedicated
     // SQLite connection would otherwise keep polling a stale/replaced file.
+    // Do not notify the frontend here, because vault switching internally restarts
+    // the worker and emitting a stop event would race with the ongoing database swap.
     let (maybe_outbox_config, maybe_handle) = {
         let mut g = outbox_state.0.lock().unwrap();
         let maybe_handle = g.take();
@@ -811,7 +810,6 @@ async fn switch_vault(
     };
     if let Some(handle) = maybe_handle {
         handle.stop().await;
-        let _ = app.emit("outbox-worker-stopped", ());
     }
 
     let stub_path = release_global_db_lock(&db_state)?;
@@ -2478,7 +2476,11 @@ async fn start_outbox_worker(
         handle.stop().await;
     }
 
-    let _ = replace_outbox_worker(&state, spawn_postgres_worker(config.clone(), Some(app_handle.clone()))).await;
+    let _ = replace_outbox_worker(
+        &state,
+        spawn_postgres_worker(config.clone(), Some(app_handle.clone())),
+    )
+    .await;
 
     // Notify frontend that outbox is now active so it can recreate the wiki
     // with enableOutbox: true for runtime worker starts.

@@ -253,22 +253,51 @@ mod tests {
     use temp_env::with_var;
 
     fn db_url() -> Option<String> {
-        // Use a dedicated OUTBOX_TEST_DATABASE_URL for outbox database tests.
-        // This avoids accidentally using a generic DATABASE_URL from CI or local env
-        // and prevents test code from mutating a non-test Postgres instance.
+        // Prefer a dedicated OUTBOX_TEST_DATABASE_URL for outbox database tests.
+        // Fallback to DATABASE_URL when the dedicated variable is not set so CI or
+        // local workflows that only specify DATABASE_URL still exercise the tests.
         std::env::var("OUTBOX_TEST_DATABASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty()))
     }
 
     #[test]
-    fn outbox_tests_require_dedicated_environment_variable() {
+    fn outbox_tests_prefer_dedicated_environment_variable() {
+        with_var(
+            "OUTBOX_TEST_DATABASE_URL",
+            Some("postgresql://postgres:postgres@localhost:5432/outbox_test"),
+            || {
+                with_var(
+                    "DATABASE_URL",
+                    Some("postgresql://postgres:postgres@localhost:5432/fallback"),
+                    || {
+                        assert_eq!(
+                            db_url(),
+                            Some(
+                                "postgresql://postgres:postgres@localhost:5432/outbox_test"
+                                    .to_string()
+                            )
+                        );
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn outbox_tests_fallback_to_database_url_if_no_dedicated_variable() {
         with_var("OUTBOX_TEST_DATABASE_URL", None::<String>, || {
             with_var(
                 "DATABASE_URL",
                 Some("postgresql://postgres:postgres@localhost:5432/outbox_test"),
                 || {
-                    assert!(db_url().is_none());
+                    assert_eq!(
+                        db_url(),
+                        Some(
+                            "postgresql://postgres:postgres@localhost:5432/outbox_test".to_string()
+                        )
+                    );
                 },
             );
         });
@@ -277,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn pg_sink_new_creates_table() {
         let Some(url) = db_url() else {
-            eprintln!("Skipping: OUTBOX_TEST_DATABASE_URL not set");
+            eprintln!("Skipping: OUTBOX_TEST_DATABASE_URL and DATABASE_URL not set");
             return;
         };
         let sink = PgSink::new(&url).await.expect("should connect");
