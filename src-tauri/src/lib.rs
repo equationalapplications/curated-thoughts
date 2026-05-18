@@ -139,6 +139,7 @@ async fn spawn_outbox_worker_if_configured(
 
     let handle = spawn_postgres_worker(config, Some(app.clone()));
     *outbox_state.0.lock().unwrap() = Some(handle);
+    let _ = app.emit("outbox-worker-started", ());
 }
 
 /// Vault-relative display path; rejects traversal so `..` cannot be silently dropped.
