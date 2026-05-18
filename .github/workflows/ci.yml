@@ -54,6 +54,13 @@ jobs:
           CURATED_MCP_INTEGRATION_TESTS: "1"
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
 
+      - name: Outbox Postgres integration tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils outbox -- --test-threads=1
+        env:
+          CURATED_MCP_INTEGRATION_TESTS: "1"
+          OUTBOX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
+          DATABASE_URL: ""
+
   rust-macos:
     runs-on: macos-latest
     steps:

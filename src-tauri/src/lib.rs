@@ -109,6 +109,35 @@ fn configured_database_url() -> Option<String> {
         .and_then(normalize_database_url)
 }
 
+fn validate_outbox_database_url(database_url: Option<String>) -> Result<String, String> {
+    match database_url {
+        Some(url) => {
+            let url = url.trim();
+            if url.is_empty() {
+                Err("database_url cannot be empty".to_string())
+            } else {
+                Ok(url.to_string())
+            }
+        }
+        None => configured_database_url().ok_or_else(|| {
+            "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
+        }),
+    }
+}
+
+async fn replace_outbox_worker(
+    state: &OutboxWorkerState,
+    new_handle: OutboxWorkerHandle,
+) -> bool {
+    let old_handle = { state.0.lock().unwrap().take() };
+    let replaced = old_handle.is_some();
+    if let Some(handle) = old_handle {
+        handle.stop().await;
+    }
+    *state.0.lock().unwrap() = Some(new_handle);
+    replaced
+}
+
 fn update_wiki_status_from_app(app: &AppHandle, updater: impl FnOnce(&mut WikiStatusFlags)) {
     let state = app.state::<WikiStatusState>();
     update_wiki_status(app, &state, updater);
@@ -2405,18 +2434,7 @@ async fn start_outbox_worker(
     on_error: Option<String>,
     state: tauri::State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let db_url = match database_url {
-        Some(url) => {
-            let url = url.trim();
-            if url.is_empty() {
-                return Err("database_url cannot be empty".to_string());
-            }
-            url.to_string()
-        }
-        None => configured_database_url().ok_or_else(|| {
-            "DATABASE_URL is not configured; runtime outbox start is not allowed.".to_string()
-        })?,
-    };
+    let db_url = validate_outbox_database_url(database_url)?;
 
     let sqlite_path = {
         let db_state = app_handle.state::<DbState>();
@@ -2460,11 +2478,7 @@ async fn start_outbox_worker(
         handle.stop().await;
     }
 
-    let new_handle = spawn_postgres_worker(config.clone(), Some(app_handle.clone()));
-    {
-        let mut guard = state.0.lock().unwrap();
-        *guard = Some(new_handle);
-    }
+    let _ = replace_outbox_worker(&state, spawn_postgres_worker(config.clone(), Some(app_handle.clone()))).await;
 
     // Notify frontend that outbox is now active so it can recreate the wiki
     // with enableOutbox: true for runtime worker starts.
@@ -2656,6 +2670,28 @@ mod drop_destination_tests {
         fs::create_dir_all(root.join("documents").join("dup.md")).unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
+    }
+}
+
+#[cfg(test)]
+mod outbox_runtime_tests {
+    use super::{replace_outbox_worker, validate_outbox_database_url, OutboxWorkerState};
+    use crate::outbox::postgres::dummy_outbox_handle;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn validate_outbox_database_url_rejects_empty_string() {
+        let err = validate_outbox_database_url(Some("  ".to_string())).unwrap_err();
+        assert_eq!(err, "database_url cannot be empty");
+    }
+
+    #[tokio::test]
+    async fn replace_outbox_worker_stops_existing_handle_before_inserting_new_one() {
+        let state = OutboxWorkerState(Mutex::new(Some(dummy_outbox_handle())));
+        let replaced = replace_outbox_worker(&state, dummy_outbox_handle()).await;
+
+        assert!(replaced);
+        assert!(state.0.lock().unwrap().is_some());
     }
 }
 
