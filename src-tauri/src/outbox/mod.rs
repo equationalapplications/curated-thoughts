@@ -212,6 +212,7 @@ impl OutboxWorker {
         let full_batch = events.len() == config.batch_size;
         let mut processed_ids: Vec<String> = Vec::with_capacity(events.len());
         let mut halt_error: Option<anyhow::Error> = None;
+        let mut skip_error: Option<anyhow::Error> = None;
 
         for event in events {
             let id = event.id.clone();
@@ -222,6 +223,9 @@ impl OutboxWorker {
                 Err(e) => match config.on_error {
                     ErrorPolicy::Skip => {
                         eprintln!("[outbox] skip event {id}: {e}");
+                        if skip_error.is_none() {
+                            skip_error = Some(e);
+                        }
                         processed_ids.push(id);
                     }
                     ErrorPolicy::Halt => {
@@ -236,10 +240,16 @@ impl OutboxWorker {
         if let Some(e) = halt_error {
             return Err(e);
         }
+        if let Some(e) = skip_error {
+            return Err(e);
+        }
         Ok(full_batch)
     }
 
-    fn wait_for_cancel(cancel: &Arc<AtomicBool>, interval: std::time::Duration) -> impl std::future::Future<Output = ()> {
+    fn wait_for_cancel(
+        cancel: &Arc<AtomicBool>,
+        interval: std::time::Duration,
+    ) -> impl std::future::Future<Output = ()> {
         let cancel = cancel.clone();
         async move {
             let chunk = std::time::Duration::from_millis(250);
@@ -346,7 +356,7 @@ mod sync_batch_tests {
     /// Sink that succeeds for all events and records call count.
     struct CountingSink(Arc<AtomicUsize>);
     impl Sink for CountingSink {
-async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
+        async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -358,7 +368,7 @@ async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
         count: Arc<AtomicUsize>,
     }
     impl Sink for FailAfterSink {
-async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
+        async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
             let n = self.count.fetch_add(1, Ordering::SeqCst);
             if n >= self.after {
                 anyhow::bail!("injected failure");
@@ -458,8 +468,8 @@ async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
             ..Default::default()
         };
         let worker = OutboxWorker::new(conn);
-        // Fails on second event, skip means it's still acked
-        worker
+        // Fails on second event, skip means the batch still completes and the error is reported.
+        let result = worker
             .sync_batch(
                 &FailAfterSink {
                     after: 1,
@@ -467,12 +477,44 @@ async fn insert_event(&self, _event: &OutboxEvent) -> anyhow::Result<()> {
                 },
                 &config,
             )
-            .await
-            .unwrap();
+            .await;
+        assert!(result.is_err(), "skip policy should still report errors");
         assert_eq!(
             count_remaining(&worker.conn),
             0,
-            "all events acked including skipped"
+            "all events are acknowledged including skipped ones"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_policy_reports_error_for_failed_insert() {
+        let (_f, conn) = setup_outbox_db();
+        insert_raw(&conn, "a", 1000);
+        insert_raw(&conn, "b", 2000);
+        let count = Arc::new(AtomicUsize::new(0));
+        let config = OutboxConfig {
+            outbox_table: "outbox".into(),
+            batch_size: 10,
+            on_error: ErrorPolicy::Skip,
+            ..Default::default()
+        };
+        let worker = OutboxWorker::new(conn);
+
+        let result = worker
+            .sync_batch(
+                &FailAfterSink {
+                    after: 1,
+                    count: count.clone(),
+                },
+                &config,
+            )
+            .await;
+
+        assert!(result.is_err(), "skip policy should still report errors");
+        assert_eq!(
+            count_remaining(&worker.conn),
+            0,
+            "skipped events are acknowledged"
         );
     }
 
