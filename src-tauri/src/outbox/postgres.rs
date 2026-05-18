@@ -142,12 +142,23 @@ pub fn spawn_postgres_worker(
                 match PgSink::new(&config.db_url).await {
                     Ok(s) => break s,
                     Err(e) => {
+                        if cancel_for_run.load(Ordering::SeqCst) {
+                            return;
+                        }
                         emit(
                             &app_handle,
                             format!("Postgres connect failed: {e}; retrying in {delay_ms}ms"),
                             false,
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        let mut remaining_ms = delay_ms;
+                        while remaining_ms > 0 {
+                            let chunk = std::cmp::min(remaining_ms, 250);
+                            tokio::time::sleep(std::time::Duration::from_millis(chunk)).await;
+                            if cancel_for_run.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            remaining_ms -= chunk;
+                        }
                         delay_ms = (delay_ms * 2).min(30_000);
                     }
                 }
