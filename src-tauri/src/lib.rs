@@ -2399,11 +2399,22 @@ async fn start_outbox_worker(
             .map(PathBuf::from)?
     };
 
-    let mut guard = state.0.lock().unwrap();
-    if let Some(ref handle) = *guard {
-        if !handle.is_finished() {
-            return Ok(());
+    // Take the existing handle out of state before any await to avoid
+    // holding MutexGuard across await (which violates Send bounds).
+    let existing = {
+        let mut guard = state.0.lock().unwrap();
+        if let Some(ref handle) = *guard {
+            if !handle.is_finished() {
+                guard.take()
+            } else {
+                None
+            }
+        } else {
+            None
         }
+    };
+    if let Some(handle) = existing {
+        handle.stop().await;
     }
     let config = OutboxConfig {
         sqlite_path,
@@ -2421,7 +2432,16 @@ async fn start_outbox_worker(
         },
         ..OutboxConfig::default()
     };
-    *guard = Some(spawn_postgres_worker(config, Some(app_handle)));
+    let new_handle = spawn_postgres_worker(config, Some(app_handle.clone()));
+    {
+        let mut guard = state.0.lock().unwrap();
+        *guard = Some(new_handle);
+    }
+
+    // Notify frontend that outbox is now active so it can recreate the wiki
+    // with enableOutbox: true for runtime worker starts.
+    let _ = app_handle.emit("outbox-worker-started", ());
+
     Ok(())
 }
 
