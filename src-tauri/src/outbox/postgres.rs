@@ -224,9 +224,16 @@ mod tests {
     fn db_url() -> Option<String> {
         // Check OUTBOX_TEST_DATABASE_URL first (dedicated test var), then fall back to
         // DATABASE_URL so CI jobs that set DATABASE_URL work without modification.
+        // Treat empty strings as "not set" so CI jobs that explicitly set DATABASE_URL=""
+        // will skip Postgres tests instead of attempting to connect with an empty URL.
         std::env::var("OUTBOX_TEST_DATABASE_URL")
             .ok()
-            .or_else(|| std::env::var("DATABASE_URL").ok())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                std::env::var("DATABASE_URL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
     }
 
     #[tokio::test]
