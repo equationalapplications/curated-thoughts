@@ -250,7 +250,14 @@ pub fn spawn_postgres_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use temp_env::with_var;
+
+    // Env var mutations and reads must be serialized: unit tests temporarily set/clear
+    // DATABASE_URL; pg_sink async tests read it via db_url(). Without serialization, a
+    // mutation window can cause pg_sink tests to see a localhost URL and attempt a real
+    // connection in CI where no Postgres service is running.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn db_url() -> Option<String> {
         // Prefer a dedicated OUTBOX_TEST_DATABASE_URL for outbox database tests.
@@ -264,6 +271,7 @@ mod tests {
 
     #[test]
     fn outbox_tests_prefer_dedicated_environment_variable() {
+        let _guard = ENV_LOCK.lock().unwrap();
         with_var(
             "OUTBOX_TEST_DATABASE_URL",
             Some("postgresql://postgres:postgres@localhost:5432/outbox_test"),
@@ -287,6 +295,7 @@ mod tests {
 
     #[test]
     fn outbox_tests_fallback_to_database_url_if_no_dedicated_variable() {
+        let _guard = ENV_LOCK.lock().unwrap();
         with_var("OUTBOX_TEST_DATABASE_URL", None::<String>, || {
             with_var(
                 "DATABASE_URL",
@@ -305,6 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_new_creates_table() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let Some(url) = db_url() else {
             eprintln!("Skipping: OUTBOX_TEST_DATABASE_URL and DATABASE_URL not set");
             return;
@@ -319,6 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_new_is_idempotent() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let Some(url) = db_url() else {
             return;
         };
@@ -328,6 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_insert_event_and_idempotency() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let Some(url) = db_url() else {
             return;
         };
