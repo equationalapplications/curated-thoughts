@@ -27,11 +27,12 @@ vi.mock('../lib/wikiAdapter', () => ({
   tauriWikiAdapter: {},
 }));
 
+import { createWiki } from '@equationalapplications/react-llm-wiki';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useWikiStatus } from '../hooks/useWikiStatus';
 import { VaultPanel } from '../components/settings/VaultPanel';
-import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki } from '../lib/wiki';
+import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki, setupWiki } from '../lib/wiki';
 import { runWikiReindex } from '../lib/tauri';
 
 describe('initWorkspaceId', () => {
@@ -91,6 +92,102 @@ describe('tieredRead', () => {
         },
       }
     );
+  });
+
+  it('creates wiki with enableOutbox true when outbox is configured', async () => {
+    vi.clearAllMocks();
+    vi.mocked(createWiki).mockReturnValue({
+      setup: vi.fn().mockResolvedValue(undefined),
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockResolvedValue(true);
+
+    await setupWiki();
+
+    expect(vi.mocked(createWiki)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        config: expect.objectContaining({
+          enableOutbox: true,
+        }),
+      })
+    );
+  });
+
+  it('creates wiki with enableOutbox false when outbox is not configured', async () => {
+    vi.clearAllMocks();
+    vi.mocked(createWiki).mockReturnValue({
+      setup: vi.fn().mockResolvedValue(undefined),
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockRejectedValue(new Error('not configured'));
+
+    await setupWiki();
+
+    expect(vi.mocked(createWiki)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        config: expect.not.objectContaining({
+          enableOutbox: true,
+        }),
+      })
+    );
+  });
+
+  it('recreates wiki with enableOutbox true when outbox-worker-started fires', async () => {
+    vi.clearAllMocks();
+    const setupMock = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(createWiki).mockImplementation(() => ({
+      setup: setupMock,
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockResolvedValue(false);
+
+    await setupWiki();
+
+    const startedCallback = vi.mocked(listen).mock.calls[0][1] as unknown as () => Promise<void>;
+    await startedCallback();
+
+    expect(vi.mocked(createWiki).mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          enableOutbox: true,
+        }),
+      })
+    );
+    expect(setupMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('recreates wiki with enableOutbox false when outbox-worker-stopped fires', async () => {
+    vi.clearAllMocks();
+    const setupMock = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(createWiki).mockImplementation(() => ({
+      setup: setupMock,
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockResolvedValue(true);
+
+    await setupWiki();
+
+    const stoppedCallback = vi.mocked(listen).mock.calls[1][1] as unknown as () => Promise<void>;
+    await stoppedCallback();
+
+    expect(vi.mocked(createWiki).mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        config: expect.not.objectContaining({
+          enableOutbox: true,
+        }),
+      })
+    );
+    expect(setupMock).toHaveBeenCalledTimes(2);
   });
 
   it('forwards graphExpansion option when provided', async () => {

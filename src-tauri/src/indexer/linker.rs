@@ -162,7 +162,8 @@ mod tests {
         mark_document_indexed(&conn, doc_id).unwrap();
 
         let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact").unwrap();
-        let ref_id = insert_chunk(&conn, doc_id, &import_ref_chunk("init_db"), 1, "tier_fact").unwrap();
+        let ref_id =
+            insert_chunk(&conn, doc_id, &import_ref_chunk("init_db"), 1, "tier_fact").unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
 
@@ -197,11 +198,9 @@ mod tests {
         run_linker(&conn, "tier_wisdom", 0).unwrap();
 
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM curated_relationships",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM curated_relationships", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0, "cross-entity edges must not be created");
     }
@@ -218,11 +217,9 @@ mod tests {
 
         run_linker(&conn, "tier_fact", 0).unwrap();
         let before: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM curated_relationships",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM curated_relationships", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(before, 1);
 
@@ -239,13 +236,14 @@ mod tests {
         run_linker(&conn, "tier_fact", since).unwrap();
 
         let after: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM curated_relationships",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM curated_relationships", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(after, 1, "edge count should remain 1 after stale cleanup + re-link");
+        assert_eq!(
+            after, 1,
+            "edge count should remain 1 after stale cleanup + re-link"
+        );
 
         let _ = (def_id, ref_id);
     }

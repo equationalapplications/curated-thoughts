@@ -46,27 +46,70 @@ export async function ingestDocumentByPath(
   return wiki.ingestDocument(entityId, params);
 }
 
-export const wiki = createWiki(tauriWikiAdapter, {
-  llmProvider: {
-    async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
-      return invoke<string>("ollama_generate", { systemPrompt, userPrompt });
+function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, unknown> {
+  return {
+    llmProvider: {
+      async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
+        return invoke<string>("ollama_generate", { systemPrompt, userPrompt });
+      },
+      async embed(text: string): Promise<number[]> {
+        return invoke<number[]>("embed_text", { text });
+      },
     },
-    async embed(text: string): Promise<number[]> {
-      return invoke<number[]>("embed_text", { text });
+    config: {
+      hybridWeight: 0.7,
+      preFilterLimit: 50,
+      ...(enableOutbox && { enableOutbox: true }),
     },
-  },
-  config: {
-    hybridWeight: 0.7,
-    preFilterLimit: 50,
-  },
-  onRetrievalFallback: (err: Error) => {
-    console.warn("[wiki] embed unavailable, using keyword search:", err.message);
-  },
-  graphAdapter: tauriGraphAdapter,
-} as WikiOptions & Record<string, unknown>);
+    onRetrievalFallback: (err: Error) => {
+      console.warn("[wiki] embed unavailable, using keyword search:", err.message);
+    },
+    graphAdapter: tauriGraphAdapter,
+  } as WikiOptions & Record<string, unknown>;
+}
+
+// Initialized in setupWiki(). The live binding is updated before the app renders,
+// so all callers that access `wiki` after setupWiki() resolves see the correct instance.
+export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
 
 export async function setupWiki() {
-  await wiki.setup();
+  // Register worker lifecycle listeners before running the initial wiki setup.
+  // This prevents a race where the worker starts or stops during setup and the
+  // module keeps a stale wiki instance based on the earlier outbox status value.
+  let wikiUpdateGeneration = 0;
+
+  const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
+    const gen = ++wikiUpdateGeneration;
+    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
+    await updatedWiki.setup();
+    if (gen !== wikiUpdateGeneration) return;
+    wiki = updatedWiki;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('wiki-updated'));
+    }
+  });
+
+  const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
+    const gen = ++wikiUpdateGeneration;
+    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+    await updatedWiki.setup();
+    if (gen !== wikiUpdateGeneration) return;
+    wiki = updatedWiki;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('wiki-updated'));
+    }
+  });
+
+  const effectiveOutboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
+  const newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(effectiveOutboxEnabled));
+  await newWiki.setup();
+  if (wikiUpdateGeneration === 0) {
+    wiki = newWiki;
+  }
+
+  // Store unlisten if you need cleanup; for now the listeners live for the session.
+  void startedUnlisten;
+  void stoppedUnlisten;
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */

@@ -6,24 +6,30 @@ on:
   pull_request:
 
 jobs:
-  rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-          - os: macos-latest
-    runs-on: ${{ matrix.os }}
+  rust-ubuntu:
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: outbox_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux dependencies (Tauri / WebKit)
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
-            pkg-config libssl-dev
+            pkg-config libssl-dev libpq-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -43,6 +49,35 @@ jobs:
       # run_wiki_heal/run_wiki_prune SQL, or the max_hops cap: run this step
       # locally first to confirm no regression.
       - name: Tests + MCP integration
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils -- --test-threads=1
+        env:
+          CURATED_MCP_INTEGRATION_TESTS: "1"
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
+
+      - name: Outbox Postgres integration tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils outbox -- --test-threads=1
+        env:
+          CURATED_MCP_INTEGRATION_TESTS: "1"
+          OUTBOX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
+          DATABASE_URL: ""
+
+  rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./tools -> target
+
+      - name: Build MCP binary
+        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
+
+      - name: Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"

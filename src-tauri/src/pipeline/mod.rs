@@ -4,17 +4,20 @@ use std::{
     collections::HashSet,
     io::Read,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    },
 };
 
-use crate::chunker::{chunk_autodetect, AstLang, ChunkStrategy, should_ingest_extension};
-use crate::indexer::{extract_references, RefLang};
+use crate::chunker::{chunk_autodetect, should_ingest_extension, AstLang, ChunkStrategy};
 use crate::db::queries::{
     delete_document, delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
     mark_document_error, mark_document_indexed, upsert_document,
 };
 use crate::embedder::{embed_batch, EmbedProfile};
 use crate::hasher::hash_bytes;
+use crate::indexer::{extract_references, RefLang};
 use crate::vault::VaultConfig;
 
 #[derive(Debug, Clone)]
@@ -80,8 +83,19 @@ pub struct PipelineWorker {
 
 impl PipelineWorker {
     #[allow(dead_code)]
-    pub fn new(db_path: PathBuf, rx: mpsc::Receiver<PipelineJob>, pending: Arc<AtomicUsize>, status_tx: mpsc::Sender<PipelineStatusEvent>) -> Self {
-        PipelineWorker { db_path, rx, pending, vault_root: None, status_tx }
+    pub fn new(
+        db_path: PathBuf,
+        rx: mpsc::Receiver<PipelineJob>,
+        pending: Arc<AtomicUsize>,
+        status_tx: mpsc::Sender<PipelineStatusEvent>,
+    ) -> Self {
+        PipelineWorker {
+            db_path,
+            rx,
+            pending,
+            vault_root: None,
+            status_tx,
+        }
     }
 
     pub fn new_with_vault(
@@ -91,7 +105,13 @@ impl PipelineWorker {
         vault_root: Option<PathBuf>,
         status_tx: mpsc::Sender<PipelineStatusEvent>,
     ) -> Self {
-        PipelineWorker { db_path, rx, pending, vault_root, status_tx }
+        PipelineWorker {
+            db_path,
+            rx,
+            pending,
+            vault_root,
+            status_tx,
+        }
     }
 
     pub fn run(self) {
@@ -125,10 +145,18 @@ impl PipelineWorker {
                 PipelineJob::Ingest { path, .. } => path.clone(),
                 PipelineJob::Delete(path) => path.clone(),
             };
-            let count_pending = matches!(&job, PipelineJob::Ingest { count_pending: true, .. });
+            let count_pending = matches!(
+                &job,
+                PipelineJob::Ingest {
+                    count_pending: true,
+                    ..
+                }
+            );
             if count_pending {
                 let previous = self.pending.fetch_add(1, Ordering::SeqCst);
-                let _ = self.status_tx.send(PipelineStatusEvent::PendingCount(previous + 1));
+                let _ = self
+                    .status_tx
+                    .send(PipelineStatusEvent::PendingCount(previous + 1));
             }
             let worker_vault_root = self.vault_root.clone();
             let mut current_entity: Option<String> = None;
@@ -136,13 +164,15 @@ impl PipelineWorker {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match job {
                     PipelineJob::Ingest { path, force, .. } => {
-                        let vault_root = worker_vault_root.as_deref().or_else(|| {
-                            std::path::Path::new(&path)
-                                .parent()
-                                .and_then(|p| p.parent())
-                        }).map(|p| p.to_path_buf());
-                        let vault_root_str = worker_vault_root.as_deref()
-                            .and_then(|p| p.to_str());
+                        let vault_root = worker_vault_root
+                            .as_deref()
+                            .or_else(|| {
+                                std::path::Path::new(&path)
+                                    .parent()
+                                    .and_then(|p| p.parent())
+                            })
+                            .map(|p| p.to_path_buf());
+                        let vault_root_str = worker_vault_root.as_deref().and_then(|p| p.to_str());
                         match ingest_file(&conn, &profile, &path, force, vault_root_str) {
                             Ok(()) => {
                                 let eid = entity_id_for_path(&path, vault_root_str);
@@ -211,30 +241,39 @@ impl PipelineWorker {
                     })
                     .unwrap_or(0);
                 let current = updated.saturating_sub(1);
-                let _ = self.status_tx.send(PipelineStatusEvent::PendingCount(current));
+                let _ = self
+                    .status_tx
+                    .send(PipelineStatusEvent::PendingCount(current));
             }
 
-            let flush_pending_linkers = |conn: &Connection, pending_linkers: &mut HashSet<String>| {
-                if pending_linkers.is_empty() {
-                    return;
-                }
-                let since = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0)
-                    .saturating_sub(300);
-                for eid in pending_linkers.drain() {
-                    if let Err(e) = crate::indexer::linker::run_linker(conn, &eid, since) {
-                        eprintln!("[linker] run_linker error ({}): {}", eid, e);
+            let flush_pending_linkers =
+                |conn: &Connection, pending_linkers: &mut HashSet<String>| {
+                    if pending_linkers.is_empty() {
+                        return;
                     }
-                }
-            };
+                    let since = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0)
+                        .saturating_sub(300);
+                    for eid in pending_linkers.drain() {
+                        if let Err(e) = crate::indexer::linker::run_linker(conn, &eid, since) {
+                            eprintln!("[linker] run_linker error ({}): {}", eid, e);
+                        }
+                    }
+                };
 
             match self.rx.try_recv() {
                 Ok(next) => {
                     let should_flush = match (&current_entity, &next) {
-                        (Some(current_eid), PipelineJob::Ingest { path: next_path, .. }) => {
-                            let next_vault_root = worker_vault_root.as_deref().and_then(|p| p.to_str());
+                        (
+                            Some(current_eid),
+                            PipelineJob::Ingest {
+                                path: next_path, ..
+                            },
+                        ) => {
+                            let next_vault_root =
+                                worker_vault_root.as_deref().and_then(|p| p.to_str());
                             let next_eid = entity_id_for_path(next_path, next_vault_root);
                             &next_eid != current_eid
                         }
@@ -517,7 +556,8 @@ pub fn start_pipeline(
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(256);
     let (status_tx, status_rx) = mpsc::channel();
     let pending = Arc::new(AtomicUsize::new(0));
-    let worker = PipelineWorker::new_with_vault(db_path, rx, pending.clone(), vault_root, status_tx);
+    let worker =
+        PipelineWorker::new_with_vault(db_path, rx, pending.clone(), vault_root, status_tx);
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
@@ -639,14 +679,8 @@ mod tests {
 
     #[test]
     fn entity_id_for_path_normalizes_vault_root_like_workspace_id() {
-        let id_a = entity_id_for_path(
-            "/Users/foo/Vault/src/db.rs",
-            Some("/Users/foo/Vault"),
-        );
-        let id_b = entity_id_for_path(
-            "/Users/foo/Vault/src/db.rs",
-            Some("/Users/foo/Vault/"),
-        );
+        let id_a = entity_id_for_path("/Users/foo/Vault/src/db.rs", Some("/Users/foo/Vault"));
+        let id_b = entity_id_for_path("/Users/foo/Vault/src/db.rs", Some("/Users/foo/Vault/"));
         assert_eq!(id_a, id_b);
     }
 }
