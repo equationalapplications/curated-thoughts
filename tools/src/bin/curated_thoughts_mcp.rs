@@ -7,8 +7,9 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use tauri_app_lib::embedder::EmbedProfile;
+use tauri_app_lib::embedder::{embed_batch, EmbedProfile};
 use tauri_app_lib::retrieval;
+use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
 
 #[derive(Clone)]
 struct VaultMcpServer {
@@ -28,6 +29,40 @@ struct VaultRelatedChunksParams {
     doc_path: String,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CuratedRecallContextParams {
+    /// Coding task query to recall context for
+    query: String,
+    /// Max number of wisdom layer (wiki) entries to return (default: 5)
+    #[serde(default)]
+    limit_wiki: Option<usize>,
+    /// Max number of code chunks to return (default: 10)
+    #[serde(default)]
+    limit_code: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CuratedGetWikiEntryParams {
+    /// Topic to search for in wiki entries (matches document path)
+    #[serde(default)]
+    topic: Option<String>,
+    /// Specific entity ID of the wiki entry to fetch
+    #[serde(default)]
+    entity_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CuratedSearchCodeParams {
+    /// Query to search code chunks
+    query: String,
+    /// Max number of code chunks to return (default: 10)
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Optional symbol name to filter code chunks (e.g., function name)
+    #[serde(default)]
+    symbol: Option<String>,
 }
 
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
@@ -68,6 +103,252 @@ impl VaultMcpServer {
         let hits = retrieval::related_chunks_facade(&conn, &doc_path, limit)
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
         serde_json::to_string(&hits)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_recall_context",
+        description = "Recall prioritized context from the Curated Thoughts wisdom layer (wiki) and vault code chunks for a coding task. Returns wiki entries first, then relevant code chunks, all ranked by relevance to the query."
+    )]
+    async fn curated_recall_context(
+        &self,
+        args: Parameters<CuratedRecallContextParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(CuratedRecallContextParams { query, limit_wiki, limit_code }) = args;
+        let limit_wiki = limit_wiki.unwrap_or(5);
+        let limit_code = limit_code.unwrap_or(10);
+        let conn = lock_conn(&self.conn)?;
+
+        // Embed the query
+        let query_embedding = embed_batch(&self.profile, vec![query.clone()])
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("failed to embed query: {e}"), None))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| rmcp::ErrorData::internal_error("no embedding returned for query", None))?;
+
+        // Helper to fetch and rank chunks by similarity
+        let fetch_ranked_chunks = |conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql], query_emb: &[f32], limit: usize| -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
+            let mut stmt = conn.prepare(sql)
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare chunk query: {e}"), None))?;
+            let rows = stmt.query_map(params, |row| {
+                Ok((
+                    row.get::<_, i64>(0)?, // id
+                    row.get::<_, String>(1)?, // text
+                    row.get::<_, Vec<u8>>(2)?, // embedding bytes
+                    row.get::<_, String>(3)?, // doc_path
+                    row.get::<_, Option<u32>>(4)?, // start_line
+                    row.get::<_, Option<u32>>(5)?, // end_line
+                    row.get::<_, Option<String>>(6)?, // symbol (optional)
+                ))
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("execute chunk query: {e}"), None))?;
+
+            let mut chunks_with_scores: Vec<(f32, serde_json::Value)> = Vec::new();
+            for row in rows {
+                let (id, text, emb_bytes, doc_path, start_line, end_line, symbol) = row
+                    .map_err(|e| rmcp::ErrorData::internal_error(format!("read chunk row: {e}"), None))?;
+                let chunk_emb = bytes_to_f32(&emb_bytes);
+                if chunk_emb.len() != query_emb.len() {
+                    continue; // skip chunks with mismatched embedding dimensions
+                }
+                let score = cosine_similarity(&query_emb, &chunk_emb);
+                let chunk_json = serde_json::json!({
+                    "id": id,
+                    "text": text,
+                    "doc_path": doc_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "symbol": symbol,
+                    "score": score
+                });
+                chunks_with_scores.push((score, chunk_json));
+            }
+
+            // Sort descending by score, take top limit
+            chunks_with_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(chunks_with_scores.into_iter().take(limit).map(|(_, v)| v).collect())
+        };
+
+        // Fetch wiki entries (wisdom layer): tier = 'wiki'
+        let wiki_sql = "
+            SELECT c.id, c.text, c.embedding, d.path, c.start_line, c.end_line, NULL
+            FROM chunks c
+            JOIN documents d ON c.doc_id = d.id
+            WHERE d.tier = 'wiki' AND c.embedding IS NOT NULL
+        ";
+        let wiki_entries = fetch_ranked_chunks(&conn, wiki_sql, &[], &query_embedding, limit_wiki)?;
+
+        // Fetch code chunks: tier = 'user_doc', strategy = 'CodeLike'
+        let code_sql = "
+            SELECT c.id, c.text, c.embedding, d.path, c.start_line, c.end_line, c.symbol
+            FROM chunks c
+            JOIN documents d ON c.doc_id = d.id
+            WHERE d.tier = 'user_doc' AND c.strategy = 'CodeLike' AND c.embedding IS NOT NULL
+        ";
+        let code_chunks = fetch_ranked_chunks(&conn, code_sql, &[], &query_embedding, limit_code)?;
+
+        // Build response
+        let response = serde_json::json!({
+            "wiki_entries": wiki_entries,
+            "code_chunks": code_chunks,
+            "query": query
+        });
+        serde_json::to_string(&response)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_get_wiki_entry",
+        description = "Fetch full content of a specific Curated Thoughts wiki (wisdom layer) entry by topic or entity ID."
+    )]
+    async fn curated_get_wiki_entry(
+        &self,
+        args: Parameters<CuratedGetWikiEntryParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(CuratedGetWikiEntryParams { topic, entity_id }) = args;
+        let conn = lock_conn(&self.conn)?;
+
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(eid) = entity_id {
+            (
+                "SELECT c.text, c.position, d.path, c.start_line, c.end_line
+                 FROM chunks c
+                 JOIN documents d ON c.doc_id = d.id
+                 WHERE d.tier = 'wiki' AND c.entity_id = ?1
+                 ORDER BY c.position",
+                vec![Box::new(eid)]
+            )
+        } else if let Some(topic) = topic {
+            (
+                "SELECT c.text, c.position, d.path, c.start_line, c.end_line
+                 FROM chunks c
+                 JOIN documents d ON c.doc_id = d.id
+                 WHERE d.tier = 'wiki' AND d.path LIKE '%' || ?1 || '%'
+                 ORDER BY c.position",
+                vec![Box::new(topic)]
+            )
+        } else {
+            return Err(rmcp::ErrorData::invalid_params("must provide either topic or entity_id", None));
+        };
+
+        let mut stmt = conn.prepare(sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare wiki entry query: {e}"), None))?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?, // text
+                row.get::<_, usize>(1)?, // position
+                row.get::<_, String>(2)?, // doc_path
+                row.get::<_, Option<u32>>(3)?, // start_line
+                row.get::<_, Option<u32>>(4)?, // end_line
+            ))
+        })
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("execute wiki entry query: {e}"), None))?;
+
+        let mut full_text = String::new();
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (text, position, doc_path, start_line, end_line) = row
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("read wiki entry row: {e}"), None))?;
+            full_text.push_str(&text);
+            full_text.push('\n');
+            chunks.push(serde_json::json!({
+                "text": text,
+                "position": position,
+                "doc_path": doc_path,
+                "start_line": start_line,
+                "end_line": end_line
+            }));
+        }
+
+        let response = serde_json::json!({
+            "full_text": full_text.trim(),
+            "chunks": chunks,
+            "topic": topic,
+            "entity_id": entity_id
+        });
+        serde_json::to_string(&response)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_search_code",
+        description = "Search Curated Thoughts code chunks (CodeLike strategy) for a query or symbol, returning relevant code snippets for coding tasks."
+    )]
+    async fn curated_search_code(
+        &self,
+        args: Parameters<CuratedSearchCodeParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(CuratedSearchCodeParams { query, limit, symbol }) = args;
+        let limit = limit.unwrap_or(10);
+        let conn = lock_conn(&self.conn)?;
+
+        // Embed the query
+        let query_embedding = embed_batch(&self.profile, vec![query.clone()])
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("failed to embed query: {e}"), None))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| rmcp::ErrorData::internal_error("no embedding returned for query", None))?;
+
+        let mut sql = "
+            SELECT c.id, c.text, c.embedding, d.path, c.start_line, c.end_line, c.symbol, c.language
+            FROM chunks c
+            JOIN documents d ON c.doc_id = d.id
+            WHERE d.tier = 'user_doc' AND c.strategy = 'CodeLike' AND c.embedding IS NOT NULL
+        ".to_string();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(sym) = symbol {
+            sql.push_str(" AND c.symbol LIKE '%' || ?1 || '%'");
+            params.push(Box::new(sym));
+        }
+
+        let mut stmt = conn.prepare(&sql)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare code search query: {e}"), None))?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?, // id
+                row.get::<_, String>(1)?, // text
+                row.get::<_, Vec<u8>>(2)?, // embedding bytes
+                row.get::<_, String>(3)?, // doc_path
+                row.get::<_, Option<u32>>(4)?, // start_line
+                row.get::<_, Option<u32>>(5)?, // end_line
+                row.get::<_, Option<String>>(6)?, // symbol
+                row.get::<_, Option<String>>(7)?, // language
+            ))
+        })
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("execute code search query: {e}"), None))?;
+
+        let mut chunks_with_scores: Vec<(f32, serde_json::Value)> = Vec::new();
+        for row in rows {
+            let (id, text, emb_bytes, doc_path, start_line, end_line, symbol, language) = row
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("read code chunk row: {e}"), None))?;
+            let chunk_emb = bytes_to_f32(&emb_bytes);
+            if chunk_emb.len() != query_embedding.len() {
+                continue;
+            }
+            let score = cosine_similarity(&query_embedding, &chunk_emb);
+            let chunk_json = serde_json::json!({
+                "id": id,
+                "text": text,
+                "doc_path": doc_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "symbol": symbol,
+                "language": language,
+                "score": score
+            });
+            chunks_with_scores.push((score, chunk_json));
+        }
+
+        // Sort by score descending, take top limit
+        chunks_with_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let results: Vec<serde_json::Value> = chunks_with_scores.into_iter().take(limit).map(|(_, v)| v).collect();
+
+        let response = serde_json::json!({
+            "code_chunks": results,
+            "query": query,
+            "symbol_filter": symbol
+        });
+        serde_json::to_string(&response)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 }
