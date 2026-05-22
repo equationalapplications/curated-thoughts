@@ -65,6 +65,18 @@ struct CuratedSearchCodeParams {
     symbol: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CuratedSuperpowersSetupParams {
+    /// Include Aider setup instructions (default: true)
+    #[serde(default = "default_true")]
+    include_aider: bool,
+    /// Include VS Code Copilot setup instructions (default: true)
+    #[serde(default = "default_true")]
+    include_vscode: bool,
+}
+
+fn default_true() -> bool { true }
+
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
     conn.lock()
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
@@ -347,6 +359,79 @@ impl VaultMcpServer {
             "code_chunks": results,
             "query": query,
             "symbol_filter": symbol
+        });
+        serde_json::to_string(&response)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_superpowers_setup",
+        description = "Get step-by-step instructions to set up the Superpowers agentic skills framework for Aider and VS Code Copilot, integrated with Curated Thoughts MCP tools."
+    )]
+    async fn curated_superpowers_setup(
+        &self,
+        args: Parameters<CuratedSuperpowersSetupParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(CuratedSuperpowersSetupParams { include_aider, include_vscode }) = args;
+        let mut instructions = String::new();
+
+        if include_aider {
+            instructions.push_str("# Superpowers Setup for Aider\n");
+            instructions.push_str("Follow these steps to use Superpowers with Aider and Curated Thoughts:\n\n");
+            instructions.push_str("## Step 1: Install OpenSkills Globally\n");
+            instructions.push_str("Open your system terminal (outside of Aider) and run:\n");
+            instructions.push_str("```bash\nbun add -g openskills\n# OR: npm install -g openskills\n```\n\n");
+            instructions.push_str("## Step 2: Fetch Superpowers Framework\n");
+            instructions.push_str("Install Superpowers globally:\n");
+            instructions.push_str("```bash\nopenskills install obra/superpowers --universal --global\n```\n\n");
+            instructions.push_str("## Step 3: Sync Skills into Your Project\n");
+            instructions.push_str("Navigate to your project directory and run:\n");
+            instructions.push_str("```bash\ncd /path/to/your/project\nopenskills sync\n```\n\n");
+            instructions.push_str("## Step 4: Configure Aider\n");
+            instructions.push_str("Create or update `.aider.conf.yml` in your project root with:\n");
+            instructions.push_str("```yaml\nmcp:\n  servers:\n    curated-thoughts:\n      command: \"curated-thoughts-mcp\"\n      args: []\nread:\n  - \".skills/superpowers/**/*\"\n  - \".skills/curated-thoughts/**/*\"\n```\n");
+            instructions.push_str("Start Aider: `aider`. Aider will automatically load the Superpowers skills and Curated Thoughts MCP tools.\n\n");
+            instructions.push_str("## Step 5: Execute Commands\n");
+            instructions.push_str("Use natural language to trigger Superpowers workflows with Curated Thoughts context:\n");
+            instructions.push_str("* “Run the superpowers brainstorming workflow on our next task, using Curated Thoughts to recall relevant wisdom.”\n");
+            instructions.push_str("* “Execute a TDD test cycle for the new module using superpowers, and use `curated_recall_context` to fetch existing patterns.”\n\n");
+        }
+
+        if include_vscode {
+            if !instructions.is_empty() {
+                instructions.push_str("---\n\n");
+            }
+            instructions.push_str("# Superpowers Setup for VS Code Copilot\n");
+            instructions.push_str("Follow these steps to use Superpowers with VS Code Copilot and Curated Thoughts:\n\n");
+            instructions.push_str("## Step 1: Install OpenSkills Globally\n");
+            instructions.push_str("Same as Aider Step 1: `bun add -g openskills` or `npm install -g openskills`\n\n");
+            instructions.push_str("## Step 2: Fetch Superpowers Framework\n");
+            instructions.push_str("Same as Aider Step 2: `openskills install obra/superpowers --universal --global`\n\n");
+            instructions.push_str("## Step 3: Sync Skills into Your Project\n");
+            instructions.push_str("Same as Aider Step 3: `cd /path/to/your/project && openskills sync`\n\n");
+            instructions.push_str("## Step 4: Configure VS Code Copilot\n");
+            instructions.push_str("Create `.vscode/mcp.json` in your project root with:\n");
+            instructions.push_str("```json\n{\n  \"servers\": {\n    \"curated-thoughts\": {\n      \"type\": \"stdio\",\n      \"command\": \"curated-thoughts-mcp\",\n      \"args\": []\n    }\n  }\n}\n```\n");
+            instructions.push_str("Restart VS Code. Copilot will discover the Curated Thoughts MCP server automatically.\n\n");
+            instructions.push_str("## Step 5: Use Superpowers with Copilot\n");
+            instructions.push_str("Open Copilot Chat and reference the Superpowers skills:\n");
+            instructions.push_str("* “Use the Superpowers brainstorming workflow, and fetch relevant context from Curated Thoughts using `curated_recall_context`.”\n\n");
+        }
+
+        instructions.push_str("\n## Curated Thoughts MCP Tools Available\n");
+        instructions.push_str("Once set up, the following tools are available via the `curated-thoughts` MCP server:\n");
+        instructions.push_str("1. `vault_semantic_search`: Semantic search over vault chunks.\n");
+        instructions.push_str("2. `vault_related_chunks`: List chunks related to a document path.\n");
+        instructions.push_str("3. `curated_recall_context`: Recall wisdom layer and code chunks for coding tasks.\n");
+        instructions.push_str("4. `curated_get_wiki_entry`: Fetch full wiki entry content.\n");
+        instructions.push_str("5. `curated_search_code`: Search code chunks by query or symbol.\n");
+        instructions.push_str("6. `curated_add_wisdom`: Add new entries to the wisdom layer.\n");
+        instructions.push_str("7. `curated_superpowers_setup`: Get this setup instructions (you just ran this!).\n");
+
+        let response = serde_json::json!({
+            "instructions": instructions,
+            "setup_complete": false,
+            "next_step": "Follow the steps above to complete Superpowers setup for your preferred tool."
         });
         serde_json::to_string(&response)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
