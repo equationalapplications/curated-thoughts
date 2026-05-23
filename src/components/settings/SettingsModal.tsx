@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { AgentIntegrationPanel } from "./AgentIntegrationPanel";
 import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
@@ -10,21 +11,14 @@ interface Props {
   vaultPath: string;
 }
 
-function defaultBrainDir(): string {
-  // Mirror the Rust convention: $HOME/.brain
-  const isWindows =
-    typeof navigator !== "undefined" && /Win/i.test(navigator.platform ?? "");
-  if (isWindows) {
-    const home =
-      (window as unknown as { env?: { USERPROFILE?: string } })?.env
-        ?.USERPROFILE ?? "C:\\Users\\You";
-    return `${home}\\.brain`;
-  }
-  return "~/.brain";
-}
-
 export function SettingsModal({ onClose, vaultPath }: Props) {
-  const brainDir = useMemo(() => defaultBrainDir(), []);
+  const [brainDir, setBrainDir] = useState<string>("~/.brain");
+
+  useEffect(() => {
+    invoke<string>("get_brain_dir")
+      .then(setBrainDir)
+      .catch(() => {});
+  }, []);
 
   return (
     <div className="review-overlay" onClick={onClose}>
