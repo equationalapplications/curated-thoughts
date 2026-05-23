@@ -38,7 +38,7 @@ export function AgentIntegrationPanel({ brainDir }: Props) {
   );
 
   function handleCopy() {
-    navigator.clipboard.writeText(snippet).catch(() => {});
+    navigator.clipboard?.writeText(snippet).catch(() => {});
   }
 
   return (
