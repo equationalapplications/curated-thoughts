@@ -115,6 +115,10 @@ impl VaultMcpServer {
 /// All tracing/logging must go to stderr only — stdout carries JSON-RPC frames.
 pub fn run() -> anyhow::Result<()> {
     // Redirect all tracing to stderr so it never corrupts the JSON-RPC stream.
+    // NOTE: this subscriber only governs `tracing` macros. Raw `println!` calls or
+    // stdout writes from C/C++ extensions (e.g. fastembed, ort) bypass it entirely.
+    // If a dependency ever starts writing to stdout, pipe-based MCP clients will see
+    // corrupted JSON-RPC frames. Audit new native deps for hardcoded stdout output.
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .finish();
