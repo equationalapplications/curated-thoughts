@@ -14,7 +14,7 @@ use crate::retrieval;
 struct VaultMcpServer {
     conn: Arc<Mutex<Connection>>,
     profile: EmbedProfile,
-    brain_dir: std::path::PathBuf,
+    vault_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -38,16 +38,39 @@ fn lock_conn(
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
 
-fn normalize_vault_path(doc_path: &str, brain_dir: &std::path::Path) -> String {
+fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) -> Vec<String> {
     let p = std::path::Path::new(doc_path);
-    if p.is_absolute() {
-        if let Ok(rel) = p.strip_prefix(brain_dir) {
-            if !rel.as_os_str().is_empty() {
-                return rel.to_string_lossy().into_owned();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if !candidates.iter().any(|e| e == &s) {
+            candidates.push(s);
+        }
+    };
+
+    if let Ok(canon) = p.canonicalize() {
+        push(canon.to_string_lossy().into_owned());
+    }
+
+    push(doc_path.to_string());
+
+    if let Some(vault) = vault_dir {
+        if p.is_absolute() {
+            if let Ok(rel) = p.strip_prefix(vault) {
+                if !rel.as_os_str().is_empty() {
+                    push(rel.to_string_lossy().into_owned());
+                    push(vault.join(rel).to_string_lossy().into_owned());
+                }
+            }
+        } else {
+            let joined = vault.join(p);
+            push(joined.to_string_lossy().into_owned());
+            if let Ok(canon) = joined.canonicalize() {
+                push(canon.to_string_lossy().into_owned());
             }
         }
     }
-    doc_path.to_string()
+
+    candidates
 }
 
 #[tool_router(server_handler)]
@@ -71,7 +94,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "vault_related_chunks",
-        description = "List chunks related to a vault document path. Accepts both relative and absolute paths."
+        description = "List chunks related to a vault document path. Accepts vault-relative paths (e.g. `notes/meeting.md`) or absolute paths — tries multiple path spellings for maximum compatibility."
     )]
     async fn vault_related_chunks(
         &self,
@@ -79,9 +102,9 @@ impl VaultMcpServer {
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(VaultRelatedChunksParams { doc_path, limit }) = args;
         let limit = limit.unwrap_or(5);
-        let normalized = normalize_vault_path(&doc_path, &self.brain_dir);
+        let candidates = build_path_candidates(&doc_path, self.vault_dir.as_deref());
         let conn = lock_conn(&self.conn)?;
-        let hits = retrieval::related_chunks_facade(&conn, &normalized, limit)
+        let hits = crate::search::related_chunks_try_paths(&conn, &candidates, limit)
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
@@ -129,10 +152,16 @@ async fn async_run() -> anyhow::Result<()> {
         let _ = crate::outbox::postgres::spawn_postgres_worker(config, None);
     }
 
+    let vault_dir = crate::vault::VaultConfig::new(p.config_path.clone())
+        .get_vault_path()
+        .ok()
+        .flatten()
+        .map(std::path::PathBuf::from);
+
     let server = VaultMcpServer {
         conn: Arc::new(Mutex::new(conn)),
         profile,
-        brain_dir: p.brain_dir.clone(),
+        vault_dir,
     };
 
     let transport = rmcp::transport::stdio();
@@ -159,41 +188,45 @@ fn configured_database_url() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_vault_path;
+    use super::build_path_candidates;
 
     #[test]
-    fn strips_brain_dir_prefix_from_absolute_path() {
-        let brain = std::path::Path::new("/home/user/.brain");
-        assert_eq!(
-            normalize_vault_path("/home/user/.brain/notes/meeting.md", brain),
-            "notes/meeting.md"
-        );
+    fn relative_path_no_vault_dir() {
+        let candidates = build_path_candidates("notes/meeting.md", None);
+        assert_eq!(candidates, vec!["notes/meeting.md".to_string()]);
     }
 
     #[test]
-    fn passthrough_for_relative_path() {
-        let brain = std::path::Path::new("/home/user/.brain");
-        assert_eq!(
-            normalize_vault_path("notes/meeting.md", brain),
-            "notes/meeting.md"
-        );
+    fn relative_path_with_vault_dir() {
+        let vault = std::path::Path::new("/home/user/vault");
+        let candidates = build_path_candidates("notes/meeting.md", Some(vault));
+        assert!(candidates.contains(&"notes/meeting.md".to_string()));
+        assert!(candidates.contains(&"/home/user/vault/notes/meeting.md".to_string()));
     }
 
     #[test]
-    fn passthrough_when_outside_brain_dir() {
-        let brain = std::path::Path::new("/home/user/.brain");
-        assert_eq!(
-            normalize_vault_path("/tmp/other/file.md", brain),
-            "/tmp/other/file.md"
-        );
+    fn absolute_path_under_vault_dir() {
+        let vault = std::path::Path::new("/home/user/vault");
+        let candidates = build_path_candidates("/home/user/vault/notes/meeting.md", Some(vault));
+        assert!(candidates.contains(&"/home/user/vault/notes/meeting.md".to_string()));
+        assert!(candidates.contains(&"notes/meeting.md".to_string()));
     }
 
     #[test]
-    fn passthrough_when_path_equals_brain_dir() {
-        let brain = std::path::Path::new("/home/user/.brain");
-        assert_eq!(
-            normalize_vault_path("/home/user/.brain", brain),
-            "/home/user/.brain"
-        );
+    fn absolute_path_outside_vault_dir_no_strip() {
+        let vault = std::path::Path::new("/home/user/vault");
+        let candidates = build_path_candidates("/tmp/other/file.md", Some(vault));
+        assert!(candidates.contains(&"/tmp/other/file.md".to_string()));
+        // Should NOT contain a stripped path since /tmp/other/file.md is not under vault
+        assert!(!candidates.iter().any(|c| c == "other/file.md"));
+    }
+
+    #[test]
+    fn no_duplicates_when_path_matches_joined() {
+        let vault = std::path::Path::new("/home/user/vault");
+        // When doc_path is already the absolute joined form, it should appear only once.
+        let candidates = build_path_candidates("/home/user/vault/notes/meeting.md", Some(vault));
+        let count = candidates.iter().filter(|c| c.as_str() == "/home/user/vault/notes/meeting.md").count();
+        assert_eq!(count, 1);
     }
 }
