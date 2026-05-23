@@ -14,6 +14,8 @@ pub mod search;
 mod setup;
 pub mod vault;
 mod watcher;
+#[cfg(feature = "mcp-server")]
+pub mod mcp_server;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
