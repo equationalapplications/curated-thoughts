@@ -1,5 +1,5 @@
-//! Spawns **`curated-thoughts-mcp`** over stdio and exercises MCP tool calls (**`rmcp`** client).
-//! Build the binary first: `cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp`
+//! Spawns **`curated-thoughts`** over stdio with `--mcp` and exercises MCP tool calls (**`rmcp`** client).
+//! Build the binary first: `cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml`
 //! Then run: `CURATED_MCP_INTEGRATION_TESTS=1 cargo test --manifest-path src-tauri/Cargo.toml --test mcp_integration`
 //!
 //! Skipped unless `CURATED_MCP_INTEGRATION_TESTS=1` is set (binary not available in default CI).
@@ -22,25 +22,19 @@ use tauri_app_lib::retrieval::{
 use tauri_app_lib::search::SearchResult;
 
 fn mcp_exe() -> PathBuf {
-    for key in [
-        "CARGO_BIN_EXE_curated_thoughts_mcp",
-        "CARGO_BIN_EXE_curated-thoughts-mcp",
-    ] {
-        if let Some(p) = std::env::var_os(key) {
-            return PathBuf::from(p);
-        }
+    // After the unified-binary refactor, the main binary runs as an MCP server
+    // when invoked with --mcp. Build it with --features mcp-server.
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_curated-thoughts") {
+        return PathBuf::from(p);
     }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("src-tauri has parent")
-        .join("tools")
         .join("target")
         .join(profile)
         .join(if cfg!(windows) {
-            "curated-thoughts-mcp.exe"
+            "curated-thoughts.exe"
         } else {
-            "curated-thoughts-mcp"
+            "curated-thoughts"
         })
 }
 
@@ -58,7 +52,8 @@ async fn spawn_mcp(
     let brain = brain_root.as_ref().to_path_buf();
     let exe = mcp_exe();
     let transport = TokioChildProcess::new(tokio::process::Command::new(&exe).configure(|cmd| {
-        cmd.stdin(std::process::Stdio::piped())
+        cmd.arg("--mcp")
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .env(
@@ -128,7 +123,7 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
 
     assert!(
         mcp_exe().exists(),
-        "MCP binary missing: {:?}\nbuild with:\n  cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp",
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml",
         mcp_exe()
     );
 
