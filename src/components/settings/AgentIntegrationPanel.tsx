@@ -5,7 +5,13 @@ interface Props {
 }
 
 function binaryPath(): string {
-  const p = typeof navigator !== "undefined" ? (navigator.platform ?? "") : "";
+  // Prefer the non-deprecated userAgentData API (Chromium 90+ / Tauri WebView);
+  // fall back to navigator.platform for environments where it isn't available.
+  const p =
+    typeof navigator !== "undefined"
+      ? ((navigator as unknown as { userAgentData?: { platform?: string } })
+          .userAgentData?.platform ?? navigator.platform ?? "")
+      : "";
   if (/Win/i.test(p)) {
     return "C:\\Program Files\\CuratedThoughts\\curated-thoughts.exe";
   }
