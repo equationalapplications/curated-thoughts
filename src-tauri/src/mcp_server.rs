@@ -36,6 +36,23 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
 
+fn normalize_path_lexically(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) -> Vec<String> {
     let p = std::path::Path::new(doc_path);
     let mut candidates: Vec<String> = Vec::new();
@@ -67,9 +84,13 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
                 if canon.starts_with(vault) {
                     push(canon.to_string_lossy().into_owned());
                 }
+            } else {
+                let normalized = normalize_path_lexically(&joined);
+                if normalized.starts_with(vault) {
+                    push(normalized.to_string_lossy().into_owned());
+                }
             }
             push(doc_path.to_string());
-            push(joined.to_string_lossy().into_owned());
         }
     } else {
         push(doc_path.to_string());
@@ -145,7 +166,7 @@ pub fn run() -> anyhow::Result<()> {
     // The guard must outlive the entire runtime — held until run() returns.
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
