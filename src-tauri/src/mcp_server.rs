@@ -14,6 +14,7 @@ use crate::retrieval;
 struct VaultMcpServer {
     conn: Arc<Mutex<Connection>>,
     profile: EmbedProfile,
+    brain_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -37,6 +38,16 @@ fn lock_conn(
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
 
+fn normalize_vault_path(doc_path: &str, brain_dir: &std::path::Path) -> String {
+    let p = std::path::Path::new(doc_path);
+    if p.is_absolute() {
+        if let Ok(rel) = p.strip_prefix(brain_dir) {
+            return rel.to_string_lossy().into_owned();
+        }
+    }
+    doc_path.to_string()
+}
+
 #[tool_router(server_handler)]
 impl VaultMcpServer {
     #[tool(
@@ -58,7 +69,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "vault_related_chunks",
-        description = "List chunks related to a vault document path."
+        description = "List chunks related to a vault document path. Accepts both relative and absolute paths."
     )]
     async fn vault_related_chunks(
         &self,
@@ -66,8 +77,9 @@ impl VaultMcpServer {
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(VaultRelatedChunksParams { doc_path, limit }) = args;
         let limit = limit.unwrap_or(5);
+        let normalized = normalize_vault_path(&doc_path, &self.brain_dir);
         let conn = lock_conn(&self.conn)?;
-        let hits = retrieval::related_chunks_facade(&conn, &doc_path, limit)
+        let hits = retrieval::related_chunks_facade(&conn, &normalized, limit)
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
@@ -118,6 +130,7 @@ async fn async_run() -> anyhow::Result<()> {
     let server = VaultMcpServer {
         conn: Arc::new(Mutex::new(conn)),
         profile,
+        brain_dir: p.brain_dir.clone(),
     };
 
     let transport = rmcp::transport::stdio();
@@ -139,5 +152,37 @@ fn configured_database_url() -> Option<String> {
         None
     } else {
         Some(db_url.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_vault_path;
+
+    #[test]
+    fn strips_brain_dir_prefix_from_absolute_path() {
+        let brain = std::path::Path::new("/home/user/.brain");
+        assert_eq!(
+            normalize_vault_path("/home/user/.brain/notes/meeting.md", brain),
+            "notes/meeting.md"
+        );
+    }
+
+    #[test]
+    fn passthrough_for_relative_path() {
+        let brain = std::path::Path::new("/home/user/.brain");
+        assert_eq!(
+            normalize_vault_path("notes/meeting.md", brain),
+            "notes/meeting.md"
+        );
+    }
+
+    #[test]
+    fn passthrough_when_outside_brain_dir() {
+        let brain = std::path::Path::new("/home/user/.brain");
+        assert_eq!(
+            normalize_vault_path("/tmp/other/file.md", brain),
+            "/tmp/other/file.md"
+        );
     }
 }
