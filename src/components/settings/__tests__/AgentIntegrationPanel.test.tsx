@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AgentIntegrationPanel } from "../AgentIntegrationPanel";
@@ -19,8 +19,8 @@ describe("AgentIntegrationPanel", () => {
   it("copy button is enabled and clickable", async () => {
     const user = userEvent.setup();
     render(<AgentIntegrationPanel brainDir="/Users/test/.brain" />);
-    const button = screen.getByRole("button", { name: /copy/i });
-    expect(button).not.toBeDisabled();
+    const button = screen.getByRole("button", { name: /copy/i }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
     await user.click(button);
   });
 });
