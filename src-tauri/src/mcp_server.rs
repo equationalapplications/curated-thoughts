@@ -47,14 +47,16 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
         }
     };
 
-    if let Ok(canon) = p.canonicalize() {
-        push(canon.to_string_lossy().into_owned());
-    }
-
-    push(doc_path.to_string());
-
     if let Some(vault) = vault_dir {
         if p.is_absolute() {
+            if let Ok(canon) = p.canonicalize() {
+                if canon.starts_with(vault) {
+                    push(canon.to_string_lossy().into_owned());
+                }
+            }
+
+            push(doc_path.to_string());
+
             if let Ok(rel) = p.strip_prefix(vault) {
                 if !rel.as_os_str().is_empty() {
                     push(rel.to_string_lossy().into_owned());
@@ -62,12 +64,15 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
             }
         } else {
             let joined = vault.join(p);
-            // Try canonicalized absolute form first — most likely to match DB (file watcher stores canon paths).
+            // Try canonicalized absolute form first — only if the path is within the vault.
             if let Ok(canon) = joined.canonicalize() {
                 push(canon.to_string_lossy().into_owned());
             }
+            push(doc_path.to_string());
             push(joined.to_string_lossy().into_owned());
         }
+    } else {
+        push(doc_path.to_string());
     }
 
     candidates
@@ -108,9 +113,11 @@ impl VaultMcpServer {
         let Parameters(VaultRelatedChunksParams { doc_path, limit }) = args;
         let limit = limit.unwrap_or(5).min(10);
         let candidates = build_path_candidates(&doc_path, self.vault_dir.as_deref());
-        let conn = lock_conn(&self.conn)?;
-        let hits = crate::search::related_chunks_try_paths(&conn, &candidates, limit)
-            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        let hits = {
+            let conn = lock_conn(&self.conn)?;
+            crate::search::related_chunks_try_paths(&conn, &candidates, limit)
+                .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?
+        };
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }

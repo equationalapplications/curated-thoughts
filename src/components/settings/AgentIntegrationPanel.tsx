@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 interface Props {
   brainDir: string | null;
+  brainDirError?: string | null;
 }
 
 function binaryPath(): string {
@@ -13,16 +14,16 @@ function binaryPath(): string {
           .userAgentData?.platform ?? navigator.platform ?? "")
       : "";
   if (/Win/i.test(p)) {
-    return "C:\\Program Files\\CuratedThoughts\\curated-thoughts.exe";
+    return "C:\\Program Files\\Curated Thoughts\\curated-thoughts.exe";
   }
   if (/Linux/i.test(p)) {
     return "/usr/bin/curated-thoughts";
   }
   // macOS default
-  return "/Applications/CuratedThoughts.app/Contents/MacOS/curated-thoughts";
+  return "/Applications/Curated Thoughts.app/Contents/MacOS/curated-thoughts";
 }
 
-export function AgentIntegrationPanel({ brainDir }: Props) {
+export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
   const snippet = useMemo(
     () =>
       brainDir === null
@@ -45,6 +46,8 @@ export function AgentIntegrationPanel({ brainDir }: Props) {
     [brainDir],
   );
 
+  const isUnavailable = brainDir === null;
+
   function handleCopy() {
     navigator.clipboard?.writeText(snippet).catch(() => {});
   }
@@ -60,7 +63,8 @@ export function AgentIntegrationPanel({ brainDir }: Props) {
         <pre>
           <code data-testid="agent-snippet">{snippet}</code>
         </pre>
-        <button type="button" className="agent-snippet-copy" onClick={handleCopy} disabled={brainDir === null}>
+        {brainDirError ? <p className="agent-snippet-error">{brainDirError}</p> : null}
+        <button type="button" className="agent-snippet-copy" onClick={handleCopy} disabled={isUnavailable}>
           Copy
         </button>
       </div>
