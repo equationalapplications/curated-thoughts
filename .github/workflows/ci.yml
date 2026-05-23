@@ -77,7 +77,7 @@ jobs:
           workspaces: ./src-tauri -> target
 
       - name: Tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
 
