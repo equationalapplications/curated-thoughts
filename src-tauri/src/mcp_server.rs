@@ -31,9 +31,7 @@ struct VaultRelatedChunksParams {
     limit: Option<usize>,
 }
 
-fn lock_conn(
-    conn: &Arc<Mutex<Connection>>,
-) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
+fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
     conn.lock()
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
@@ -119,7 +117,7 @@ impl VaultMcpServer {
         args: Parameters<VaultRelatedChunksParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(VaultRelatedChunksParams { doc_path, limit }) = args;
-        let limit = limit.unwrap_or(5).min(10);
+        let limit = limit.unwrap_or(5).clamp(1, 10);
         let candidates = build_path_candidates(&doc_path, self.vault_dir.as_deref());
         let hits = {
             let conn = lock_conn(&self.conn)?;
@@ -242,7 +240,10 @@ mod tests {
         let vault = std::path::Path::new("/home/user/vault");
         // When doc_path is already the absolute joined form, it should appear only once.
         let candidates = build_path_candidates("/home/user/vault/notes/meeting.md", Some(vault));
-        let count = candidates.iter().filter(|c| c.as_str() == "/home/user/vault/notes/meeting.md").count();
+        let count = candidates
+            .iter()
+            .filter(|c| c.as_str() == "/home/user/vault/notes/meeting.md")
+            .count();
         assert_eq!(count, 1);
     }
 }

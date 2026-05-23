@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 interface Props {
   brainDir: string | null;
@@ -47,9 +47,44 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
   );
 
   const isUnavailable = brainDir === null;
+  const [copyStatus, setCopyStatus] = useState<"idle" | "success" | "error">("idle");
+  const [copyError, setCopyError] = useState<string | null>(null);
 
-  function handleCopy() {
-    navigator.clipboard?.writeText(snippet).catch(() => {});
+  async function handleCopy() {
+    if (isUnavailable || !snippet) {
+      return;
+    }
+
+    setCopyError(null);
+    setCopyStatus("idle");
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(snippet);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = snippet;
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        textarea.style.top = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+
+        const success = document.execCommand("copy");
+        document.body.removeChild(textarea);
+
+        if (!success) {
+          throw new Error("copy command failed");
+        }
+      }
+
+      setCopyStatus("success");
+    } catch (error) {
+      console.error("Copy failed", error);
+      setCopyError("Copy failed. Please select the text and copy manually.");
+      setCopyStatus("error");
+    }
   }
 
   return (
@@ -67,6 +102,10 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
         <button type="button" className="agent-snippet-copy" onClick={handleCopy} disabled={isUnavailable}>
           Copy
         </button>
+        {copyStatus === "success" ? (
+          <p className="agent-snippet-copy-success">Copied to clipboard.</p>
+        ) : null}
+        {copyError ? <p className="agent-snippet-error">{copyError}</p> : null}
       </div>
     </div>
   );

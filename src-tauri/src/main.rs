@@ -4,7 +4,7 @@
 // Debug builds intentionally keep the console attached for easier debugging.
 
 fn main() {
-    let is_mcp = std::env::args().any(|a| a == "--mcp");
+    let is_mcp = std::env::args_os().any(|a| a == std::ffi::OsStr::new("--mcp"));
 
     if is_mcp {
         run_mcp();
@@ -47,13 +47,17 @@ fn hide_console_on_windows() {}
 
 #[cfg(test)]
 mod dispatch_tests {
-    fn has_mcp_flag(args: &[&str]) -> bool {
-        args.iter().any(|a| *a == "--mcp")
+    fn has_mcp_flag(args: &[std::ffi::OsString]) -> bool {
+        args.iter().any(|a| a == std::ffi::OsStr::new("--mcp"))
     }
 
     #[test]
     fn detects_mcp_flag() {
-        assert!(has_mcp_flag(&["curated-thoughts", "--mcp"]));
+        let args = ["curated-thoughts", "--mcp"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        assert!(has_mcp_flag(&args));
     }
 
     #[test]
