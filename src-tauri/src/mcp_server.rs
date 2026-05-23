@@ -58,15 +58,15 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
             if let Ok(rel) = p.strip_prefix(vault) {
                 if !rel.as_os_str().is_empty() {
                     push(rel.to_string_lossy().into_owned());
-                    push(vault.join(rel).to_string_lossy().into_owned());
                 }
             }
         } else {
             let joined = vault.join(p);
-            push(joined.to_string_lossy().into_owned());
+            // Try canonicalized absolute form first — most likely to match DB (file watcher stores canon paths).
             if let Ok(canon) = joined.canonicalize() {
                 push(canon.to_string_lossy().into_owned());
             }
+            push(joined.to_string_lossy().into_owned());
         }
     }
 
@@ -200,16 +200,20 @@ mod tests {
     fn relative_path_with_vault_dir() {
         let vault = std::path::Path::new("/home/user/vault");
         let candidates = build_path_candidates("notes/meeting.md", Some(vault));
-        assert!(candidates.contains(&"notes/meeting.md".to_string()));
-        assert!(candidates.contains(&"/home/user/vault/notes/meeting.md".to_string()));
+        // canon of joined path won't exist on disk, so no canonicalized form
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], "notes/meeting.md");
+        assert_eq!(candidates[1], "/home/user/vault/notes/meeting.md");
     }
 
     #[test]
     fn absolute_path_under_vault_dir() {
         let vault = std::path::Path::new("/home/user/vault");
         let candidates = build_path_candidates("/home/user/vault/notes/meeting.md", Some(vault));
-        assert!(candidates.contains(&"/home/user/vault/notes/meeting.md".to_string()));
-        assert!(candidates.contains(&"notes/meeting.md".to_string()));
+        // file doesn't exist on disk, no canonicalized form
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], "/home/user/vault/notes/meeting.md");
+        assert_eq!(candidates[1], "notes/meeting.md");
     }
 
     #[test]
