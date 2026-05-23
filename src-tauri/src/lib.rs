@@ -424,6 +424,17 @@ fn get_brain_dir() -> String {
         .into_owned()
 }
 
+#[tauri::command]
+fn get_binary_path() -> Result<String, String> {
+    std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|path| {
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| "binary path is not valid UTF-8".to_string())
+        })
+}
+
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
 /// Returns the temp stub path; callers must call [`cleanup_temp_stub_db`] after the stub
 /// connection is dropped (otherwise `-wal` / `-shm` sidecars and the file may remain, especially on Windows).
@@ -2270,6 +2281,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             save_wiki_page,
             queue_full_reindex,
             get_impact_radius,
+            get_binary_path,
             get_brain_dir,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -2433,6 +2445,7 @@ pub fn run() {
             start_outbox_worker,
             stop_outbox_worker,
             outbox_is_configured,
+            get_binary_path,
             get_brain_dir,
         ])
         .run(tauri::generate_context!())

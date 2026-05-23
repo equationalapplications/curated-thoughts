@@ -35,6 +35,7 @@ export const getRecommendedModel = (): Promise<string> =>
   invoke("get_recommended_model");
 
 export const getBrainDir = (): Promise<string> => invoke("get_brain_dir");
+export const getBinaryPath = (): Promise<string> => invoke("get_binary_path");
 
 export interface IndexingStatus {
   indexed: number;

@@ -55,6 +55,29 @@ fn normalize_path_lexically(path: &std::path::Path) -> std::path::PathBuf {
     normalized
 }
 
+fn canonicalize_absolute_path_under_vault(path: &Path, vault_canonical: &Path) -> Option<std::path::PathBuf> {
+    let mut cur = path.to_path_buf();
+    let mut tail = std::path::PathBuf::new();
+
+    loop {
+        match cur.canonicalize() {
+            Ok(canon_prefix) => {
+                if !canon_prefix.starts_with(vault_canonical) {
+                    return None;
+                }
+                return Some(canon_prefix.join(&tail));
+            }
+            Err(_) => {
+                let name = cur.file_name()?.to_owned();
+                tail = std::path::Path::new(&name).join(&tail);
+                if !cur.pop() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String> {
     let p = Path::new(doc_path);
     let mut candidates: Vec<String> = Vec::new();
@@ -73,23 +96,31 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
         };
 
         if p.is_absolute() {
-            let mut accepted_candidate: Option<String> = None;
-
-            if let Ok(canon) = p.canonicalize() {
-                if canon.starts_with(&vault_canonical) {
-                    accepted_candidate = Some(canon.to_string_lossy().into_owned());
-                }
-            } else {
-                let normalized = normalize_path_lexically(p);
-                if normalized.starts_with(&vault_canonical) {
-                    accepted_candidate = Some(normalized.to_string_lossy().into_owned());
-                }
-            }
+            let accepted_candidate = p
+                .canonicalize()
+                .ok()
+                .filter(|canon| canon.starts_with(&vault_canonical))
+                .or_else(|| {
+                    let normalized = normalize_path_lexically(p);
+                    if normalized.starts_with(&vault_canonical) {
+                        Some(normalized)
+                    } else {
+                        canonicalize_absolute_path_under_vault(p, &vault_canonical)
+                    }
+                });
 
             if let Some(candidate) = accepted_candidate {
+                let mut candidate_string = candidate.to_string_lossy().into_owned();
+                if candidate_string != std::path::MAIN_SEPARATOR.to_string()
+                    && candidate_string.ends_with(std::path::MAIN_SEPARATOR)
+                {
+                    candidate_string = candidate_string
+                        .trim_end_matches(std::path::MAIN_SEPARATOR)
+                        .to_string();
+                }
                 push(doc_path.to_string());
-                push(candidate.clone());
-                if let Ok(rel) = std::path::Path::new(&candidate).strip_prefix(&vault_canonical) {
+                push(candidate_string.clone());
+                if let Ok(rel) = std::path::Path::new(&candidate_string).strip_prefix(&vault_canonical) {
                     if !rel.as_os_str().is_empty() {
                         push(rel.to_string_lossy().into_owned());
                     }
@@ -257,6 +288,7 @@ async fn async_run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::build_path_candidates;
+    use tempfile::TempDir;
 
     #[test]
     fn relative_path_no_vault_dir() {
@@ -284,6 +316,28 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0], "/home/user/vault/notes/meeting.md");
         assert_eq!(candidates[1], "notes/meeting.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_path_under_vault_dir_with_canonical_prefix_alias() {
+        let temp_dir = TempDir::new().unwrap();
+        let vault_real = temp_dir.path().join("vault-real");
+        std::fs::create_dir_all(&vault_real).unwrap();
+        let vault_alias = temp_dir.path().join("vault-alias");
+        std::os::unix::fs::symlink(&vault_real, &vault_alias).unwrap();
+
+        let doc_path = vault_alias.join("notes/meeting.md");
+        let expected_canonical = vault_real
+            .canonicalize()
+            .unwrap()
+            .join("notes/meeting.md");
+
+        let candidates = build_path_candidates(doc_path.to_string_lossy().as_ref(), Some(&vault_real));
+
+        assert!(candidates.contains(&doc_path.to_string_lossy().into_owned()));
+        assert!(candidates.contains(&expected_canonical.to_string_lossy().into_owned()));
+        assert!(candidates.contains(&"notes/meeting.md".to_string()));
     }
 
     #[cfg(unix)]

@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { getBinaryPath } from "../../lib/tauri";
 
 interface Props {
   brainDir: string | null;
@@ -24,6 +25,33 @@ function binaryPath(): string {
 }
 
 export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
+  const [commandPath, setCommandPath] = useState<string>(binaryPath());
+  const [binaryPathError, setBinaryPathError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    getBinaryPath()
+      .then((path) => {
+        if (active && path) {
+          setCommandPath(path);
+        }
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        console.error("Failed to resolve binary path for MCP snippet:", error);
+        setBinaryPathError(
+          "Could not resolve the current app binary path. The snippet is using a safe fallback path.",
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const snippet = useMemo(
     () =>
       brainDir === null
@@ -32,7 +60,7 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
             {
               mcpServers: {
                 "curated-thoughts": {
-                  command: binaryPath(),
+                  command: commandPath,
                   args: ["--mcp"],
                   env: {
                     CURATED_BRAIN_DIR: brainDir,
@@ -43,7 +71,7 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
             null,
             2,
           ),
-    [brainDir],
+    [brainDir, commandPath],
   );
 
   const isUnavailable = brainDir === null;
@@ -101,6 +129,11 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
         {brainDirError ? (
           <p className="agent-snippet-error" role="alert" aria-live="assertive">
             {brainDirError}
+          </p>
+        ) : null}
+        {binaryPathError ? (
+          <p className="agent-snippet-error" role="alert" aria-live="assertive">
+            {binaryPathError}
           </p>
         ) : null}
         <button type="button" className="agent-snippet-copy" onClick={handleCopy} disabled={isUnavailable}>
