@@ -105,7 +105,7 @@ Overall, the spec is airtight, but here are a couple of microscopic observations
 | Modify | `src-tauri/src/main.rs` | Remove `windows_subsystem` attr; add `FreeConsole` for GUI path; `--mcp` dispatch |
 | Modify | `src-tauri/tests/mcp_integration.rs` | `mcp_exe()` returns the Tauri binary; `spawn_mcp()` passes `--mcp` arg |
 | Create | `src/components/settings/AgentIntegrationPanel.tsx` | Read-only JSON snippet; OS-keyed binary path via `navigator.platform` |
-| Modify | `src/components/settings/SettingsModal.tsx` | Import + render `<AgentIntegrationPanel brainDir={brainDir} />`; `defaultBrainDir()` returns `~/.brain` (Unix) or `%USERPROFILE%\.brain` (Windows, double-backslash) |
+| Modify | `src/components/settings/SettingsModal.tsx` | Import + render `<AgentIntegrationPanel brainDir={brainDir} />`; `brainDir` resolved via `invoke("get_brain_dir")` Tauri command; Copy button disabled until resolved |
 
 ### Key implementation details
 
@@ -113,7 +113,9 @@ Overall, the spec is airtight, but here are a couple of microscopic observations
 ```rust
 pub fn run() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::stderr).finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    // set_default (thread-local guard) instead of set_global_default — never silently
+    // no-ops if a prior subscriber is already registered. Guard must outlive the runtime.
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async_run())
 }
@@ -131,19 +133,16 @@ fn main() {
 }
 ```
 
-**`defaultBrainDir()` in SettingsModal** (mixed-slash bug fixed):
+**Brain dir in SettingsModal** — resolved via `get_brain_dir` Tauri command:
 ```ts
-function defaultBrainDir(): string {
-  const isWindows = typeof navigator !== "undefined" && /Win/i.test(navigator.platform ?? "");
-  if (isWindows) {
-    const home = (window as any)?.env?.USERPROFILE ?? "C:\\Users\\You";
-    return `${home}\\.brain`;
-  }
-  return "~/.brain";
-}
+// SettingsModal.tsx
+const [brainDir, setBrainDir] = useState<string | null>(null);
+useEffect(() => {
+  invoke<string>("get_brain_dir").then(setBrainDir).catch(() => {});
+}, []);
+// Copy button is disabled until brainDir resolves (non-null).
 ```
 
 ### Notes for future tasks
 
-- `window.env.USERPROFILE` is not available in Tauri webviews — the Windows brain dir falls back to the `C:\Users\You` placeholder. A follow-up could expose a `get_brain_dir` Tauri command to return the exact resolved path.
 - `fastembed` uses the `log` crate internally. If it writes to stdout at log-level INFO before the tracing subscriber is initialized, it could corrupt the MCP stream. Monitor this when running integration tests with `RUST_LOG=info`.

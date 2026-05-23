@@ -12,7 +12,7 @@ interface Props {
 }
 
 export function SettingsModal({ onClose, vaultPath }: Props) {
-  const [brainDir, setBrainDir] = useState<string>("~/.brain");
+  const [brainDir, setBrainDir] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<string>("get_brain_dir")
