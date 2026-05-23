@@ -96,33 +96,42 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
         };
 
         if p.is_absolute() {
-            let accepted_candidate = p
-                .canonicalize()
-                .ok()
-                .filter(|canon| canon.starts_with(&vault_canonical))
-                .or_else(|| {
-                    let normalized = normalize_path_lexically(p);
-                    if normalized.starts_with(&vault_canonical) {
-                        Some(normalized)
-                    } else {
-                        canonicalize_absolute_path_under_vault(p, &vault_canonical)
-                    }
-                });
-
-            if let Some(candidate) = accepted_candidate {
-                let mut candidate_string = candidate.to_string_lossy().into_owned();
-                if candidate_string != std::path::MAIN_SEPARATOR.to_string()
-                    && candidate_string.ends_with(std::path::MAIN_SEPARATOR)
-                {
-                    candidate_string = candidate_string
-                        .trim_end_matches(std::path::MAIN_SEPARATOR)
-                        .to_string();
-                }
+            if let Ok(rel) = crate::normalize_path_argument_to_vault_relative(doc_path, vault) {
                 push(doc_path.to_string());
-                push(candidate_string.clone());
-                if let Ok(rel) = std::path::Path::new(&candidate_string).strip_prefix(&vault_canonical) {
-                    if !rel.as_os_str().is_empty() {
-                        push(rel.to_string_lossy().into_owned());
+                let abs_candidate = vault_canonical.join(&rel);
+                push(abs_candidate.to_string_lossy().into_owned());
+                if !rel.is_empty() {
+                    push(rel);
+                }
+            } else if vault.canonicalize().is_err() {
+                let accepted_candidate = p
+                    .canonicalize()
+                    .ok()
+                    .filter(|canon| canon.starts_with(&vault_canonical))
+                    .or_else(|| {
+                        let normalized = normalize_path_lexically(p);
+                        if normalized.starts_with(&vault_canonical) {
+                            Some(normalized)
+                        } else {
+                            canonicalize_absolute_path_under_vault(p, &vault_canonical)
+                        }
+                    });
+
+                if let Some(candidate) = accepted_candidate {
+                    let mut candidate_string = candidate.to_string_lossy().into_owned();
+                    if candidate_string != std::path::MAIN_SEPARATOR.to_string()
+                        && candidate_string.ends_with(std::path::MAIN_SEPARATOR)
+                    {
+                        candidate_string = candidate_string
+                            .trim_end_matches(std::path::MAIN_SEPARATOR)
+                            .to_string();
+                    }
+                    push(doc_path.to_string());
+                    push(candidate_string.clone());
+                    if let Ok(rel) = std::path::Path::new(&candidate_string).strip_prefix(&vault_canonical) {
+                        if !rel.as_os_str().is_empty() {
+                            push(rel.to_string_lossy().into_owned());
+                        }
                     }
                 }
             }

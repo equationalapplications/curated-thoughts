@@ -7,10 +7,12 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   rust-ubuntu:
+    permissions:
+      contents: read
+      actions: write
     runs-on: ubuntu-22.04
     services:
       postgres:
@@ -65,6 +67,9 @@ jobs:
           DATABASE_URL: ""
 
   rust-macos:
+    permissions:
+      contents: read
+      actions: write
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
