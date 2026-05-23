@@ -13,11 +13,17 @@ interface Props {
 
 export function SettingsModal({ onClose, vaultPath }: Props) {
   const [brainDir, setBrainDir] = useState<string | null>(null);
+  const [brainDirError, setBrainDirError] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<string>("get_brain_dir")
       .then(setBrainDir)
-      .catch(() => {});
+      .catch((error) => {
+        console.error("Failed to resolve brain directory for MCP snippet:", error);
+        setBrainDirError(
+          "Could not resolve the MCP brain directory. The config snippet is unavailable.",
+        );
+      });
   }, []);
 
   return (
@@ -35,7 +41,7 @@ export function SettingsModal({ onClose, vaultPath }: Props) {
         <hr className="settings-divider" />
         <FolderRulesPanel />
         <hr className="settings-divider" />
-        <AgentIntegrationPanel brainDir={brainDir} />
+        <AgentIntegrationPanel brainDir={brainDir} brainDirError={brainDirError} />
         <hr className="settings-divider" />
         <MaintenanceDashboard />
       </div>
