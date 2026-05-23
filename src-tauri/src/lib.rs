@@ -5,6 +5,8 @@ pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
+#[cfg(feature = "mcp-server")]
+pub mod mcp_server;
 pub mod outbox;
 mod pipeline;
 pub mod recall_bench_fixture;
@@ -14,8 +16,6 @@ pub mod search;
 mod setup;
 pub mod vault;
 mod watcher;
-#[cfg(feature = "mcp-server")]
-pub mod mcp_server;
 
 use chunker::should_ingest_extension;
 use db::AppDb;
