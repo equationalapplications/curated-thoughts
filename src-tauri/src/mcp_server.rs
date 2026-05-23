@@ -84,10 +84,15 @@ impl VaultMcpServer {
         args: Parameters<VaultSemanticSearchParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(VaultSemanticSearchParams { query, limit }) = args;
-        let limit = limit.unwrap_or(10);
-        let conn = lock_conn(&self.conn)?;
-        let hits = retrieval::semantic_search_chunks(&conn, &self.profile, &query, limit)
+        let limit = limit.unwrap_or(10).clamp(1, 50);
+        // Compute embedding before taking the DB lock — embed_one is CPU/network bound.
+        let query_vec = crate::embedder::embed_one(&self.profile, query)
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        let hits = {
+            let conn = lock_conn(&self.conn)?;
+            crate::search::semantic_search(&conn, &query_vec, limit)
+                .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?
+        }; // lock released here, before JSON encoding
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -184,6 +189,7 @@ mod tests {
         assert_eq!(candidates, vec!["notes/meeting.md".to_string()]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn relative_path_with_vault_dir() {
         let vault = std::path::Path::new("/home/user/vault");
@@ -194,6 +200,7 @@ mod tests {
         assert_eq!(candidates[1], "/home/user/vault/notes/meeting.md");
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_path_under_vault_dir() {
         let vault = std::path::Path::new("/home/user/vault");
@@ -204,6 +211,7 @@ mod tests {
         assert_eq!(candidates[1], "notes/meeting.md");
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_path_outside_vault_dir_no_strip() {
         let vault = std::path::Path::new("/home/user/vault");
@@ -213,6 +221,7 @@ mod tests {
         assert!(!candidates.iter().any(|c| c == "other/file.md"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_duplicates_when_path_matches_joined() {
         let vault = std::path::Path::new("/home/user/vault");
