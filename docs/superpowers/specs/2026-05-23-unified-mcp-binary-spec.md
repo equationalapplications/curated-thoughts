@@ -15,7 +15,7 @@ Please implement this architectural change. Below are the specific requirements 
 
 ### 2. Update the Main Entry Point (`src-tauri/src/main.rs`)
 
-* Intercept command-line arguments early in `main()` using `std::env::args()`.
+* Intercept command-line arguments early in `main()` using `std::env::args_os()`.
 * If the `--mcp` flag is detected:
 * **Do not** initialize the Tauri Builder, window, or webview.
 * Initialize a `tokio::runtime::Runtime` (if not already handled by the library).
@@ -64,7 +64,9 @@ Please implement this architectural change. Below are the specific requirements 
 **`main.rs`** dispatch (no `windows_subsystem` attribute):
 ```rust
 fn main() {
-    if std::env::args().any(|a| a == "--mcp") {
+    let is_mcp = std::env::args_os().any(|a| a == std::ffi::OsStr::new("--mcp"));
+
+    if is_mcp {
         run_mcp();
     } else {
         hide_console_on_windows(); // calls FreeConsole() on Windows targets
