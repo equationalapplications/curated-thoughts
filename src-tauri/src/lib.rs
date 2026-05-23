@@ -428,11 +428,7 @@ fn get_brain_dir() -> String {
 fn get_binary_path() -> Result<String, String> {
     std::env::current_exe()
         .map_err(|e| e.to_string())
-        .and_then(|path| {
-            path.into_os_string()
-                .into_string()
-                .map_err(|_| "binary path is not valid UTF-8".to_string())
-        })
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
