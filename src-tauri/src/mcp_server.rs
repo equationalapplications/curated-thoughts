@@ -101,7 +101,7 @@ impl VaultMcpServer {
         args: Parameters<VaultRelatedChunksParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(VaultRelatedChunksParams { doc_path, limit }) = args;
-        let limit = limit.unwrap_or(5);
+        let limit = limit.unwrap_or(5).min(10);
         let candidates = build_path_candidates(&doc_path, self.vault_dir.as_deref());
         let conn = lock_conn(&self.conn)?;
         let hits = crate::search::related_chunks_try_paths(&conn, &candidates, limit)

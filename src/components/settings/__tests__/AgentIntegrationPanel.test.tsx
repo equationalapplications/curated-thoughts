@@ -7,13 +7,13 @@ import { SettingsModal } from "../SettingsModal";
 describe("AgentIntegrationPanel", () => {
   it("renders a code block containing --mcp", () => {
     render(<AgentIntegrationPanel brainDir="/Users/test/.brain" />);
-    const code = screen.getByRole("code");
+    const code = screen.getByTestId("agent-snippet");
     expect(code.textContent).toContain("--mcp");
   });
 
   it("renders the brainDir env var", () => {
     render(<AgentIntegrationPanel brainDir="/Users/test/.brain" />);
-    expect(screen.getByRole("code").textContent).toContain("/Users/test/.brain");
+    expect(screen.getByTestId("agent-snippet").textContent).toContain("/Users/test/.brain");
   });
 
   it("copy button writes snippet to clipboard", async () => {

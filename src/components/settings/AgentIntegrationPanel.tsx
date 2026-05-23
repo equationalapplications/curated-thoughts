@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 
 interface Props {
-  brainDir: string;
+  brainDir: string | null;
 }
 
 function binaryPath(): string {
@@ -25,21 +25,23 @@ function binaryPath(): string {
 export function AgentIntegrationPanel({ brainDir }: Props) {
   const snippet = useMemo(
     () =>
-      JSON.stringify(
-        {
-          mcpServers: {
-            "curated-thoughts": {
-              command: binaryPath(),
-              args: ["--mcp"],
-              env: {
-                CURATED_BRAIN_DIR: brainDir,
+      brainDir === null
+        ? ""
+        : JSON.stringify(
+            {
+              mcpServers: {
+                "curated-thoughts": {
+                  command: binaryPath(),
+                  args: ["--mcp"],
+                  env: {
+                    CURATED_BRAIN_DIR: brainDir,
+                  },
+                },
               },
             },
-          },
-        },
-        null,
-        2,
-      ),
+            null,
+            2,
+          ),
     [brainDir],
   );
 
@@ -56,9 +58,9 @@ export function AgentIntegrationPanel({ brainDir }: Props) {
       </p>
       <div className="agent-snippet-wrapper">
         <pre>
-          <code role="code">{snippet}</code>
+          <code data-testid="agent-snippet">{snippet}</code>
         </pre>
-        <button type="button" className="agent-snippet-copy" onClick={handleCopy}>
+        <button type="button" className="agent-snippet-copy" onClick={handleCopy} disabled={brainDir === null}>
           Copy
         </button>
       </div>
