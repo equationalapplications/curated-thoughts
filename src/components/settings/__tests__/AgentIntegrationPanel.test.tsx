@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AgentIntegrationPanel } from "../AgentIntegrationPanel";
@@ -16,12 +16,27 @@ describe("AgentIntegrationPanel", () => {
     expect(screen.getByTestId("agent-snippet").textContent).toContain("/Users/test/.brain");
   });
 
-  it("copy button is enabled and clickable", async () => {
+  it("copy button is enabled and copies the snippet", async () => {
     const user = userEvent.setup();
+    const execCommandMock = vi.fn(() => true);
+    Object.defineProperty(document, "execCommand", {
+      value: execCommandMock,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: undefined,
+      configurable: true,
+    });
+
     render(<AgentIntegrationPanel brainDir="/Users/test/.brain" />);
     const button = screen.getByRole("button", { name: /copy/i }) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     await user.click(button);
+
+    expect(execCommandMock).toHaveBeenCalledWith("copy");
+    expect(await screen.findByText(/Copied to clipboard\./i)).toBeTruthy();
+
+    delete (document as any).execCommand;
   });
 });
 

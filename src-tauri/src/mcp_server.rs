@@ -216,7 +216,8 @@ async fn async_run() -> anyhow::Result<()> {
         .get_vault_path()
         .ok()
         .flatten()
-        .map(std::path::PathBuf::from);
+        .map(std::path::PathBuf::from)
+        .and_then(|path| path.canonicalize().ok());
 
     let server = VaultMcpServer {
         conn: Arc::new(Mutex::new(conn)),
