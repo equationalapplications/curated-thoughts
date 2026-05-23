@@ -42,7 +42,9 @@ fn normalize_vault_path(doc_path: &str, brain_dir: &std::path::Path) -> String {
     let p = std::path::Path::new(doc_path);
     if p.is_absolute() {
         if let Ok(rel) = p.strip_prefix(brain_dir) {
-            return rel.to_string_lossy().into_owned();
+            if !rel.as_os_str().is_empty() {
+                return rel.to_string_lossy().into_owned();
+            }
         }
     }
     doc_path.to_string()
@@ -183,6 +185,15 @@ mod tests {
         assert_eq!(
             normalize_vault_path("/tmp/other/file.md", brain),
             "/tmp/other/file.md"
+        );
+    }
+
+    #[test]
+    fn passthrough_when_path_equals_brain_dir() {
+        let brain = std::path::Path::new("/home/user/.brain");
+        assert_eq!(
+            normalize_vault_path("/home/user/.brain", brain),
+            "/home/user/.brain"
         );
     }
 }
