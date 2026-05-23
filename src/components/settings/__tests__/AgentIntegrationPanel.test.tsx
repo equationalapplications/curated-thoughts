@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AgentIntegrationPanel } from "../AgentIntegrationPanel";
+import { SettingsModal } from "../SettingsModal";
 
 describe("AgentIntegrationPanel", () => {
   it("renders a code block containing --mcp", () => {
@@ -22,4 +23,16 @@ describe("AgentIntegrationPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: /copy/i }));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("--mcp"));
   });
+});
+
+it("SettingsModal renders agent integration section heading", () => {
+  render(
+    <SettingsModal
+      onClose={() => {}}
+      vaultPath="/test/vault"
+    />,
+  );
+  expect(
+    screen.getByText("Developer / Agent Integration"),
+  ).toBeTruthy();
 });
