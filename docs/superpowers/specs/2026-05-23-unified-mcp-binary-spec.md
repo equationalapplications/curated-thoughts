@@ -1,7 +1,7 @@
 # Unified MCP Binary Implementation Spec
 
 **Context**
-We are working on the `curated-thoughts` project, a local-first second brain desktop application built with Tauri 2.x, React, and Rust. Currently, the project contains an experimental Model Context Protocol (MCP) server that compiles as a completely separate standalone binary (`curated-thoughts-mcp`) behind a `mcp-server` feature flag.
+We are working on the `curated-thoughts` project, a local-first second brain desktop application built with Tauri 2.x, React, and Rust. Currently, the project contains an experimental Model Context Protocol (MCP) server that compiles as a separate helper binary (`curated-thoughts-mcp`) behind a `mcp-server` feature flag. The primary app binary is `curated-thoughts`, and a legacy helper crate still exists under `tools/curated-thoughts-mcp`.
 
 **Objective**
 I want to deprecate the separate MCP binary and integrate the MCP server directly into the main Tauri application binary. The application should act as a multi-call binary. If executed with the `--mcp` command-line flag, it should launch the headless stdio MCP server. If executed normally, it should launch the standard Tauri desktop GUI.
