@@ -65,57 +65,48 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
     };
 
     if let Some(vault) = vault_dir {
+        let vault_canonical = vault.canonicalize().unwrap_or_else(|_| normalize_path_lexically(vault));
+        let is_safe_relative = || {
+            p.components().all(|c| {
+                !matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+            })
+        };
+
         if p.is_absolute() {
-            let mut inside_vault = false;
-            let mut normalized_candidate: Option<String> = None;
+            let mut accepted_candidate: Option<String> = None;
 
             if let Ok(canon) = p.canonicalize() {
-                if canon.starts_with(vault) {
-                    inside_vault = true;
-                    normalized_candidate = Some(canon.to_string_lossy().into_owned());
+                if canon.starts_with(&vault_canonical) {
+                    accepted_candidate = Some(canon.to_string_lossy().into_owned());
                 }
             } else {
                 let normalized = normalize_path_lexically(p);
-                if normalized.starts_with(vault) {
-                    inside_vault = true;
-                    normalized_candidate = Some(normalized.to_string_lossy().into_owned());
+                if normalized.starts_with(&vault_canonical) {
+                    accepted_candidate = Some(normalized.to_string_lossy().into_owned());
                 }
             }
 
-            if inside_vault {
+            if let Some(candidate) = accepted_candidate {
                 push(doc_path.to_string());
-                if let Some(candidate) = normalized_candidate {
-                    let candidate = candidate.clone();
-                    push(candidate.clone());
-                    if let Ok(rel) = std::path::Path::new(&candidate).strip_prefix(vault) {
-                        if !rel.as_os_str().is_empty() {
-                            push(rel.to_string_lossy().into_owned());
-                        }
+                push(candidate.clone());
+                if let Ok(rel) = std::path::Path::new(&candidate).strip_prefix(&vault_canonical) {
+                    if !rel.as_os_str().is_empty() {
+                        push(rel.to_string_lossy().into_owned());
                     }
                 }
             }
-        } else {
-            // Avoid returning relative paths that normalize outside the vault.
+        } else if is_safe_relative() {
             let joined = vault.join(p);
-            let mut inside_vault = false;
-            let mut absolute_candidate: Option<String> = None;
             if let Ok(canon) = joined.canonicalize() {
-                if canon.starts_with(vault) {
-                    inside_vault = true;
-                    absolute_candidate = Some(canon.to_string_lossy().into_owned());
+                if canon.starts_with(&vault_canonical) {
+                    push(doc_path.to_string());
+                    push(canon.to_string_lossy().into_owned());
                 }
             } else {
                 let normalized = normalize_path_lexically(&joined);
-                if normalized.starts_with(vault) {
-                    inside_vault = true;
-                    absolute_candidate = Some(normalized.to_string_lossy().into_owned());
-                }
-            }
-
-            if inside_vault {
-                push(doc_path.to_string());
-                if let Some(candidate) = absolute_candidate {
-                    push(candidate);
+                if normalized.starts_with(&vault_canonical) {
+                    push(doc_path.to_string());
+                    push(normalized.to_string_lossy().into_owned());
                 }
             }
         }

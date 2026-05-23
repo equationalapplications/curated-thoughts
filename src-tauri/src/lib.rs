@@ -2270,6 +2270,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             save_wiki_page,
             queue_full_reindex,
             get_impact_radius,
+            get_brain_dir,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()

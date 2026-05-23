@@ -98,14 +98,24 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
         <pre>
           <code data-testid="agent-snippet">{snippet}</code>
         </pre>
-        {brainDirError ? <p className="agent-snippet-error">{brainDirError}</p> : null}
+        {brainDirError ? (
+          <p className="agent-snippet-error" role="alert" aria-live="assertive">
+            {brainDirError}
+          </p>
+        ) : null}
         <button type="button" className="agent-snippet-copy" onClick={handleCopy} disabled={isUnavailable}>
           Copy
         </button>
         {copyStatus === "success" ? (
-          <p className="agent-snippet-copy-success">Copied to clipboard.</p>
+          <p className="agent-snippet-copy-success" role="status" aria-live="polite">
+            Copied to clipboard.
+          </p>
         ) : null}
-        {copyError ? <p className="agent-snippet-error">{copyError}</p> : null}
+        {copyError ? (
+          <p className="agent-snippet-error" role="alert" aria-live="assertive">
+            {copyError}
+          </p>
+        ) : null}
       </div>
     </div>
   );
