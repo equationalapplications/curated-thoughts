@@ -233,12 +233,6 @@ pub fn run() -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .on_thread_start({
-            let dispatcher = dispatcher.clone();
-            move || {
-                let _ = tracing::dispatcher::set_default(&dispatcher);
-            }
-        })
         .build()?;
 
     rt.block_on(async_run())
