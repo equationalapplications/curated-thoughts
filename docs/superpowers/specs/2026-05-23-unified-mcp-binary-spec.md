@@ -33,7 +33,7 @@ Please implement this architectural change. Below are the specific requirements 
 ### 4. Enforce Strict `stdout` Hygiene (CRITICAL)
 
 * The MCP protocol relies on strict JSON-RPC communication over `stdout`.
-* Ensure that when the app is running in `--mcp` mode, **absolutely no logging, tracing, or debugging output is written to `stdout**`.
+* Ensure that when the app is running in `--mcp` mode, **absolutely no logging, tracing, or debugging output is written to `stdout`**.
 * Reroute all `tracing` or `log` events to `stderr` or a local log file when the `--mcp` flag is active to prevent crashing connected AI clients.
 
 ### 5. Create Frontend UI Configuration Snippet (React)
