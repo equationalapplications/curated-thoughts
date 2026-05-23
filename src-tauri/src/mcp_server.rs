@@ -67,20 +67,30 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
     if let Some(vault) = vault_dir {
         if p.is_absolute() {
             let mut inside_vault = false;
+            let mut normalized_candidate: Option<String> = None;
+
             if let Ok(canon) = p.canonicalize() {
                 if canon.starts_with(vault) {
                     inside_vault = true;
-                    push(canon.to_string_lossy().into_owned());
+                    normalized_candidate = Some(canon.to_string_lossy().into_owned());
                 }
-            } else if p.starts_with(vault) {
-                inside_vault = true;
+            } else {
+                let normalized = normalize_path_lexically(p);
+                if normalized.starts_with(vault) {
+                    inside_vault = true;
+                    normalized_candidate = Some(normalized.to_string_lossy().into_owned());
+                }
             }
 
             if inside_vault {
                 push(doc_path.to_string());
-                if let Ok(rel) = p.strip_prefix(vault) {
-                    if !rel.as_os_str().is_empty() {
-                        push(rel.to_string_lossy().into_owned());
+                if let Some(candidate) = normalized_candidate {
+                    let candidate = candidate.clone();
+                    push(candidate.clone());
+                    if let Ok(rel) = std::path::Path::new(&candidate).strip_prefix(vault) {
+                        if !rel.as_os_str().is_empty() {
+                            push(rel.to_string_lossy().into_owned());
+                        }
                     }
                 }
             }
@@ -107,7 +117,6 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
                 if let Some(candidate) = absolute_candidate {
                     push(candidate);
                 }
-                push(vault.join(p).to_string_lossy().into_owned());
             }
         }
     } else {
@@ -138,11 +147,18 @@ impl VaultMcpServer {
         .await
         .map_err(|e| rmcp::ErrorData::internal_error(format!("embed task failed: {e}"), None))?
         .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
-        let hits = {
-            let conn = lock_conn(&self.conn)?;
-            crate::search::semantic_search(&conn, &query_vec, limit)
-                .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?
-        }; // lock released here, before JSON encoding
+
+        let hits = tokio::task::spawn_blocking({
+            let conn = self.conn.clone();
+            move || {
+                let conn = lock_conn(&conn)?;
+                crate::search::semantic_search(&conn, &query_vec, limit)
+                    .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))
+            }
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("db task failed: {e}"), None))??;
+
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -158,11 +174,17 @@ impl VaultMcpServer {
         let Parameters(VaultRelatedChunksParams { doc_path, limit }) = args;
         let limit = limit.unwrap_or(5).clamp(1, 10);
         let candidates = build_path_candidates(&doc_path, self.vault_dir.as_deref());
-        let hits = {
-            let conn = lock_conn(&self.conn)?;
-            crate::search::related_chunks_try_paths(&conn, &candidates, limit)
-                .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?
-        };
+        let hits = tokio::task::spawn_blocking({
+            let conn = self.conn.clone();
+            let candidates = candidates.clone();
+            move || {
+                let conn = lock_conn(&conn)?;
+                crate::search::related_chunks_try_paths(&conn, &candidates, limit)
+                    .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))
+            }
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("db task failed: {e}"), None))??;
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -288,5 +310,21 @@ mod tests {
             .filter(|c| c.as_str() == "/home/user/vault/notes/meeting.md")
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_path_with_parent_segments_outside_vault_is_rejected() {
+        let vault = std::path::Path::new("/vault");
+        let candidates = build_path_candidates("/vault/../outside.md", Some(vault));
+        assert!(candidates.is_empty(), "Paths that normalize outside the vault must not be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_with_parent_segments_outside_vault_is_rejected() {
+        let vault = std::path::Path::new("/vault");
+        let candidates = build_path_candidates("../outside.md", Some(vault));
+        assert!(candidates.is_empty(), "Relative paths that resolve outside the vault must not be accepted");
     }
 }
