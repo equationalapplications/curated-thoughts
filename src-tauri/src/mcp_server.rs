@@ -122,7 +122,10 @@ pub fn run() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    // Use set_default (thread-local guard) rather than set_global_default so this
+    // never silently no-ops when a prior subscriber is already registered.
+    // The guard must outlive the entire runtime — held until run() returns.
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -147,15 +150,6 @@ async fn async_run() -> anyhow::Result<()> {
         e
     })?;
 
-    if let Some(db_url) = configured_database_url() {
-        let config = crate::outbox::OutboxConfig {
-            sqlite_path: p.db_path.clone(),
-            db_url,
-            ..crate::outbox::OutboxConfig::default()
-        };
-        let _ = crate::outbox::postgres::spawn_postgres_worker(config, None);
-    }
-
     let vault_dir = crate::vault::VaultConfig::new(p.config_path.clone())
         .get_vault_path()
         .ok()
@@ -178,16 +172,6 @@ async fn async_run() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("MCP server task ended with error: {e}"))?;
     Ok(())
-}
-
-fn configured_database_url() -> Option<String> {
-    let db_url = std::env::var("DATABASE_URL").ok()?;
-    let db_url = db_url.trim();
-    if db_url.is_empty() {
-        None
-    } else {
-        Some(db_url.to_string())
-    }
 }
 
 #[cfg(test)]

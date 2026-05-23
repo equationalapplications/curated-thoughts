@@ -1,6 +1,7 @@
-// On Windows in release, we manage console visibility at runtime (FreeConsole in GUI mode)
-// instead of using the compile-time `windows_subsystem = "windows"` attribute, which would
-// send stdout to null and break --mcp stdio communication.
+// On Windows in release builds, we manage console visibility at runtime (FreeConsole in GUI
+// mode) instead of using the compile-time `windows_subsystem = "windows"` attribute, which
+// would send stdout to null and break --mcp stdio communication.
+// Debug builds intentionally keep the console attached for easier debugging.
 
 fn main() {
     let is_mcp = std::env::args().any(|a| a == "--mcp");
@@ -8,6 +9,7 @@ fn main() {
     if is_mcp {
         run_mcp();
     } else {
+        #[cfg(not(debug_assertions))]
         hide_console_on_windows();
         tauri_app_lib::run();
     }

@@ -24,7 +24,8 @@ use tauri_app_lib::search::SearchResult;
 fn mcp_exe() -> PathBuf {
     // After the unified-binary refactor, the main binary runs as an MCP server
     // when invoked with --mcp. Build it with --features mcp-server.
-    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_curated-thoughts") {
+    // Cargo replaces hyphens with underscores in CARGO_BIN_EXE_* env var names.
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_curated_thoughts") {
         return PathBuf::from(p);
     }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
