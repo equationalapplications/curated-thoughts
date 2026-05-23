@@ -43,10 +43,12 @@ fn run_mcp() {
 #[cfg(target_os = "windows")]
 fn hide_console_on_windows() {
     // Safety: FreeConsole is safe to call with no preconditions.
-    // It detaches the process from its console window so no terminal
-    // flashes when launching the GUI from Explorer/Start menu.
+    // Detach only when no console is attached, preserving terminal output
+    // for users who launch the app from an existing command prompt.
     unsafe {
-        windows_sys::Win32::System::Console::FreeConsole();
+        if windows_sys::Win32::System::Console::GetConsoleWindow() == 0 {
+            windows_sys::Win32::System::Console::FreeConsole();
+        }
     }
 }
 
