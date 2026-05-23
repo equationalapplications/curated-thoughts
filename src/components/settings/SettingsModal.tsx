@@ -16,14 +16,26 @@ export function SettingsModal({ onClose, vaultPath }: Props) {
   const [brainDirError, setBrainDirError] = useState<string | null>(null);
 
   useEffect(() => {
+    let active = true;
+
     getBrainDir()
-      .then(setBrainDir)
+      .then((dir) => {
+        if (active) {
+          setBrainDir(dir);
+        }
+      })
       .catch((error) => {
-        console.error("Failed to resolve brain directory for MCP snippet:", error);
-        setBrainDirError(
-          "Could not resolve the MCP brain directory. The config snippet is unavailable.",
-        );
+        if (active) {
+          console.error("Failed to resolve brain directory for MCP snippet:", error);
+          setBrainDirError(
+            "Could not resolve the MCP brain directory. The config snippet is unavailable.",
+          );
+        }
       });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   return (
