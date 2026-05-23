@@ -67,57 +67,7 @@ Please implement this architectural change. Below are the specific requirements 
 **Output Expected:**
 Please provide the modified Rust files (`main.rs`, `lib.rs`, `Cargo.toml`), the changes needed for the `tracing`/logging configuration, and the new React component for the settings page.
 
----
 
-This is an exceptionally well-crafted and robust implementation plan. You have mapped out the architecture perfectly, and your foresight regarding the Windows `FreeConsole` issue (Task 4) is a detail that is very easy to miss but critical for standard I/O communication.
-
-Here is my review of the plan, followed by my recommendation for the handoff.
-
-### Plan Review & Minor Observations
-
-Overall, the spec is airtight, but here are a couple of microscopic observations to consider before execution:
-
-* **Task 7 (Windows Path Slashes):** In `SettingsModal.tsx`, your `defaultBrainDir()` fallback for Windows returns ``${home}/.brain``. If `home` is resolved to `C:\Users\You`, the resulting string will be `C:\Users\You/.brain`. While Rust's `PathBuf` handles mixed slashes gracefully, it might look slightly unpolished in the UI snippet. You could refine the return statement to conditionally use `\\` for Windows.
-* **Task 2 (Error Handling):** In `mcp_server::run`, you are setting the global default for the `tracing_subscriber` to `stderr`. This is the correct move. Just ensure that absolutely no other crates in your dependency tree are initializing their own standard loggers to `stdout` before this runs.
-* **Task 6 (OS Detection):** Relying on `navigator.platform` is technically deprecated in modern browsers, but for a local Tauri application environment where the webview targets are known and controlled, it is a perfectly acceptable and pragmatic approach.
-
----
-
-## Implementation Plan Summary
-
-**Plan file:** `docs/superpowers/plans/2026-05-23-unified-mcp-binary-plan.md`
-
-### Architecture decisions
-
-- MCP server logic moves to `src-tauri/src/mcp_server.rs`, gated by `mcp-server` Cargo feature.
-- `main.rs` checks `std::env::args()` for `--mcp` before any Tauri initialization. `--mcp` → `mcp_server::run()` + `process::exit(0)`. No flag → `tauri_app_lib::run()`.
-- The `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` compile-time attribute is **removed** from `main.rs` and replaced with a runtime `FreeConsole()` call (via `windows-sys`) in the GUI path. Reason: the attribute redirects stdout to null in release builds on Windows, silently breaking MCP stdio.
-- `tracing` and `tracing-subscriber` added as non-optional deps. In `--mcp` mode, `tracing_subscriber` is initialized with `std::io::stderr` writer before any other output — ensures no tracing frames corrupt the JSON-RPC stream on stdout.
-- The tools workspace binary (`tools/src/bin/curated_thoughts_mcp.rs`) is **not deleted** — it stays as a developer convenience tool. The integration test is updated to use the main binary instead.
-
-### File map
-
-| Action | File | What changes |
-|--------|------|-------------|
-| Modify | `src-tauri/Cargo.toml` | Add `mcp-server` feature; `rmcp` + `schemars` optional; `windows-sys` platform dep; `tracing`/`tracing-subscriber` unconditional |
-| Create | `src-tauri/src/mcp_server.rs` | Full MCP server — `pub fn run() -> anyhow::Result<()>` |
-| Modify | `src-tauri/src/lib.rs` | `#[cfg(feature = "mcp-server")] pub mod mcp_server;` after `mod watcher;` |
-| Modify | `src-tauri/src/main.rs` | Remove `windows_subsystem` attr; add `FreeConsole` for GUI path; `--mcp` dispatch |
-| Modify | `src-tauri/tests/mcp_integration.rs` | `mcp_exe()` returns the Tauri binary; `spawn_mcp()` passes `--mcp` arg |
-| Create | `src/components/settings/AgentIntegrationPanel.tsx` | Read-only JSON snippet; OS-keyed binary path via `navigator.platform` |
-| Modify | `src/components/settings/SettingsModal.tsx` | Import + render `<AgentIntegrationPanel brainDir={brainDir} />`; `brainDir` resolved via `invoke("get_brain_dir")` Tauri command; Copy button disabled until resolved |
-
-### Key implementation details
-
-**`mcp_server::run()`** (public, sync wrapper):
-```rust
-pub fn run() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::fmt().with_writer(std::io::stderr).finish();
-    // set_default (thread-local guard) instead of set_global_default — never silently
-    // no-ops if a prior subscriber is already registered. Guard must outlive the runtime.
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    rt.block_on(async_run())
 }
 ```
 
