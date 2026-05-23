@@ -55,9 +55,7 @@ fn hide_console_on_windows() {}
 
 #[cfg(test)]
 mod dispatch_tests {
-    fn has_mcp_flag(args: &[std::ffi::OsString]) -> bool {
-        args.iter().any(|a| a == std::ffi::OsStr::new("--mcp"))
-    }
+    use super::has_mcp_flag;
 
     #[test]
     fn detects_mcp_flag() {
