@@ -416,6 +416,14 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     Ok(())
 }
 
+#[tauri::command]
+fn get_brain_dir() -> String {
+    retrieval::resolve_brain_paths()
+        .brain_dir
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
 /// Returns the temp stub path; callers must call [`cleanup_temp_stub_db`] after the stub
 /// connection is dropped (otherwise `-wal` / `-shm` sidecars and the file may remain, especially on Windows).
@@ -2424,6 +2432,7 @@ pub fn run() {
             start_outbox_worker,
             stop_outbox_worker,
             outbox_is_configured,
+            get_brain_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
