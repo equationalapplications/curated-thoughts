@@ -202,7 +202,11 @@ pub fn run() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .finish();
     let dispatcher = Dispatch::new(subscriber);
-    let _ = tracing::dispatcher::set_global_default(dispatcher.clone());
+    if let Err(err) = tracing::dispatcher::set_global_default(dispatcher.clone()) {
+        eprintln!(
+            "curated-thoughts [--mcp]: failed to set global tracing subscriber: {err}"
+        );
+    }
     let _subscriber_guard = tracing::dispatcher::set_default(&dispatcher);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
