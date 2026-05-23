@@ -79,7 +79,8 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
             }
         } else {
             let joined = vault.join(p);
-            // Try canonicalized absolute form first — only if the resolved path is still within the vault.
+            push(doc_path.to_string());
+            // Try canonicalized absolute form next — only if the resolved path is still within the vault.
             if let Ok(canon) = joined.canonicalize() {
                 if canon.starts_with(vault) {
                     push(canon.to_string_lossy().into_owned());
@@ -90,7 +91,6 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
                     push(normalized.to_string_lossy().into_owned());
                 }
             }
-            push(doc_path.to_string());
         }
     } else {
         push(doc_path.to_string());
