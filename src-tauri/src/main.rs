@@ -62,6 +62,6 @@ mod dispatch_tests {
 
     #[test]
     fn no_false_positive_without_flag() {
-        assert!(!has_mcp_flag(&["curated-thoughts"]));
+        assert!(!has_mcp_flag(&[std::ffi::OsString::from("curated-thoughts")]));
     }
 }
