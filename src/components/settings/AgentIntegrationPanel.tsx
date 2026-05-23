@@ -96,14 +96,21 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
         textarea.style.left = "-9999px";
         textarea.style.top = "0";
         document.body.appendChild(textarea);
-        textarea.focus();
-        textarea.select();
 
-        const success = document.execCommand("copy");
-        document.body.removeChild(textarea);
+        try {
+          textarea.focus();
+          textarea.select();
 
-        if (!success) {
-          throw new Error("copy command failed");
+          if (typeof document.execCommand !== "function") {
+            throw new Error("document.execCommand is unavailable");
+          }
+
+          const success = document.execCommand("copy");
+          if (!success) {
+            throw new Error("copy command failed");
+          }
+        } finally {
+          document.body.removeChild(textarea);
         }
       }
 
