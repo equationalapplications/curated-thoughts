@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getBrainDir } from "../../lib/tauri";
 import { AgentIntegrationPanel } from "./AgentIntegrationPanel";
 import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
@@ -16,7 +16,7 @@ export function SettingsModal({ onClose, vaultPath }: Props) {
   const [brainDirError, setBrainDirError] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<string>("get_brain_dir")
+    getBrainDir()
       .then(setBrainDir)
       .catch((error) => {
         console.error("Failed to resolve brain directory for MCP snippet:", error);

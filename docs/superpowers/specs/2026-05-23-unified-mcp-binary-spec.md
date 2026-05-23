@@ -59,16 +59,6 @@ Please implement this architectural change. Below are the specific requirements 
     }
   }
 }
-
-```
-
-
-
-**Output Expected:**
-Please provide the modified Rust files (`main.rs`, `lib.rs`, `Cargo.toml`), the changes needed for the `tracing`/logging configuration, and the new React component for the settings page.
-
-
-}
 ```
 
 **`main.rs`** dispatch (no `windows_subsystem` attribute):

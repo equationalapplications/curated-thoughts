@@ -1,11 +1,13 @@
 //! MCP stdio server for vault search. Activated when the binary is launched with `--mcp`.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tracing::dispatcher::Dispatch;
 
 use crate::embedder::EmbedProfile;
 use crate::retrieval;
@@ -53,8 +55,8 @@ fn normalize_path_lexically(path: &std::path::Path) -> std::path::PathBuf {
     normalized
 }
 
-fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) -> Vec<String> {
-    let p = std::path::Path::new(doc_path);
+fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String> {
+    let p = Path::new(doc_path);
     let mut candidates: Vec<String> = Vec::new();
     let mut push = |s: String| {
         if !candidates.iter().any(|e| e == &s) {
@@ -64,32 +66,48 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
 
     if let Some(vault) = vault_dir {
         if p.is_absolute() {
+            let mut inside_vault = false;
             if let Ok(canon) = p.canonicalize() {
                 if canon.starts_with(vault) {
+                    inside_vault = true;
                     push(canon.to_string_lossy().into_owned());
                 }
+            } else if p.starts_with(vault) {
+                inside_vault = true;
             }
 
-            push(doc_path.to_string());
-
-            if let Ok(rel) = p.strip_prefix(vault) {
-                if !rel.as_os_str().is_empty() {
-                    push(rel.to_string_lossy().into_owned());
+            if inside_vault {
+                push(doc_path.to_string());
+                if let Ok(rel) = p.strip_prefix(vault) {
+                    if !rel.as_os_str().is_empty() {
+                        push(rel.to_string_lossy().into_owned());
+                    }
                 }
             }
         } else {
+            // Avoid returning relative paths that normalize outside the vault.
             let joined = vault.join(p);
-            push(doc_path.to_string());
-            // Try canonicalized absolute form next — only if the resolved path is still within the vault.
+            let mut inside_vault = false;
+            let mut absolute_candidate: Option<String> = None;
             if let Ok(canon) = joined.canonicalize() {
                 if canon.starts_with(vault) {
-                    push(canon.to_string_lossy().into_owned());
+                    inside_vault = true;
+                    absolute_candidate = Some(canon.to_string_lossy().into_owned());
                 }
             } else {
                 let normalized = normalize_path_lexically(&joined);
                 if normalized.starts_with(vault) {
-                    push(normalized.to_string_lossy().into_owned());
+                    inside_vault = true;
+                    absolute_candidate = Some(normalized.to_string_lossy().into_owned());
                 }
+            }
+
+            if inside_vault {
+                push(doc_path.to_string());
+                if let Some(candidate) = absolute_candidate {
+                    push(candidate);
+                }
+                push(vault.join(p).to_string_lossy().into_owned());
             }
         }
     } else {
@@ -161,13 +179,18 @@ pub fn run() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .finish();
-    // Use set_default (thread-local guard) rather than set_global_default so this
-    // never silently no-ops when a prior subscriber is already registered.
-    // The guard must outlive the entire runtime — held until run() returns.
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let dispatcher = Dispatch::new(subscriber);
+    let _ = tracing::dispatcher::set_global_default(dispatcher.clone());
+    let _subscriber_guard = tracing::dispatcher::set_default(&dispatcher);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .on_thread_start({
+            let dispatcher = dispatcher.clone();
+            move || {
+                let _ = tracing::dispatcher::set_default(&dispatcher);
+            }
+        })
         .build()?;
 
     rt.block_on(async_run())
@@ -250,9 +273,7 @@ mod tests {
     fn absolute_path_outside_vault_dir_no_strip() {
         let vault = std::path::Path::new("/home/user/vault");
         let candidates = build_path_candidates("/tmp/other/file.md", Some(vault));
-        assert!(candidates.contains(&"/tmp/other/file.md".to_string()));
-        // Should NOT contain a stripped path since /tmp/other/file.md is not under vault
-        assert!(!candidates.iter().any(|c| c == "other/file.md"));
+        assert!(candidates.is_empty(), "Outside-vault absolute paths should not be accepted");
     }
 
     #[cfg(unix)]
