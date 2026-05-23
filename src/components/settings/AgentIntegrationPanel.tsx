@@ -78,6 +78,31 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
   const [copyStatus, setCopyStatus] = useState<"idle" | "success" | "error">("idle");
   const [copyError, setCopyError] = useState<string | null>(null);
 
+  async function fallbackCopy(snippetText: string) {
+    const textarea = document.createElement("textarea");
+    textarea.value = snippetText;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+
+    try {
+      textarea.focus();
+      textarea.select();
+
+      if (typeof document.execCommand !== "function") {
+        throw new Error("document.execCommand is unavailable");
+      }
+
+      const success = document.execCommand("copy");
+      if (!success) {
+        throw new Error("copy command failed");
+      }
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+
   async function handleCopy() {
     if (isUnavailable || !snippet) {
       return;
@@ -88,30 +113,13 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
 
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(snippet);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = snippet;
-        textarea.style.position = "fixed";
-        textarea.style.left = "-9999px";
-        textarea.style.top = "0";
-        document.body.appendChild(textarea);
-
         try {
-          textarea.focus();
-          textarea.select();
-
-          if (typeof document.execCommand !== "function") {
-            throw new Error("document.execCommand is unavailable");
-          }
-
-          const success = document.execCommand("copy");
-          if (!success) {
-            throw new Error("copy command failed");
-          }
-        } finally {
-          document.body.removeChild(textarea);
+          await navigator.clipboard.writeText(snippet);
+        } catch {
+          await fallbackCopy(snippet);
         }
+      } else {
+        await fallbackCopy(snippet);
       }
 
       setCopyStatus("success");
