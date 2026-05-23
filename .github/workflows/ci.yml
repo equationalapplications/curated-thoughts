@@ -35,12 +35,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            ./src-tauri -> target
-            ./tools -> target
-
-      - name: Build MCP binary
-        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
+          workspaces: ./src-tauri -> target
 
       # Phase 4 regression tests run here:
       #   graph_integration.rs  — recursive impact radius (5-hop CTE via Tauri command)
@@ -48,8 +43,10 @@ jobs:
       # Before addressing PR review comments that touch graph.rs CTEs, lib.rs
       # run_wiki_heal/run_wiki_prune SQL, or the max_hops cap: run this step
       # locally first to confirm no regression.
+      # mcp-server feature included so cargo builds curated-thoughts with --mcp support;
+      # cargo sets CARGO_BIN_EXE_curated-thoughts automatically for mcp_integration.rs.
       - name: Tests + MCP integration
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils -- --test-threads=1
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
@@ -70,15 +67,10 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            ./src-tauri -> target
-            ./tools -> target
-
-      - name: Build MCP binary
-        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
+          workspaces: ./src-tauri -> target
 
       - name: Tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
 
