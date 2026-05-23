@@ -64,9 +64,11 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&std::path::Path>) ->
             }
         } else {
             let joined = vault.join(p);
-            // Try canonicalized absolute form first — only if the path is within the vault.
+            // Try canonicalized absolute form first — only if the resolved path is still within the vault.
             if let Ok(canon) = joined.canonicalize() {
-                push(canon.to_string_lossy().into_owned());
+                if canon.starts_with(vault) {
+                    push(canon.to_string_lossy().into_owned());
+                }
             }
             push(doc_path.to_string());
             push(joined.to_string_lossy().into_owned());
@@ -91,8 +93,14 @@ impl VaultMcpServer {
         let Parameters(VaultSemanticSearchParams { query, limit }) = args;
         let limit = limit.unwrap_or(10).clamp(1, 50);
         // Compute embedding before taking the DB lock — embed_one is CPU/network bound.
-        let query_vec = crate::embedder::embed_one(&self.profile, query)
-            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        let query_vec = tokio::task::spawn_blocking({
+            let profile = self.profile.clone();
+            let query = query.clone();
+            move || crate::embedder::embed_one(&profile, query)
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("embed task failed: {e}"), None))?
+        .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
         let hits = {
             let conn = lock_conn(&self.conn)?;
             crate::search::semantic_search(&conn, &query_vec, limit)

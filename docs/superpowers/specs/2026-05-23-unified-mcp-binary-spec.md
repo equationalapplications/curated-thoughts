@@ -41,8 +41,8 @@ Please implement this architectural change. Below are the specific requirements 
 * Add a new component or section in the React frontend Settings page called "Developer / Agent Integration".
 * Create a read-only code block that dynamically generates the JSON configuration required for an agent (like Cursor or Claude Code) to connect to the embedded server.
 * The snippet should dynamically format the absolute path to the binary based on the OS:
-* **macOS:** `/Applications/CuratedThoughts.app/Contents/MacOS/curated-thoughts`
-* **Windows:** `C:\Program Files\CuratedThoughts\curated-thoughts.exe` (or local AppData path)
+* **macOS:** `/Applications/Curated Thoughts.app/Contents/MacOS/curated-thoughts`
+* **Windows:** `C:\Program Files\Curated Thoughts\curated-thoughts.exe` (or local AppData path)
 * **Linux:** `/usr/bin/curated-thoughts` (or appropriate install path)
 
 
