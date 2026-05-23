@@ -42,11 +42,24 @@ fn run_mcp() {
 
 #[cfg(target_os = "windows")]
 fn hide_console_on_windows() {
-    // Safety: FreeConsole is safe to call with no preconditions.
-    // Detach only when no console is attached, preserving terminal output
-    // for users who launch the app from an existing command prompt.
+    // Safety: these Windows console APIs are called with valid arguments:
+    // - GetConsoleWindow and FreeConsole have no preconditions for this use.
+    // - GetConsoleProcessList is given a valid writable buffer and its length.
+    // Detach only when a console is attached and this process is its sole client,
+    // preserving terminal output for users who launch the app from an existing
+    // command prompt while still hiding a transient console created for the GUI app.
     unsafe {
         if windows_sys::Win32::System::Console::GetConsoleWindow() == 0 {
+            return;
+        }
+
+        let mut process_list = [0u32; 2];
+        let process_count = windows_sys::Win32::System::Console::GetConsoleProcessList(
+            process_list.as_mut_ptr(),
+            process_list.len() as u32,
+        );
+
+        if process_count == 1 {
             windows_sys::Win32::System::Console::FreeConsole();
         }
     }
