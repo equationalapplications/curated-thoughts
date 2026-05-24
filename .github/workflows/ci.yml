@@ -5,8 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   rust-ubuntu:
+    permissions:
+      contents: read
+      actions: write
     runs-on: ubuntu-22.04
     services:
       postgres:
@@ -23,6 +29,8 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Linux dependencies (Tauri / WebKit)
         run: |
@@ -35,12 +43,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            ./src-tauri -> target
-            ./tools -> target
-
-      - name: Build MCP binary
-        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
+          workspaces: ./src-tauri -> target
 
       # Phase 4 regression tests run here:
       #   graph_integration.rs  — recursive impact radius (5-hop CTE via Tauri command)
@@ -48,8 +51,10 @@ jobs:
       # Before addressing PR review comments that touch graph.rs CTEs, lib.rs
       # run_wiki_heal/run_wiki_prune SQL, or the max_hops cap: run this step
       # locally first to confirm no regression.
+      # mcp-server feature included so cargo builds curated-thoughts with --mcp support;
+      # cargo sets CARGO_BIN_EXE_curated_thoughts automatically for mcp_integration.rs.
       - name: Tests + MCP integration
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils -- --test-threads=1
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
@@ -62,23 +67,23 @@ jobs:
           DATABASE_URL: ""
 
   rust-macos:
+    permissions:
+      contents: read
+      actions: write
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            ./src-tauri -> target
-            ./tools -> target
-
-      - name: Build MCP binary
-        run: cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp
+          workspaces: ./src-tauri -> target
 
       - name: Tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
 
@@ -86,6 +91,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:

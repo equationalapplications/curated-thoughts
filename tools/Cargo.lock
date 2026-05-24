@@ -944,6 +944,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "walkdir",
+ "windows-sys 0.59.0",
  "zip",
 ]
 

@@ -8,6 +8,12 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_vault_path") {
       return Promise.resolve("/Users/test/Curated-Thoughts");
     }
+    if (cmd === "get_brain_dir") {
+      return Promise.resolve("/Users/test/.brain");
+    }
+    if (cmd === "get_binary_path") {
+      return Promise.resolve("/Users/test/Curated Thoughts/curated-thoughts");
+    }
     if (cmd === "get_recommended_model") {
       return Promise.resolve("llama3.2:3b");
     }
