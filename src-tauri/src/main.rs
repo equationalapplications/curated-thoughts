@@ -49,7 +49,7 @@ fn hide_console_on_windows() {
     // preserving terminal output for users who launch the app from an existing
     // command prompt while still hiding a transient console created for the GUI app.
     unsafe {
-        if windows_sys::Win32::System::Console::GetConsoleWindow() == 0 {
+        if windows_sys::Win32::System::Console::GetConsoleWindow() == std::ptr::null_mut() {
             return;
         }
 
