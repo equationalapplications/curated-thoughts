@@ -5,6 +5,8 @@ pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
+#[cfg(feature = "mcp-server")]
+pub mod mcp_server;
 pub mod outbox;
 mod pipeline;
 pub mod recall_bench_fixture;
@@ -412,6 +414,24 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     }
     std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn get_brain_dir() -> String {
+    let paths = retrieval::resolve_brain_paths();
+    paths
+        .db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| paths.brain_dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn get_binary_path() -> Result<String, String> {
+    std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
@@ -2260,6 +2280,8 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             save_wiki_page,
             queue_full_reindex,
             get_impact_radius,
+            get_binary_path,
+            get_brain_dir,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -2422,6 +2444,8 @@ pub fn run() {
             start_outbox_worker,
             stop_outbox_worker,
             outbox_is_configured,
+            get_binary_path,
+            get_brain_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
