@@ -1,6 +1,6 @@
 //! MCP stdio server for vault search. Activated when the binary is launched with `--mcp`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt};
@@ -55,27 +55,8 @@ fn normalize_path_lexically(path: &std::path::Path) -> std::path::PathBuf {
     normalized
 }
 
-fn canonicalize_absolute_path_under_vault(path: &Path, vault_canonical: &Path) -> Option<std::path::PathBuf> {
-    let mut cur = path.to_path_buf();
-    let mut tail = std::path::PathBuf::new();
-
-    loop {
-        match cur.canonicalize() {
-            Ok(canon_prefix) => {
-                if !canon_prefix.starts_with(vault_canonical) {
-                    return None;
-                }
-                return Some(canon_prefix.join(&tail));
-            }
-            Err(_) => {
-                let name = cur.file_name()?.to_owned();
-                tail = std::path::Path::new(&name).join(&tail);
-                if !cur.pop() {
-                    return None;
-                }
-            }
-        }
-    }
+fn safe_vault_relative_path(vault: &Path, user_path: &str) -> Option<PathBuf> {
+    crate::vault::safe_vault_path(vault, user_path, &["."], crate::vault::PathMode::MayCreate).ok()
 }
 
 fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String> {
@@ -89,21 +70,36 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
 
     if let Some(vault) = vault_dir {
         let vault_normalized = normalize_path_lexically(vault);
-        let is_safe_relative = || {
-            p.components().all(|c| {
-                !matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
-            })
-        };
 
         if p.is_absolute() {
-            if let Ok(rel) = crate::normalize_path_argument_to_vault_relative(doc_path, vault) {
-                push(doc_path.to_string());
-                let abs_candidate = vault_normalized.join(&rel);
-                push(abs_candidate.to_string_lossy().into_owned());
-                if !rel.is_empty() {
-                    push(rel);
+            let safe_validation_available = vault.canonicalize().is_ok();
+            if safe_validation_available {
+                if let Ok(rel) = crate::normalize_path_argument_to_vault_relative(doc_path, vault) {
+                    if let Some(safe) = safe_vault_relative_path(vault, &rel) {
+                        push(doc_path.to_string());
+                        let abs_candidate = vault_normalized.join(&rel);
+                        push(abs_candidate.to_string_lossy().into_owned());
+                        if !rel.is_empty() {
+                            push(rel.clone());
+                        }
+                        if let Ok(canon) = safe.canonicalize() {
+                            push(canon.to_string_lossy().into_owned());
+                        }
+                        push(safe.to_string_lossy().into_owned());
+                        return candidates;
+                    }
+
+                    push(doc_path.to_string());
+                    let abs_candidate = vault_normalized.join(&rel);
+                    push(abs_candidate.to_string_lossy().into_owned());
+                    if !rel.is_empty() {
+                        push(rel.clone());
+                    }
+                    return candidates;
                 }
-            } else {
+            }
+
+            if !doc_path.as_bytes().contains(&0) {
                 let accepted_candidate = p
                     .canonicalize()
                     .ok()
@@ -113,7 +109,7 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
                         if normalized.starts_with(&vault_normalized) {
                             Some(normalized)
                         } else {
-                            canonicalize_absolute_path_under_vault(p, &vault_normalized)
+                            None
                         }
                     });
 
@@ -135,18 +131,38 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
                     }
                 }
             }
-        } else if is_safe_relative() {
-            let joined = vault.join(p);
-            if let Ok(canon) = joined.canonicalize() {
-                if canon.starts_with(&vault_normalized) {
+        } else {
+            let is_safe_relative = || {
+                !doc_path.as_bytes().contains(&0)
+                    && p.components().all(|c| {
+                        !matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+                    })
+            };
+
+            if is_safe_relative() {
+                if let Some(safe) = safe_vault_relative_path(vault, doc_path) {
                     push(doc_path.to_string());
-                    push(canon.to_string_lossy().into_owned());
-                }
-            } else {
-                let normalized = normalize_path_lexically(&joined);
-                if normalized.starts_with(&vault_normalized) {
-                    push(doc_path.to_string());
-                    push(normalized.to_string_lossy().into_owned());
+                    if let Ok(canon) = safe.canonicalize() {
+                        if canon.starts_with(&vault_normalized) {
+                            push(canon.to_string_lossy().into_owned());
+                        }
+                    }
+                    push(safe.to_string_lossy().into_owned());
+                    push(vault_normalized.join(p).to_string_lossy().into_owned());
+                } else {
+                    let joined = vault.join(p);
+                    if let Ok(canon) = joined.canonicalize() {
+                        if canon.starts_with(&vault_normalized) {
+                            push(doc_path.to_string());
+                            push(canon.to_string_lossy().into_owned());
+                        }
+                    } else {
+                        let normalized = normalize_path_lexically(&joined);
+                        if normalized.starts_with(&vault_normalized) {
+                            push(doc_path.to_string());
+                            push(normalized.to_string_lossy().into_owned());
+                        }
+                    }
                 }
             }
         }
@@ -376,5 +392,13 @@ mod tests {
         let vault = std::path::Path::new("/vault");
         let candidates = build_path_candidates("../outside.md", Some(vault));
         assert!(candidates.is_empty(), "Relative paths that resolve outside the vault must not be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_path_with_invalid_vault_path_is_rejected() {
+        let vault = std::path::Path::new("/home/user/vault");
+        let candidates = build_path_candidates("/home/user/vault/documents/evil\0.md", Some(vault));
+        assert!(candidates.is_empty(), "Paths containing invalid characters must not be accepted");
     }
 }
