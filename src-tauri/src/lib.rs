@@ -422,6 +422,7 @@ fn get_brain_dir() -> String {
     paths
         .db_path
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| paths.brain_dir.to_string_lossy().into_owned())
 }
