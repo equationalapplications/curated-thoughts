@@ -1,3 +1,46 @@
+## [1.5.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.4.0...v1.5.0) (2026-05-24)
+
+### Features
+
+* **mcp:** add mcp_server module with vault_semantic_search and vault_related_chunks tools ([046f382](https://github.com/equationalapplications/curated-thoughts/commit/046f38204e1a4071eccae0499d45d914b990753e))
+* **mcp:** add mcp-server feature flag with rmcp/schemars optional deps ([07ecdd9](https://github.com/equationalapplications/curated-thoughts/commit/07ecdd9bb5d18388a051f67c35b770111309c70b))
+* **mcp:** expose mcp_server module from lib under mcp-server feature ([770435e](https://github.com/equationalapplications/curated-thoughts/commit/770435ef4548ef8087f8247fce89a1dc1dedabad))
+* **mcp:** multi-call dispatch — --mcp flag routes to stdio MCP server, GUI hides Windows console at runtime ([9cc0a8d](https://github.com/equationalapplications/curated-thoughts/commit/9cc0a8dc9a9e8e41cde41dd655374e40cb060b0e))
+* **settings:** add AgentIntegrationPanel with MCP config snippet ([1836fb1](https://github.com/equationalapplications/curated-thoughts/commit/1836fb11f626a19406f2d8cc98e49afadb88c126))
+* **settings:** add get_brain_dir Tauri command for absolute brain dir IPC ([984b212](https://github.com/equationalapplications/curated-thoughts/commit/984b212ded66500500a7b3677fdfa0fbf85ef953))
+* **settings:** resolve brainDir via Tauri IPC instead of navigator.platform heuristic ([f4c8336](https://github.com/equationalapplications/curated-thoughts/commit/f4c833635841651f38b75b835f57011ba2272bbf))
+* **settings:** wire AgentIntegrationPanel into SettingsModal ([d796fa1](https://github.com/equationalapplications/curated-thoughts/commit/d796fa18e0a523bbae3b9c5fbd609f49ce66c92f))
+
+### Bug Fixes
+
+* **frontend:** resolve TypeScript CI failure in AgentIntegrationPanel test ([09cbee4](https://github.com/equationalapplications/curated-thoughts/commit/09cbee4bda8f72ede0395fc73782ad0c8f7ef722))
+* **mcp-server:** rename vault path normalization variable in build_path_candidates ([e95cf82](https://github.com/equationalapplications/curated-thoughts/commit/e95cf8296d7952492471a32443b36e262aa3da01))
+* **mcp-server:** validate MCP doc_path input with vault-safe normalization ([792249d](https://github.com/equationalapplications/curated-thoughts/commit/792249de6602a20956ff6f80ba770903a13b6a18))
+* **mcp:** address PR review — correct CARGO_BIN_EXE env var name, set_default subscriber guard, remove outbox from MCP mode, gate FreeConsole to release builds ([4c3ce30](https://github.com/equationalapplications/curated-thoughts/commit/4c3ce30e89083c8b956485a1d0cbe813108b862c))
+* **mcp:** address PR review — invalid ARIA role, limit clamp, brainDir loading state, CI comment ([23380b0](https://github.com/equationalapplications/curated-thoughts/commit/23380b0b4e28bdc65be189ab9e1c704649aa5455))
+* **mcp:** address unresolved MCP review feedback ([ccb841f](https://github.com/equationalapplications/curated-thoughts/commit/ccb841f9699b9ee3c6a44700f2bbd0e041fc1abf))
+* **mcp:** guard against empty strip_prefix result in normalize_vault_path ([edf439a](https://github.com/equationalapplications/curated-thoughts/commit/edf439a1951389971f8ccfd7a58bbedda52d7442))
+* **mcp:** guard clipboard fallback and tolerate non-UTF8 binary paths ([9f68723](https://github.com/equationalapplications/curated-thoughts/commit/9f687239f0f0625779ee407aeafefa1a75b8c1fd))
+* **mcp:** guard SettingsModal async update, use shallow CI checkout, and clarify legacy curated-thoughts-mcp doc ([85e4f69](https://github.com/equationalapplications/curated-thoughts/commit/85e4f69fb16135b39a493e019d6991b12d65bac2))
+* **mcp:** handle brain dir errors and tighten MCP path handling ([5a45a3b](https://github.com/equationalapplications/curated-thoughts/commit/5a45a3b5f054922b3803bb6c02219d2c8f3e7fb5))
+* **mcp:** harden MCP path validation, isolate blocking DB work, and restore clipboard test state ([c59ba16](https://github.com/equationalapplications/curated-thoughts/commit/c59ba16c859b9f6e9ad1982f290cf4f3f9bdc61a))
+* **mcp:** improve clipboard fallback, preserve Windows console, and grant cache permissions in CI ([b86d532](https://github.com/equationalapplications/curated-thoughts/commit/b86d5325decb09f0c1f525ca76b69ea3cba8569e))
+* **mcp:** make MCP tracing setup robust when global subscriber already exists ([74b526d](https://github.com/equationalapplications/curated-thoughts/commit/74b526d2834e1bfa130a0fbce8f646ad094d0cf0))
+* **mcp:** narrow mutex scope in vault_semantic_search; gate Unix path tests ([7e401c6](https://github.com/equationalapplications/curated-thoughts/commit/7e401c6ac915187c52a946d4cfdbb4c3c91e48de))
+* **mcp:** normalize absolute doc paths in vault_related_chunks to vault-relative form ([a1ad206](https://github.com/equationalapplications/curated-thoughts/commit/a1ad20604ce63a1c922212aa82f9d025e2b349ca))
+* **mcp:** preserve relative path first for build_path_candidates ([39340ab](https://github.com/equationalapplications/curated-thoughts/commit/39340ab6ba21eb98060ea5ebd6e1b155ee0d6365))
+* **mcp:** prevent blocking runtime and harden vault path candidates ([40c9764](https://github.com/equationalapplications/curated-thoughts/commit/40c976417b345ddf3f576937f9a9ab85e5259aec))
+* **mcp:** remove redundant vault.join candidate, fix relative-path ordering in build_path_candidates ([f433bc1](https://github.com/equationalapplications/curated-thoughts/commit/f433bc17a60347648dc23b7f6684a4d4db541267))
+* **mcp:** resolve binary path and absolute vault path handling ([c0f17e0](https://github.com/equationalapplications/curated-thoughts/commit/c0f17e0424266c1b5041bfdd6913492696f5386f))
+* **mcp:** resolve final review feedback and improve clipboard test ([b1742a4](https://github.com/equationalapplications/curated-thoughts/commit/b1742a4188cd8af66a408f4123f68b7486ddd65d))
+* **mcp:** resolve PR review feedback for path handling, accessibility, and CI ([0907a0d](https://github.com/equationalapplications/curated-thoughts/commit/0907a0d7b5808c1e6cafd4acc76d76790071ce51))
+* **mcp:** tighten path candidate handling and remove stale spec review commentary ([a03d423](https://github.com/equationalapplications/curated-thoughts/commit/a03d423dc42662d9b8150d0983a4de1513dbc168))
+* **mcp:** use build_path_candidates + related_chunks_try_paths for vault-layout-agnostic path resolution ([33a544e](https://github.com/equationalapplications/curated-thoughts/commit/33a544ea82a569baacff5b8f33766843931208c2))
+* **mcp:** use canonical brain DB parent dir in get_brain_dir and avoid redundant vault canonicalization in build_path_candidates ([41105e3](https://github.com/equationalapplications/curated-thoughts/commit/41105e3dafe22509e429608c579d53b02b26257b))
+* **mcp:** use existing vault path normalization in MCP server and scope CI write permissions ([bf1a9d8](https://github.com/equationalapplications/curated-thoughts/commit/bf1a9d8f7c2c0e88fd99e9ba68e6bdc04a44ab33))
+* **settings:** guard navigator.clipboard with optional chaining; add clipboard test ([1b3b1cd](https://github.com/equationalapplications/curated-thoughts/commit/1b3b1cd0b95849f8d97d533545eb508b72677f57))
+* **settings:** prefer userAgentData.platform over deprecated navigator.platform; document stdout hygiene risk in mcp_server ([d70072d](https://github.com/equationalapplications/curated-thoughts/commit/d70072ddf87e3140c3a2c16280f3acd720d3034e))
+
 ## [1.4.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.3.2...v1.4.0) (2026-05-18)
 
 ### Features
