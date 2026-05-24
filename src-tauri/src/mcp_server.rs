@@ -88,7 +88,7 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
     };
 
     if let Some(vault) = vault_dir {
-        let vault_canonical = normalize_path_lexically(vault);
+        let vault_normalized = normalize_path_lexically(vault);
         let is_safe_relative = || {
             p.components().all(|c| {
                 !matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
@@ -98,7 +98,7 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
         if p.is_absolute() {
             if let Ok(rel) = crate::normalize_path_argument_to_vault_relative(doc_path, vault) {
                 push(doc_path.to_string());
-                let abs_candidate = vault_canonical.join(&rel);
+                let abs_candidate = vault_normalized.join(&rel);
                 push(abs_candidate.to_string_lossy().into_owned());
                 if !rel.is_empty() {
                     push(rel);
@@ -107,13 +107,13 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
                 let accepted_candidate = p
                     .canonicalize()
                     .ok()
-                    .filter(|canon| canon.starts_with(&vault_canonical))
+                    .filter(|canon| canon.starts_with(&vault_normalized))
                     .or_else(|| {
                         let normalized = normalize_path_lexically(p);
-                        if normalized.starts_with(&vault_canonical) {
+                        if normalized.starts_with(&vault_normalized) {
                             Some(normalized)
                         } else {
-                            canonicalize_absolute_path_under_vault(p, &vault_canonical)
+                            canonicalize_absolute_path_under_vault(p, &vault_normalized)
                         }
                     });
 
@@ -128,7 +128,7 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
                     }
                     push(doc_path.to_string());
                     push(candidate_string.clone());
-                    if let Ok(rel) = std::path::Path::new(&candidate_string).strip_prefix(&vault_canonical) {
+                    if let Ok(rel) = std::path::Path::new(&candidate_string).strip_prefix(&vault_normalized) {
                         if !rel.as_os_str().is_empty() {
                             push(rel.to_string_lossy().into_owned());
                         }
@@ -138,13 +138,13 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
         } else if is_safe_relative() {
             let joined = vault.join(p);
             if let Ok(canon) = joined.canonicalize() {
-                if canon.starts_with(&vault_canonical) {
+                if canon.starts_with(&vault_normalized) {
                     push(doc_path.to_string());
                     push(canon.to_string_lossy().into_owned());
                 }
             } else {
                 let normalized = normalize_path_lexically(&joined);
-                if normalized.starts_with(&vault_canonical) {
+                if normalized.starts_with(&vault_normalized) {
                     push(doc_path.to_string());
                     push(normalized.to_string_lossy().into_owned());
                 }
