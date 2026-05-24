@@ -223,7 +223,6 @@ impl VaultMcpServer {
         let candidates = build_path_candidates(&doc_path, self.vault_dir.as_deref());
         let hits = tokio::task::spawn_blocking({
             let conn = self.conn.clone();
-            let candidates = candidates.clone();
             move || {
                 let conn = lock_conn(&conn)?;
                 crate::search::related_chunks_try_paths(&conn, &candidates, limit)
