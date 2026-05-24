@@ -1,3 +1,9 @@
+## [1.5.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.5.0...v1.5.1) (2026-05-24)
+
+### Bug Fixes
+
+* **windows:** compare GetConsoleWindow() to null_mut() not 0 ([7bdf905](https://github.com/equationalapplications/curated-thoughts/commit/7bdf905d5188e44d5a5076a7c0af6911bf296a55))
+
 ## [1.5.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.4.0...v1.5.0) (2026-05-24)
 
 ### Features
