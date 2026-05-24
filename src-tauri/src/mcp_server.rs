@@ -188,7 +188,6 @@ impl VaultMcpServer {
         // Compute embedding before taking the DB lock — embed_one is CPU/network bound.
         let query_vec = tokio::task::spawn_blocking({
             let profile = self.profile.clone();
-            let query = query.clone();
             move || crate::embedder::embed_one(&profile, query)
         })
         .await
