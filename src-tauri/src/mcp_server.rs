@@ -88,7 +88,7 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
     };
 
     if let Some(vault) = vault_dir {
-        let vault_canonical = vault.canonicalize().unwrap_or_else(|_| normalize_path_lexically(vault));
+        let vault_canonical = normalize_path_lexically(vault);
         let is_safe_relative = || {
             p.components().all(|c| {
                 !matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
@@ -103,7 +103,7 @@ fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<String
                 if !rel.is_empty() {
                     push(rel);
                 }
-            } else if vault.canonicalize().is_err() {
+            } else {
                 let accepted_candidate = p
                     .canonicalize()
                     .ok()
@@ -327,14 +327,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let vault_real = temp_dir.path().join("vault-real");
         std::fs::create_dir_all(&vault_real).unwrap();
+        let vault_real = vault_real.canonicalize().unwrap();
         let vault_alias = temp_dir.path().join("vault-alias");
         std::os::unix::fs::symlink(&vault_real, &vault_alias).unwrap();
 
         let doc_path = vault_alias.join("notes/meeting.md");
-        let expected_canonical = vault_real
-            .canonicalize()
-            .unwrap()
-            .join("notes/meeting.md");
+        let expected_canonical = vault_real.join("notes/meeting.md");
 
         let candidates = build_path_candidates(doc_path.to_string_lossy().as_ref(), Some(&vault_real));
 
