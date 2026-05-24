@@ -418,10 +418,12 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
 
 #[tauri::command]
 fn get_brain_dir() -> String {
-    retrieval::resolve_brain_paths()
-        .brain_dir
-        .to_string_lossy()
-        .into_owned()
+    let paths = retrieval::resolve_brain_paths();
+    paths
+        .db_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| paths.brain_dir.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
