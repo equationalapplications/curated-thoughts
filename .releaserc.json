@@ -1,5 +1,7 @@
 {
-  "branches": ["main"],
+  "branches": [
+    "main"
+  ],
   "plugins": [
     [
       "@semantic-release/commit-analyzer",
@@ -7,10 +9,22 @@
         "preset": "conventionalcommits",
         "presetConfig": {},
         "releaseRules": [
-          { "type": "feat", "release": "minor" },
-          { "type": "fix", "release": "patch" },
-          { "type": "perf", "release": false },
-          { "type": "revert", "release": false }
+          {
+            "type": "feat",
+            "release": "minor"
+          },
+          {
+            "type": "fix",
+            "release": "patch"
+          },
+          {
+            "type": "perf",
+            "release": false
+          },
+          {
+            "type": "revert",
+            "release": false
+          }
         ]
       }
     ],
@@ -39,7 +53,7 @@
       {
         "assets": [
           "package.json",
-          "package-lock.json",
+          "pnpm-lock.yaml",
           "src-tauri/Cargo.toml",
           "src-tauri/Cargo.lock",
           "src-tauri/tauri.conf.json",
