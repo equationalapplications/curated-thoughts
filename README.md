@@ -58,7 +58,7 @@ pnpm install
 pnpm run tauri dev
 
 # Build the app for production
-npm run build
+pnpm run build
 
 ```
 
