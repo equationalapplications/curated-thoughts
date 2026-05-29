@@ -2402,9 +2402,7 @@ pub fn run() {
                             let state = app_handle.state::<InferenceState>();
                             let mut guard = state.0.lock().unwrap();
                             *guard = provider;
-                            if matches!(*guard, GenerationProvider::External { .. } | GenerationProvider::Unconfigured) {
-                                let _ = app_handle.emit("provider-ready", ());
-                            }
+                            let _ = app_handle.emit("provider-ready", ());
                         }
                         Err(e) => {
                             let _ = app_handle.emit(
