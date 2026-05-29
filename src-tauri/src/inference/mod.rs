@@ -130,10 +130,10 @@ fn sidecar_binary_name() -> &'static str {
     }
 }
 
-pub fn initialize_provider(
+fn initialize_provider_inner(
     brain_dir: &Path,
     config: &GenerationConfig,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
 ) -> Result<GenerationProvider> {
     match config.provider {
         GenerationProviderKind::Unconfigured => Ok(GenerationProvider::Unconfigured),
@@ -179,6 +179,7 @@ pub fn initialize_provider(
                 .to_string();
             let port = pick_port()?;
             let mut proc = spawn_sidecar(&binary, &model_abs, port)?;
+            let app = app.ok_or_else(|| anyhow::anyhow!("sidecar provider requires app handle"))?;
             await_sidecar_ready(&mut proc, app)?;
             std::env::set_var("OLLAMA_BASE_URL", format!("http://127.0.0.1:{}", port));
             Ok(GenerationProvider::Sidecar {
@@ -187,6 +188,64 @@ pub fn initialize_provider(
             })
         }
     }
+}
+
+pub fn initialize_provider(
+    brain_dir: &Path,
+    config: &GenerationConfig,
+    app: &AppHandle,
+) -> Result<GenerationProvider> {
+    initialize_provider_inner(brain_dir, config, Some(app))
+}
+
+pub fn update_provider_with_brain_path(
+    brain_path: &Path,
+    config: GenerationConfig,
+    state: &InferenceState,
+    app: Option<&AppHandle>,
+) -> Result<(), String> {
+    let new_provider = match initialize_provider_inner(brain_path, &config, app) {
+        Ok(provider) => provider,
+        Err(e) => {
+            let mut fallback_config = read_config(brain_path);
+            fallback_config.generation = GenerationConfig::default();
+            let rollback_err = write_config(brain_path, &fallback_config).err();
+            let mut guard = state.0.lock().unwrap();
+            *guard = GenerationProvider::Unconfigured;
+            return Err(match rollback_err {
+                Some(rollback_err) => {
+                    format!(
+                        "provider init failed: {e}; rollback failed: {rollback_err}"
+                    )
+                }
+                None => e.to_string(),
+            });
+        }
+    };
+
+    let mut llm_config = read_config(brain_path);
+    llm_config.generation = config;
+
+    if let Err(e) = write_config(brain_path, &llm_config) {
+        let mut fallback = llm_config;
+        fallback.generation = GenerationConfig::default();
+        let rollback_err = write_config(brain_path, &fallback).err();
+        let mut guard = state.0.lock().unwrap();
+        *guard = GenerationProvider::Unconfigured;
+        return Err(match rollback_err {
+            Some(rollback_err) => format!(
+                "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"
+            ),
+            None => format!("settings could not be saved to disk: {e}"),
+        });
+    }
+
+    let mut guard = state.0.lock().unwrap();
+    *guard = new_provider;
+    if let Some(app) = app {
+        let _ = app.emit("provider-ready", ());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -198,34 +257,7 @@ pub fn update_provider(
     let brain_dir = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir);
 
-    let new_provider = match initialize_provider(brain_path, &config, &app) {
-        Ok(provider) => provider,
-        Err(e) => {
-            let mut fallback_config = read_config(brain_path);
-            fallback_config.generation = GenerationConfig::default();
-            let _ = write_config(brain_path, &fallback_config);
-            let mut guard = state.0.lock().unwrap();
-            *guard = GenerationProvider::Unconfigured;
-            return Err(e.to_string());
-        }
-    };
-
-    let mut llm_config = read_config(brain_path);
-    llm_config.generation = config;
-
-    if let Err(e) = write_config(brain_path, &llm_config) {
-        let mut fallback = llm_config;
-        fallback.generation = GenerationConfig::default();
-        let _ = write_config(brain_path, &fallback);
-        let mut guard = state.0.lock().unwrap();
-        *guard = GenerationProvider::Unconfigured;
-        return Err(format!("settings could not be saved to disk: {e}"));
-    }
-
-    let mut guard = state.0.lock().unwrap();
-    *guard = new_provider;
-    let _ = app.emit("provider-ready", ());
-    Ok(())
+    update_provider_with_brain_path(brain_path, config, &state, Some(&app))
 }
 
 #[tauri::command]
