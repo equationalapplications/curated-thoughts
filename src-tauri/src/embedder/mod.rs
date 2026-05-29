@@ -65,8 +65,8 @@ pub fn embed_batch(profile: &EmbedProfile, texts: Vec<String>) -> Result<Vec<Vec
     }
     match profile {
         EmbedProfile::Local { .. } => {
-            let guard = get_or_init_local_embedder()?;
-            guard.as_ref().unwrap().embed(texts)
+            let embedder = OllamaEmbedder::from_profile(profile)?;
+            embedder.embed(texts)
         }
         EmbedProfile::Cloud { .. } => Err(anyhow!("cloud embed not implemented")),
     }

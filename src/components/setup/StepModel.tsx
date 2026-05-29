@@ -184,19 +184,25 @@ export function StepModel({ onNext }: Props) {
       {phase === "skip" && (
         <>
           <p>Optional: enter an OpenAI-compatible base URL and API key.</p>
+          <label htmlFor="external-url">OpenAI-compatible base URL</label>
           <input
+            id="external-url"
             type="text"
             placeholder="http://localhost:11434/v1"
             value={externalUrl}
             onChange={(e) => setExternalUrl(e.target.value)}
           />
+          <label htmlFor="api-key">API key (optional)</label>
           <input
+            id="api-key"
             type="password"
             placeholder="API key (optional)"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
+          <label htmlFor="model-name">Model name (optional)</label>
           <input
+            id="model-name"
             type="text"
             placeholder="Model name (optional)"
             value={modelName}

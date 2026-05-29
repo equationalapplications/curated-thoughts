@@ -52,10 +52,10 @@ All parsing, chunking, local embeddings (Fastembed), and SQLite metadata operati
 ### Install & Run
 ```bash
 # Install frontend dependencies
-npm install
+pnpm install
 
 # Run the desktop app in dev mode
-npm run tauri dev
+pnpm run tauri dev
 
 # Build the app for production
 npm run build
