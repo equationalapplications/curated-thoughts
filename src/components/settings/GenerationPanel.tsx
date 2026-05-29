@@ -31,7 +31,9 @@ export function GenerationPanel() {
 
       const [loadingUnlisten, readyUnlisten, errorUnlisten] = await Promise.all([
         onProviderLoading(() => setStatus("loading")),
-        onProviderReady(() => setStatus("ready")),
+        onProviderReady(() => {
+          setStatus(cfg?.generation.provider === "unconfigured" ? "unconfigured" : "ready");
+        }),
         onProviderError(() => setStatus("error")),
       ]);
       unlistens = [loadingUnlisten, readyUnlisten, errorUnlisten];
@@ -60,8 +62,14 @@ export function GenerationPanel() {
       setStatus(newConfig.provider === "unconfigured" ? "unconfigured" : "ready");
       setConfig(newConfig);
     } catch (e) {
-      setSaveError(String(e));
-      setSavePhase("error");
+      const message = String(e);
+      if (message.includes("provider-not-ready")) {
+        setStatus("loading");
+        setSavePhase("idle");
+      } else {
+        setSaveError(message);
+        setSavePhase("error");
+      }
     }
   };
 
