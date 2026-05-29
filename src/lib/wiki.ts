@@ -59,7 +59,7 @@ function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, un
             ? error.message
             : String(error);
           if (message === "provider-not-ready") {
-            throw new WikiBusyError("generation provider is not ready");
+            throw new WikiBusyError("librarian", "provider-not-ready");
           }
           throw error;
         }
