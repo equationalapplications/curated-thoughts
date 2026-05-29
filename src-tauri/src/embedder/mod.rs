@@ -5,6 +5,18 @@ pub use ollama::OllamaEmbedder;
 use anyhow::{anyhow, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+static LOCAL_EMBEDDER: OnceLock<Mutex<Option<Embedder>>> = OnceLock::new();
+
+pub fn get_or_init_local_embedder() -> Result<MutexGuard<'static, Option<Embedder>>> {
+    let mutex = LOCAL_EMBEDDER.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|_| anyhow!("embedder mutex poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(Embedder::new()?);
+    }
+    Ok(guard)
+}
 
 #[derive(Clone, Eq, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -52,9 +64,9 @@ pub fn embed_batch(profile: &EmbedProfile, texts: Vec<String>) -> Result<Vec<Vec
         return Ok(out);
     }
     match profile {
-        EmbedProfile::Local { model } => {
-            let o = OllamaEmbedder::new_local(model.as_str());
-            o.embed(texts)
+        EmbedProfile::Local { .. } => {
+            let embedder = OllamaEmbedder::from_profile(profile)?;
+            embedder.embed(texts)
         }
         EmbedProfile::Cloud { .. } => Err(anyhow!("cloud embed not implemented")),
     }

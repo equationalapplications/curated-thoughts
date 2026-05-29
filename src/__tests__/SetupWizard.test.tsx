@@ -7,15 +7,15 @@ test("renders welcome step on mount", () => {
   expect(screen.getByRole("button", { name: /get started/i })).toBeInTheDocument();
 });
 
-test("clicking Get Started advances to Ollama step", () => {
+test("clicking Get Started advances to Fastembed step", () => {
   render(<SetupWizard onComplete={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
-  expect(screen.getByText(/set up ai model/i)).toBeInTheDocument();
+  expect(screen.getByText(/setting up local search engine/i)).toBeInTheDocument();
 });
 
 test("calls onComplete when done step button clicked", () => {
   const onComplete = vi.fn();
-  render(<SetupWizard onComplete={onComplete} initialStep={2} />);
+  render(<SetupWizard onComplete={onComplete} initialStep={3} />);
   fireEvent.click(screen.getByRole("button", { name: /open my brain/i }));
   expect(onComplete).toHaveBeenCalledTimes(1);
 });
