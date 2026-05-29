@@ -14,6 +14,7 @@ pub mod retrieval;
 pub mod scifact_fixture;
 pub mod search;
 mod setup;
+pub mod inference;
 pub mod vault;
 mod watcher;
 
@@ -34,6 +35,16 @@ use serde_json::{json, Value as JsonVal};
 use setup::{
     check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
     recommended_model as ollama_recommended, start_ollama_server as ollama_start, OllamaStatus,
+};
+use crate::inference::{
+    download_model_weights,
+    download_sidecar_engine,
+    generate_text,
+    get_provider_config,
+    initialize_provider,
+    update_provider,
+    InferenceState,
+    GenerationProvider,
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -416,8 +427,7 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     Ok(())
 }
 
-#[tauri::command]
-fn get_brain_dir() -> String {
+fn get_brain_dir_inner() -> String {
     let paths = retrieval::resolve_brain_paths();
     paths
         .db_path
@@ -425,6 +435,11 @@ fn get_brain_dir() -> String {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| paths.brain_dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn get_brain_dir() -> String {
+    get_brain_dir_inner()
 }
 
 #[tauri::command]
@@ -1429,38 +1444,29 @@ fn wiki_get_first(
 // ── Embed text (for wiki llmProvider.embed) ───────────────────────────────────
 
 #[tauri::command]
-fn embed_text(text: String, cfg: State<VaultConfigState>) -> Result<Vec<f32>, String> {
-    let profile = cfg
-        .0
-        .lock()
-        .unwrap()
-        .get_embed_profile()
-        .map_err(|e| e.to_string())?;
-    crate::embedder::embed_one(&profile, text).map_err(|e| e.to_string())
+fn embed_text(text: String) -> Result<Vec<f32>, String> {
+    crate::embedder::get_or_init_local_embedder()
+        .and_then(|guard| guard.as_ref().unwrap().embed(vec![text]))
+        .map(|mut v| v.pop().unwrap_or_default())
+        .map_err(|e| e.to_string())
 }
 
-// ── Ollama generate (for wiki llmProvider.generateText) ───────────────────────
-
 #[tauri::command]
-async fn ollama_generate(system_prompt: String, user_prompt: String) -> Result<String, String> {
-    let model = ollama_recommended();
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("http://localhost:11434/api/generate")
-        .json(&serde_json::json!({
-            "model": model,
-            "system": system_prompt,
-            "prompt": user_prompt,
-            "stream": false
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let body: JsonVal = resp.json().await.map_err(|e| e.to_string())?;
-    body["response"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "missing 'response' in Ollama reply".to_string())
+fn init_fastembed(app: AppHandle) -> Result<(), String> {
+    let _ = app.emit("embed-init-progress", ());
+    match crate::embedder::get_or_init_local_embedder() {
+        Ok(_) => {
+            let _ = app.emit("embed-init-done", ());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "embed-init-error",
+                serde_json::json!({ "message": e.to_string() }),
+            );
+            Err(e.to_string())
+        }
+    }
 }
 
 // ── Ollama commands ───────────────────────────────────────────────────────────
@@ -2372,6 +2378,42 @@ pub fn run() {
                     let state = app.state::<OutboxWorkerState>();
                     *state.0.lock().unwrap() = Some(handle);
                 }
+
+                let app_handle = app.app_handle().clone();
+                std::thread::spawn(move || {
+                    let _ = app_handle.emit("embed-init-progress", ());
+                    match crate::embedder::get_or_init_local_embedder() {
+                        Ok(_) => {
+                            let _ = app_handle.emit("embed-init-done", ());
+                        }
+                        Err(e) => {
+                            let _ = app_handle.emit(
+                                "embed-init-error",
+                                serde_json::json!({ "message": e.to_string() }),
+                            );
+                        }
+                    }
+
+                    let brain_dir_str = get_brain_dir_inner();
+                    let brain_path = std::path::Path::new(&brain_dir_str);
+                    let config = crate::inference::config::read_config(brain_path);
+                    match initialize_provider(brain_path, &config.generation, &app_handle) {
+                        Ok(provider) => {
+                            let state = app_handle.state::<InferenceState>();
+                            let mut guard = state.0.lock().unwrap();
+                            *guard = provider;
+                            if matches!(*guard, GenerationProvider::External { .. } | GenerationProvider::Unconfigured) {
+                                let _ = app_handle.emit("provider-ready", ());
+                            }
+                        }
+                        Err(e) => {
+                            let _ = app_handle.emit(
+                                "provider-error",
+                                serde_json::json!({ "message": e.to_string() }),
+                            );
+                        }
+                    }
+                });
                 Ok(())
             }
         })
@@ -2396,6 +2438,7 @@ pub fn run() {
         .manage(VaultConfigState(Mutex::new(config)))
         .manage(PipelineHolder(Mutex::new(Some(pipeline))))
         .manage(WikiStatusState(Mutex::new(WikiStatusFlags::default())))
+        .manage(InferenceState(Mutex::new(GenerationProvider::Unconfigured)))
         .manage(WatcherStarted(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
@@ -2414,7 +2457,12 @@ pub fn run() {
             wiki_get_all,
             wiki_get_first,
             embed_text,
-            ollama_generate,
+            generate_text,
+            update_provider,
+            get_provider_config,
+            download_sidecar_engine,
+            download_model_weights,
+            init_fastembed,
             check_ollama,
             list_local_models,
             pull_model,

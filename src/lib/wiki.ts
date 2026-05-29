@@ -50,7 +50,7 @@ function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, un
   return {
     llmProvider: {
       async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
-        return invoke<string>("ollama_generate", { systemPrompt, userPrompt });
+        return invoke<string>("generate_text", { systemPrompt, userPrompt });
       },
       async embed(text: string): Promise<number[]> {
         return invoke<number[]>("embed_text", { text });
