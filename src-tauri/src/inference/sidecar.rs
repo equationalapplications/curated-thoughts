@@ -35,17 +35,20 @@ pub fn spawn_sidecar(binary_path: &Path, model_path: &Path, port: u16) -> Result
     Ok(SidecarProcess { port, child })
 }
 
-pub fn await_sidecar_ready(sidecar: &mut SidecarProcess, app: &AppHandle) -> Result<()> {
+fn await_sidecar_ready_impl(
+    sidecar: &mut SidecarProcess,
+    timeout: std::time::Duration,
+    mut emit_progress: impl FnMut(u64),
+) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(1))
         .build()?;
     let url = format!("http://127.0.0.1:{}/health", sidecar.port);
     let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(120);
 
     loop {
         if start.elapsed() > timeout {
-            return Err(anyhow::anyhow!("sidecar startup timed out after 120s"));
+            return Err(anyhow::anyhow!("sidecar startup timed out after {}s", timeout.as_secs()));
         }
         if let Ok(Some(status)) = sidecar.child.try_wait() {
             return Err(anyhow::anyhow!("sidecar exited during startup ({})", status));
@@ -57,12 +60,22 @@ pub fn await_sidecar_ready(sidecar: &mut SidecarProcess, app: &AppHandle) -> Res
                 }
             }
         }
-        let _ = app.emit(
-            "provider-loading",
-            serde_json::json!({ "elapsed_s": start.elapsed().as_secs() }),
-        );
+        emit_progress(start.elapsed().as_secs());
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
+}
+
+pub fn await_sidecar_ready(sidecar: &mut SidecarProcess, app: &AppHandle) -> Result<()> {
+    await_sidecar_ready_impl(
+        sidecar,
+        std::time::Duration::from_secs(120),
+        |elapsed_s| {
+            let _ = app.emit(
+                "provider-loading",
+                serde_json::json!({ "elapsed_s": elapsed_s }),
+            );
+        },
+    )
 }
 
 #[cfg(test)]
@@ -98,7 +111,32 @@ mod tests {
             .mock("GET", "/health")
             .with_body(r#"{"status":"loading model"}"#)
             .with_header("content-type", "application/json")
+            .expect_at_least(1)
             .create();
-        assert!(true);
+
+        let server_url = server.url();
+        let port: u16 = server_url
+            .rsplit_once(':')
+            .expect("mock server URL contains a port")
+            .1
+            .parse()
+            .expect("port is numeric");
+
+        let mut sidecar = SidecarProcess {
+            port,
+            child: std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 60")
+                .spawn()
+                .unwrap(),
+        };
+
+        let result = await_sidecar_ready_impl(
+            &mut sidecar,
+            std::time::Duration::from_millis(200),
+            |_| {},
+        );
+
+        assert!(result.is_err(), "await_sidecar_ready should time out if health never becomes ok");
     }
 }

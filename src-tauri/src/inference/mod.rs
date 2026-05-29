@@ -183,10 +183,10 @@ pub fn initialize_provider(
 #[tauri::command]
 pub fn update_provider(
     config: GenerationConfig,
-    brain_dir: String,
     state: State<'_, InferenceState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let brain_dir = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir);
 
     let new_provider = initialize_provider(brain_path, &config, &app).map_err(|e| e.to_string())?;
@@ -209,8 +209,10 @@ pub fn update_provider(
 }
 
 #[tauri::command]
-pub fn get_provider_config(brain_dir: String) -> Result<serde_json::Value, String> {
-    let config = read_config(Path::new(&brain_dir));
+pub fn get_provider_config() -> Result<serde_json::Value, String> {
+    let brain_dir = crate::get_brain_dir_inner();
+    let brain_path = Path::new(&brain_dir);
+    let config = read_config(brain_path);
     serde_json::to_value(&config).map_err(|e| e.to_string())
 }
 
@@ -226,6 +228,17 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn sanitize_filename(filename: &str) -> Result<&str, String> {
+    if filename.contains('/') || filename.contains('\\') {
+        return Err("filename must not contain path separators".to_string());
+    }
+    let file_name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "filename must be a valid single path component".to_string())?;
+    Ok(file_name)
 }
 
 fn stream_download(url: &str, dest: &Path, app: &AppHandle, event: &str) -> Result<()> {
@@ -268,7 +281,8 @@ fn llama_server_release_url() -> Result<(&'static str, &'static str)> {
 }
 
 #[tauri::command]
-pub fn download_sidecar_engine(brain_dir: String, app: AppHandle) -> Result<(), String> {
+pub fn download_sidecar_engine(app: AppHandle) -> Result<(), String> {
+    let brain_dir = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir);
     let (url, expected_sha) = llama_server_release_url().map_err(|e| e.to_string())?;
     let dest = brain_path.join("bin").join(sidecar_binary_name());
@@ -294,14 +308,15 @@ pub fn download_sidecar_engine(brain_dir: String, app: AppHandle) -> Result<(), 
 
 #[tauri::command]
 pub fn download_model_weights(
-    brain_dir: String,
     url: String,
     filename: String,
     expected_sha256: String,
     app: AppHandle,
 ) -> Result<(), String> {
+    let brain_dir = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir);
-    let dest = brain_path.join("models").join(&filename);
+    let filename = sanitize_filename(&filename)?;
+    let dest = brain_path.join("models").join(filename);
 
     stream_download(&url, &dest, &app, "gguf-download-progress").map_err(|e| e.to_string())?;
 

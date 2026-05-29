@@ -31,6 +31,8 @@ const RECOMMENDED_MODEL = {
   sha256: "REPLACE_WITH_KNOWN_SHA256",
 };
 
+const AUTO_INSTALL_AVAILABLE = !RECOMMENDED_MODEL.sha256.startsWith("REPLACE_WITH_");
+
 export function StepModel({ onNext }: Props) {
   const [phase, setPhase] = useState<Phase>("choice");
   const [progress, setProgress] = useState(0);
@@ -54,6 +56,14 @@ export function StepModel({ onNext }: Props) {
   }, []);
 
   const runAutoInstall = async () => {
+    if (!AUTO_INSTALL_AVAILABLE) {
+      setErrorMsg(
+        "Auto-install is unavailable: recommended model checksum is not configured. Please use Skip / Use my own."
+      );
+      setPhase("auto-error");
+      return;
+    }
+
     cleanup();
     const [unlistenProgress, unlistenEngineProgress, unlistenReady, unlistenError] = await Promise.all([
       onSidecarDownloadProgress(({ downloaded, total }) => {
@@ -72,7 +82,6 @@ export function StepModel({ onNext }: Props) {
       }),
     ]);
     unlistens.current = [unlistenProgress, unlistenEngineProgress, unlistenReady, unlistenError];
-    unlistens.current = [unlistenProgress, unlistenReady, unlistenError];
 
     try {
       setPhase("auto-downloading-engine");

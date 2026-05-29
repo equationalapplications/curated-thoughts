@@ -54,24 +54,22 @@ export interface LlmConfig {
 }
 
 export const getProviderConfig = (): Promise<LlmConfig> =>
-  getBrainDir().then((brainDir) => invoke("get_provider_config", { brainDir }));
+  invoke("get_provider_config");
 
 export const updateProvider = (config: GenerationConfig): Promise<void> =>
-  getBrainDir().then((brainDir) => invoke("update_provider", { config, brainDir }));
+  invoke("update_provider", { config });
 
 export const initFastembed = (): Promise<void> => invoke("init_fastembed");
 
 export const downloadSidecarEngine = (): Promise<void> =>
-  getBrainDir().then((brainDir) => invoke("download_sidecar_engine", { brainDir }));
+  invoke("download_sidecar_engine");
 
 export const downloadModelWeights = (
   url: string,
   filename: string,
   expectedSha256: string,
 ): Promise<void> =>
-  getBrainDir().then((brainDir) =>
-    invoke("download_model_weights", { brainDir, url, filename, expectedSha256 }),
-  );
+  invoke("download_model_weights", { url, filename, expectedSha256 });
 
 export interface IndexingStatus {
   indexed: number;

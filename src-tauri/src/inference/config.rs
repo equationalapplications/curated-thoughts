@@ -65,7 +65,26 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(config)?;
+
+    let mut existing = if path.exists() {
+        let contents = std::fs::read_to_string(&path)?;
+        serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !existing.is_object() {
+        existing = serde_json::json!({});
+    }
+
+    let generation = serde_json::to_value(&config.generation)?;
+    let embedding = serde_json::to_value(&config.embedding)?;
+
+    let obj = existing.as_object_mut().unwrap();
+    obj.insert("generation".to_string(), generation);
+    obj.insert("embedding".to_string(), embedding);
+
+    let json = serde_json::to_string_pretty(&existing)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &json)?;
     std::fs::rename(&tmp, &path)?;
