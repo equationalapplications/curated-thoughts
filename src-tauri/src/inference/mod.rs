@@ -1,7 +1,9 @@
 pub mod config;
 pub mod sidecar;
 
-use crate::inference::config::{read_config, resolve_model_path, write_config, GenerationConfig, GenerationProviderKind};
+use crate::inference::config::{
+    read_config, resolve_model_path, write_config, GenerationConfig, GenerationProviderKind,
+};
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
 use anyhow::Result;
 use reqwest::blocking::Client;
@@ -93,7 +95,11 @@ pub async fn generate_text(
 
     match route {
         RouteInfo::Unconfigured => Err("provider-not-ready".to_string()),
-        RouteInfo::Http { url, api_key, model } => {
+        RouteInfo::Http {
+            url,
+            api_key,
+            model,
+        } => {
             let payload = ChatRequest {
                 model: &model,
                 messages: vec![
@@ -210,16 +216,14 @@ pub fn update_provider_with_brain_path(
             let mut fallback_config = read_config(brain_path);
             fallback_config.generation = GenerationConfig::default();
             let rollback_err = write_config(brain_path, &fallback_config).err();
+            if let Some(rollback_err) = rollback_err {
+                return Err(format!(
+                    "provider init failed: {e}; rollback failed: {rollback_err}"
+                ));
+            }
             let mut guard = state.0.lock().unwrap();
             *guard = GenerationProvider::Unconfigured;
-            return Err(match rollback_err {
-                Some(rollback_err) => {
-                    format!(
-                        "provider init failed: {e}; rollback failed: {rollback_err}"
-                    )
-                }
-                None => e.to_string(),
-            });
+            return Err(e.to_string());
         }
     };
 
@@ -230,14 +234,14 @@ pub fn update_provider_with_brain_path(
         let mut fallback = llm_config;
         fallback.generation = GenerationConfig::default();
         let rollback_err = write_config(brain_path, &fallback).err();
+        if let Some(rollback_err) = rollback_err {
+            return Err(format!(
+                "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"
+            ));
+        }
         let mut guard = state.0.lock().unwrap();
         *guard = GenerationProvider::Unconfigured;
-        return Err(match rollback_err {
-            Some(rollback_err) => format!(
-                "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"
-            ),
-            None => format!("settings could not be saved to disk: {e}"),
-        });
+        return Err(format!("settings could not be saved to disk: {e}"));
     }
 
     let mut guard = state.0.lock().unwrap();
@@ -310,7 +314,10 @@ fn stream_download(url: &str, dest: &Path, app: &AppHandle, event: &str) -> Resu
         }
         std::io::Write::write_all(&mut file, &buf[..n])?;
         downloaded += n as u64;
-        let _ = app.emit(event, serde_json::json!({ "downloaded": downloaded, "total": total }));
+        let _ = app.emit(
+            event,
+            serde_json::json!({ "downloaded": downloaded, "total": total }),
+        );
     }
     Ok(())
 }
@@ -341,7 +348,9 @@ fn llama_server_release_url() -> Result<(String, String)> {
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         TODO_URL.to_string()
     } else {
-        return Err(anyhow::anyhow!("unsupported platform for automatic llama-server download"));
+        return Err(anyhow::anyhow!(
+            "unsupported platform for automatic llama-server download"
+        ));
     };
 
     Ok((url, TODO_SHA.to_string()))
@@ -359,13 +368,17 @@ pub fn download_sidecar_engine(app: AppHandle) -> Result<(), String> {
     let actual = sha256_file(&dest).map_err(|e| e.to_string())?;
     if actual != expected_sha {
         let _ = std::fs::remove_file(&dest);
-        return Err(format!("checksum mismatch: expected {expected_sha}, got {actual}"));
+        return Err(format!(
+            "checksum mismatch: expected {expected_sha}, got {actual}"
+        ));
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dest).map_err(|e| e.to_string())?.permissions();
+        let mut perms = std::fs::metadata(&dest)
+            .map_err(|e| e.to_string())?
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&dest, perms).map_err(|e| e.to_string())?;
     }
@@ -390,7 +403,9 @@ pub fn download_model_weights(
     let actual = sha256_file(&dest).map_err(|e| e.to_string())?;
     if actual != expected_sha256 {
         let _ = std::fs::remove_file(&dest);
-        return Err(format!("model checksum mismatch: expected {expected_sha256}, got {actual}"));
+        return Err(format!(
+            "model checksum mismatch: expected {expected_sha256}, got {actual}"
+        ));
     }
 
     Ok(())
@@ -406,8 +421,14 @@ mod tests {
         let req = ChatRequest {
             model: "llama3.2",
             messages: vec![
-                ChatMessage { role: "system", content: "be helpful" },
-                ChatMessage { role: "user", content: "hello" },
+                ChatMessage {
+                    role: "system",
+                    content: "be helpful",
+                },
+                ChatMessage {
+                    role: "user",
+                    content: "hello",
+                },
             ],
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
@@ -415,8 +436,14 @@ mod tests {
         assert_eq!(json["messages"][0]["content"], "be helpful");
         assert_eq!(json["messages"][1]["role"], "user");
         assert_eq!(json["messages"][1]["content"], "hello");
-        assert!(json.get("stream").is_none(), "payload should not include stream");
-        assert!(json.get("messages").is_some(), "top-level 'messages' key must exist");
+        assert!(
+            json.get("stream").is_none(),
+            "payload should not include stream"
+        );
+        assert!(
+            json.get("messages").is_some(),
+            "top-level 'messages' key must exist"
+        );
         assert!(json["messages"].is_array(), "'messages' must be an array");
     }
 
@@ -433,7 +460,9 @@ mod tests {
             api_key: None,
             model_name: "llama3.2".to_string(),
         };
-        let RouteInfo::Http { url, .. } = p.route_info() else { panic!() };
+        let RouteInfo::Http { url, .. } = p.route_info() else {
+            panic!()
+        };
         assert_eq!(url, "http://localhost:11434/v1/chat/completions");
     }
 
@@ -444,7 +473,14 @@ mod tests {
             api_key: Some("key123".to_string()),
             model_name: "gpt-4o".to_string(),
         };
-        let RouteInfo::Http { url, api_key, model } = p.route_info() else { panic!() };
+        let RouteInfo::Http {
+            url,
+            api_key,
+            model,
+        } = p.route_info()
+        else {
+            panic!()
+        };
         assert_eq!(url, "http://localhost:11434/v1/chat/completions");
         assert_eq!(api_key.as_deref(), Some("key123"));
         assert_eq!(model, "gpt-4o");
@@ -457,7 +493,9 @@ mod tests {
             api_key: Some("key123".to_string()),
             model_name: "  ".to_string(),
         };
-        let RouteInfo::Http { model, .. } = p.route_info() else { panic!() };
+        let RouteInfo::Http { model, .. } = p.route_info() else {
+            panic!()
+        };
         assert_eq!(model, "default");
     }
 
