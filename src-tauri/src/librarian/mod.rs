@@ -4,7 +4,7 @@
 //! relying on refreshed summaries.
 
 use anyhow::Result;
-use crate::inference::config::{read_config, GenerationProviderKind};
+use crate::inference::config::{read_config, GenerationProviderKind, LlmConfig};
 use rusqlite::Connection;
 
 pub struct ChunkRow {
@@ -277,20 +277,7 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
             let base = std::env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string());
             let base = base.trim_end_matches('/');
-            let chosen_model = llm_config
-                .generation
-                .model_name
-                .clone()
-                .filter(|name| !name.trim().is_empty())
-                .or_else(|| {
-                    llm_config.generation.model_path.as_deref().and_then(|path| {
-                        std::path::Path::new(path)
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .map(|name| name.to_string())
-                    })
-                })
-                .unwrap_or_else(|| model.to_string());
+            let chosen_model = choose_sidecar_model_name(&llm_config, model);
             (
                 format!("{}/v1/chat/completions", base),
                 None,
@@ -382,10 +369,28 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
     Ok(())
 }
 
+fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> String {
+    llm_config
+        .generation
+        .model_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            llm_config.generation.model_path.as_deref().and_then(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_string())
+            })
+        })
+        .unwrap_or_else(|| fallback_model.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
+    use crate::inference::config::GenerationConfig;
 
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
@@ -487,5 +492,22 @@ mod tests {
             context.contains("[source: src/db/init.rs | symbol: foo | lines 22-45]"),
             "expected symbol in header, got:\n{context}"
         );
+    }
+
+    #[test]
+    fn choose_sidecar_model_name_prefers_configured_filename() {
+        let llm_config = LlmConfig {
+            generation: GenerationConfig {
+                provider: GenerationProviderKind::Sidecar,
+                model_path: Some("models/llama-3.2-3b.gguf".to_string()),
+                model_name: None,
+                external_url: None,
+                api_key: None,
+            },
+            embedding: Default::default(),
+        };
+
+        let chosen = choose_sidecar_model_name(&llm_config, "llama3.2:1b");
+        assert_eq!(chosen, "llama-3.2-3b.gguf");
     }
 }

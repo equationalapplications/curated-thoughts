@@ -4,6 +4,30 @@ use serde_json::json;
 use tauri_app_lib::inference::config::{write_config, GenerationConfig, GenerationProviderKind, LlmConfig};
 use tauri_app_lib::librarian::generate_summary;
 
+struct EnvVarGuard {
+    key: String,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn new(key: &str) -> Self {
+        EnvVarGuard {
+            key: key.to_string(),
+            previous: std::env::var_os(key),
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(&self.key, previous);
+        } else {
+            std::env::remove_var(&self.key);
+        }
+    }
+}
+
 fn seed_chunks(app: &TestApp, source_path: &str) {
     let conn = app.open_db();
     conn.execute(
@@ -113,7 +137,7 @@ fn auto_approve_writes_directly_to_wiki() {
         .with_body("{\"choices\":[{\"message\":{\"content\":\"Auto Wiki Generated content.\"}}]}")
         .create();
 
-    let previous_brain_dir = std::env::var_os("CURATED_BRAIN_DIR");
+    let _brain_dir_guard = EnvVarGuard::new("CURATED_BRAIN_DIR");
     std::env::set_var("CURATED_BRAIN_DIR", app.tmp.path().to_string_lossy().to_string());
     write_config(
         app.tmp.path(),
@@ -129,12 +153,6 @@ fn auto_approve_writes_directly_to_wiki() {
         },
     )
     .unwrap();
-
-    if let Some(previous) = previous_brain_dir {
-        std::env::set_var("CURATED_BRAIN_DIR", previous);
-    } else {
-        std::env::remove_var("CURATED_BRAIN_DIR");
-    }
 
     let conn = db_conn;
     let result = generate_summary(&conn, &source_str, "test-model");
