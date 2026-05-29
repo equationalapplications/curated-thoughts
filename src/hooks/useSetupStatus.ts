@@ -31,7 +31,7 @@ export function useSetupStatus(): SetupStatus {
 
   return {
     loading,
-    needsSetup: !vaultPath || !providerConfigured,
+    needsSetup: !vaultPath,
     vaultPath,
     providerConfigured,
   };

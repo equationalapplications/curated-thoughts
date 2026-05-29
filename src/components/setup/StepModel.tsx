@@ -8,7 +8,6 @@ import {
 import {
   onGgufDownloadProgress,
   onSidecarDownloadProgress,
-  onProviderReady,
   onProviderError,
 } from "../../lib/events";
 
@@ -65,23 +64,19 @@ export function StepModel({ onNext }: Props) {
     }
 
     cleanup();
-    const [unlistenProgress, unlistenEngineProgress, unlistenReady, unlistenError] = await Promise.all([
+    const [unlistenProgress, unlistenEngineProgress, unlistenError] = await Promise.all([
       onSidecarDownloadProgress(({ downloaded, total }) => {
         setProgress(total > 0 ? Math.round((downloaded / total) * 100) : 0);
       }),
       onGgufDownloadProgress(({ downloaded, total }) => {
         setProgress(total > 0 ? Math.round((downloaded / total) * 100) : 0);
       }),
-      onProviderReady(() => {
-        setPhase("auto-ready");
-        setTimeout(onNext, 800);
-      }),
       onProviderError(({ message }) => {
         setErrorMsg(message);
         setPhase("auto-error");
       }),
     ]);
-    unlistens.current = [unlistenProgress, unlistenEngineProgress, unlistenReady, unlistenError];
+    unlistens.current = [unlistenProgress, unlistenEngineProgress, unlistenError];
 
     try {
       setPhase("auto-downloading-engine");
@@ -104,6 +99,8 @@ export function StepModel({ onNext }: Props) {
         external_url: null,
         api_key: null,
       });
+      setPhase("auto-ready");
+      setTimeout(onNext, 800);
     } catch (e) {
       setErrorMsg(String(e));
       setPhase("auto-error");
@@ -142,8 +139,15 @@ export function StepModel({ onNext }: Props) {
       {phase === "choice" && (
         <>
           <p>Choose how to power the Active Librarian:</p>
-          <button onClick={runAutoInstall}>Auto-Install (recommended)</button>
+          <button onClick={runAutoInstall} disabled={!AUTO_INSTALL_AVAILABLE}>
+            Auto-Install (recommended)
+          </button>
           <p className="ollama-hint">Downloads llama-server and a model to your machine.</p>
+          {!AUTO_INSTALL_AVAILABLE && (
+            <p className="ollama-hint" style={{ color: "gray" }}>
+              Auto-install is unavailable until the recommended model checksum is configured.
+            </p>
+          )}
           <button onClick={() => setPhase("skip")}>Skip / Use my own</button>
           <p className="ollama-hint">
             Point to an existing OpenAI-compatible endpoint or continue without a provider.

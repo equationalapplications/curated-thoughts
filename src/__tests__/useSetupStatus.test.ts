@@ -36,7 +36,7 @@ test("needsSetup false when vault set and provider configured", async () => {
   expect(result.current.needsSetup).toBe(false);
 });
 
-test("needsSetup true when provider unconfigured", async () => {
+test("needsSetup false when vault path exists even if provider is unconfigured", async () => {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === "get_vault_path") return Promise.resolve("/Users/test/vault");
     if (cmd === "get_brain_dir") return Promise.resolve("/Users/test/.brain");
@@ -49,5 +49,5 @@ test("needsSetup true when provider unconfigured", async () => {
   });
   const { result } = renderHook(() => useSetupStatus());
   await waitFor(() => expect(result.current.loading).toBe(false));
-  expect(result.current.needsSetup).toBe(true);
+  expect(result.current.needsSetup).toBe(false);
 });

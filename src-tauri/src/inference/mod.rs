@@ -78,7 +78,6 @@ struct ChatMessage<'a> {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage<'a>>,
-    stream: bool,
 }
 
 #[tauri::command]
@@ -107,7 +106,6 @@ pub async fn generate_text(
                         content: &user_prompt,
                     },
                 ],
-                stream: false,
             };
             let client = reqwest::Client::new();
             let mut req = client.post(&url).json(&payload);
@@ -183,7 +181,6 @@ pub fn initialize_provider(
             let mut proc = spawn_sidecar(&binary, &model_abs, port)?;
             await_sidecar_ready(&mut proc, app)?;
             std::env::set_var("OLLAMA_BASE_URL", format!("http://127.0.0.1:{}", port));
-            let _ = app.emit("provider-ready", ());
             Ok(GenerationProvider::Sidecar {
                 process: proc,
                 model: model_name,
@@ -201,7 +198,17 @@ pub fn update_provider(
     let brain_dir = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir);
 
-    let new_provider = initialize_provider(brain_path, &config, &app).map_err(|e| e.to_string())?;
+    let new_provider = match initialize_provider(brain_path, &config, &app) {
+        Ok(provider) => provider,
+        Err(e) => {
+            let mut fallback_config = read_config(brain_path);
+            fallback_config.generation = GenerationConfig::default();
+            let _ = write_config(brain_path, &fallback_config);
+            let mut guard = state.0.lock().unwrap();
+            *guard = GenerationProvider::Unconfigured;
+            return Err(e.to_string());
+        }
+    };
 
     let mut llm_config = read_config(brain_path);
     llm_config.generation = config;
@@ -217,6 +224,7 @@ pub fn update_provider(
 
     let mut guard = state.0.lock().unwrap();
     *guard = new_provider;
+    let _ = app.emit("provider-ready", ());
     Ok(())
 }
 
@@ -369,14 +377,13 @@ mod tests {
                 ChatMessage { role: "system", content: "be helpful" },
                 ChatMessage { role: "user", content: "hello" },
             ],
-            stream: false,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["messages"][0]["role"], "system");
         assert_eq!(json["messages"][0]["content"], "be helpful");
         assert_eq!(json["messages"][1]["role"], "user");
         assert_eq!(json["messages"][1]["content"], "hello");
-        assert_eq!(json["stream"], false);
+        assert!(json.get("stream").is_none(), "payload should not include stream");
         assert!(json.get("messages").is_some(), "top-level 'messages' key must exist");
         assert!(json["messages"].is_array(), "'messages' must be an array");
     }

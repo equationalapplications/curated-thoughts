@@ -36,8 +36,8 @@ describe("StepModel", () => {
 
   it("renders two choices on load", () => {
     render(<StepModel onNext={onNext} />);
-    expect(screen.getByText(/Auto-Install/i)).toBeInTheDocument();
-    expect(screen.getByText(/Skip/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Auto-Install/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Skip/i })).toBeInTheDocument();
   });
 
   it("save with blank URL calls updateProvider with unconfigured", async () => {
@@ -68,12 +68,11 @@ describe("StepModel", () => {
     );
   });
 
-  it("auto-install shows error when checksums are not configured", async () => {
+  it("disables auto-install when checksums are not configured", async () => {
     render(<StepModel onNext={onNext} />);
-    fireEvent.click(screen.getByText(/Auto-Install/i));
-    await waitFor(() => {
-      expect(screen.getByText(/Auto-install is unavailable/i)).toBeInTheDocument();
-    });
+    const button = screen.getByRole("button", { name: /Auto-Install/i });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/Auto-install is unavailable until/i)).toBeInTheDocument();
     expect(downloadSidecarEngine).not.toHaveBeenCalled();
     expect(downloadModelWeights).not.toHaveBeenCalled();
   });

@@ -99,9 +99,17 @@ mod tests {
                 .spawn()
                 .unwrap(),
         };
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let result = sidecar.child.try_wait().unwrap();
-        assert!(result.is_some(), "child should have exited");
+
+        let result = await_sidecar_ready_impl(
+            &mut sidecar,
+            std::time::Duration::from_millis(200),
+            |_| {},
+        );
+
+        assert!(result.is_err(), "await_sidecar_ready_impl should detect child exit");
+        if let Err(err) = result {
+            assert!(err.to_string().contains("sidecar exited"), "unexpected error: {err}");
+        }
     }
 
     #[test]

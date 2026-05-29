@@ -113,6 +113,7 @@ fn auto_approve_writes_directly_to_wiki() {
         .with_body("{\"choices\":[{\"message\":{\"content\":\"Auto Wiki Generated content.\"}}]}")
         .create();
 
+    let previous_brain_dir = std::env::var_os("CURATED_BRAIN_DIR");
     std::env::set_var("CURATED_BRAIN_DIR", app.tmp.path().to_string_lossy().to_string());
     write_config(
         app.tmp.path(),
@@ -128,6 +129,12 @@ fn auto_approve_writes_directly_to_wiki() {
         },
     )
     .unwrap();
+
+    if let Some(previous) = previous_brain_dir {
+        std::env::set_var("CURATED_BRAIN_DIR", previous);
+    } else {
+        std::env::remove_var("CURATED_BRAIN_DIR");
+    }
 
     let conn = db_conn;
     let result = generate_summary(&conn, &source_str, "test-model");

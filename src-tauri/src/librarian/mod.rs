@@ -277,10 +277,24 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
             let base = std::env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string());
             let base = base.trim_end_matches('/');
+            let chosen_model = llm_config
+                .generation
+                .model_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| {
+                    llm_config.generation.model_path.as_deref().and_then(|path| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| name.to_string())
+                    })
+                })
+                .unwrap_or_else(|| model.to_string());
             (
                 format!("{}/v1/chat/completions", base),
                 None,
-                model.to_string(),
+                chosen_model,
             )
         }
         GenerationProviderKind::External => {
