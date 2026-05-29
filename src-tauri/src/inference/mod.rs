@@ -13,7 +13,10 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 
 pub enum GenerationProvider {
-    Sidecar(SidecarProcess),
+    Sidecar {
+        process: SidecarProcess,
+        model: String,
+    },
     External {
         base_url: String,
         api_key: Option<String>,
@@ -38,10 +41,10 @@ impl GenerationProvider {
     fn route_info(&self) -> RouteInfo {
         match self {
             GenerationProvider::Unconfigured => RouteInfo::Unconfigured,
-            GenerationProvider::Sidecar(s) => RouteInfo::Http {
-                url: format!("http://127.0.0.1:{}/v1/chat/completions", s.port),
+            GenerationProvider::Sidecar { process, model } => RouteInfo::Http {
+                url: format!("http://127.0.0.1:{}/v1/chat/completions", process.port),
                 api_key: None,
-                model: String::new(),
+                model: model.clone(),
             },
             GenerationProvider::External {
                 base_url,
@@ -171,11 +174,20 @@ pub fn initialize_provider(
                     model_abs.display()
                 ));
             }
+            let model_name = model_rel
+                .split(std::path::MAIN_SEPARATOR)
+                .last()
+                .unwrap_or_default()
+                .to_string();
             let port = pick_port()?;
             let mut proc = spawn_sidecar(&binary, &model_abs, port)?;
             await_sidecar_ready(&mut proc, app)?;
+            std::env::set_var("OLLAMA_BASE_URL", format!("http://127.0.0.1:{}", port));
             let _ = app.emit("provider-ready", ());
-            Ok(GenerationProvider::Sidecar(proc))
+            Ok(GenerationProvider::Sidecar {
+                process: proc,
+                model: model_name,
+            })
         }
     }
 }
@@ -263,21 +275,36 @@ fn stream_download(url: &str, dest: &Path, app: &AppHandle, event: &str) -> Resu
     Ok(())
 }
 
-fn llama_server_release_url() -> Result<(&'static str, &'static str)> {
+fn llama_server_release_url() -> Result<(String, String)> {
+    if let (Ok(url), Ok(sha)) = (
+        std::env::var("LLAMA_SERVER_RELEASE_URL"),
+        std::env::var("LLAMA_SERVER_RELEASE_SHA256"),
+    ) {
+        return Ok((url, sha));
+    }
+
     const TODO_URL: &str = "REPLACE_WITH_PINNED_LLAMA_CPP_RELEASE_URL";
     const TODO_SHA: &str = "REPLACE_WITH_SHA256_OF_BINARY";
 
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Ok((TODO_URL, TODO_SHA))
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Ok((TODO_URL, TODO_SHA))
-    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        Ok((TODO_URL, TODO_SHA))
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Ok((TODO_URL, TODO_SHA))
-    } else {
-        Err(anyhow::anyhow!("unsupported platform for automatic llama-server download"))
+    if TODO_URL.starts_with("REPLACE_WITH_") || TODO_SHA.starts_with("REPLACE_WITH_") {
+        return Err(anyhow::anyhow!(
+            "automatic sidecar download is not configured: set LLAMA_SERVER_RELEASE_URL and LLAMA_SERVER_RELEASE_SHA256 or update the hardcoded platform release values"
+        ));
     }
+
+    let url = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        TODO_URL.to_string()
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        TODO_URL.to_string()
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        TODO_URL.to_string()
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        TODO_URL.to_string()
+    } else {
+        return Err(anyhow::anyhow!("unsupported platform for automatic llama-server download"));
+    };
+
+    Ok((url, TODO_SHA.to_string()))
 }
 
 #[tauri::command]
@@ -287,7 +314,7 @@ pub fn download_sidecar_engine(app: AppHandle) -> Result<(), String> {
     let (url, expected_sha) = llama_server_release_url().map_err(|e| e.to_string())?;
     let dest = brain_path.join("bin").join(sidecar_binary_name());
 
-    stream_download(url, &dest, &app, "sidecar-download-progress").map_err(|e| e.to_string())?;
+    stream_download(&url, &dest, &app, "sidecar-download-progress").map_err(|e| e.to_string())?;
 
     let actual = sha256_file(&dest).map_err(|e| e.to_string())?;
     if actual != expected_sha {
