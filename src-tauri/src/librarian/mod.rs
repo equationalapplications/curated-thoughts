@@ -274,10 +274,12 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
             return Ok(());
         }
         GenerationProviderKind::Sidecar => {
-            let base = std::env::var("OLLAMA_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string());
+            let base = std::env::var("OLLAMA_BASE_URL").map_err(|_| anyhow::anyhow!(
+                "sidecar provider is configured but OLLAMA_BASE_URL is not set; folder-rule generation cannot route to the running sidecar"
+            ))?;
+            let base = base.trim_end_matches('/');
             (
-                format!("{}/v1/chat/completions", base.trim_end_matches('/')),
+                format!("{}/v1/chat/completions", base),
                 None,
                 model.to_string(),
             )
