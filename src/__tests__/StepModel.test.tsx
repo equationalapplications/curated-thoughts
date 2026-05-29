@@ -12,8 +12,8 @@ vi.mock("../lib/events", () => ({
   onGgufDownloadProgress: vi.fn().mockResolvedValue(() => {}),
   onSidecarDownloadProgress: vi.fn().mockResolvedValue(() => {}),
   onProviderReady: vi.fn().mockImplementation((cb: () => void) => {
-    cb();
-    return Promise.resolve(() => {});
+     cb();
+     return Promise.resolve(() => {});
   }),
   onProviderError: vi.fn().mockResolvedValue(() => {}),
 }));
@@ -68,10 +68,13 @@ describe("StepModel", () => {
     );
   });
 
-  it("auto-install triggers download commands", async () => {
+  it("auto-install shows error when checksums are not configured", async () => {
     render(<StepModel onNext={onNext} />);
     fireEvent.click(screen.getByText(/Auto-Install/i));
-    await waitFor(() => expect(downloadSidecarEngine).toHaveBeenCalled());
-    await waitFor(() => expect(downloadModelWeights).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByText(/Auto-install is unavailable/i)).toBeInTheDocument();
+    });
+    expect(downloadSidecarEngine).not.toHaveBeenCalled();
+    expect(downloadModelWeights).not.toHaveBeenCalled();
   });
 });
