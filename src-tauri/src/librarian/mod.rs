@@ -4,6 +4,7 @@
 //! relying on refreshed summaries.
 
 use anyhow::Result;
+use crate::inference::config::{read_config, GenerationProviderKind};
 use rusqlite::Connection;
 
 pub struct ChunkRow {
@@ -265,23 +266,57 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
         .unwrap_or(full_text.len());
     let truncated = &full_text[..byte_limit];
 
-    let client = reqwest::blocking::Client::new();
-    let base_url =
-        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let resp = client
-        .post(format!("{}/api/generate", base_url))
-        .json(&serde_json::json!({
-            "model": model,
-            "system": "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.\n\nCONFLICT RESOLUTION DIRECTIVE: If Working Context contradicts Anchor Truth, do not harmonize or modify the Anchor Truth. Instead, create a new Wisdom entry titled 'Architectural Inconsistency' that states: which Working file and symbol introduced the deviation (cite source: metadata), which Anchor Truth document it violates (cite source: metadata), and a one-sentence description of the conflict. Do not emit a Wisdom proposal for any content that is consistent with the Anchor Truth.\n\nCASCADING VIOLATION DIRECTIVE: If a Structural Context chunk reveals that a violation in Working Context propagates to multiple callers, enumerate each caller file and symbol in the Wisdom proposal. Title the proposal 'Cascading Violation' and list each impacted call site under an 'Affected callers' section. Do not emit separate proposals per caller — consolidate into one.",
-            "prompt": format!("Document to summarize:\n\n{}", truncated),
-            "stream": false
-        }))
-        .send()?;
+    let brain_dir_str = crate::get_brain_dir_inner();
+    let brain_path = std::path::Path::new(&brain_dir_str);
+    let llm_config = read_config(brain_path);
+    let (endpoint_url, api_key, model_name) = match &llm_config.generation.provider {
+        GenerationProviderKind::Unconfigured => {
+            return Ok(());
+        }
+        GenerationProviderKind::Sidecar => {
+            let base = std::env::var("OLLAMA_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:11434".to_string());
+            (
+                format!("{}/v1/chat/completions", base.trim_end_matches('/')),
+                None,
+                model.to_string(),
+            )
+        }
+        GenerationProviderKind::External => {
+            let base = llm_config.generation.external_url.clone().unwrap_or_default();
+            let base = base.trim_end_matches('/');
+            let base = base.strip_suffix("/v1").unwrap_or(base);
+            (
+                format!("{}/v1/chat/completions", base),
+                llm_config.generation.api_key.clone(),
+                llm_config
+                    .generation
+                    .model_name
+                    .clone()
+                    .unwrap_or_else(|| model.to_string()),
+            )
+        }
+    };
 
+    let system_prompt = "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.\n\nCONFLICT RESOLUTION DIRECTIVE: If Working Context contradicts Anchor Truth, do not harmonize or modify the Anchor Truth. Instead, create a new Wisdom entry titled 'Architectural Inconsistency' that states: which Working file and symbol introduced the deviation (cite source: metadata), which Anchor Truth document it violates (cite source: metadata), and a one-sentence description of the conflict. Do not emit a Wisdom proposal for any content that is consistent with the Anchor Truth.\n\nCASCADING VIOLATION DIRECTIVE: If a Structural Context chunk reveals that a violation in Working Context propagates to multiple callers, enumerate each caller file and symbol in the Wisdom proposal. Title the proposal 'Cascading Violation' and list each impacted call site under an 'Affected callers' section. Do not emit separate proposals per caller — consolidate into one.";
+
+    let client = reqwest::blocking::Client::new();
+    let mut req = client.post(&endpoint_url).json(&serde_json::json!({
+        "model": model_name,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": format!("Document to summarize:\n\n{}", truncated) }
+        ],
+        "stream": false,
+    }));
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let resp = req.send()?;
     let body: serde_json::Value = resp.json()?;
-    let wiki_content = body["response"]
+    let wiki_content = body["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing response from Ollama"))?
+        .ok_or_else(|| anyhow::anyhow!("missing content in /v1/chat/completions response"))?
         .to_string();
 
     let source_file = std::path::Path::new(source_path)

@@ -37,6 +37,42 @@ export const getRecommendedModel = (): Promise<string> =>
 export const getBrainDir = (): Promise<string> => invoke("get_brain_dir");
 export const getBinaryPath = (): Promise<string> => invoke("get_binary_path");
 
+export interface GenerationConfig {
+  provider: "unconfigured" | "sidecar" | "external";
+  model_path: string | null;
+  model_name: string | null;
+  external_url: string | null;
+  api_key: string | null;
+}
+
+export interface LlmConfig {
+  generation: GenerationConfig;
+  embedding: {
+    provider: "fastembed" | "external";
+    external_url: string | null;
+  };
+}
+
+export const getProviderConfig = (): Promise<LlmConfig> =>
+  getBrainDir().then((brainDir) => invoke("get_provider_config", { brainDir }));
+
+export const updateProvider = (config: GenerationConfig): Promise<void> =>
+  getBrainDir().then((brainDir) => invoke("update_provider", { config, brainDir }));
+
+export const initFastembed = (): Promise<void> => invoke("init_fastembed");
+
+export const downloadSidecarEngine = (): Promise<void> =>
+  getBrainDir().then((brainDir) => invoke("download_sidecar_engine", { brainDir }));
+
+export const downloadModelWeights = (
+  url: string,
+  filename: string,
+  expectedSha256: string,
+): Promise<void> =>
+  getBrainDir().then((brainDir) =>
+    invoke("download_model_weights", { brainDir, url, filename, expectedSha256 }),
+  );
+
 export interface IndexingStatus {
   indexed: number;
   pending: number;
