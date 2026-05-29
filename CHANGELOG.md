@@ -1,3 +1,19 @@
+## [1.6.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.5.1...v1.6.0) (2026-05-29)
+
+### Features
+
+* **byoi:** complete provider routing, fastembed bootstrap, and sidecar download progress ([c148eef](https://github.com/equationalapplications/curated-thoughts/commit/c148eefe8532ece88fdef0002236a54aa460ce2d))
+
+### Bug Fixes
+
+* **byoi:** make provider config writes safe, protect download paths, and harden sidecar routing ([0c374b3](https://github.com/equationalapplications/curated-thoughts/commit/0c374b314cc98f2d16fa683624ba0d0786522be9))
+* improve provider rollback, local embedding routing, and setup accessibility ([7cdf516](https://github.com/equationalapplications/curated-thoughts/commit/7cdf516de0cad221806d44d3407f6847f29178d5))
+* pass required WikiBusyError args for provider-not-ready mapping ([328f5b4](https://github.com/equationalapplications/curated-thoughts/commit/328f5b41b3a51096614c284c9a0b046bb3f8918b))
+* preserve provider state on rollback failure and normalize docs to pnpm ([5dfc956](https://github.com/equationalapplications/curated-thoughts/commit/5dfc9569278ef5b9878bbcbebe8eba918ba4b228))
+* preserve setup completion on skip and stabilize sidecar provider lifecycle ([5493b5a](https://github.com/equationalapplications/curated-thoughts/commit/5493b5a31d2cdc42ad98824106271156fda143ac))
+* **release:** support pnpm lockfile in semantic-release config ([ac48a87](https://github.com/equationalapplications/curated-thoughts/commit/ac48a872bd5ca5450c3d2b1cadae5ede6ac28c11))
+* **test:** restore CURATED_BRAIN_DIR in folder_rules tests and fix sidecar summary model selection ([132d083](https://github.com/equationalapplications/curated-thoughts/commit/132d083d49385c912ebd0f2031702828067c62ad))
+
 ## [1.5.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.5.0...v1.5.1) (2026-05-24)
 
 ### Bug Fixes
