@@ -44,8 +44,8 @@ Artifacts available on [Releases page](https://github.com/equationalapplications
 
 ## Before Submitting
 
-1. Run tests: `npm test`
-2. Build locally: `npm run tauri build`
+1. Run tests: `pnpm test`
+2. Build locally: `pnpm run tauri build`
 3. Verify commit message format
 4. One feature or fix per commit (or group logically related changes)
 

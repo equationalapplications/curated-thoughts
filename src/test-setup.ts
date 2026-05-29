@@ -11,6 +11,30 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_brain_dir") {
       return Promise.resolve("/Users/test/.brain");
     }
+    if (cmd === "get_provider_config") {
+      return Promise.resolve({
+        generation: {
+          provider: "sidecar",
+          model_path: null,
+          model_name: null,
+          external_url: null,
+          api_key: null,
+        },
+        embedding: { provider: "fastembed", external_url: null },
+      });
+    }
+    if (cmd === "update_provider") {
+      return Promise.resolve();
+    }
+    if (cmd === "download_sidecar_engine") {
+      return Promise.resolve();
+    }
+    if (cmd === "download_model_weights") {
+      return Promise.resolve();
+    }
+    if (cmd === "init_fastembed") {
+      return Promise.resolve();
+    }
     if (cmd === "get_binary_path") {
       return Promise.resolve("/Users/test/Curated Thoughts/curated-thoughts");
     }

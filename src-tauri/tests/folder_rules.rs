@@ -1,7 +1,32 @@
 mod helpers;
 use helpers::TestApp;
 use serde_json::json;
+use tauri_app_lib::inference::config::{write_config, GenerationConfig, GenerationProviderKind, LlmConfig};
 use tauri_app_lib::librarian::generate_summary;
+
+struct EnvVarGuard {
+    key: String,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn new(key: &str) -> Self {
+        EnvVarGuard {
+            key: key.to_string(),
+            previous: std::env::var_os(key),
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(&self.key, previous);
+        } else {
+            std::env::remove_var(&self.key);
+        }
+    }
+}
 
 fn seed_chunks(app: &TestApp, source_path: &str) {
     let conn = app.open_db();
@@ -97,27 +122,41 @@ fn auto_approve_writes_directly_to_wiki() {
     std::fs::write(&source_path, "Auto-approve test content.").unwrap();
     seed_chunks(&app, &source_str);
 
-    let conn = app.open_db();
-    conn.execute(
+    let db_conn = app.open_db();
+    db_conn.execute(
         "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'summarize', 1)",
-        [vault.join("documents").to_string_lossy().to_string()],
-    ).unwrap();
+        [&vault.join("documents").to_string_lossy().to_string()],
+    )
+    .unwrap();
 
-    // Start mockito server
     let mut server = mockito::Server::new();
     let _mock = server
-        .mock("POST", "/api/generate")
+        .mock("POST", "/v1/chat/completions")
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("{\"response\": \"Auto Wiki Generated content.\"}")
+        .with_body("{\"choices\":[{\"message\":{\"content\":\"Auto Wiki Generated content.\"}}]}")
         .create();
 
-    std::env::set_var("OLLAMA_BASE_URL", server.url());
+    let _brain_dir_guard = EnvVarGuard::new("CURATED_BRAIN_DIR");
+    std::env::set_var("CURATED_BRAIN_DIR", app.tmp.path().to_string_lossy().to_string());
+    write_config(
+        app.tmp.path(),
+        &LlmConfig {
+            generation: GenerationConfig {
+                provider: GenerationProviderKind::External,
+                model_path: None,
+                model_name: Some("test-model".to_string()),
+                external_url: Some(server.url()),
+                api_key: None,
+            },
+            embedding: Default::default(),
+        },
+    )
+    .unwrap();
 
+    let conn = db_conn;
     let result = generate_summary(&conn, &source_str, "test-model");
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);
-
-    std::env::remove_var("OLLAMA_BASE_URL");
 
     // Wiki page written directly to vault/wiki/ (auto_approve=true)
     let wiki_file = vault.join("wiki").join("auto.md");

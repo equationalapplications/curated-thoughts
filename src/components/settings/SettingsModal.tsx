@@ -3,7 +3,8 @@ import { getBrainDir } from "../../lib/tauri";
 import { AgentIntegrationPanel } from "./AgentIntegrationPanel";
 import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
-import { ModelPanel } from "./ModelPanel";
+import { GenerationPanel } from "./GenerationPanel";
+import { EmbeddingPanel } from "./EmbeddingPanel";
 import { VaultPanel } from "./VaultPanel";
 
 interface Props {
@@ -49,7 +50,8 @@ export function SettingsModal({ onClose, vaultPath }: Props) {
         </div>
         <VaultPanel vaultPath={vaultPath} />
         <hr className="settings-divider" />
-        <ModelPanel />
+        <GenerationPanel />
+        <EmbeddingPanel />
         <hr className="settings-divider" />
         <FolderRulesPanel />
         <hr className="settings-divider" />

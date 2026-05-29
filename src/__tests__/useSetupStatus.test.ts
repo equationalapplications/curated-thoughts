@@ -7,7 +7,12 @@ const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 test("needsSetup true when vault path is null", async () => {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === "get_vault_path") return Promise.resolve(null);
-    if (cmd === "check_ollama") return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
+    if (cmd === "get_brain_dir") return Promise.resolve("/Users/test/.brain");
+    if (cmd === "get_provider_config")
+      return Promise.resolve({
+        generation: { provider: "unconfigured", model_path: null, model_name: null, external_url: null, api_key: null },
+        embedding: { provider: "fastembed", external_url: null },
+      });
     return Promise.resolve(null);
   });
   const { result } = renderHook(() => useSetupStatus());
@@ -15,10 +20,15 @@ test("needsSetup true when vault path is null", async () => {
   expect(result.current.needsSetup).toBe(true);
 });
 
-test("needsSetup false when vault set and Ollama running", async () => {
+test("needsSetup false when vault set and provider configured", async () => {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === "get_vault_path") return Promise.resolve("/Users/test/vault");
-    if (cmd === "check_ollama") return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
+    if (cmd === "get_brain_dir") return Promise.resolve("/Users/test/.brain");
+    if (cmd === "get_provider_config")
+      return Promise.resolve({
+        generation: { provider: "sidecar", model_path: null, model_name: null, external_url: null, api_key: null },
+        embedding: { provider: "fastembed", external_url: null },
+      });
     return Promise.resolve(null);
   });
   const { result } = renderHook(() => useSetupStatus());
@@ -26,13 +36,18 @@ test("needsSetup false when vault set and Ollama running", async () => {
   expect(result.current.needsSetup).toBe(false);
 });
 
-test("needsSetup true when Ollama not installed", async () => {
+test("needsSetup false when vault path exists even if provider is unconfigured", async () => {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === "get_vault_path") return Promise.resolve("/Users/test/vault");
-    if (cmd === "check_ollama") return Promise.resolve({ installed: false, running: false, models: [] });
+    if (cmd === "get_brain_dir") return Promise.resolve("/Users/test/.brain");
+    if (cmd === "get_provider_config")
+      return Promise.resolve({
+        generation: { provider: "unconfigured", model_path: null, model_name: null, external_url: null, api_key: null },
+        embedding: { provider: "fastembed", external_url: null },
+      });
     return Promise.resolve(null);
   });
   const { result } = renderHook(() => useSetupStatus());
   await waitFor(() => expect(result.current.loading).toBe(false));
-  expect(result.current.needsSetup).toBe(true);
+  expect(result.current.needsSetup).toBe(false);
 });
