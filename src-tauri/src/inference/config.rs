@@ -92,7 +92,16 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
 }
 
 pub fn resolve_model_path(brain_dir: &Path, relative: &str) -> PathBuf {
-    brain_dir.join(relative)
+    let relative_path = std::path::Path::new(relative);
+    if relative_path.is_absolute() || relative_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        brain_dir.join("models").join(
+            relative_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("")),
+        )
+    } else {
+        brain_dir.join(relative_path)
+    }
 }
 
 #[cfg(test)]
