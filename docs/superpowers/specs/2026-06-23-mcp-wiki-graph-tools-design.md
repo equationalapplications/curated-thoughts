@@ -42,8 +42,9 @@ New module `src-tauri/src/wiki_graph.rs` owns the 3 query functions and their SQ
 
 ### `wiki_search` (new — no upstream manifest)
 - **params:** `query: string` (required), `entityIds?: string[]` (default `["tier_fact", "tier_wisdom"]`), `limit?: integer` (default 10, max 25)
-- **behavior:** embed `query` via existing `embedder::embed_one(profile, text)`; cosine-similarity (`search::cosine_similarity`) against `llm_wiki_entries.embedding_blob` for rows where `entity_id IN entityIds AND deleted_at IS NULL`; multiply by tier weight (`tier_fact: 1.5`, `tier_wisdom: 1.0`, any other explicit `entity_id`: `1.0`) before sorting — mirrors `tieredRead` (`src/lib/wiki.ts:127`).
+- **behavior:** embed `query` via existing `embedder::embed_one(profile, text)`; load candidate rows with `entity_id IN entityIds AND deleted_at IS NULL`; compute cosine similarity (`search::cosine_similarity`) per row in Rust; multiply each row's score by its tier weight (`tier_fact: 1.5`, `tier_wisdom: 1.0`, any other explicit `entity_id`: `1.0`) **in Rust, on the in-memory `Vec<(row, score)>`, before sort/limit** — not via SQL `CASE`/`ORDER BY`, since the similarity itself is already computed outside SQL. Mirrors `tieredRead` (`src/lib/wiki.ts:127`).
 - **dimension guard:** skip rows where `length(embedding_blob) / 4 != active profile dim` (same defensive check `core-llm-wiki` already does for healing) — never errors the whole call.
+- **`entityIds IN (...)` binding:** `rusqlite`/SQLite has no native array-bind for `IN (?)`. Build the placeholder string dynamically (`IN (?, ?, ?)` sized to `entityIds.len()`) and bind each element positionally — no new dependency (e.g. `rarray`/`carray`) needed for a handful of tier strings.
 - **returns:** `[{ id, entity_id, title, score }]` — no body, keeps payload small; agent calls `wiki_traverse_graph` next with the `id`.
 
 ### `wiki_get_ontology` (mirrors `wikiGetOntologyManifest`)
@@ -54,7 +55,8 @@ New module `src-tauri/src/wiki_graph.rs` owns the 3 query functions and their SQ
 ### `wiki_traverse_graph` (mirrors `wikiTraverseGraphManifest`)
 - **params:** `entityId` (required), `sourceId` (required), `maxDepth?: 1-3` (default `2`, clamp out-of-range rather than error), `direction?: inbound|outbound|both` (default `both`), `edgeTypes?: string[]`
 - **behavior:** BFS over `llm_wiki_edges` (`source_id`/`target_id`/`edge_type`) up to `maxDepth` hops, filtered by `entity_id` and optional `edgeTypes`. Joins to `llm_wiki_entries` for node titles; drops any edge whose endpoint entry has `deleted_at IS NOT NULL`. The `deleted_at IS NULL` filter applies **only** to `llm_wiki_entries` — `llm_wiki_edges` has no such column.
-- **returns:** `{ nodes: [{id, title, entity_id}], edges: [{source_id, target_id, edge_type}] }`
+- **fan-out guard:** hub nodes can produce hundreds of nodes/edges even at `maxDepth: 3`. Short-circuit the BFS once it has collected `maxTraversalNodes` (constant, 50) — return the partial neighborhood rather than the full one. Mirrors the spirit of the upstream package's own traversal bounds.
+- **returns:** `{ nodes: [{id, title, entity_id}], edges: [{source_id, target_id, edge_type}], truncated: boolean }`
 
 ## 5. Error handling & edge cases
 
@@ -63,11 +65,12 @@ New module `src-tauri/src/wiki_graph.rs` owns the 3 query functions and their SQ
 - `maxDepth` outside 1-3 → clamp, log clamp to stderr only (stdout hygiene rule from unified-mcp-binary spec; MCP stdout must stay pure JSON-RPC).
 - Deleted entries (`llm_wiki_entries.deleted_at IS NOT NULL`) excluded everywhere entries are read; `llm_wiki_edges` has no soft-delete, so edge filtering happens via its joined entry endpoints only.
 - No ontology manifest row → not an error, returns `{ mode: "off", manifest: null }`.
+- Hub node exceeding `maxTraversalNodes` (50) → return the partial neighborhood with `truncated: true`, not an error.
 
 ## 6. Testing
 
 - New `src-tauri/tests/wiki_graph.rs`, seeding `llm_wiki_entries`/`llm_wiki_edges`/`llm_wiki_entity_manifests` via direct SQL (same style as `wiki_maintenance.rs`/`folder_rules.rs`), no JS involved.
-- Cases: `wiki_search` tier-weight ordering, dimension-mismatch skip, no-match empty result; `wiki_get_ontology` present/absent row; `wiki_traverse_graph` multi-hop BFS, direction filter, `edgeTypes` filter, soft-deleted-node exclusion, `maxDepth` clamp.
+- Cases: `wiki_search` tier-weight ordering, dimension-mismatch skip, no-match empty result, `entityIds` IN-list binding with varying array sizes; `wiki_get_ontology` present/absent row; `wiki_traverse_graph` multi-hop BFS, direction filter, `edgeTypes` filter, soft-deleted-node exclusion, `maxDepth` clamp, fan-out truncation at `maxTraversalNodes`.
 - Extend `src-tauri/tests/mcp_integration.rs` with end-to-end stdio calls for the 3 new tools, mirroring the existing `vault_semantic_search` integration test.
 
 ## 7. Non-goals
