@@ -1,7 +1,7 @@
 # MCP wiki graph tools (wiki_search, wiki_get_ontology, wiki_traverse_graph)
 
 **Date:** 2026-06-23
-**Status:** Approved
+**Status:** Implemented
 **Depends on:** `2026-05-07-mcp-retrieval-facade-design.md` (single-code-path principle, stdio MCP server), `2026-05-23-unified-mcp-binary-spec.md` (one binary, `--mcp` flag)
 
 ## 1. Summary
@@ -26,7 +26,7 @@ This is read-only, additive work: no new tables, no JS dependency, no mutation p
 
 ## 3. Architecture
 
-```
+```text
 VaultMcpServer (src-tauri/src/mcp_server.rs)
  ├─ vault_semantic_search / vault_related_chunks   (existing — chunks/embeddings tables)
  └─ wiki_search / wiki_get_ontology / wiki_traverse_graph   (NEW — src-tauri/src/wiki_graph.rs)
@@ -42,7 +42,7 @@ New module `src-tauri/src/wiki_graph.rs` owns the 3 query functions and their SQ
 
 ### `wiki_search` (new — no upstream manifest)
 - **params:** `query: string` (required), `entityIds?: string[]` (default `["tier_fact", "tier_wisdom"]`), `limit?: integer` (default 10, max 25)
-- **behavior:** embed `query` via existing `embedder::embed_one(profile, text)`; load candidate rows with `entity_id IN entityIds AND deleted_at IS NULL`; compute cosine similarity (`search::cosine_similarity`) per row in Rust; multiply each row's score by its tier weight (`tier_fact: 1.5`, `tier_wisdom: 1.0`, any other explicit `entity_id`: `1.0`) **in Rust, on the in-memory `Vec<(row, score)>`, before sort/limit** — not via SQL `CASE`/`ORDER BY`, since the similarity itself is already computed outside SQL. Mirrors `tieredRead` (`src/lib/wiki.ts:127`).
+- **behavior:** embed `query` via existing `embedder::embed_one(profile, text)`; load candidate rows with `entity_id IN entityIds AND deleted_at IS NULL`; compute cosine similarity (`search::cosine_similarity`) per row in Rust; multiply each row's score by its tier weight (`tier_fact: 1.5`, `tier_wisdom: 1.0`, `tier_working::*: 0.6`, any other explicit `entity_id`: `1.0`) **in Rust, on the in-memory `Vec<(row, score)>`, before sort/limit** — not via SQL `CASE`/`ORDER BY`, since the similarity itself is already computed outside SQL. Mirrors `tieredRead` (`src/lib/wiki.ts:127`).
 - **dimension guard:** skip rows where `length(embedding_blob) / 4 != active profile dim` (same defensive check `core-llm-wiki` already does for healing) — never errors the whole call.
 - **`entityIds IN (...)` binding:** `rusqlite`/SQLite has no native array-bind for `IN (?)`. Build the placeholder string dynamically (`IN (?, ?, ?)` sized to `entityIds.len()`) and bind each element positionally — no new dependency (e.g. `rarray`/`carray`) needed for a handful of tier strings.
 - **returns:** `[{ id, entity_id, title, score }]` — no body, keeps payload small; agent calls `wiki_traverse_graph` next with the `id`.
