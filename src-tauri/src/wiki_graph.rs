@@ -23,7 +23,6 @@ pub struct WikiSearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WikiOntologyResult {
     pub mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<WikiManifest>,
 }
 
@@ -134,7 +133,7 @@ pub fn wiki_search(
     let sql = format!(
         "SELECT id, entity_id, title, embedding_blob
          FROM llm_wiki_entries
-         WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL"
+         WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL AND embedding_blob IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(entity_ids.iter()))?;
@@ -143,7 +142,10 @@ pub fn wiki_search(
         let id: String = row.get(0)?;
         let entity_id: String = row.get(1)?;
         let title: String = row.get(2)?;
-        let bytes: Vec<u8> = row.get(3)?;
+        let bytes: Option<Vec<u8>> = row.get(3)?;
+        let Some(bytes) = bytes else {
+            continue;
+        };
         if bytes.len() != dim * 4 {
             continue;
         }
@@ -374,5 +376,15 @@ mod unit_tests {
         assert_eq!(tier_weight("tier_wisdom"), 1.0);
         assert_eq!(tier_weight("tier_working::abc"), 0.6);
         assert_eq!(tier_weight("custom_entity"), 1.0);
+    }
+
+    #[test]
+    fn wiki_ontology_result_serializes_manifest_null() {
+        let result = WikiOntologyResult {
+            mode: "off".into(),
+            manifest: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"manifest\":null"));
     }
 }
