@@ -107,6 +107,17 @@ fn wiki_search_applies_tier_weight_before_sort() {
 }
 
 #[test]
+fn wiki_search_skips_extra_trailing_bytes_without_error() {
+    let conn = open_entries_db();
+    let q = vec![1.0_f32, 0.0];
+    let mut bad = f32_vec_to_blob(&[1.0, 0.0]);
+    bad.extend_from_slice(&[0_u8, 1]); // dim*4 + 2 bytes
+    insert_entry(&conn, "bad", "tier_fact", "Bad trailing", &bad, None);
+    let hits = wiki_search(&conn, &q, &["tier_fact"], 10).unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
 fn wiki_search_skips_dimension_mismatch_without_error() {
     let conn = open_entries_db();
     let q = vec![1.0_f32, 0.0];
@@ -324,4 +335,30 @@ fn wiki_traverse_graph_truncates_at_max_nodes() {
     .unwrap();
     assert!(got.truncated);
     assert!(got.nodes.len() <= MAX_TRAVERSAL_NODES);
+    let node_ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
+    for edge in &got.edges {
+        assert!(node_ids.contains(edge.source_id.as_str()));
+        assert!(node_ids.contains(edge.target_id.as_str()));
+    }
+}
+
+#[test]
+fn wiki_traverse_graph_excludes_cross_tier_endpoints() {
+    let conn = open_graph_db();
+    insert_node(&conn, "a", "tier_fact", "A", false);
+    insert_node(&conn, "b", "tier_wisdom", "B", false);
+    insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
+
+    let got = wiki_traverse_graph(
+        &conn,
+        "tier_fact",
+        "a",
+        1,
+        TraverseDirection::Outbound,
+        &[],
+    )
+    .unwrap();
+    let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, HashSet::from(["a"]));
+    assert!(got.edges.is_empty());
 }

@@ -71,11 +71,12 @@ impl TraverseDirection {
     }
 }
 
-/// Mirrors `tieredRead` weights in `src/lib/wiki.ts` (tier_fact 1.5×, tier_wisdom 1.0×, other 1.0×).
+/// Mirrors `tieredRead` weights in `src/lib/wiki.ts` (tier_fact 1.5×, tier_wisdom 1.0×, tier_working::* 0.6×, other 1.0×).
 pub fn tier_weight(entity_id: &str) -> f32 {
     match entity_id {
         "tier_fact" => 1.5,
         "tier_wisdom" => 1.0,
+        id if id.starts_with("tier_working::") => 0.6,
         _ => 1.0,
     }
 }
@@ -143,7 +144,7 @@ pub fn wiki_search(
         let entity_id: String = row.get(1)?;
         let title: String = row.get(2)?;
         let bytes: Vec<u8> = row.get(3)?;
-        if bytes.len() / 4 != dim {
+        if bytes.len() != dim * 4 {
             continue;
         }
         let vec = bytes_to_f32(&bytes);
@@ -231,8 +232,8 @@ fn fetch_outbound_neighbors(
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, t.id, t.title, t.entity_id
          FROM llm_wiki_edges e
-         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL
-         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL
+         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL AND s.entity_id = ?1
+         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL AND t.entity_id = ?1
          WHERE e.entity_id = ?1 AND e.source_id = ?2{edge_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -267,8 +268,8 @@ fn fetch_inbound_neighbors(
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, s.id, s.title, s.entity_id
          FROM llm_wiki_edges e
-         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL
-         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL
+         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL AND s.entity_id = ?1
+         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL AND t.entity_id = ?1
          WHERE e.entity_id = ?1 AND e.target_id = ?2{edge_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -327,6 +328,11 @@ pub fn wiki_traverse_graph(
         }
         let pairs = fetch_neighbors(conn, entity_id, &current_id, direction, edge_types)?;
         for (edge, neighbor_id) in pairs {
+            let is_new_neighbor = !visited.contains(&neighbor_id);
+            if is_new_neighbor && nodes.len() >= MAX_TRAVERSAL_NODES {
+                truncated = true;
+                break;
+            }
             let key = (
                 edge.source_id.clone(),
                 edge.target_id.clone(),
@@ -335,11 +341,7 @@ pub fn wiki_traverse_graph(
             if edge_keys.insert(key) {
                 edges.push(edge);
             }
-            if !visited.contains(&neighbor_id) {
-                if nodes.len() >= MAX_TRAVERSAL_NODES {
-                    truncated = true;
-                    break;
-                }
+            if is_new_neighbor {
                 if let Some(node) = load_live_entry(conn, entity_id, &neighbor_id)? {
                     visited.insert(neighbor_id.clone());
                     nodes.insert(neighbor_id.clone(), node);
@@ -370,7 +372,7 @@ mod unit_tests {
     fn tier_weight_matches_tiered_read() {
         assert_eq!(tier_weight("tier_fact"), 1.5);
         assert_eq!(tier_weight("tier_wisdom"), 1.0);
-        assert_eq!(tier_weight("tier_working::abc"), 1.0);
+        assert_eq!(tier_weight("tier_working::abc"), 0.6);
         assert_eq!(tier_weight("custom_entity"), 1.0);
     }
 }
