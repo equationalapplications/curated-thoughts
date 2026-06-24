@@ -11,6 +11,9 @@ use tracing::dispatcher::Dispatch;
 
 use crate::embedder::EmbedProfile;
 use crate::retrieval;
+use crate::wiki_graph::{
+    self, TraverseDirection, DEFAULT_ENTITY_IDS, DEFAULT_MAX_DEPTH,
+};
 
 #[derive(Clone)]
 struct VaultMcpServer {
@@ -31,6 +34,35 @@ struct VaultRelatedChunksParams {
     doc_path: String,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WikiSearchParams {
+    query: String,
+    #[serde(default, rename = "entityIds")]
+    entity_ids: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WikiGetOntologyParams {
+    #[serde(rename = "entityId")]
+    entity_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WikiTraverseGraphParams {
+    #[serde(rename = "entityId")]
+    entity_id: String,
+    #[serde(rename = "sourceId")]
+    source_id: String,
+    #[serde(default, rename = "maxDepth")]
+    max_depth: Option<usize>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default, rename = "edgeTypes")]
+    edge_types: Option<Vec<String>>,
 }
 
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
@@ -231,6 +263,114 @@ impl VaultMcpServer {
         .await
         .map_err(|e| rmcp::ErrorData::internal_error(format!("db task failed: {e}"), None))??;
         serde_json::to_string(&hits)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "wiki_search",
+        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Returns entry ids for use with wiki_traverse_graph."
+    )]
+    async fn wiki_search(
+        &self,
+        args: Parameters<WikiSearchParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(WikiSearchParams {
+            query,
+            entity_ids,
+            limit,
+        }) = args;
+        let limit = limit.unwrap_or(10).clamp(1, 25);
+        let entity_ids: Vec<String> = entity_ids.unwrap_or_else(|| {
+            DEFAULT_ENTITY_IDS.iter().map(|s| (*s).to_string()).collect()
+        });
+
+        let query_vec = tokio::task::spawn_blocking({
+            let profile = self.profile.clone();
+            move || crate::embedder::embed_one(&profile, query)
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("embed task failed: {e}"), None))?
+        .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+
+        let hits = tokio::task::spawn_blocking({
+            let conn = self.conn.clone();
+            move || {
+                let conn = lock_conn(&conn)?;
+                let entity_refs: Vec<&str> = entity_ids.iter().map(|s| s.as_str()).collect();
+                wiki_graph::wiki_search(&conn, &query_vec, &entity_refs, limit)
+                    .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))
+            }
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("db task failed: {e}"), None))??;
+
+        serde_json::to_string(&hits)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "wiki_get_ontology",
+        description = "Return the ontology manifest (node_types, edge_types) for a wiki entity tier."
+    )]
+    async fn wiki_get_ontology(
+        &self,
+        args: Parameters<WikiGetOntologyParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(WikiGetOntologyParams { entity_id }) = args;
+        let result = tokio::task::spawn_blocking({
+            let conn = self.conn.clone();
+            move || {
+                let conn = lock_conn(&conn)?;
+                wiki_graph::wiki_get_ontology(&conn, &entity_id)
+                    .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))
+            }
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("db task failed: {e}"), None))??;
+
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "wiki_traverse_graph",
+        description = "BFS traversal of llm_wiki_edges from a source entry id. Use wiki_search first to obtain sourceId."
+    )]
+    async fn wiki_traverse_graph(
+        &self,
+        args: Parameters<WikiTraverseGraphParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(WikiTraverseGraphParams {
+            entity_id,
+            source_id,
+            max_depth,
+            direction,
+            edge_types,
+        }) = args;
+        let max_depth = max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
+        let direction = TraverseDirection::parse(direction.as_deref().unwrap_or("both"));
+        let edge_types = edge_types.unwrap_or_default();
+
+        let result = tokio::task::spawn_blocking({
+            let conn = self.conn.clone();
+            move || {
+                let conn = lock_conn(&conn)?;
+                let edge_type_refs: Vec<&str> = edge_types.iter().map(|s| s.as_str()).collect();
+                wiki_graph::wiki_traverse_graph(
+                    &conn,
+                    &entity_id,
+                    &source_id,
+                    max_depth,
+                    direction,
+                    &edge_type_refs,
+                )
+                .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))
+            }
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("db task failed: {e}"), None))??;
+
+        serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 }
