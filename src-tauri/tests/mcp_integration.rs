@@ -20,6 +20,9 @@ use tauri_app_lib::retrieval::{
     self, insert_chunk, insert_embedding, mark_document_indexed, upsert_document, AppDb,
 };
 use tauri_app_lib::search::SearchResult;
+use tauri_app_lib::wiki_graph::{
+    f32_vec_to_blob, WikiOntologyResult, WikiSearchHit, WikiTraverseResult,
+};
 
 fn mcp_exe() -> PathBuf {
     // After the unified-binary refactor, the main binary runs as an MCP server
@@ -96,6 +99,52 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     let v_b = embed_one(&profile, chunk_b.text.clone())?;
     insert_embedding(conn, cid_b, &v_b)?;
     mark_document_indexed(conn, doc_b)?;
+    Ok(())
+}
+
+fn seed_wiki_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_wiki_entries (
+            id TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            deleted_at INTEGER,
+            embedding_blob BLOB
+        );
+        CREATE TABLE IF NOT EXISTS llm_wiki_edges (
+            id TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            edge_type TEXT NOT NULL,
+            created_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS llm_wiki_entity_manifests (
+            entity_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            updated_at INTEGER
+        );",
+    )?;
+    let blob = f32_vec_to_blob(&[1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, embedding_blob) VALUES (?1, ?2, ?3, ?4)",
+        ("seed-a", "tier_fact", "MCP seed A", blob.clone()),
+    )?;
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, embedding_blob) VALUES (?1, ?2, ?3, ?4)",
+        ("seed-b", "tier_fact", "MCP seed B", blob),
+    )?;
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type)
+         VALUES ('edge-ab', 'tier_fact', 'seed-a', 'seed-b', 'relates')",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json)
+         VALUES ('tier_fact', 'active', '{\"node_types\":[\"Fact\"],\"edge_types\":[\"relates\"]}')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -182,6 +231,88 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
             .any(|row| row.doc_path == "/fixtures/mcp_other.md"),
         "related should rank chunks from the other fixtures doc; got {rel_text:?}"
     );
+
+    client.cancel().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_lists_wiki_tools_and_returns_json() {
+    if std::env::var("CURATED_MCP_INTEGRATION_TESTS").is_err() {
+        eprintln!("Skipping MCP integration test — set CURATED_MCP_INTEGRATION_TESTS=1 to run");
+        return;
+    }
+    let root = tempdir().expect("tempdir");
+    let brain = root.path();
+    std::fs::write(brain.join("config.json"), b"{}\n").unwrap();
+
+    with_vars(
+        [
+            ("CURATED_EMBED_STUB", Some("constant8")),
+            ("CURATED_BRAIN_DIR", brain.to_str()),
+        ],
+        || {
+            let paths = retrieval::resolve_brain_paths();
+            let db = AppDb::open(&paths.db_path).unwrap();
+            seed_fixture(&db.0).unwrap();
+            seed_wiki_fixture(&db.0).unwrap();
+        },
+    );
+
+    assert!(
+        mcp_exe().exists(),
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml",
+        mcp_exe()
+    );
+
+    let client = spawn_mcp(brain).await.expect("mcp handshake");
+    let tools = client.list_all_tools().await.expect("list_all_tools");
+    let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
+    for tool in ["wiki_search", "wiki_get_ontology", "wiki_traverse_graph"] {
+        assert!(names.iter().any(|n| *n == tool), "missing tool {tool}");
+    }
+
+    let search_args = serde_json::json!({ "query": "seed", "limit": 5 })
+        .as_object()
+        .unwrap()
+        .clone();
+    let search_res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("wiki_search").with_arguments(search_args))
+        .await
+        .expect("wiki_search");
+    let search_hits: Vec<WikiSearchHit> =
+        serde_json::from_str(&first_text_hit(&search_res)).expect("wiki_search JSON");
+    assert!(search_hits.iter().any(|h| h.id == "seed-a"));
+
+    let onto_args = serde_json::json!({ "entityId": "tier_fact" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let onto_res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("wiki_get_ontology").with_arguments(onto_args))
+        .await
+        .expect("wiki_get_ontology");
+    let onto: WikiOntologyResult =
+        serde_json::from_str(&first_text_hit(&onto_res)).expect("ontology JSON");
+    assert_eq!(onto.mode, "active");
+
+    let traverse_args = serde_json::json!({
+        "entityId": "tier_fact",
+        "sourceId": "seed-a",
+        "maxDepth": 1,
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let traverse_res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("wiki_traverse_graph").with_arguments(traverse_args))
+        .await
+        .expect("wiki_traverse_graph");
+    let graph: WikiTraverseResult =
+        serde_json::from_str(&first_text_hit(&traverse_res)).expect("traverse JSON");
+    assert!(graph.nodes.iter().any(|n| n.id == "seed-b"));
 
     client.cancel().await.expect("shutdown");
 }
