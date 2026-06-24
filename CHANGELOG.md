@@ -1,3 +1,14 @@
+## [1.7.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.6.0...v1.7.0) (2026-06-24)
+
+### Features
+
+* **mcp:** add wiki graph tools for Active Librarian memory ([448b392](https://github.com/equationalapplications/curated-thoughts/commit/448b392fc07bc684aa343adf1242dda0d2535cd5))
+
+### Bug Fixes
+
+* **mcp:** address CodeRabbit review on wiki graph tools ([55e2cc7](https://github.com/equationalapplications/curated-thoughts/commit/55e2cc700e86fe9ee37ad7784ff1ec4eeb69523a))
+* **mcp:** align wiki_graph scoring and traversal with tieredRead ([7b4195d](https://github.com/equationalapplications/curated-thoughts/commit/7b4195da31411e82a7d40813c16edf4224cd89ea))
+
 ## [1.6.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.5.1...v1.6.0) (2026-05-29)
 
 ### Features
