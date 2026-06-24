@@ -16,6 +16,7 @@ pub mod search;
 mod setup;
 pub mod inference;
 pub mod vault;
+pub mod wiki_graph;
 mod watcher;
 
 use chunker::should_ingest_extension;
