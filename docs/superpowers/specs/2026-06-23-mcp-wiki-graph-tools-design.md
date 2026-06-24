@@ -1,7 +1,7 @@
 # MCP wiki graph tools (wiki_search, wiki_get_ontology, wiki_traverse_graph)
 
 **Date:** 2026-06-23
-**Status:** Proposed
+**Status:** Approved
 **Depends on:** `2026-05-07-mcp-retrieval-facade-design.md` (single-code-path principle, stdio MCP server), `2026-05-23-unified-mcp-binary-spec.md` (one binary, `--mcp` flag)
 
 ## 1. Summary
