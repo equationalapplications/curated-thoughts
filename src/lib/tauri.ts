@@ -218,3 +218,17 @@ export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');
 export const runWikiReembed = (): Promise<number> => invoke('run_wiki_reembed');
 export const forgetWikiSource = (sourcePath: string): Promise<void> =>
   invoke('run_wiki_forget', { sourcePath });
+
+export interface CloudBridgeStatus {
+  configured: boolean;
+  connection_status: "disconnected" | "connecting" | "connected" | "reconnecting";
+}
+
+export const setCloudBridgePairingToken = (token: string): Promise<void> =>
+  invoke("set_cloud_bridge_pairing_token", { token });
+
+export const clearCloudBridgePairingToken = (): Promise<void> =>
+  invoke("clear_cloud_bridge_pairing_token");
+
+export const getCloudBridgeStatus = (): Promise<CloudBridgeStatus> =>
+  invoke("get_cloud_bridge_status");

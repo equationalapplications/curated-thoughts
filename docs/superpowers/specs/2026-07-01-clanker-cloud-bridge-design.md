@@ -1,7 +1,7 @@
 # Clanker Cloud Bridge — Direct Desktop-to-Cloud Vault Retrieval
 
 **Date:** 2026-07-01
-**Status:** Draft
+**Status:** Approved
 **Depends on:** `2026-06-23-mcp-wiki-graph-tools-design.md` (tool contracts reused verbatim), `2026-05-23-unified-mcp-binary-spec.md` (shared `tauri_app_lib`, both binaries), `2026-05-17-prisma-adapter-rust-design.md` (`OutboxWorker` auto-init pattern this design mirrors)
 **External repo referenced (contract only, not designed here):** `clanker` (Cloud Coordinator + MV3 extension)
 
