@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getBrainDir } from "../../lib/tauri";
 import { AgentIntegrationPanel } from "./AgentIntegrationPanel";
+import { CloudBridgePanel } from "./CloudBridgePanel";
 import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
 import { GenerationPanel } from "./GenerationPanel";
@@ -56,6 +57,8 @@ export function SettingsModal({ onClose, vaultPath }: Props) {
         <FolderRulesPanel />
         <hr className="settings-divider" />
         <AgentIntegrationPanel brainDir={brainDir} brainDirError={brainDirError} />
+        <hr className="settings-divider" />
+        <CloudBridgePanel />
         <hr className="settings-divider" />
         <MaintenanceDashboard />
       </div>

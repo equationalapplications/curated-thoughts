@@ -13,6 +13,8 @@ pub mod recall_bench_fixture;
 pub mod retrieval;
 pub mod scifact_fixture;
 pub mod search;
+pub mod tool_dispatch;
+pub mod cloud_bridge;
 mod setup;
 pub mod inference;
 pub mod vault;
@@ -25,6 +27,7 @@ use outbox::{
     postgres::{spawn_postgres_worker, OutboxWorkerHandle},
     OutboxConfig,
 };
+use cloud_bridge::pairing::PairingTokenStore;
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
@@ -75,6 +78,7 @@ struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
 struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
+struct CloudBridgeState(Mutex<Option<cloud_bridge::CloudBridgeHandle>>);
 
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
@@ -121,6 +125,49 @@ fn configured_database_url() -> Option<String> {
     std::env::var("DATABASE_URL")
         .ok()
         .and_then(normalize_database_url)
+}
+
+/// Builds the read-only `ToolDispatchContext` the cloud bridge queries against — its own
+/// connection via `retrieval::open_brain_readonly`, independent of `DbState`, so a slow
+/// embed/query never contends with the GUI's live read/write connection (mirrors how the
+/// `--mcp` binary opens its own connection in `mcp_server::async_run`).
+fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext> {
+    let paths = retrieval::resolve_brain_paths();
+    let profile = retrieval::load_embed_profile(&paths.config_path)?;
+    let conn = retrieval::open_brain_readonly(&paths.db_path)?;
+    let vault_dir = VaultConfig::new(paths.config_path.clone())
+        .get_vault_path()
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+        .and_then(|p| p.canonicalize().ok());
+    Ok(tool_dispatch::ToolDispatchContext {
+        conn: Arc::new(Mutex::new(conn)),
+        profile,
+        vault_dir,
+    })
+}
+
+async fn start_cloud_bridge_if_configured(state: &CloudBridgeState) {
+    let Some(config) = cloud_bridge::CloudBridgeConfig::resolve() else {
+        return;
+    };
+    let Ok(Some(token)) = cloud_bridge::pairing::KeyringPairingTokenStore.get() else {
+        return;
+    };
+    let ctx = match build_cloud_bridge_ctx() {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("[cloud_bridge] failed to build dispatch context: {e}");
+            return;
+        }
+    };
+    let existing = { state.0.lock().unwrap().take() };
+    if let Some(handle) = existing {
+        handle.stop().await;
+    }
+    let handle = cloud_bridge::spawn(config, token, ctx);
+    *state.0.lock().unwrap() = Some(handle);
 }
 
 fn validate_outbox_database_url(database_url: Option<String>) -> Result<String, String> {
@@ -2366,6 +2413,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(OutboxWorkerState(Mutex::new(None)))
+        .manage(CloudBridgeState(Mutex::new(None)))
         .setup({
             let db_path = db_path.clone();
             move |app| {
@@ -2379,6 +2427,12 @@ pub fn run() {
                     let state = app.state::<OutboxWorkerState>();
                     *state.0.lock().unwrap() = Some(handle);
                 }
+
+                let app_handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<CloudBridgeState>();
+                    start_cloud_bridge_if_configured(&state).await;
+                });
 
                 let app_handle = app.app_handle().clone();
                 std::thread::spawn(move || {
@@ -2491,6 +2545,9 @@ pub fn run() {
             start_outbox_worker,
             stop_outbox_worker,
             outbox_is_configured,
+            set_cloud_bridge_pairing_token,
+            clear_cloud_bridge_pairing_token,
+            get_cloud_bridge_status,
             get_binary_path,
             get_brain_dir,
         ])
@@ -2590,6 +2647,66 @@ fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
             None => false,
         })
         .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn set_cloud_bridge_pairing_token(
+    token: String,
+    state: tauri::State<'_, CloudBridgeState>,
+) -> Result<(), String> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("pairing token cannot be empty".to_string());
+    }
+    cloud_bridge::pairing::KeyringPairingTokenStore
+        .set(&token)
+        .map_err(|e| e.to_string())?;
+    start_cloud_bridge_if_configured(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_cloud_bridge_pairing_token(
+    state: tauri::State<'_, CloudBridgeState>,
+) -> Result<(), String> {
+    cloud_bridge::pairing::KeyringPairingTokenStore
+        .delete()
+        .map_err(|e| e.to_string())?;
+    let handle = { state.0.lock().unwrap().take() };
+    if let Some(handle) = handle {
+        handle.stop().await;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct CloudBridgeStatusPayload {
+    configured: bool,
+    connection_status: &'static str,
+}
+
+#[tauri::command]
+fn get_cloud_bridge_status(state: tauri::State<'_, CloudBridgeState>) -> CloudBridgeStatusPayload {
+    let guard = state.0.lock().unwrap();
+    match guard.as_ref() {
+        Some(handle) => CloudBridgeStatusPayload {
+            configured: true,
+            connection_status: match handle.status() {
+                cloud_bridge::ConnectionStatus::Disconnected => "disconnected",
+                cloud_bridge::ConnectionStatus::Connecting => "connecting",
+                cloud_bridge::ConnectionStatus::Connected => "connected",
+                cloud_bridge::ConnectionStatus::Reconnecting => "reconnecting",
+            },
+        },
+        None => CloudBridgeStatusPayload {
+            configured: cloud_bridge::pairing::KeyringPairingTokenStore
+                .get()
+                .ok()
+                .flatten()
+                .is_some(),
+            connection_status: "disconnected",
+        },
+    }
 }
 
 #[cfg(test)]
