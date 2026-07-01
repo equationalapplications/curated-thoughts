@@ -1,3 +1,14 @@
+## [1.8.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.7.0...v1.8.0) (2026-07-01)
+
+### Features
+
+* add Clanker cloud bridge for remote vault tool dispatch ([6a834c7](https://github.com/equationalapplications/curated-thoughts/commit/6a834c712571bd839a03e8f5a72b5bc237db9443))
+
+### Bug Fixes
+
+* address Copilot review feedback on cloud bridge PR ([dcfeffa](https://github.com/equationalapplications/curated-thoughts/commit/dcfeffabf7d66dbac7572cd919996e0b5d154974))
+* address PR [#21](https://github.com/equationalapplications/curated-thoughts/issues/21) review feedback for cloud bridge hardening ([16e0398](https://github.com/equationalapplications/curated-thoughts/commit/16e03985bfaa6db40535ebf9d097911413fce57e))
+
 ## [1.7.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.6.0...v1.7.0) (2026-06-24)
 
 ### Features
