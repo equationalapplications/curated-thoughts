@@ -79,6 +79,7 @@ struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
 struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
 struct CloudBridgeState(Mutex<Option<cloud_bridge::CloudBridgeHandle>>);
+struct CloudBridgeLifecycle(tokio::sync::Mutex<()>);
 
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
@@ -148,7 +149,7 @@ fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext
     })
 }
 
-async fn start_cloud_bridge_if_configured(state: &CloudBridgeState) {
+async fn start_cloud_bridge_if_configured_unlocked(state: &CloudBridgeState) {
     let Some(config) = cloud_bridge::CloudBridgeConfig::resolve() else {
         return;
     };
@@ -168,6 +169,23 @@ async fn start_cloud_bridge_if_configured(state: &CloudBridgeState) {
     }
     let handle = cloud_bridge::spawn(config, token, ctx);
     *state.0.lock().unwrap() = Some(handle);
+}
+
+async fn start_cloud_bridge_if_configured(
+    lifecycle: &CloudBridgeLifecycle,
+    state: &CloudBridgeState,
+) {
+    let _guard = lifecycle.0.lock().await;
+    start_cloud_bridge_if_configured_unlocked(state).await;
+}
+
+fn cloud_bridge_is_pairing_configured() -> bool {
+    let has_token = cloud_bridge::pairing::KeyringPairingTokenStore
+        .get()
+        .ok()
+        .flatten()
+        .is_some();
+    has_token && cloud_bridge::CloudBridgeConfig::resolve().is_some()
 }
 
 fn validate_outbox_database_url(database_url: Option<String>) -> Result<String, String> {
@@ -2414,6 +2432,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(OutboxWorkerState(Mutex::new(None)))
         .manage(CloudBridgeState(Mutex::new(None)))
+        .manage(CloudBridgeLifecycle(tokio::sync::Mutex::new(())))
         .setup({
             let db_path = db_path.clone();
             move |app| {
@@ -2431,7 +2450,8 @@ pub fn run() {
                 let app_handle = app.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<CloudBridgeState>();
-                    start_cloud_bridge_if_configured(&state).await;
+                    let lifecycle = app_handle.state::<CloudBridgeLifecycle>();
+                    start_cloud_bridge_if_configured(&lifecycle, &state).await;
                 });
 
                 let app_handle = app.app_handle().clone();
@@ -2653,22 +2673,26 @@ fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
 async fn set_cloud_bridge_pairing_token(
     token: String,
     state: tauri::State<'_, CloudBridgeState>,
+    lifecycle: tauri::State<'_, CloudBridgeLifecycle>,
 ) -> Result<(), String> {
     let token = token.trim().to_string();
     if token.is_empty() {
         return Err("pairing token cannot be empty".to_string());
     }
+    let _guard = lifecycle.0.lock().await;
     cloud_bridge::pairing::KeyringPairingTokenStore
         .set(&token)
         .map_err(|e| e.to_string())?;
-    start_cloud_bridge_if_configured(&state).await;
+    start_cloud_bridge_if_configured_unlocked(&state).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn clear_cloud_bridge_pairing_token(
     state: tauri::State<'_, CloudBridgeState>,
+    lifecycle: tauri::State<'_, CloudBridgeLifecycle>,
 ) -> Result<(), String> {
+    let _guard = lifecycle.0.lock().await;
     cloud_bridge::pairing::KeyringPairingTokenStore
         .delete()
         .map_err(|e| e.to_string())?;
@@ -2699,11 +2723,7 @@ fn get_cloud_bridge_status(state: tauri::State<'_, CloudBridgeState>) -> CloudBr
             },
         },
         None => CloudBridgeStatusPayload {
-            configured: cloud_bridge::pairing::KeyringPairingTokenStore
-                .get()
-                .ok()
-                .flatten()
-                .is_some(),
+            configured: cloud_bridge_is_pairing_configured(),
             connection_status: "disconnected",
         },
     }

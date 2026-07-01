@@ -17,7 +17,28 @@ pub const DEAD_CONNECTION_TIMEOUT: Duration = Duration::from_secs(45);
 pub const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
 pub const BACKOFF_CAP: Duration = Duration::from_secs(30);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_TICK: Duration = Duration::from_millis(500);
+
+/// Rejects insecure WebSocket URLs before a bearer token is sent on the upgrade request.
+pub fn validate_ws_url(ws_url: &str) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let request = ws_url.into_client_request()?;
+    match request.uri().scheme_str() {
+        Some("wss") => Ok(()),
+        Some("ws") => {
+            let host = request.uri().host().unwrap_or("");
+            if host == "localhost" || host == "127.0.0.1" {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "CURATED_CLANKER_WS_URL must use wss:// (ws:// is only allowed for localhost)"
+                );
+            }
+        }
+        _ => anyhow::bail!("CURATED_CLANKER_WS_URL must use wss://"),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudBridgeConfig {
@@ -32,6 +53,9 @@ impl CloudBridgeConfig {
         let ws_url = std::env::var("CURATED_CLANKER_WS_URL").ok()?;
         let trimmed = ws_url.trim();
         if trimmed.is_empty() {
+            return None;
+        }
+        if validate_ws_url(trimmed).is_err() {
             return None;
         }
         Some(Self {
@@ -80,9 +104,13 @@ async fn interruptible_sleep(duration: Duration, cancel: &Arc<AtomicBool>) {
     }
 }
 
-async fn handle_incoming<T: Transport>(ctx: &Arc<ToolDispatchContext>, transport: &mut T, raw: &str) {
+async fn handle_incoming<T: Transport>(
+    ctx: &Arc<ToolDispatchContext>,
+    transport: &mut T,
+    raw: &str,
+) -> anyhow::Result<()> {
     let Ok(task) = serde_json::from_str::<IncomingTask>(raw) else {
-        return;
+        return Ok(());
     };
     let response = match tokio::time::timeout(
         TOOL_CALL_TIMEOUT,
@@ -103,7 +131,7 @@ async fn handle_incoming<T: Transport>(ctx: &Arc<ToolDispatchContext>, transport
             error: "tool call timed out after 10s".to_string(),
         },
     };
-    let _ = transport.send(response).await;
+    transport.send(response).await
 }
 
 /// One connected session: heartbeats every [`HEARTBEAT_INTERVAL`], dispatches inbound tasks,
@@ -136,7 +164,9 @@ async fn run_session<T: Transport>(
                 match recv_result {
                     Ok(Some(raw)) => {
                         last_activity = tokio::time::Instant::now();
-                        handle_incoming(ctx, &mut transport, &raw).await;
+                        if handle_incoming(ctx, &mut transport, &raw).await.is_err() {
+                            return;
+                        }
                     }
                     Ok(None) | Err(_) => return,
                 }
@@ -196,11 +226,14 @@ pub struct WsTransport {
 impl WsTransport {
     pub async fn connect(ws_url: &str, pairing_token: &str) -> anyhow::Result<Self> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        validate_ws_url(ws_url)?;
         let mut request = ws_url.into_client_request()?;
         request
             .headers_mut()
             .insert("Authorization", format!("Bearer {pairing_token}").parse()?);
-        let (stream, _response) = tokio_tungstenite::connect_async(request).await?;
+        let (stream, _response) =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
+                .await??;
         Ok(Self { stream })
     }
 }
@@ -327,6 +360,13 @@ mod config_tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn resolve_none_for_insecure_ws_url() {
+        with_var("CURATED_CLANKER_WS_URL", Some("ws://evil.example/agent/desktop"), || {
+            assert_eq!(CloudBridgeConfig::resolve(), None);
+        });
     }
 }
 

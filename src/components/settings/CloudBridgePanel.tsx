@@ -22,6 +22,7 @@ export function CloudBridgePanel() {
   async function refreshStatus() {
     try {
       setStatus(await getCloudBridgeStatus());
+      setError(null);
     } catch (err) {
       setError(String(err));
     }
@@ -103,6 +104,7 @@ export function CloudBridgePanel() {
             value={tokenInput}
             onChange={(e) => setTokenInput(e.target.value)}
             placeholder="Paste pairing token"
+            aria-label="Clanker pairing token"
             disabled={busy}
           />
           <button type="button" onClick={handleConnect} disabled={busy || !tokenInput.trim()}>
