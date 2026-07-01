@@ -105,6 +105,8 @@ export function CloudBridgePanel() {
             onChange={(e) => setTokenInput(e.target.value)}
             placeholder="Paste pairing token"
             aria-label="Clanker pairing token"
+            autoComplete="off"
+            spellCheck={false}
             disabled={busy}
           />
           <button type="button" onClick={handleConnect} disabled={busy || !tokenInput.trim()}>

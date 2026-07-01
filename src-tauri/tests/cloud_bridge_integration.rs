@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use tauri_app_lib::cloud_bridge::{self, protocol::OutgoingMessage, Transport};
+use tauri_app_lib::cloud_bridge::{self, protocol::OutgoingMessage, RecvEvent, Transport};
 use tauri_app_lib::embedder::EmbedProfile;
 use tauri_app_lib::tool_dispatch::ToolDispatchContext;
 
@@ -65,7 +65,14 @@ async fn wiki_get_ontology_round_trips_over_a_real_websocket() {
         .expect("client should connect to the mock server");
 
     let ctx = Arc::new(seeded_ctx());
-    let raw = transport.recv().await.unwrap().expect("expected the task frame");
+    let RecvEvent::Text(raw) = transport
+        .recv()
+        .await
+        .unwrap()
+        .expect("expected the task frame")
+    else {
+        panic!("expected a text task frame");
+    };
     let task: cloud_bridge::protocol::IncomingTask = serde_json::from_str(&raw).unwrap();
     assert_eq!(task.task_id, "t1");
     assert_eq!(task.tool, "wiki_get_ontology");
@@ -117,7 +124,9 @@ async fn unknown_tool_produces_a_task_error_frame() {
         .await
         .unwrap();
     let ctx = Arc::new(seeded_ctx());
-    let raw = transport.recv().await.unwrap().unwrap();
+    let RecvEvent::Text(raw) = transport.recv().await.unwrap().unwrap() else {
+        panic!("expected a text task frame");
+    };
     let task: cloud_bridge::protocol::IncomingTask = serde_json::from_str(&raw).unwrap();
 
     let response = match tauri_app_lib::tool_dispatch::dispatch_tool_call(&ctx, &task.tool, task.params).await

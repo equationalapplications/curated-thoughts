@@ -221,14 +221,14 @@ export const forgetWikiSource = (sourcePath: string): Promise<void> =>
 
 export interface CloudBridgeStatus {
   configured: boolean;
-  connection_status: "disconnected" | "connecting" | "connected" | "reconnecting";
+  connection_status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 }
 
 export const setCloudBridgePairingToken = (token: string): Promise<void> =>
-  invoke("set_cloud_bridge_pairing_token", { token });
+  invoke('set_cloud_bridge_pairing_token', { token });
 
 export const clearCloudBridgePairingToken = (): Promise<void> =>
-  invoke("clear_cloud_bridge_pairing_token");
+  invoke('clear_cloud_bridge_pairing_token');
 
 export const getCloudBridgeStatus = (): Promise<CloudBridgeStatus> =>
-  invoke("get_cloud_bridge_status");
+  invoke('get_cloud_bridge_status');
