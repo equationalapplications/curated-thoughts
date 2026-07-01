@@ -197,7 +197,9 @@ pub fn dispatch_wiki_traverse_graph(
     direction: Option<String>,
     edge_types: Option<Vec<String>>,
 ) -> Result<WikiTraverseResult> {
-    let max_depth = max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
+    let max_depth = max_depth
+        .unwrap_or(DEFAULT_MAX_DEPTH)
+        .clamp(1, DEFAULT_MAX_DEPTH);
     let direction = TraverseDirection::parse(direction.as_deref().unwrap_or("both"));
     let edge_types = edge_types.unwrap_or_default();
     let edge_type_refs: Vec<&str> = edge_types.iter().map(|s| s.as_str()).collect();
@@ -232,7 +234,7 @@ pub struct VaultRelatedChunksParams {
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WikiSearchParams {
     pub query: String,
-    #[serde(default, rename = "entityIds")]
+    #[serde(default, rename = "entityIds", alias = "entity_ids")]
     pub entity_ids: Option<Vec<String>>,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -241,22 +243,22 @@ pub struct WikiSearchParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WikiGetOntologyParams {
-    #[serde(rename = "entityId")]
+    #[serde(rename = "entityId", alias = "entity_id")]
     pub entity_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WikiTraverseGraphParams {
-    #[serde(rename = "entityId")]
+    #[serde(rename = "entityId", alias = "entity_id")]
     pub entity_id: String,
-    #[serde(rename = "sourceId")]
+    #[serde(rename = "sourceId", alias = "source_id")]
     pub source_id: String,
-    #[serde(default, rename = "maxDepth")]
+    #[serde(default, rename = "maxDepth", alias = "max_depth")]
     pub max_depth: Option<usize>,
     #[serde(default)]
     pub direction: Option<String>,
-    #[serde(default, rename = "edgeTypes")]
+    #[serde(default, rename = "edgeTypes", alias = "edge_types")]
     pub edge_types: Option<Vec<String>>,
 }
 
