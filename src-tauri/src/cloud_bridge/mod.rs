@@ -72,6 +72,14 @@ pub enum ConnectionStatus {
     Reconnecting,
 }
 
+/// Inbound frame from the transport. `Keepalive` covers WebSocket Ping/Pong so
+/// `run_session` can refresh liveness without treating them as task payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecvEvent {
+    Text(String),
+    Keepalive,
+}
+
 /// Abstracts the WebSocket connection so the state machine is testable without a real socket.
 /// Mirrors `outbox::Sink`.
 pub trait Transport: Send + 'static {
@@ -82,7 +90,7 @@ pub trait Transport: Send + 'static {
     /// `Ok(None)` means the connection closed cleanly.
     fn recv(
         &mut self,
-    ) -> impl std::future::Future<Output = anyhow::Result<Option<String>>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<RecvEvent>>> + Send;
 }
 
 fn set_status(status: &Arc<Mutex<ConnectionStatus>>, value: ConnectionStatus) {
@@ -162,11 +170,14 @@ async fn run_session<T: Transport>(
         tokio::select! {
             recv_result = transport.recv() => {
                 match recv_result {
-                    Ok(Some(raw)) => {
+                    Ok(Some(RecvEvent::Text(raw))) => {
                         last_activity = tokio::time::Instant::now();
                         if handle_incoming(ctx, &mut transport, &raw).await.is_err() {
                             return;
                         }
+                    }
+                    Ok(Some(RecvEvent::Keepalive)) => {
+                        last_activity = tokio::time::Instant::now();
                     }
                     Ok(None) | Err(_) => return,
                 }
@@ -248,12 +259,21 @@ impl Transport for WsTransport {
         Ok(())
     }
 
-    async fn recv(&mut self) -> anyhow::Result<Option<String>> {
-        use futures_util::StreamExt;
+    async fn recv(&mut self) -> anyhow::Result<Option<RecvEvent>> {
+        use futures_util::{SinkExt, StreamExt};
         loop {
             match self.stream.next().await {
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
-                    return Ok(Some(t.to_string()));
+                    return Ok(Some(RecvEvent::Text(t.to_string())));
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(data))) => {
+                    self.stream
+                        .send(tokio_tungstenite::tungstenite::Message::Pong(data))
+                        .await?;
+                    return Ok(Some(RecvEvent::Keepalive));
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
+                    return Ok(Some(RecvEvent::Keepalive));
                 }
                 Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
                     return Ok(None);
@@ -389,8 +409,8 @@ mod session_tests {
                 .send(msg)
                 .map_err(|_| anyhow::anyhow!("outgoing channel closed"))
         }
-        async fn recv(&mut self) -> anyhow::Result<Option<String>> {
-            Ok(self.incoming.recv().await)
+        async fn recv(&mut self) -> anyhow::Result<Option<RecvEvent>> {
+            Ok(self.incoming.recv().await.map(RecvEvent::Text))
         }
     }
 
