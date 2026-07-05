@@ -2568,6 +2568,7 @@ pub fn run() {
             set_cloud_bridge_pairing_token,
             clear_cloud_bridge_pairing_token,
             get_cloud_bridge_status,
+            retry_cloud_bridge_now,
             get_binary_path,
             get_brain_dir,
         ])
@@ -2710,6 +2711,16 @@ struct CloudBridgeStatusPayload {
 }
 
 #[tauri::command]
+fn retry_cloud_bridge_now(state: tauri::State<'_, CloudBridgeState>) -> Result<(), String> {
+    let guard = state.0.lock().unwrap();
+    let Some(handle) = guard.as_ref() else {
+        return Err("cloud bridge is not running".to_string());
+    };
+    handle.retry_now();
+    Ok(())
+}
+
+#[tauri::command]
 fn get_cloud_bridge_status(state: tauri::State<'_, CloudBridgeState>) -> CloudBridgeStatusPayload {
     let guard = state.0.lock().unwrap();
     match guard.as_ref() {
@@ -2718,8 +2729,10 @@ fn get_cloud_bridge_status(state: tauri::State<'_, CloudBridgeState>) -> CloudBr
             connection_status: match handle.status() {
                 cloud_bridge::ConnectionStatus::Disconnected => "disconnected",
                 cloud_bridge::ConnectionStatus::Connecting => "connecting",
+                cloud_bridge::ConnectionStatus::Authenticating => "authenticating",
                 cloud_bridge::ConnectionStatus::Connected => "connected",
                 cloud_bridge::ConnectionStatus::Reconnecting => "reconnecting",
+                cloud_bridge::ConnectionStatus::AuthRejected => "auth_rejected",
             },
         },
         None => CloudBridgeStatusPayload {

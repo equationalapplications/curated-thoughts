@@ -1,7 +1,7 @@
 # Clanker Desktop Bridge — Wire Alignment (Amendment)
 
 **Date:** 2026-07-05
-**Status:** Draft
+**Status:** Implemented
 **Amends:** `2026-07-01-clanker-cloud-bridge-design.md` (Approved — architecture, trust boundary, and tool contracts unchanged; this spec supersedes only its §4 wire details)
 **Fixed external contract:** `clanker/docs/superpowers/specs/2026-07-05-desktop-vault-bridge-design.md` — Clanker's `/agent/desktop` handler spec. Its wire protocol (§5) is treated as authoritative; Curated Thoughts conforms.
 
@@ -51,6 +51,7 @@ wait for {"type":"ready"}                        ← gate; 10s timeout
 
 - `ConnectionStatus` gains two variants: `Authenticating` (auth sent, awaiting `ready`) and `AuthRejected`. `Connected` is only set after `ready` — previously it was set as soon as the socket opened, which overstated reality and would have shown "Connected" during a doomed handshake.
 - Heartbeat pings start only after `ready`. Nothing but the auth frame is sent before it.
+- **Buffered-frame ordering:** the server may send `ready` and the first `task` back-to-back (same TCP segment). The `Authenticating → Connected` transition must happen synchronously inside the same receive loop that dispatches tasks, on the same transport — not as a separate "wait for ready" phase that reads (and could discard) frames before handing the socket to the session loop. A `task` received while still `Authenticating` (i.e. before `ready`) is a protocol violation and is dropped like any unknown frame; a `task` read on the very next loop iteration after `ready` must dispatch normally.
 - The pairing token now transits as a WS text frame instead of an HTTP header. Same TLS channel either way (`validate_ws_url` still enforces `wss://` outside localhost), so no security regression; it also stops the token from being eligible for HTTP-layer header logging on any intermediate.
 
 **Close `4001` (auth rejected).** Clanker sends `4001` for an unknown token hash, a revoked device, *and* a paused device — indistinguishable client-side. A paused device is expected to come back, so CT must not stop retrying permanently; a revoked token never recovers, so CT must not stay on the 30s backoff cap indefinitely either. Resolution: on `4001`, enter `AuthRejected` and retry on a fixed slow interval of **5 minutes**, forever, until a connect succeeds (→ normal lifecycle) or the user deletes the token. Unpausing recovers within 5 minutes with no app restart; a revoked token costs Clanker one cheap rejected handshake per 5 minutes until the user re-pairs or clears the token.
