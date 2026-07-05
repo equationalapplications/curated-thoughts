@@ -55,8 +55,7 @@ pub enum OutgoingMessage {
 
 /// Classify a dispatch error into the CT-side error-code taxonomy (design spec §6).
 pub fn classify_dispatch_error(err: &anyhow::Error) -> TaskErrorCode {
-    let msg = err.to_string();
-    if msg.contains("unknown tool") {
+    if err.downcast_ref::<crate::tool_dispatch::UnknownToolError>().is_some() {
         TaskErrorCode::UnknownTool
     } else if err.downcast_ref::<serde_json::Error>().is_some() {
         TaskErrorCode::BadParams
@@ -152,5 +151,17 @@ mod tests {
     fn ping_serializes_to_type_ping() {
         let json = serde_json::to_value(&OutgoingMessage::Ping).unwrap();
         assert_eq!(json["type"], "ping");
+    }
+
+    #[test]
+    fn classify_unknown_tool_by_type_not_string() {
+        let err: anyhow::Error = crate::tool_dispatch::UnknownToolError("nope".into()).into();
+        assert_eq!(classify_dispatch_error(&err), TaskErrorCode::UnknownTool);
+    }
+
+    #[test]
+    fn classify_bad_params_from_serde_json_error() {
+        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>("not json").unwrap_err().into();
+        assert_eq!(classify_dispatch_error(&err), TaskErrorCode::BadParams);
     }
 }

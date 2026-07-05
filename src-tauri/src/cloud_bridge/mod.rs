@@ -318,7 +318,14 @@ async fn run<T, F>(
                 }
             }
             Err(_) => {
-                set_status(&status, ConnectionStatus::Reconnecting);
+                set_status(
+                    &status,
+                    if auth_rejected {
+                        ConnectionStatus::AuthRejected
+                    } else {
+                        ConnectionStatus::Reconnecting
+                    },
+                );
             }
         }
 
@@ -732,7 +739,8 @@ mod session_tests {
         ));
 
         let _auth = out_rx.recv().await;
-        tokio::time::advance(HEARTBEAT_INTERVAL + Duration::from_secs(1)).await;
+        // Stay within AUTH_READY_TIMEOUT so the session survives until ready is sent.
+        tokio::time::advance(AUTH_READY_TIMEOUT - Duration::from_secs(1)).await;
         assert!(out_rx.try_recv().is_err(), "ping must not fire before ready");
 
         in_tx
