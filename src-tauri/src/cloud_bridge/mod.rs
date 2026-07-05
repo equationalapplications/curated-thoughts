@@ -223,23 +223,29 @@ pub async fn run_session<T: Transport>(
             recv_result = transport.recv() => {
                 match recv_result {
                     Ok(Some(RecvEvent::Text(raw))) => {
-                        last_activity = tokio::time::Instant::now();
                         match serde_json::from_str::<IncomingFrame>(&raw) {
-                            Ok(IncomingFrame::Ready) if !authenticated => {
-                                authenticated = true;
-                                set_status(status, ConnectionStatus::Connected);
-                                next_heartbeat = tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
-                            }
-                            Ok(IncomingFrame::Pong) if authenticated => {}
-                            Ok(IncomingFrame::Task { .. }) if authenticated => {
-                                if let Ok(frame) = serde_json::from_str::<IncomingFrame>(&raw) {
-                                    if handle_incoming(ctx, &mut transport, frame).await.is_err() {
-                                        return SessionEnd::Normal;
+                            Ok(frame) => {
+                                last_activity = tokio::time::Instant::now();
+                                match frame {
+                                    IncomingFrame::Ready if !authenticated => {
+                                        authenticated = true;
+                                        set_status(status, ConnectionStatus::Connected);
+                                        next_heartbeat =
+                                            tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
+                                    }
+                                    IncomingFrame::Pong if authenticated => {}
+                                    IncomingFrame::Task { .. } if authenticated => {
+                                        if handle_incoming(ctx, &mut transport, frame)
+                                            .await
+                                            .is_err()
+                                        {
+                                            return SessionEnd::Normal;
+                                        }
+                                    }
+                                    _ => {
+                                        // task before ready, or unknown variant — drop
                                     }
                                 }
-                            }
-                            Ok(_) => {
-                                // task before ready, or unknown variant — drop
                             }
                             Err(_) => {
                                 // malformed frame — drop
