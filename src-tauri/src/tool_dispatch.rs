@@ -17,6 +17,18 @@ use crate::wiki_graph::{
     DEFAULT_ENTITY_IDS, DEFAULT_MAX_DEPTH,
 };
 
+/// Typed error for unknown tool names so callers can classify without string matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownToolError(pub String);
+
+impl std::fmt::Display for UnknownToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown tool: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownToolError {}
+
 fn normalize_path_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -341,7 +353,7 @@ pub async fn dispatch_tool_call(ctx: &ToolDispatchContext, tool: &str, params: V
             .await??;
             Ok(serde_json::to_value(result)?)
         }
-        other => Err(anyhow::anyhow!("unknown tool: {other}")),
+        other => Err(UnknownToolError(other.to_string()).into()),
     }
 }
 
