@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   clearCloudBridgePairingToken,
   getCloudBridgeStatus,
+  retryCloudBridgeNow,
   setCloudBridgePairingToken,
   type CloudBridgeStatus,
 } from "../../lib/tauri";
@@ -9,8 +10,10 @@ import {
 const STATUS_LABEL: Record<CloudBridgeStatus["connection_status"], string> = {
   disconnected: "Not connected",
   connecting: "Connecting…",
+  authenticating: "Authenticating…",
   connected: "Connected",
   reconnecting: "Reconnecting…",
+  auth_rejected: "Pairing rejected — token revoked or device paused",
 };
 
 export function CloudBridgePanel() {
@@ -86,6 +89,27 @@ export function CloudBridgePanel() {
           ? STATUS_LABEL[status.connection_status]
           : "Not paired with Clanker."}
       </p>
+
+      {status?.connection_status === "auth_rejected" ? (
+        <button
+          type="button"
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await retryCloudBridgeNow();
+              await refreshStatus();
+            } catch (err) {
+              setError(String(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+          disabled={busy}
+        >
+          Retry now
+        </button>
+      ) : null}
 
       {error ? (
         <p className="agent-snippet-error" role="alert" aria-live="assertive">
