@@ -221,7 +221,13 @@ export const forgetWikiSource = (sourcePath: string): Promise<void> =>
 
 export interface CloudBridgeStatus {
   configured: boolean;
-  connection_status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+  connection_status:
+    | 'disconnected'
+    | 'connecting'
+    | 'authenticating'
+    | 'connected'
+    | 'reconnecting'
+    | 'auth_rejected';
 }
 
 export const setCloudBridgePairingToken = (token: string): Promise<void> =>
@@ -232,3 +238,6 @@ export const clearCloudBridgePairingToken = (): Promise<void> =>
 
 export const getCloudBridgeStatus = (): Promise<CloudBridgeStatus> =>
   invoke('get_cloud_bridge_status');
+
+export const retryCloudBridgeNow = (): Promise<void> =>
+  invoke('retry_cloud_bridge_now');
