@@ -1,3 +1,14 @@
+## [1.9.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.8.0...v1.9.0) (2026-07-05)
+
+### Features
+
+* **cloud_bridge:** align desktop bridge with Clanker wire protocol ([ae3f008](https://github.com/equationalapplications/curated-thoughts/commit/ae3f0081a89f6cb6ca8202a0139fff24d734202b))
+
+### Bug Fixes
+
+* **cloud_bridge:** address PR review and flaky no_ping_before_ready test ([fbb6c82](https://github.com/equationalapplications/curated-thoughts/commit/fbb6c82b17e68b2b6a51eba4278f85f0063aadda))
+* **cloud_bridge:** refresh liveness only on well-formed frames ([26a59e6](https://github.com/equationalapplications/curated-thoughts/commit/26a59e69e53e256b75b5560429f6d355dcc419c0))
+
 ## [1.8.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.7.0...v1.8.0) (2026-07-01)
 
 ### Features
