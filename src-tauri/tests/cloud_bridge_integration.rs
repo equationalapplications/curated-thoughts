@@ -35,7 +35,7 @@ fn seeded_ctx() -> ToolDispatchContext {
 }
 
 #[tokio::test]
-async fn wiki_search_round_trips_through_auth_and_typed_envelopes() {
+async fn wiki_get_ontology_round_trips_through_auth_and_typed_envelopes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
