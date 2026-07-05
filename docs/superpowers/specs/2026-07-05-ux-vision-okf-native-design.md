@@ -34,6 +34,8 @@ Meanwhile, the OKF format (entities, facts, tasks, edges, event log) has become 
 
 **Cross-links everywhere.** Any reference to an entity, fact, document, or proposal — in any mode — is clickable and jumps to the owning mode with the target focused. Browser-style back/forward history buttons in the header. This is the antidote to mode-switch context loss.
 
+**Peek views.** A plain click navigates; `Option`+click (or a peek affordance on hover) opens the target in a temporary slide-over panel instead, so a user mid-edit can check a source document or entity without leaving their current mode. Peek panels are read-only and dismiss on `Esc` or click-outside; "Open in [mode]" inside the peek promotes it to full navigation. This matters most in Brain and Review, where following a source link into Library would otherwise destroy editorial flow.
+
 **Status bar:** left = librarian state ("Idle", "Embedding 3 documents…", "Synthesizing…"); center = generation-model and embedder health dots plus the privacy-mode shield glyph; right = vault name and switcher. Clicking any segment opens the Activity feed panel (privacy glyph opens Settings → Privacy).
 
 **Window title:** current mode + focused item name.
@@ -66,6 +68,8 @@ Replaces `ReviewModal` entirely. Three columns:
 
 - **Left — queue list:** proposal cards showing target entity, proposal type (new entity / update facts / new edges), source document names, and age. Oldest-first by default; filters by type and source. `j`/`k` navigate.
 - **Center — proposal editor:** the proposal rendered as *what it will become*. A new entity shows a full entity-page preview, editable before approval. An update to an existing entity shows a **suggestion-style diff** — the current page with additions in green and removals in red, inline — with accept/reject per fact-level change, or direct text editing.
+
+  Diffing must be **word-level (or semantic), not line-level**. LLMs rephrase rather than append: a librarian that subtly rewrites a paragraph to accommodate one new fact would render under a line-level differ as a wall of red followed by a wall of green — unreviewable. The diff library choice in the phase 2 plan must be evaluated against exactly this case (paragraph rewritten, one fact changed), and should fall back to a side-by-side old/new view when the computed diff exceeds a churn threshold (e.g. >70% of the paragraph changed) rather than showing noise.
 - **Right — evidence panel:** the source chunks the librarian used, quoted verbatim, each with document name and line range; click opens Library at the exact spot. A "why this proposal" reasoning summary appears when the librarian recorded one.
 
 **Actions (keyboard-first):** `a` approve, `r` reject, `e` focus editor, `space` next. Approve commits to Brain and advances. Multi-select enables batch approval of low-stakes proposals.
@@ -106,7 +110,7 @@ Replaces `ReviewModal` entirely. Three columns:
 **Tasks mode:**
 
 - OKF tasks are actionable items extracted by the librarian or added by the user ("follow up with X", "verify claim Y").
-- Flat task list with a status filter (open / done / archived). Each task links to its entity and source.
+- Task list with a status filter (open / done / archived), **grouped by parent entity by default** (with a group-by-source-document alternative). A week of meeting notes can produce 50+ extracted tasks; a purely flat list stops being scannable well before that. Grouping keeps it navigable without building kanban. Each task links to its entity and source.
 - Manual creation supported; librarian-proposed tasks arrive through Review like facts do.
 - Deliberately simple in v1: no due-date engine, no kanban, not project management.
 
