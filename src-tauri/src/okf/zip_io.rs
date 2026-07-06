@@ -64,8 +64,8 @@ fn read_bundle_zip(path: &Path) -> Result<Vec<OkfFile>> {
         let name = entry.name().to_string();
         let mut content = String::new();
         let budget = MAX_TOTAL_BYTES.saturating_sub(total) + 1;
-        let read = entry
-            .take(budget)
+        let mut reader = entry.take(budget);
+        let read = reader
             .read_to_string(&mut content)
             .with_context(|| format!("reading {name}"))? as u64;
         total += read;
