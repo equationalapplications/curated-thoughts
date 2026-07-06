@@ -120,13 +120,13 @@ fn seed_wiki_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         ("seed-b", "tier_fact", "MCP seed B", "seed body B", blob),
     )?;
     conn.execute(
-        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type)
-         VALUES ('edge-ab', 'tier_fact', 'seed-a', 'seed-b', 'relates')",
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('edge-ab', 'tier_fact', 'seed-a', 'seed-b', 'relates', 1)",
         [],
     )?;
     conn.execute(
-        "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json)
-         VALUES ('tier_fact', 'active', '{\"node_types\":[\"Fact\"],\"edge_types\":[\"relates\"]}')",
+        "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+         VALUES ('tier_fact', 'active', '{\"node_types\":[\"Fact\"],\"edge_types\":[\"relates\"]}', 1)",
         [],
     )?;
     Ok(())
