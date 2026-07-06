@@ -34,7 +34,7 @@ export function computeChurnRatio(oldText: string, newText: string): number {
   const totalWords = Math.max(countWords(oldText), countWords(newText));
   if (totalWords === 0) return 0;
 
-  return changedWords / totalWords;
+  return Math.min(1, changedWords / totalWords);
 }
 
 export function computeProposalDiff(
