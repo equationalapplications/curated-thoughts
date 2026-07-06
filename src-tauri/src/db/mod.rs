@@ -2,6 +2,7 @@ pub mod connection;
 pub mod ddl_compat;
 pub mod okf_ddl;
 pub mod okf_migration;
+pub mod outbox_format;
 pub mod proposals;
 pub mod queries;
 pub mod schema;
