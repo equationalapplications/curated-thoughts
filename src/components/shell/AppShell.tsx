@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
-import { AppHeader } from "./AppHeader";
-import { Sidebar } from "./Sidebar";
-import { EditorPane } from "./EditorPane";
-import { RelatedNotes } from "./RelatedNotes";
-import { ReviewModal } from "../review/ReviewModal";
-import { SettingsModal } from "../settings/SettingsModal";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ModeRail, AppMode } from "./ModeRail";
+import { StatusBar } from "./StatusBar";
+import { ActivityFeedPanel } from "./ActivityFeedPanel";
+import { BrainMode } from "../modes/BrainMode";
+import { LibraryMode } from "../modes/LibraryMode";
+import { ReviewMode } from "../modes/ReviewMode";
+import {
+  SettingsScreen,
+  type SettingsTab,
+} from "../settings/SettingsScreen";
 import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { useReviewQueue } from "../../hooks/useReviewQueue";
@@ -14,56 +19,31 @@ interface Props {
   onVaultChanged: (newPath: string) => void;
 }
 
-function isAbsolutePath(norm: string): boolean {
-  return norm.startsWith("/") || /^[A-Za-z]:\//.test(norm);
-}
+const MODE_SHORTCUTS: Record<string, AppMode> = {
+  "1": "brain",
+  "2": "review",
+  "3": "library",
+};
 
-/** Strip configured vault root from an absolute path; otherwise null. */
-function vaultRelative(norm: string, vaultRoot: string): string | null {
-  const n = norm.replace(/\\/g, "/");
-  const root = vaultRoot.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (!root) return null;
+const MODE_TITLES: Record<AppMode, string> = {
+  brain: "Brain",
+  review: "Review",
+  library: "Library",
+  settings: "Settings",
+};
 
-  // Windows paths are case-insensitive; Unix paths are case-sensitive.
-  const caseInsensitive = /^[A-Za-z]:\//.test(root);
-  const lhs = n.slice(0, root.length);
-  const rhs = root;
-  const matchesPrefix = caseInsensitive
-    ? lhs.toLowerCase() === rhs.toLowerCase()
-    : lhs === rhs;
-
-  if (n.length >= root.length && matchesPrefix) {
-    if (n.length === root.length) return "";
-    const sep = n[root.length];
-    if (sep === "/" || sep === "\\") {
-      return n.slice(root.length + 1);
-    }
-  }
-  return null;
-}
-
-/**
- * Wiki docs live under the vault's top-level `wiki/` directory only.
- * Avoid `includes("/wiki/")` so `documents/wiki/...` is not treated as wiki.
- */
-function isWikiDocPath(p: string | null | undefined, vaultRoot: string): boolean {
-  if (!p) return false;
-  const norm = p.replace(/\\/g, "/");
-  if (!isAbsolutePath(norm)) {
-    const first = norm.split("/").filter(Boolean)[0];
-    return first === "wiki";
-  }
-  const rel = vaultRelative(norm, vaultRoot);
-  if (rel === null || rel === "") return false;
-  const first = rel.split("/").filter(Boolean)[0];
-  return first === "wiki";
+function docTitleSegment(path: string | null): string | null {
+  if (!path) return null;
+  return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? path;
 }
 
 export function AppShell({ vaultPath, onVaultChanged }: Props) {
-  const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
-  const [showReview, setShowReview] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const isWiki = isWikiDocPath(selectedDoc, vaultPath);
+  const [mode, setMode] = useState<AppMode>("brain");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [brainDoc, setBrainDoc] = useState<string | null>(null);
+  const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const { queue, refresh } = useReviewQueue(vaultPath);
 
   useEffect(() => {
@@ -72,8 +52,9 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
 
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
-      setSelectedDoc(null);
-      setShowSettings(false);
+      setBrainDoc(null);
+      setLibraryDoc(null);
+      setMode("brain");
       onVaultChanged(newPath);
     });
     return () => {
@@ -81,34 +62,130 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
     };
   }, [onVaultChanged]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    getCurrentWindow()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "leave") {
+          setDragging(false);
+          return;
+        }
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragging(true);
+        } else if (payload.type === "drop") {
+          setDragging(false);
+        }
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [vaultPath]);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const target = MODE_SHORTCUTS[e.key];
+      if (target) {
+        e.preventDefault();
+        setMode(target);
+      }
+      if (e.key === "k") {
+        e.preventDefault();
+        // Command palette ships in a later phase.
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const focused =
+      mode === "brain"
+        ? docTitleSegment(brainDoc)
+        : mode === "library"
+          ? docTitleSegment(libraryDoc)
+          : null;
+    const title = focused
+      ? `${MODE_TITLES[mode]} — ${focused}`
+      : MODE_TITLES[mode];
+    getCurrentWindow()
+      .setTitle(`Curated Thoughts — ${title}`)
+      .catch(() => {});
+  }, [mode, brainDoc, libraryDoc]);
+
+  useEffect(() => {
+    if (!activityOpen) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setActivityOpen(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activityOpen]);
+
+  function openPrivacySettings() {
+    setSettingsTab("privacy");
+    setMode("settings");
+  }
+
   return (
     <div className="app-root">
-      <AppHeader onSettingsOpen={() => setShowSettings(true)} />
-      <div className="app-shell">
-        <Sidebar
-          vaultPath={vaultPath}
+      <div className="app-body">
+        <ModeRail
+          mode={mode}
           reviewCount={queue.length}
-          selectedDoc={selectedDoc}
-          onDocSelect={setSelectedDoc}
-          onReviewOpen={() => setShowReview(true)}
-        />
-        <EditorPane selectedDoc={selectedDoc} isWiki={isWiki} />
-        <RelatedNotes selectedDoc={selectedDoc} />
-      </div>
-      {showReview && (
-        <ReviewModal
-          queue={queue}
-          onClose={() => setShowReview(false)}
-          onAction={() => {
-            refresh();
+          onModeChange={(next) => {
+            setSettingsTab(undefined);
+            setMode(next);
           }}
         />
-      )}
-      {showSettings && (
-        <SettingsModal
-          onClose={() => setShowSettings(false)}
-          vaultPath={vaultPath}
-        />
+        <div className="app-main">
+          {mode === "brain" && (
+            <BrainMode
+              vaultPath={vaultPath}
+              selectedDoc={brainDoc}
+              onDocSelect={setBrainDoc}
+            />
+          )}
+          {mode === "review" && (
+            <ReviewMode queue={queue} onAction={refresh} />
+          )}
+          {mode === "library" && (
+            <LibraryMode
+              vaultPath={vaultPath}
+              selectedDoc={libraryDoc}
+              onDocSelect={setLibraryDoc}
+            />
+          )}
+          {mode === "settings" && (
+            <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} />
+          )}
+        </div>
+      </div>
+      <StatusBar
+        vaultPath={vaultPath}
+        onOpenActivity={() => setActivityOpen(true)}
+        onOpenPrivacy={openPrivacySettings}
+      />
+      <ActivityFeedPanel
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
+      />
+      {dragging && (
+        <div className="drop-overlay">
+          <span>Drop to add to Library</span>
+        </div>
       )}
     </div>
   );
