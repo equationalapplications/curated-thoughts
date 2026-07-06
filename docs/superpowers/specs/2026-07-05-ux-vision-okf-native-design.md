@@ -193,7 +193,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 |---|---|
 | Queue via `listProposals` (not legacy `get_review_queue` shim) | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
 | Approve/reject via `resolve_proposal` with per-item decisions | All-accept/all-reject wired in branch; per-item toggles → follow-up slice |
-| Evidence panel chunk quotes + line ranges | Placeholder; Slice 2 |
+| Evidence panel chunk quotes + line ranges | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
 | Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Markdown preview interim; Slice 4 |
 | Per-fact accept/reject toggles in editor | Slice 3 |
 | Inline `edited_payload` editing | Follow-up after per-item toggles |

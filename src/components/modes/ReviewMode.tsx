@@ -260,7 +260,8 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
     return (
       <div className="mode-layout review-screen">
         <div className="review-empty">
-          <h2>Queue clear</h2>
+          <h2>{queueError ? "Queue unavailable" : "Queue clear"}</h2>
+          {queueError && <p className="review-hint">{queueError}</p>}
           <p className="placeholder">
             Librarian watching {indexed} document{indexed === 1 ? "" : "s"}.
           </p>

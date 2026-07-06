@@ -40,5 +40,33 @@ describe("useProposalQueue", () => {
     await waitFor(() =>
       expect(result.current.error).toMatch(/temporarily unavailable/i),
     );
+    expect(result.current.queue).toEqual([]);
+  });
+
+  it("clears stale queue data when a refresh fails", async () => {
+    const proposals = [
+      makeProposalSummary({
+        id: "prop_1",
+        target_name: "Alpha",
+        created_at: 1,
+      }),
+    ];
+    let shouldFail = false;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_proposals_cmd") {
+        return shouldFail
+          ? Promise.reject(new Error("offline"))
+          : Promise.resolve(proposals);
+      }
+      return Promise.resolve(null);
+    });
+
+    const { result } = renderHook(() => useProposalQueue("/vault"));
+    await waitFor(() => expect(result.current.queue).toEqual(proposals));
+
+    shouldFail = true;
+    result.current.refresh();
+    await waitFor(() => expect(result.current.queue).toEqual([]));
+    expect(result.current.error).toMatch(/temporarily unavailable/i);
   });
 });
