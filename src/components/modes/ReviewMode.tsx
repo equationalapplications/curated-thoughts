@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getProposalDetail,
   resolveProposal,
+  type CommitResult,
   type ProposalDetail,
   type ProposalSummary,
 } from "../../lib/tauri";
@@ -22,13 +23,31 @@ interface Props {
   queue: ProposalSummary[];
   onAction: () => void;
   vaultPath: string;
+  queueError?: string | null;
 }
 
-export function ReviewMode({ queue, onAction, vaultPath }: Props) {
+function summarizeCommitResult(result: CommitResult): string | null {
+  const issues: string[] = [];
+  if (result.proposal_status === "partial") {
+    issues.push("Applied partially");
+  }
+  if (result.conflicts.length > 0) {
+    issues.push(`${result.conflicts.length} conflict${result.conflicts.length === 1 ? "" : "s"}`);
+  }
+  if (result.dropped_edges.length > 0) {
+    issues.push(`${result.dropped_edges.length} dropped edge${result.dropped_edges.length === 1 ? "" : "s"}`);
+  }
+  return issues.length > 0 ? issues.join(" · ") : null;
+}
+
+export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [detail, setDetail] = useState<ProposalDetail | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const detailRequestSeq = useRef(0);
   const editorRef = useRef<HTMLDivElement>(null);
   const { indexed } = useIndexingStatus(vaultPath);
 
@@ -49,9 +68,20 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
   useEffect(() => {
     setDetail(null);
     if (!proposal) return;
+    detailRequestSeq.current += 1;
+    const requestSeq = detailRequestSeq.current;
     getProposalDetail(proposal.id)
-      .then((loaded) => setDetail(loaded))
-      .catch(() => setDetail(null));
+      .then((loaded) => {
+        if (detailRequestSeq.current === requestSeq) {
+          setDetail(loaded);
+        }
+      })
+      .catch(() => {
+        if (detailRequestSeq.current === requestSeq) {
+          setDetail(null);
+          setActionError("Could not load proposal details.");
+        }
+      });
   }, [proposal?.id]);
 
   const handleToggleChecked = useCallback((id: string, checked: boolean) => {
@@ -85,12 +115,12 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
       loadedDetail: ProposalDetail,
       mode: "accept" | "reject",
       rejectReason?: string,
-    ) => {
+    ): Promise<CommitResult> => {
       const decisions =
         mode === "accept"
           ? allAcceptDecisions(loadedDetail)
           : allRejectDecisions(loadedDetail);
-      await resolveProposal(
+      return resolveProposal(
         proposalId,
         decisions,
         mode === "reject" ? rejectReason : undefined,
@@ -101,9 +131,13 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
 
   const handleApprove = useCallback(async () => {
     if (!proposal || !detail || busy) return;
+    setActionError(null);
+    setActionNotice(null);
     setBusy(true);
     try {
-      await commitProposal(proposal.id, detail, "accept");
+      const result = await commitProposal(proposal.id, detail, "accept");
+      const notice = summarizeCommitResult(result);
+      if (notice) setActionNotice(notice);
       const nextId = nextQueueSelectionId(sortedQueue, proposal.id);
       setSelectedId(nextId);
       setCheckedIds((prev) => {
@@ -112,6 +146,8 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
         return next;
       });
       onAction();
+    } catch {
+      setActionError("Could not approve proposal. Please retry.");
     } finally {
       setBusy(false);
     }
@@ -123,11 +159,20 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
     const reason = window.prompt("Reject reason (optional):");
     if (reason === null) return;
 
+    setActionError(null);
+    setActionNotice(null);
     setBusy(true);
     try {
       const trimmed = reason.trim();
       if (trimmed) saveRejectReason(proposal.id, trimmed);
-      await commitProposal(proposal.id, detail, "reject", trimmed || undefined);
+      const result = await commitProposal(
+        proposal.id,
+        detail,
+        "reject",
+        trimmed || undefined,
+      );
+      const notice = summarizeCommitResult(result);
+      if (notice) setActionNotice(notice);
       const nextId = nextQueueSelectionId(sortedQueue, proposal.id);
       setSelectedId(nextId);
       setCheckedIds((prev) => {
@@ -136,6 +181,8 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
         return next;
       });
       onAction();
+    } catch {
+      setActionError("Could not reject proposal. Please retry.");
     } finally {
       setBusy(false);
     }
@@ -143,23 +190,58 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
 
   const handleBatchApprove = useCallback(async () => {
     if (checkedIds.size === 0 || busy) return;
+    setActionError(null);
+    setActionNotice(null);
     setBusy(true);
     try {
       const ids = sortReviewQueue(
         sortedQueue.filter((p) => checkedIds.has(p.id)),
       ).map((p) => p.id);
+      const failedIds = new Set<string>();
+      let approvedCount = 0;
+      let sawPartial = false;
+      let totalConflicts = 0;
+      let totalDroppedEdges = 0;
 
       for (const id of ids) {
-        const loaded = await getProposalDetail(id);
-        if (!loaded) continue;
-        await commitProposal(id, loaded, "accept");
+        try {
+          const loaded = await getProposalDetail(id);
+          if (!loaded) {
+            failedIds.add(id);
+            continue;
+          }
+          const result = await commitProposal(id, loaded, "accept");
+          approvedCount += 1;
+          if (result.proposal_status === "partial") sawPartial = true;
+          totalConflicts += result.conflicts.length;
+          totalDroppedEdges += result.dropped_edges.length;
+        } catch {
+          failedIds.add(id);
+        }
       }
 
-      setCheckedIds(new Set());
+      setCheckedIds(failedIds);
       if (proposal && checkedIds.has(proposal.id)) {
         setSelectedId(nextQueueSelectionId(sortedQueue, proposal.id));
       }
-      onAction();
+      if (approvedCount > 0) {
+        onAction();
+      }
+      const noticeParts: string[] = [];
+      if (approvedCount > 0) {
+        noticeParts.push(`Approved ${approvedCount}`);
+      }
+      if (sawPartial || totalConflicts > 0 || totalDroppedEdges > 0) {
+        if (sawPartial) noticeParts.push("some partial");
+        if (totalConflicts > 0) noticeParts.push(`${totalConflicts} conflict${totalConflicts === 1 ? "" : "s"}`);
+        if (totalDroppedEdges > 0) noticeParts.push(`${totalDroppedEdges} dropped edge${totalDroppedEdges === 1 ? "" : "s"}`);
+      }
+      if (noticeParts.length > 0) {
+        setActionNotice(noticeParts.join(" · "));
+      }
+      if (failedIds.size > 0) {
+        setActionError(`${failedIds.size} proposal${failedIds.size === 1 ? "" : "s"} failed during batch approve.`);
+      }
     } finally {
       setBusy(false);
     }
@@ -201,6 +283,9 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
       <main className="review-detail">
         {proposal && (
           <>
+            {queueError && <p className="review-hint">{queueError}</p>}
+            {actionError && <p className="review-hint">{actionError}</p>}
+            {actionNotice && <p className="review-hint">{actionNotice}</p>}
             <div className="review-meta">
               <strong>{proposal.target_name}</strong>
               <span className="review-kind">
@@ -237,6 +322,7 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
         <ReviewEvidencePanel
           proposal={proposal}
           reasoning={detail?.reasoning}
+          items={detail?.items}
           onSourceClick={() => {
             /* Library navigation deferred until cross-mode routing exists */
           }}

@@ -44,7 +44,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   const [brainDoc, setBrainDoc] = useState<string | null>(null);
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const { queue, refresh } = useProposalQueue(vaultPath);
+  const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
 
   useEffect(() => {
     startFileWatcher().catch(console.error);
@@ -159,7 +159,12 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
             />
           )}
           {mode === "review" && (
-            <ReviewMode queue={queue} onAction={refresh} vaultPath={vaultPath} />
+            <ReviewMode
+              queue={queue}
+              onAction={refresh}
+              vaultPath={vaultPath}
+              queueError={queueError}
+            />
           )}
           {mode === "library" && (
             <LibraryMode

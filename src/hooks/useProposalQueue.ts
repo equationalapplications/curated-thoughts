@@ -5,11 +5,17 @@ const POLL_MS = 5000;
 
 export function useProposalQueue(vaultPath: string) {
   const [queue, setQueue] = useState<ProposalSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     listProposals({ status: "pending" })
-      .then(setQueue)
-      .catch(() => {});
+      .then((next) => {
+        setQueue(next);
+        setError(null);
+      })
+      .catch(() => {
+        setError("Review queue is temporarily unavailable.");
+      });
   }, []);
 
   useEffect(() => {
@@ -18,5 +24,5 @@ export function useProposalQueue(vaultPath: string) {
     return () => clearInterval(id);
   }, [refresh, vaultPath]);
 
-  return { queue, refresh };
+  return { queue, refresh, error };
 }

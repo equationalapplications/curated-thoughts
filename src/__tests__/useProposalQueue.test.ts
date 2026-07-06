@@ -24,8 +24,21 @@ describe("useProposalQueue", () => {
 
     const { result } = renderHook(() => useProposalQueue("/vault"));
     await waitFor(() => expect(result.current.queue).toEqual(proposals));
+    expect(result.current.error).toBeNull();
     expect(invoke).toHaveBeenCalledWith("list_proposals_cmd", {
       filter: { status: "pending" },
     });
+  });
+
+  it("sets an error when list_proposals fails", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_proposals_cmd") return Promise.reject(new Error("offline"));
+      return Promise.resolve(null);
+    });
+
+    const { result } = renderHook(() => useProposalQueue("/vault"));
+    await waitFor(() =>
+      expect(result.current.error).toMatch(/temporarily unavailable/i),
+    );
   });
 });

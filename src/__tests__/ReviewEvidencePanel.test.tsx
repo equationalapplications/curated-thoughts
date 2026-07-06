@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ReviewEvidencePanel } from "../components/review/ReviewEvidencePanel";
+import type { ProposalItem } from "../lib/tauri";
 import { makeProposalSummary } from "./fixtures/proposals";
 
 const PROPOSAL = makeProposalSummary({
@@ -10,9 +11,30 @@ const PROPOSAL = makeProposalSummary({
   source_doc_paths: ["documents/notes.md", "documents/meeting.pdf"],
 });
 
+const EVIDENCE_ITEMS: ProposalItem[] = [
+  {
+    id: "item_1",
+    item_type: "fact_add",
+    target_id: null,
+    payload: { body: "Fact from source." },
+    evidence: [
+      {
+        chunk_id: 1,
+        quote: "Budget increased in Q3 by 10%.",
+        start_line: 12,
+        end_line: 12,
+        doc_path: "documents/notes.md",
+        source_deleted: false,
+      },
+    ],
+    status: "pending",
+    edited_payload: null,
+  },
+];
+
 describe("ReviewEvidencePanel", () => {
   it("renders source doc names from source_doc_paths", () => {
-    render(<ReviewEvidencePanel proposal={PROPOSAL} />);
+    render(<ReviewEvidencePanel proposal={PROPOSAL} items={EVIDENCE_ITEMS} />);
 
     expect(screen.getByRole("button", { name: "notes.md" })).toHaveAttribute(
       "title",
@@ -41,6 +63,14 @@ describe("ReviewEvidencePanel", () => {
     expect(
       screen.getByText(/source chunks not available/i),
     ).toBeInTheDocument();
+  });
+
+  it("renders chunk quotes and line ranges when available", () => {
+    render(<ReviewEvidencePanel proposal={PROPOSAL} items={EVIDENCE_ITEMS} />);
+    expect(
+      screen.getByText(/Budget increased in Q3 by 10%\./i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/notes\.md · L12/i)).toBeInTheDocument();
   });
 
   it('shows "Not recorded" when reasoning is missing', () => {
