@@ -29,7 +29,7 @@ impl Drop for EnvVarGuard {
 }
 
 fn seed_chunks(app: &TestApp, source_path: &str) {
-    let mut conn = app.open_db();
+    let conn = app.open_db();
     conn.execute(
         "INSERT INTO documents (path, hash, tier, status) VALUES (?1, 'hash1', 'user_doc', 'indexed')",
         [source_path],
