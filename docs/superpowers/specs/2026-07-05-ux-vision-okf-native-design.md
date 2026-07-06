@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (structurally implemented, V7 wiring in progress); Phase 3 backend dependency (implemented, v1.10.0)
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec (`2026-07-05-okf-backend-migration-design.md` — implemented).
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
@@ -170,7 +170,7 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 Each phase gets its own implementation plan. Phases 1–2 are shippable immediately on the current data model; phases 4–5 were blocked on the backend spec (phase 3), now implemented in v1.10.0.
 
 1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change. *(Implemented 2026-07-05.)*
-2. **Review editorial desk** — three-column layout, keyboard flows, word-level diff component. *(Structurally implemented 2026-07-05; V7 proposal API wiring in progress — see Phase 2 deferrals.)*
+2. **Review editorial desk** — three-column layout, keyboard flows, word-level diff component, per-item toggles, entity-aware diff. *(Structurally implemented 2026-07-05; V7 proposal API wiring Slice 1 merged PR #25; Slices 3–4 per-item toggles + entity diff implemented 2026-07-06.)*
 
 ### Phase 1 deferrals (shipped with documented gaps)
 
@@ -192,10 +192,10 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Item | Status / target |
 |---|---|
 | Queue via `listProposals` (not legacy `get_review_queue` shim) | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
-| Approve/reject via `resolve_proposal` with per-item decisions | All-accept/all-reject wired in branch; per-item toggles → follow-up slice |
+| Approve/reject via `resolve_proposal` with per-item decisions | Implemented (Slice 3) |
 | Evidence panel chunk quotes + line ranges | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
-| Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Markdown preview interim; Slice 4 |
-| Per-fact accept/reject toggles in editor | Slice 3 |
+| Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Implemented (Slice 4) |
+| Per-fact accept/reject toggles in editor | Implemented (Slice 3) |
 | Inline `edited_payload` editing | Follow-up after per-item toggles |
 | Library deep-link from evidence | Blocked on cross-mode routing (Phase 1 follow-up) |
 
