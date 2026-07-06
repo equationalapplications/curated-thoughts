@@ -13,6 +13,19 @@ if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z
 }
 
 try {
+  function verifyLockVersion(lockfilePath, expectedVersion, label) {
+    const lockContent = fs.readFileSync(lockfilePath, 'utf8');
+    const packageMatch = lockContent.match(/\[\[package\]\]\r?\n\s*name\s*=\s*"curated-thoughts"\r?\n\s*version\s*=\s*"([^"]+)"/);
+
+    if (!packageMatch || packageMatch[1] !== expectedVersion) {
+      const foundVersion = packageMatch ? packageMatch[1] : 'not found';
+      throw new Error(
+        `${label} verification failed: expected version ${expectedVersion}, found ${foundVersion}. ` +
+        `cargo metadata may not have updated the lockfile correctly.`
+      );
+    }
+  }
+
   // Update Cargo.toml
   const cargoPath = path.join(__dirname, '..', 'src-tauri', 'Cargo.toml');
   let cargoContent = fs.readFileSync(cargoPath, 'utf8');
@@ -33,20 +46,17 @@ try {
 
   execSync('cargo metadata --format-version 1', { cwd: cargoDir, stdio: ['ignore', 'ignore', 'inherit'] });
 
-  // Verify Cargo.lock was updated with the new version
-  // Tolerant to CRLF and whitespace variations
-  const cargoLockContent = fs.readFileSync(cargoLockPath, 'utf8');
-  const packageMatch = cargoLockContent.match(/\[\[package\]\]\r?\n\s*name\s*=\s*"curated-thoughts"\r?\n\s*version\s*=\s*"([^"]+)"/);
-
-  if (!packageMatch || packageMatch[1] !== version) {
-    const foundVersion = packageMatch ? packageMatch[1] : 'not found';
-    throw new Error(
-      `Cargo.lock verification failed: expected version ${version}, found ${foundVersion}. ` +
-      `cargo metadata may not have updated the lockfile correctly.`
-    );
-  }
+  // Verify src-tauri/Cargo.lock was updated with the new version.
+  verifyLockVersion(cargoLockPath, version, 'src-tauri/Cargo.lock');
 
   console.log(`Updated and verified Cargo.lock package version to ${version}`);
+
+  // Refresh tools/Cargo.lock to keep path dependency version in sync (without upgrading dependencies).
+  const toolsDir = path.join(__dirname, '..', 'tools');
+  const toolsCargoLockPath = path.join(toolsDir, 'Cargo.lock');
+  execSync('cargo metadata --format-version 1', { cwd: toolsDir, stdio: ['ignore', 'ignore', 'inherit'] });
+  verifyLockVersion(toolsCargoLockPath, version, 'tools/Cargo.lock');
+  console.log(`Updated and verified tools/Cargo.lock package version to ${version}`);
 
   // Update tauri.conf.json
   const tauriConfPath = path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json');
