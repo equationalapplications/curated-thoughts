@@ -1,8 +1,8 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (implemented)
-**Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec.
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (structurally implemented, V7 wiring in progress); Phase 3 backend dependency (implemented, v1.10.0)
+**Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec (`2026-07-05-okf-backend-migration-design.md` — implemented).
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
 ## Problem
@@ -167,10 +167,10 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 
 ## Phasing
 
-Each phase gets its own implementation plan. Phases 1–2 are shippable immediately on the current data model; phases 4–5 are blocked on the backend spec (phase 3).
+Each phase gets its own implementation plan. Phases 1–2 are shippable immediately on the current data model; phases 4–5 were blocked on the backend spec (phase 3), now implemented in v1.10.0.
 
 1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change. *(Implemented 2026-07-05.)*
-2. **Review editorial desk** — the biggest UX win; works on the current model. *(Implemented 2026-07-05.)*
+2. **Review editorial desk** — three-column layout, keyboard flows, word-level diff component. *(Structurally implemented 2026-07-05; V7 proposal API wiring in progress — see Phase 2 deferrals.)*
 
 ### Phase 1 deferrals (shipped with documented gaps)
 
@@ -186,9 +186,22 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Background errors → Activity feed + retry | Phase 5 |
 | Review empty state richness (doc count, last-synthesis time) | Phase 2 |
 | Library protected badge copy ("Source document — read-only") | Phase 4 |
-3. **Backend OKF-native migration spec** — separate brainstorm: schema, librarian synthesis output, event log. *(Not an implementation phase of this spec — a dependency.)*
-4. **Brain mode entity pages** — requires phase 3.
-5. **Timeline + Tasks modes** — requires phase 3.
+
+### Phase 2 deferrals (V7 backend shipped; UI wiring in progress)
+
+| Item | Status / target |
+|---|---|
+| Queue via `listProposals` (not legacy `get_review_queue` shim) | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
+| Approve/reject via `resolve_proposal` with per-item decisions | All-accept/all-reject wired in branch; per-item toggles → follow-up slice |
+| Evidence panel chunk quotes + line ranges | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
+| Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Markdown preview interim; Slice 4 |
+| Per-fact accept/reject toggles in editor | Slice 3 |
+| Inline `edited_payload` editing | Follow-up after per-item toggles |
+| Library deep-link from evidence | Blocked on cross-mode routing (Phase 1 follow-up) |
+
+3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
+4. **Brain mode entity pages** — unblocked; not started.
+5. **Timeline + Tasks modes** — unblocked; not started.
 6. **OKF import/export, privacy modes, Cloud Bridge gating.**
 7. **Onboarding rework + visual polish pass.**
 
