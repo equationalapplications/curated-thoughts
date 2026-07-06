@@ -121,6 +121,7 @@ export interface ReviewPage {
   path: string;
   source_doc_ids: string;
   generated_by: string;
+  reasoning_summary?: string | null;
 }
 
 export const getReviewQueue = (): Promise<ReviewPage[]> =>
