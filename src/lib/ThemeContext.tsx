@@ -33,7 +33,9 @@ function readStored(): ThemePreference {
 
 function resolveTheme(preference: ThemePreference): ResolvedTheme {
   if (preference === "light" || preference === "dark") return preference;
-  if (typeof window === "undefined") return "light";
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return "light";
+  }
   return window.matchMedia("(prefers-color-scheme: dark)").matches
     ? "dark"
     : "light";
