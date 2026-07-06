@@ -1,3 +1,9 @@
+## [1.11.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.11.0...v1.11.1) (2026-07-06)
+
+### Bug Fixes
+
+* **release:** refresh tools lockfile during version bumps ([235ceaf](https://github.com/equationalapplications/curated-thoughts/commit/235ceafb5efd004631b029f1f471785566421b94))
+
 ## [1.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.10.0...v1.11.0) (2026-07-06)
 
 ### Features
