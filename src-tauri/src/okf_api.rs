@@ -25,14 +25,15 @@ pub fn okf_export_bundle_cmd(
     entity_ids: Option<Vec<String>>,
     db_state: State<DbState>,
 ) -> Result<ExportSummary, String> {
-    let guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    let entities =
-        load_export_entities(&guard.0, entity_ids.as_deref()).map_err(|e| e.to_string())?;
+    let entities = {
+        let guard = db_state.0.lock().map_err(|e| e.to_string())?;
+        load_export_entities(&guard.0, entity_ids.as_deref()).map_err(|e| e.to_string())?
+    };
     if entities.is_empty() {
         return Err("Nothing to export: no entities in the brain.".into());
     }
     let count = entities.len();
-    let files = write_bundle(&entities);
+    let files = write_bundle(&entities).map_err(|e| e)?;
     write_bundle_zip(&PathBuf::from(&dest_path), &files).map_err(|e| e.to_string())?;
     Ok(ExportSummary {
         path: dest_path,

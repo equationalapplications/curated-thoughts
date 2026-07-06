@@ -101,52 +101,52 @@ fn parse_index_entry(line: &str) -> Option<crate::okf::types::OkfIndexEntry> {
         return None;
     }
     let rest = &trimmed[3..];
-    let (title, rest) = parse_bracket_link(rest)?;
-    let (path, description) = if let Some(dash_idx) = rest.find(" - ") {
-        let path = rest[..dash_idx].trim();
-        let desc = rest[dash_idx + 3..].trim();
-        (path, Some(unescape_index_title(desc)))
-    } else {
-        (rest.trim(), None)
-    };
+    let (title, path, tail) = parse_bracket_link(rest)?;
+    let description = tail
+        .find(" - ")
+        .map(|dash_idx| unescape_index_title(tail[dash_idx + 3..].trim()));
     Some(crate::okf::types::OkfIndexEntry {
-        title: unescape_index_title(title),
-        path: path.to_string(),
+        title: unescape_index_title(&title),
+        path,
         description,
     })
 }
 
-fn parse_bracket_link(input: &str) -> Option<(&str, &str)> {
-    let mut i = 0;
+fn parse_bracket_link(input: &str) -> Option<(String, String, &str)> {
     let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut title = String::new();
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() {
+            title.push(chars[i + 1]);
             i += 2;
             continue;
         }
         if chars[i] == ']' {
             break;
         }
+        title.push(chars[i]);
         i += 1;
     }
     if i >= chars.len() || chars[i] != ']' {
         return None;
     }
-    let title_end = i;
     i += 1;
     if i >= chars.len() || chars[i] != '(' {
         return None;
     }
     i += 1;
+    let path_start = i;
     while i < chars.len() && chars[i] != ')' {
         i += 1;
     }
     if i >= chars.len() || chars[i] != ')' {
         return None;
     }
-    let open_paren = input.find('(')? + 1;
-    let close_paren = input[open_paren..].find(')')? + open_paren;
-    Some((&input[..title_end], &input[open_paren..close_paren]))
+    let path: String = chars[path_start..i].iter().collect();
+    i += 1;
+    let byte_offset: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
+    Some((title, path, &input[byte_offset..]))
 }
 
 fn unescape_index_title(title: &str) -> String {
@@ -154,4 +154,18 @@ fn unescape_index_title(title: &str) -> String {
         .replace("\\]", "]")
         .replace("\\[", "[")
         .replace("\\\\", "\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_description_and_non_ascii_title() {
+        let line = "* [café](facts/a.md) - short summary";
+        let entry = parse_index_entry(line).expect("entry");
+        assert_eq!(entry.title, "café");
+        assert_eq!(entry.path, "facts/a.md");
+        assert_eq!(entry.description.as_deref(), Some("short summary"));
+    }
 }

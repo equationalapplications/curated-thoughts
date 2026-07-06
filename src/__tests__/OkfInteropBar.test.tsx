@@ -93,6 +93,35 @@ test("import flow: preview counts shown, apply on confirm", async () => {
   expect(onImported).toHaveBeenCalled();
 });
 
+test("import preview refetches when mode changes", async () => {
+  vi.mocked(open).mockResolvedValue("/tmp/incoming.zip");
+  const replacePreview = {
+    ...PREVIEW,
+    entities: [{ ...PREVIEW.entities[0], facts_new: 0, facts_existing: 3 }],
+  };
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: { mode?: string }) => {
+    if (cmd === "okf_import_preview_cmd") {
+      return Promise.resolve(args?.mode === "replace" ? replacePreview : PREVIEW);
+    }
+    return Promise.resolve(null);
+  });
+
+  renderWithTheme(<OkfInteropBar />);
+  fireEvent.click(screen.getByRole("button", { name: /import bundle/i }));
+  expect(await screen.findByText(/3 new facts/i)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("radio", { name: /replace/i }));
+
+  await waitFor(() =>
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("okf_import_preview_cmd", {
+      srcPath: "/tmp/incoming.zip",
+      mode: "replace",
+    }),
+  );
+  expect(await screen.findByText(/0 new facts/i)).toBeInTheDocument();
+  expect(screen.getByText(/3 existing/i)).toBeInTheDocument();
+});
+
 test("import preview cancel discards without applying", async () => {
   vi.mocked(open).mockResolvedValue("/tmp/incoming.zip");
   vi.mocked(invoke).mockResolvedValue(PREVIEW);
