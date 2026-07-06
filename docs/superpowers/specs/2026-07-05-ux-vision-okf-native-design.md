@@ -3,7 +3,7 @@
 **Date:** 2026-07-05
 **Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (implemented)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec.
-**Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design)
+**Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
 ## Problem
 
@@ -203,5 +203,5 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 ## Open Questions Deferred to Follow-up Specs
 
 - Exact OKF-native schema mapping in the Rust backend and migration path for existing vaults (phase 3 spec).
-- Whether Curated Thoughts' OKF bundles need the same id-remap-on-clone semantics as Clanker's import (likely yes — decide in the phase 6 plan, referencing the Clanker import spec's collision-guard findings).
+- Whether Curated Thoughts' OKF bundles need the same id-remap-on-clone semantics as Clanker's import (likely yes — decide in the phase 6 plan, referencing the Clanker import spec's collision-guard findings). *(Resolved: yes — OKF profile v1 §10 makes remap the application's job, and profile-1 bundles carry stable event ids that must be remapped too. See the backend spec's profile-v1 addendum, which also adds a phase 6 summary write-path decision.)*
 - How librarian "reasoning summary" gets captured for the Review evidence panel (depends on librarian pipeline internals — phase 2/3 boundary).
