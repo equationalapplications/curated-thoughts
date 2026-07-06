@@ -3,7 +3,7 @@
 **Date:** 2026-07-05
 **Status:** Approved
 **Branch:** feat
-**Related:** `2026-07-05-ux-vision-okf-native-design.md` (phases 4–5 block on this), `../../../../clanker/docs/superpowers/specs/2026-07-03-okf-export-design.md`, `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md`
+**Related:** `2026-07-05-ux-vision-okf-native-design.md` (phases 4–5 block on this), `../../../../clanker/docs/superpowers/specs/2026-07-03-okf-export-design.md`, `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md`, `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; see the addendum at the bottom)
 
 ## Problem
 
@@ -22,7 +22,7 @@ Other verified load-bearing facts:
 - Approval handler (`approve_wiki_page`, `lib.rs:1970-2018`) writes the markdown file and flips the `wiki_pages` status. The current `ReviewModal` is approve/reject only — the `content` parameter is round-tripped unedited from `get_proposed_content` (confirmed by the UX vision spec's own problem statement).
 - Chunk retrieval routes by `chunks.entity_id` tier (`tier_fact` / `tier_wisdom` / `tier_working::<hash>`, derived in `pipeline/mod.rs:440-476`), not by `documents.status`.
 - The outbox worker (`src-tauri/src/outbox/`) drains the package-written `outbox` table to Postgres. Any Rust-authored `llm_wiki_*` write must produce matching outbox rows or replication and cloud sync silently miss them.
-- Clanker's OKF bundle format is `formatOkfBundle`/`parseOkfBundle` in core-llm-wiki. Known gaps documented in the Clanker specs and inherited here: edges not natively serialized (call-site augmentation), events not idempotent (deduped by `(event_type, summary, UTC-day)`), cross-entity id collision guard forces id-remap on clone.
+- Clanker's OKF bundle format is `formatOkfBundle`/`parseOkfBundle` in core-llm-wiki. Known gaps documented in the Clanker specs and inherited here: edges not natively serialized (call-site augmentation), events not idempotent (deduped by `(event_type, summary, UTC-day)`), cross-entity id collision guard forces id-remap on clone. *(Superseded later the same day — profile v1 fixed the first two at the format level; see the addendum.)*
 
 ## Decisions Made During Brainstorming
 
@@ -241,8 +241,18 @@ Failure mid-conversion: guard key unwritten → next startup re-runs; step 2's d
 
 ## Open Questions Deferred
 
-- Whether Curated Thoughts' OKF bundles need Clanker's id-remap-on-clone semantics (phase 6 plan; almost certainly yes, per the Clanker import spec's collision-guard findings).
-- Canonical cross-repo OKF format doc (separate spec; this spec keeps wire compatibility by construction — same tables, same package, same event granularity).
+- Whether Curated Thoughts' OKF bundles need Clanker's id-remap-on-clone semantics (phase 6 plan; almost certainly yes, per the Clanker import spec's collision-guard findings). *(Resolved — see addendum item 3.)*
+- Canonical cross-repo OKF format doc (separate spec; this spec keeps wire compatibility by construction — same tables, same package, same event granularity). *(Resolved — see addendum item 1.)*
+
+## Addendum: llm-wiki OKF Profile v1 (added 2026-07-05, after approval)
+
+Later the same day, the format this spec interoperates with was standardized as the **llm-wiki OKF profile v1** (`expo-llm-wiki/docs/okf-profile.md`, normative, RFC-2119; design record `expo-llm-wiki/docs/superpowers/specs/2026-07-05-okf-profile-design.md`), implemented in core-llm-wiki **4.18.x** and extended by the summary-persistence spec targeting **4.19.0** (`expo-llm-wiki/docs/superpowers/specs/2026-07-05-okf-summary-persistence-design.md`). Nothing here changes PR-24 scope; these notes bind the **phase 6** (bundle import/export) plan:
+
+1. **The canonical format doc now exists.** Phase 6 implements against the profile doc, not against Clanker's specs or package internals. Profile §9 requires non-TypeScript implementations to vendor **checksummed copies** of the conformance fixtures (`expo-llm-wiki/packages/okf/fixtures/golden-v1/` and `legacy-profile-0/`); the Rust export/import ships with those vendored and drift-checked, same pattern as this spec's DDL guard.
+2. **Two "Verified Current State" gaps are fixed at the format level as of 4.18.x:** `formatOkfBundle` natively emits the `## Related` edge section, `profile: llm-wiki/1` root marker, and per-event `<!-- id: evt_x -->` comments; `parseOkfBundle` strips `## Related` from stored bodies and preserves event ids. The `(event_type, summary, UTC-day)` tuple survives only as the profile-0 **fallback** (profile §7) — phase 6's consumer must be id-first with tuple fallback, mirroring Clanker's adoption spec (`clanker/docs/superpowers/specs/2026-07-05-okf-profile-v1-adoption-design.md`).
+3. **Id-remap-on-clone: yes, needed.** Profile §10 settles the deferred question: remapping is application behavior, and the format guarantees raw ids in frontmatter precisely so importers can remap. Phase 6's "import as new entity" path remaps fact/task ids (and, per the Clanker adoption spec's finding, **event ids too** — profile-1 bundles carry stable `evt_*` ids that would otherwise collide).
+4. **Summary write-path decision (new, must be made in the phase 6 plan).** core-llm-wiki ≥ 4.19.0's `importDump` persists entity summaries into `llm_wiki_meta` under `entity_summary:{entity_id}` — a table this migration adopts, in a database where the TS `wiki_exec` passthrough still operates. Curated Thoughts' summary home is `curated_entities.summary`. Two homes = silent divergence if any TS-package import path ever runs here. Phase 6 must either (a) implement import natively in Rust writing `curated_entities.summary` and never route bundle import through the TS package (recommended — consistent with this spec's Rust-writes-directly ownership decision), or (b) define an explicit sync between the meta key and `curated_entities.summary`. Splitting reads/writes across both without a rule is the one prohibited outcome.
+5. **Version pin distance.** This spec verified against core-llm-wiki **4.9.0**; profile v1 ships in **4.18.x**/**4.19.0**. The startup compat check and DDL-diff CI guard make the bump deliberate work, as designed — the 4.9→4.19 DDL delta must be reviewed when phase 6 bumps the pin. (The 4.19.0 summary change adds **no DDL** — it reuses the existing `{prefix}meta` table — so it does not by itself trip the guard.)
 
 ## References
 
