@@ -79,6 +79,8 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
     }
 
+    crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
+
     Ok(())
 }
 
