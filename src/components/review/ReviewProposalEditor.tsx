@@ -89,6 +89,7 @@ export function ReviewProposalEditor({
         tabIndex={-1}
       >
         <BlockNoteView editor={editor} editable={false} theme={theme} />
+      </div>
     );
   }
 
