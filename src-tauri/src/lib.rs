@@ -5,6 +5,7 @@ pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
+mod proposals_api;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
 pub mod outbox;
@@ -1932,105 +1933,7 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
     std::fs::read_to_string(&safe).map_err(|e| e.to_string())
 }
 
-// ── Review queue ──────────────────────────────────────────────────────────────
-
-#[derive(serde::Serialize, Clone)]
-pub struct ReviewPage {
-    pub id: i64,
-    pub path: String,
-    pub source_doc_ids: String,
-    pub generated_by: String,
-}
-
-#[tauri::command]
-fn get_review_queue(db_state: State<DbState>) -> Result<Vec<ReviewPage>, String> {
-    let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, path, source_doc_ids, generated_by
-             FROM wiki_pages WHERE status = 'pending_review'
-             ORDER BY id DESC",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut pages = Vec::new();
-    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        pages.push(ReviewPage {
-            id: row.get(0).map_err(|e| e.to_string())?,
-            path: row.get(1).map_err(|e| e.to_string())?,
-            source_doc_ids: row.get(2).map_err(|e| e.to_string())?,
-            generated_by: row.get(3).map_err(|e| e.to_string())?,
-        });
-    }
-    Ok(pages)
-}
-
-#[tauri::command]
-fn approve_wiki_page(
-    id: i64,
-    content: String,
-    db_state: State<DbState>,
-    vault_state: State<VaultConfigState>,
-) -> Result<(), String> {
-    let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let page_path: String = conn
-        .query_row("SELECT path FROM wiki_pages WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
-        .map_err(|e| e.to_string())?;
-
-    let vault_path = vault_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no vault configured".to_string())?;
-    let vault_root = std::path::PathBuf::from(&vault_path);
-    std::fs::create_dir_all(vault_root.join("wiki")).map_err(|e| e.to_string())?;
-
-    // Reject absolute paths before normalization
-    if std::path::Path::new(&page_path).is_absolute() {
-        return Err("absolute paths not allowed".to_string());
-    }
-
-    // Normalize separators and ensure a wiki/ prefix for backward compatibility.
-    let normalized_path = normalize_wiki_relative_path(&page_path);
-
-    let safe = crate::vault::safe_vault_path(
-        &vault_root,
-        &normalized_path,
-        &["wiki"],
-        crate::vault::PathMode::MayCreate,
-    )
-    .map_err(|e| e.to_string())?;
-
-    crate::vault::safe_path::safe_write_bytes(&safe, content.as_bytes())
-        .map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE wiki_pages SET status = 'approved', last_synced = unixepoch() WHERE id = ?1",
-        [id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-fn reject_wiki_page(id: i64, db_state: State<DbState>) -> Result<(), String> {
-    db_state
-        .0
-        .lock()
-        .unwrap()
-        .0
-        .execute(
-            "UPDATE wiki_pages SET status = 'rejected' WHERE id = ?1",
-            [id],
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
+// ── Review queue (see proposals_api.rs) ───────────────────────────────────────
 
 // ── Folder rules ──────────────────────────────────────────────────────────────
 
@@ -2095,63 +1998,6 @@ fn delete_folder_rule(id: i64, db_state: State<DbState>) -> Result<(), String> {
         .execute("DELETE FROM folder_rules WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-#[tauri::command]
-fn get_proposed_content(
-    page_id: i64,
-    db_state: State<DbState>,
-    vault_state: State<VaultConfigState>,
-) -> Result<String, String> {
-    let page_path: String = {
-        let guard = db_state.0.lock().unwrap();
-        guard
-            .0
-            .query_row(
-                "SELECT path FROM wiki_pages WHERE id = ?1",
-                [page_id],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?
-    };
-    let vault = vault_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no vault set".to_string())?;
-    let vault_root = std::path::PathBuf::from(&vault);
-    std::fs::create_dir_all(vault_root.join(".brain").join("proposed"))
-        .map_err(|e| e.to_string())?;
-
-    if std::path::Path::new(&page_path).is_absolute() {
-        return Err("absolute paths not allowed".to_string());
-    }
-
-    let page_rel = page_path.replace('\\', "/");
-    let safe = crate::vault::safe_vault_path(
-        &vault_root,
-        &format!(".brain/proposed/{}", page_rel),
-        &[".brain/proposed"],
-        crate::vault::PathMode::MustExist,
-    );
-
-    let placeholder = || {
-        format!(
-            "# {}\n\n*Proposed wiki page — content not available.*",
-            page_rel
-        )
-    };
-    match safe {
-        Ok(p) => match std::fs::read_to_string(&p) {
-            Ok(content) => Ok(content),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(placeholder()),
-            Err(e) => Err(e.to_string()),
-        },
-        Err(crate::vault::SafePathError::NotFound(_)) => Ok(placeholder()),
-        Err(e) => Err(e.to_string()),
-    }
 }
 
 #[tauri::command]
@@ -2337,10 +2183,13 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_vault_path,
             set_vault_path,
             get_workspace_id,
-            get_review_queue,
-            approve_wiki_page,
-            reject_wiki_page,
-            get_proposed_content,
+            proposals_api::get_review_queue,
+            proposals_api::approve_wiki_page,
+            proposals_api::reject_wiki_page,
+            proposals_api::get_proposed_content,
+            proposals_api::list_proposals_cmd,
+            proposals_api::get_proposal_detail_cmd,
+            proposals_api::resolve_proposal_cmd,
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
@@ -2545,13 +2394,16 @@ pub fn run() {
             get_related_chunks,
             list_vault_files,
             read_document,
-            get_review_queue,
-            approve_wiki_page,
-            reject_wiki_page,
+            proposals_api::get_review_queue,
+            proposals_api::approve_wiki_page,
+            proposals_api::reject_wiki_page,
+            proposals_api::get_proposed_content,
+            proposals_api::list_proposals_cmd,
+            proposals_api::get_proposal_detail_cmd,
+            proposals_api::resolve_proposal_cmd,
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
-            get_proposed_content,
             save_wiki_page,
             delete_vault_file,
             run_wiki_heal,
