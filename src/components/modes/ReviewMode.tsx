@@ -222,7 +222,7 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
                 ✗ Reject
               </button>
               <span className="review-shortcuts-hint">
-                a approve · r reject · e edit · j/k navigate · space next
+                a approve · r reject · e focus · j/k navigate · space next
               </span>
             </div>
           </>
