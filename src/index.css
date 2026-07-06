@@ -1174,6 +1174,25 @@ body {
   min-height: 0;
   overflow-y: auto;
 }
+.review-proposal-preview {
+  margin: 0;
+  padding: 12px 16px;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.review-queue-item-kind,
+.review-kind {
+  font-size: 0.75rem;
+  color: var(--on-surface-variant, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.review-queue-item-counts {
+  font-size: 0.8rem;
+  color: var(--on-surface-variant, #666);
+}
 .review-empty {
   flex: 1;
   display: flex;

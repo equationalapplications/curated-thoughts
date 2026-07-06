@@ -1,25 +1,21 @@
-import { ReviewPage } from "../../lib/tauri";
-
-function parseSourceDocIds(json: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(json || "[]");
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
-  }
-}
+import type { ProposalSummary } from "../../lib/tauri";
 
 function sourceDocLabel(path: string): string {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? path;
 }
 
 interface Props {
-  page: ReviewPage;
+  proposal: ProposalSummary;
+  reasoning?: string | null;
   onSourceClick?: (path: string) => void;
 }
 
-export function ReviewEvidencePanel({ page, onSourceClick }: Props) {
-  const sources = parseSourceDocIds(page.source_doc_ids);
+export function ReviewEvidencePanel({
+  proposal,
+  reasoning,
+  onSourceClick,
+}: Props) {
+  const sources = proposal.source_doc_paths;
 
   return (
     <aside
@@ -61,10 +57,8 @@ export function ReviewEvidencePanel({ page, onSourceClick }: Props) {
 
       <section className="review-evidence-section">
         <h4 className="review-evidence-label">Why this proposal</h4>
-        {page.reasoning_summary ? (
-          <p className="review-evidence-reasoning">
-            {page.reasoning_summary}
-          </p>
+        {reasoning?.trim() ? (
+          <p className="review-evidence-reasoning">{reasoning}</p>
         ) : (
           <p className="review-evidence-placeholder">Not recorded</p>
         )}
