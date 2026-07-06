@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { screen, fireEvent } from "@testing-library/react";
 
 vi.mock("../components/shell/EditorPane", () => ({
   EditorPane: () => <div data-testid="editor-pane" />,
