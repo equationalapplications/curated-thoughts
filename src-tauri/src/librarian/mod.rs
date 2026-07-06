@@ -1,10 +1,13 @@
-//! Active librarian: after each successful ingest, optionally generates wiki proposals from **current**
+//! Active librarian: after each successful ingest, optionally synthesizes OKF proposals from **current**
 //! chunks in SQLite. If chunking strategy (`ast_*`, prose, …) or embeddings change, rebuild chunks with
 //! **`bulk_reindex`** (CLI) or the **`queue_full_reindex`** Tauri command (`force_rechunk: true`) before
 //! relying on refreshed summaries.
 
-use anyhow::Result;
-use crate::inference::config::{read_config, GenerationProviderKind, LlmConfig};
+mod synthesis;
+
+use anyhow::{Context, Result};
+use crate::db::queries::get_document_by_path;
+use crate::librarian::synthesis::{run_synthesis, SynthesisMode};
 use rusqlite::Connection;
 
 pub struct ChunkRow {
@@ -66,7 +69,7 @@ struct StructuralNeighbor {
     depth: i64,
 }
 
-fn build_structural_context(conn: &Connection, source_chunks: &[ChunkRow]) -> String {
+pub(crate) fn build_structural_context(conn: &Connection, source_chunks: &[ChunkRow]) -> String {
     let source_ids: Vec<i64> = source_chunks.iter().map(|c| c.id).collect();
     if source_ids.is_empty() {
         return String::new();
@@ -182,12 +185,17 @@ fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
     ("summarize".to_string(), false)
 }
 
-pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Result<()> {
+pub fn generate_summary(conn: &mut Connection, source_path: &str, model: &str) -> Result<()> {
     let (mode, auto_approve) = get_folder_mode(conn, source_path);
 
     if mode == "index" {
         return Ok(());
     }
+
+    let synthesis_mode = match mode.as_str() {
+        "synthesize" => SynthesisMode::Synthesize,
+        _ => SynthesisMode::Summarize,
+    };
 
     let chunks: Vec<ChunkRow> = {
         let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
@@ -251,162 +259,46 @@ pub fn generate_summary(conn: &Connection, source_path: &str, model: &str) -> Re
         return Ok(());
     }
 
-    let source_text = assemble_librarian_context(&chunks);
-    // Build structural context section
-    let structural_text = build_structural_context(conn, &chunks);
-    let full_text = if structural_text.is_empty() {
-        source_text
-    } else {
-        format!("{}\n{}", source_text, structural_text)
-    };
-    let byte_limit = full_text
-        .char_indices()
-        .nth(4000)
-        .map(|(i, _)| i)
-        .unwrap_or(full_text.len());
-    let truncated = &full_text[..byte_limit];
+    let trigger_doc_id = get_document_by_path(conn, source_path)?
+        .map(|d| d.id)
+        .context("source document not found after ingest")?;
 
-    let brain_dir_str = crate::get_brain_dir_inner();
-    let brain_path = std::path::Path::new(&brain_dir_str);
-    let llm_config = read_config(brain_path);
-    let (endpoint_url, api_key, model_name) = match &llm_config.generation.provider {
-        GenerationProviderKind::Unconfigured => {
-            return Ok(());
-        }
-        GenerationProviderKind::Sidecar => {
-            let base = std::env::var("OLLAMA_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string());
-            let base = base.trim_end_matches('/');
-            let chosen_model = choose_sidecar_model_name(&llm_config, model);
-            (
-                format!("{}/v1/chat/completions", base),
-                None,
-                chosen_model,
-            )
-        }
-        GenerationProviderKind::External => {
-            let base = llm_config.generation.external_url.clone().unwrap_or_default();
-            let base = base.trim_end_matches('/');
-            let base = base.strip_suffix("/v1").unwrap_or(base);
-            (
-                format!("{}/v1/chat/completions", base),
-                llm_config.generation.api_key.clone(),
-                llm_config
-                    .generation
-                    .model_name
-                    .clone()
-                    .unwrap_or_else(|| model.to_string()),
-            )
-        }
-    };
-
-    let system_prompt = "You are a knowledge librarian. Summarize the document into a concise wiki page in markdown format. Use headings and bullet points, keep under 400 words. Output only markdown.\n\nCONFLICT RESOLUTION DIRECTIVE: If Working Context contradicts Anchor Truth, do not harmonize or modify the Anchor Truth. Instead, create a new Wisdom entry titled 'Architectural Inconsistency' that states: which Working file and symbol introduced the deviation (cite source: metadata), which Anchor Truth document it violates (cite source: metadata), and a one-sentence description of the conflict. Do not emit a Wisdom proposal for any content that is consistent with the Anchor Truth.\n\nCASCADING VIOLATION DIRECTIVE: If a Structural Context chunk reveals that a violation in Working Context propagates to multiple callers, enumerate each caller file and symbol in the Wisdom proposal. Title the proposal 'Cascading Violation' and list each impacted call site under an 'Affected callers' section. Do not emit separate proposals per caller — consolidate into one.";
-
-    let client = reqwest::blocking::Client::new();
-    let mut req = client.post(&endpoint_url).json(&serde_json::json!({
-        "model": model_name,
-        "messages": [
-            { "role": "system", "content": system_prompt },
-            { "role": "user", "content": format!("Document to summarize:\n\n{}", truncated) }
-        ],
-        "stream": false,
-    }));
-    if let Some(key) = api_key {
-        req = req.header("Authorization", format!("Bearer {key}"));
-    }
-    let resp = req.send()?;
-    let body: serde_json::Value = resp.json()?;
-    let wiki_content = body["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing content in /v1/chat/completions response"))?
-        .to_string();
-
-    let source_file = std::path::Path::new(source_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("summary.md")
-        .to_string();
-
-    let initial_status = if auto_approve {
-        "approved"
-    } else {
-        "pending_review"
-    };
-    let source_ids = serde_json::json!([source_path]).to_string();
-
-    conn.execute(
-        "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(path) DO UPDATE SET
-           source_doc_ids = ?2,
-           generated_by = ?3,
-           status = ?4,
-           last_synced = unixepoch()",
-        rusqlite::params![source_file, source_ids, model, initial_status],
-    )?;
-
-    let proposed_dir = std::path::Path::new(source_path)
+    let vault_root = std::path::Path::new(source_path)
         .parent()
-        .and_then(|p| p.parent())
-        .map(|vault| vault.join(".brain").join("proposed"));
+        .and_then(|p| p.parent());
 
-    if let Some(dir) = &proposed_dir {
-        std::fs::create_dir_all(dir).ok();
-        std::fs::write(dir.join(&source_file), &wiki_content).ok();
-    }
-
-    if auto_approve {
-        if let Some(vault) = std::path::Path::new(source_path)
-            .parent()
-            .and_then(|p| p.parent())
-        {
-            let wiki_dir = vault.join("wiki");
-            std::fs::create_dir_all(&wiki_dir).ok();
-            std::fs::write(wiki_dir.join(&source_file), &wiki_content).ok();
-        }
-    }
-
-    Ok(())
-}
-
-fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> String {
-    llm_config
-        .generation
-        .model_name
-        .clone()
-        .filter(|name| !name.trim().is_empty())
-        .or_else(|| {
-            llm_config.generation.model_path.as_deref().and_then(|path| {
-                std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.to_string())
-            })
-        })
-        .unwrap_or_else(|| fallback_model.to_string())
+    run_synthesis(
+        conn,
+        source_path,
+        &chunks,
+        trigger_doc_id,
+        model,
+        synthesis_mode,
+        auto_approve,
+        vault_root,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
-    use crate::inference::config::GenerationConfig;
 
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
-        let conn = open_in_memory().unwrap();
-        let result = generate_summary(&conn, "/vault/documents/nonexistent.md", "llama3.2:1b");
+        let mut conn = open_in_memory().unwrap();
+        let result = generate_summary(&mut conn, "/vault/documents/nonexistent.md", "llama3.2:1b");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_index_mode_skips_librarian() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('/vault/documents', 'index', 0)",
             [],
         ).unwrap();
-        let result = generate_summary(&conn, "/vault/documents/note.md", "llama3.2:1b");
+        let result = generate_summary(&mut conn, "/vault/documents/note.md", "llama3.2:1b");
         assert!(result.is_ok());
     }
 
@@ -494,20 +386,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn choose_sidecar_model_name_prefers_configured_filename() {
-        let llm_config = LlmConfig {
-            generation: GenerationConfig {
-                provider: GenerationProviderKind::Sidecar,
-                model_path: Some("models/llama-3.2-3b.gguf".to_string()),
-                model_name: None,
-                external_url: None,
-                api_key: None,
-            },
-            embedding: Default::default(),
-        };
-
-        let chosen = choose_sidecar_model_name(&llm_config, "llama3.2:1b");
-        assert_eq!(chosen, "llama-3.2-3b.gguf");
-    }
 }
