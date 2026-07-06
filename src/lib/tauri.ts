@@ -124,6 +124,92 @@ export interface ReviewPage {
   reasoning_summary?: string | null;
 }
 
+export interface ProposalItemCounts {
+  total: number;
+  facts: number;
+  edges: number;
+  tasks: number;
+  summary_updates: number;
+}
+
+export interface ProposalSummary {
+  id: string;
+  kind: "new_entity" | "update_entity";
+  target_name: string;
+  entity_id?: string | null;
+  source_doc_paths: string[];
+  item_counts: ProposalItemCounts;
+  created_at: number;
+  age_secs: number;
+  model: string;
+}
+
+export interface HydratedEvidenceChunk {
+  chunk_id: number;
+  quote: string;
+  start_line: number;
+  end_line: number;
+  doc_path?: string | null;
+  source_deleted: boolean;
+}
+
+export interface ProposalItem {
+  id: string;
+  item_type: string;
+  target_id?: string | null;
+  payload: Record<string, unknown>;
+  evidence: HydratedEvidenceChunk[];
+  status: string;
+  edited_payload?: Record<string, unknown> | null;
+}
+
+export interface ProposalDetail {
+  id: string;
+  kind: "new_entity" | "update_entity";
+  entity_id?: string | null;
+  proposed_name?: string | null;
+  proposed_type?: string | null;
+  target_name: string;
+  reasoning?: string | null;
+  model: string;
+  status: string;
+  created_at: number;
+  source_doc_paths: string[];
+  items: ProposalItem[];
+}
+
+export interface ItemDecision {
+  item_id: string;
+  decision: "accept" | "reject";
+  edited_payload?: Record<string, unknown> | null;
+}
+
+export interface CommitResult {
+  committed: { item_id: string; table: string; record_id: string }[];
+  conflicts: string[];
+  dropped_edges: string[];
+  proposal_status: string;
+}
+
+export const listProposals = (filter?: { status?: string }): Promise<ProposalSummary[]> =>
+  invoke("list_proposals_cmd", { filter: filter ?? {} });
+
+export const getProposalDetail = (proposalId: string): Promise<ProposalDetail | null> =>
+  invoke("get_proposal_detail_cmd", { proposalId });
+
+export const resolveProposal = (
+  proposalId: string,
+  decisions: ItemDecision[],
+  rejectReason?: string,
+  autoApprove?: boolean,
+): Promise<CommitResult> =>
+  invoke("resolve_proposal_cmd", {
+    proposalId,
+    decisions,
+    rejectReason: rejectReason ?? null,
+    autoApprove: autoApprove ?? false,
+  });
+
 export const getReviewQueue = (): Promise<ReviewPage[]> =>
   invoke("get_review_queue");
 

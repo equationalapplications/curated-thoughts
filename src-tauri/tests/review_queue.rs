@@ -1,171 +1,285 @@
 mod helpers;
 use helpers::TestApp;
 use serde_json::json;
+use tauri_app_lib::db::proposals::{
+    insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalKind,
+    ProposalSourceRole, StoredEvidenceChunk,
+};
 
-fn seed_pending_page(app: &TestApp, filename: &str, content: &str) -> i64 {
-    // Write proposed content to tmp/.brain/proposed/
-    let proposed_dir = app.tmp.path().join(".brain").join("proposed");
-    std::fs::create_dir_all(&proposed_dir).unwrap();
-    std::fs::write(proposed_dir.join(filename), content).unwrap();
-
-    // Seed wiki_pages row with status='pending_review'
+fn seed_pending_proposal(app: &TestApp, proposal_id: &str, target_name: &str, fact_body: &str) -> i64 {
     let conn = app.open_db();
     conn.execute(
-        "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
-         VALUES (?1, '[]', 'test-model', 'pending_review')",
-        [filename],
+        "INSERT INTO documents (path, hash, tier, status) VALUES ('/vault/documents/src.pdf', 'hash1', 'user_doc', 'indexed')",
+        [],
     )
     .unwrap();
-    conn.last_insert_rowid()
+    let doc_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line) VALUES (?1, 'evidence quote', 0, 1, 3)",
+        [doc_id],
+    )
+    .unwrap();
+    let chunk_id = conn.last_insert_rowid();
+
+    insert_proposal(
+        &conn,
+        &NewProposal {
+            id: proposal_id.into(),
+            kind: ProposalKind::NewEntity,
+            entity_id: None,
+            proposed_name: Some(target_name.into()),
+            proposed_type: Some("concept".into()),
+            reasoning: Some("Librarian reasoning for this proposal.".into()),
+            model: "test-model".into(),
+        },
+        &[NewProposalItem {
+            id: format!("{proposal_id}-item"),
+            item_type: "fact_add".into(),
+            target_id: None,
+            payload: serde_json::json!({
+                "body": fact_body,
+                "tags": [],
+                "confidence": "inferred"
+            }),
+            evidence: vec![StoredEvidenceChunk {
+                chunk_id,
+                quote: "evidence quote".into(),
+                start_line: 1,
+                end_line: 3,
+            }],
+        }],
+        &[NewProposalSource {
+            doc_id,
+            role: ProposalSourceRole::Trigger,
+        }],
+    )
+    .unwrap();
+
+    conn.query_row(
+        "SELECT rowid FROM curated_proposals WHERE id = ?1",
+        [proposal_id],
+        |r| r.get(0),
+    )
+    .unwrap()
 }
 
 #[test]
 fn get_review_queue_returns_pending_pages() {
     let app = TestApp::new();
-    seed_pending_page(&app, "note.md", "# Note");
+    seed_pending_proposal(&app, "prop-queue", "note.md", "A fact.");
 
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
     assert_eq!(queue.len(), 1);
     assert_eq!(queue[0]["path"], "note.md");
     assert_eq!(queue[0]["generated_by"], "test-model");
+    assert_eq!(
+        queue[0]["reasoning_summary"],
+        "Librarian reasoning for this proposal."
+    );
 }
 
 #[test]
-fn get_proposed_content_returns_file_contents() {
+fn get_proposed_content_returns_formatted_preview() {
     let app = TestApp::new();
-    let id = seed_pending_page(&app, "doc.md", "# Generated Content");
+    let rowid = seed_pending_proposal(&app, "prop-preview", "doc.md", "Generated Content");
 
-    // set_vault_path needed so get_proposed_content can find the file
-    app.invoke::<()>("set_vault_path", json!({ "path": app.tmp.path() }));
-
-    // get_proposed_content reads from {vault}/.brain/proposed/
-    // Copy to vault's .brain/proposed/ since set_vault_path changed config
-    let vault_proposed = app.tmp.path().join(".brain").join("proposed");
-    std::fs::create_dir_all(&vault_proposed).unwrap();
-    std::fs::write(vault_proposed.join("doc.md"), "# Generated Content").unwrap();
-
-    let content: String = app.invoke("get_proposed_content", json!({ "pageId": id }));
+    let content: String = app.invoke("get_proposed_content", json!({ "pageId": rowid }));
     assert!(
         content.contains("Generated Content"),
-        "expected content, got: {content}"
+        "expected fact body in preview, got: {content}"
     );
+    assert!(content.contains("# doc.md"));
+    assert!(content.contains("Librarian reasoning"));
 }
 
 #[test]
-fn get_proposed_content_normalizes_backslash_in_db_path() {
+fn get_proposed_content_resolves_by_rowid_not_wiki_path() {
     let app = TestApp::new();
-    app.invoke::<()>("set_vault_path", json!({ "path": app.tmp.path() }));
+    let rowid = seed_pending_proposal(&app, "prop-nested", "nested/win", "From nested");
 
-    let proposed_dir = app.tmp.path().join(".brain").join("proposed");
-    std::fs::create_dir_all(proposed_dir.join("nested")).unwrap();
-    std::fs::write(proposed_dir.join("nested").join("win.md"), "# From nested").unwrap();
-
-    let conn = app.open_db();
-    conn.execute(
-        "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
-         VALUES (?1, '[]', 'test-model', 'pending_review')",
-        ["nested\\win.md"],
-    )
-    .unwrap();
-    let id = conn.last_insert_rowid();
-
-    let content: String = app.invoke("get_proposed_content", json!({ "pageId": id }));
+    let content: String = app.invoke("get_proposed_content", json!({ "pageId": rowid }));
     assert!(
         content.contains("From nested"),
-        "expected file via normalized path, got: {content}"
+        "expected preview via rowid lookup, got: {content}"
     );
 }
 
 #[test]
-fn approve_wiki_page_writes_file_and_marks_approved() {
+fn approve_wiki_page_commits_proposal_and_clears_queue() {
     let app = TestApp::new();
-    let vault = app.tmp.path().join("vault");
-    std::fs::create_dir_all(&vault).unwrap();
-    app.invoke::<()>("set_vault_path", json!({ "path": vault }));
-
-    let id = seed_pending_page(&app, "page.md", "# Wiki");
-    let content = "# Approved Wiki Page\n\nContent.";
+    let rowid = seed_pending_proposal(&app, "prop-approve", "page.md", "Approved fact body.");
+    let content = "# Ignored markdown\n\nShim ignores content param.";
 
     app.invoke::<()>(
         "approve_wiki_page",
         json!({
-            "id": id,
+            "id": rowid,
             "content": content
         }),
     );
 
-    // File written to vault/wiki/
-    let wiki_file = vault.join("wiki").join("page.md");
-    assert!(wiki_file.exists(), "wiki file not written");
-    assert_eq!(std::fs::read_to_string(&wiki_file).unwrap(), content);
-
-    // Status updated; no longer in queue
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
-    assert!(queue.is_empty(), "page still in queue after approve");
+    assert!(queue.is_empty(), "proposal still in queue after approve");
 
     let conn = app.open_db();
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(status, "approved");
+
+    let fact_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fact_count, 1);
+
+    let body: String = conn
+        .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(body, "Approved fact body.");
 }
 
 #[test]
-fn approve_wiki_page_accepts_backslash_wiki_path() {
+fn approve_wiki_page_ignores_content_parameter() {
     let app = TestApp::new();
-    let vault = app.tmp.path().join("vault");
-    std::fs::create_dir_all(&vault).unwrap();
-    app.invoke::<()>("set_vault_path", json!({ "path": vault }));
-
-    // Simulate a DB row whose path uses backslash separators (possible on Windows).
-    // After normalization: "wiki/bs-approved.md" — must not double-prefix.
-    let id = seed_pending_page(&app, "wiki\\bs-approved.md", "# Wiki");
-    let content = "# Approved";
+    let rowid = seed_pending_proposal(&app, "prop-ignore", "wiki/bs-approved.md", "Stored fact.");
 
     app.invoke::<()>(
         "approve_wiki_page",
         json!({
-            "id": id,
-            "content": content
+            "id": rowid,
+            "content": "# Different content that must be ignored"
         }),
     );
 
-    let wiki_file = vault.join("wiki").join("bs-approved.md");
-    assert!(
-        wiki_file.exists(),
-        "wiki file not written at normalized path"
-    );
-    assert_eq!(std::fs::read_to_string(&wiki_file).unwrap(), content);
+    let conn = app.open_db();
+    let body: String = conn
+        .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(body, "Stored fact.");
 }
 
 #[test]
-fn reject_wiki_page_does_not_write_file_and_marks_rejected() {
+fn reject_wiki_page_marks_proposal_rejected() {
     let app = TestApp::new();
-    let vault = app.tmp.path().join("vault");
-    std::fs::create_dir_all(vault.join("wiki")).unwrap();
-    app.invoke::<()>("set_vault_path", json!({ "path": vault }));
+    let rowid = seed_pending_proposal(&app, "prop-reject", "reject.md", "Draft fact");
 
-    let id = seed_pending_page(&app, "reject.md", "# Draft");
+    app.invoke::<()>("reject_wiki_page", json!({ "id": rowid }));
 
-    app.invoke::<()>("reject_wiki_page", json!({ "id": id }));
-
-    // No file written
-    assert!(
-        !vault.join("wiki").join("reject.md").exists(),
-        "file should not exist after reject"
-    );
-
-    // No longer in queue
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
-    assert!(queue.is_empty(), "page still in queue after reject");
+    assert!(queue.is_empty(), "proposal still in queue after reject");
 
     let conn = app.open_db();
     let status: String = conn
-        .query_row("SELECT status FROM wiki_pages WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT status FROM curated_proposals WHERE id = 'prop-reject'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(status, "rejected");
+
+    let fact_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fact_count, 0);
+}
+
+#[test]
+fn list_proposals_cmd_returns_pending_summaries() {
+    let app = TestApp::new();
+    seed_pending_proposal(&app, "prop-list", "Listed Entity", "Fact.");
+
+    let list: Vec<serde_json::Value> = app.invoke("list_proposals_cmd", json!({}));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["target_name"], "Listed Entity");
+    assert_eq!(list[0]["item_counts"]["facts"], 1);
+}
+
+#[test]
+fn resolve_proposal_cmd_partial_approval() {
+    let app = TestApp::new();
+    let conn = app.open_db();
+    conn.execute(
+        "INSERT INTO documents (path, hash, tier, status) VALUES ('/vault/documents/a.pdf', 'h', 'user_doc', 'indexed')",
+        [],
+    )
+    .unwrap();
+    let doc_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, 'x', 0)",
+        [doc_id],
+    )
+    .unwrap();
+    let chunk_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent-1', 'Existing', 'concept', 'Sum', 100, 100)",
+        [],
+    )
+    .unwrap();
+
+    insert_proposal(
+        &conn,
+        &NewProposal {
+            id: "prop-partial".into(),
+            kind: ProposalKind::UpdateEntity,
+            entity_id: Some("ent-1".into()),
+            proposed_name: None,
+            proposed_type: None,
+            reasoning: None,
+            model: "test".into(),
+        },
+        &[
+            NewProposalItem {
+                id: "item-a".into(),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({ "body": "Keep", "tags": [], "confidence": "inferred" }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id,
+                    quote: "x".into(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+            },
+            NewProposalItem {
+                id: "item-b".into(),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({ "body": "Drop", "tags": [], "confidence": "inferred" }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id,
+                    quote: "x".into(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+            },
+        ],
+        &[NewProposalSource {
+            doc_id,
+            role: ProposalSourceRole::Trigger,
+        }],
+    )
+    .unwrap();
+
+    let result: serde_json::Value = app.invoke(
+        "resolve_proposal_cmd",
+        json!({
+            "proposalId": "prop-partial",
+            "decisions": [
+                { "item_id": "item-a", "decision": "accept" },
+                { "item_id": "item-b", "decision": "reject" }
+            ]
+        }),
+    );
+    assert_eq!(result["proposal_status"], "partial");
+
+    let fact_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fact_count, 1);
 }
