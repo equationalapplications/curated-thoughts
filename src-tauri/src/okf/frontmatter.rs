@@ -1,5 +1,4 @@
 use crate::okf::types::{OkfFrontmatter, OkfFrontmatterValue};
-use std::collections::HashSet;
 
 const RESERVED_LITERALS: &[&str] = &["true", "false", "yes", "no", "on", "off", "null", "~", ""];
 
@@ -149,11 +148,20 @@ fn serialize_value(value: &OkfFrontmatterValue) -> String {
 }
 
 pub fn serialize_frontmatter(fm: &OkfFrontmatter) -> String {
-    let mut lines = vec!["---".to_string()];
     let mut keys: Vec<_> = fm.fields.keys().collect();
     keys.sort();
-    for key in keys {
-        let value = &fm.fields[key];
+    let pairs: Vec<(&str, OkfFrontmatterValue)> = keys
+        .into_iter()
+        .map(|k| (k.as_str(), fm.fields[k].clone()))
+        .collect();
+    serialize_frontmatter_pairs(&pairs)
+}
+
+/// Ordered variant: emits keys exactly in the given sequence (profile
+/// producers order fields to match the reference implementation).
+pub fn serialize_frontmatter_pairs(pairs: &[(&str, OkfFrontmatterValue)]) -> String {
+    let mut lines = vec!["---".to_string()];
+    for (key, value) in pairs {
         match value {
             OkfFrontmatterValue::StringList(items) if items.is_empty() => {
                 lines.push(format!("{}: []", serialize_key(key)));
@@ -398,6 +406,26 @@ mod tests {
         assert_eq!(parsed.get_str("title"), Some("Hello: world"));
         assert_eq!(parsed.get_number("created_at"), Some(1719835200000.0));
         assert!(parsed.fields.contains_key("deleted_at"));
-        assert_eq!(parsed.get_string_list("tags"), Some(&["demo".as_ref()][..]));
+        assert_eq!(
+            parsed.get_string_list("tags").map(|tags| tags.to_vec()),
+            Some(vec!["demo".to_string()])
+        );
+    }
+
+    #[test]
+    fn pairs_serializer_preserves_order() {
+        use crate::okf::types::OkfFrontmatterValue as V;
+        let pairs = vec![
+            ("type", V::String("fact".into())),
+            ("title", V::String("Alpha fact".into())),
+            ("tags", V::StringList(vec!["demo".into()])),
+            ("created_at", V::Number(1719835200000.0)),
+            ("resolved_at", V::Null),
+        ];
+        let out = serialize_frontmatter_pairs(&pairs);
+        assert_eq!(
+            out,
+            "---\ntype: fact\ntitle: Alpha fact\ntags:\n  - demo\ncreated_at: 1719835200000\nresolved_at: null\n---\n"
+        );
     }
 }

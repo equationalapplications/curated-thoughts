@@ -389,3 +389,60 @@ export const getCloudBridgeStatus = (): Promise<CloudBridgeStatus> =>
 
 export const retryCloudBridgeNow = (): Promise<void> =>
   invoke('retry_cloud_bridge_now');
+
+export interface OkfExportSummary {
+  path: string;
+  entities: number;
+  files: number;
+}
+
+export interface OkfEntityImportPreview {
+  entity_id: string;
+  name: string;
+  entity_exists: boolean;
+  facts_new: number;
+  facts_existing: number;
+  tasks_new: number;
+  tasks_existing: number;
+  edges_total: number;
+  events_new: number;
+  events_duplicate: number;
+  summary_action: string;
+}
+
+export interface OkfImportPreview {
+  profile: string | null;
+  entities: OkfEntityImportPreview[];
+  warnings: string[];
+}
+
+export interface OkfImportResult {
+  entities_touched: number;
+  facts_added: number;
+  facts_skipped: number;
+  tasks_added: number;
+  tasks_skipped: number;
+  edges_added: number;
+  events_added: number;
+  events_skipped: number;
+}
+
+export type OkfImportMode = "merge" | "replace" | "clone";
+
+export const exportOkfBundle = (
+  destPath: string,
+  entityIds: string[] | null = null,
+): Promise<OkfExportSummary> =>
+  invoke("okf_export_bundle_cmd", { destPath, entityIds });
+
+export const previewOkfImport = (
+  srcPath: string,
+  mode: OkfImportMode,
+): Promise<OkfImportPreview> =>
+  invoke("okf_import_preview_cmd", { srcPath, mode });
+
+export const applyOkfImport = (
+  srcPath: string,
+  mode: OkfImportMode,
+): Promise<OkfImportResult> =>
+  invoke("okf_import_apply_cmd", { srcPath, mode });

@@ -224,7 +224,7 @@ fn source_ref_json(proposal_id: &str, evidence: &[StoredEvidenceChunk]) -> Strin
     .to_string()
 }
 
-fn wiki_fact_outbox_payload(
+pub(crate) fn wiki_fact_outbox_payload(
     id: &str,
     entity_id: &str,
     title: &str,
@@ -255,7 +255,7 @@ fn wiki_fact_outbox_payload(
     })
 }
 
-fn wiki_task_outbox_payload(
+pub(crate) fn wiki_task_outbox_payload(
     id: &str,
     entity_id: &str,
     description: &str,
@@ -277,7 +277,7 @@ fn wiki_task_outbox_payload(
     })
 }
 
-fn push_entries_outbox(
+pub(crate) fn push_entries_outbox(
     conn: &Connection,
     entity_id: &str,
     record_id: &str,
@@ -299,7 +299,7 @@ fn push_entries_outbox(
     Ok(())
 }
 
-fn push_tasks_outbox(
+pub(crate) fn push_tasks_outbox(
     conn: &Connection,
     entity_id: &str,
     record_id: &str,
