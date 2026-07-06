@@ -191,13 +191,14 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 
 | Item | Status / target |
 |---|---|
-| Queue via `listProposals` (not legacy `get_review_queue` shim) | In progress (`feat-phase-2-review-wiring`) |
+| Queue via `listProposals` (not legacy `get_review_queue` shim) | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
 | Approve/reject via `resolve_proposal` with per-item decisions | All-accept/all-reject wired in branch; per-item toggles → follow-up slice |
 | Evidence panel chunk quotes + line ranges | Placeholder; Slice 2 |
 | Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Markdown preview interim; Slice 4 |
 | Per-fact accept/reject toggles in editor | Slice 3 |
 | Inline `edited_payload` editing | Follow-up after per-item toggles |
 | Library deep-link from evidence | Blocked on cross-mode routing (Phase 1 follow-up) |
+
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
 4. **Brain mode entity pages** — unblocked; not started.
 5. **Timeline + Tasks modes** — unblocked; not started.

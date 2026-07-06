@@ -41,12 +41,24 @@ function detailFor(summary: typeof PAGE) {
         item_type: "fact_add",
         target_id: null,
         payload: { body: "Test fact for preview." },
-        evidence: [],
+        evidence: [
+          {
+            chunk_id: 1,
+            quote: "Test fact for preview.",
+            start_line: 1,
+            end_line: 1,
+            source_deleted: false,
+          },
+        ],
         status: "pending",
         edited_payload: null,
       },
     ],
   });
+}
+
+async function waitForProposalPreview() {
+  await screen.findAllByText(/Test fact for preview/i);
 }
 
 function defaultInvoke(cmd: string, args?: Record<string, unknown>) {
@@ -124,21 +136,22 @@ test("renders evidence panel with source documents for selected proposal", async
     within(evidence).getByRole("button", { name: "notes.md" }),
   ).toBeInTheDocument();
   expect(
-    within(evidence).getByText(/source chunks not available/i),
+    within(evidence).getByText(/Test fact for preview/i),
   ).toBeInTheDocument();
+  expect(within(evidence).getByText(/Unknown source · L1/i)).toBeInTheDocument();
   expect(within(evidence).getByText("Not recorded")).toBeInTheDocument();
 });
 
 test("renders queue items and proposal preview", async () => {
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={vi.fn()} vaultPath={VAULT} />);
   expect((await screen.findAllByText("Project X")).length).toBeGreaterThan(0);
-  expect(await screen.findByText(/Test fact for preview/i)).toBeInTheDocument();
+  expect((await screen.findAllByText(/Test fact for preview/i)).length).toBeGreaterThan(0);
 });
 
 test("approve invokes resolve_proposal_cmd and calls onAction", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
-  await screen.findByText(/Test fact for preview/i);
+  await waitForProposalPreview();
   fireEvent.click(screen.getByRole("button", { name: /approve/i }));
   await waitFor(() => expect(onAction).toHaveBeenCalled());
   expect(vi.mocked(invoke)).toHaveBeenCalledWith(
@@ -153,7 +166,7 @@ test("approve invokes resolve_proposal_cmd and calls onAction", async () => {
 test("keyboard a approves the selected proposal", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
-  await screen.findByText(/Test fact for preview/i);
+  await waitForProposalPreview();
   fireEvent.keyDown(window, { key: "a" });
   await waitFor(() => expect(onAction).toHaveBeenCalled());
   expect(vi.mocked(invoke)).toHaveBeenCalledWith(
@@ -166,7 +179,7 @@ test("keyboard r rejects after optional prompt", async () => {
   const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("Too noisy");
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
-  await screen.findByText(/Test fact for preview/i);
+  await waitForProposalPreview();
   fireEvent.keyDown(window, { key: "r" });
   await waitFor(() => expect(onAction).toHaveBeenCalled());
   expect(promptSpy).toHaveBeenCalled();
@@ -185,7 +198,7 @@ test("keyboard r does nothing when prompt is cancelled", async () => {
   const promptSpy = vi.spyOn(window, "prompt").mockReturnValue(null);
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
-  await screen.findByText(/Test fact for preview/i);
+  await waitForProposalPreview();
   fireEvent.keyDown(window, { key: "r" });
   await new Promise((r) => setTimeout(r, 50));
   expect(onAction).not.toHaveBeenCalled();
@@ -250,7 +263,7 @@ test("keyboard e focuses the proposal editor container", async () => {
 test("keyboard shortcuts are ignored inside text inputs", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
-  await screen.findByText(/Test fact for preview/i);
+  await waitForProposalPreview();
   const input = document.createElement("input");
   document.body.appendChild(input);
   input.focus();
@@ -274,7 +287,7 @@ test("approve advances selection to the next queue item", async () => {
   fireEvent.click(
     within(list).getByRole("button", { name: /Older Entity/i }),
   );
-  await screen.findByText(/Test fact for preview/i);
+  await waitForProposalPreview();
   fireEvent.click(screen.getByRole("button", { name: /approve/i }));
   await waitFor(() => expect(onAction).toHaveBeenCalled());
 
@@ -306,12 +319,67 @@ test("batch approve approves all checked queue items", async () => {
   fireEvent.click(screen.getByRole("button", { name: /approve 2 selected/i }));
 
   await waitFor(() => expect(onAction).toHaveBeenCalled());
-  expect(vi.mocked(invoke)).toHaveBeenCalledWith(
-    "resolve_proposal_cmd",
+  const resolveCalls = vi
+    .mocked(invoke)
+    .mock.calls.filter((call) => call[0] === "resolve_proposal_cmd");
+  expect(resolveCalls[0]?.[1]).toEqual(
     expect.objectContaining({ proposalId: "prop_older" }),
   );
-  expect(vi.mocked(invoke)).toHaveBeenCalledWith(
-    "resolve_proposal_cmd",
+  expect(resolveCalls[1]?.[1]).toEqual(
     expect.objectContaining({ proposalId: "prop_newer" }),
   );
+});
+
+test("shows queue fetch errors passed from AppShell", async () => {
+  renderWithTheme(
+    <ReviewMode
+      queue={[PAGE]}
+      onAction={vi.fn()}
+      vaultPath={VAULT}
+      queueError="Review queue is temporarily unavailable."
+    />,
+  );
+  expect(
+    await screen.findByText(/review queue is temporarily unavailable/i),
+  ).toBeInTheDocument();
+});
+
+test("batch approve continues after individual failures", async () => {
+  const onAction = vi.fn();
+  const resolveCalls: string[] = [];
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "resolve_proposal_cmd") {
+      const proposalId = typeof args?.proposalId === "string" ? args.proposalId : "";
+      resolveCalls.push(proposalId);
+      if (proposalId === "prop_older") {
+        return Promise.reject(new Error("boom"));
+      }
+      return Promise.resolve({
+        committed: [],
+        conflicts: [],
+        dropped_edges: [],
+        proposal_status: "approved",
+      });
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  renderWithTheme(
+    <ReviewMode
+      queue={[NEWER, OLDER]}
+      onAction={onAction}
+      vaultPath={VAULT}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("checkbox", { name: /select Older Entity/i }));
+  fireEvent.click(screen.getByRole("checkbox", { name: /select Newer Entity/i }));
+  fireEvent.click(screen.getByRole("button", { name: /approve 2 selected/i }));
+
+  await waitFor(() => expect(onAction).toHaveBeenCalled());
+  expect(resolveCalls).toEqual(["prop_older", "prop_newer"]);
+  expect(screen.getByText(/Approved 1/i)).toBeInTheDocument();
+  expect(
+    screen.getByRole("checkbox", { name: /select Older Entity/i }),
+  ).toBeChecked();
 });
