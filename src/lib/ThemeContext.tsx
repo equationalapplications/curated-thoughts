@@ -57,11 +57,18 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setResolved(resolveTheme(preference));
     if (preference !== "system") return;
+    if (typeof window.matchMedia !== "function") return;
 
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => setResolved(resolveTheme("system"));
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    }
+
+    mq.addListener(onChange);
+    return () => mq.removeListener(onChange);
   }, [preference]);
 
   useEffect(() => {
