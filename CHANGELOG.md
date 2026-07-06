@@ -1,3 +1,13 @@
+## [1.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.11.1...v1.12.0) (2026-07-06)
+
+### Features
+
+* **review:** Phase 2 slices 3–4 — per-item toggles and entity-aware diff ([f60d019](https://github.com/equationalapplications/curated-thoughts/commit/f60d0199c486272d6f685bac310f46d6cbd1010c))
+
+### Bug Fixes
+
+* **review:** address PR review feedback on diff and approvals ([859eb0d](https://github.com/equationalapplications/curated-thoughts/commit/859eb0db5af308fac369d7ea33a3452b97097f98))
+
 ## [1.11.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.11.0...v1.11.1) (2026-07-06)
 
 ### Bug Fixes
