@@ -193,14 +193,11 @@ pub fn run_okf_migration(conn: &Connection, vault_root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
-    use crate::db::okf_ddl::{
-        CURATED_TABLES_DDL, LLM_WIKI_GRAPH_EXTENSION_DDL, LLM_WIKI_PACKAGE_DDL,
-    };
+    use crate::db::okf_ddl::{CURATED_TABLES_DDL, LLM_WIKI_PACKAGE_DDL};
 
     fn open_v7_db() -> Connection {
         let conn = open_in_memory().unwrap();
         conn.execute_batch(LLM_WIKI_PACKAGE_DDL).unwrap();
-        conn.execute_batch(LLM_WIKI_GRAPH_EXTENSION_DDL).unwrap();
         conn.execute_batch(CURATED_TABLES_DDL).unwrap();
         conn
     }

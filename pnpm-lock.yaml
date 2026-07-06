@@ -18,11 +18,11 @@ importers:
         specifier: ^0.50.0
         version: 0.50.0(@floating-ui/dom@1.7.6)(@types/hast@3.0.4)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@equationalapplications/core-llm-wiki':
-        specifier: ^4.9.0
-        version: 4.9.0
+        specifier: ^4.19.0
+        version: 4.19.0
       '@equationalapplications/react-llm-wiki':
-        specifier: ^4.9.0
-        version: 4.9.0(react@19.2.6)
+        specifier: ^4.19.0
+        version: 4.19.0(react@19.2.6)
       '@mantine/core':
         specifier: ^9.1.1
         version: 9.1.1(@mantine/hooks@9.1.1(react@19.2.6))(@types/react@19.2.14)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -253,12 +253,16 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@4.9.0':
-    resolution: {integrity: sha512-hlNXH4wEkG0k1EHdCZc8SVqF6AOYYjixBDAYKviKvWjeUw59X46ww8cePnfTD/BYJYRvSc4x72274igL5YhCXg==}
+  '@equationalapplications/core-llm-wiki@4.19.0':
+    resolution: {integrity: sha512-xTUs7pz/13jcx6f6pxjx4E9tD0ctUAJVZMub90sCrS8z8sdgHIvjSnpZ/p5XZ1GAaNoqoHjPiSUATYQYC6ZCgw==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@4.9.0':
-    resolution: {integrity: sha512-IZzzO9oaJo7zQ62kroLAENrC99I5hBJFTi4njVE1iJpzjBzv4hC0DkO/InKnQrZfcWDowDA0G+dY4AMfh4gMSw==}
+  '@equationalapplications/core-okf@4.19.0':
+    resolution: {integrity: sha512-jYqGBgwr6kKtv1wUbNyIvy/QRysN6k/cUtCcxxgzA/PcpmxpfccrdalrtmUqZqSL75nJCzXEsv/7viP3i5QShg==}
+    engines: {node: '>=20'}
+
+  '@equationalapplications/react-llm-wiki@4.19.0':
+    resolution: {integrity: sha512-W7c1qy64oAKWe2M4d48sbPyzZo1FREM3/OOPqvHcruOOp8jD6l3dWVqkNSyZjjcLmSVAD0fSJmVc9c8aUd8+Ow==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
@@ -3858,13 +3862,16 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@4.9.0':
+  '@equationalapplications/core-llm-wiki@4.19.0':
     dependencies:
+      '@equationalapplications/core-okf': 4.19.0
       minisearch: 7.2.0
 
-  '@equationalapplications/react-llm-wiki@4.9.0(react@19.2.6)':
+  '@equationalapplications/core-okf@4.19.0': {}
+
+  '@equationalapplications/react-llm-wiki@4.19.0(react@19.2.6)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 4.9.0
+      '@equationalapplications/core-llm-wiki': 4.19.0
       react: 19.2.6
 
   '@eslint-community/eslint-utils@4.9.1(eslint@9.39.4)':

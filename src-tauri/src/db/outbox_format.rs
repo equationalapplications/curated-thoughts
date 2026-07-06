@@ -1,4 +1,4 @@
-//! CDC outbox row format matching core-llm-wiki@4.9.0 `OutboxRepository.push`.
+//! CDC outbox row format matching core-llm-wiki@4.19.0 `OutboxRepository.push`.
 //!
 //! Rust-authored `llm_wiki_*` writes must stage rows in `llm_wiki_outbox` with the same
 //! column values and payload JSON shapes as the TypeScript package, or Postgres replication
@@ -88,7 +88,7 @@ pub fn push_outbox_row(
     Ok(id)
 }
 
-/// Golden-fixture payloads captured from core-llm-wiki@4.9.0 repository outbox pushes.
+/// Golden-fixture payloads captured from core-llm-wiki@4.19.0 repository outbox pushes.
 pub mod fixtures {
     use super::OutboxOperation;
     use super::OutboxPushParams;
