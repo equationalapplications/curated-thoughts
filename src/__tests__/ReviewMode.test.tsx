@@ -136,7 +136,7 @@ test("renders evidence panel with source documents for selected proposal", async
     within(evidence).getByRole("button", { name: "notes.md" }),
   ).toBeInTheDocument();
   expect(
-    within(evidence).getByText(/Test fact for preview/i),
+    await within(evidence).findByText(/Test fact for preview/i),
   ).toBeInTheDocument();
   expect(within(evidence).getByText(/Unknown source · L1/i)).toBeInTheDocument();
   expect(within(evidence).getByText("Not recorded")).toBeInTheDocument();
