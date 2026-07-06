@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Approved
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (in progress)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec.
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design)
 
@@ -169,8 +169,23 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 
 Each phase gets its own implementation plan. Phases 1–2 are shippable immediately on the current data model; phases 4–5 are blocked on the backend spec (phase 3).
 
-1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change.
-2. **Review editorial desk** — the biggest UX win; works on the current model.
+1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change. *(Implemented 2026-07-05.)*
+2. **Review editorial desk** — the biggest UX win; works on the current model. *(In progress.)*
+
+### Phase 1 deferrals (shipped with documented gaps)
+
+| Item | Deferred to |
+|---|---|
+| `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Phase 5 (modes not built yet) |
+| Global `⌘K` command palette | Phase 1 follow-up or Phase 7 polish |
+| Cross-mode links, back/forward history, peek panels | Phase 1 follow-up (needed by Phase 2 evidence links) |
+| Activity rail pulse icon | Phase 1 follow-up |
+| Live Activity feed (beyond stub panel) | Phase 5 (Timeline data) |
+| Per-mode empty states (Brain, Library) | Phase 4 / Phase 7 |
+| Embedder/model down → inline feature notice | Phase 1 follow-up |
+| Background errors → Activity feed + retry | Phase 5 |
+| Review empty state richness (doc count, last-synthesis time) | Phase 2 |
+| Library protected badge copy ("Source document — read-only") | Phase 4 |
 3. **Backend OKF-native migration spec** — separate brainstorm: schema, librarian synthesis output, event log. *(Not an implementation phase of this spec — a dependency.)*
 4. **Brain mode entity pages** — requires phase 3.
 5. **Timeline + Tasks modes** — requires phase 3.
