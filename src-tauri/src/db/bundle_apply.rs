@@ -392,11 +392,10 @@ pub fn apply_import(
                 generate_id("evt_"),
                 target_entity_id,
                 format!(
-                    "Imported {} fact(s), {} task(s) from OKF bundle",
+                    "OKF import: bundle contains {} fact(s), {} task(s)",
                     entity.facts.len(),
                     entity.tasks.len()
                 ),
-                now_ms,
             ],
         )?;
         result.entities_touched += 1;
