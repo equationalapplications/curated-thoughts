@@ -202,7 +202,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
 4. **Brain mode entity pages** — unblocked; not started.
 5. **Timeline + Tasks modes** — unblocked; not started.
-6. **OKF import/export, privacy modes, Cloud Bridge gating.**
+6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes and Cloud Bridge gating split to a separate upcoming plan.
 7. **Onboarding rework + visual polish pass.**
 
 ## Non-Goals (this vision, v1)

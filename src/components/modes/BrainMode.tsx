@@ -2,6 +2,7 @@ import { SearchResults } from "../shell/SearchResults";
 import { FolderTree } from "../shell/FolderTree";
 import { EditorPane } from "../shell/EditorPane";
 import { RelatedNotes } from "../shell/RelatedNotes";
+import { OkfInteropBar } from "../shell/OkfInteropBar";
 import { useSearch } from "../../hooks/useSearch";
 import { useVaultFiles } from "../../hooks/useVaultFiles";
 import { isWikiDocPath } from "../../lib/paths";
@@ -41,6 +42,7 @@ export function BrainMode({ vaultPath, selectedDoc, onDocSelect }: Props) {
             onSelect={onDocSelect}
           />
         )}
+        <OkfInteropBar />
       </aside>
       <EditorPane selectedDoc={selectedDoc} isWiki={isWiki} />
       <RelatedNotes selectedDoc={selectedDoc} />
