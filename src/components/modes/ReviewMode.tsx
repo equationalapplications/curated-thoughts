@@ -77,7 +77,6 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
         if (detailRequestSeq.current !== requestSeq) return;
         if (loaded === null) {
           setDetail(null);
-          setActionError("Proposal details unavailable.");
           return;
         }
         setDetail(loaded);

@@ -428,6 +428,55 @@ test("ignores stale proposal detail responses when selection changes quickly", a
   expect(screen.queryByText(/Older-only fact body/i)).not.toBeInTheDocument();
 });
 
+test("shows unavailable state when getProposalDetail returns null", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "get_proposal_detail_cmd") {
+      return Promise.resolve(null);
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={vi.fn()} vaultPath={VAULT} />);
+
+  expect(
+    (await screen.findAllByText(/proposal details unavailable/i)).length,
+  ).toBeGreaterThan(0);
+  expect(screen.queryByText(/loading proposal/i)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
+});
+
+test("clears action error when switching proposals", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "get_proposal_detail_cmd") {
+      const proposalId = args?.proposalId as string;
+      if (proposalId === "prop_older") {
+        return Promise.reject(new Error("load failed"));
+      }
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  renderWithTheme(
+    <ReviewMode
+      queue={[NEWER, OLDER]}
+      onAction={vi.fn()}
+      vaultPath={VAULT}
+    />,
+  );
+
+  const list = screen.getByRole("list", { name: /review queue/i });
+  fireEvent.click(within(list).getByRole("button", { name: /Older Entity/i }));
+  expect(
+    await screen.findByText(/could not load proposal details/i),
+  ).toBeInTheDocument();
+
+  fireEvent.click(within(list).getByRole("button", { name: /Newer Entity/i }));
+  await screen.findByTestId("review-proposal-editor");
+  expect(
+    screen.queryByText(/could not load proposal details/i),
+  ).not.toBeInTheDocument();
+});
+
 test("batch approve continues after individual failures", async () => {
   const onAction = vi.fn();
   const resolveCalls: string[] = [];
