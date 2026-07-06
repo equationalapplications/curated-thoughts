@@ -1,9 +1,9 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Approved
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (implemented)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec.
-**Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design)
+**Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
 ## Problem
 
@@ -33,6 +33,8 @@ Meanwhile, the OKF format (entities, facts, tasks, edges, event log) has become 
 **Search is not a mode.** Global `⌘K` command palette plus a search field in each mode's sidebar.
 
 **Cross-links everywhere.** Any reference to an entity, fact, document, or proposal — in any mode — is clickable and jumps to the owning mode with the target focused. Browser-style back/forward history buttons in the header. This is the antidote to mode-switch context loss.
+
+**Peek views.** A plain click navigates; `Option`+click (or a peek affordance on hover) opens the target in a temporary slide-over panel instead, so a user mid-edit can check a source document or entity without leaving their current mode. Peek panels are read-only and dismiss on `Esc` or click-outside; "Open in [mode]" inside the peek promotes it to full navigation. This matters most in Brain and Review, where following a source link into Library would otherwise destroy editorial flow.
 
 **Status bar:** left = librarian state ("Idle", "Embedding 3 documents…", "Synthesizing…"); center = generation-model and embedder health dots plus the privacy-mode shield glyph; right = vault name and switcher. Clicking any segment opens the Activity feed panel (privacy glyph opens Settings → Privacy).
 
@@ -66,6 +68,8 @@ Replaces `ReviewModal` entirely. Three columns:
 
 - **Left — queue list:** proposal cards showing target entity, proposal type (new entity / update facts / new edges), source document names, and age. Oldest-first by default; filters by type and source. `j`/`k` navigate.
 - **Center — proposal editor:** the proposal rendered as *what it will become*. A new entity shows a full entity-page preview, editable before approval. An update to an existing entity shows a **suggestion-style diff** — the current page with additions in green and removals in red, inline — with accept/reject per fact-level change, or direct text editing.
+
+  Diffing must be **word-level (or semantic), not line-level**. LLMs rephrase rather than append: a librarian that subtly rewrites a paragraph to accommodate one new fact would render under a line-level differ as a wall of red followed by a wall of green — unreviewable. The diff library choice in the phase 2 plan must be evaluated against exactly this case (paragraph rewritten, one fact changed), and should fall back to a side-by-side old/new view when the computed diff exceeds a churn threshold (e.g. >70% of the paragraph changed) rather than showing noise.
 - **Right — evidence panel:** the source chunks the librarian used, quoted verbatim, each with document name and line range; click opens Library at the exact spot. A "why this proposal" reasoning summary appears when the librarian recorded one.
 
 **Actions (keyboard-first):** `a` approve, `r` reject, `e` focus editor, `space` next. Approve commits to Brain and advances. Multi-select enables batch approval of low-stakes proposals.
@@ -106,7 +110,7 @@ Replaces `ReviewModal` entirely. Three columns:
 **Tasks mode:**
 
 - OKF tasks are actionable items extracted by the librarian or added by the user ("follow up with X", "verify claim Y").
-- Flat task list with a status filter (open / done / archived). Each task links to its entity and source.
+- Task list with a status filter (open / done / archived), **grouped by parent entity by default** (with a group-by-source-document alternative). A week of meeting notes can produce 50+ extracted tasks; a purely flat list stops being scannable well before that. Grouping keeps it navigable without building kanban. Each task links to its entity and source.
 - Manual creation supported; librarian-proposed tasks arrive through Review like facts do.
 - Deliberately simple in v1: no due-date engine, no kanban, not project management.
 
@@ -165,8 +169,23 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 
 Each phase gets its own implementation plan. Phases 1–2 are shippable immediately on the current data model; phases 4–5 are blocked on the backend spec (phase 3).
 
-1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change.
-2. **Review editorial desk** — the biggest UX win; works on the current model.
+1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change. *(Implemented 2026-07-05.)*
+2. **Review editorial desk** — the biggest UX win; works on the current model. *(Implemented 2026-07-05.)*
+
+### Phase 1 deferrals (shipped with documented gaps)
+
+| Item | Deferred to |
+|---|---|
+| `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Phase 5 (modes not built yet) |
+| Global `⌘K` command palette | Phase 1 follow-up or Phase 7 polish |
+| Cross-mode links, back/forward history, peek panels | Phase 1 follow-up (needed by Phase 2 evidence links) |
+| Activity rail pulse icon | Phase 1 follow-up |
+| Live Activity feed (beyond stub panel) | Phase 5 (Timeline data) |
+| Per-mode empty states (Brain, Library) | Phase 4 / Phase 7 |
+| Embedder/model down → inline feature notice | Phase 1 follow-up |
+| Background errors → Activity feed + retry | Phase 5 |
+| Review empty state richness (doc count, last-synthesis time) | Phase 2 |
+| Library protected badge copy ("Source document — read-only") | Phase 4 |
 3. **Backend OKF-native migration spec** — separate brainstorm: schema, librarian synthesis output, event log. *(Not an implementation phase of this spec — a dependency.)*
 4. **Brain mode entity pages** — requires phase 3.
 5. **Timeline + Tasks modes** — requires phase 3.
@@ -184,5 +203,5 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 ## Open Questions Deferred to Follow-up Specs
 
 - Exact OKF-native schema mapping in the Rust backend and migration path for existing vaults (phase 3 spec).
-- Whether Curated Thoughts' OKF bundles need the same id-remap-on-clone semantics as Clanker's import (likely yes — decide in the phase 6 plan, referencing the Clanker import spec's collision-guard findings).
+- Whether Curated Thoughts' OKF bundles need the same id-remap-on-clone semantics as Clanker's import (likely yes — decide in the phase 6 plan, referencing the Clanker import spec's collision-guard findings). *(Resolved: yes — OKF profile v1 §10 makes remap the application's job, and profile-1 bundles carry stable event ids that must be remapped too. See the backend spec's profile-v1 addendum, which also adds a phase 6 summary write-path decision.)*
 - How librarian "reasoning summary" gets captured for the Review evidence panel (depends on librarian pipeline internals — phase 2/3 boundary).

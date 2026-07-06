@@ -1,3 +1,4 @@
+use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
 };
@@ -74,6 +75,11 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     if version < 6 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))?;
     }
+    if version < 7 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
+    }
+
+    crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
     Ok(())
 }
@@ -96,7 +102,13 @@ impl AppDb {
                 let root_str = root.to_string_lossy().to_string();
                 canonicalize_workspace_root(&root_str)
             });
-        migrate(&conn, vault_root)?;
+        migrate(&conn, vault_root.clone())?;
+        if let Some(root) = vault_root.as_deref() {
+            let vault_path = std::path::Path::new(root);
+            if vault_path.is_dir() {
+                let _ = crate::db::okf_migration::run_okf_migration(&conn, vault_path);
+            }
+        }
         Ok(AppDb(conn))
     }
 }
@@ -117,7 +129,32 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 6);
+        assert_eq!(max_version, 7);
+    }
+
+    #[test]
+    fn test_v7_okf_and_curated_tables_exist() {
+        let conn = open_in_memory().unwrap();
+        for table in &[
+            "llm_wiki_entries",
+            "llm_wiki_outbox",
+            "llm_wiki_meta",
+            "llm_wiki_edges",
+            "curated_entities",
+            "curated_proposals",
+            "curated_proposal_items",
+            "curated_proposal_sources",
+            "curated_agent_log",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table '{}' not found in schema", table);
+        }
     }
 
     #[test]
@@ -152,15 +189,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn test_schema_version_is_6() {
-        let conn = open_in_memory().unwrap();
-        let max_version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(max_version, 6);
     }
 
     #[test]

@@ -1,0 +1,12 @@
+name: Setup Node & pnpm
+description: Install Node 22 and pnpm for CI jobs
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - uses: pnpm/action-setup@v4
+      with:
+        run_install: false

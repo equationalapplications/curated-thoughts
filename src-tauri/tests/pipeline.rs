@@ -35,6 +35,47 @@ fn run_pipeline_job(tmp: &TempDir, jobs: Vec<PipelineJob>) {
 }
 
 #[test]
+fn ingest_skips_vault_wiki_markdown_under_vault_root() {
+    let tmp = TempDir::new().unwrap();
+    let vault = tmp.path().join("vault");
+    let wiki_file = vault.join("wiki").join("legacy.md");
+    std::fs::create_dir_all(wiki_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &wiki_file,
+        "# Legacy\n\n".to_owned() + &"word ".repeat(20),
+    )
+    .unwrap();
+
+    let _stub_lock = PIPELINE_STUB_GUARD.lock().unwrap();
+    std::env::set_var("CURATED_EMBED_STUB", "constant8");
+    let _stub_cleanup = StubUnset;
+
+    drop(tauri_app_lib::make_test_app(tmp.path()));
+
+    let db_path = tmp.path().join("brain.db");
+    let (tx, rx) = mpsc::sync_channel::<PipelineJob>(64);
+    let (status_tx, _status_rx) = mpsc::channel();
+    let worker = PipelineWorker::new_with_vault(
+        db_path.clone(),
+        rx,
+        Arc::new(AtomicUsize::new(0)),
+        Some(vault.clone()),
+        status_tx,
+    );
+    let handle = std::thread::spawn(move || worker.run());
+    tx.send(PipelineJob::ingest(wiki_file.to_string_lossy().to_string()))
+        .unwrap();
+    drop(tx);
+    handle.join().expect("pipeline worker panicked");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "vault/wiki/*.md must not be indexed post-V7");
+}
+
+#[test]
 fn ingest_markdown_indexes_document_with_chunks_and_embeddings() {
     let tmp = TempDir::new().unwrap();
     let docs_dir = tmp.path().join("documents");

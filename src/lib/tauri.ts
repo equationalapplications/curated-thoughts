@@ -121,7 +121,178 @@ export interface ReviewPage {
   path: string;
   source_doc_ids: string;
   generated_by: string;
+  reasoning_summary?: string | null;
 }
+
+export interface ProposalItemCounts {
+  total: number;
+  facts: number;
+  edges: number;
+  tasks: number;
+  summary_updates: number;
+}
+
+export interface ProposalSummary {
+  id: string;
+  kind: "new_entity" | "update_entity";
+  target_name: string;
+  entity_id?: string | null;
+  source_doc_paths: string[];
+  item_counts: ProposalItemCounts;
+  created_at: number;
+  age_secs: number;
+  model: string;
+}
+
+export interface HydratedEvidenceChunk {
+  chunk_id: number;
+  quote: string;
+  start_line: number;
+  end_line: number;
+  doc_path?: string | null;
+  source_deleted: boolean;
+}
+
+export interface ProposalItem {
+  id: string;
+  item_type: string;
+  target_id?: string | null;
+  payload: Record<string, unknown>;
+  evidence: HydratedEvidenceChunk[];
+  status: string;
+  edited_payload?: Record<string, unknown> | null;
+}
+
+export interface ProposalDetail {
+  id: string;
+  kind: "new_entity" | "update_entity";
+  entity_id?: string | null;
+  proposed_name?: string | null;
+  proposed_type?: string | null;
+  target_name: string;
+  reasoning?: string | null;
+  model: string;
+  status: string;
+  created_at: number;
+  source_doc_paths: string[];
+  items: ProposalItem[];
+}
+
+export interface ItemDecision {
+  item_id: string;
+  decision: "accept" | "reject";
+  edited_payload?: Record<string, unknown> | null;
+}
+
+export interface CommitResult {
+  committed: { item_id: string; table: string; record_id: string }[];
+  conflicts: string[];
+  dropped_edges: string[];
+  proposal_status: string;
+}
+
+export const listProposals = (filter?: { status?: string }): Promise<ProposalSummary[]> =>
+  invoke("list_proposals_cmd", { filter: filter ?? {} });
+
+export const getProposalDetail = (proposalId: string): Promise<ProposalDetail | null> =>
+  invoke("get_proposal_detail_cmd", { proposalId });
+
+export const resolveProposal = (
+  proposalId: string,
+  decisions: ItemDecision[],
+  rejectReason?: string,
+  autoApprove?: boolean,
+): Promise<CommitResult> =>
+  invoke("resolve_proposal_cmd", {
+    proposalId,
+    decisions,
+    rejectReason: rejectReason ?? null,
+    autoApprove: autoApprove ?? false,
+  });
+
+export type EntitySort = "updated_desc" | "name_asc" | "name_desc" | "created_desc";
+
+export interface EntityListFilter {
+  entity_type?: string | null;
+  include_archived?: boolean | null;
+}
+
+export interface EntitySummary {
+  id: string;
+  name: string;
+  entity_type: string;
+  summary_snippet: string;
+  fact_count: number;
+  open_task_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface EntityFact {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  confidence: string;
+  source_type: string;
+  updated_at: number;
+}
+
+export interface EntityTask {
+  id: string;
+  description: string;
+  status: string;
+  priority: number;
+  created_at: number;
+}
+
+export interface EntityEvent {
+  id: string;
+  event_type: string;
+  summary: string;
+  related_entry_id?: string | null;
+  created_at: number;
+}
+
+export interface EntityDetail {
+  id: string;
+  name: string;
+  entity_type: string;
+  summary: string;
+  created_at: number;
+  updated_at: number;
+  deleted_at?: number | null;
+  facts: EntityFact[];
+  tasks: EntityTask[];
+  events: EntityEvent[];
+}
+
+export interface CreateEntityInput {
+  name: string;
+  entity_type?: string | null;
+  summary?: string | null;
+}
+
+export const listEntities = (
+  sort?: EntitySort,
+  filter?: EntityListFilter,
+): Promise<EntitySummary[]> =>
+  invoke("list_entities_cmd", { sort: sort ?? null, filter: filter ?? {} });
+
+export const getEntity = (entityId: string): Promise<EntityDetail | null> =>
+  invoke("get_entity_cmd", { entityId });
+
+export const createEntity = (input: CreateEntityInput): Promise<EntityDetail> =>
+  invoke("create_entity_cmd", { input });
+
+export const updateEntitySummary = (
+  entityId: string,
+  summary: string,
+): Promise<void> =>
+  invoke("update_entity_summary_cmd", { entityId, summary });
+
+export const archiveEntity = (entityId: string): Promise<void> =>
+  invoke("archive_entity_cmd", { entityId });
 
 export const getReviewQueue = (): Promise<ReviewPage[]> =>
   invoke("get_review_queue");
