@@ -42,13 +42,17 @@ fn list_vault_files_returns_forward_slash_relative_paths() {
     app.invoke::<()>("set_vault_path", json!({ "path": vault }));
 
     let files: Vec<serde_json::Value> = app.invoke("list_vault_files", json!({}));
-    let wiki_path = files
+    let doc = files
         .iter()
-        .find(|f| f["name"] == "page.md" && f["tier"] == "wiki")
+        .find(|f| f["name"] == "note.md" && f["tier"] == "user_doc")
         .and_then(|f| f["path"].as_str())
-        .expect("wiki page path not found");
-    assert_eq!(wiki_path, "wiki/page.md");
-    assert!(!wiki_path.contains('\\'));
+        .expect("documents note path not found");
+    assert_eq!(doc, "documents/note.md");
+    assert!(
+        !files.iter().any(|f| f["name"] == "page.md"),
+        "wiki/ is archive-only post-V7 and must not appear in list_vault_files"
+    );
+    assert!(!doc.contains('\\'));
 }
 
 #[test]

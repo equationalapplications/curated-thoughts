@@ -5,6 +5,7 @@ pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
+mod entities_api;
 mod proposals_api;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
@@ -1848,7 +1849,7 @@ fn get_chunk_ids_for_wiki_entry(
 pub struct VaultFile {
     pub path: String,
     pub name: String,
-    pub tier: String, // "user_doc" | "wiki"
+    pub tier: String, // "user_doc" — wiki/ is archive-only post-V7, not listed for ingest
 }
 
 #[tauri::command]
@@ -1870,7 +1871,7 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
 
     let mut files = Vec::new();
 
-    for (subdir, tier) in &[("documents", "user_doc"), ("wiki", "wiki")] {
+    for subdir in &["documents"] {
         let dir = root.join(subdir);
         if !dir.exists() {
             continue;
@@ -1899,7 +1900,7 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
             files.push(VaultFile {
                 path,
                 name,
-                tier: tier.to_string(),
+                tier: "user_doc".to_string(),
             });
         }
     }
@@ -2187,6 +2188,11 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             proposals_api::approve_wiki_page,
             proposals_api::reject_wiki_page,
             proposals_api::get_proposed_content,
+            entities_api::list_entities_cmd,
+            entities_api::get_entity_cmd,
+            entities_api::create_entity_cmd,
+            entities_api::update_entity_summary_cmd,
+            entities_api::archive_entity_cmd,
             proposals_api::list_proposals_cmd,
             proposals_api::get_proposal_detail_cmd,
             proposals_api::resolve_proposal_cmd,
@@ -2398,6 +2404,11 @@ pub fn run() {
             proposals_api::approve_wiki_page,
             proposals_api::reject_wiki_page,
             proposals_api::get_proposed_content,
+            entities_api::list_entities_cmd,
+            entities_api::get_entity_cmd,
+            entities_api::create_entity_cmd,
+            entities_api::update_entity_summary_cmd,
+            entities_api::archive_entity_cmd,
             proposals_api::list_proposals_cmd,
             proposals_api::get_proposal_detail_cmd,
             proposals_api::resolve_proposal_cmd,
@@ -2664,17 +2675,12 @@ mod heal_invalid_sources_tests {
         {
             let guard = db_state.0.lock().unwrap();
             let conn = &guard.0;
-            conn.execute_batch(
-                "CREATE TABLE llm_wiki_entries (
-                    source_ref TEXT,
-                    source_type TEXT,
-                    deleted_at INTEGER
-                );",
-            )
-            .unwrap();
             conn.execute(
-                "INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at) VALUES (?1, 'librarian_inferred', NULL)",
-                params!["documents/missing.md"],
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                    created_at, updated_at, deleted_at
+                 ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', ?5, 1, 1, NULL)",
+                params!["entry-missing", "tier_fact", "Missing", "body", "documents/missing.md"],
             )
             .unwrap();
 
@@ -2832,18 +2838,23 @@ mod workspace_id_tests {
 mod maintenance_command_tests {
     use super::{heal_lost_librarian_inferred, prune_old_librarian_inferred};
     use crate::db::connection::open_in_memory;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::fs;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    fn create_llm_wiki_entries_table(conn: &Connection) {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS llm_wiki_entries (
-                entity_id TEXT,
-                source_type TEXT,
-                source_ref TEXT,
-                deleted_at INTEGER
-            );",
+    fn insert_wiki_entry(
+        conn: &Connection,
+        id: &str,
+        source_type: &str,
+        source_ref: &str,
+        deleted_at: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                created_at, updated_at, deleted_at
+             ) VALUES (?1, 'tier_fact', ?2, 'body', '[]', 'inferred', ?3, ?4, 1, 1, ?5)",
+            params![id, format!("Title {id}"), source_type, source_ref, deleted_at],
         )
         .unwrap();
     }
@@ -2851,27 +2862,32 @@ mod maintenance_command_tests {
     #[test]
     fn prune_only_removes_old_librarian_inferred_rows() {
         let conn = open_in_memory().unwrap();
-        create_llm_wiki_entries_table(&conn);
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let old = now - Duration::from_secs(7 * 86400 + 1);
         let fresh = now - Duration::from_secs(7 * 86400 - 1);
 
-        conn.execute(
-            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, ?4)",
-            ("tier_fact", "librarian_inferred", "documents/old.md", Some(old.as_secs() as i64)),
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, ?4)",
-            ("tier_fact", "librarian_inferred", "documents/fresh.md", Some(fresh.as_secs() as i64)),
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, ?4)",
-            ("tier_fact", "immutable_document", "documents/immutable.md", Some(old.as_secs() as i64)),
-        )
-        .unwrap();
+        insert_wiki_entry(
+            &conn,
+            "old-inferred",
+            "librarian_inferred",
+            "documents/old.md",
+            Some(old.as_secs() as i64),
+        );
+        insert_wiki_entry(
+            &conn,
+            "fresh-inferred",
+            "librarian_inferred",
+            "documents/fresh.md",
+            Some(fresh.as_secs() as i64),
+        );
+        insert_wiki_entry(
+            &conn,
+            "old-immutable",
+            "immutable_document",
+            "documents/immutable.md",
+            Some(old.as_secs() as i64),
+        );
 
         let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
         assert_eq!(
@@ -2903,28 +2919,33 @@ mod maintenance_command_tests {
     #[test]
     fn heal_soft_deletes_missing_librarian_inferred_entries_only() {
         let conn = open_in_memory().unwrap();
-        create_llm_wiki_entries_table(&conn);
 
         let tmp = tempfile::TempDir::new().unwrap();
         let vault_root = tmp.path();
         fs::create_dir_all(vault_root.join("documents")).unwrap();
         fs::write(vault_root.join("documents/existing.md"), b"x").unwrap();
 
-        conn.execute(
-            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, NULL)",
-            ("tier_fact", "librarian_inferred", "documents/existing.md"),
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, NULL)",
-            ("tier_fact", "librarian_inferred", "documents/missing.md"),
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO llm_wiki_entries (entity_id, source_type, source_ref, deleted_at) VALUES (?1, ?2, ?3, NULL)",
-            ("tier_fact", "immutable_document", "documents/missing.md"),
-        )
-        .unwrap();
+        insert_wiki_entry(
+            &conn,
+            "existing-inferred",
+            "librarian_inferred",
+            "documents/existing.md",
+            None,
+        );
+        insert_wiki_entry(
+            &conn,
+            "missing-inferred",
+            "librarian_inferred",
+            "documents/missing.md",
+            None,
+        );
+        insert_wiki_entry(
+            &conn,
+            "missing-immutable",
+            "immutable_document",
+            "documents/missing.md",
+            None,
+        );
 
         let updated = heal_lost_librarian_inferred(&conn, vault_root).unwrap();
         assert_eq!(

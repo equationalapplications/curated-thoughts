@@ -28,7 +28,6 @@ pub fn assemble_librarian_context(chunks: &[ChunkRow]) -> String {
         let label_key = if chunk.entity_id.is_empty() {
             match chunk.tier.as_str() {
                 "user_doc" => "tier_fact",
-                "wiki" => "tier_wisdom",
                 _ => "",
             }
         } else {
@@ -330,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_context_labels_wiki_as_curated_wisdom() {
+    fn assemble_context_labels_legacy_wiki_tier_as_working_context() {
         let chunks = vec![ChunkRow {
             id: 0,
             entity_id: String::new(),
@@ -343,8 +342,12 @@ mod tests {
         }];
         let context = assemble_librarian_context(&chunks);
         assert!(
-            context.contains("CURATED WISDOM"),
-            "expected CURATED WISDOM label, got:\n{context}"
+            context.contains("WORKING CONTEXT"),
+            "post-V7 wiki tier is not curated wisdom, got:\n{context}"
+        );
+        assert!(
+            !context.contains("CURATED WISDOM"),
+            "wiki tier must not map to CURATED WISDOM, got:\n{context}"
         );
     }
 

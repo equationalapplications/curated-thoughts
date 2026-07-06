@@ -210,6 +210,90 @@ export const resolveProposal = (
     autoApprove: autoApprove ?? false,
   });
 
+export type EntitySort = "updated_desc" | "name_asc" | "name_desc" | "created_desc";
+
+export interface EntityListFilter {
+  entity_type?: string | null;
+  include_archived?: boolean | null;
+}
+
+export interface EntitySummary {
+  id: string;
+  name: string;
+  entity_type: string;
+  summary_snippet: string;
+  fact_count: number;
+  open_task_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface EntityFact {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  confidence: string;
+  source_type: string;
+  updated_at: number;
+}
+
+export interface EntityTask {
+  id: string;
+  description: string;
+  status: string;
+  priority: number;
+  created_at: number;
+}
+
+export interface EntityEvent {
+  id: string;
+  event_type: string;
+  summary: string;
+  related_entry_id?: string | null;
+  created_at: number;
+}
+
+export interface EntityDetail {
+  id: string;
+  name: string;
+  entity_type: string;
+  summary: string;
+  created_at: number;
+  updated_at: number;
+  deleted_at?: number | null;
+  facts: EntityFact[];
+  tasks: EntityTask[];
+  events: EntityEvent[];
+}
+
+export interface CreateEntityInput {
+  name: string;
+  entity_type?: string | null;
+  summary?: string | null;
+}
+
+export const listEntities = (
+  sort?: EntitySort,
+  filter?: EntityListFilter,
+): Promise<EntitySummary[]> =>
+  invoke("list_entities_cmd", { sort: sort ?? null, filter: filter ?? {} });
+
+export const getEntity = (entityId: string): Promise<EntityDetail | null> =>
+  invoke("get_entity_cmd", { entityId });
+
+export const createEntity = (input: CreateEntityInput): Promise<EntityDetail> =>
+  invoke("create_entity_cmd", { input });
+
+export const updateEntitySummary = (
+  entityId: string,
+  summary: string,
+): Promise<void> =>
+  invoke("update_entity_summary_cmd", { entityId, summary });
+
+export const archiveEntity = (entityId: string): Promise<void> =>
+  invoke("archive_entity_cmd", { entityId });
+
 export const getReviewQueue = (): Promise<ReviewPage[]> =>
   invoke("get_review_queue");
 

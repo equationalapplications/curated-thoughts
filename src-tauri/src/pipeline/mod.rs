@@ -445,8 +445,8 @@ pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
 
     if let Some(root) = vault_root {
         // Strip vault root prefix and inspect only the first vault-relative component so
-        // ancestor folders named "documents" or "wiki" (e.g. /Users/me/documents/vault/)
-        // or nested sub-folders (e.g. vault/src/wiki/) don't misroute.
+        // ancestor folders named "documents" (e.g. /Users/me/documents/vault/)
+        // or nested sub-folders don't misroute.
         let root_prefix = std::path::Path::new(root)
             .canonicalize()
             .map(|p| normalize_workspace_root(&p.to_string_lossy()))
@@ -457,7 +457,6 @@ pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
         let first = rel.split('/').next().unwrap_or("");
         return match first {
             "documents" => "tier_fact".to_string(),
-            "wiki" => "tier_wisdom".to_string(),
             _ => {
                 let hash = hash_bytes(root_prefix.as_bytes());
                 format!("tier_working::{}", &hash[..16])
@@ -468,11 +467,30 @@ pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
     // No vault root: fall back to substring heuristics (approximate).
     if normalized.contains("/documents/") {
         "tier_fact".to_string()
-    } else if normalized.contains("/wiki/") {
-        "tier_wisdom".to_string()
     } else {
         "tier_working".to_string()
     }
+}
+
+/// Post-V7: `vault/wiki/` is archive-only; do not index markdown there as documents.
+pub fn is_vault_wiki_ingest_path(path: &str, vault_root: Option<&str>) -> bool {
+    let normalized = std::path::Path::new(path)
+        .canonicalize()
+        .map(|p| normalize_workspace_root(&p.to_string_lossy()))
+        .unwrap_or_else(|_| normalize_workspace_root(path));
+
+    if let Some(root) = vault_root {
+        let root_prefix = std::path::Path::new(root)
+            .canonicalize()
+            .map(|p| normalize_workspace_root(&p.to_string_lossy()))
+            .unwrap_or_else(|_| normalize_workspace_root(root));
+        let rel = normalized
+            .strip_prefix(&format!("{}/", root_prefix))
+            .unwrap_or(&normalized);
+        return rel.starts_with("wiki/");
+    }
+
+    normalized.contains("/wiki/") && !normalized.contains("/documents/")
 }
 
 fn ingest_file(
@@ -487,6 +505,9 @@ fn ingest_file(
         .and_then(|e| e.to_str())
         .unwrap_or("");
     if !should_ingest_extension(ext) {
+        return Ok(());
+    }
+    if is_vault_wiki_ingest_path(path, vault_root) {
         return Ok(());
     }
 
@@ -636,6 +657,7 @@ fn connect() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::connection::open_in_memory;
 
     #[test]
     fn test_extract_text_skips_markdown() {
@@ -675,6 +697,59 @@ mod tests {
         assert!(text.contains("Hello"));
         assert!(text.contains("world"));
         assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn entity_id_for_path_maps_wiki_to_working_not_wisdom() {
+        let vault = "/Users/foo/Vault";
+        let id = entity_id_for_path("/Users/foo/Vault/wiki/page.md", Some(vault));
+        assert_ne!(id, "tier_wisdom");
+        assert!(id.starts_with("tier_working::"));
+    }
+
+    #[test]
+    fn is_vault_wiki_ingest_path_detects_wiki_under_vault() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let wiki_file = vault.join("wiki").join("page.md");
+        std::fs::create_dir_all(wiki_file.parent().unwrap()).unwrap();
+        std::fs::write(&wiki_file, "# page").unwrap();
+        let vault_str = vault.to_string_lossy().to_string();
+        let path_str = wiki_file.to_string_lossy().to_string();
+        assert!(is_vault_wiki_ingest_path(&path_str, Some(&vault_str)));
+        let doc_file = vault.join("documents").join("note.md");
+        std::fs::create_dir_all(doc_file.parent().unwrap()).unwrap();
+        std::fs::write(&doc_file, "# note").unwrap();
+        assert!(!is_vault_wiki_ingest_path(
+            &doc_file.to_string_lossy(),
+            Some(&vault_str)
+        ));
+    }
+
+    #[test]
+    fn ingest_skips_vault_wiki_markdown() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let wiki_file = vault.join("wiki").join("legacy.md");
+        std::fs::create_dir_all(wiki_file.parent().unwrap()).unwrap();
+        std::fs::write(&wiki_file, "# Legacy\n\n".to_owned() + &"word ".repeat(20)).unwrap();
+
+        let conn = open_in_memory().unwrap();
+        let vault_str = vault.to_string_lossy().to_string();
+        let path_str = wiki_file.to_string_lossy().to_string();
+        ingest_file(
+            &conn,
+            &EmbedProfile::default(),
+            &path_str,
+            false,
+            Some(&vault_str),
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "wiki markdown must not be indexed post-V7");
     }
 
     #[test]
