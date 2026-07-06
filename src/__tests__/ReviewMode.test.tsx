@@ -148,6 +148,73 @@ test("renders queue items and proposal preview", async () => {
   expect((await screen.findAllByText(/Test fact for preview/i)).length).toBeGreaterThan(0);
 });
 
+test("approve sends per-item decisions when an item is rejected", async () => {
+  const multiItemDetail = makeProposalDetail(PAGE, {
+    reasoning: null,
+    items: [
+      {
+        id: "item_keep",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "Keep this fact." },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+      {
+        id: "item_reject",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "Reject this fact." },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+    ],
+  });
+
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "get_proposal_detail_cmd") {
+      return Promise.resolve(multiItemDetail);
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await screen.findByText(/Reject this fact/i);
+
+  const rejectButtons = screen.getAllByRole("button", { name: /^Reject$/i });
+  fireEvent.click(rejectButtons[1]!);
+  fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+
+  await waitFor(() => expect(onAction).toHaveBeenCalled());
+  expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+    "resolve_proposal_cmd",
+    expect.objectContaining({
+      proposalId: "prop_project_x",
+      decisions: [
+        { item_id: "item_keep", decision: "accept" },
+        { item_id: "item_reject", decision: "reject" },
+      ],
+    }),
+  );
+});
+
+test("approve is disabled when every item is rejected", async () => {
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={vi.fn()} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+
+  fireEvent.click(
+    screen.getAllByRole("button", { name: /^Reject$/i })[0]!,
+  );
+
+  expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
+  expect(
+    screen.getByText(/accept at least one change to approve/i),
+  ).toBeInTheDocument();
+});
+
 test("approve invokes resolve_proposal_cmd and calls onAction", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
