@@ -29,7 +29,7 @@ impl Drop for EnvVarGuard {
 }
 
 fn seed_chunks(app: &TestApp, source_path: &str) {
-    let conn = app.open_db();
+    let mut conn = app.open_db();
     conn.execute(
         "INSERT INTO documents (path, hash, tier, status) VALUES (?1, 'hash1', 'user_doc', 'indexed')",
         [source_path],
@@ -90,7 +90,7 @@ fn index_mode_skips_librarian_without_calling_ollama() {
     let source_path = "/vault/documents/note.md";
     seed_chunks(&app, source_path);
 
-    let conn = app.open_db();
+    let mut conn = app.open_db();
     // Insert folder rule: mode=index for the documents directory
     conn.execute(
         "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('/vault/documents', 'index', 0)",
@@ -98,23 +98,21 @@ fn index_mode_skips_librarian_without_calling_ollama() {
     ).unwrap();
 
     // Should return Ok without calling Ollama (mode=index returns early)
-    let result = generate_summary(&conn, source_path, "test-model");
+    let result = generate_summary(&mut conn, source_path, "test-model");
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);
 
-    // No wiki_pages row should have been created
+    // No proposal should have been created
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM wiki_pages", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM curated_proposals", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 0, "no wiki page should be created for index mode");
+    assert_eq!(count, 0, "no proposal should be created for index mode");
 }
 
 #[test]
-fn auto_approve_writes_directly_to_wiki() {
+fn auto_approve_commits_proposal_via_resolve_path() {
     let app = TestApp::new();
     let vault = app.tmp.path().join("vault");
     std::fs::create_dir_all(vault.join("documents")).unwrap();
-    std::fs::create_dir_all(vault.join("wiki")).unwrap();
-    std::fs::create_dir_all(vault.join(".brain").join("proposed")).unwrap();
     app.invoke::<()>("set_vault_path", json!({ "path": vault }));
 
     let source_path = vault.join("documents").join("auto.md");
@@ -124,17 +122,44 @@ fn auto_approve_writes_directly_to_wiki() {
 
     let db_conn = app.open_db();
     db_conn.execute(
-        "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'summarize', 1)",
+        "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'synthesize', 1)",
         [&vault.join("documents").to_string_lossy().to_string()],
     )
     .unwrap();
 
+    db_conn
+        .execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent-auto', 'Auto Entity', 'concept', 'Summary', 100, 100)",
+            [],
+        )
+        .unwrap();
+
     let mut server = mockito::Server::new();
+    let llm_json = serde_json::json!({
+        "proposals": [{
+            "target": { "existing_id": "ent-auto" },
+            "reasoning": "Auto commit test.",
+            "summary_update": null,
+            "facts": [{
+                "op": "add",
+                "body": "Auto Wiki Generated content.",
+                "tags": [],
+                "confidence": "inferred",
+                "evidence": ["C1"]
+            }],
+            "edges": [],
+            "tasks": []
+        }]
+    });
     let _mock = server
         .mock("POST", "/v1/chat/completions")
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("{\"choices\":[{\"message\":{\"content\":\"Auto Wiki Generated content.\"}}]}")
+        .with_body(format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":{}}}}}]}}",
+            serde_json::to_string(&llm_json.to_string()).unwrap()
+        ))
         .create();
 
     let _brain_dir_guard = EnvVarGuard::new("CURATED_BRAIN_DIR");
@@ -154,28 +179,33 @@ fn auto_approve_writes_directly_to_wiki() {
     )
     .unwrap();
 
-    let conn = db_conn;
-    let result = generate_summary(&conn, &source_str, "test-model");
+    let mut conn = db_conn;
+    let result = generate_summary(&mut conn, &source_str, "test-model");
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);
 
-    // Wiki page written directly to vault/wiki/ (auto_approve=true)
-    let wiki_file = vault.join("wiki").join("auto.md");
-    assert!(wiki_file.exists(), "wiki file not written for auto_approve");
-
-    // Status should be approved, not pending_review
-    let status: String = conn
+    // Proposal auto-approved — no pending queue
+    let pending: i64 = conn
         .query_row(
-            "SELECT status FROM wiki_pages WHERE path = 'auto.md'",
+            "SELECT COUNT(*) FROM curated_proposals WHERE status = 'pending'",
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(status, "approved");
+    assert_eq!(pending, 0, "auto-approved proposal should not stay pending");
 
-    // Should NOT appear in review queue (already approved)
+    let fact_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fact_count, 1, "auto-approve should commit fact to llm_wiki_entries");
+
+    // Legacy review queue still uses wiki_pages until Task 9 shims
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
     assert!(
         queue.is_empty(),
-        "auto-approved page should not be in review queue"
+        "auto-approved work should not appear in legacy review queue"
     );
 }

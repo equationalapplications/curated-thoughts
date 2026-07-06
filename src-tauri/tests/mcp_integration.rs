@@ -103,37 +103,21 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
 }
 
 fn seed_wiki_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS llm_wiki_entries (
-            id TEXT PRIMARY KEY,
-            entity_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            deleted_at INTEGER,
-            embedding_blob BLOB
-        );
-        CREATE TABLE IF NOT EXISTS llm_wiki_edges (
-            id TEXT PRIMARY KEY,
-            entity_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            edge_type TEXT NOT NULL,
-            created_at INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS llm_wiki_entity_manifests (
-            entity_id TEXT PRIMARY KEY,
-            mode TEXT NOT NULL,
-            manifest_json TEXT NOT NULL,
-            updated_at INTEGER
-        );",
-    )?;
+    // AppDb::open (via seed_fixture's caller) already runs V7 migrations; only insert rows.
     let blob = f32_vec_to_blob(&[1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     conn.execute(
-        "INSERT INTO llm_wiki_entries (id, entity_id, title, embedding_blob) VALUES (?1, ?2, ?3, ?4)",
-        ("seed-a", "tier_fact", "MCP seed A", blob.clone()),
+        "INSERT INTO llm_wiki_entries (
+            id, entity_id, title, body, tags, confidence, source_type,
+            created_at, updated_at, embedding_blob
+         ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', 1, 1, ?5)",
+        ("seed-a", "tier_fact", "MCP seed A", "seed body A", blob.clone()),
     )?;
     conn.execute(
-        "INSERT INTO llm_wiki_entries (id, entity_id, title, embedding_blob) VALUES (?1, ?2, ?3, ?4)",
-        ("seed-b", "tier_fact", "MCP seed B", blob),
+        "INSERT INTO llm_wiki_entries (
+            id, entity_id, title, body, tags, confidence, source_type,
+            created_at, updated_at, embedding_blob
+         ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', 1, 1, ?5)",
+        ("seed-b", "tier_fact", "MCP seed B", "seed body B", blob),
     )?;
     conn.execute(
         "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type)

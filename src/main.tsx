@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { WikiProvider } from "@equationalapplications/react-llm-wiki";
 import { App } from "./App";
 import { wiki, setupWiki } from "./lib/wiki";
+import { ThemeProvider } from "./lib/ThemeContext";
 import "./index.css";
 
 function Root() {
@@ -17,7 +18,9 @@ function Root() {
   return (
     <React.StrictMode>
       <WikiProvider wiki={wikiInstance}>
-        <App />
+        <ThemeProvider>
+          <App />
+        </ThemeProvider>
       </WikiProvider>
     </React.StrictMode>
   );
@@ -29,7 +32,9 @@ setupWiki().then(() => {
   console.error("[wiki] setup failed, rendering without wiki:", err);
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </React.StrictMode>
   );
 });

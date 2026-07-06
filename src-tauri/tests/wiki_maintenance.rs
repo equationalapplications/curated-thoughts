@@ -26,23 +26,17 @@ fn open_migrated_db(tmp: &TempDir) -> Connection {
     drop(tauri_app_lib::make_test_app(tmp.path()));
     let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-    // llm_wiki_entries is owned by core-llm-wiki in production; create a minimal
-    // test-only schema matching the columns heal/prune operate on.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS llm_wiki_entries (
-            source_ref  TEXT,
-            source_type TEXT NOT NULL DEFAULT 'librarian_inferred',
-            deleted_at  INTEGER
-        );",
-    )
-    .unwrap();
     conn
 }
 
 fn insert_entry(conn: &Connection, source_ref: Option<&str>, source_type: &str) -> i64 {
+    let id = format!("entry-{}", conn.last_insert_rowid() + 1);
     conn.execute(
-        "INSERT INTO llm_wiki_entries (source_ref, source_type) VALUES (?1, ?2)",
-        rusqlite::params![source_ref, source_type],
+        "INSERT INTO llm_wiki_entries (
+            id, entity_id, title, body, tags, confidence, source_type, source_ref,
+            created_at, updated_at
+         ) VALUES (?1, 'tier_fact', ?2, 'body', '[]', 'inferred', ?3, ?4, 1, 1)",
+        rusqlite::params![id, format!("Title {id}"), source_type, source_ref],
     )
     .unwrap();
     conn.last_insert_rowid()
@@ -54,9 +48,13 @@ fn insert_entry_soft_deleted(
     source_type: &str,
     deleted_at: i64,
 ) -> i64 {
+    let id = format!("entry-{}", conn.last_insert_rowid() + 1);
     conn.execute(
-        "INSERT INTO llm_wiki_entries (source_ref, source_type, deleted_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![source_ref, source_type, deleted_at],
+        "INSERT INTO llm_wiki_entries (
+            id, entity_id, title, body, tags, confidence, source_type, source_ref,
+            created_at, updated_at, deleted_at
+         ) VALUES (?1, 'tier_fact', ?2, 'body', '[]', 'inferred', ?3, ?4, 1, 1, ?5)",
+        rusqlite::params![id, format!("Title {id}"), source_type, source_ref, deleted_at],
     )
     .unwrap();
     conn.last_insert_rowid()
