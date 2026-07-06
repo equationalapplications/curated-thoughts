@@ -76,9 +76,48 @@ test("buildDecisions respects per-item overrides", () => {
 });
 
 test("hasAcceptedItems is false when every item is rejected", () => {
+  const detail = makeProposalDetail(SUMMARY, {
+    items: [
+      {
+        id: "item_a",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "A" },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+      {
+        id: "item_b",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "B" },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+    ],
+  });
   const decisions = new Map([
     ["item_a", "reject"],
     ["item_b", "reject"],
   ] as const);
-  expect(hasAcceptedItems(decisions)).toBe(false);
+  expect(hasAcceptedItems(detail, decisions)).toBe(false);
+});
+
+test("hasAcceptedItems defaults missing map entries to accept", () => {
+  const detail = makeProposalDetail(SUMMARY, {
+    items: [
+      {
+        id: "item_a",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "A" },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+    ],
+  });
+  expect(hasAcceptedItems(detail, new Map())).toBe(true);
 });
