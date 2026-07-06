@@ -3,7 +3,7 @@
 **Date:** 2026-07-05
 **Status:** Approved
 **Branch:** feat
-**Related:** `2026-07-05-ux-vision-okf-native-design.md` (phases 4–5 block on this), `../../../../clanker/docs/superpowers/specs/2026-07-03-okf-export-design.md`, `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md`, `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; see the addendum at the bottom)
+**Related:** `2026-07-05-ux-vision-okf-native-design.md` (phases 4–5 block on this), `../../../clanker/docs/superpowers/specs/2026-07-03-okf-export-design.md`, `../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md`, `../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; see the addendum at the bottom)
 
 ## Problem
 
@@ -241,8 +241,7 @@ Failure mid-conversion: guard key unwritten → next startup re-runs; step 2's d
 
 ## Open Questions Deferred
 
-- Whether Curated Thoughts' OKF bundles need Clanker's id-remap-on-clone semantics (phase 6 plan; almost certainly yes, per the Clanker import spec's collision-guard findings). *(Resolved — see addendum item 3.)*
-- Canonical cross-repo OKF format doc (separate spec; this spec keeps wire compatibility by construction — same tables, same package, same event granularity). *(Resolved — see addendum item 1.)*
+<!-- resolved in the addendum below -->
 
 ## Addendum: llm-wiki OKF Profile v1 (added 2026-07-05, after approval)
 
