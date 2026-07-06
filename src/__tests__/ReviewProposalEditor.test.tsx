@@ -1,81 +1,130 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { ReviewProposalEditor } from "../components/review/ReviewProposalEditor";
-import type { ReviewPage } from "../lib/tauri";
+import { defaultItemDecisions } from "../lib/reviewDecisions";
 import { renderWithTheme } from "./test-utils";
+import { makeProposalDetail, makeProposalSummary } from "./fixtures/proposals";
+import type { EntityDetail } from "../lib/tauri";
 
-const editorMock = {
-  document: [],
-  tryParseMarkdownToBlocks: vi.fn(async () => []),
-  replaceBlocks: vi.fn(),
-  blocksToMarkdownLossy: vi.fn(async () => "# Edited Wiki Page\n\nEdited content."),
-  onChange: vi.fn(() => () => {}),
+const NEW_SUMMARY = makeProposalSummary({
+  id: "prop_new",
+  target_name: "New Entity",
+  created_at: 1,
+});
+
+const NEW_DETAIL = makeProposalDetail(NEW_SUMMARY, {
+  items: [
+    {
+      id: "item_fact",
+      item_type: "fact_add",
+      target_id: null,
+      payload: { body: "Test fact body." },
+      evidence: [],
+      status: "pending",
+      edited_payload: null,
+    },
+  ],
+});
+
+const UPDATE_SUMMARY = makeProposalSummary({
+  id: "prop_update",
+  target_name: "Existing Entity",
+  created_at: 2,
+  kind: "update_entity",
+  entity_id: "ent_existing",
+});
+
+const ENTITY: EntityDetail = {
+  id: "ent_existing",
+  name: "Existing Entity",
+  entity_type: "concept",
+  summary: "Current summary text.",
+  created_at: 1,
+  updated_at: 2,
+  facts: [],
+  tasks: [],
+  events: [],
 };
 
-vi.mock("@blocknote/react", () => ({
-  useCreateBlockNote: () => editorMock,
-}));
-
-vi.mock("@blocknote/mantine", () => ({
-  BlockNoteView: () => <div data-testid="blocknote-editor" />,
-}));
-
-const PAGE = {
-  id: 1,
-  path: "wiki/Project-X.md",
-  generated_by: "llama3.2:3b",
-  source_doc_ids: "[]",
-} as unknown as ReviewPage;
-
-const PROPOSED = "# Test Wiki Page\n\nTest content.";
+const UPDATE_DETAIL = makeProposalDetail(UPDATE_SUMMARY, {
+  kind: "update_entity",
+  entity_id: "ent_existing",
+  items: [
+    {
+      id: "item_summary",
+      item_type: "summary_update",
+      target_id: null,
+      payload: { summary: "Proposed summary text." },
+      evidence: [],
+      status: "pending",
+      edited_payload: null,
+    },
+    {
+      id: "item_fact",
+      item_type: "fact_add",
+      target_id: null,
+      payload: { body: "Another fact." },
+      evidence: [],
+      status: "pending",
+      edited_payload: null,
+    },
+  ],
+});
 
 beforeEach(() => {
-  editorMock.tryParseMarkdownToBlocks.mockClear();
-  editorMock.replaceBlocks.mockClear();
-  editorMock.blocksToMarkdownLossy.mockClear();
-  editorMock.onChange.mockClear();
   vi.mocked(invoke).mockReset();
 });
 
-test("shows BlockNote editor for new proposals when wiki page does not exist", async () => {
-  vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === "read_document") return Promise.reject(new Error("ENOENT"));
-    return Promise.resolve(null);
-  });
-
-  const onEditedContentChange = vi.fn();
+test("shows per-item toggles for new entity proposals", () => {
+  const onItemDecisionChange = vi.fn();
   renderWithTheme(
     <ReviewProposalEditor
-      page={PAGE}
-      proposedContent={PROPOSED}
-      onEditedContentChange={onEditedContentChange}
+      detail={NEW_DETAIL}
+      itemDecisions={defaultItemDecisions(NEW_DETAIL)}
+      onItemDecisionChange={onItemDecisionChange}
     />,
   );
 
-  expect(await screen.findByTestId("blocknote-editor")).toBeInTheDocument();
-  expect(screen.getByTestId("review-proposal-editor")).toHaveAttribute(
-    "data-variant",
-    "new",
-  );
-  await waitFor(() =>
-    expect(onEditedContentChange).toHaveBeenCalledWith(PROPOSED),
-  );
+  const editor = screen.getByTestId("review-proposal-editor");
+  expect(editor).toHaveAttribute("data-variant", "new");
+  expect(screen.getByText(/Test fact body/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Reject$/i }));
+  expect(onItemDecisionChange).toHaveBeenCalledWith("item_fact", "reject");
 });
 
-test("shows ProposalDiff for updates when wiki page already exists", async () => {
+test("shows loading state while detail is loading", () => {
+  renderWithTheme(
+    <ReviewProposalEditor
+      detail={undefined}
+      itemDecisions={new Map()}
+      onItemDecisionChange={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/loading proposal/i)).toBeInTheDocument();
+});
+
+test("shows unavailable state when detail is null", () => {
+  renderWithTheme(
+    <ReviewProposalEditor
+      detail={null}
+      itemDecisions={new Map()}
+      onItemDecisionChange={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/proposal details unavailable/i)).toBeInTheDocument();
+});
+
+test("shows ProposalDiff for update_entity proposals via getEntity", async () => {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === "read_document") {
-      return Promise.resolve("# Project X\n\nExisting wiki content.");
-    }
+    if (cmd === "get_entity_cmd") return Promise.resolve(ENTITY);
     return Promise.resolve(null);
   });
 
-  const onEditedContentChange = vi.fn();
   renderWithTheme(
     <ReviewProposalEditor
-      page={PAGE}
-      proposedContent={PROPOSED}
-      onEditedContentChange={onEditedContentChange}
+      detail={UPDATE_DETAIL}
+      itemDecisions={defaultItemDecisions(UPDATE_DETAIL)}
+      onItemDecisionChange={vi.fn()}
     />,
   );
 
@@ -85,19 +134,8 @@ test("shows ProposalDiff for updates when wiki page already exists", async () =>
     "data-variant",
     "update",
   );
-  expect(screen.getByText(/test wiki page/i)).toBeInTheDocument();
-  await waitFor(() =>
-    expect(onEditedContentChange).toHaveBeenCalledWith(PROPOSED),
-  );
-});
-
-test("shows loading state while proposed content is null", () => {
-  renderWithTheme(
-    <ReviewProposalEditor
-      page={PAGE}
-      proposedContent={null}
-      onEditedContentChange={vi.fn()}
-    />,
-  );
-  expect(screen.getByText(/loading proposal/i)).toBeInTheDocument();
+  expect(diff.querySelector(".proposal-diff-removed")).toBeTruthy();
+  expect(diff.querySelector(".proposal-diff-added")).toBeTruthy();
+  expect(screen.getByText(/Proposed summary text/i)).toBeInTheDocument();
+  expect(screen.getByText(/Another fact/i)).toBeInTheDocument();
 });

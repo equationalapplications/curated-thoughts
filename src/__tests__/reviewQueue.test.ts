@@ -6,33 +6,37 @@ import {
 } from "../lib/reviewQueue";
 
 const QUEUE = [
-  { id: 3, path: "c" },
-  { id: 1, path: "a" },
-  { id: 2, path: "b" },
+  { id: "prop_c", created_at: 300, path: "c" },
+  { id: "prop_a", created_at: 100, path: "a" },
+  { id: "prop_b", created_at: 200, path: "b" },
 ];
 
 describe("sortReviewQueue", () => {
-  it("orders by id ascending", () => {
-    expect(sortReviewQueue(QUEUE).map((p) => p.id)).toEqual([1, 2, 3]);
+  it("orders by created_at ascending", () => {
+    expect(sortReviewQueue(QUEUE).map((p) => p.id)).toEqual([
+      "prop_a",
+      "prop_b",
+      "prop_c",
+    ]);
   });
 });
 
 describe("nextQueueSelectionId", () => {
   it("selects the next item after the current one is removed", () => {
-    expect(nextQueueSelectionId(QUEUE, 1)).toBe(2);
-    expect(nextQueueSelectionId(QUEUE, 2)).toBe(3);
+    expect(nextQueueSelectionId(QUEUE, "prop_a")).toBe("prop_b");
+    expect(nextQueueSelectionId(QUEUE, "prop_b")).toBe("prop_c");
   });
 
   it("selects the previous item when the last one is removed", () => {
-    expect(nextQueueSelectionId(QUEUE, 3)).toBe(2);
+    expect(nextQueueSelectionId(QUEUE, "prop_c")).toBe("prop_b");
   });
 });
 
 describe("adjacentQueueId", () => {
   it("moves next and prev in sorted order", () => {
     const sorted = sortReviewQueue(QUEUE);
-    expect(adjacentQueueId(sorted, 1, "next")).toBe(2);
-    expect(adjacentQueueId(sorted, 2, "prev")).toBe(1);
-    expect(adjacentQueueId(sorted, 1, "prev")).toBe(1);
+    expect(adjacentQueueId(sorted, "prop_a", "next")).toBe("prop_b");
+    expect(adjacentQueueId(sorted, "prop_b", "prev")).toBe("prop_a");
+    expect(adjacentQueueId(sorted, "prop_a", "prev")).toBe("prop_a");
   });
 });

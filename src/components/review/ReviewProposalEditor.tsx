@@ -1,107 +1,157 @@
-import { useEffect, useState, type RefObject } from "react";
-import { useCreateBlockNote } from "@blocknote/react";
-import { BlockNoteView } from "@blocknote/mantine";
-import "@blocknote/mantine/style.css";
-import { readDocument, ReviewPage } from "../../lib/tauri";
-import { useTheme } from "../../lib/ThemeContext";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { getEntity, type EntityDetail, type ProposalDetail } from "../../lib/tauri";
+import type { ItemDecisionState } from "../../lib/reviewDecisions";
+import {
+  findSummaryUpdateItem,
+  nonSummaryItems,
+  proposedSummaryText,
+  summaryTextFromItem,
+} from "../../lib/proposalEntityPreview";
 import { ProposalDiff } from "./ProposalDiff";
+import { ProposalItemRow } from "./ProposalItemRow";
 
 interface Props {
-  page: ReviewPage;
-  proposedContent: string | null;
-  onEditedContentChange: (content: string) => void;
+  detail: ProposalDetail | null | undefined;
+  itemDecisions: Map<string, ItemDecisionState>;
+  onItemDecisionChange: (itemId: string, decision: ItemDecisionState) => void;
   containerRef?: RefObject<HTMLDivElement | null>;
 }
 
 export function ReviewProposalEditor({
-  page,
-  proposedContent,
-  onEditedContentChange,
+  detail,
+  itemDecisions,
+  onItemDecisionChange,
   containerRef,
 }: Props) {
-  const editor = useCreateBlockNote();
-  const { resolved: theme } = useTheme();
-  const [currentContent, setCurrentContent] = useState<
-    string | null | undefined
-  >(undefined);
+  const [entity, setEntity] = useState<EntityDetail | null | undefined>(
+    undefined,
+  );
+  const entityRequestSeq = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
-    setCurrentContent(undefined);
-    readDocument(page.path)
-      .then((content) => {
-        if (!cancelled) setCurrentContent(content);
+    setEntity(undefined);
+    if (!detail || detail.kind !== "update_entity" || !detail.entity_id) {
+      setEntity(null);
+      return;
+    }
+
+    entityRequestSeq.current += 1;
+    const requestSeq = entityRequestSeq.current;
+    getEntity(detail.entity_id)
+      .then((loaded) => {
+        if (entityRequestSeq.current !== requestSeq) return;
+        setEntity(loaded);
       })
       .catch(() => {
-        if (!cancelled) setCurrentContent(null);
+        if (entityRequestSeq.current === requestSeq) setEntity(null);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [page.id, page.path]);
+  }, [detail?.id, detail?.kind, detail?.entity_id]);
 
-  useEffect(() => {
-    if (proposedContent === null || currentContent !== null) return;
-
-    let cancelled = false;
-    void (async () => {
-      try {
-        const blocks = await editor.tryParseMarkdownToBlocks(proposedContent);
-        if (cancelled) return;
-        editor.replaceBlocks(editor.document, blocks);
-        onEditedContentChange(proposedContent);
-      } catch {
-        if (!cancelled) onEditedContentChange(proposedContent);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [proposedContent, currentContent, editor, onEditedContentChange]);
-
-  useEffect(() => {
-    if (currentContent !== null) return;
-
-    return editor.onChange(async () => {
-      const markdown = await editor.blocksToMarkdownLossy(editor.document);
-      onEditedContentChange(markdown);
-    });
-  }, [currentContent, editor, onEditedContentChange]);
-
-  useEffect(() => {
-    if (currentContent === null || currentContent === undefined) return;
-    if (proposedContent === null) return;
-    onEditedContentChange(proposedContent);
-  }, [currentContent, proposedContent, onEditedContentChange]);
-
-  if (proposedContent === null || currentContent === undefined) {
+  if (detail === undefined) {
     return <p className="review-hint">Loading proposal…</p>;
   }
-
-  if (currentContent === null) {
-    return (
-      <div
-        className="review-proposal-editor"
-        data-variant="new"
-        data-testid="review-proposal-editor"
-        ref={containerRef}
-        tabIndex={-1}
-      >
-        <BlockNoteView editor={editor} editable={false} theme={theme} />
-      </div>
-    );
+  if (detail === null) {
+    return <p className="review-hint">Proposal details unavailable.</p>;
   }
+
+  const variant = detail.kind === "new_entity" ? "new" : "update";
+  const summaryItem = findSummaryUpdateItem(detail);
+  const otherItems = nonSummaryItems(detail);
+  const entityLoading =
+    detail.kind === "update_entity" && detail.entity_id && entity === undefined;
+  const proposedSummary = proposedSummaryText(detail);
 
   return (
     <div
       className="review-proposal-editor"
-      data-variant="update"
+      data-variant={variant}
       data-testid="review-proposal-editor"
       ref={containerRef}
       tabIndex={-1}
     >
-      <ProposalDiff oldText={currentContent} newText={proposedContent} />
+      <header className="review-proposal-header">
+        <h2 className="review-proposal-title">{detail.target_name}</h2>
+        {detail.kind === "new_entity" && detail.proposed_type && (
+          <span className="review-proposal-type">{detail.proposed_type}</span>
+        )}
+      </header>
+
+      {entityLoading && (
+        <p className="review-hint">Loading current entity…</p>
+      )}
+
+      {detail.kind === "update_entity" && summaryItem && !entityLoading && (
+        <section className="review-proposal-section">
+          <h3 className="review-proposal-section-title">Summary</h3>
+          {entity ? (
+            <ProposalDiff
+              oldText={entity.summary}
+              newText={proposedSummary || summaryTextFromItem(summaryItem)}
+            />
+          ) : (
+            <>
+              <p className="review-hint">
+                Current entity unavailable — showing proposed summary only.
+              </p>
+              <pre className="review-proposal-preview">
+                {proposedSummary || summaryTextFromItem(summaryItem)}
+              </pre>
+            </>
+          )}
+          <ProposalItemRow
+            item={summaryItem}
+            decision={itemDecisions.get(summaryItem.id) ?? "accept"}
+            entity={entity}
+            onDecisionChange={onItemDecisionChange}
+          />
+        </section>
+      )}
+
+      {detail.kind === "new_entity" && summaryItem && proposedSummary && (
+        <section className="review-proposal-section">
+          <h3 className="review-proposal-section-title">Summary</h3>
+          <pre className="review-proposal-preview">{proposedSummary}</pre>
+          <ProposalItemRow
+            item={summaryItem}
+            decision={itemDecisions.get(summaryItem.id) ?? "accept"}
+            entity={entity}
+            onDecisionChange={onItemDecisionChange}
+          />
+        </section>
+      )}
+
+      {(detail.kind === "new_entity"
+        ? detail.items.filter(
+            (item) =>
+              item.item_type !== "summary_update" || !proposedSummary,
+          )
+        : otherItems
+      ).length > 0 ? (
+        <section className="review-proposal-section">
+          <h3 className="review-proposal-section-title">Proposed changes</h3>
+          <div className="proposal-item-list">
+            {(detail.kind === "new_entity"
+              ? detail.items.filter(
+                  (item) =>
+                    item.item_type !== "summary_update" || !proposedSummary,
+                )
+              : otherItems
+            ).map((item) => (
+              <ProposalItemRow
+                key={item.id}
+                item={item}
+                decision={itemDecisions.get(item.id) ?? "accept"}
+                entity={entity}
+                onDecisionChange={onItemDecisionChange}
+              />
+            ))}
+          </div>
+        </section>
+      ) : (
+        detail.items.length === 0 && (
+          <p className="review-hint">No proposed items.</p>
+        )
+      )}
     </div>
   );
 }

@@ -1,8 +1,8 @@
 # Spec: OKF-Native Backend Migration (Phase 3)
 
 **Date:** 2026-07-05
-**Status:** Approved
-**Branch:** feat
+**Status:** Implemented (2026-07-06, v1.10.0). Deferred: `curated_agent_log` writers + 90-day pruning (§5), `healed` maintenance events (§5), maintenance `incremental_vacuum` (§4), `wiki_pages` drop in V8 (§1).
+**Branch:** `main` (shipped v1.10.0)
 **Related:** `2026-07-05-ux-vision-okf-native-design.md` (phases 4–5 block on this), `../../../clanker/docs/superpowers/specs/2026-07-03-okf-export-design.md`, `../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md`, `../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; see the addendum at the bottom)
 
 ## Problem
@@ -232,6 +232,16 @@ Failure mid-conversion: guard key unwritten → next startup re-runs; step 2's d
 - Auto-approve rule UI changes (existing `folder_rules.auto_approve` semantics carried over).
 - Retrieval-ranking changes beyond removing the `tier_wisdom` chunk source.
 - Summary-edit merge UX (v1 ships the timestamp conflict check; a real merge flow is v2).
+
+### Implemented deferrals (v1.10.0)
+
+| Item | Spec ref | Status |
+|---|---|---|
+| `curated_agent_log` writers (`tool_dispatch`, `mcp_server`) | §5 | Table created; writers not wired |
+| Agent log 90-day startup pruning | §5 | Not implemented |
+| `healed` events on heal/prune/re-embed maintenance | §5 | Not implemented |
+| Maintenance `incremental_vacuum` | §4 | One-time `VACUUM` at migration only |
+| `wiki_pages` table drop | §1 | Deferred to V8 per design |
 
 ## Known Limitations (documented, accepted for v1)
 
