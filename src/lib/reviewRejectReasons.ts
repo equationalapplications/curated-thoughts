@@ -22,12 +22,12 @@ function writeMap(map: RejectReasonMap): void {
   }
 }
 
-export function saveRejectReason(pageId: number, reason: string): void {
+export function saveRejectReason(proposalId: string, reason: string): void {
   const map = readMap();
-  map[String(pageId)] = reason;
+  map[proposalId] = reason;
   writeMap(map);
 }
 
-export function getRejectReason(pageId: number): string | undefined {
-  return readMap()[String(pageId)];
+export function getRejectReason(proposalId: string): string | undefined {
+  return readMap()[proposalId];
 }

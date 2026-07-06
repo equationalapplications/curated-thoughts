@@ -1,8 +1,9 @@
 # Clanker Cloud Bridge — Direct Desktop-to-Cloud Vault Retrieval
 
 **Date:** 2026-07-01
-**Status:** Approved
+**Status:** Implemented (2026-07-05, v1.8.0). Wire protocol aligned with Clanker in v1.9.0 per `2026-07-05-clanker-desktop-bridge-alignment-design.md`.
 **Depends on:** `2026-06-23-mcp-wiki-graph-tools-design.md` (tool contracts reused verbatim), `2026-05-23-unified-mcp-binary-spec.md` (shared `tauri_app_lib`, both binaries), `2026-05-17-prisma-adapter-rust-design.md` (`OutboxWorker` auto-init pattern this design mirrors)
+**Related:** `2026-07-05-clanker-desktop-bridge-alignment-design.md` (wire-protocol amendment — supersedes this spec's §4 handshake/frame sketch only)
 **External repo referenced (contract only, not designed here):** `clanker` (Cloud Coordinator + MV3 extension)
 
 ## 1. Summary

@@ -40,7 +40,7 @@ fn run_mcp() {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
 fn hide_console_on_windows() {
     // Safety: these Windows console APIs are called with valid arguments:
     // - GetConsoleWindow and FreeConsole have no preconditions for this use.
@@ -65,7 +65,7 @@ fn hide_console_on_windows() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(debug_assertions)))]
 fn hide_console_on_windows() {}
 
 #[cfg(test)]
