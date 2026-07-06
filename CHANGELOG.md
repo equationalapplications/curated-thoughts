@@ -1,3 +1,15 @@
+## [1.13.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.12.0...v1.13.0) (2026-07-06)
+
+### Features
+
+* **okf:** implement profile-v1 bundle import/export end-to-end ([96e97fc](https://github.com/equationalapplications/curated-thoughts/commit/96e97fc70e0e2910912fc62a25346a9664a18f77))
+
+### Bug Fixes
+
+* **okf:** address PR review feedback on bundle fidelity and UX ([91b3176](https://github.com/equationalapplications/curated-thoughts/commit/91b317647917d114b4852f4ed1149c20265abad0))
+* **okf:** restore created_at param on import audit event INSERT ([bb5b9bc](https://github.com/equationalapplications/curated-thoughts/commit/bb5b9bc16515c6c23fdf2dd98785ba5ac6c77803))
+* **test:** supply NOT NULL wiki fixture columns for MCP integration ([8d2f251](https://github.com/equationalapplications/curated-thoughts/commit/8d2f25114cbd19744fefb2d869da2a2efb86544a))
+
 ## [1.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.11.1...v1.12.0) (2026-07-06)
 
 ### Features
