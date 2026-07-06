@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
-import { getReviewQueue, ReviewPage } from "../lib/tauri";
+import { listProposals, type ProposalSummary } from "../lib/tauri";
 
 const POLL_MS = 5000;
 
-export function useReviewQueue(vaultPath: string) {
-  const [queue, setQueue] = useState<ReviewPage[]>([]);
+export function useProposalQueue(vaultPath: string) {
+  const [queue, setQueue] = useState<ProposalSummary[]>([]);
 
   const refresh = useCallback(() => {
-    getReviewQueue().then(setQueue).catch(() => {});
+    listProposals({ status: "pending" })
+      .then(setQueue)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
