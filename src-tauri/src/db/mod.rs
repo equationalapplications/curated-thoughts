@@ -1,3 +1,5 @@
+pub mod bundle_apply;
+pub mod bundle_io;
 pub mod commit;
 pub mod connection;
 pub mod ddl_compat;

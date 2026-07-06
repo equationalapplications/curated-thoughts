@@ -1,5 +1,5 @@
 //! DDL for OKF tables: package-owned `llm_wiki_*` (verbatim from core-llm-wiki setupDatabase)
-//! plus Rust-owned `curated_*` staging tables and graph extensions used by wiki_graph.
+//! plus Rust-owned `curated_*` staging tables.
 
 /// Default table prefix for core-llm-wiki in Curated Thoughts.
 pub const LLM_WIKI_PREFIX: &str = "llm_wiki_";
@@ -8,7 +8,7 @@ pub const LLM_WIKI_PREFIX: &str = "llm_wiki_";
 pub const LLM_WIKI_META_TABLE: &str = "llm_wiki_meta";
 
 /// Verbatim `setupDatabase` SQL from `@equationalapplications/core-llm-wiki` with prefix applied.
-pub const LLM_WIKI_PACKAGE_DDL: &str = r"
+pub const LLM_WIKI_PACKAGE_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS llm_wiki_entries (
   id TEXT PRIMARY KEY,
   entity_id TEXT NOT NULL,
@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS llm_wiki_entries (
   access_count INTEGER NOT NULL DEFAULT 0,
   deleted_at INTEGER,
   embedding TEXT,
-  embedding_blob BLOB
+  embedding_blob BLOB,
+  okf_type TEXT
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_entity_idx ON llm_wiki_entries(entity_id);
@@ -42,10 +43,23 @@ CREATE TABLE IF NOT EXISTS llm_wiki_tasks (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   resolved_at INTEGER,
-  deleted_at INTEGER
+  deleted_at INTEGER,
+  okf_type TEXT
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_tasks_entity_idx ON llm_wiki_tasks(entity_id, status);
+
+CREATE TABLE IF NOT EXISTS llm_wiki_edges (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(entity_id, source_id, target_id, edge_type)
+);
+
+CREATE INDEX IF NOT EXISTS llm_wiki_edges_entity_idx ON llm_wiki_edges(entity_id);
 
 CREATE TABLE IF NOT EXISTS llm_wiki_events (
   id TEXT PRIMARY KEY,
@@ -62,6 +76,13 @@ CREATE TABLE IF NOT EXISTS llm_wiki_checkpoints (
   entity_id TEXT PRIMARY KEY,
   heal_checkpoint INTEGER NOT NULL DEFAULT 0,
   memory_checkpoint INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS llm_wiki_entity_manifests (
+  entity_id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL DEFAULT 'off',
+  manifest_json TEXT NOT NULL DEFAULT '{"node_types":[],"edge_types":[]}',
+  updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS llm_wiki_meta (
@@ -84,29 +105,7 @@ CREATE INDEX IF NOT EXISTS llm_wiki_outbox_entity_id_created_at
 
 CREATE INDEX IF NOT EXISTS llm_wiki_outbox_created_at
   ON llm_wiki_outbox (created_at);
-";
-
-/// Graph tables used by MCP/wiki_graph but not yet in core-llm-wiki@4.9.0 setupDatabase.
-pub const LLM_WIKI_GRAPH_EXTENSION_DDL: &str = r"
-CREATE TABLE IF NOT EXISTS llm_wiki_edges (
-  id TEXT PRIMARY KEY,
-  entity_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  edge_type TEXT NOT NULL,
-  created_at INTEGER
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS llm_wiki_edges_unique
-  ON llm_wiki_edges (entity_id, source_id, target_id, edge_type);
-
-CREATE TABLE IF NOT EXISTS llm_wiki_entity_manifests (
-  entity_id TEXT PRIMARY KEY,
-  mode TEXT NOT NULL,
-  manifest_json TEXT NOT NULL,
-  updated_at INTEGER
-);
-";
+"#;
 
 /// Rust-owned staging and local-only tables (spec §1).
 pub const CURATED_TABLES_DDL: &str = r"
@@ -172,12 +171,11 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_sources_doc ON curated_proposal_
 CREATE INDEX IF NOT EXISTS idx_curated_agent_log_created ON curated_agent_log(created_at);
 ";
 
-/// Full V7 schema migration SQL (package + graph extensions + curated tables).
+/// Full V7 schema migration SQL (package + curated tables).
 pub fn migration_v7_sql() -> String {
     format!(
-        "{}{}{}\nINSERT OR IGNORE INTO schema_version (version) VALUES (7);",
+        "{}{}\nINSERT OR IGNORE INTO schema_version (version) VALUES (7);",
         LLM_WIKI_PACKAGE_DDL.trim(),
-        LLM_WIKI_GRAPH_EXTENSION_DDL.trim(),
         CURATED_TABLES_DDL.trim(),
     )
 }
