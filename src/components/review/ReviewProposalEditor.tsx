@@ -26,10 +26,18 @@ export function ReviewProposalEditor({
   >(undefined);
 
   useEffect(() => {
+    let cancelled = false;
     setCurrentContent(undefined);
     readDocument(page.path)
-      .then(setCurrentContent)
-      .catch(() => setCurrentContent(null));
+      .then((content) => {
+        if (!cancelled) setCurrentContent(content);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentContent(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [page.id, page.path]);
 
   useEffect(() => {

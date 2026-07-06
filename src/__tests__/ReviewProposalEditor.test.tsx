@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { ReviewProposalEditor } from "../components/review/ReviewProposalEditor";
 import type { ReviewPage } from "../lib/tauri";

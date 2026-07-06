@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { StatusBar } from "../components/shell/StatusBar";
 import { renderWithTheme } from "./test-utils";

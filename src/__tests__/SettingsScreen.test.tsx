@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { screen, fireEvent } from "@testing-library/react";
 import { SettingsScreen } from "../components/settings/SettingsScreen";
 import { renderWithTheme } from "./test-utils";
 
