@@ -116,14 +116,6 @@ export const listVaultFiles = (): Promise<VaultFile[]> =>
 export const readDocument = (path: string): Promise<string> =>
   invoke("read_document", { path });
 
-export interface ReviewPage {
-  id: number;
-  path: string;
-  source_doc_ids: string;
-  generated_by: string;
-  reasoning_summary?: string | null;
-}
-
 export interface ProposalItemCounts {
   total: number;
   facts: number;
@@ -294,18 +286,6 @@ export const updateEntitySummary = (
 export const archiveEntity = (entityId: string): Promise<void> =>
   invoke("archive_entity_cmd", { entityId });
 
-export const getReviewQueue = (): Promise<ReviewPage[]> =>
-  invoke("get_review_queue");
-
-export const approveWikiPage = (
-  id: number,
-  content: string
-): Promise<void> =>
-  invoke("approve_wiki_page", { id, content });
-
-export const rejectWikiPage = (id: number): Promise<void> =>
-  invoke("reject_wiki_page", { id });
-
 export interface FolderRule {
   id: number;
   folder_path: string;
@@ -325,9 +305,6 @@ export const setFolderRule = (
 
 export const deleteFolderRule = (id: number): Promise<void> =>
   invoke("delete_folder_rule", { id });
-
-export const getProposedContent = (pageId: number): Promise<string> =>
-  invoke("get_proposed_content", { pageId });
 
 export const saveWikiPage = (path: string, content: string): Promise<void> =>
   invoke("save_wiki_page", { path, content });

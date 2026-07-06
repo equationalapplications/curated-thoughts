@@ -1,13 +1,18 @@
 /** Oldest-first queue order (matches editorial desk default). */
-export function sortReviewQueue<T extends { id: number }>(queue: T[]): T[] {
-  return [...queue].sort((a, b) => a.id - b.id);
+export function sortReviewQueue<T extends { id: string; created_at: number }>(
+  queue: T[],
+): T[] {
+  return [...queue].sort((a, b) => {
+    if (a.created_at !== b.created_at) return a.created_at - b.created_at;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 /** After removing `currentId`, pick the next focused item in sorted order. */
-export function nextQueueSelectionId<T extends { id: number }>(
+export function nextQueueSelectionId<T extends { id: string; created_at: number }>(
   queue: T[],
-  currentId: number,
-): number | null {
+  currentId: string,
+): string | null {
   const sorted = sortReviewQueue(queue);
   const index = sorted.findIndex((page) => page.id === currentId);
   const remaining = sorted.filter((page) => page.id !== currentId);
@@ -17,11 +22,11 @@ export function nextQueueSelectionId<T extends { id: number }>(
   return remaining[remaining.length - 1].id;
 }
 
-export function adjacentQueueId<T extends { id: number }>(
+export function adjacentQueueId<T extends { id: string; created_at: number }>(
   queue: T[],
-  currentId: number,
+  currentId: string,
   direction: "next" | "prev",
-): number | null {
+): string | null {
   const sorted = sortReviewQueue(queue);
   const index = sorted.findIndex((page) => page.id === currentId);
   if (index === -1) return sorted[0]?.id ?? null;

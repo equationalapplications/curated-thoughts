@@ -1,3 +1,34 @@
+## [1.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.11.1...v1.12.0) (2026-07-06)
+
+### Features
+
+* **review:** Phase 2 slices 3–4 — per-item toggles and entity-aware diff ([f60d019](https://github.com/equationalapplications/curated-thoughts/commit/f60d0199c486272d6f685bac310f46d6cbd1010c))
+
+### Bug Fixes
+
+* **review:** address PR review feedback on diff and approvals ([859eb0d](https://github.com/equationalapplications/curated-thoughts/commit/859eb0db5af308fac369d7ea33a3452b97097f98))
+
+## [1.11.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.11.0...v1.11.1) (2026-07-06)
+
+### Bug Fixes
+
+* **release:** refresh tools lockfile during version bumps ([235ceaf](https://github.com/equationalapplications/curated-thoughts/commit/235ceafb5efd004631b029f1f471785566421b94))
+
+## [1.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.10.0...v1.11.0) (2026-07-06)
+
+### Features
+
+* **review:** wire Phase 2 queue to V7 proposal API (Slice 1) ([ace568d](https://github.com/equationalapplications/curated-thoughts/commit/ace568d648a7785f3222b29e63b7720861f09ddb))
+
+### Bug Fixes
+
+* **ci:** scope outbox tests to lib crate to avoid linker OOM ([2625e42](https://github.com/equationalapplications/curated-thoughts/commit/2625e4266308e866f99eef8e391128e9a6eeacf5))
+* **ci:** silence rustc warnings in outbox test build ([94cef6f](https://github.com/equationalapplications/curated-thoughts/commit/94cef6f4ab42bc43bab67978b02f79bb3055be5f))
+* **review:** address PR review feedback on proposal detail loading ([b5c026a](https://github.com/equationalapplications/curated-thoughts/commit/b5c026a3628371b175cea2c822acea9632128141))
+* **review:** handle null proposal detail without duplicate error ([13c88c1](https://github.com/equationalapplications/curated-thoughts/commit/13c88c10940a5dd3b74f31da4568591ea388b8b4))
+* **review:** harden V7 proposal desk wiring from review feedback ([a27f70d](https://github.com/equationalapplications/curated-thoughts/commit/a27f70d8eb97ea2daece98fb15955d5afd7b327f))
+* **review:** surface queue errors in empty state and clear stale data ([2d10c3f](https://github.com/equationalapplications/curated-thoughts/commit/2d10c3fc28e5d8569cf583c58b59e5d7841bac49))
+
 ## [1.10.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.9.0...v1.10.0) (2026-07-06)
 
 ### Features

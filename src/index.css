@@ -1174,6 +1174,116 @@ body {
   min-height: 0;
   overflow-y: auto;
 }
+.review-proposal-preview {
+  margin: 0;
+  padding: 12px 16px;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.review-proposal-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 16px 0;
+}
+.review-proposal-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.review-proposal-type {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--on-surface-var);
+}
+.review-proposal-section {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.review-proposal-section-title {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--on-surface-var);
+}
+.proposal-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.proposal-item-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--elev-2);
+  border: 1px solid var(--outline-var);
+}
+.proposal-item-row[data-decision="reject"] {
+  opacity: 0.72;
+}
+.proposal-item-body {
+  min-width: 0;
+  flex: 1;
+}
+.proposal-item-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--on-surface-var);
+}
+.proposal-item-detail {
+  margin: 4px 0 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.proposal-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.proposal-item-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--on-surface-var);
+  cursor: pointer;
+}
+.proposal-item-btn--active.proposal-item-btn--accept {
+  background: color-mix(in srgb, var(--primary) 20%, transparent);
+  color: var(--primary);
+  font-weight: 600;
+}
+.proposal-item-btn--active.proposal-item-btn--reject {
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+  color: var(--error);
+  font-weight: 600;
+}
+.review-queue-item-kind,
+.review-kind {
+  font-size: 0.75rem;
+  color: var(--on-surface-variant, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.review-queue-item-counts {
+  font-size: 0.8rem;
+  color: var(--on-surface-variant, #666);
+}
 .review-empty {
   flex: 1;
   display: flex;
