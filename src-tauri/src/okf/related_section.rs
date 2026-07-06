@@ -1,6 +1,6 @@
 use crate::okf::types::OkfMarkdownLink;
 
-fn escape_link_label(label: &str) -> String {
+pub(crate) fn escape_link_label(label: &str) -> String {
     label
         .replace('\\', "\\\\")
         .replace('[', "\\[")
@@ -82,7 +82,7 @@ pub fn split_related_section(body: &str) -> (String, Vec<OkfMarkdownLink>) {
     (normalized_body, related_links)
 }
 
-fn parse_inline_links(text: &str) -> Vec<OkfMarkdownLink> {
+pub(crate) fn parse_inline_links(text: &str) -> Vec<OkfMarkdownLink> {
     let mut links = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;

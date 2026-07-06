@@ -42,7 +42,8 @@ pub fn sanitize_for_filename(value: &str) -> String {
         .join("_");
 
     const MAX_BASE: usize = 200;
-    let trimmed = if sanitized.len() > MAX_BASE {
+    let over_max = sanitized.len() > MAX_BASE;
+    let trimmed = if over_max {
         sanitized[..MAX_BASE].to_string()
     } else {
         sanitized
@@ -66,7 +67,7 @@ pub fn sanitize_for_filename(value: &str) -> String {
 
     let windows_reserved = is_windows_reserved_name(&base_name);
     let needs_suffix = base_name != value
-        || sanitized.len() > MAX_BASE
+        || over_max
         || had_trailing_dot_space
         || windows_reserved;
 

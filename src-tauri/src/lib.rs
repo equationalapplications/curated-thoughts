@@ -5,7 +5,9 @@ pub mod graph;
 mod hasher;
 pub mod indexer;
 pub mod librarian;
+pub mod okf;
 mod entities_api;
+mod okf_api;
 mod proposals_api;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
@@ -2193,6 +2195,9 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             entities_api::create_entity_cmd,
             entities_api::update_entity_summary_cmd,
             entities_api::archive_entity_cmd,
+            okf_api::okf_export_bundle_cmd,
+            okf_api::okf_import_preview_cmd,
+            okf_api::okf_import_apply_cmd,
             proposals_api::list_proposals_cmd,
             proposals_api::get_proposal_detail_cmd,
             proposals_api::resolve_proposal_cmd,
@@ -2409,6 +2414,9 @@ pub fn run() {
             entities_api::create_entity_cmd,
             entities_api::update_entity_summary_cmd,
             entities_api::archive_entity_cmd,
+            okf_api::okf_export_bundle_cmd,
+            okf_api::okf_import_preview_cmd,
+            okf_api::okf_import_apply_cmd,
             proposals_api::list_proposals_cmd,
             proposals_api::get_proposal_detail_cmd,
             proposals_api::resolve_proposal_cmd,

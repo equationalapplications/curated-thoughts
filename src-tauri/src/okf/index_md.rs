@@ -54,7 +54,7 @@ pub fn build_root_index_md(
 ) -> String {
     let mut lines = vec![
         "---".to_string(),
-        format!("okf_version: {}", serialize_scalar_string(okf_version)),
+        format!("okf_version: {}", okf_version),
     ];
     if let Some(profile) = profile {
         lines.push(format!("profile: {}", serialize_scalar_string(profile)));

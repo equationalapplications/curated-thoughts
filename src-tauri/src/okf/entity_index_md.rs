@@ -70,7 +70,7 @@ pub fn parse_entity_index_md(content: &str) -> (String, Vec<OkfIndexSection>) {
         return (summary, sections);
     };
 
-    let mut current: Option<OkfIndexSection> = None;
+    let mut current_idx: Option<usize> = None;
     for line in &lines[first_section_idx.max(start)..] {
         if line.trim() == EVENT_LOG_LINK {
             continue;
@@ -81,14 +81,14 @@ pub fn parse_entity_index_md(content: &str) -> (String, Vec<OkfIndexSection>) {
                 entries: Vec::new(),
             };
             sections.push(section);
-            current = sections.last_mut();
+            current_idx = Some(sections.len() - 1);
             continue;
         }
-        let Some(section) = current.as_mut() else {
+        let Some(idx) = current_idx else {
             continue;
         };
         if let Some(entry) = parse_index_entry(line) {
-            section.entries.push(entry);
+            sections[idx].entries.push(entry);
         }
     }
 
@@ -119,38 +119,34 @@ fn parse_index_entry(line: &str) -> Option<crate::okf::types::OkfIndexEntry> {
 fn parse_bracket_link(input: &str) -> Option<(&str, &str)> {
     let mut i = 0;
     let chars: Vec<char> = input.chars().collect();
-    let mut label = String::new();
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() {
-            label.push(chars[i + 1]);
             i += 2;
             continue;
         }
         if chars[i] == ']' {
             break;
         }
-        label.push(chars[i]);
         i += 1;
     }
     if i >= chars.len() || chars[i] != ']' {
         return None;
     }
+    let title_end = i;
     i += 1;
     if i >= chars.len() || chars[i] != '(' {
         return None;
     }
     i += 1;
-    let path_start = i;
     while i < chars.len() && chars[i] != ')' {
         i += 1;
     }
-    let path = &input[label.len() + 2..input.len().min(path_start + (i - path_start))];
-    // Recompute path from original string for correctness
+    if i >= chars.len() || chars[i] != ')' {
+        return None;
+    }
     let open_paren = input.find('(')? + 1;
     let close_paren = input[open_paren..].find(')')? + open_paren;
-    let path = &input[open_paren..close_paren];
-    let _ = label;
-    Some((&input[1..input.find(']')?], &input[open_paren..close_paren]))
+    Some((&input[..title_end], &input[open_paren..close_paren]))
 }
 
 fn unescape_index_title(title: &str) -> String {
