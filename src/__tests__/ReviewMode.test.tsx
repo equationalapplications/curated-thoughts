@@ -344,6 +344,90 @@ test("shows queue fetch errors passed from AppShell", async () => {
   ).toBeInTheDocument();
 });
 
+test("shows queue fetch errors in the empty state", async () => {
+  renderWithTheme(
+    <ReviewMode
+      queue={[]}
+      onAction={vi.fn()}
+      vaultPath={VAULT}
+      queueError="Review queue is temporarily unavailable."
+    />,
+  );
+  expect(screen.getByRole("heading", { name: /queue unavailable/i })).toBeInTheDocument();
+  expect(
+    screen.getByText(/review queue is temporarily unavailable/i),
+  ).toBeInTheDocument();
+});
+
+test("ignores stale proposal detail responses when selection changes quickly", async () => {
+  let resolveOlder: ((value: ReturnType<typeof makeProposalDetail>) => void) | undefined;
+  const olderDetailPromise = new Promise<ReturnType<typeof makeProposalDetail>>((resolve) => {
+    resolveOlder = resolve;
+  });
+
+  const olderDetail = makeProposalDetail(OLDER, {
+    reasoning: null,
+    items: [
+      {
+        id: "item_prop_older",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "Older-only fact body." },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+    ],
+  });
+  const newerDetail = makeProposalDetail(NEWER, {
+    reasoning: null,
+    items: [
+      {
+        id: "item_prop_newer",
+        item_type: "fact_add",
+        target_id: null,
+        payload: { body: "Newer-only fact body." },
+        evidence: [],
+        status: "pending",
+        edited_payload: null,
+      },
+    ],
+  });
+
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "get_proposal_detail_cmd") {
+      const proposalId = args?.proposalId as string;
+      if (proposalId === "prop_older") {
+        return olderDetailPromise;
+      }
+      if (proposalId === "prop_newer") {
+        return Promise.resolve(newerDetail);
+      }
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  renderWithTheme(
+    <ReviewMode
+      queue={[NEWER, OLDER]}
+      onAction={vi.fn()}
+      vaultPath={VAULT}
+    />,
+  );
+
+  const list = screen.getByRole("list", { name: /review queue/i });
+  fireEvent.click(within(list).getByRole("button", { name: /Older Entity/i }));
+  fireEvent.click(within(list).getByRole("button", { name: /Newer Entity/i }));
+
+  await screen.findByText(/Newer-only fact body/i);
+
+  resolveOlder?.(olderDetail);
+  await new Promise((r) => setTimeout(r, 50));
+
+  expect(screen.getByText(/Newer-only fact body/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Older-only fact body/i)).not.toBeInTheDocument();
+});
+
 test("batch approve continues after individual failures", async () => {
   const onAction = vi.fn();
   const resolveCalls: string[] = [];

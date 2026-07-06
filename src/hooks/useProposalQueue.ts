@@ -14,6 +14,7 @@ export function useProposalQueue(vaultPath: string) {
         setError(null);
       })
       .catch(() => {
+        setQueue([]);
         setError("Review queue is temporarily unavailable.");
       });
   }, []);
