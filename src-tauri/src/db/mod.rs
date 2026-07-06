@@ -1,3 +1,4 @@
+pub mod commit;
 pub mod connection;
 pub mod ddl_compat;
 pub mod okf_ddl;

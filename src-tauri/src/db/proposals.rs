@@ -20,7 +20,7 @@ impl ProposalKind {
         }
     }
 
-    fn from_db(s: &str) -> Result<Self> {
+    pub(crate) fn from_db(s: &str) -> Result<Self> {
         match s {
             "new_entity" => Ok(Self::NewEntity),
             "update_entity" => Ok(Self::UpdateEntity),
