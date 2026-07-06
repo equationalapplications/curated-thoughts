@@ -277,7 +277,7 @@ fn extract_key(line: &str) -> Option<(String, usize)> {
                 continue;
             }
             if bytes[i] == b'"' {
-                let key = line[1..i].to_string();
+                let key = line[0..=i].to_string();
                 return Some((key, i + 1));
             }
             i += 1;
@@ -292,7 +292,7 @@ fn extract_key(line: &str) -> Option<(String, usize)> {
                     i += 2;
                     continue;
                 }
-                let key = line[1..i].to_string();
+                let key = line[0..=i].to_string();
                 return Some((key, i + 1));
             }
             i += 1;
@@ -410,6 +410,13 @@ mod tests {
             parsed.get_string_list("tags").map(|tags| tags.to_vec()),
             Some(vec!["demo".to_string()])
         );
+    }
+
+    #[test]
+    fn quoted_key_unescapes() {
+        let yaml = "---\n\"weird\\nkey\": value\n---\n";
+        let (parsed, _) = parse_frontmatter(yaml);
+        assert_eq!(parsed.get_str("weird\nkey"), Some("value"));
     }
 
     #[test]

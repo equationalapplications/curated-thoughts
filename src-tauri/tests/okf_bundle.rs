@@ -138,7 +138,7 @@ fn export_from_parsed(bundle: &tauri_app_lib::okf::bundle_read::ParsedBundle) ->
 fn golden_v1_round_trips_losslessly() {
     let original = load_fixture_files("golden-v1");
     let parsed = parse_bundle(&original).unwrap();
-    let rebuilt = write_bundle(&export_from_parsed(&parsed));
+    let rebuilt = write_bundle(&export_from_parsed(&parsed)).expect("write_bundle");
 
     let norm = |files: &[OkfFile]| -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = files

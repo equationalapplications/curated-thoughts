@@ -192,12 +192,25 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
             }
         }
 
-        entity.entity_id = entity
+        let collected_ids: Vec<String> = entity
             .facts
-            .first()
+            .iter()
             .map(|f| f.entity_id.clone())
-            .or_else(|| entity.tasks.first().map(|t| t.entity_id.clone()))
-            .unwrap_or_else(|| dir.clone());
+            .chain(entity.tasks.iter().map(|t| t.entity_id.clone()))
+            .filter(|id| !id.is_empty())
+            .collect();
+        entity.entity_id = if collected_ids.is_empty() {
+            dir.clone()
+        } else {
+            let unique: std::collections::HashSet<&str> =
+                collected_ids.iter().map(|s| s.as_str()).collect();
+            if unique.len() > 1 {
+                bundle.warnings.push(format!(
+                    "entities/{dir}: inconsistent entity_id values ({unique:?}); using first seen"
+                ));
+            }
+            collected_ids[0].clone()
+        };
 
         for (source_id, subdir, links) in pending_links {
             for link in links {
@@ -224,6 +237,10 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
         if let Some(content) = log_content {
             for entry in parse_log_md(content) {
                 let Some(parsed) = parse_event_text(&entry.text) else {
+                    bundle.warnings.push(format!(
+                        "entities/{dir}/log.md: skipped unparseable event on {}: {}",
+                        entry.date, entry.text
+                    ));
                     continue;
                 };
                 let related_entry_id = parsed.related_path.as_deref().and_then(|p| {

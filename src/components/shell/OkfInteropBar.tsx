@@ -53,9 +53,22 @@ export function OkfInteropBar({ onImported }: Props) {
     if (typeof src !== "string") return;
     setBusy(true);
     try {
-      const preview = await previewOkfImport(src, "merge");
+      const preview = await previewOkfImport(src, mode);
       setPending({ path: src, preview });
-      setMode("merge");
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleModeChange = async (m: OkfImportMode) => {
+    setMode(m);
+    if (!pending) return;
+    setBusy(true);
+    try {
+      const preview = await previewOkfImport(pending.path, m);
+      setPending({ path: pending.path, preview });
     } catch (e) {
       fail(e);
     } finally {
@@ -119,7 +132,7 @@ export function OkfInteropBar({ onImported }: Props) {
                   name="okf-import-mode"
                   value={m}
                   checked={mode === m}
-                  onChange={() => setMode(m)}
+                  onChange={() => void handleModeChange(m)}
                 />
                 {m === "merge" && "Merge (add new, keep existing)"}
                 {m === "replace" && "Replace (overwrite entity content)"}

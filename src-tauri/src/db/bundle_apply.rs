@@ -237,8 +237,8 @@ pub fn apply_import(
                 "INSERT INTO llm_wiki_entries (
                     id, entity_id, title, body, tags, confidence, source_type,
                     source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                    access_count, deleted_at, embedding_blob, embedding
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL)",
+                    access_count, deleted_at, embedding_blob, embedding, okf_type
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15)",
                 params![
                     fact_id,
                     target_entity_id,
@@ -254,6 +254,7 @@ pub fn apply_import(
                     fact.last_accessed_at,
                     fact.access_count,
                     fact.deleted_at,
+                    fact.okf_type,
                 ],
             )?;
             push_entries_outbox(
@@ -288,8 +289,8 @@ pub fn apply_import(
             tx.execute(
                 "INSERT INTO llm_wiki_tasks (
                     id, entity_id, description, status, priority,
-                    created_at, updated_at, resolved_at, deleted_at
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    created_at, updated_at, resolved_at, deleted_at, okf_type
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![
                     task_id,
                     target_entity_id,
@@ -300,6 +301,7 @@ pub fn apply_import(
                     task.updated_at,
                     task.resolved_at,
                     task.deleted_at,
+                    task.okf_type,
                 ],
             )?;
             push_tasks_outbox(

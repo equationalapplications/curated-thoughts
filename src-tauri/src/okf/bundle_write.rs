@@ -42,7 +42,7 @@ enum ConceptKind {
     Task,
 }
 
-pub fn write_bundle(entities: &[ExportEntity]) -> Vec<OkfFile> {
+pub fn write_bundle(entities: &[ExportEntity]) -> Result<Vec<OkfFile>, String> {
     let mut files = Vec::new();
     let mut root_entries = Vec::new();
 
@@ -52,12 +52,24 @@ pub fn write_bundle(entities: &[ExportEntity]) -> Vec<OkfFile> {
 
         let mut concepts: HashMap<&str, (ConceptKind, String)> = HashMap::new();
         for fact in &entity.facts {
+            if concepts.contains_key(fact.id.as_str()) {
+                return Err(format!(
+                    "duplicate concept id {} in entity {}",
+                    fact.id, entity.entity_id
+                ));
+            }
             concepts.insert(
                 fact.id.as_str(),
                 (ConceptKind::Fact, format!("{}.md", sanitize_concept_id(&fact.id))),
             );
         }
         for task in &entity.tasks {
+            if concepts.contains_key(task.id.as_str()) {
+                return Err(format!(
+                    "duplicate concept id {} in entity {}",
+                    task.id, entity.entity_id
+                ));
+            }
             concepts.insert(
                 task.id.as_str(),
                 (ConceptKind::Task, format!("{}.md", sanitize_concept_id(&task.id))),
@@ -175,5 +187,5 @@ pub fn write_bundle(entities: &[ExportEntity]) -> Vec<OkfFile> {
         ),
     });
 
-    files
+    Ok(files)
 }
