@@ -396,6 +396,7 @@ pub fn apply_import(
                     entity.facts.len(),
                     entity.tasks.len()
                 ),
+                now_ms,
             ],
         )?;
         result.entities_touched += 1;
