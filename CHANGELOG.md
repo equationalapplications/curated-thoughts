@@ -1,3 +1,26 @@
+## [1.10.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.9.0...v1.10.0) (2026-07-06)
+
+### Features
+
+* **api:** add entity CRUD and retire wiki ingest post-V7 ([ff1bef7](https://github.com/equationalapplications/curated-thoughts/commit/ff1bef7c3571663796e5e1b693799273142f204f))
+* **api:** add proposal Tauri commands and legacy review shims ([7a3c571](https://github.com/equationalapplications/curated-thoughts/commit/7a3c5710651ffcfdbb169dfa783b3aa9e886b943))
+* **db:** add curated proposal store with supersede and evidence hydration ([ad67fbe](https://github.com/equationalapplications/curated-thoughts/commit/ad67fbe6f3fdddb1eb54fd35fcb73c6ea782c3cd))
+* **db:** add llm_wiki outbox CDC format matching core-llm-wiki@4.9.0 ([5094a9a](https://github.com/equationalapplications/curated-thoughts/commit/5094a9a4405a5ed64574f77c12a55eb163fd08bb))
+* **db:** add resolve_proposal commit path with outbox staging ([19cda50](https://github.com/equationalapplications/curated-thoughts/commit/19cda5083f1cb6356e856231ff58835f21cfdb5c))
+* **db:** add V7 OKF schema, DDL compat guard, and migration fixtures ([54c887b](https://github.com/equationalapplications/curated-thoughts/commit/54c887b8c635615f78dfa5ced057cf91859773eb))
+* **db:** verify llm_wiki columns at startup against pinned package schema ([1d459a7](https://github.com/equationalapplications/curated-thoughts/commit/1d459a78efc8e4c9c27adb4877157bcd316bf329))
+* **librarian:** replace wiki page synthesis with OKF JSON proposals ([8bd1bd1](https://github.com/equationalapplications/curated-thoughts/commit/8bd1bd1104b075696bd710b63a9d10ae60356bc6))
+* **review:** ship three-column editorial desk (Phase 2 UX vision) ([c43dddb](https://github.com/equationalapplications/curated-thoughts/commit/c43dddb1ac694af297786186b7769fb00058e881))
+* **ui:** replace modals with mode-based shell (Phase 1 UX vision) ([8f9e8c1](https://github.com/equationalapplications/curated-thoughts/commit/8f9e8c129b8fabe49798a8a73471b479e7a2b6d0))
+
+### Bug Fixes
+
+* address CodeRabbit review on spec links and CI setup ([7e114db](https://github.com/equationalapplications/curated-thoughts/commit/7e114dbdf4ae9a421cc12e40019710d613e44eb5))
+* **ci:** install node deps before Rust tests for DDL compat guard ([9ec10e7](https://github.com/equationalapplications/curated-thoughts/commit/9ec10e7e73dee12bde2c454726d5e1299d3e5d2e))
+* repair syntax errors breaking CI build ([8f2a53f](https://github.com/equationalapplications/curated-thoughts/commit/8f2a53f7c8bfd1c785677f9806e12440c6f603a3))
+* **review:** guard readDocument effect against stale page switches ([9d71af2](https://github.com/equationalapplications/curated-thoughts/commit/9d71af201ec367829f11eeb4800ae7b5b0ad3cc3))
+* **test:** seed V7 llm_wiki_entries columns in MCP integration test ([d13d366](https://github.com/equationalapplications/curated-thoughts/commit/d13d366b04947033451947e71765bf190a635bb1))
+
 ## [1.9.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.8.0...v1.9.0) (2026-07-05)
 
 ### Features
