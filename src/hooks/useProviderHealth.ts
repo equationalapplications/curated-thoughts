@@ -43,9 +43,12 @@ export function useProviderHealth(): {
         }
       });
 
-    Promise.all([
-      onProviderLoading(() => setGeneration("loading")),
+    void Promise.all([
+      onProviderLoading(() => {
+        if (active) setGeneration("loading");
+      }),
       onProviderReady(() => {
+        if (!active) return;
         getProviderConfig()
           .then((cfg) => {
             if (active) {
@@ -56,11 +59,25 @@ export function useProviderHealth(): {
             if (active) setGeneration("error");
           });
       }),
-      onProviderError(() => setGeneration("error")),
-      onEmbedInitProgress(() => setEmbedding("loading")),
-      onEmbedInitDone(() => setEmbedding("ok")),
-      onEmbedInitError(() => setEmbedding("error")),
-    ]).then((uls) => unlisteners.push(...uls));
+      onProviderError(() => {
+        if (active) setGeneration("error");
+      }),
+      onEmbedInitProgress(() => {
+        if (active) setEmbedding("loading");
+      }),
+      onEmbedInitDone(() => {
+        if (active) setEmbedding("ok");
+      }),
+      onEmbedInitError(() => {
+        if (active) setEmbedding("error");
+      }),
+    ]).then((uls) => {
+      if (!active) {
+        uls.forEach((u) => u());
+      } else {
+        unlisteners.push(...uls);
+      }
+    });
 
     return () => {
       active = false;
