@@ -147,6 +147,7 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
         if (!item) continue;
         const content = await getProposedContent(id);
         await approveWikiPage(id, content);
+      }
 
       setCheckedIds(new Set());
       if (page && checkedIds.has(page.id)) {
@@ -156,7 +157,7 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [checkedIds, busy, sortedQueue, page, editedContent, onAction]);
+  }, [checkedIds, busy, sortedQueue, page, onAction]);
 
   useReviewKeyboard({
     enabled: queue.length > 0 && !busy,
