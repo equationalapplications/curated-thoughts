@@ -145,12 +145,8 @@ export function ReviewMode({ queue, onAction, vaultPath }: Props) {
       for (const id of ids) {
         const item = sortedQueue.find((p) => p.id === id);
         if (!item) continue;
-        const content =
-          item.id === page?.id && editedContent
-            ? editedContent
-            : await getProposedContent(id);
+        const content = await getProposedContent(id);
         await approveWikiPage(id, content);
-      }
 
       setCheckedIds(new Set());
       if (page && checkedIds.has(page.id)) {
