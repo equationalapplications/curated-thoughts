@@ -126,7 +126,7 @@ impl PipelineWorker {
                 eprintln!("[pipeline] failed to read embed_profile: {err}, using default");
                 crate::embedder::EmbedProfile::default()
             });
-        let conn = match Connection::open(&self.db_path) {
+        let mut conn = match Connection::open(&self.db_path) {
             Ok(c) => c,
             Err(err) => {
                 eprintln!("[pipeline] db open failed: {err}");
@@ -179,7 +179,7 @@ impl PipelineWorker {
                                 current_entity = Some(eid.clone());
                                 pending_linkers.insert(eid.clone());
                                 if let Err(e) = crate::librarian::generate_summary(
-                                    &conn,
+                                    &mut conn,
                                     &path,
                                     crate::setup::recommended_model(),
                                 ) {
