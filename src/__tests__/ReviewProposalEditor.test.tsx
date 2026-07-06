@@ -33,9 +33,14 @@ test("shows markdown preview for a loaded proposal", () => {
   expect(screen.getByText(/Test fact body/i)).toBeInTheDocument();
 });
 
-test("shows loading state while detail is null", () => {
-  renderWithTheme(<ReviewProposalEditor detail={null} />);
+test("shows loading state while detail is loading", () => {
+  renderWithTheme(<ReviewProposalEditor detail={undefined} />);
   expect(screen.getByText(/loading proposal/i)).toBeInTheDocument();
+});
+
+test("shows unavailable state when detail is null", () => {
+  renderWithTheme(<ReviewProposalEditor detail={null} />);
+  expect(screen.getByText(/proposal details unavailable/i)).toBeInTheDocument();
 });
 
 test("marks update proposals with the update variant", () => {

@@ -3,13 +3,16 @@ import type { ProposalDetail } from "../../lib/tauri";
 import { formatProposalPreview } from "../../lib/proposalPreview";
 
 interface Props {
-  detail: ProposalDetail | null;
+  detail: ProposalDetail | null | undefined;
   containerRef?: RefObject<HTMLDivElement | null>;
 }
 
 export function ReviewProposalEditor({ detail, containerRef }: Props) {
-  if (detail === null) {
+  if (detail === undefined) {
     return <p className="review-hint">Loading proposal…</p>;
+  }
+  if (detail === null) {
+    return <p className="review-hint">Proposal details unavailable.</p>;
   }
 
   const preview = formatProposalPreview(detail);

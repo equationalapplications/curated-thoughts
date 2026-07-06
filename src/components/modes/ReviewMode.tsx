@@ -44,7 +44,7 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
-  const [detail, setDetail] = useState<ProposalDetail | null>(null);
+  const [detail, setDetail] = useState<ProposalDetail | null | undefined>(undefined);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const detailRequestSeq = useRef(0);
@@ -66,15 +66,21 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
   }, [queue]);
 
   useEffect(() => {
-    setDetail(null);
+    setActionError(null);
+    setActionNotice(null);
+    setDetail(undefined);
     if (!proposal) return;
     detailRequestSeq.current += 1;
     const requestSeq = detailRequestSeq.current;
     getProposalDetail(proposal.id)
       .then((loaded) => {
-        if (detailRequestSeq.current === requestSeq) {
-          setDetail(loaded);
+        if (detailRequestSeq.current !== requestSeq) return;
+        if (loaded === null) {
+          setDetail(null);
+          setActionError("Proposal details unavailable.");
+          return;
         }
+        setDetail(loaded);
       })
       .catch(() => {
         if (detailRequestSeq.current === requestSeq) {
@@ -221,7 +227,11 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
       }
 
       setCheckedIds(failedIds);
-      if (proposal && checkedIds.has(proposal.id)) {
+      if (
+        proposal &&
+        checkedIds.has(proposal.id) &&
+        !failedIds.has(proposal.id)
+      ) {
         setSelectedId(nextQueueSelectionId(sortedQueue, proposal.id));
       }
       if (approvedCount > 0) {
@@ -301,14 +311,14 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
               <button
                 className="review-btn review-btn--approve"
                 onClick={() => void handleApprove()}
-                disabled={busy || detail === null}
+                disabled={busy || !detail}
               >
                 ✓ Approve
               </button>
               <button
                 className="review-btn review-btn--reject"
                 onClick={() => void handleReject()}
-                disabled={busy || detail === null}
+                disabled={busy || !detail}
               >
                 ✗ Reject
               </button>
