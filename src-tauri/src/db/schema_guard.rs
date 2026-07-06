@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// Pinned `package.json` dependency — keep in sync with `@equationalapplications/core-llm-wiki`.
-pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "4.9.0";
+pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "4.19.0";
 
 struct TableExpectation {
     name: &'static str,
@@ -32,6 +32,7 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "deleted_at",
             "embedding",
             "embedding_blob",
+            "okf_type",
         ],
     },
     TableExpectation {
@@ -46,6 +47,7 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "updated_at",
             "resolved_at",
             "deleted_at",
+            "okf_type",
         ],
     },
     TableExpectation {
@@ -187,7 +189,7 @@ mod tests {
     fn verify_fails_on_extra_column() {
         let conn = open_in_memory().unwrap();
         conn.execute(
-            "ALTER TABLE llm_wiki_entries ADD COLUMN okf_type TEXT",
+            "ALTER TABLE llm_wiki_entries ADD COLUMN bogus_extra TEXT",
             [],
         )
         .unwrap();
