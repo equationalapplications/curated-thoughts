@@ -2,9 +2,7 @@
 
 use crate::db::commit::{resolve_proposal, CommitResult, ResolveOptions};
 use crate::db::proposals::{
-    get_proposal_detail, insert_proposal, ItemDecision, ItemDecisionKind, NewProposal,
-    NewProposalItem, NewProposalSource, ProposalDetail, ProposalFilter, ProposalKind,
-    ProposalSourceRole, StoredEvidenceChunk,
+    get_proposal_detail, ItemDecision, ItemDecisionKind, ProposalDetail,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
@@ -236,9 +234,13 @@ pub fn proposed_content_for_rowid(conn: &Connection, rowid: i64) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::connection::open_in_memory;
-    use crate::db::queries::{insert_chunk, upsert_document};
     use crate::chunker::{Chunk, ChunkStrategyTag};
+    use crate::db::connection::open_in_memory;
+    use crate::db::proposals::{
+        insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalFilter,
+        ProposalKind, ProposalSourceRole, StoredEvidenceChunk,
+    };
+    use crate::db::queries::{insert_chunk, upsert_document};
 
     fn seed_proposal(conn: &Connection, id: &str, name: &str) -> i64 {
         let doc_id = upsert_document(conn, "/vault/documents/src.pdf", "hash").unwrap();
