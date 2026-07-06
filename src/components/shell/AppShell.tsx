@@ -159,7 +159,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
             />
           )}
           {mode === "review" && (
-            <ReviewMode queue={queue} onAction={refresh} />
+            <ReviewMode queue={queue} onAction={refresh} vaultPath={vaultPath} />
           )}
           {mode === "library" && (
             <LibraryMode

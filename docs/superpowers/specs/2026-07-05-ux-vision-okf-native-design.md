@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (in progress)
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (implemented)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec.
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design)
 
@@ -170,7 +170,7 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 Each phase gets its own implementation plan. Phases 1–2 are shippable immediately on the current data model; phases 4–5 are blocked on the backend spec (phase 3).
 
 1. **Shell** — rail, modes, status bar, full-screen Settings. Current features rehomed; no data-model change. *(Implemented 2026-07-05.)*
-2. **Review editorial desk** — the biggest UX win; works on the current model. *(In progress.)*
+2. **Review editorial desk** — the biggest UX win; works on the current model. *(Implemented 2026-07-05.)*
 
 ### Phase 1 deferrals (shipped with documented gaps)
 
