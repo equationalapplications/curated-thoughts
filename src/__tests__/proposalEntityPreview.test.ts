@@ -48,6 +48,37 @@ test("proposedSummaryText reads summary_update payload", () => {
   expect(proposedSummaryText(detail)).toBe("Proposed summary.");
 });
 
+test("describeProposalItem shows empty-string fact body as previous value", () => {
+  const entityWithEmptyFact: EntityDetail = {
+    ...ENTITY,
+    facts: [
+      {
+        id: "fact_empty",
+        title: "",
+        body: "",
+        tags: [],
+        confidence: "certain",
+        source_type: "user_confirmed",
+        updated_at: 2,
+      },
+    ],
+  };
+  const item = {
+    id: "item_update",
+    item_type: "fact_update",
+    target_id: "fact_empty",
+    payload: { body: "New body." },
+    evidence: [],
+    status: "pending",
+    edited_payload: null,
+  };
+
+  expect(describeProposalItem(item, entityWithEmptyFact)).toEqual({
+    label: "Update fact",
+    detail: " → New body.",
+  });
+});
+
 test("describeProposalItem shows fact update with previous body", () => {
   const item = {
     id: "item_update",

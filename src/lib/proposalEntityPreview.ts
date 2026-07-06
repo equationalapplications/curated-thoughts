@@ -57,7 +57,7 @@ export function describeProposalItem(
     case "fact_update": {
       const nextBody = itemPayloadString(item, "body");
       const previousBody = factBodyFromEntity(entity, item.target_id);
-      if (previousBody) {
+      if (previousBody !== null) {
         return {
           label: "Update fact",
           detail: previousBody === nextBody ? nextBody : `${previousBody} → ${nextBody}`,

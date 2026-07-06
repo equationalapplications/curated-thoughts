@@ -83,10 +83,21 @@ export function ReviewProposalEditor({
       {detail.kind === "update_entity" && summaryItem && !entityLoading && (
         <section className="review-proposal-section">
           <h3 className="review-proposal-section-title">Summary</h3>
-          <ProposalDiff
-            oldText={entity?.summary ?? ""}
-            newText={proposedSummary || summaryTextFromItem(summaryItem)}
-          />
+          {entity ? (
+            <ProposalDiff
+              oldText={entity.summary}
+              newText={proposedSummary || summaryTextFromItem(summaryItem)}
+            />
+          ) : (
+            <>
+              <p className="review-hint">
+                Current entity unavailable — showing proposed summary only.
+              </p>
+              <pre className="review-proposal-preview">
+                {proposedSummary || summaryTextFromItem(summaryItem)}
+              </pre>
+            </>
+          )}
           <ProposalItemRow
             item={summaryItem}
             decision={itemDecisions.get(summaryItem.id) ?? "accept"}

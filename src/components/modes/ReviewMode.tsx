@@ -151,7 +151,7 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
     [itemDecisions],
   );
 
-  const canApprove = Boolean(detail) && hasAcceptedItems(itemDecisions);
+  const canApprove = detail != null && hasAcceptedItems(detail, itemDecisions);
 
   const handleApprove = useCallback(async () => {
     if (!proposal || !detail || busy || !canApprove) return;

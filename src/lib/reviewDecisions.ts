@@ -19,12 +19,12 @@ export function buildDecisions(
 }
 
 export function hasAcceptedItems(
+  detail: ProposalDetail,
   itemDecisions: Map<string, ItemDecisionState>,
 ): boolean {
-  for (const decision of itemDecisions.values()) {
-    if (decision === "accept") return true;
-  }
-  return false;
+  return detail.items.some(
+    (item) => (itemDecisions.get(item.id) ?? "accept") === "accept",
+  );
 }
 
 export function allAcceptDecisions(detail: ProposalDetail): ItemDecision[] {
