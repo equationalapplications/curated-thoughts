@@ -15,7 +15,7 @@ Object.defineProperty(window, "matchMedia", {
 });
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn((cmd: string) => {
+  invoke: vi.fn((cmd: string, args?: Record<string, unknown>) => {
     if (cmd === "check_ollama") {
       return Promise.resolve({ installed: true, running: true, models: ["llama3.2:3b"] });
     }
@@ -69,6 +69,41 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "list_vault_files") return Promise.resolve([]);
     if (cmd === "read_document") return Promise.resolve("# Hello\n\nTest document.");
     if (cmd === "list_proposals_cmd") return Promise.resolve([]);
+    if (cmd === "get_proposal_detail_cmd") {
+      const proposalId = (args?.proposalId as string) ?? "prop_test";
+      return Promise.resolve({
+        id: proposalId,
+        kind: "new_entity",
+        entity_id: null,
+        proposed_name: "Test Entity",
+        proposed_type: "concept",
+        target_name: "Test Entity",
+        reasoning: null,
+        model: "llama3.2:3b",
+        status: "pending",
+        created_at: 100,
+        source_doc_paths: [],
+        items: [
+          {
+            id: "item_1",
+            item_type: "fact_add",
+            target_id: null,
+            payload: { body: "Test fact body." },
+            evidence: [],
+            status: "pending",
+            edited_payload: null,
+          },
+        ],
+      });
+    }
+    if (cmd === "resolve_proposal_cmd") {
+      return Promise.resolve({
+        committed: [],
+        conflicts: [],
+        dropped_edges: [],
+        proposal_status: "approved",
+      });
+    }
     if (cmd === "get_folder_rules") return Promise.resolve([]);
     if (cmd === "set_folder_rule") return Promise.resolve();
     if (cmd === "delete_folder_rule") return Promise.resolve();
