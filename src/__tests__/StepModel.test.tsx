@@ -18,6 +18,17 @@ vi.mock("../lib/events", () => ({
   onProviderError: vi.fn().mockResolvedValue(() => {}),
 }));
 
+vi.mock("../hooks/usePrivacyMode", () => ({
+  usePrivacyMode: () => ({
+    mode: "ephemeral",
+    chosen: true,
+    needs_migration_disclosure: false,
+    ephemeral_disclosure_acknowledged: true,
+    loading: false,
+    setMode: vi.fn(),
+  }),
+}));
+
 import {
   downloadSidecarEngine,
   downloadModelWeights,

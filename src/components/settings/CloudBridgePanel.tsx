@@ -16,7 +16,11 @@ const STATUS_LABEL: Record<CloudBridgeStatus["connection_status"], string> = {
   auth_rejected: "Pairing rejected — token revoked or device paused",
 };
 
-export function CloudBridgePanel() {
+interface Props {
+  disabled?: boolean;
+}
+
+export function CloudBridgePanel({ disabled = false }: Props) {
   const [status, setStatus] = useState<CloudBridgeStatus | null>(null);
   const [tokenInput, setTokenInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -84,6 +88,12 @@ export function CloudBridgePanel() {
         brain.db or a config file.
       </p>
 
+      {disabled ? (
+        <p className="settings-hint" role="status">
+          Cloud Bridge is only available in Connected agent privacy mode.
+        </p>
+      ) : null}
+
       <p className="maintenance-status" aria-live="polite">
         {status?.configured
           ? STATUS_LABEL[status.connection_status]
@@ -118,7 +128,7 @@ export function CloudBridgePanel() {
       ) : null}
 
       {status?.configured ? (
-        <button type="button" onClick={handleDisconnect} disabled={busy}>
+        <button type="button" onClick={handleDisconnect} disabled={busy || disabled}>
           Disconnect
         </button>
       ) : (
@@ -131,9 +141,13 @@ export function CloudBridgePanel() {
             aria-label="Clanker pairing token"
             autoComplete="off"
             spellCheck={false}
-            disabled={busy}
+            disabled={busy || disabled}
           />
-          <button type="button" onClick={handleConnect} disabled={busy || !tokenInput.trim()}>
+          <button
+            type="button"
+            onClick={handleConnect}
+            disabled={busy || disabled || !tokenInput.trim()}
+          >
             Connect
           </button>
         </div>

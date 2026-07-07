@@ -1,8 +1,9 @@
 import { useIndexingStatus } from "../../hooks/useIndexingStatus";
 import { useProviderHealth, type HealthState } from "../../hooks/useProviderHealth";
-import { usePrivacyMode, type PrivacyMode } from "../../hooks/usePrivacyMode";
+import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { useVaultSwitcher } from "../../hooks/useVaultSwitcher";
 import { useWikiStatus } from "../../hooks/useWikiStatus";
+import { PrivacyShieldIcon } from "../privacy/PrivacyShieldIcon";
 
 interface Props {
   vaultPath: string;
@@ -47,21 +48,12 @@ function healthTitle(kind: "Generation" | "Embeddings", state: HealthState): str
   return `${kind}: ${labels[state]}`;
 }
 
+import type { PrivacyMode } from "../../hooks/usePrivacyMode";
+
 function privacyLabel(mode: PrivacyMode): string {
   if (mode === "strict") return "Strict privacy — local only";
   if (mode === "ephemeral") return "Ephemeral cloud inference";
-  return "Full cloud sync";
-}
-
-function PrivacyShield({ mode }: { mode: PrivacyMode }) {
-  return (
-    <span
-      className={`status-bar-shield status-bar-shield--${mode}`}
-      aria-hidden="true"
-    >
-      {mode === "strict" ? "🛡" : mode === "ephemeral" ? "🛡" : "🛡"}
-    </span>
-  );
+  return "Connected agent — Cloud Bridge";
 }
 
 export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
@@ -118,7 +110,7 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
           title={privacyLabel(privacyMode)}
           aria-label={privacyLabel(privacyMode)}
         >
-          <PrivacyShield mode={privacyMode} />
+          <PrivacyShieldIcon mode={privacyMode} />
         </button>
       </div>
 

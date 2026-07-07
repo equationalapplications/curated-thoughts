@@ -13,6 +13,8 @@ import {
 import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
+import { usePrivacyMode } from "../../hooks/usePrivacyMode";
+import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
 
 interface Props {
   vaultPath: string;
@@ -45,6 +47,12 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
+  const {
+    needs_migration_disclosure,
+    loading: privacyLoading,
+    mode: privacyMode,
+  } = usePrivacyMode();
+  const [migrationDismissed, setMigrationDismissed] = useState(false);
 
   useEffect(() => {
     startFileWatcher().catch(console.error);
@@ -192,6 +200,14 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
           <span>Drop to add to Library</span>
         </div>
       )}
+      {!privacyLoading &&
+      needs_migration_disclosure &&
+      !migrationDismissed &&
+      privacyMode === "connected" ? (
+        <MigrationDisclosureModal
+          onAcknowledged={() => setMigrationDismissed(true)}
+        />
+      ) : null}
     </div>
   );
 }

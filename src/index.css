@@ -810,15 +810,44 @@ body {
 .status-bar-privacy:hover {
   background: var(--elev-2);
 }
-.status-bar-shield--strict {
-  opacity: 1;
+.privacy-shield {
+  display: block;
+  color: var(--on-surface);
 }
-.status-bar-shield--ephemeral {
-  opacity: 0.55;
+.privacy-shield--strict {
+  color: var(--primary);
 }
-.status-bar-shield--full {
-  opacity: 0.35;
-  filter: grayscale(0.3);
+.privacy-shield--ephemeral {
+  color: var(--primary);
+}
+.privacy-shield--connected {
+  color: var(--on-surface-var);
+}
+
+.privacy-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(31, 27, 22, 0.35);
+}
+.privacy-modal {
+  width: min(480px, 92vw);
+  padding: 20px 22px;
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  border: 1px solid var(--outline-var);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.privacy-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .status-dot {
   width: 7px;

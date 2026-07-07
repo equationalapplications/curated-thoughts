@@ -390,6 +390,31 @@ export const getCloudBridgeStatus = (): Promise<CloudBridgeStatus> =>
 export const retryCloudBridgeNow = (): Promise<void> =>
   invoke('retry_cloud_bridge_now');
 
+export type PrivacyMode = 'strict' | 'ephemeral' | 'connected';
+
+export interface PrivacyState {
+  mode: PrivacyMode;
+  chosen: boolean;
+  needs_migration_disclosure: boolean;
+  ephemeral_disclosure_acknowledged: boolean;
+}
+
+export interface SetPrivacyModeResult {
+  disconnected_bridge: boolean;
+  state: PrivacyState;
+}
+
+export const getPrivacyMode = (): Promise<PrivacyState> => invoke('get_privacy_mode');
+
+export const setPrivacyMode = (mode: PrivacyMode): Promise<SetPrivacyModeResult> =>
+  invoke('set_privacy_mode', { mode });
+
+export const acknowledgeMigrationDisclosure = (): Promise<void> =>
+  invoke('acknowledge_migration_disclosure');
+
+export const acknowledgeEphemeralDisclosure = (): Promise<void> =>
+  invoke('acknowledge_ephemeral_disclosure');
+
 export interface OkfExportSummary {
   path: string;
   entities: number;

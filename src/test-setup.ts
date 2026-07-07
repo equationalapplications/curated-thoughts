@@ -113,6 +113,38 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "backup_vault_db") return Promise.resolve("/test/backup.db");
     if (cmd === "check_vault_backup") return Promise.resolve(false);
     if (cmd === "reveal_vault") return Promise.resolve();
+    if (cmd === "retry_cloud_bridge_now") {
+      return Promise.resolve();
+    }
+    if (cmd === "get_privacy_mode") {
+      return Promise.resolve({
+        mode: "strict",
+        chosen: true,
+        needs_migration_disclosure: false,
+        ephemeral_disclosure_acknowledged: false,
+      });
+    }
+    if (cmd === "set_privacy_mode") {
+      const mode = (args?.mode as string) ?? "strict";
+      return Promise.resolve({
+        disconnected_bridge: false,
+        state: {
+          mode,
+          chosen: true,
+          needs_migration_disclosure: false,
+          ephemeral_disclosure_acknowledged: false,
+        },
+      });
+    }
+    if (cmd === "acknowledge_migration_disclosure") {
+      return Promise.resolve();
+    }
+    if (cmd === "acknowledge_ephemeral_disclosure") {
+      return Promise.resolve();
+    }
+    if (cmd === "get_cloud_bridge_status") {
+      return Promise.resolve({ configured: false, connection_status: "disconnected" });
+    }
     return Promise.resolve(null);
   }),
 }));
