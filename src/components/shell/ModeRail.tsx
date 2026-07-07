@@ -4,6 +4,10 @@ interface Props {
   mode: AppMode;
   reviewCount: number;
   onModeChange: (mode: AppMode) => void;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onBack: () => void;
+  onForward: () => void;
 }
 
 const MAIN_MODES: { id: AppMode; label: string; icon: string }[] = [
@@ -43,9 +47,35 @@ function RailButton({
   );
 }
 
-export function ModeRail({ mode, reviewCount, onModeChange }: Props) {
+export function ModeRail({
+  mode,
+  reviewCount,
+  onModeChange,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
+}: Props) {
   return (
     <nav className="mode-rail" aria-label="Primary">
+      <button
+        className="mode-rail-history-btn"
+        aria-label="Go back"
+        title="Go back"
+        disabled={!canGoBack}
+        onClick={onBack}
+      >
+        ‹
+      </button>
+      <button
+        className="mode-rail-history-btn"
+        aria-label="Go forward"
+        title="Go forward"
+        disabled={!canGoForward}
+        onClick={onForward}
+      >
+        ›
+      </button>
       {MAIN_MODES.map((m) => (
         <RailButton
           key={m.id}

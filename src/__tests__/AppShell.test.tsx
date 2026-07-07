@@ -57,3 +57,30 @@ test("status bar librarian segment opens activity panel", async () => {
   fireEvent.click(screen.getByRole("button", { name: /^Idle/i }));
   expect(screen.getByRole("dialog", { name: "Activity feed" })).toBeInTheDocument();
 });
+
+test("back button returns to previous mode after navigation", async () => {
+  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Brain" })).toHaveAttribute(
+    "aria-current",
+    "page"
+  );
+
+  // Navigate to Review
+  fireEvent.click(screen.getByRole("button", { name: "Review" }));
+  await screen.findByText(/queue clear/i);
+  expect(screen.getByRole("button", { name: "Review" })).toHaveAttribute(
+    "aria-current",
+    "page"
+  );
+
+  // Click back button
+  const backButton = screen.getByRole("button", { name: "Go back" });
+  expect(backButton).not.toBeDisabled();
+  fireEvent.click(backButton);
+
+  // Should return to Brain
+  expect(screen.getByRole("button", { name: "Brain" })).toHaveAttribute(
+    "aria-current",
+    "page"
+  );
+});

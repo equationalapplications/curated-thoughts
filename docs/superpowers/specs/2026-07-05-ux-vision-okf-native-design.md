@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0)
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec (`2026-07-05-okf-backend-migration-design.md` — implemented).
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
@@ -180,7 +180,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 |---|---|
 | `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Phase 5 (modes not built yet) |
 | Global `⌘K` command palette | Phase 1 follow-up or Phase 7 polish |
-| Cross-mode links, back/forward history, peek panels | Phase 1 follow-up (needed by Phase 2 evidence links) |
+| Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels → Phase 7 |
 | Activity rail pulse icon | Phase 1 follow-up |
 | Live Activity feed (beyond stub panel) | Phase 5 (Timeline data) |
 | Per-mode empty states (Brain, Library) | Phase 4 / Phase 7 |
@@ -199,10 +199,10 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Implemented (Slice 4) |
 | Per-fact accept/reject toggles in editor | Implemented (Slice 3) |
 | Inline `edited_payload` editing | Follow-up after per-item toggles |
-| Library deep-link from evidence | Blocked on cross-mode routing (Phase 1 follow-up) |
+| Library deep-link from evidence | Implemented (Phase 4 navigation; opens document, chunk-level highlight → Phase 7) |
 
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
-4. **Brain mode entity pages** — unblocked; not started.
+4. **Brain mode entity pages** — implemented 2026-07-06 (see `2026-07-06-phase-4-brain-entity-pages.md`). Deferred: peek panels, `[[` autocomplete, similarity in Connections, entity sort picker.
 5. **Timeline + Tasks modes** — unblocked; not started.
 6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes and Cloud Bridge gating split to a separate upcoming plan.
 7. **Onboarding rework + visual polish pass.**
