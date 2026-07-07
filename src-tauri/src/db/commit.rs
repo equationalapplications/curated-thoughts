@@ -68,13 +68,13 @@ struct CommitContext {
     tasks_added: usize,
 }
 
-fn generate_llm_id(prefix: &str) -> String {
+pub(crate) fn generate_llm_id(prefix: &str) -> String {
     let mut bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("{prefix}{}", hex::encode(bytes))
 }
 
-fn now_timestamps() -> (i64, i64) {
+pub(crate) fn now_timestamps() -> (i64, i64) {
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -203,7 +203,7 @@ fn trigger_source_label(conn: &Connection, proposal_id: &str) -> Result<String> 
         .unwrap_or_else(|| "unknown source".into()))
 }
 
-fn fact_title_from_body(body: &str) -> String {
+pub(crate) fn fact_title_from_body(body: &str) -> String {
     let line = body.lines().next().unwrap_or(body).trim();
     if line.is_empty() {
         return "Untitled fact".into();
