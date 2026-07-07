@@ -14,6 +14,7 @@ export interface NavigationState {
   navigate: (target: NavTarget) => void;
   goBack: () => void;
   goForward: () => void;
+  reset: (target: NavTarget) => void;
 }
 
 interface Stacks {
@@ -63,6 +64,14 @@ export function useNavigationState(
     });
   }, []);
 
+  const reset = useCallback((target: NavTarget) => {
+    setState({
+      current: target,
+      back: [],
+      forward: [],
+    });
+  }, []);
+
   return useMemo(
     () => ({
       current: state.current,
@@ -71,7 +80,8 @@ export function useNavigationState(
       navigate,
       goBack,
       goForward,
+      reset,
     }),
-    [state, navigate, goBack, goForward],
+    [state, navigate, goBack, goForward, reset],
   );
 }

@@ -88,7 +88,7 @@ export function BrainMode({
   const handleMutated = useCallback(async () => {
     try {
       await refresh();
-    } catch (err) {
+    } catch {
       // Silent fail on refresh; EntityPage already shows error.
     }
   }, [refresh]);

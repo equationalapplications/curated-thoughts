@@ -67,7 +67,7 @@ beforeEach(() => {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === "list_entities_cmd") return Promise.resolve(ENTITIES);
     if (cmd === "get_entity_cmd") {
-      const id = (invoke as any).mock.lastCall?.[1]?.entityId;
+      const id = vi.mocked(invoke).mock.lastCall?.[1]?.entityId;
       return Promise.resolve(
         ENTITIES.find((e) => e.id === id) || null,
       );
