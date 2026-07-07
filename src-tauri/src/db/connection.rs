@@ -79,6 +79,15 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
     }
 
+    // Phase 5 data migration: fix resolution event taxonomy
+    // v1.10-v1.15 wrote 'action'/'observation' for resolutions; normalize to 'approved'/'rejected'
+    conn.execute_batch(
+        "UPDATE llm_wiki_events SET event_type = 'approved'
+           WHERE event_type = 'action' AND summary LIKE 'Approved%';
+         UPDATE llm_wiki_events SET event_type = 'rejected'
+           WHERE event_type = 'observation' AND summary LIKE 'Rejected proposal%';",
+    )?;
+
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
     Ok(())

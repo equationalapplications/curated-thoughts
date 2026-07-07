@@ -731,8 +731,8 @@ fn write_resolution_event(
     source_label: &str,
 ) -> Result<()> {
     let event_type = match proposal_status {
-        "rejected" => "observation",
-        _ => "action",
+        "rejected" => "rejected",
+        _ => "approved",
     };
     let mut parts = Vec::new();
     if ctx.facts_added > 0 {
@@ -1432,5 +1432,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn resolution_events_use_approved_rejected_types() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/notes.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+
+        // Approve a proposal (NewEntity)
+        insert_test_proposal(
+            &conn,
+            "prop-approve",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-approve", chunk_id, "Approved fact.")],
+            doc_id,
+        );
+        resolve_proposal(
+            &mut conn,
+            "prop-approve",
+            &[ItemDecision {
+                item_id: "item-approve".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+            },
+        )
+        .unwrap();
+
+        // Reject a proposal (UpdateEntity with existing entity so the resolve path reaches write_resolution_event)
+        seed_entity(&conn, "ent-1", "Project X", "Summary", 100);
+        insert_test_proposal(
+            &conn,
+            "prop-reject",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("item-reject", chunk_id, "Rejected fact.")],
+            doc_id,
+        );
+        resolve_proposal(
+            &mut conn,
+            "prop-reject",
+            &[ItemDecision {
+                item_id: "item-reject".into(),
+                decision: ItemDecisionKind::Reject,
+                edited_payload: None,
+            }],
+            Some("not relevant"),
+            ResolveOptions {
+                auto_approve: false,
+            },
+        )
+        .unwrap();
+
+        let approved_type: String = conn
+            .query_row(
+                "SELECT event_type FROM llm_wiki_events WHERE summary LIKE 'Approved%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(approved_type, "approved");
+
+        let rejected_type: String = conn
+            .query_row(
+                "SELECT event_type FROM llm_wiki_events WHERE event_type = 'rejected'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rejected_type, "rejected");
     }
 }
