@@ -1,3 +1,15 @@
+## [1.14.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.13.0...v1.14.0) (2026-07-07)
+
+### Features
+
+* **privacy:** enforce three-mode posture with Cloud Bridge gating ([a512051](https://github.com/equationalapplications/curated-thoughts/commit/a512051bfc88c4a893dd1d11ea98da364140016d))
+
+### Bug Fixes
+
+* **privacy:** remove unused refresh callback from usePrivacyMode ([0a57454](https://github.com/equationalapplications/curated-thoughts/commit/0a57454c38688511ca80be634cb24095752c0075))
+* **test:** make provider rollback init-failure test runner-independent ([2f16c0f](https://github.com/equationalapplications/curated-thoughts/commit/2f16c0ffc3f62d440d27a68e963a6fd3ec273b36))
+* **test:** skip keyring in provider rollback init-failure test ([6a2d0d2](https://github.com/equationalapplications/curated-thoughts/commit/6a2d0d24b4844909b24828199b6ff4f3d7ad7f59))
+
 ## [1.13.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.12.0...v1.13.0) (2026-07-06)
 
 ### Features
