@@ -22,7 +22,7 @@ Meanwhile, the OKF format (entities, facts, tasks, edges, event log) has become 
 - **Audience:** layered. Friendly PKM framing by default ("pages, links, sources"), power-user detail (raw ids, provenance, embedding info) one level deeper.
 - **Scope of this spec:** UX vision only. Backend schema and librarian-output changes are a separate spec (Phase 3 dependency below).
 - **Shell concept:** Approach A (activity-rail workspace), blended with inbox mechanics in Review and suggestion-diff editing from the "everything is a page" concept.
-- **Privacy:** explicit three-mode privacy posture (Strict / Ephemeral cloud inference / Full cloud sync), enforced by the UI, ambient in the status bar, chosen during onboarding.
+- **Privacy:** explicit three-mode privacy posture (Strict / Ephemeral cloud inference / Connected agent — renamed from "Full cloud sync", see §6), enforced by the UI, ambient in the status bar, chosen during onboarding.
 
 ## 1. Shell & Navigation
 
@@ -134,9 +134,11 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 
 1. **Strict (default)** — fully local. Inference, embeddings, and storage all on-device. Cloud Bridge and external API fields disabled. "Nothing ever leaves this machine."
 2. **Ephemeral cloud inference** — local storage and embeddings; generation may route to an external OpenAI-compatible API. Sent context is transient and never stored remotely. The UI shows exactly what gets sent (prompt + retrieved chunks) before first use.
-3. **Full cloud sync** — the above plus Cloud Bridge sync of brain state (Clanker interop), with explicit disclosure of what syncs.
+3. **Connected agent (Cloud Bridge)** — the above plus the Clanker Cloud Bridge: your Clanker agent may **query** the vault on demand over a read-only channel (the five retrieval tools; see `2026-07-01-clanker-cloud-bridge-design.md`). Disclosure must describe what it actually is: individual query results leave the machine when the agent asks; **nothing syncs, nothing is stored remotely as a copy of the brain, and nothing can be written back over this channel**. *(Renamed from "Full cloud sync" — that label promised state synchronization the bridge does not do, and would have users consenting to the wrong mental model. If brain-state sync ever ships, it becomes a separate fourth mode or an explicit sub-toggle, not an expansion of this one.)*
 
 **Enforcement, not just preference:** the mode gates the UI. Strict hides/disables cloud fields in the Models tab; the Cloud Bridge configuration (CloudBridgePanel) moves under the Privacy tab and is active only in mode 3. Downgrading to Strict prompts: "Disconnect cloud bridge and clear remote config?"
+
+**Sequencing debt (flagged in the 2026-07-06 cross-repo architecture review):** the Cloud Bridge shipped (v1.8.0/v1.9.0) *before* this gating exists — today it is configurable regardless of privacy posture. The privacy-modes plan (split out of phase 6) must land before privacy modes are presented to users as enforced, and its migration step must handle the existing state: a user with a paired token but no chosen mode is placed in mode 3 (their current reality) and shown the disclosure, not silently downgraded to Strict with a live token in the keychain.
 
 **Ambient indicator:** the status bar shows a privacy-mode shield glyph (filled / half / outline). Clicking it opens the Privacy tab. The user always knows the data posture at a glance.
 

@@ -19,6 +19,7 @@ pub mod scifact_fixture;
 pub mod search;
 pub mod tool_dispatch;
 pub mod cloud_bridge;
+pub mod privacy;
 mod setup;
 pub mod inference;
 pub mod vault;
@@ -154,6 +155,24 @@ fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext
 }
 
 async fn start_cloud_bridge_if_configured_unlocked(state: &CloudBridgeState) {
+    let brain_dir = PathBuf::from(get_brain_dir_inner());
+    let privacy = match privacy::resolve_privacy_state(
+        &brain_dir,
+        &cloud_bridge::pairing::KeyringPairingTokenStore,
+    ) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("[cloud_bridge] failed to resolve privacy state: {e}");
+            return;
+        }
+    };
+    if !privacy::allows_cloud_bridge(privacy.mode) {
+        let existing = { state.0.lock().unwrap().take() };
+        if let Some(handle) = existing {
+            handle.stop().await;
+        }
+        return;
+    }
     let Some(config) = cloud_bridge::CloudBridgeConfig::resolve() else {
         return;
     };
@@ -2440,6 +2459,10 @@ pub fn run() {
             clear_cloud_bridge_pairing_token,
             get_cloud_bridge_status,
             retry_cloud_bridge_now,
+            get_privacy_mode,
+            set_privacy_mode,
+            acknowledge_migration_disclosure,
+            acknowledge_ephemeral_disclosure,
             get_binary_path,
             get_brain_dir,
         ])
@@ -2541,6 +2564,101 @@ fn outbox_is_configured(state: tauri::State<'_, OutboxWorkerState>) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(serde::Serialize)]
+struct PrivacyStatePayload {
+    mode: &'static str,
+    chosen: bool,
+    needs_migration_disclosure: bool,
+    ephemeral_disclosure_acknowledged: bool,
+}
+
+fn privacy_mode_label(mode: privacy::PrivacyMode) -> &'static str {
+    match mode {
+        privacy::PrivacyMode::Strict => "strict",
+        privacy::PrivacyMode::Ephemeral => "ephemeral",
+        privacy::PrivacyMode::Connected => "connected",
+    }
+}
+
+fn privacy_state_payload(state: privacy::PrivacyState) -> PrivacyStatePayload {
+    PrivacyStatePayload {
+        mode: privacy_mode_label(state.mode),
+        chosen: state.chosen,
+        needs_migration_disclosure: state.needs_migration_disclosure,
+        ephemeral_disclosure_acknowledged: state.ephemeral_disclosure_acknowledged,
+    }
+}
+
+fn parse_privacy_mode(mode: &str) -> Result<privacy::PrivacyMode, String> {
+    match mode {
+        "strict" => Ok(privacy::PrivacyMode::Strict),
+        "ephemeral" => Ok(privacy::PrivacyMode::Ephemeral),
+        "connected" => Ok(privacy::PrivacyMode::Connected),
+        _ => Err(format!("unknown privacy mode: {mode}")),
+    }
+}
+
+#[tauri::command]
+fn get_privacy_mode() -> Result<PrivacyStatePayload, String> {
+    let brain_dir = PathBuf::from(get_brain_dir_inner());
+    let state = privacy::resolve_privacy_state(
+        &brain_dir,
+        &cloud_bridge::pairing::KeyringPairingTokenStore,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(privacy_state_payload(state))
+}
+
+#[derive(serde::Serialize)]
+struct SetPrivacyModeResult {
+    disconnected_bridge: bool,
+    state: PrivacyStatePayload,
+}
+
+#[tauri::command]
+async fn set_privacy_mode(
+    mode: String,
+    state: tauri::State<'_, CloudBridgeState>,
+    lifecycle: tauri::State<'_, CloudBridgeLifecycle>,
+    app: tauri::AppHandle,
+) -> Result<SetPrivacyModeResult, String> {
+    let mode = parse_privacy_mode(&mode)?;
+    let brain_dir = PathBuf::from(get_brain_dir_inner());
+    let _guard = lifecycle.0.lock().await;
+    let (privacy_state, disconnected_bridge) = privacy::set_privacy_mode_config(
+        &brain_dir,
+        mode,
+        &cloud_bridge::pairing::KeyringPairingTokenStore,
+    )
+    .map_err(|e| e.to_string())?;
+    if disconnected_bridge {
+        let handle = { state.0.lock().unwrap().take() };
+        if let Some(handle) = handle {
+            handle.stop().await;
+        }
+    } else if privacy::allows_cloud_bridge(privacy_state.mode) {
+        start_cloud_bridge_if_configured_unlocked(&state).await;
+    }
+    let payload = privacy_state_payload(privacy_state);
+    let _ = app.emit("privacy-mode-changed", &payload);
+    Ok(SetPrivacyModeResult {
+        disconnected_bridge,
+        state: payload,
+    })
+}
+
+#[tauri::command]
+fn acknowledge_migration_disclosure() -> Result<(), String> {
+    let brain_dir = PathBuf::from(get_brain_dir_inner());
+    privacy::acknowledge_migration_disclosure(&brain_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn acknowledge_ephemeral_disclosure() -> Result<(), String> {
+    let brain_dir = PathBuf::from(get_brain_dir_inner());
+    privacy::acknowledge_ephemeral_disclosure(&brain_dir).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn set_cloud_bridge_pairing_token(
     token: String,
@@ -2550,6 +2668,17 @@ async fn set_cloud_bridge_pairing_token(
     let token = token.trim().to_string();
     if token.is_empty() {
         return Err("pairing token cannot be empty".to_string());
+    }
+    let brain_dir = PathBuf::from(get_brain_dir_inner());
+    let privacy_state = privacy::resolve_privacy_state(
+        &brain_dir,
+        &cloud_bridge::pairing::KeyringPairingTokenStore,
+    )
+    .map_err(|e| e.to_string())?;
+    if !privacy::allows_cloud_bridge(privacy_state.mode) {
+        return Err(
+            "Cloud Bridge is only available in Connected agent privacy mode".to_string(),
+        );
     }
     let _guard = lifecycle.0.lock().await;
     cloud_bridge::pairing::KeyringPairingTokenStore
