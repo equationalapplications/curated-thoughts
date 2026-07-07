@@ -2,6 +2,8 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { vi } from "vitest";
 
+vi.mock("@tauri-apps/api/core");
+
 vi.mock("../components/brain/EntitySummarySection", () => ({
   EntitySummarySection: ({ summary }: { summary: string }) => (
     <div data-testid="summary-section">{summary}</div>
