@@ -33,6 +33,8 @@ fn update_provider_rejects_external_in_strict_mode() {
 fn update_provider_rolls_back_to_unconfigured_on_init_failure() {
     let tmp = TempDir::new().expect("tempdir");
     let brain_path = tmp.path();
+    // Mark privacy as chosen so resolve_privacy_state skips keyring (unavailable on headless CI).
+    privacy::write_privacy_mode(brain_path, PrivacyMode::Strict, true).expect("privacy mode");
 
     let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
     // Missing model_path fails before any runner-specific llama-server layout.
