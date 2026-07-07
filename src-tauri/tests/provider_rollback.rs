@@ -35,16 +35,17 @@ fn update_provider_rolls_back_to_unconfigured_on_init_failure() {
     let brain_path = tmp.path();
 
     let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
+    // Missing model_path fails before any runner-specific llama-server layout.
     let config = GenerationConfig {
         provider: GenerationProviderKind::Sidecar,
-        model_path: Some("models/nonexistent.gguf".to_string()),
+        model_path: None,
         model_name: None,
         external_url: None,
         api_key: None,
     };
 
     let err = update_provider_with_brain_path(brain_path, config, &state, None).unwrap_err();
-    assert!(err.contains("llama-server binary not found") || err.contains("provider init failed"));
+    assert!(err.contains("sidecar requires model_path"));
 
     assert!(matches!(
         *state.0.lock().unwrap(),
