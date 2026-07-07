@@ -227,6 +227,7 @@ export interface EntityFact {
   tags: string[];
   confidence: string;
   source_type: string;
+  source_docs: string[];
   updated_at: number;
 }
 
@@ -285,6 +286,41 @@ export const updateEntitySummary = (
 
 export const archiveEntity = (entityId: string): Promise<void> =>
   invoke("archive_entity_cmd", { entityId });
+
+export interface EntityEdgeView {
+  id: string;
+  edge_type: string;
+  source_id: string;
+  source_label: string;
+  target_id: string;
+  target_label: string;
+}
+
+export interface EntityBacklink {
+  entity_id: string;
+  name: string;
+  entity_type: string;
+}
+
+export interface EntityConnections {
+  outgoing: EntityEdgeView[];
+  backlinks: EntityBacklink[];
+}
+
+export const getEntityConnections = (entityId: string): Promise<EntityConnections> =>
+  invoke("get_entity_connections_cmd", { entityId });
+
+export const addEntityFact = (entityId: string, body: string): Promise<EntityFact> =>
+  invoke("add_entity_fact_cmd", { entityId, body });
+
+export const updateEntityFact = (
+  entityId: string,
+  factId: string,
+  body: string,
+): Promise<void> => invoke("update_entity_fact_cmd", { entityId, factId, body });
+
+export const archiveEntityFact = (entityId: string, factId: string): Promise<void> =>
+  invoke("archive_entity_fact_cmd", { entityId, factId });
 
 export interface FolderRule {
   id: number;
