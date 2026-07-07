@@ -43,6 +43,7 @@ pub struct EntityFact {
     pub tags: Vec<String>,
     pub confidence: String,
     pub source_type: String,
+    pub source_docs: Vec<String>,
     pub updated_at: i64,
 }
 
@@ -104,6 +105,38 @@ fn summary_snippet(summary: &str) -> String {
 
 fn parse_tags(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<String> {
+    let Some(raw) = source_ref else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for chunk in evidence {
+        let Some(chunk_id) = chunk.get("chunk_id").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        let resolved: Option<String> = conn
+            .query_row(
+                "SELECT d.path FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if let Some(path) = resolved {
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 fn order_clause(sort: EntitySort) -> &'static str {
@@ -205,7 +238,7 @@ pub fn list_entities(
 
 fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, body, tags, confidence, source_type, updated_at
+        "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at
          FROM llm_wiki_entries
          WHERE entity_id = ?1 AND deleted_at IS NULL
          ORDER BY updated_at DESC",
@@ -218,12 +251,13 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
             r.get::<_, String>(3)?,
             r.get::<_, String>(4)?,
             r.get::<_, String>(5)?,
-            r.get::<_, i64>(6)?,
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, i64>(7)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, title, body, tags_raw, confidence, source_type, updated_at) = row?;
+        let (id, title, body, tags_raw, confidence, source_type, source_ref, updated_at) = row?;
         out.push(EntityFact {
             id,
             title,
@@ -231,6 +265,7 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
             tags: parse_tags(&tags_raw),
             confidence,
             source_type,
+            source_docs: source_docs_from_ref(conn, source_ref.as_deref()),
             updated_at,
         });
     }
@@ -545,5 +580,52 @@ mod tests {
             )
             .unwrap();
         assert!(embedding.is_none());
+    }
+
+    #[test]
+    fn fact_source_docs_resolved_from_source_ref() {
+        let conn = open_in_memory().unwrap();
+        let detail = create_entity(
+            &conn,
+            &CreateEntityInput {
+                name: "Sourced".into(),
+                entity_type: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('documents/notes.md', 'h1', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy)
+             VALUES (?1, 'quoted text', 0, 1, 3, NULL, 'prose')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id = conn.last_insert_rowid();
+
+        let source_ref = format!(
+            r#"{{"proposal_id":"prop_1","evidence":[{{"chunk_id":{chunk_id},"quote":"quoted text","start_line":1,"end_line":3}}]}}"#
+        );
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type, source_ref, created_at, updated_at
+             ) VALUES ('fact-src', ?1, 'T', 'B', '[]', 'inferred', 'user_confirmed', ?2, 100, 100)",
+            params![detail.id, source_ref],
+        )
+        .unwrap();
+        // A fact with NULL source_ref must yield an empty list, not an error.
+        seed_fact(&conn, &detail.id, "fact-plain", "No source.");
+
+        let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
+        let sourced = loaded.facts.iter().find(|f| f.id == "fact-src").unwrap();
+        assert_eq!(sourced.source_docs, vec!["documents/notes.md".to_string()]);
+        let plain = loaded.facts.iter().find(|f| f.id == "fact-plain").unwrap();
+        assert!(plain.source_docs.is_empty());
     }
 }
