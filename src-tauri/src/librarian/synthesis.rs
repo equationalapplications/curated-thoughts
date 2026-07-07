@@ -929,11 +929,11 @@ pub(crate) fn run_synthesis_with_completer(
                 .proposed_name
                 .as_deref()
                 .unwrap_or(entity_id);
-            let _ = write_synthesized_event(
+            write_synthesized_event(
                 conn,
                 entity_id,
                 &format!("Synthesized proposal for *{label}*"),
-            );
+            )?;
         } else if let Some(name) = bundle.proposal.proposed_name.as_deref() {
             // new_entity — entity_id assigned at commit; event written by resolve_proposal on auto_approve
             let _ = name;
