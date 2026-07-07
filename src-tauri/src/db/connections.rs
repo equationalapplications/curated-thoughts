@@ -3,6 +3,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityEdgeView {
@@ -27,25 +28,74 @@ pub struct EntityConnections {
     pub backlinks: Vec<EntityBacklink>,
 }
 
-fn endpoint_label(conn: &Connection, entity_id: &str, record_id: &str) -> Result<String> {
-    let title: Option<String> = conn
-        .query_row(
-            "SELECT title FROM llm_wiki_entries WHERE id = ?1 AND entity_id = ?2",
-            params![record_id, entity_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(title) = title {
-        return Ok(title);
+/// Batch-load endpoint labels (facts + tasks) to avoid N+1 queries.
+fn get_endpoint_labels_batch(
+    conn: &Connection,
+    entity_id: &str,
+    record_ids: &[String],
+) -> Result<HashMap<String, String>> {
+    let mut labels = HashMap::new();
+
+    if record_ids.is_empty() {
+        return Ok(labels);
     }
-    let description: Option<String> = conn
-        .query_row(
-            "SELECT description FROM llm_wiki_tasks WHERE id = ?1 AND entity_id = ?2",
-            params![record_id, entity_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(description.unwrap_or_else(|| record_id.to_string()))
+
+    // Load fact titles in one batch
+    let placeholders = record_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let query_str = format!(
+        "SELECT id, title FROM llm_wiki_entries WHERE entity_id = ? AND id IN ({})",
+        placeholders
+    );
+
+    let mut stmt = conn.prepare(&query_str)?;
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&entity_id];
+    for id in record_ids {
+        params_vec.push(id);
+    }
+
+    let mut iter = stmt.query(rusqlite::params_from_iter(params_vec.iter().copied()))?;
+    while let Some(row) = iter.next()? {
+        let id: String = row.get(0)?;
+        let title: String = row.get(1)?;
+        labels.insert(id, title);
+    }
+    drop(iter);
+    drop(stmt);
+
+    // Load task descriptions for any remaining IDs
+    let remaining_ids: Vec<&String> = record_ids
+        .iter()
+        .filter(|id| !labels.contains_key(id.as_str()))
+        .collect();
+    if !remaining_ids.is_empty() {
+        let placeholders = remaining_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query_str = format!(
+            "SELECT id, description FROM llm_wiki_tasks WHERE entity_id = ? AND id IN ({})",
+            placeholders
+        );
+
+        let mut stmt = conn.prepare(&query_str)?;
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&entity_id];
+        for id in &remaining_ids {
+            params_vec.push(*id);
+        }
+
+        let mut iter = stmt.query(rusqlite::params_from_iter(params_vec.iter().copied()))?;
+        while let Some(row) = iter.next()? {
+            let id: String = row.get(0)?;
+            let description: String = row.get(1)?;
+            labels.insert(id, description);
+        }
+    }
+
+    // For any IDs still missing, use the raw ID as fallback
+    for id in record_ids {
+        if !labels.contains_key(id) {
+            labels.insert(id.clone(), id.clone());
+        }
+    }
+
+    Ok(labels)
 }
 
 fn escape_like(input: &str) -> String {
@@ -69,13 +119,24 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Collect all endpoint IDs for batch-loading
+        let all_record_ids: Vec<String> = rows
+            .iter()
+            .flat_map(|(_, source_id, target_id, _)| vec![source_id.clone(), target_id.clone()])
+            .collect();
+
+        // Batch-load all labels in two queries (facts, then tasks)
+        let labels = get_endpoint_labels_batch(conn, entity_id, &all_record_ids)?;
+
+        // Build edges using pre-loaded labels
         for (id, source_id, target_id, edge_type) in rows {
             outgoing.push(EntityEdgeView {
                 id,
                 edge_type,
-                source_label: endpoint_label(conn, entity_id, &source_id)?,
+                source_label: labels.get(&source_id).cloned().unwrap_or(source_id.clone()),
                 source_id,
-                target_label: endpoint_label(conn, entity_id, &target_id)?,
+                target_label: labels.get(&target_id).cloned().unwrap_or(target_id.clone()),
                 target_id,
             });
         }
