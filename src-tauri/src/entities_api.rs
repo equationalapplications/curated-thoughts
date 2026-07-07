@@ -1,9 +1,11 @@
 //! Tauri commands for OKF entity CRUD (Brain mode, Phase 4).
 
+use crate::db::connections::{get_entity_connections, EntityConnections};
 use crate::db::entities::{
     archive_entity, create_entity, get_entity, list_entities, update_entity_summary,
-    CreateEntityInput, EntityDetail, EntityListFilter, EntitySort, EntitySummary,
+    CreateEntityInput, EntityDetail, EntityFact, EntityListFilter, EntitySort, EntitySummary,
 };
+use crate::db::facts::{add_fact, archive_fact, update_fact};
 use crate::DbState;
 use tauri::State;
 
@@ -54,4 +56,44 @@ pub fn update_entity_summary_cmd(
 pub fn archive_entity_cmd(entity_id: String, db_state: State<DbState>) -> Result<(), String> {
     let guard = db_state.0.lock().map_err(|e| e.to_string())?;
     archive_entity(&guard.0, &entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_entity_connections_cmd(
+    entity_id: String,
+    db_state: State<DbState>,
+) -> Result<EntityConnections, String> {
+    let guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    get_entity_connections(&guard.0, &entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_entity_fact_cmd(
+    entity_id: String,
+    body: String,
+    db_state: State<DbState>,
+) -> Result<EntityFact, String> {
+    let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    add_fact(&mut guard.0, &entity_id, &body).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_entity_fact_cmd(
+    entity_id: String,
+    fact_id: String,
+    body: String,
+    db_state: State<DbState>,
+) -> Result<(), String> {
+    let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    update_fact(&mut guard.0, &entity_id, &fact_id, &body).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn archive_entity_fact_cmd(
+    entity_id: String,
+    fact_id: String,
+    db_state: State<DbState>,
+) -> Result<(), String> {
+    let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    archive_fact(&mut guard.0, &entity_id, &fact_id).map_err(|e| e.to_string())
 }
