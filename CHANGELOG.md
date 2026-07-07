@@ -1,3 +1,33 @@
+## [1.15.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.14.0...v1.15.0) (2026-07-07)
+
+### Features
+
+* **brain:** add frontend bindings for entity connections and fact CRUD ([ac6c5c8](https://github.com/equationalapplications/curated-thoughts/commit/ac6c5c8d18fb71cb21b04347377f7e6792682855))
+* **brain:** composed entity page (header, summary, facts, strips) ([7f4558b](https://github.com/equationalapplications/curated-thoughts/commit/7f4558b25a2ef3d8f58937cb677af88407b974bc))
+* **brain:** connections and fact CRUD tauri commands ([0e83b62](https://github.com/equationalapplications/curated-thoughts/commit/0e83b62f18eeeef29caaf8f2dc1651aac8f110b8))
+* **brain:** connections panel (backlinks + edges by type) ([cb3de88](https://github.com/equationalapplications/curated-thoughts/commit/cb3de88f634a8f917e51c4423ea98dc8fb932246))
+* **brain:** entity connections query (edges + wikilink backlinks) ([e67d33a](https://github.com/equationalapplications/curated-thoughts/commit/e67d33af5e08939c883d5708fe11c0d19bac0fbf))
+* **brain:** entity list hook ([ef58aa0](https://github.com/equationalapplications/curated-thoughts/commit/ef58aa03892e0c6eddb5dddd872d82fe8def5bd5))
+* **brain:** entity list sidebar with grouping, filter, create ([6cca7ce](https://github.com/equationalapplications/curated-thoughts/commit/6cca7ce7ee3d6b28726e13b0e4e1ea2dd3d265e9))
+* **brain:** entity summary section with BlockNote editing ([ab41b1c](https://github.com/equationalapplications/curated-thoughts/commit/ab41b1c3adbe09d6d45d39d6b5dc3c3cd64e8444))
+* **brain:** entity-first BrainMode layout ([52cc2af](https://github.com/equationalapplications/curated-thoughts/commit/52cc2af97cbe941f02e0ec243d35559185f99b3d))
+* **brain:** fact card with inline edit, archive, source chips ([0364f19](https://github.com/equationalapplications/curated-thoughts/commit/0364f195d694cf17eb5034f02277f32955812114))
+* **brain:** fact update and archive with outbox rows ([be3b03b](https://github.com/equationalapplications/curated-thoughts/commit/be3b03bf60567919c0be148e4c336f5c15c254e9))
+* **brain:** phase 4 styles and spec status update ([5267159](https://github.com/equationalapplications/curated-thoughts/commit/5267159cf42b2af99b8b988dbc4944852f0dcdb1))
+* **brain:** resolve fact source documents from source_ref ([78b3ea6](https://github.com/equationalapplications/curated-thoughts/commit/78b3ea6e1b02f3a3b9c8ba57be221ed2671847ab))
+* **brain:** wikilink chip rendering ([a2d33c8](https://github.com/equationalapplications/curated-thoughts/commit/a2d33c8ba278d771096abd777322f45073ad0959))
+* **shell:** cross-mode navigation with back/forward history ([5d5b851](https://github.com/equationalapplications/curated-thoughts/commit/5d5b85155d1fff6159df38cdde66950ffe4dffa3))
+* **shell:** navigation history hook for cross-mode routing ([1251bcc](https://github.com/equationalapplications/curated-thoughts/commit/1251bcc4a3c693f5abb97e89ad5b5a3867e7cb17))
+
+### Bug Fixes
+
+* address PR [#31](https://github.com/equationalapplications/curated-thoughts/issues/31) review feedback ([82d67a5](https://github.com/equationalapplications/curated-thoughts/commit/82d67a5ff5ed8eda9392f76cac202b1611c25f04))
+* **brain:** add entity validation to update/archive_fact ([b9bd02a](https://github.com/equationalapplications/curated-thoughts/commit/b9bd02a4fc2f31be4e13256b264d22c6ec1e7e70))
+
+### Performance Improvements
+
+* **brain:** batch-load endpoint labels to fix N+1 query issue ([e9a0cb5](https://github.com/equationalapplications/curated-thoughts/commit/e9a0cb5e7baaf4dc7d729c85184c64a1ba553995))
+
 ## [1.14.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.13.0...v1.14.0) (2026-07-07)
 
 ### Features
