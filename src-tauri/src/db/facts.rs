@@ -100,6 +100,7 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
     let title = fact_title_from_body(body);
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    assert_entity_active(&tx, entity_id)?;
     let existing = tx
         .query_row(
             "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at
@@ -156,6 +157,7 @@ pub fn archive_fact(conn: &mut Connection, entity_id: &str, fact_id: &str) -> Re
     let (now_secs, now_ms) = now_timestamps();
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    assert_entity_active(&tx, entity_id)?;
     let changes = tx.execute(
         "UPDATE llm_wiki_entries
          SET deleted_at = ?1, updated_at = ?1
