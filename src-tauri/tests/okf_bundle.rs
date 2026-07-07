@@ -150,3 +150,48 @@ fn golden_v1_round_trips_losslessly() {
     };
     assert_eq!(norm(&rebuilt), norm(&original));
 }
+
+#[test]
+fn export_writes_exported_event_per_entity() {
+    use tauri_app_lib::db::connection::open_in_memory;
+    use tauri_app_lib::db::queries::{insert_chunk, upsert_document};
+    use tauri_app_lib::chunker::{Chunk, ChunkStrategyTag};
+
+    let conn = open_in_memory().unwrap();
+    let doc_id = upsert_document(&conn, "/vault/documents/notes.pdf", "hash").unwrap();
+    let chunk = Chunk {
+        text: "evidence".into(),
+        start_line: 1,
+        end_line: 2,
+        symbol_name: None,
+        defined_symbol: None,
+        strategy: ChunkStrategyTag::Prose,
+    };
+        let _chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent-1', 'Project X', 'concept', 'Summary', 100, 100)",
+        [],
+    ).unwrap();
+
+    // Write an exported event manually to test the query
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap()
+        .as_millis() as i64;
+    conn.execute(
+        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+         VALUES ('evt_export_1', 'ent-1', 'exported', 'Exported *Project X* to OKF bundle', NULL, ?1)",
+        [now_ms],
+    ).unwrap();
+
+    let (event_type, summary): (String, String) = conn
+        .query_row(
+            "SELECT event_type, summary FROM llm_wiki_events
+             WHERE entity_id = 'ent-1' AND event_type = 'exported'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("exported event row");
+    assert_eq!(event_type, "exported");
+    assert!(summary.starts_with("Exported"));
+}

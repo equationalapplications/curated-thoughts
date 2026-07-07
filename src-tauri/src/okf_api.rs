@@ -10,6 +10,7 @@ use crate::db::bundle_io::load_export_entities;
 use crate::okf::bundle_read::parse_bundle;
 use crate::okf::bundle_write::write_bundle;
 use crate::okf::zip_io::{read_bundle_source, write_bundle_zip};
+use crate::db::commit::generate_llm_id;
 use crate::DbState;
 
 #[derive(Debug, Serialize)]
@@ -35,6 +36,28 @@ pub fn okf_export_bundle_cmd(
     let count = entities.len();
     let files = write_bundle(&entities).map_err(|e| e)?;
     write_bundle_zip(&PathBuf::from(&dest_path), &files).map_err(|e| e.to_string())?;
+
+    // Write exported event for each exported entity (after zip is finalized)
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let guard = db_state.0.lock().map_err(|e| e.to_string())?;
+        for entity in &entities {
+            let _ = guard.0.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+                 VALUES (?1, ?2, 'exported', ?3, NULL, ?4)",
+                rusqlite::params![
+                    generate_llm_id("evt_"),
+                    entity.entity_id.clone(),
+                    format!("Exported *{}* to OKF bundle", entity.display_name),
+                    now_ms,
+                ],
+            );
+        }
+    }
+
     Ok(ExportSummary {
         path: dest_path,
         entities: count,
