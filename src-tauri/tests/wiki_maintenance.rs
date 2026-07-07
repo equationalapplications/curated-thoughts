@@ -29,14 +29,14 @@ fn open_migrated_db(tmp: &TempDir) -> Connection {
     conn
 }
 
-fn insert_entry(conn: &Connection, source_ref: Option<&str>, source_type: &str) -> i64 {
+fn insert_entry(conn: &Connection, entity_id: &str, source_ref: Option<&str>, source_type: &str) -> i64 {
     let id = format!("entry-{}", conn.last_insert_rowid() + 1);
     conn.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type, source_ref,
             created_at, updated_at
-         ) VALUES (?1, 'tier_fact', ?2, 'body', '[]', 'inferred', ?3, ?4, 1, 1)",
-        rusqlite::params![id, format!("Title {id}"), source_type, source_ref],
+         ) VALUES (?1, ?2, ?3, 'body', '[]', 'inferred', ?4, ?5, 1, 1)",
+        rusqlite::params![id, entity_id, format!("Title {id}"), source_type, source_ref],
     )
     .unwrap();
     conn.last_insert_rowid()
@@ -44,6 +44,7 @@ fn insert_entry(conn: &Connection, source_ref: Option<&str>, source_type: &str) 
 
 fn insert_entry_soft_deleted(
     conn: &Connection,
+    entity_id: &str,
     source_ref: Option<&str>,
     source_type: &str,
     deleted_at: i64,
@@ -53,8 +54,8 @@ fn insert_entry_soft_deleted(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type, source_ref,
             created_at, updated_at, deleted_at
-         ) VALUES (?1, 'tier_fact', ?2, 'body', '[]', 'inferred', ?3, ?4, 1, 1, ?5)",
-        rusqlite::params![id, format!("Title {id}"), source_type, source_ref, deleted_at],
+         ) VALUES (?1, ?2, ?3, 'body', '[]', 'inferred', ?4, ?5, 1, 1, ?6)",
+        rusqlite::params![id, entity_id, format!("Title {id}"), source_type, source_ref, deleted_at],
     )
     .unwrap();
     conn.last_insert_rowid()
@@ -82,11 +83,12 @@ fn row_exists(conn: &Connection, rowid: i64) -> bool {
 // ─── heal ─────────────────────────────────────────────────────────────────────
 
 fn run_heal(conn: &Connection, vault_root: &std::path::Path) {
-    let entries: Vec<(i64, String)> = {
+    let entries: Vec<(i64, String, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT rowid, source_ref FROM llm_wiki_entries
-                 WHERE deleted_at IS NULL AND source_ref IS NOT NULL",
+                "SELECT e.rowid, e.source_ref, e.entity_id
+                 FROM llm_wiki_entries e
+                 WHERE e.deleted_at IS NULL AND e.source_ref IS NOT NULL",
             )
             .unwrap();
         let mut rows = stmt.query([]).unwrap();
@@ -95,11 +97,13 @@ fn run_heal(conn: &Connection, vault_root: &std::path::Path) {
             v.push((
                 row.get::<_, i64>(0).unwrap(),
                 row.get::<_, String>(1).unwrap(),
+                row.get::<_, String>(2).unwrap(),
             ));
         }
         v
     };
-    for (rowid, source_ref) in entries {
+    let mut healed_by_entity: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (rowid, source_ref, entity_id) in entries {
         let safe = safe_vault_path(vault_root, &source_ref, &["."], PathMode::MustExist);
         if safe.is_err() {
             conn.execute(
@@ -107,6 +111,26 @@ fn run_heal(conn: &Connection, vault_root: &std::path::Path) {
                 [rowid],
             )
             .unwrap();
+            *healed_by_entity.entry(entity_id).or_insert(0) += 1;
+        }
+    }
+    // Write healed events
+    if !healed_by_entity.is_empty() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        for (entity_id, n) in healed_by_entity {
+            let _ = conn.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+                 VALUES (?1, ?2, 'healed', ?3, NULL, ?4)",
+                rusqlite::params![
+                    format!("evt_{}", rand::random::<u64>()),
+                    entity_id,
+                    format!("Healed {n} invalid source reference(s)"),
+                    now_ms,
+                ],
+            );
         }
     }
 }
@@ -119,7 +143,7 @@ fn heal_keeps_entry_whose_source_file_exists() {
     std::fs::write(vault.join("note.md"), "content").unwrap();
 
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, Some("note.md"), "librarian_inferred");
+    let rowid = insert_entry(&conn, "tier_fact", Some("note.md"), "librarian_inferred");
 
     run_heal(&conn, &vault);
 
@@ -136,7 +160,7 @@ fn heal_soft_deletes_entry_whose_source_file_is_missing() {
     std::fs::create_dir_all(&vault).unwrap();
 
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, Some("ghost.md"), "librarian_inferred");
+    let rowid = insert_entry(&conn, "tier_fact", Some("ghost.md"), "librarian_inferred");
 
     run_heal(&conn, &vault);
 
@@ -153,7 +177,7 @@ fn heal_soft_deletes_absolute_source_ref() {
     std::fs::create_dir_all(&vault).unwrap();
 
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, Some("/etc/passwd"), "librarian_inferred");
+    let rowid = insert_entry(&conn, "tier_fact", Some("/etc/passwd"), "librarian_inferred");
 
     run_heal(&conn, &vault);
 
@@ -170,7 +194,7 @@ fn heal_soft_deletes_traversal_source_ref() {
     std::fs::create_dir_all(&vault).unwrap();
 
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, Some("../escape.md"), "librarian_inferred");
+    let rowid = insert_entry(&conn, "tier_fact", Some("../escape.md"), "librarian_inferred");
 
     run_heal(&conn, &vault);
 
@@ -189,7 +213,7 @@ fn heal_ignores_already_soft_deleted_entries() {
     let conn = open_migrated_db(&tmp);
     let original_ts: i64 = 1_000_000;
     let rowid =
-        insert_entry_soft_deleted(&conn, Some("ghost.md"), "librarian_inferred", original_ts);
+        insert_entry_soft_deleted(&conn, "tier_fact", Some("ghost.md"), "librarian_inferred", original_ts);
 
     run_heal(&conn, &vault);
 
@@ -198,6 +222,35 @@ fn heal_ignores_already_soft_deleted_entries() {
         Some(original_ts),
         "heal must not overwrite an already-soft-deleted entry's timestamp"
     );
+}
+
+#[test]
+fn heal_writes_healed_event() {
+    let tmp = TempDir::new().unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+
+    let conn = open_migrated_db(&tmp);
+    // Insert an entity
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent-1', 'Test Entity', 'concept', 'Summary', 100, 100)",
+        [],
+    ).unwrap();
+    // Insert an entry with invalid source_ref
+    let _rowid = insert_entry(&conn, "ent-1", Some("../escape.md"), "librarian_inferred");
+
+    run_heal(&conn, &vault);
+
+    // Verify healed event was written
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'healed' AND entity_id = 'ent-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 // ─── prune ────────────────────────────────────────────────────────────────────
@@ -223,7 +276,7 @@ fn prune_hard_deletes_old_librarian_inferred_entry() {
             .unwrap();
         ts - 8 * 86400
     };
-    let rowid = insert_entry_soft_deleted(&conn, Some("stale.md"), "librarian_inferred", old_ts);
+    let rowid = insert_entry_soft_deleted(&conn, "tier_fact", Some("stale.md"), "librarian_inferred", old_ts);
 
     run_prune(&conn);
 
@@ -244,7 +297,7 @@ fn prune_retains_recently_soft_deleted_librarian_inferred_entry() {
         ts - 6 * 86400
     };
     let rowid =
-        insert_entry_soft_deleted(&conn, Some("recent.md"), "librarian_inferred", six_days_ago);
+        insert_entry_soft_deleted(&conn, "tier_fact", Some("recent.md"), "librarian_inferred", six_days_ago);
 
     run_prune(&conn);
 
@@ -259,7 +312,7 @@ fn prune_retains_non_librarian_inferred_entries_regardless_of_age() {
     let tmp = TempDir::new().unwrap();
     let conn = open_migrated_db(&tmp);
     let very_old: i64 = 1_000_000;
-    let rowid = insert_entry_soft_deleted(&conn, Some("manual.md"), "manual", very_old);
+    let rowid = insert_entry_soft_deleted(&conn, "tier_fact", Some("manual.md"), "manual", very_old);
 
     run_prune(&conn);
 
@@ -273,7 +326,7 @@ fn prune_retains_non_librarian_inferred_entries_regardless_of_age() {
 fn prune_retains_entries_not_yet_soft_deleted() {
     let tmp = TempDir::new().unwrap();
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, Some("active.md"), "librarian_inferred");
+    let rowid = insert_entry(&conn, "tier_fact", Some("active.md"), "librarian_inferred");
 
     run_prune(&conn);
 
