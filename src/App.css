@@ -144,13 +144,13 @@ button {
 
 /* ── Brain mode: entity pages (Phase 4) ─────────────────────────────── */
 
-.rail-history {
+.mode-rail-history {
   display: flex;
   flex-direction: column;
   gap: 2px;
   margin-bottom: 8px;
 }
-.rail-history-btn {
+.mode-rail-history-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -159,7 +159,7 @@ button {
   padding: 4px;
   opacity: 0.8;
 }
-.rail-history-btn:disabled {
+.mode-rail-history-btn:disabled {
   opacity: 0.25;
   cursor: default;
 }

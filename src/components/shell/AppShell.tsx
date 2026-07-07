@@ -65,13 +65,13 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
       setBrainEntityId(null);
       setBrainEntityName(null);
       setLibraryDoc(null);
-      nav.navigate({ mode: "brain" });
+      nav.reset({ mode: "brain" });
       onVaultChanged(newPath);
     });
     return () => {
       promise.then((unlisten) => unlisten());
     };
-  }, [onVaultChanged, nav]);
+  }, [onVaultChanged, nav.reset]);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,7 +119,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [nav]);
+  }, [nav.navigate]);
 
   useEffect(() => {
     const focused =

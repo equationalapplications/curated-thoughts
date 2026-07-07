@@ -120,11 +120,13 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // Collect all endpoint IDs for batch-loading
-        let all_record_ids: Vec<String> = rows
-            .iter()
-            .flat_map(|(_, source_id, target_id, _)| vec![source_id.clone(), target_id.clone()])
-            .collect();
+        // Collect all endpoint IDs for batch-loading (deduplicated)
+        let mut dedup_ids = std::collections::HashSet::new();
+        for (_, source_id, target_id, _) in &rows {
+            dedup_ids.insert(source_id.clone());
+            dedup_ids.insert(target_id.clone());
+        }
+        let all_record_ids: Vec<String> = dedup_ids.into_iter().collect();
 
         // Batch-load all labels in two queries (facts, then tasks)
         let labels = get_endpoint_labels_batch(conn, entity_id, &all_record_ids)?;
