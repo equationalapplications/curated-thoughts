@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { getBrainDir } from "../../lib/tauri";
 import { AgentIntegrationPanel } from "./AgentIntegrationPanel";
 import { AppearancePanel } from "./AppearancePanel";
-import { CloudBridgePanel } from "./CloudBridgePanel";
 import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
 import { GenerationPanel } from "./GenerationPanel";
@@ -97,14 +96,10 @@ export function SettingsScreen({ vaultPath, initialTab }: Props) {
         )}
         {tab === "librarian" && <FolderRulesPanel />}
         {tab === "agents" && (
-          <>
-            <AgentIntegrationPanel
-              brainDir={brainDir}
-              brainDirError={brainDirError}
-            />
-            {/* Moves to the Privacy tab in phase 6. */}
-            <CloudBridgePanel />
-          </>
+          <AgentIntegrationPanel
+            brainDir={brainDir}
+            brainDirError={brainDirError}
+          />
         )}
         {tab === "maintenance" && <MaintenanceDashboard />}
         {tab === "appearance" && <AppearancePanel />}

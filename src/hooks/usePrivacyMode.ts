@@ -1,46 +1,109 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import {
+  getPrivacyMode,
+  setPrivacyMode as setPrivacyModeInvoke,
+  type PrivacyMode,
+  type PrivacyState,
+} from "../lib/tauri";
 
-export type PrivacyMode = "strict" | "ephemeral" | "full";
+export type { PrivacyMode };
 
-const STORAGE_KEY = "ct-privacy-mode";
+const LEGACY_STORAGE_KEY = "ct-privacy-mode";
 
-function readStored(): PrivacyMode {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw === "strict" || raw === "ephemeral" || raw === "full") return raw;
-  } catch {
-    /* private browsing */
-  }
-  return "strict";
+function mapLegacyMode(raw: string): PrivacyMode | null {
+  if (raw === "strict" || raw === "ephemeral") return raw;
+  if (raw === "full" || raw === "connected") return "connected";
+  return null;
 }
 
-export function usePrivacyMode(): {
-  mode: PrivacyMode;
-  setMode: (mode: PrivacyMode) => void;
-} {
-  const [mode, setModeState] = useState<PrivacyMode>(readStored);
+function readLegacyMode(): PrivacyMode | null {
+  try {
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return null;
+    return mapLegacyMode(raw);
+  } catch {
+    return null;
+  }
+}
 
-  const setMode = useCallback((next: PrivacyMode) => {
-    setModeState(next);
-    try {
-      localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      /* ignore */
-    }
+function clearLegacyMode() {
+  try {
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+const defaultState: PrivacyState = {
+  mode: "strict",
+  chosen: false,
+  needs_migration_disclosure: false,
+  ephemeral_disclosure_acknowledged: false,
+};
+
+export function usePrivacyMode(): PrivacyState & {
+  setMode: (mode: PrivacyMode) => Promise<void>;
+  loading: boolean;
+} {
+  const [state, setState] = useState<PrivacyState>(defaultState);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    const next = await getPrivacyMode();
+    setState(next);
+    return next;
   }, []);
 
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY && e.newValue) {
-        const raw = e.newValue;
-        if (raw === "strict" || raw === "ephemeral" || raw === "full") {
-          setModeState(raw);
+    let active = true;
+
+    const load = async () => {
+      try {
+        let next = await getPrivacyMode();
+        if (!next.chosen) {
+          const legacy = readLegacyMode();
+          if (legacy) {
+            const result = await setPrivacyModeInvoke(legacy);
+            next = result.state;
+            clearLegacyMode();
+          }
+        }
+        if (active) {
+          setState(next);
+        }
+      } catch {
+        if (active) {
+          setState(defaultState);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
         }
       }
     };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+
+    load();
+
+    const unlistenPromise = listen<PrivacyState>("privacy-mode-changed", (event) => {
+      setState(event.payload);
+    });
+
+    return () => {
+      active = false;
+      unlistenPromise.then((unlisten) => unlisten());
+    };
   }, []);
 
-  return { mode, setMode };
+  const setMode = useCallback(async (mode: PrivacyMode) => {
+    const result = await setPrivacyModeInvoke(mode);
+    setState(result.state);
+    clearLegacyMode();
+  }, []);
+
+  return {
+    ...state,
+    loading,
+    setMode,
+  };
 }
