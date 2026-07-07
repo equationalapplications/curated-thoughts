@@ -16,6 +16,10 @@ import {
   runWikiReembed,
   forgetWikiSource,
   subscribeEntityStatus,
+  getEntityConnections,
+  addEntityFact,
+  updateEntityFact,
+  archiveEntityFact,
 } from '../lib/tauri';
 
 describe('tauri API helpers', () => {
@@ -48,5 +52,25 @@ describe('tauri API helpers', () => {
     expect(invoke).toHaveBeenCalledWith('run_wiki_forget', {
       sourcePath: '/Users/test/Vault/documents/notes.md',
     });
+  });
+
+  it('entity connections and fact CRUD bindings call the right commands', async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+
+    await getEntityConnections('ent_1');
+    expect(invoke).toHaveBeenCalledWith('get_entity_connections_cmd', { entityId: 'ent_1' });
+
+    await addEntityFact('ent_1', 'A body.');
+    expect(invoke).toHaveBeenCalledWith('add_entity_fact_cmd', { entityId: 'ent_1', body: 'A body.' });
+
+    await updateEntityFact('ent_1', 'fact_1', 'New body.');
+    expect(invoke).toHaveBeenCalledWith('update_entity_fact_cmd', {
+      entityId: 'ent_1',
+      factId: 'fact_1',
+      body: 'New body.',
+    });
+
+    await archiveEntityFact('ent_1', 'fact_1');
+    expect(invoke).toHaveBeenCalledWith('archive_entity_fact_cmd', { entityId: 'ent_1', factId: 'fact_1' });
   });
 });
