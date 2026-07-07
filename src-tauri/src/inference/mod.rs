@@ -4,6 +4,8 @@ pub mod sidecar;
 use crate::inference::config::{
     read_config, resolve_model_path, write_config, GenerationConfig, GenerationProviderKind,
 };
+use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
+use crate::privacy::{self, allows_external_generation};
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
 use anyhow::Result;
 use reqwest::blocking::Client;
@@ -210,6 +212,14 @@ pub fn update_provider_with_brain_path(
     state: &InferenceState,
     app: Option<&AppHandle>,
 ) -> Result<(), String> {
+    let privacy_state = privacy::resolve_privacy_state(brain_path, &KeyringPairingTokenStore)
+        .map_err(|e| e.to_string())?;
+    if config.provider == GenerationProviderKind::External
+        && !allows_external_generation(privacy_state.mode)
+    {
+        return Err("privacy-mode-strict: external generation is disabled".to_string());
+    }
+
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {

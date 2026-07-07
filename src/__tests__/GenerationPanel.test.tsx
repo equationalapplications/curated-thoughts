@@ -1,5 +1,11 @@
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
+
+const privacyMock = vi.hoisted(() => ({
+  mode: "ephemeral" as "strict" | "ephemeral" | "connected",
+  ephemeral_disclosure_acknowledged: true,
+}));
+
 import { GenerationPanel } from "../components/settings/GenerationPanel";
 
 // Mock the tauri module
@@ -14,6 +20,17 @@ vi.mock("../lib/tauri", () => ({
     },
   }),
   updateProvider: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../hooks/usePrivacyMode", () => ({
+  usePrivacyMode: () => ({
+    mode: privacyMock.mode,
+    chosen: true,
+    needs_migration_disclosure: false,
+    ephemeral_disclosure_acknowledged: privacyMock.ephemeral_disclosure_acknowledged,
+    loading: false,
+    setMode: vi.fn(),
+  }),
 }));
 
 // Mock the events module
@@ -34,6 +51,8 @@ import * as events from "../lib/events";
 describe("GenerationPanel", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    privacyMock.mode = "ephemeral";
+    privacyMock.ephemeral_disclosure_acknowledged = true;
     (getProviderConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
       generation: {
         provider: "sidecar",
@@ -136,5 +155,13 @@ describe("GenerationPanel", () => {
     }
     
     expect(screen.getByText(/Waking up the Librarian/i)).toBeInTheDocument();
+  });
+
+  it("disables external URL fields in strict mode", async () => {
+    privacyMock.mode = "strict";
+    render(<GenerationPanel />);
+    await waitFor(() => expect(getProviderConfig).toHaveBeenCalled());
+    expect(screen.getByLabelText(/External base URL/i)).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Save/i })).toBeDisabled();
   });
 });

@@ -10,6 +10,7 @@ import {
   onSidecarDownloadProgress,
   onProviderError,
 } from "../../lib/events";
+import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 
 interface Props {
   onNext: () => void;
@@ -33,6 +34,8 @@ const RECOMMENDED_MODEL = {
 const AUTO_INSTALL_AVAILABLE = !RECOMMENDED_MODEL.sha256.startsWith("REPLACE_WITH_");
 
 export function StepModel({ onNext }: Props) {
+  const { mode: privacyMode } = usePrivacyMode();
+  const strictPrivacy = privacyMode === "strict";
   const [phase, setPhase] = useState<Phase>("choice");
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -148,10 +151,18 @@ export function StepModel({ onNext }: Props) {
               Auto-install is unavailable until the recommended model checksum is configured.
             </p>
           )}
-          <button onClick={() => setPhase("skip")}>Skip / Use my own</button>
-          <p className="ollama-hint">
-            Point to an existing OpenAI-compatible endpoint or continue without a provider.
-          </p>
+          {!strictPrivacy ? (
+            <button onClick={() => setPhase("skip")}>Skip / Use my own</button>
+          ) : null}
+          {!strictPrivacy ? (
+            <p className="ollama-hint">
+              Point to an existing OpenAI-compatible endpoint or continue without a provider.
+            </p>
+          ) : (
+            <p className="ollama-hint">
+              Strict privacy keeps generation local. Use Auto-Install or continue without a provider.
+            </p>
+          )}
         </>
       )}
 
