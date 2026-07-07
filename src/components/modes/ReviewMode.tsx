@@ -24,6 +24,7 @@ interface Props {
   onAction: () => void;
   vaultPath: string;
   queueError?: string | null;
+  onOpenSource?: (path: string) => void;
 }
 
 function summarizeCommitResult(result: CommitResult): string | null {
@@ -40,7 +41,13 @@ function summarizeCommitResult(result: CommitResult): string | null {
   return issues.length > 0 ? issues.join(" · ") : null;
 }
 
-export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
+export function ReviewMode({
+  queue,
+  onAction,
+  vaultPath,
+  queueError,
+  onOpenSource,
+}: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
@@ -366,9 +373,7 @@ export function ReviewMode({ queue, onAction, vaultPath, queueError }: Props) {
           proposal={proposal}
           reasoning={detail?.reasoning}
           items={detail?.items}
-          onSourceClick={() => {
-            /* Library navigation deferred until cross-mode routing exists */
-          }}
+          onSourceClick={(path) => onOpenSource?.(path)}
         />
       )}
     </div>

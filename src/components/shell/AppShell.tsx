@@ -14,6 +14,7 @@ import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
+import { useNavigationState } from "../../lib/navigation";
 import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
 
 interface Props {
@@ -40,10 +41,11 @@ function docTitleSegment(path: string | null): string | null {
 }
 
 export function AppShell({ vaultPath, onVaultChanged }: Props) {
-  const [mode, setMode] = useState<AppMode>("brain");
+  const nav = useNavigationState({ mode: "brain" });
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
   const [activityOpen, setActivityOpen] = useState(false);
-  const [brainDoc, setBrainDoc] = useState<string | null>(null);
+  const [brainEntityId, setBrainEntityId] = useState<string | null>(null);
+  const [brainEntityName, setBrainEntityName] = useState<string | null>(null);
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
@@ -60,15 +62,16 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
 
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
-      setBrainDoc(null);
+      setBrainEntityId(null);
+      setBrainEntityName(null);
       setLibraryDoc(null);
-      setMode("brain");
+      nav.navigate({ mode: "brain" });
       onVaultChanged(newPath);
     });
     return () => {
       promise.then((unlisten) => unlisten());
     };
-  }, [onVaultChanged]);
+  }, [onVaultChanged, nav]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +110,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
       const target = MODE_SHORTCUTS[e.key];
       if (target) {
         e.preventDefault();
-        setMode(target);
+        nav.navigate({ mode: target });
       }
       if (e.key === "k") {
         e.preventDefault();
@@ -116,22 +119,22 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [nav]);
 
   useEffect(() => {
     const focused =
-      mode === "brain"
-        ? docTitleSegment(brainDoc)
-        : mode === "library"
+      nav.current.mode === "brain"
+        ? brainEntityName
+        : nav.current.mode === "library"
           ? docTitleSegment(libraryDoc)
           : null;
     const title = focused
-      ? `${MODE_TITLES[mode]} — ${focused}`
-      : MODE_TITLES[mode];
+      ? `${MODE_TITLES[nav.current.mode]} — ${focused}`
+      : MODE_TITLES[nav.current.mode];
     getCurrentWindow()
       .setTitle(`Curated Thoughts — ${title}`)
       .catch(() => {});
-  }, [mode, brainDoc, libraryDoc]);
+  }, [nav.current.mode, brainEntityName, libraryDoc]);
 
   useEffect(() => {
     if (!activityOpen) return;
@@ -142,46 +145,72 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activityOpen]);
 
+  useEffect(() => {
+    if (nav.current.mode === "brain") {
+      setBrainEntityId(nav.current.entityId ?? null);
+      setBrainEntityName(null);
+    } else if (nav.current.mode === "library") {
+      setLibraryDoc(nav.current.docPath ?? null);
+    }
+  }, [nav.current.mode, nav.current.entityId, nav.current.docPath]);
+
   function openPrivacySettings() {
     setSettingsTab("privacy");
-    setMode("settings");
+    nav.navigate({ mode: "settings" });
   }
 
   return (
     <div className="app-root">
       <div className="app-body">
         <ModeRail
-          mode={mode}
+          mode={nav.current.mode}
           reviewCount={queue.length}
+          canGoBack={nav.canGoBack}
+          canGoForward={nav.canGoForward}
           onModeChange={(next) => {
             setSettingsTab(undefined);
-            setMode(next);
+            nav.navigate({ mode: next });
           }}
+          onBack={nav.goBack}
+          onForward={nav.goForward}
         />
         <div className="app-main">
-          {mode === "brain" && (
+          {nav.current.mode === "brain" && (
             <BrainMode
-              vaultPath={vaultPath}
-              selectedDoc={brainDoc}
-              onDocSelect={setBrainDoc}
+              selectedEntityId={brainEntityId}
+              onEntitySelect={(id) => {
+                if (!id) {
+                  setBrainEntityId(null);
+                  setBrainEntityName(null);
+                } else {
+                  nav.navigate({ mode: "brain", entityId: id });
+                }
+              }}
+              onOpenSource={(path) => {
+                nav.navigate({ mode: "library", docPath: path });
+              }}
+              onEntityName={setBrainEntityName}
             />
           )}
-          {mode === "review" && (
+          {nav.current.mode === "review" && (
             <ReviewMode
               queue={queue}
               onAction={refresh}
               vaultPath={vaultPath}
               queueError={queueError}
+              onOpenSource={(path) => {
+                nav.navigate({ mode: "library", docPath: path });
+              }}
             />
           )}
-          {mode === "library" && (
+          {nav.current.mode === "library" && (
             <LibraryMode
               vaultPath={vaultPath}
               selectedDoc={libraryDoc}
               onDocSelect={setLibraryDoc}
             />
           )}
-          {mode === "settings" && (
+          {nav.current.mode === "settings" && (
             <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} />
           )}
         </div>
