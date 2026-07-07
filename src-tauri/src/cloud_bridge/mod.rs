@@ -576,6 +576,7 @@ mod session_tests {
             conn: Arc::new(Mutex::new(conn)),
             profile: crate::embedder::EmbedProfile::default(),
             vault_dir: None,
+            client: "clanker-bridge".into(),
         })
     }
 
@@ -841,6 +842,7 @@ mod reconnect_loop_tests {
             conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
             profile: crate::embedder::EmbedProfile::default(),
             vault_dir: None,
+            client: "clanker-bridge".into(),
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let retry_now = Arc::new(AtomicBool::new(false));
@@ -907,6 +909,7 @@ mod reconnect_loop_tests {
             conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
             profile: crate::embedder::EmbedProfile::default(),
             vault_dir: None,
+            client: "clanker-bridge".into(),
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let retry_now = Arc::new(AtomicBool::new(false));

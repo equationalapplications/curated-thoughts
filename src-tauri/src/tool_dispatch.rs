@@ -223,6 +223,8 @@ pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
     pub profile: EmbedProfile,
     pub vault_dir: Option<PathBuf>,
+    /// Agent-log client label: "clanker-bridge" for cloud bridge, MCP client name locally.
+    pub client: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,13 +285,30 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, 
     conn.lock().map_err(|_| anyhow::anyhow!("database mutex poisoned"))
 }
 
+/// Best-effort audit log for agent tool access. A failed log write must never fail
+/// the tool call — tool availability wins over audit completeness.
+fn log_agent_access(conn: &Connection, client: &str, tool: &str, entity_id: Option<&str>) {
+    let _ = conn.execute(
+        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
+         VALUES (?1, ?2, 'read', ?3, NULL)",
+        rusqlite::params![client, tool, entity_id],
+    );
+}
+
 /// Single entry point for all five read-only tools. Deserializes `params`, computes any
 /// embedding *before* taking the DB lock (embedding is CPU/network bound; holding the mutex
 /// during it would block concurrent callers), then dispatches to the matching pure
 /// `dispatch_*` function on a blocking task. Both `mcp_server.rs`'s `#[tool]` methods and
 /// `cloud_bridge::CloudBridgeClient` call this — it is the one code path behind two callers.
 pub async fn dispatch_tool_call(ctx: &ToolDispatchContext, tool: &str, params: Value) -> Result<Value> {
-    match tool {
+    // Extract entity_id from params for agent logging (before deserialization consumes params)
+    let entity_id = params.get("entity_id").and_then(|v| v.as_str()).map(str::to_string);
+    let tool_owned = tool.to_string();
+
+    let client = ctx.client.clone();
+    let conn_for_log = ctx.conn.clone();
+
+    let result = match tool {
         "vault_semantic_search" => {
             let p: VaultSemanticSearchParams = serde_json::from_value(params)?;
             let query_vec = embed_query(&ctx.profile, p.query).await?;
@@ -354,7 +373,21 @@ pub async fn dispatch_tool_call(ctx: &ToolDispatchContext, tool: &str, params: V
             Ok(serde_json::to_value(result)?)
         }
         other => Err(UnknownToolError(other.to_string()).into()),
+    };
+
+    // Agent access log: best-effort, never fail the tool call
+    if let Ok(ref _val) = result {
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = match conn_for_log.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
+        })
+        .await;
     }
+
+    result
 }
 
 #[cfg(test)]
@@ -543,6 +576,7 @@ mod dispatch_tool_call_tests {
             conn: Arc::new(Mutex::new(conn)),
             profile: EmbedProfile::default(),
             vault_dir: None,
+            client: "test-client".into(),
         }
     }
 

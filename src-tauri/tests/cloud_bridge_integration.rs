@@ -31,6 +31,7 @@ fn seeded_ctx() -> ToolDispatchContext {
         conn: Arc::new(Mutex::new(conn)),
         profile: EmbedProfile::default(),
         vault_dir: None,
+        client: "test-client".into(),
     }
 }
 
