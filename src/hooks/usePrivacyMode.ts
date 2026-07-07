@@ -49,12 +49,6 @@ export function usePrivacyMode(): PrivacyState & {
   const [state, setState] = useState<PrivacyState>(defaultState);
   const [loading, setLoading] = useState(true);
 
-  const refresh = useCallback(async () => {
-    const next = await getPrivacyMode();
-    setState(next);
-    return next;
-  }, []);
-
   useEffect(() => {
     let active = true;
 
