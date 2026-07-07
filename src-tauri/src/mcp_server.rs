@@ -155,6 +155,7 @@ async fn async_run() -> anyhow::Result<()> {
             conn: Arc::new(std::sync::Mutex::new(conn)),
             profile,
             vault_dir,
+            client: "local-mcp".into(),
         },
     };
 

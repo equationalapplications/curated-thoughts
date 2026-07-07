@@ -88,6 +88,12 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
            WHERE event_type = 'observation' AND summary LIKE 'Rejected proposal%';",
     )?;
 
+    // 90-day pruning of curated_agent_log (local-only audit trail)
+    conn.execute(
+        "DELETE FROM curated_agent_log WHERE created_at < unixepoch() - 90*24*60*60",
+        [],
+    )?;
+
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
     Ok(())

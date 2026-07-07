@@ -151,6 +151,7 @@ fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext
         conn: Arc::new(Mutex::new(conn)),
         profile,
         vault_dir,
+        client: "clanker-bridge".into(),
     })
 }
 
