@@ -2,7 +2,7 @@
 //! All timestamps normalized to milliseconds, reversed chronologically, with optional filtering.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 /// Unified timeline event across all three sources.
@@ -28,16 +28,6 @@ pub struct TimelineFilter {
     pub until_ms: Option<i64>,
     pub before_ms: Option<i64>, // cursor: return strictly older than this
     pub limit: Option<u32>,
-}
-
-/// Map event_type to kind. Recognized types are mapped; others become 'other'.
-fn normalize_kind(event_type: &str) -> String {
-    match event_type {
-        "synthesized" | "approved" | "rejected" | "healed" | "imported" | "exported" => {
-            event_type.to_string()
-        }
-        _ => "other".to_string(),
-    }
 }
 
 /// List timeline events from all three sources, normalized and filtered.
@@ -165,15 +155,10 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::okf_ddl::CURATED_TABLES_DDL;
-    use crate::db::schema::SCHEMA_CREATE;
+    use crate::db::connection::open_in_memory;
 
     fn setup_test_db() -> Result<Connection> {
-        let conn = Connection::open_in_memory()?;
-        // Initialize schema
-        conn.execute_batch(SCHEMA_CREATE)?;
-        conn.execute_batch(CURATED_TABLES_DDL)?;
-        Ok(conn)
+        open_in_memory()
     }
 
     #[test]
@@ -248,16 +233,19 @@ mod tests {
         conn.execute(
             "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
              VALUES ('wiki_approved', 'ent_1', 'approved', 'Approved', 1000)",
+            [],
         )?;
 
         conn.execute(
             "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
              VALUES ('wiki_synthesized', 'ent_1', 'synthesized', 'Synthesized', 1001)",
+            [],
         )?;
 
         conn.execute(
             "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
              VALUES ('wiki_weird', 'ent_1', 'weird_custom_type', 'Weird', 1002)",
+            [],
         )?;
 
         let filter = TimelineFilter::default();
@@ -291,6 +279,7 @@ mod tests {
         conn.execute(
             "INSERT INTO curated_entities (id, name, created_at, updated_at)
              VALUES ('ent_1', 'Entity 1', 1000, 1000)",
+            [],
         )?;
 
         // Seed multiple events

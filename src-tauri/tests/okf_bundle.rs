@@ -155,7 +155,6 @@ fn golden_v1_round_trips_losslessly() {
 fn export_writes_exported_event_per_entity() {
     use tauri_app_lib::db::connection::open_in_memory;
     use tauri_app_lib::db::bundle_io::load_export_entities;
-    use tauri_app_lib::db::commit::generate_id;
 
     let conn = open_in_memory().unwrap();
 
@@ -186,7 +185,7 @@ fn export_writes_exported_event_per_entity() {
             "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
              VALUES (?1, ?2, 'exported', ?3, NULL, ?4)",
             rusqlite::params![
-                generate_id("evt_"),
+                format!("evt_{now_ms}_{}", entity.entity_id),
                 entity.entity_id.clone(),
                 format!("Exported *{}* to OKF bundle", entity.display_name),
                 now_ms,

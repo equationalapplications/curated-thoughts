@@ -71,7 +71,6 @@ CREATE TABLE IF NOT EXISTS llm_wiki_events (
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_events_entity_idx ON llm_wiki_events(entity_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS llm_wiki_events_created_idx ON llm_wiki_events(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS llm_wiki_checkpoints (
   entity_id TEXT PRIMARY KEY,
