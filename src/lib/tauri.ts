@@ -322,6 +322,60 @@ export const updateEntityFact = (
 export const archiveEntityFact = (entityId: string, factId: string): Promise<void> =>
   invoke("archive_entity_fact_cmd", { entityId, factId });
 
+export type TimelineKind =
+  | "synthesized" | "approved" | "rejected" | "healed"
+  | "imported" | "exported" | "agent_access" | "ingested" | "other";
+
+export interface TimelineEvent {
+  id: string;
+  kind: TimelineKind;
+  summary: string;
+  entity_id?: string | null;
+  entity_name?: string | null;
+  doc_path?: string | null;
+  raw_type: string;
+  client?: string | null;
+  created_at_ms: number;
+}
+
+export interface TimelineFilter {
+  kinds?: TimelineKind[];
+  entity_id?: string;
+  since_ms?: number;
+  until_ms?: number;
+  before_ms?: number;
+  limit?: number;
+}
+
+export const listEvents = (filter?: TimelineFilter): Promise<TimelineEvent[]> =>
+  invoke("list_events_cmd", { filter: filter ?? {} });
+
+export interface TaskRow {
+  id: string;
+  entity_id: string;
+  entity_name: string;
+  description: string;
+  status: "pending" | "done";
+  priority: number;
+  created_at: number;
+  resolved_at?: number | null;
+}
+
+export const listTasks = (
+  status?: "pending" | "done",
+  includeArchived?: boolean,
+): Promise<TaskRow[]> =>
+  invoke("list_tasks_cmd", { status, includeArchived });
+
+export const createTask = (entityId: string, description: string): Promise<TaskRow> =>
+  invoke("create_task_cmd", { entityId, description });
+
+export const setTaskStatus = (taskId: string, status: "pending" | "done"): Promise<void> =>
+  invoke("set_task_status_cmd", { taskId, status });
+
+export const archiveTask = (taskId: string): Promise<void> =>
+  invoke("archive_task_cmd", { taskId });
+
 export interface FolderRule {
   id: number;
   folder_path: string;
