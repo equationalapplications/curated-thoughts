@@ -127,3 +127,41 @@ test("forward button calls onForward when enabled", () => {
   fireEvent.click(screen.getByRole("button", { name: "Go forward" }));
   expect(onForward).toHaveBeenCalled();
 });
+
+test("activity button calls onOpenActivity", () => {
+  const onOpenActivity = vi.fn();
+  render(
+    <ModeRail
+      mode="brain"
+      reviewCount={0}
+      onModeChange={vi.fn()}
+      {...defaultProps}
+      onOpenActivity={onOpenActivity}
+    />
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Activity" }));
+  expect(onOpenActivity).toHaveBeenCalled();
+});
+
+test("shows error badge only when errorCount > 0", () => {
+  const { rerender } = render(
+    <ModeRail
+      mode="brain"
+      reviewCount={0}
+      errorCount={2}
+      onModeChange={vi.fn()}
+      {...defaultProps}
+    />
+  );
+  expect(screen.getByText("2")).toBeInTheDocument();
+  rerender(
+    <ModeRail
+      mode="brain"
+      reviewCount={0}
+      errorCount={0}
+      onModeChange={vi.fn()}
+      {...defaultProps}
+    />
+  );
+  expect(screen.queryByText("0")).not.toBeInTheDocument();
+});
