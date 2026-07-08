@@ -5,6 +5,8 @@ export interface NavTarget {
   mode: AppMode;
   entityId?: string;
   docPath?: string;
+  proposalId?: string;
+  taskId?: string;
 }
 
 export interface NavigationState {

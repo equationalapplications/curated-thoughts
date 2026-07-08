@@ -9,6 +9,7 @@ pub mod okf;
 mod entities_api;
 mod okf_api;
 mod proposals_api;
+mod timeline_api;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
 pub mod outbox;
@@ -2243,6 +2244,11 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             entities_api::add_entity_fact_cmd,
             entities_api::update_entity_fact_cmd,
             entities_api::archive_entity_fact_cmd,
+            timeline_api::list_events_cmd,
+            timeline_api::list_tasks_cmd,
+            timeline_api::create_task_cmd,
+            timeline_api::set_task_status_cmd,
+            timeline_api::archive_task_cmd,
             okf_api::okf_export_bundle_cmd,
             okf_api::okf_import_preview_cmd,
             okf_api::okf_import_apply_cmd,
@@ -2466,6 +2472,11 @@ pub fn run() {
             entities_api::add_entity_fact_cmd,
             entities_api::update_entity_fact_cmd,
             entities_api::archive_entity_fact_cmd,
+            timeline_api::list_events_cmd,
+            timeline_api::list_tasks_cmd,
+            timeline_api::create_task_cmd,
+            timeline_api::set_task_status_cmd,
+            timeline_api::archive_task_cmd,
             okf_api::okf_export_bundle_cmd,
             okf_api::okf_import_preview_cmd,
             okf_api::okf_import_apply_cmd,

@@ -6,14 +6,18 @@ import { ActivityFeedPanel } from "./ActivityFeedPanel";
 import { BrainMode } from "../modes/BrainMode";
 import { LibraryMode } from "../modes/LibraryMode";
 import { ReviewMode } from "../modes/ReviewMode";
+import { TimelineMode } from "../modes/TimelineMode";
+import { TasksMode } from "../modes/TasksMode";
 import {
   SettingsScreen,
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
+import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
+import { useErrorFeed } from "../../hooks/useErrorFeed";
 import { useNavigationState } from "../../lib/navigation";
 import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
 
@@ -26,12 +30,16 @@ const MODE_SHORTCUTS: Record<string, AppMode> = {
   "1": "brain",
   "2": "review",
   "3": "library",
+  "4": "timeline",
+  "5": "tasks",
 };
 
 const MODE_TITLES: Record<AppMode, string> = {
   brain: "Brain",
   review: "Review",
   library: "Library",
+  timeline: "Timeline",
+  tasks: "Tasks",
   settings: "Settings",
 };
 
@@ -55,10 +63,17 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
     mode: privacyMode,
   } = usePrivacyMode();
   const [migrationDismissed, setMigrationDismissed] = useState(false);
+  const reviewProposalId = nav.current.proposalId;
 
   useEffect(() => {
     startFileWatcher().catch(console.error);
   }, [vaultPath]);
+
+  useEffect(() => {
+    if (reviewProposalId && nav.current.mode === "review") {
+      // Focus proposal logic here — will be passed to ReviewMode
+    }
+  }, [reviewProposalId, nav.current.mode]);
 
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
@@ -173,6 +188,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
           }}
           onBack={nav.goBack}
           onForward={nav.goForward}
+          onOpenActivity={() => setActivityOpen(true)}
         />
         <div className="app-main">
           {nav.current.mode === "brain" && (
@@ -201,14 +217,21 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
               onOpenSource={(path) => {
                 nav.navigate({ mode: "library", docPath: path });
               }}
+              focusProposalId={reviewProposalId}
             />
           )}
           {nav.current.mode === "library" && (
             <LibraryMode
               vaultPath={vaultPath}
               selectedDoc={libraryDoc}
-              onDocSelect={setLibraryDoc}
+              onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
             />
+          )}
+          {nav.current.mode === "timeline" && (
+            <TimelineMode onNavigate={nav.navigate} />
+          )}
+          {nav.current.mode === "tasks" && (
+            <TasksMode onNavigate={nav.navigate} />
           )}
           {nav.current.mode === "settings" && (
             <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} />
@@ -221,8 +244,9 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
         onOpenPrivacy={openPrivacySettings}
       />
       <ActivityFeedPanel
-        open={activityOpen}
+        isOpen={activityOpen}
         onClose={() => setActivityOpen(false)}
+        onNavigate={(t) => { nav.navigate(t); setActivityOpen(false); }}
       />
       {dragging && (
         <div className="drop-overlay">
