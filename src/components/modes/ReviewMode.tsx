@@ -57,6 +57,9 @@ export function ReviewMode({
   const [itemDecisions, setItemDecisions] = useState<Map<string, ItemDecisionState>>(
     () => new Map(),
   );
+  const [itemEdits, setItemEdits] = useState<Map<string, Record<string, unknown>>>(
+    () => new Map(),
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [rejectPrompt, setRejectPrompt] = useState(false);
@@ -102,6 +105,7 @@ export function ReviewMode({
         }
         setDetail(loaded);
         setItemDecisions(defaultItemDecisions(loaded));
+        setItemEdits(new Map());
       })
       .catch(() => {
         if (detailRequestSeq.current === requestSeq) {
@@ -147,6 +151,17 @@ export function ReviewMode({
     [],
   );
 
+  const handleItemEditSave = useCallback(
+    (itemId: string, editedPayload: Record<string, unknown>) => {
+      setItemEdits((prev) => {
+        const next = new Map(prev);
+        next.set(itemId, editedPayload);
+        return next;
+      });
+    },
+    [],
+  );
+
   const commitProposal = useCallback(
     async (
       proposalId: string,
@@ -157,7 +172,7 @@ export function ReviewMode({
     ): Promise<CommitResult> => {
       const decisions =
         mode === "accept"
-          ? buildDecisions(loadedDetail, decisionsOverride ?? itemDecisions)
+          ? buildDecisions(loadedDetail, decisionsOverride ?? itemDecisions, itemEdits)
           : allRejectDecisions(loadedDetail);
       return resolveProposal(
         proposalId,
@@ -165,7 +180,7 @@ export function ReviewMode({
         mode === "reject" ? rejectReason : undefined,
       );
     },
-    [itemDecisions],
+    [itemDecisions, itemEdits],
   );
 
   const canApprove = detail != null && hasAcceptedItems(detail, itemDecisions);
@@ -369,6 +384,7 @@ export function ReviewMode({
               detail={detail}
               itemDecisions={itemDecisions}
               onItemDecisionChange={handleItemDecisionChange}
+              onItemEditSave={handleItemEditSave}
               containerRef={editorRef}
             />
             {!canApprove && detail && (

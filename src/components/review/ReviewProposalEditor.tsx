@@ -14,6 +14,7 @@ interface Props {
   detail: ProposalDetail | null | undefined;
   itemDecisions: Map<string, ItemDecisionState>;
   onItemDecisionChange: (itemId: string, decision: ItemDecisionState) => void;
+  onItemEditSave: (itemId: string, editedPayload: Record<string, unknown>) => void;
   containerRef?: RefObject<HTMLDivElement | null>;
 }
 
@@ -21,6 +22,7 @@ export function ReviewProposalEditor({
   detail,
   itemDecisions,
   onItemDecisionChange,
+  onItemEditSave,
   containerRef,
 }: Props) {
   const [entity, setEntity] = useState<EntityDetail | null | undefined>(
@@ -103,6 +105,7 @@ export function ReviewProposalEditor({
             decision={itemDecisions.get(summaryItem.id) ?? "accept"}
             entity={entity}
             onDecisionChange={onItemDecisionChange}
+            onEditSave={onItemEditSave}
           />
         </section>
       )}
@@ -116,6 +119,7 @@ export function ReviewProposalEditor({
             decision={itemDecisions.get(summaryItem.id) ?? "accept"}
             entity={entity}
             onDecisionChange={onItemDecisionChange}
+            onEditSave={onItemEditSave}
           />
         </section>
       )}
@@ -143,6 +147,7 @@ export function ReviewProposalEditor({
                 decision={itemDecisions.get(item.id) ?? "accept"}
                 entity={entity}
                 onDecisionChange={onItemDecisionChange}
+                onEditSave={onItemEditSave}
               />
             ))}
           </div>
