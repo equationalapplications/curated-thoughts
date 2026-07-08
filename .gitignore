@@ -29,9 +29,11 @@ src-tauri/.fastembed_cache/
 # Superpowers planning (work-in-progress)
 docs/superpowers/plans/
 
+# Git worktrees
+.worktrees/
+
 # Precomputed recall-bench embeddings under src-tauri/tests/fixtures/**/*.json.gz must stay
 # tracked (gzip JSON archives, not ephemeral build output). Do not ignore them.
- .worktree/
  dist/
 tools/target/
 .aider*
