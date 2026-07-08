@@ -40,3 +40,14 @@ export function subscribeErrors(l: Listener): () => void {
   l(errors); // immediate emit of current state
   return () => listeners.delete(l);
 }
+
+export function getErrorSnapshot(): BackgroundError[] {
+  return errors;
+}
+
+// Test utility: reset the error feed state
+export function __resetErrorFeed(): void {
+  nextId = 1;
+  errors = [];
+  listeners.clear();
+}

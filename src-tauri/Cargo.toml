@@ -58,6 +58,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 http = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 rand = "0.8"
+tauri-plugin-notification = "2.3.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
