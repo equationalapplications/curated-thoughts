@@ -39,6 +39,17 @@ export function itemPayloadString(
   return typeof value === "string" ? value : "";
 }
 
+const EDITABLE_FIELD_BY_TYPE: Record<string, string> = {
+  fact_add: "body",
+  fact_update: "body",
+  summary_update: "summary",
+  task_add: "description",
+};
+
+export function editableFieldForItem(item: ProposalItem): string | null {
+  return EDITABLE_FIELD_BY_TYPE[item.item_type] ?? null;
+}
+
 export function describeProposalItem(
   item: ProposalItem,
   entity?: EntityDetail | null,
