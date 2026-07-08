@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { listLocalModels, pullModel, getRecommendedModel } from "../../lib/tauri";
 import { onPullProgress } from "../../lib/events";
+import { reportBackgroundError } from "../../lib/errorFeed";
 
 export function ModelPanel() {
   const [models, setModels] = useState<string[]>([]);
@@ -11,8 +12,22 @@ export function ModelPanel() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listLocalModels().then(setModels).catch(() => {});
-    getRecommendedModel().then(setRecommended).catch(() => {});
+    listLocalModels()
+      .then(setModels)
+      .catch((e) => {
+        reportBackgroundError(
+          `Failed to load models: ${String(e)}`,
+          () => listLocalModels().then(setModels)
+        );
+      });
+    getRecommendedModel()
+      .then(setRecommended)
+      .catch((e) => {
+        reportBackgroundError(
+          `Failed to get recommended model: ${String(e)}`,
+          () => getRecommendedModel().then(setRecommended)
+        );
+      });
   }, []);
 
   async function handlePull() {

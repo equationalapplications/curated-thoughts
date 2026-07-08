@@ -1,12 +1,12 @@
 import { useSyncExternalStore } from "react";
 import {
   subscribeErrors,
+  getErrorSnapshot,
   dismissError,
   retryError,
-  type BackgroundError,
 } from "../lib/errorFeed";
 
 export function useErrorFeed() {
-  const errors = useSyncExternalStore(subscribeErrors, () => []);
+  const errors = useSyncExternalStore(subscribeErrors, getErrorSnapshot);
   return { errors, dismiss: dismissError, retry: retryError };
 }
