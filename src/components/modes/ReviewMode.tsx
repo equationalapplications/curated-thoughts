@@ -25,6 +25,7 @@ interface Props {
   vaultPath: string;
   queueError?: string | null;
   onOpenSource?: (path: string) => void;
+  focusProposalId?: string;
 }
 
 function summarizeCommitResult(result: CommitResult): string | null {
@@ -47,6 +48,7 @@ export function ReviewMode({
   vaultPath,
   queueError,
   onOpenSource,
+  focusProposalId,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
@@ -57,6 +59,8 @@ export function ReviewMode({
   );
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [rejectPrompt, setRejectPrompt] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
   const detailRequestSeq = useRef(0);
   const editorRef = useRef<HTMLDivElement>(null);
   const { indexed } = useIndexingStatus(vaultPath);
@@ -64,6 +68,12 @@ export function ReviewMode({
   const sortedQueue = useMemo(() => sortReviewQueue(queue), [queue]);
   const proposal =
     sortedQueue.find((p) => p.id === selectedId) ?? sortedQueue[0] ?? null;
+
+  useEffect(() => {
+    if (focusProposalId && sortedQueue.some((p) => p.id === focusProposalId)) {
+      setSelectedId(focusProposalId);
+    }
+  }, [focusProposalId, sortedQueue]);
 
   useEffect(() => {
     setCheckedIds((prev) => {
@@ -184,11 +194,8 @@ export function ReviewMode({
     }
   }, [proposal, detail, busy, canApprove, commitProposal, sortedQueue, onAction]);
 
-  const handleReject = useCallback(async () => {
-    if (!proposal || !detail || busy) return;
-
-    const reason = window.prompt("Reject reason (optional):");
-    if (reason === null) return;
+  const handleRejectSubmit = useCallback(async (reason: string) => {
+    if (!proposal || !detail) return;
 
     setActionError(null);
     setActionNotice(null);
@@ -217,7 +224,28 @@ export function ReviewMode({
     } finally {
       setBusy(false);
     }
-  }, [proposal, detail, busy, commitProposal, sortedQueue, onAction]);
+  }, [proposal, detail, commitProposal, sortedQueue, onAction]);
+
+  const handleReject = useCallback(() => {
+    if (!proposal || !detail || busy) return;
+    setRejectPrompt(true);
+  }, [proposal, detail, busy]);
+
+  const handleSubmitRejectForm = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      setRejectPrompt(false);
+      const reason = rejectReason;
+      setRejectReason("");
+      await handleRejectSubmit(reason);
+    },
+    [rejectReason, handleRejectSubmit],
+  );
+
+  const handleCancelRejectForm = useCallback(() => {
+    setRejectPrompt(false);
+    setRejectReason("");
+  }, []);
 
   const handleBatchApprove = useCallback(async () => {
     if (checkedIds.size === 0 || busy) return;
@@ -289,7 +317,7 @@ export function ReviewMode({
   }, [checkedIds, busy, sortedQueue, proposal, commitProposal, onAction]);
 
   useReviewKeyboard({
-    enabled: queue.length > 0 && !busy,
+    enabled: queue.length > 0 && !busy && !rejectPrompt,
     onApprove: () => void handleApprove(),
     onReject: () => void handleReject(),
     onNext: handleSelectNext,
@@ -365,6 +393,41 @@ export function ReviewMode({
                 a approve · r reject · e focus · j/k navigate · space next
               </span>
             </div>
+            {rejectPrompt && (
+              <form
+                className="review-reject-form"
+                onSubmit={handleSubmitRejectForm}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    handleCancelRejectForm();
+                  }
+                }}
+              >
+                <textarea
+                  className="review-reject-textarea"
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="Optional: add a reason for rejection..."
+                  autoFocus
+                />
+                <div className="review-reject-buttons">
+                  <button
+                    type="submit"
+                    className="review-btn review-btn--reject-confirm"
+                  >
+                    Confirm Reject
+                  </button>
+                  <button
+                    type="button"
+                    className="review-btn review-btn--cancel"
+                    onClick={handleCancelRejectForm}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
           </>
         )}
       </main>

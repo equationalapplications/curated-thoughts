@@ -1,10 +1,17 @@
+import { useTimeline } from "../../hooks/useTimeline";
+import { TimelineFeed } from "../timeline/TimelineFeed";
+import type { NavTarget } from "../../lib/navigation";
+
 interface Props {
-  open: boolean;
+  isOpen: boolean;
   onClose: () => void;
+  onNavigate: (target: NavTarget) => void;
 }
 
-export function ActivityFeedPanel({ open, onClose }: Props) {
-  if (!open) return null;
+export function ActivityFeedPanel({ isOpen, onClose, onNavigate }: Props) {
+  const { events, error } = useTimeline({ limit: 50 });
+
+  if (!isOpen) return null;
 
   return (
     <>
@@ -32,14 +39,28 @@ export function ActivityFeedPanel({ open, onClose }: Props) {
           </button>
         </header>
         <div className="activity-panel-body">
-          <p className="settings-hint">
-            Live librarian events will appear here. Full Timeline mode ships in
-            a later phase.
-          </p>
-          <p className="settings-hint">
-            For now, check the status bar for indexing and synthesis state.
-          </p>
+          {error && (
+            <div className="error-banner" role="alert">
+              {error}
+            </div>
+          )}
+          <TimelineFeed
+            events={events}
+            powerLayer={false}
+            onNavigate={onNavigate}
+          />
         </div>
+        <footer className="activity-panel-footer">
+          <button
+            className="activity-open-timeline"
+            onClick={() => {
+              onNavigate({ mode: "timeline" });
+              onClose();
+            }}
+          >
+            Open full Timeline
+          </button>
+        </footer>
       </aside>
     </>
   );

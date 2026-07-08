@@ -1,4 +1,4 @@
-export type AppMode = "brain" | "review" | "library" | "settings";
+export type AppMode = "brain" | "review" | "library" | "timeline" | "tasks" | "settings";
 
 interface Props {
   mode: AppMode;
@@ -8,12 +8,15 @@ interface Props {
   canGoForward: boolean;
   onBack: () => void;
   onForward: () => void;
+  onOpenActivity: () => void;
 }
 
 const MAIN_MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: "brain", label: "Brain", icon: "🧠" },
   { id: "review", label: "Review", icon: "📥" },
   { id: "library", label: "Library", icon: "📚" },
+  { id: "timeline", label: "Timeline", icon: "🕘" },
+  { id: "tasks", label: "Tasks", icon: "☑️" },
 ];
 
 function RailButton({
@@ -55,6 +58,7 @@ export function ModeRail({
   canGoForward,
   onBack,
   onForward,
+  onOpenActivity,
 }: Props) {
   return (
     <nav className="mode-rail" aria-label="Primary">
@@ -88,6 +92,14 @@ export function ModeRail({
         />
       ))}
       <div className="mode-rail-spacer" />
+      <button
+        className="mode-rail-btn"
+        aria-label="Activity"
+        title="Activity"
+        onClick={onOpenActivity}
+      >
+        <span aria-hidden="true">📡</span>
+      </button>
       <RailButton
         id="settings"
         label="Settings"
