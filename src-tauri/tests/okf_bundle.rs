@@ -154,36 +154,47 @@ fn golden_v1_round_trips_losslessly() {
 #[test]
 fn export_writes_exported_event_per_entity() {
     use tauri_app_lib::db::connection::open_in_memory;
-    use tauri_app_lib::db::queries::{insert_chunk, upsert_document};
-    use tauri_app_lib::chunker::{Chunk, ChunkStrategyTag};
+    use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::commit::generate_id;
 
     let conn = open_in_memory().unwrap();
-    let doc_id = upsert_document(&conn, "/vault/documents/notes.pdf", "hash").unwrap();
-    let chunk = Chunk {
-        text: "evidence".into(),
-        start_line: 1,
-        end_line: 2,
-        symbol_name: None,
-        defined_symbol: None,
-        strategy: ChunkStrategyTag::Prose,
-    };
-        let _chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+
+    // Seed entity with facts
     conn.execute(
         "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
-         VALUES ('ent-1', 'Project X', 'concept', 'Summary', 100, 100)",
+         VALUES ('ent-1', 'Project X', 'concept', 'A test entity', 100, 100)",
         [],
     ).unwrap();
 
-    // Write an exported event manually to test the query
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type, created_at, updated_at)
+         VALUES ('fact-1', 'ent-1', 'Test Fact', 'Fact body.', '[]', 'certain', 'user_confirmed', 100, 100)",
+        [],
+    ).unwrap();
+
+    // Simulate export: load entities (as okf_export_bundle_cmd does)
+    let entities = load_export_entities(&conn, None).unwrap();
+    assert_eq!(entities.len(), 1);
+    assert_eq!(entities[0].entity_id, "ent-1");
+
+    // Write exported event for each entity (as okf_export_bundle_cmd does after zip is finalized)
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap()
         .as_millis() as i64;
-    conn.execute(
-        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
-         VALUES ('evt_export_1', 'ent-1', 'exported', 'Exported *Project X* to OKF bundle', NULL, ?1)",
-        [now_ms],
-    ).unwrap();
+    for entity in &entities {
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+             VALUES (?1, ?2, 'exported', ?3, NULL, ?4)",
+            rusqlite::params![
+                generate_id("evt_"),
+                entity.entity_id.clone(),
+                format!("Exported *{}* to OKF bundle", entity.display_name),
+                now_ms,
+            ],
+        ).unwrap();
+    }
 
+    // Query and verify the exported event was written
     let (event_type, summary): (String, String) = conn
         .query_row(
             "SELECT event_type, summary FROM llm_wiki_events
@@ -194,4 +205,5 @@ fn export_writes_exported_event_per_entity() {
         .expect("exported event row");
     assert_eq!(event_type, "exported");
     assert!(summary.starts_with("Exported"));
+    assert!(summary.contains("Project X"));
 }
