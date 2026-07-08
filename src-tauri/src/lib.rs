@@ -2407,6 +2407,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_notification::init())
         // Handle file-drop in Rust so source paths come from OS drop events,
         // not from attacker-controlled webview command arguments.
         .on_window_event(|window, event| {

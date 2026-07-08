@@ -71,7 +71,7 @@ pub fn create_task(
     if description.is_empty() {
         bail!("task description must not be empty");
     }
-    let (now_secs, now_ms) = now_timestamps();
+    let (_now_secs, now_ms) = now_timestamps();
     let task_id = generate_llm_id("task_");
     let priority = 0i64;
 
@@ -140,7 +140,7 @@ pub fn set_task_status(
     if !matches!(status, "pending" | "done") {
         bail!("status must be 'pending' or 'done'");
     }
-    let (now_secs, now_ms) = now_timestamps();
+    let (_now_secs, now_ms) = now_timestamps();
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -198,7 +198,7 @@ pub fn set_task_status(
 
 /// Soft-delete a task by setting deleted_at.
 pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
-    let (now_secs, now_ms) = now_timestamps();
+    let (_now_secs, now_ms) = now_timestamps();
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -222,7 +222,7 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
             },
         )
         .optional()?;
-    let Some((id, entity_id, description, status, priority, created_at, updated_at)) = task else {
+    let Some((id, entity_id, description, status, priority, created_at, _updated_at)) = task else {
         bail!("task not found or already archived: {task_id}");
     };
 
@@ -291,7 +291,7 @@ mod tests {
         let ent2_id = "ent_second";
         conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, created_at, updated_at)
-             VALUES (?1, 'SecondEntity', NULL, 1, 1)",
+             VALUES (?1, 'SecondEntity', 'concept', 1, 1)",
             [ent2_id],
         )
         .unwrap();
