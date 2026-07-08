@@ -42,15 +42,14 @@ describe('useTimeline', () => {
 
   it('calls listEvents with filter on initial load and sets events', async () => {
     const filter: TimelineFilter = { kinds: ['synthesized', 'approved'], limit: 10 };
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'list_events_cmd') {
-        return Promise.resolve([MOCK_EVENT_1]);
-      }
-      return Promise.resolve(null);
-    });
+    vi.mocked(invoke).mockResolvedValue([MOCK_EVENT_1]);
 
     const { result } = renderHook(() => useTimeline(filter));
-    await waitFor(() => expect(result.current.events.length).toBeGreaterThan(0));
+
+    // Flush all timers and microtasks to let the promise resolve
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(result.current.events).toEqual([MOCK_EVENT_1]);
     expect(result.current.error).toBeNull();
@@ -59,17 +58,17 @@ describe('useTimeline', () => {
 
   it('polls listEvents at POLL_MS intervals', async () => {
     const filter: TimelineFilter = {};
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'list_events_cmd') {
-        return Promise.resolve([MOCK_EVENT_1]);
-      }
-      return Promise.resolve(null);
-    });
+    vi.mocked(invoke).mockResolvedValue([MOCK_EVENT_1]);
 
     const { result } = renderHook(() => useTimeline(filter));
-    await waitFor(() => expect(result.current.events.length).toBeGreaterThan(0));
+
+    // Initial load
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(invoke).toHaveBeenCalledTimes(1);
+    expect(result.current.events).toEqual([MOCK_EVENT_1]);
 
     // Advance time by 5000ms (POLL_MS)
     await act(async () => {
@@ -81,65 +80,54 @@ describe('useTimeline', () => {
 
   it('sets error on listEvents failure but preserves previous events', async () => {
     const filter: TimelineFilter = {};
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'list_events_cmd') {
-        return Promise.resolve([MOCK_EVENT_1]);
-      }
-      return Promise.resolve(null);
-    });
+
+    // First call succeeds
+    vi.mocked(invoke).mockResolvedValueOnce([MOCK_EVENT_1]);
 
     const { result } = renderHook(() => useTimeline(filter));
-    await waitFor(() => expect(result.current.events.length).toBeGreaterThan(0));
+
+    // Wait for initial load
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(result.current.events).toEqual([MOCK_EVENT_1]);
     expect(result.current.error).toBeNull();
 
     // Mock subsequent calls to fail
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'list_events_cmd') {
-        return Promise.reject(new Error('Connection failed'));
-      }
-      return Promise.resolve(null);
-    });
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('Connection failed'));
 
     await act(async () => {
-      vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
 
-    await waitFor(() => expect(result.current.error).not.toBeNull());
-
     expect(result.current.error).toBe('Timeline is temporarily unavailable.');
+    // Events should be preserved
     expect(result.current.events).toEqual([MOCK_EVENT_1]);
   });
 
   it('allows manual refresh that re-fetches without waiting for interval', async () => {
     const filter: TimelineFilter = {};
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'list_events_cmd') {
-        return Promise.resolve([MOCK_EVENT_1]);
-      }
-      return Promise.resolve(null);
-    });
+    vi.mocked(invoke).mockResolvedValueOnce([MOCK_EVENT_1]);
 
     const { result } = renderHook(() => useTimeline(filter));
-    await waitFor(() => expect(result.current.events.length).toBeGreaterThan(0));
+
+    // Wait for initial load
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(invoke).toHaveBeenCalledTimes(1);
+    expect(result.current.events).toEqual([MOCK_EVENT_1]);
 
-    // Mock subsequent calls to return a different event
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'list_events_cmd') {
-        return Promise.resolve([MOCK_EVENT_1, MOCK_EVENT_2]);
-      }
-      return Promise.resolve(null);
-    });
+    // Mock subsequent calls to return additional event
+    vi.mocked(invoke).mockResolvedValueOnce([MOCK_EVENT_1, MOCK_EVENT_2]);
 
     // Manually call refresh
     await act(async () => {
       result.current.refresh();
+      await vi.advanceTimersByTimeAsync(0);
     });
-
-    await waitFor(() => expect(result.current.events).toHaveLength(2));
 
     expect(result.current.events).toEqual([MOCK_EVENT_1, MOCK_EVENT_2]);
     expect(invoke).toHaveBeenCalledTimes(2);

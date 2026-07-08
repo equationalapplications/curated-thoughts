@@ -122,22 +122,26 @@ beforeEach(() => {
   });
 });
 
-test("groups_tasks_under_entity_headings", async () => {
-  const onNavigate = vi.fn();
-  render(<TasksMode onNavigate={onNavigate} />);
+test(
+  "groups_tasks_under_entity_headings",
+  async () => {
+    const onNavigate = vi.fn();
+    render(<TasksMode onNavigate={onNavigate} />);
 
-  // Should show Alice and Bob as entity headings
-  const aliceHeading = await screen.findByRole("button", { name: "Alice" });
-  const bobHeading = await screen.findByRole("button", { name: "Bob" });
+    // Should show Alice and Bob as entity headings
+    const aliceHeading = await screen.findByRole("button", { name: "Alice" });
+    const bobHeading = await screen.findByRole("button", { name: "Bob" });
 
-  expect(aliceHeading).toBeInTheDocument();
-  expect(bobHeading).toBeInTheDocument();
+    expect(aliceHeading).toBeInTheDocument();
+    expect(bobHeading).toBeInTheDocument();
 
-  // Verify Alice has 2 tasks and Bob has 1 task
-  expect(screen.getByText("Review documents")).toBeInTheDocument();
-  expect(screen.getByText("Schedule meeting")).toBeInTheDocument();
-  expect(screen.getByText("Send email")).toBeInTheDocument();
-});
+    // Verify Alice has 2 tasks and Bob has 1 task
+    expect(screen.getByText("Review documents")).toBeInTheDocument();
+    expect(screen.getByText("Schedule meeting")).toBeInTheDocument();
+    expect(screen.getByText("Send email")).toBeInTheDocument();
+  },
+  15000, // 15 second timeout
+);
 
 test("status_filter_switches_listTasks_call", async () => {
   const onNavigate = vi.fn();

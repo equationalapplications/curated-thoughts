@@ -3,6 +3,7 @@ export type AppMode = "brain" | "review" | "library" | "timeline" | "tasks" | "s
 interface Props {
   mode: AppMode;
   reviewCount: number;
+  errorCount?: number;
   onModeChange: (mode: AppMode) => void;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -53,6 +54,7 @@ function RailButton({
 export function ModeRail({
   mode,
   reviewCount,
+  errorCount,
   onModeChange,
   canGoBack,
   canGoForward,
@@ -99,6 +101,9 @@ export function ModeRail({
         onClick={onOpenActivity}
       >
         <span aria-hidden="true">📡</span>
+        {errorCount !== undefined && errorCount > 0 && (
+          <span className="mode-rail-badge">{errorCount}</span>
+        )}
       </button>
       <RailButton
         id="settings"

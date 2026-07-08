@@ -16,6 +16,7 @@ import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
+import { useProposalNotifications } from "../../hooks/useProposalNotifications";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { useErrorFeed } from "../../hooks/useErrorFeed";
 import { useNavigationState } from "../../lib/navigation";
@@ -57,23 +58,25 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
+  useProposalNotifications(queue.length);
   const {
     needs_migration_disclosure,
     loading: privacyLoading,
     mode: privacyMode,
   } = usePrivacyMode();
+  const { errors } = useErrorFeed();
   const [migrationDismissed, setMigrationDismissed] = useState(false);
-  const reviewProposalId = nav.current.proposalId;
 
   useEffect(() => {
-    startFileWatcher().catch(console.error);
+    const start = () =>
+      startFileWatcher().catch(() => {
+        reportBackgroundError(
+          "File watcher failed to start — new documents won't be detected.",
+          start
+        );
+      });
+    start();
   }, [vaultPath]);
-
-  useEffect(() => {
-    if (reviewProposalId && nav.current.mode === "review") {
-      // Focus proposal logic here — will be passed to ReviewMode
-    }
-  }, [reviewProposalId, nav.current.mode]);
 
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
@@ -180,6 +183,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
         <ModeRail
           mode={nav.current.mode}
           reviewCount={queue.length}
+          errorCount={errors.length}
           canGoBack={nav.canGoBack}
           canGoForward={nav.canGoForward}
           onModeChange={(next) => {
@@ -217,7 +221,6 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
               onOpenSource={(path) => {
                 nav.navigate({ mode: "library", docPath: path });
               }}
-              focusProposalId={reviewProposalId}
             />
           )}
           {nav.current.mode === "library" && (
@@ -246,7 +249,11 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
       <ActivityFeedPanel
         isOpen={activityOpen}
         onClose={() => setActivityOpen(false)}
-        onNavigate={(t) => { nav.navigate(t); setActivityOpen(false); }}
+        onNavigate={(t) => {
+          nav.navigate(t);
+          setActivityOpen(false);
+        }}
+        errors={errors}
       />
       {dragging && (
         <div className="drop-overlay">

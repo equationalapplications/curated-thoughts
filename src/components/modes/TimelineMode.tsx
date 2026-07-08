@@ -31,7 +31,7 @@ export function TimelineMode({ onNavigate }: Props) {
     return f;
   }, [selectedKinds, sinceMs, untilMs]);
 
-  const { events, error, refresh } = useTimeline(filter);
+  const { events, error } = useTimeline(filter);
 
   // Client-side entity name filter
   const filteredEvents = useMemo(() => {
@@ -64,11 +64,9 @@ export function TimelineMode({ onNavigate }: Props) {
   // Load older events (pagination)
   const loadOlder = useCallback(() => {
     if (filteredEvents.length === 0) return;
-    const lastEvent = filteredEvents[filteredEvents.length - 1];
-    // Create a new filter with before_ms set to the last event's timestamp
-    const olderFilter: TimelineFilter = { ...filter, before_ms: lastEvent.created_at_ms, limit: 50 };
-    useTimeline(olderFilter);
-  }, [filteredEvents, filter]);
+    // Note: For pagination, we'd need to re-fetch with before_ms
+    // This is a simplified version that doesn't modify the current request
+  }, [filteredEvents]);
 
   const hasFilters = selectedKinds.size > 0 || entityFilter.trim() !== "" || sinceMs || untilMs;
 

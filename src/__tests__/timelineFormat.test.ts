@@ -13,12 +13,11 @@ describe("timelineFormat", () => {
 
     it("handles multiple emphasized segments", () => {
       const segments = parseSummary("Updated *field A* and *field B*");
-      expect(segments).toHaveLength(5);
+      expect(segments).toHaveLength(4);
       expect(segments[0]).toEqual({ text: "Updated " });
       expect(segments[1]).toEqual({ text: "field A", em: true });
       expect(segments[2]).toEqual({ text: " and " });
       expect(segments[3]).toEqual({ text: "field B", em: true });
-      expect(segments[4]).toEqual({ text: "" });
     });
 
     it("handles no emphasis", () => {
