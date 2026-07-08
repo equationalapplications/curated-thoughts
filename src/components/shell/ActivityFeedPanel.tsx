@@ -1,15 +1,25 @@
 import { useTimeline } from "../../hooks/useTimeline";
 import { TimelineFeed } from "../timeline/TimelineFeed";
+import { useErrorFeed } from "../../hooks/useErrorFeed";
 import type { NavTarget } from "../../lib/navigation";
+import type { BackgroundError } from "../../lib/errorFeed";
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   onNavigate: (target: NavTarget) => void;
+  errors?: BackgroundError[];
 }
 
-export function ActivityFeedPanel({ isOpen, onClose, onNavigate }: Props) {
+export function ActivityFeedPanel({
+  isOpen,
+  onClose,
+  onNavigate,
+  errors: errorsProp,
+}: Props) {
   const { events, error } = useTimeline({ limit: 50 });
+  const { errors: errorsFromHook, dismiss, retry } = useErrorFeed();
+  const errors = errorsProp ?? errorsFromHook;
 
   if (!isOpen) return null;
 
@@ -42,6 +52,31 @@ export function ActivityFeedPanel({ isOpen, onClose, onNavigate }: Props) {
           {error && (
             <div className="error-banner" role="alert">
               {error}
+            </div>
+          )}
+          {errors.length > 0 && (
+            <div className="activity-errors">
+              {errors.map((err) => (
+                <div key={err.id} className="activity-error">
+                  <p>{err.message}</p>
+                  <div className="activity-error-actions">
+                    {err.retry && (
+                      <button
+                        onClick={() => retry(err.id)}
+                        className="activity-error-btn"
+                      >
+                        Retry
+                      </button>
+                    )}
+                    <button
+                      onClick={() => dismiss(err.id)}
+                      className="activity-error-btn"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           <TimelineFeed

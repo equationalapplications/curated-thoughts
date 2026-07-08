@@ -6,6 +6,7 @@ const defaultProps = {
   canGoForward: false,
   onBack: vi.fn(),
   onForward: vi.fn(),
+  onOpenActivity: vi.fn(),
 };
 
 test("renders Brain, Review, Library, and Settings buttons", () => {
@@ -88,6 +89,7 @@ test("back and forward buttons are disabled when no history", () => {
       canGoForward={false}
       onBack={vi.fn()}
       onForward={vi.fn()}
+      onOpenActivity={vi.fn()}
     />
   );
   expect(screen.getByRole("button", { name: "Go back" })).toBeDisabled();
@@ -105,6 +107,7 @@ test("back button calls onBack when enabled", () => {
       canGoForward={false}
       onBack={onBack}
       onForward={vi.fn()}
+      onOpenActivity={vi.fn()}
     />
   );
   fireEvent.click(screen.getByRole("button", { name: "Go back" }));
@@ -122,6 +125,7 @@ test("forward button calls onForward when enabled", () => {
       canGoForward={true}
       onBack={vi.fn()}
       onForward={onForward}
+      onOpenActivity={vi.fn()}
     />
   );
   fireEvent.click(screen.getByRole("button", { name: "Go forward" }));

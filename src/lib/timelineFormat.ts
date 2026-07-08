@@ -35,10 +35,8 @@ export function groupByDay(events: TimelineEvent[]): { day: string; events: Time
     });
     (groups.get(day) ?? groups.set(day, []).get(day)!).push(e);
   }
-  // Return with newest first
-  return [...groups.entries()]
-    .reverse()
-    .map(([day, evts]) => ({ day, events: evts }));
+  // Groups are in insertion order (newest first when events are chronologically sorted)
+  return [...groups.entries()].map(([day, evts]) => ({ day, events: evts }));
 }
 
 export const KIND_ICONS: Record<TimelineKind, string> = {
