@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use tauri_app_lib::okf::bundle_read::parse_bundle;
 use tauri_app_lib::okf::bundle_write::{write_bundle, ExportEntity};
 use tauri_app_lib::okf::types::OkfFile;
+use tauri_app_lib::okf_api::write_exported_event;
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/okf")
@@ -174,15 +175,11 @@ fn export_writes_exported_event_per_entity() {
         [],
     ).unwrap();
 
-    // Write an exported event manually to test the query
+    // Use the shared helper to write the exported event
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap()
         .as_millis() as i64;
-    conn.execute(
-        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
-         VALUES ('evt_export_1', 'ent-1', 'exported', 'Exported *Project X* to OKF bundle', NULL, ?1)",
-        [now_ms],
-    ).unwrap();
+    write_exported_event(&conn, "ent-1", "Project X", now_ms).unwrap();
 
     let (event_type, summary): (String, String) = conn
         .query_row(

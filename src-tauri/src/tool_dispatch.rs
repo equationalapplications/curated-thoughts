@@ -223,7 +223,9 @@ pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
     pub profile: EmbedProfile,
     pub vault_dir: Option<PathBuf>,
-    /// Agent-log client label: "clanker-bridge" for cloud bridge, MCP client name locally.
+    /// Agent-log client label: "clanker-bridge" for cloud bridge, static label for local MCP (e.g. "local-mcp").
+    /// The actual MCP client name is only known after the initialize handshake, which happens
+    /// after this context is constructed; for now we use a static label.
     pub client: String,
 }
 
@@ -375,17 +377,16 @@ pub async fn dispatch_tool_call(ctx: &ToolDispatchContext, tool: &str, params: V
         other => Err(UnknownToolError(other.to_string()).into()),
     };
 
-    // Agent access log: best-effort, never fail the tool call
-    if let Ok(ref _val) = result {
-        let _ = tokio::task::spawn_blocking(move || {
-            let guard = match conn_for_log.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
-        })
-        .await;
-    }
+    // Agent access log: best-effort, never fail the tool call.
+    // Log both successful and failed attempts (including unknown tool).
+    let _ = tokio::task::spawn_blocking(move || {
+        let guard = match conn_for_log.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
+    })
+    .await;
 
     result
 }
