@@ -20,6 +20,21 @@ pub struct ExportSummary {
     pub files: usize,
 }
 
+/// Write an exported event for a single entity. Used by both the command and tests.
+pub fn write_exported_event(conn: &rusqlite::Connection, entity_id: &str, display_name: &str, now_ms: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+         VALUES (?1, ?2, 'exported', ?3, NULL, ?4)",
+        rusqlite::params![
+            generate_llm_id("evt_"),
+            entity_id,
+            format!("Exported *{}* to OKF bundle", display_name),
+            now_ms,
+        ],
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn okf_export_bundle_cmd(
     dest_path: String,
@@ -45,16 +60,8 @@ pub fn okf_export_bundle_cmd(
             .as_millis() as i64;
         let guard = db_state.0.lock().map_err(|e| e.to_string())?;
         for entity in &entities {
-            let _ = guard.0.execute(
-                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
-                 VALUES (?1, ?2, 'exported', ?3, NULL, ?4)",
-                rusqlite::params![
-                    generate_llm_id("evt_"),
-                    entity.entity_id.clone(),
-                    format!("Exported *{}* to OKF bundle", entity.display_name),
-                    now_ms,
-                ],
-            );
+            write_exported_event(&guard.0, &entity.entity_id, &entity.display_name, now_ms)
+                .map_err(|e| e.to_string())?;
         }
     }
 

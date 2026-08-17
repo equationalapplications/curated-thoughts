@@ -79,19 +79,28 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
     }
 
-    // Phase 5 data migration: fix resolution event taxonomy
-    // v1.10-v1.15 wrote 'action'/'observation' for resolutions; normalize to 'approved'/'rejected'
-    conn.execute_batch(
-        "UPDATE llm_wiki_events SET event_type = 'approved'
-           WHERE event_type = 'action' AND summary LIKE 'Approved%';
-         UPDATE llm_wiki_events SET event_type = 'rejected'
-           WHERE event_type = 'observation' AND summary LIKE 'Rejected proposal%';",
-    )?;
+    // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
+    if version < 8 {
+        conn.execute_batch(
+            "UPDATE llm_wiki_events SET event_type = 'approved'
+               WHERE event_type = 'action' AND summary LIKE 'Approved%';
+             UPDATE llm_wiki_events SET event_type = 'rejected'
+               WHERE event_type = 'observation' AND summary LIKE 'Rejected proposal%';",
+        )?;
+        // Bump schema_version to 8 so this migration runs only once
+        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (8)", [])?;
+    }
 
     // 90-day pruning of curated_agent_log (local-only audit trail)
     conn.execute(
         "DELETE FROM curated_agent_log WHERE created_at < unixepoch() - 90*24*60*60",
         [],
+    )?;
+
+    // Ensure index on curated_agent_log.created_at for pruning performance
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_curated_agent_log_created_at
+         ON curated_agent_log(created_at);"
     )?;
 
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
@@ -144,7 +153,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 7);
+        assert_eq!(max_version, 8);
     }
 
     #[test]
