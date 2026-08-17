@@ -2,7 +2,6 @@ import { renderHook } from "@testing-library/react";
 import * as notificationPlugin from "@tauri-apps/plugin-notification";
 import {
   useProposalNotifications,
-  proposalNotificationsEnabled,
   setProposalNotificationsEnabled,
 } from "../hooks/useProposalNotifications";
 

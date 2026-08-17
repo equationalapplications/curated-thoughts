@@ -323,7 +323,6 @@ describe("ActivityFeedPanel", () => {
   it("uses_errors_prop_when_provided", () => {
     const onNavigate = vi.fn();
     const onClose = vi.fn();
-    const mockDismiss = vi.fn();
 
     const errorsProp: BackgroundError[] = [
       {
