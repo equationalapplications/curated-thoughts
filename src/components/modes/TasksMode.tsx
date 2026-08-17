@@ -60,7 +60,7 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
       try {
         const loaded = await listEntities();
         setEntities(loaded);
-      } catch (err) {
+      } catch {
         // Silent fail on entities load; form can still work
       }
     })();

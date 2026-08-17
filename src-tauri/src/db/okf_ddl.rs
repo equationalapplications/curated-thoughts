@@ -26,13 +26,41 @@ CREATE TABLE IF NOT EXISTS llm_wiki_entries (
   deleted_at INTEGER,
   embedding TEXT,
   embedding_blob BLOB,
-  okf_type TEXT
+  okf_type TEXT,
+  ontology_checked_at INTEGER,
+  heal_checked_at INTEGER,
+  lifecycle_status TEXT NOT NULL DEFAULT 'stable',
+  stale_after INTEGER,
+  generated_by TEXT,
+  last_verified_at INTEGER,
+  last_verified_by TEXT,
+  okf_sources TEXT,
+  okf_verified TEXT,
+  okf_usage_window TEXT
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_entity_idx ON llm_wiki_entries(entity_id);
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_source_ref_idx ON llm_wiki_entries(entity_id, source_ref);
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_source_hash_idx ON llm_wiki_entries(entity_id, source_hash) WHERE source_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_updated_idx ON llm_wiki_entries(updated_at DESC);
+
+-- source_ref_index: per-(entity, source_hash) record of the canonical sourceRef
+-- currently holding that hash. The partial UNIQUE index on (entity_id, source_hash)
+-- WHERE deleted_at IS NULL enforces the sourceRef-level TOCTOU-race invariant;
+-- entries-level uniqueness cannot express it because a single ingestDocument call
+-- writes N facts that all share (entity_id, source_ref, source_hash). See
+-- docs/superpowers/specs/2026-08-07-dependabot-concurrency-release-hygiene-design.md \xA7B1.
+CREATE TABLE IF NOT EXISTS llm_wiki_source_ref_index (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  deleted_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS llm_wiki_idx_source_ref_hash
+  ON llm_wiki_source_ref_index (entity_id, source_hash)
+  WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS llm_wiki_tasks (
   id TEXT PRIMARY KEY,
@@ -44,7 +72,15 @@ CREATE TABLE IF NOT EXISTS llm_wiki_tasks (
   updated_at INTEGER NOT NULL,
   resolved_at INTEGER,
   deleted_at INTEGER,
-  okf_type TEXT
+  okf_type TEXT,
+  lifecycle_status TEXT NOT NULL DEFAULT 'stable',
+  stale_after INTEGER,
+  generated_by TEXT,
+  last_verified_at INTEGER,
+  last_verified_by TEXT,
+  okf_sources TEXT,
+  okf_verified TEXT,
+  okf_usage_window TEXT
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_tasks_entity_idx ON llm_wiki_tasks(entity_id, status);

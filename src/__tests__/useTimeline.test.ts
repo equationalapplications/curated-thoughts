@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import type { TimelineEvent, TimelineFilter } from '../lib/tauri';
 import { useTimeline } from '../hooks/useTimeline';
