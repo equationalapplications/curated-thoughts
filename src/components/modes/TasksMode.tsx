@@ -139,20 +139,25 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
     [refreshTasks],
   );
 
-  // Group tasks by entity_name
+  // Group tasks by entity_id (curated_entities.name is not unique, so id is the
+  // only safe key). entity_name is kept only for display and sorting.
   const groupedTasks = tasks.reduce(
     (acc, task) => {
-      if (!acc[task.entity_name]) {
-        acc[task.entity_name] = [];
+      if (!acc[task.entity_id]) {
+        acc[task.entity_id] = [];
       }
-      acc[task.entity_name].push(task);
+      acc[task.entity_id].push(task);
       return acc;
     },
     {} as Record<string, TaskRow[]>,
   );
 
-  // Sort entity names alphabetically
-  const sortedEntityNames = Object.keys(groupedTasks).sort();
+  // Sort groups by their display name alphabetically
+  const sortedEntityIds = Object.keys(groupedTasks).sort((a, b) => {
+    const aName = groupedTasks[a][0]?.entity_name ?? "";
+    const bName = groupedTasks[b][0]?.entity_name ?? "";
+    return aName.localeCompare(bName);
+  });
 
   // Format date (relative or absolute)
   const formatDate = (timestamp: number) => {
@@ -371,7 +376,14 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
         ) : tasks.length === 0 ? (
           <div style={{ color: "var(--outline)", fontSize: "13px" }}>
             <p style={{ fontStyle: "italic", marginBottom: "8px" }}>
-              No {status === "archived" ? "archived" : "open"} tasks.
+              No{" "}
+              {status === "archived"
+                ? "archived"
+                : status === "done"
+                  ? "done"
+                  : "open"}
+              {" "}
+              tasks.
             </p>
             {status === "pending" && (
               <p style={{ fontSize: "12px", lineHeight: 1.5 }}>
@@ -388,20 +400,18 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
               gap: "20px",
             }}
           >
-            {sortedEntityNames.map((entityName) => (
-              <div key={entityName}>
-                <button
-                  onClick={() => {
-                    const entity = entities.find(
-                      (e) => e.name === entityName,
-                    );
-                    if (entity) {
+            {sortedEntityIds.map((entityId) => {
+              const group = groupedTasks[entityId];
+              const entityName = group[0]?.entity_name ?? "";
+              return (
+                <div key={entityId}>
+                  <button
+                    onClick={() => {
                       onNavigate({
                         mode: "brain",
-                        entityId: entity.id,
+                        entityId,
                       });
-                    }
-                  }}
+                    }}
                   style={{
                     background: "none",
                     border: "none",
@@ -418,82 +428,83 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
                 </button>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                  {groupedTasks[entityName]
-                    .sort((a, b) => {
-                      // Sort by priority DESC, then by created_at ASC
-                      if (a.priority !== b.priority) {
-                        return b.priority - a.priority;
-                      }
-                      return a.created_at - b.created_at;
-                    })
-                    .map((task) => (
-                      <div
-                        key={task.id}
-                        style={{
-                          display: "flex",
-                          gap: "8px",
-                          alignItems: "flex-start",
-                          padding: "8px",
-                          backgroundColor: "var(--elev-2)",
-                          borderRadius: "6px",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={task.status === "done"}
-                          onChange={() =>
-                            handleToggleTaskStatus(task.id, task.status)
-                          }
-                          style={{ marginTop: "2px", cursor: "pointer" }}
-                          aria-label={`Mark "${task.description}" as ${task.status === "done" ? "pending" : "done"}`}
-                        />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <p
-                            style={{
-                              margin: 0,
-                              fontSize: "13px",
-                              color:
-                                task.status === "done"
-                                  ? "var(--outline)"
-                                  : "var(--on-surface)",
-                              textDecoration:
-                                task.status === "done"
-                                  ? "line-through"
-                                  : "none",
-                            }}
-                          >
-                            {task.description}
-                          </p>
-                          <p
-                            style={{
-                              margin: "2px 0 0",
-                              fontSize: "11px",
-                              color: "var(--outline)",
-                            }}
-                          >
-                            {formatDate(task.created_at)}
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => handleArchiveTask(task.id)}
+                    {group
+                      .sort((a, b) => {
+                        // Sort by priority DESC, then by created_at ASC
+                        if (a.priority !== b.priority) {
+                          return b.priority - a.priority;
+                        }
+                        return a.created_at - b.created_at;
+                      })
+                      .map((task) => (
+                        <div
+                          key={task.id}
                           style={{
-                            background: "none",
-                            border: "none",
-                            cursor: "pointer",
-                            padding: "0 4px",
-                            fontSize: "16px",
-                            color: "var(--outline)",
-                            opacity: 0.6,
+                            display: "flex",
+                            gap: "8px",
+                            alignItems: "flex-start",
+                            padding: "8px",
+                            backgroundColor: "var(--elev-2)",
+                            borderRadius: "6px",
                           }}
-                          aria-label={`Archive task "${task.description}"`}
                         >
-                          ×
-                        </button>
-                      </div>
-                    ))}
+                          <input
+                            type="checkbox"
+                            checked={task.status === "done"}
+                            onChange={() =>
+                              handleToggleTaskStatus(task.id, task.status)
+                            }
+                            style={{ marginTop: "2px", cursor: "pointer" }}
+                            aria-label={`Mark "${task.description}" as ${task.status === "done" ? "pending" : "done"}`}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p
+                              style={{
+                                margin: 0,
+                                fontSize: "13px",
+                                color:
+                                  task.status === "done"
+                                    ? "var(--outline)"
+                                    : "var(--on-surface)",
+                                textDecoration:
+                                  task.status === "done"
+                                    ? "line-through"
+                                    : "none",
+                              }}
+                            >
+                              {task.description}
+                            </p>
+                            <p
+                              style={{
+                                margin: "2px 0 0",
+                                fontSize: "11px",
+                                color: "var(--outline)",
+                              }}
+                            >
+                              {formatDate(task.created_at)}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => handleArchiveTask(task.id)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor: "pointer",
+                              padding: "0 4px",
+                              fontSize: "16px",
+                              color: "var(--outline)",
+                              opacity: 0.6,
+                            }}
+                            aria-label={`Archive task "${task.description}"`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </main>
