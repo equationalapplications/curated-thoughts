@@ -29,6 +29,9 @@ pub struct TimelineFilter {
     pub since_ms: Option<i64>,
     pub until_ms: Option<i64>,
     pub before_ms: Option<i64>, // cursor: return strictly older than this
+    pub before_id: Option<String>, // tie-breaker: when an event shares `before_ms`'s
+                                   // timestamp, skip those whose id is >= this so the
+                                   // (created_at_ms, id) cursor is lexically exclusive.
     pub limit: Option<u32>,
 }
 
@@ -38,11 +41,14 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
 
     // Build the UNION query that normalizes timestamps to milliseconds
     // and maps event types to kinds. The kinds filter is applied at the outer
-    // WHERE so the LIMIT counts only matching rows.
+    // WHERE so the LIMIT counts only matching rows. Kinds use explicit
+    // numbered placeholders (?5..) because mixing anonymous ? with explicit
+    // ?N causes SQLite to auto-number the anonymous ones past the highest
+    // explicit N, which would misalign the bound parameters.
     let (kinds_clause, kinds_count) = match filter.kinds.as_ref() {
         Some(kinds) if !kinds.is_empty() => {
-            let placeholders = std::iter::repeat("?")
-                .take(kinds.len())
+            let placeholders = (5..5 + kinds.len())
+                .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             (format!("AND kind IN ({placeholders}) "), kinds.len())
@@ -50,6 +56,7 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
         _ => (String::new(), 0),
     };
     let limit_param = 5 + kinds_count;
+    let before_id_param = 6 + kinds_count;
 
     let sql = format!(
         r#"
@@ -109,11 +116,18 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
         )
         WHERE
             (?1 IS NULL OR entity_id = ?1)
-            AND (?2 IS NULL OR created_at_ms < ?2)
+            -- Composite cursor: skip events whose (created_at_ms, id) is
+            -- lexically >= (before_ms, before_id). When before_id is NULL
+            -- the OR-clause is false and we fall back to strict timestamp
+            -- ordering, preserving the original filter behavior.
+            AND (?2 IS NULL OR (
+                created_at_ms < ?2
+                OR (?{before_id_param} IS NOT NULL AND created_at_ms = ?2 AND id < ?{before_id_param})
+            ))
             AND (?3 IS NULL OR created_at_ms >= ?3)
             AND (?4 IS NULL OR created_at_ms <= ?4)
             {kinds_clause}
-        ORDER BY created_at_ms DESC
+        ORDER BY created_at_ms DESC, id DESC
         LIMIT ?{limit_param}
     "#
     );
@@ -129,6 +143,7 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
         }
     }
     bound.push(&limit);
+    bound.push(&filter.before_id);
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
@@ -338,6 +353,132 @@ mod tests {
         for event in &events {
             assert!(event.created_at_ms < middle_ts_ms);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn pagination_does_not_skip_same_millisecond_events() -> Result<()> {
+        // Regression: prior cursor used `created_at_ms < before_ms` only,
+        // so events sharing the cursor's millisecond never appeared on later
+        // pages. With a composite (created_at_ms, id) cursor and a
+        // deterministic id tie-breaker, paging should cover every event
+        // exactly once with no gaps or duplicates.
+        let conn = setup_test_db()?;
+
+        // Create an entity so events with an entity_id are valid.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, created_at, updated_at)
+             VALUES ('ent_1', 'Entity 1', 1000, 1000)",
+            [],
+        )?;
+
+        // Five events all sharing the same timestamp. The IDs are chosen so
+        // that lexicographic order matches the desired DESC tie-break: a, b,
+        // c, d, e -> DESC -> e, d, c, b, a.
+        let shared_ms = 5_000;
+        for id in ["a", "b", "c", "d", "e"] {
+            conn.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+                 VALUES ('wiki_' || ?1, 'ent_1', 'approved', 'Event ' || ?1, ?2)",
+                params![id, shared_ms],
+            )?;
+        }
+
+        // Also add an event with a strictly newer timestamp so we know the
+        // composite predicate doesn't drop it from the first page.
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('wiki_newer', 'ent_1', 'approved', 'Newer', ?1)",
+            params![shared_ms + 1],
+        )?;
+
+        // Page 1: newest-first, no cursor. limit=2 splits the same-ms cohort
+        // across multiple pages so the tie-breaker is actually exercised.
+        let page1 = list_events(
+            &conn,
+            &TimelineFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page1.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["wiki_newer", "wiki_e"],
+            "first page should include the newer event and the top same-ms event in DESC id order"
+        );
+
+        // Page 2: composite cursor using (created_at_ms, id) of the last
+        // row of page 1. Should land mid-timestamp and exclude only the
+        // row that was already on page 1.
+        let last = page1.last().unwrap();
+        let cursor_ms = last.created_at_ms;
+        let cursor_id = last.id.clone();
+        let page2 = list_events(
+            &conn,
+            &TimelineFilter {
+                before_ms: Some(cursor_ms),
+                before_id: Some(cursor_id),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page2.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["wiki_d", "wiki_c"],
+            "second page should pick up same-ms events whose id is < cursor id, in DESC order, with no duplicates"
+        );
+
+        // Page 3: keep paging.
+        let last = page2.last().unwrap();
+        let cursor_ms = last.created_at_ms;
+        let cursor_id = last.id.clone();
+        let page3 = list_events(
+            &conn,
+            &TimelineFilter {
+                before_ms: Some(cursor_ms),
+                before_id: Some(cursor_id),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page3.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["wiki_b", "wiki_a"],
+            "third page should contain the remaining same-ms events"
+        );
+
+        // Page 4: no more rows.
+        let last = page3.last().unwrap();
+        let page4 = list_events(
+            &conn,
+            &TimelineFilter {
+                before_ms: Some(last.created_at_ms),
+                before_id: Some(last.id.clone()),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert!(
+            page4.is_empty(),
+            "fourth page should be empty; got {:?}",
+            page4.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+        );
+
+        // Sanity check: union of all pages contains every event exactly
+        // once and no row appears twice.
+        let mut all: Vec<&str> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .chain(page4.iter())
+            .map(|e| e.id.as_str())
+            .collect();
+        all.sort();
+        assert_eq!(
+            all,
+            vec!["wiki_a", "wiki_b", "wiki_c", "wiki_d", "wiki_e", "wiki_newer"]
+        );
 
         Ok(())
     }

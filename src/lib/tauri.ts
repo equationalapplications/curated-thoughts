@@ -344,6 +344,9 @@ export interface TimelineFilter {
   since_ms?: number;
   until_ms?: number;
   before_ms?: number;
+  /** Composite-cursor tie-breaker: when an event shares `before_ms`'s
+   * timestamp, skip those whose id is >= this. */
+  before_id?: string;
   limit?: number;
 }
 
