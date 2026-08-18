@@ -1,3 +1,31 @@
+## [1.16.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.15.0...v1.16.0) (2026-08-18)
+
+### Features
+
+* add activity feed panel and mode rail with error handling ([863dba3](https://github.com/equationalapplications/curated-thoughts/commit/863dba3fd8bce921515645a024c20356ea9204bb))
+* **audit:** log MCP/bridge tool calls to curated_agent_log with 90-day pruning ([73406d0](https://github.com/equationalapplications/curated-thoughts/commit/73406d02549a110559be48002ac3d7c9bae73150))
+* **errors,review:** background error feed with retry + OS proposal notifications ([92f7b29](https://github.com/equationalapplications/curated-thoughts/commit/92f7b29533e272d991a442c70477424799cb0aaa))
+* **maintenance:** write healed events for repaired entities ([3a88f75](https://github.com/equationalapplications/curated-thoughts/commit/3a88f75f3c5b853fc5b751a93962c07bdb6686dc))
+* **okf:** write exported event on bundle export ([ed97f4b](https://github.com/equationalapplications/curated-thoughts/commit/ed97f4b35620e18eae7f06f77a7e90afa548d49f))
+* **shell:** timeline/tasks modes, live activity feed, nav wiring ([4534cb6](https://github.com/equationalapplications/curated-thoughts/commit/4534cb674a60ca21e680100257c608181c8e7e98))
+* **styles:** timeline, tasks, activity feed styles ([5da7636](https://github.com/equationalapplications/curated-thoughts/commit/5da7636f477fa834a51fd066ba44965d82e3fd1f))
+* **tasks:** tasks mode grouped by entity with manual create ([3825203](https://github.com/equationalapplications/curated-thoughts/commit/3825203bd1537476fd877140f9c40df12cbe2c24))
+* **timeline:** global list_events query + tasks CRUD API with outbox CDC ([98e5cc3](https://github.com/equationalapplications/curated-thoughts/commit/98e5cc35b119b685d0994954b0f0596dacaa675a))
+* **ui:** tauri bindings for timeline and tasks ([8dd3d75](https://github.com/equationalapplications/curated-thoughts/commit/8dd3d7538f338fd25a10c72babbd7f6bcd6c00b3))
+
+### Bug Fixes
+
+* add .worktrees to gitignore ([d9833bf](https://github.com/equationalapplications/curated-thoughts/commit/d9833bf11c3eeaa830bf0818d0c3aec03ae6dfb4))
+* address code-review findings on Phase 5 ([930f913](https://github.com/equationalapplications/curated-thoughts/commit/930f9133ee77823ce822978bb0bef5c5477e148d))
+* address PR review comments for Phase 5 implementation ([e3e4d53](https://github.com/equationalapplications/curated-thoughts/commit/e3e4d5342726c52cbdec0c531a90d11f50d084a8))
+* **errorFeed:** refresh snapshot reference so useSyncExternalStore re-renders ([353abff](https://github.com/equationalapplications/curated-thoughts/commit/353abff1bcbe32a9f6038fcdaecebb73cbf2a97c))
+* **events:** composite (created_at_ms, id) cursor so same-ms events paginate ([493f4b3](https://github.com/equationalapplications/curated-thoughts/commit/493f4b32ac3b440440821e5afd3f2b0cba873ed8))
+* **events:** resolution events use approved/rejected taxonomy per backend spec ([426991d](https://github.com/equationalapplications/curated-thoughts/commit/426991d0d853c14a27e2aee9242dfca98abcaaf1))
+* **librarian:** propagate synthesized-event write failures ([0d431cf](https://github.com/equationalapplications/curated-thoughts/commit/0d431cf76481f50f50dec9b744bf5c5f3cd22b69))
+* **review:** actually wire inline edited_payload editing (Task 16) ([294f2c3](https://github.com/equationalapplications/curated-thoughts/commit/294f2c39c267c50af4307ccc5d74d718f2fb2296))
+* sync Rust DDL with core-llm-wiki 5.5.1 and fix lint errors ([aeeae85](https://github.com/equationalapplications/curated-thoughts/commit/aeeae85247d622412e22a3664725a327a8673cc4))
+* **tasks:** address CodeRabbit review on TasksMode ([b541466](https://github.com/equationalapplications/curated-thoughts/commit/b5414665d16e776d817f562b15c3df47cf47131a))
+
 ## [1.15.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.14.0...v1.15.0) (2026-07-07)
 
 ### Features
