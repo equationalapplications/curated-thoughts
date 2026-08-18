@@ -242,14 +242,23 @@ test("keyboard a approves the selected proposal", async () => {
   );
 });
 
-test("keyboard r rejects after optional prompt", async () => {
-  const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("Too noisy");
+test("pressing_r_or_reject_button_opens_form", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
   await waitForProposalPreview();
   fireEvent.keyDown(window, { key: "r" });
+  expect(await screen.findByPlaceholderText(/optional: add a reason/i)).toBeInTheDocument();
+});
+
+test("form_submits_with_typed_reason", async () => {
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+  fireEvent.keyDown(window, { key: "r" });
+  const textarea = await screen.findByPlaceholderText(/optional: add a reason/i);
+  fireEvent.change(textarea, { target: { value: "Too noisy" } });
+  fireEvent.click(screen.getByRole("button", { name: /confirm reject/i }));
   await waitFor(() => expect(onAction).toHaveBeenCalled());
-  expect(promptSpy).toHaveBeenCalled();
   expect(vi.mocked(invoke)).toHaveBeenCalledWith(
     "resolve_proposal_cmd",
     expect.objectContaining({
@@ -258,18 +267,56 @@ test("keyboard r rejects after optional prompt", async () => {
       decisions: [{ item_id: `item_${PAGE.id}`, decision: "reject" }],
     }),
   );
-  promptSpy.mockRestore();
 });
 
-test("keyboard r does nothing when prompt is cancelled", async () => {
-  const promptSpy = vi.spyOn(window, "prompt").mockReturnValue(null);
+test("form_does_not_call_resolveProposal_until_submitted", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
   await waitForProposalPreview();
   fireEvent.keyDown(window, { key: "r" });
+  await screen.findByPlaceholderText(/optional: add a reason/i);
   await new Promise((r) => setTimeout(r, 50));
   expect(onAction).not.toHaveBeenCalled();
-  promptSpy.mockRestore();
+});
+
+test("esc_key_cancels_form", async () => {
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+  fireEvent.keyDown(window, { key: "r" });
+  const textarea = await screen.findByPlaceholderText(/optional: add a reason/i);
+  fireEvent.keyDown(textarea, { key: "Escape" });
+  await new Promise((r) => setTimeout(r, 50));
+  expect(onAction).not.toHaveBeenCalled();
+  expect(screen.queryByPlaceholderText(/optional: add a reason/i)).not.toBeInTheDocument();
+});
+
+test("empty_reason_is_allowed_and_submitted", async () => {
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+  fireEvent.keyDown(window, { key: "r" });
+  await screen.findByPlaceholderText(/optional: add a reason/i);
+  fireEvent.click(screen.getByRole("button", { name: /confirm reject/i }));
+  await waitFor(() => expect(onAction).toHaveBeenCalled());
+  expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+    "resolve_proposal_cmd",
+    expect.objectContaining({
+      proposalId: "prop_project_x",
+      decisions: [{ item_id: `item_${PAGE.id}`, decision: "reject" }],
+    }),
+  );
+});
+
+test("keyboard_handlers_disabled_while_form_open", async () => {
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+  fireEvent.keyDown(window, { key: "r" });
+  await screen.findByPlaceholderText(/optional: add a reason/i);
+  fireEvent.keyDown(window, { key: "a" });
+  await new Promise((r) => setTimeout(r, 50));
+  expect(onAction).not.toHaveBeenCalled();
 });
 
 test("keyboard j and k move queue selection", async () => {

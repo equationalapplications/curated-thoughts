@@ -1,56 +1,74 @@
-//! Timeline event queries — union of llm_wiki_events, curated_agent_log, and documents.
+//! Unified Timeline API: unions llm_wiki_events, curated_agent_log, documents (ingestions).
+//! All timestamps normalized to milliseconds, reversed chronologically, with optional filtering.
 
-use rusqlite::{params, Connection, named_params};
-use serde::Serialize;
+use anyhow::Result;
+#[cfg(test)]
+use rusqlite::params;
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
-use crate::db::commit::now_timestamps;
-
+/// Unified timeline event across all three sources.
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelineEvent {
     pub id: String,
-    pub kind: String,
+    pub kind: String, // 'synthesized'|'approved'|'rejected'|'healed'|'imported'|'exported'|'agent_access'|'ingested'|'other'
     pub summary: String,
     pub entity_id: Option<String>,
     pub entity_name: Option<String>,
     pub doc_path: Option<String>,
-    /// For `agent_access` kind: the agent client name.
-    /// For `ingested` kind: the document status (e.g. "indexed").
-    /// For other kinds: NULL.
-    pub raw_type: String,
+    pub raw_type: String, // event_type / tool / document status
     pub client: Option<String>,
     pub created_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Default)]
+/// Query filter for timeline events.
+#[derive(Debug, Default, Deserialize)]
 pub struct TimelineFilter {
-    pub entity_id: Option<String>,
     pub kinds: Option<Vec<String>>,
-    pub before_ms: Option<i64>,
+    pub entity_id: Option<String>,
     pub since_ms: Option<i64>,
     pub until_ms: Option<i64>,
-    pub limit: Option<usize>,
+    pub before_ms: Option<i64>, // cursor: return strictly older than this
+    pub before_id: Option<String>, // tie-breaker: when an event shares `before_ms`'s
+                                   // timestamp, skip those whose id is >= this so the
+                                   // (created_at_ms, id) cursor is lexically exclusive.
+    pub limit: Option<u32>,
 }
 
-/// List timeline events, applying kind filter in SQL before LIMIT.
-pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> rusqlite::Result<Vec<TimelineEvent>> {
+/// List timeline events from all three sources, normalized and filtered.
+pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<TimelineEvent>> {
     let limit = filter.limit.unwrap_or(100).min(500) as i64;
 
-    // Build dynamic kind IN clause if filter.kinds is set
-    let (kind_where, kind_params): (String, Vec<String>) = if let Some(ref kinds) = filter.kinds {
-        let placeholders: Vec<String> = kinds.iter().enumerate().map(|(i, _)| format!(":kind_{i}")).collect();
-        let clause = format!("AND kind IN ({})", placeholders.join(", "));
-        (clause, kinds.clone())
-    } else {
-        ("".into(), vec![])
+    // Build the UNION query that normalizes timestamps to milliseconds
+    // and maps event types to kinds. The kinds filter is applied at the outer
+    // WHERE so the LIMIT counts only matching rows. Kinds use explicit
+    // numbered placeholders (?5..) because mixing anonymous ? with explicit
+    // ?N causes SQLite to auto-number the anonymous ones past the highest
+    // explicit N, which would misalign the bound parameters.
+    let (kinds_clause, kinds_count) = match filter.kinds.as_ref() {
+        Some(kinds) if !kinds.is_empty() => {
+            let placeholders = (5..5 + kinds.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("AND kind IN ({placeholders}) "), kinds.len())
+        }
+        _ => (String::new(), 0),
     };
+    let limit_param = 5 + kinds_count;
+    let before_id_param = 6 + kinds_count;
 
     let sql = format!(
         r#"
-        WITH all_events AS (
-            -- llm_wiki_events (timestamps in ms, may be in seconds)
+        SELECT * FROM (
+            -- llm_wiki_events (timestamps in seconds, need *1000)
             SELECT
                 e.id,
-                e.event_type AS kind,
+                CASE
+                    WHEN e.event_type IN ('synthesized','approved','rejected','healed','imported','exported')
+                    THEN e.event_type
+                    ELSE 'other'
+                END AS kind,
                 e.summary,
                 e.entity_id,
                 ce.name AS entity_name,
@@ -96,50 +114,39 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> rusqlite::Resu
             FROM documents d
             WHERE d.tier = 'user_doc' AND d.last_indexed IS NOT NULL
         )
-        SELECT id, kind, summary, entity_id, entity_name, doc_path, raw_type, client, created_at_ms
-        FROM all_events
         WHERE
-            (:entity_id IS NULL OR entity_id = :entity_id)
-            AND (:before_ms IS NULL OR created_at_ms < :before_ms)
-            AND (:since_ms IS NULL OR created_at_ms >= :since_ms)
-            AND (:until_ms IS NULL OR created_at_ms <= :until_ms)
-            {kind_where}
-        ORDER BY created_at_ms DESC
-        LIMIT :limit
-        "#,
-        kind_where = kind_where
+            (?1 IS NULL OR entity_id = ?1)
+            -- Composite cursor: skip events whose (created_at_ms, id) is
+            -- lexically >= (before_ms, before_id). When before_id is NULL
+            -- the OR-clause is false and we fall back to strict timestamp
+            -- ordering, preserving the original filter behavior.
+            AND (?2 IS NULL OR (
+                created_at_ms < ?2
+                OR (?{before_id_param} IS NOT NULL AND created_at_ms = ?2 AND id < ?{before_id_param})
+            ))
+            AND (?3 IS NULL OR created_at_ms >= ?3)
+            AND (?4 IS NULL OR created_at_ms <= ?4)
+            {kinds_clause}
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT ?{limit_param}
+    "#
     );
 
+    let mut bound: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    bound.push(&filter.entity_id);
+    bound.push(&filter.before_ms);
+    bound.push(&filter.since_ms);
+    bound.push(&filter.until_ms);
+    if let Some(kinds) = filter.kinds.as_ref() {
+        for k in kinds {
+            bound.push(k);
+        }
+    }
+    bound.push(&limit);
+    bound.push(&filter.before_id);
+
     let mut stmt = conn.prepare(&sql)?;
-
-    // Build named params
-    let mut named = Vec::new();
-    named.push((":entity_id", filter.entity_id.as_deref()));
-    named.push((":before_ms", filter.before_ms));
-    named.push((":since_ms", filter.since_ms));
-    named.push((":until_ms", filter.until_ms));
-    named.push((":limit", Some(limit)));
-    for (i, k) in kind_params.iter().enumerate() {
-        named.push((Box::leak(format!(":kind_{i}").into_boxed_str()), Some(k.as_str())));
-    }
-
-    // We'll use a helper to bind named params dynamically.
-    // Since rusqlite's named_params! macro is compile-time, we'll fall back to positional binding
-    // but ensure the order matches the SQL. Safer: use a loop with stmt.raw_bind_named.
-    // For simplicity, we'll use positional binding with the same order as the SQL placeholders.
-    // The SQL placeholders appear in order: :entity_id, :before_ms, :since_ms, :until_ms, :limit, then :kind_0, :kind_1, ...
-    // We'll bind them positionally.
-    let mut param_values: Vec<&dyn rusqlite::ToSql> = Vec::new();
-    param_values.push(&filter.entity_id);
-    param_values.push(&filter.before_ms);
-    param_values.push(&filter.since_ms);
-    param_values.push(&filter.until_ms);
-    param_values.push(&limit);
-    for k in &kind_params {
-        param_values.push(k);
-    }
-
-    let rows = stmt.query_map(param_values.as_slice(), |r| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -155,7 +162,8 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> rusqlite::Resu
 
     let mut events = Vec::new();
     for row in rows {
-        let (id, kind, summary, entity_id, entity_name, doc_path, raw_type, client, created_at_ms) = row?;
+        let (id, kind, summary, entity_id, entity_name, doc_path, raw_type, client, created_at_ms) =
+            row?;
         events.push(TimelineEvent {
             id,
             kind,
@@ -170,4 +178,308 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> rusqlite::Resu
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::connection::open_in_memory;
+
+    fn setup_test_db() -> Result<Connection> {
+        open_in_memory()
+    }
+
+    #[test]
+    fn unions_and_orders_all_three_legs() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        // Seed a wiki event (timestamp in seconds)
+        let wiki_event_ts = 1000; // seconds
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('wiki_1', 'ent_1', 'approved', 'Wiki event', ?1)",
+            params![wiki_event_ts],
+        )?;
+
+        // Seed an agent log (created_at defaults to unixepoch(), which is seconds)
+        let agent_log_ts = 1500; // seconds
+        conn.execute(
+            "INSERT INTO curated_agent_log (client, tool, operation, entity_id, created_at)
+             VALUES ('test_client', 'test_tool', 'read', 'ent_1', ?1)",
+            params![agent_log_ts],
+        )?;
+
+        // Seed a document ingestion (last_indexed in seconds)
+        let doc_ingest_ts = 1200; // seconds
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status, last_indexed)
+             VALUES ('test.md', 'hash1', 'user_doc', 'indexed', ?1)",
+            params![doc_ingest_ts],
+        )?;
+
+        // Query all events
+        let filter = TimelineFilter::default();
+        let events = list_events(&conn, &filter)?;
+
+        // Should have 3 events
+        assert_eq!(events.len(), 3, "Expected 3 events, got {}", events.len());
+
+        // Check timestamps are in milliseconds
+        let wiki_event = events.iter().find(|e| e.id == "wiki_1").unwrap();
+        assert_eq!(wiki_event.created_at_ms, wiki_event_ts * 1000);
+
+        let agent_event = events
+            .iter()
+            .find(|e| e.id.starts_with("agent_"))
+            .unwrap();
+        assert_eq!(agent_event.created_at_ms, agent_log_ts * 1000);
+
+        let ingest_event = events
+            .iter()
+            .find(|e| e.id.starts_with("ingest_"))
+            .unwrap();
+        assert_eq!(ingest_event.created_at_ms, doc_ingest_ts * 1000);
+
+        // Check reverse chronological order (newest first)
+        assert!(
+            events[0].created_at_ms > events[1].created_at_ms,
+            "Events not in reverse chronological order"
+        );
+        assert!(
+            events[1].created_at_ms > events[2].created_at_ms,
+            "Events not in reverse chronological order"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn known_event_types_map_to_kind_and_unknown_to_other() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        // Seed events with different event_types
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('wiki_approved', 'ent_1', 'approved', 'Approved', 1000)",
+            [],
+        )?;
+
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('wiki_synthesized', 'ent_1', 'synthesized', 'Synthesized', 1001)",
+            [],
+        )?;
+
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('wiki_weird', 'ent_1', 'weird_custom_type', 'Weird', 1002)",
+            [],
+        )?;
+
+        let filter = TimelineFilter::default();
+        let events = list_events(&conn, &filter)?;
+
+        assert_eq!(events.len(), 3);
+
+        let approved = events.iter().find(|e| e.id == "wiki_approved").unwrap();
+        assert_eq!(approved.kind, "approved");
+        assert_eq!(approved.raw_type, "approved");
+
+        let synthesized = events
+            .iter()
+            .find(|e| e.id == "wiki_synthesized")
+            .unwrap();
+        assert_eq!(synthesized.kind, "synthesized");
+        assert_eq!(synthesized.raw_type, "synthesized");
+
+        let weird = events.iter().find(|e| e.id == "wiki_weird").unwrap();
+        assert_eq!(weird.kind, "other");
+        assert_eq!(weird.raw_type, "weird_custom_type");
+
+        Ok(())
+    }
+
+    #[test]
+    fn filters_by_kind_entity_and_cursor() -> Result<()> {
+        let conn = setup_test_db()?;
+
+        // Create entity
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, created_at, updated_at)
+             VALUES ('ent_1', 'Entity 1', 1000, 1000)",
+            [],
+        )?;
+
+        // Seed multiple events
+        for i in 0..5 {
+            let ts = 1000 + (i * 100);
+            let event_type = if i % 2 == 0 { "approved" } else { "rejected" };
+            conn.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+                 VALUES ('wiki_' || ?1, 'ent_1', ?2, 'Event ' || ?1, ?3)",
+                params![i, event_type, ts],
+            )?;
+        }
+
+        // Filter by kind='approved' (should only get i=0,2,4)
+        let filter = TimelineFilter {
+            kinds: Some(vec!["approved".to_string()]),
+            ..Default::default()
+        };
+        let events = list_events(&conn, &filter)?;
+        assert_eq!(events.len(), 3);
+        for event in &events {
+            assert_eq!(event.kind, "approved");
+        }
+
+        // Filter by entity_id='ent_1'
+        let filter = TimelineFilter {
+            entity_id: Some("ent_1".to_string()),
+            ..Default::default()
+        };
+        let events = list_events(&conn, &filter)?;
+        assert_eq!(events.len(), 5);
+        for event in &events {
+            assert_eq!(event.entity_id, Some("ent_1".to_string()));
+        }
+
+        // Filter by before_ms (cursor pagination)
+        let middle_ts_ms = 1200 * 1000; // one of the middle events
+        let filter = TimelineFilter {
+            before_ms: Some(middle_ts_ms),
+            ..Default::default()
+        };
+        let events = list_events(&conn, &filter)?;
+        for event in &events {
+            assert!(event.created_at_ms < middle_ts_ms);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn pagination_does_not_skip_same_millisecond_events() -> Result<()> {
+        // Regression: prior cursor used `created_at_ms < before_ms` only,
+        // so events sharing the cursor's millisecond never appeared on later
+        // pages. With a composite (created_at_ms, id) cursor and a
+        // deterministic id tie-breaker, paging should cover every event
+        // exactly once with no gaps or duplicates.
+        let conn = setup_test_db()?;
+
+        // Create an entity so events with an entity_id are valid.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, created_at, updated_at)
+             VALUES ('ent_1', 'Entity 1', 1000, 1000)",
+            [],
+        )?;
+
+        // Five events all sharing the same timestamp. The IDs are chosen so
+        // that lexicographic order matches the desired DESC tie-break: a, b,
+        // c, d, e -> DESC -> e, d, c, b, a.
+        let shared_ms = 5_000;
+        for id in ["a", "b", "c", "d", "e"] {
+            conn.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+                 VALUES ('wiki_' || ?1, 'ent_1', 'approved', 'Event ' || ?1, ?2)",
+                params![id, shared_ms],
+            )?;
+        }
+
+        // Also add an event with a strictly newer timestamp so we know the
+        // composite predicate doesn't drop it from the first page.
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('wiki_newer', 'ent_1', 'approved', 'Newer', ?1)",
+            params![shared_ms + 1],
+        )?;
+
+        // Page 1: newest-first, no cursor. limit=2 splits the same-ms cohort
+        // across multiple pages so the tie-breaker is actually exercised.
+        let page1 = list_events(
+            &conn,
+            &TimelineFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page1.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["wiki_newer", "wiki_e"],
+            "first page should include the newer event and the top same-ms event in DESC id order"
+        );
+
+        // Page 2: composite cursor using (created_at_ms, id) of the last
+        // row of page 1. Should land mid-timestamp and exclude only the
+        // row that was already on page 1.
+        let last = page1.last().unwrap();
+        let cursor_ms = last.created_at_ms;
+        let cursor_id = last.id.clone();
+        let page2 = list_events(
+            &conn,
+            &TimelineFilter {
+                before_ms: Some(cursor_ms),
+                before_id: Some(cursor_id),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page2.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["wiki_d", "wiki_c"],
+            "second page should pick up same-ms events whose id is < cursor id, in DESC order, with no duplicates"
+        );
+
+        // Page 3: keep paging.
+        let last = page2.last().unwrap();
+        let cursor_ms = last.created_at_ms;
+        let cursor_id = last.id.clone();
+        let page3 = list_events(
+            &conn,
+            &TimelineFilter {
+                before_ms: Some(cursor_ms),
+                before_id: Some(cursor_id),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page3.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["wiki_b", "wiki_a"],
+            "third page should contain the remaining same-ms events"
+        );
+
+        // Page 4: no more rows.
+        let last = page3.last().unwrap();
+        let page4 = list_events(
+            &conn,
+            &TimelineFilter {
+                before_ms: Some(last.created_at_ms),
+                before_id: Some(last.id.clone()),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )?;
+        assert!(
+            page4.is_empty(),
+            "fourth page should be empty; got {:?}",
+            page4.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+        );
+
+        // Sanity check: union of all pages contains every event exactly
+        // once and no row appears twice.
+        let mut all: Vec<&str> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .chain(page4.iter())
+            .map(|e| e.id.as_str())
+            .collect();
+        all.sort();
+        assert_eq!(
+            all,
+            vec!["wiki_a", "wiki_b", "wiki_c", "wiki_d", "wiki_e", "wiki_newer"]
+        );
+
+        Ok(())
+    }
 }

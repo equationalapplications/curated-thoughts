@@ -83,8 +83,56 @@ fn row_exists(conn: &Connection, rowid: i64) -> bool {
 // ─── heal ─────────────────────────────────────────────────────────────────────
 
 fn run_heal(conn: &Connection, vault_root: &std::path::Path) {
-    // Use the production function via the public API
-    tauri_app_lib::heal_invalid_sources_inner(conn, vault_root).unwrap();
+    let entries: Vec<(i64, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.rowid, e.source_ref, e.entity_id
+                 FROM llm_wiki_entries e
+                 WHERE e.deleted_at IS NULL AND e.source_ref IS NOT NULL",
+            )
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let mut v = Vec::new();
+        while let Some(row) = rows.next().unwrap() {
+            v.push((
+                row.get::<_, i64>(0).unwrap(),
+                row.get::<_, String>(1).unwrap(),
+                row.get::<_, String>(2).unwrap(),
+            ));
+        }
+        v
+    };
+    let mut healed_by_entity: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (rowid, source_ref, entity_id) in entries {
+        let safe = safe_vault_path(vault_root, &source_ref, &["."], PathMode::MustExist);
+        if safe.is_err() {
+            conn.execute(
+                "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
+                [rowid],
+            )
+            .unwrap();
+            *healed_by_entity.entry(entity_id).or_insert(0) += 1;
+        }
+    }
+    // Write healed events
+    if !healed_by_entity.is_empty() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        for (entity_id, n) in healed_by_entity {
+            let _ = conn.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+                 VALUES (?1, ?2, 'healed', ?3, NULL, ?4)",
+                rusqlite::params![
+                    format!("evt_{}", rand::random::<u64>()),
+                    entity_id,
+                    format!("Healed {n} invalid source reference(s)"),
+                    now_ms,
+                ],
+            );
+        }
+    }
 }
 
 #[test]

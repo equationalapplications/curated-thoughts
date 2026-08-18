@@ -1,21 +1,30 @@
-import { type BackgroundError } from "../../lib/errorFeed";
+import { useTimeline } from "../../hooks/useTimeline";
+import { TimelineFeed } from "../timeline/TimelineFeed";
+import { useErrorFeed } from "../../hooks/useErrorFeed";
+import type { NavTarget } from "../../lib/navigation";
+import type { BackgroundError } from "../../lib/errorFeed";
 
 interface Props {
-  open: boolean;
+  isOpen: boolean;
   onClose: () => void;
+  onNavigate: (target: NavTarget) => void;
   errors?: BackgroundError[];
-  onNavigate?: (mode: string) => void;
-  onDismiss?: (id: number) => void;
 }
 
-export function ActivityFeedPanel({
-  open,
+// Rendered only while the panel is open, so its polling hook is active
+// only when the user can actually see the feed.
+function ActivityFeedPanelBody({
   onClose,
-  errors = [],
   onNavigate,
-  onDismiss,
-}: Props) {
-  if (!open) return null;
+  errorsProp,
+}: {
+  onClose: () => void;
+  onNavigate: (target: NavTarget) => void;
+  errorsProp?: BackgroundError[];
+}) {
+  const { events, error } = useTimeline({ limit: 50 });
+  const { errors: errorsFromHook, dismiss, retry } = useErrorFeed();
+  const errors = errorsProp ?? errorsFromHook;
 
   return (
     <>
@@ -43,64 +52,70 @@ export function ActivityFeedPanel({
           </button>
         </header>
         <div className="activity-panel-body">
-          {errors.length === 0 && (
-            <p className="settings-hint">
-              Live librarian events will appear here. Full Timeline mode ships in
-              a later phase.
-            </p>
+          {error && (
+            <div className="error-banner" role="alert">
+              {error}
+            </div>
           )}
           {errors.length > 0 && (
-            <div className="activity-error-list">
+            <div className="activity-errors">
               {errors.map((err) => (
-                <div key={err.id} className="activity-error-item">
-                  <div className="activity-error-message">
-                    <span>{err.message}</span>
-                    <small>{new Date(err.at).toLocaleTimeString()}</small>
-                  </div>
+                <div key={err.id} className="activity-error">
+                  <p>{err.message}</p>
                   <div className="activity-error-actions">
                     {err.retry && (
                       <button
-                        onClick={() => {
-                          retry(err.id).catch(() => {});
-                        }}
+                        onClick={() => retry(err.id)}
                         className="activity-error-btn"
                       >
                         Retry
                       </button>
                     )}
-                    {onDismiss && (
-                      <button
-                        aria-label="Dismiss"
-                        onClick={() => onDismiss(err.id)}
-                        className="activity-error-btn"
-                      >
-                        Dismiss
-                      </button>
-                    )}
+                    <button
+                      onClick={() => dismiss(err.id)}
+                      className="activity-error-btn"
+                    >
+                      Dismiss
+                    </button>
                   </div>
                 </div>
               ))}
             </div>
           )}
-          <p className="settings-hint">
-            For now, check the status bar for indexing and synthesis state.
-          </p>
-          {onNavigate && (
-            <button
-              className="tree-file"
-              onClick={() => onNavigate("timeline")}
-              style={{ marginTop: 8 }}
-            >
-              Open full Timeline
-            </button>
-          )}
+          <TimelineFeed
+            events={events}
+            powerLayer={false}
+            onNavigate={onNavigate}
+          />
         </div>
+        <footer className="activity-panel-footer">
+          <button
+            className="activity-open-timeline"
+            onClick={() => {
+              onNavigate({ mode: "timeline" });
+              onClose();
+            }}
+          >
+            Open full Timeline
+          </button>
+        </footer>
       </aside>
     </>
   );
 }
 
-function retry(id: number): Promise<void> {
-  // rethrow so the caller can catch
-  return import("../../lib/errorFeed").then(({ retryError }) => retryError(id));
+export function ActivityFeedPanel({
+  isOpen,
+  onClose,
+  onNavigate,
+  errors: errorsProp,
+}: Props) {
+  if (!isOpen) return null;
+  return (
+    <ActivityFeedPanelBody
+      onClose={onClose}
+      onNavigate={onNavigate}
+      errorsProp={errorsProp}
+    />
+  );
 }

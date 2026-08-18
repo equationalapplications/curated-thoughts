@@ -10,15 +10,16 @@ export function useTimeline(filter: TimelineFilter) {
   const requestIdRef = useRef(0);
 
   const refresh = useCallback(() => {
-    const requestId = ++requestIdRef.current;
-    listEvents(JSON.parse(key) as TimelineFilter)
+    const myId = ++requestIdRef.current;
+    const currentFilter = JSON.parse(key) as TimelineFilter;
+    listEvents(currentFilter)
       .then((next) => {
-        if (requestId !== requestIdRef.current) return;
+        if (myId !== requestIdRef.current) return; // stale, drop
         setEvents(next);
         setError(null);
       })
       .catch(() => {
-        if (requestId !== requestIdRef.current) return;
+        if (myId !== requestIdRef.current) return; // stale, drop
         setError("Timeline is temporarily unavailable.");
       });
   }, [key]);

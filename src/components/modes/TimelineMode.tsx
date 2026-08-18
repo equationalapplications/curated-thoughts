@@ -1,53 +1,57 @@
-import { useState, useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
+import type { TimelineKind, TimelineFilter } from "../../lib/tauri";
 import { useTimeline } from "../../hooks/useTimeline";
+import type { NavTarget } from "../../lib/navigation";
 import { TimelineFeed } from "../timeline/TimelineFeed";
-import type { TimelineEvent } from "../../lib/tauri";
+import { KIND_LABELS } from "../../lib/timelineFormat";
 
-const EVENT_KINDS = [
-  "approved",
-  "rejected",
-  "agent_access",
-  "ingested",
-  "synthesized",
-  "healed",
-  "imported",
-  "exported",
-] as const;
+interface Props {
+  onNavigate: (target: NavTarget) => void;
+}
 
-export function TimelineMode() {
-  const [selectedKinds, setSelectedKinds] = useState<Set<string>>(new Set());
-  const [entityFilter, setEntityFilter] = useState("");
+export function TimelineMode({ onNavigate }: Props) {
+  const [selectedKinds, setSelectedKinds] = useState<Set<TimelineKind>>(new Set());
+  const [entityFilter, setEntityFilter] = useState<string>("");
   const [sinceMs, setSinceMs] = useState<number | null>(null);
   const [untilMs, setUntilMs] = useState<number | null>(null);
+  const [powerLayer, setPowerLayer] = useState(false);
 
-  const filter = useMemo(
-    () => ({
-      kinds: selectedKinds.size > 0 ? Array.from(selectedKinds) : undefined,
-      entity_id: entityFilter.trim() || undefined,
-      since_ms: sinceMs,
-      until_ms: untilMs,
-    }),
-    [selectedKinds, entityFilter, sinceMs, untilMs]
-  );
-
-  const { events, error, refresh } = useTimeline(filter);
-
-  // Client-side filtering for kinds (already filtered server-side, but keep as fallback)
-  const filteredEvents = useMemo(() => {
-    let result = events;
+  // Build filter for the hook
+  const filter = useMemo<TimelineFilter>(() => {
+    const f: TimelineFilter = {};
     if (selectedKinds.size > 0) {
-      result = result.filter((e) => selectedKinds.has(e.kind));
+      f.kinds = Array.from(selectedKinds);
     }
-    if (entityFilter.trim()) {
-      const lower = entityFilter.toLowerCase();
-      result = result.filter(
-        (e) =>
-          (e.entity_name && e.entity_name.toLowerCase().includes(lower)) ||
-          (e.entity_id && e.entity_id.toLowerCase().includes(lower))
-      );
+    if (sinceMs) {
+      f.since_ms = sinceMs;
     }
-    return result;
-  }, [events, selectedKinds, entityFilter]);
+    if (untilMs) {
+      f.until_ms = untilMs;
+    }
+    return f;
+  }, [selectedKinds, sinceMs, untilMs]);
+
+  const { events, error } = useTimeline(filter);
+
+  // Client-side entity name filter
+  const filteredEvents = useMemo(() => {
+    if (!entityFilter.trim()) return events;
+    const needle = entityFilter.toLowerCase();
+    return events.filter((e) => e.entity_name?.toLowerCase().includes(needle));
+  }, [events, entityFilter]);
+
+  // Handle kind checkbox toggle
+  const toggleKind = useCallback((kind: TimelineKind) => {
+    setSelectedKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(kind)) {
+        next.delete(kind);
+      } else {
+        next.add(kind);
+      }
+      return next;
+    });
+  }, []);
 
   // Clear all filters
   const clearFilters = useCallback(() => {
@@ -57,111 +61,84 @@ export function TimelineMode() {
     setUntilMs(null);
   }, []);
 
-  // Load older events (pagination) — currently a no-op; disable button until implemented
-  const loadOlder = useCallback(() => {
-    // Not yet implemented
-  }, []);
-
-  const hasFilters =
-    selectedKinds.size > 0 ||
-    entityFilter.trim() !== "" ||
-    sinceMs !== null ||
-    untilMs !== null;
+  const hasFilters = selectedKinds.size > 0 || entityFilter.trim() !== "" || sinceMs || untilMs;
 
   return (
     <div className="mode-layout">
-      <div className="sidebar">
-        <h2>Timeline</h2>
-        <div className="search-bar">
-          <input
-            type="text"
-            placeholder="Filter by entity…"
-            value={entityFilter}
-            onChange={(e) => setEntityFilter(e.target.value)}
-          />
-        </div>
-        <div className="folder-tree">
-          <div className="tree-section">
-            <span className="tree-section-label">Event types</span>
-            {EVENT_KINDS.map((kind) => (
-              <label key={kind} className="tree-file-row">
+      <aside className="mode-sidebar">
+        <div className="filters-section">
+          <h3>Kind</h3>
+          <div className="kind-filters">
+            {(Object.keys(KIND_LABELS) as TimelineKind[]).map((kind) => (
+              <label key={kind}>
                 <input
                   type="checkbox"
                   checked={selectedKinds.has(kind)}
-                  onChange={() => {
-                    setSelectedKinds((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(kind)) next.delete(kind);
-                      else next.add(kind);
-                      return next;
-                    });
-                  }}
+                  onChange={() => toggleKind(kind)}
                 />
-                <span className="tree-file">{kind}</span>
+                {KIND_LABELS[kind]}
               </label>
             ))}
           </div>
-          <div className="tree-section">
-            <span className="tree-section-label">Date range</span>
-            <input
-              type="date"
-              value={
-                sinceMs
-                  ? new Date(sinceMs).toISOString().slice(0, 10)
-                  : ""
-              }
-              onChange={(e) =>
-                setSinceMs(
-                  e.target.value
-                    ? new Date(e.target.value).getTime()
-                    : null
-                )
-              }
-              className="rule-input"
-              placeholder="From"
-            />
-            <input
-              type="date"
-              value={
-                untilMs
-                  ? new Date(untilMs).toISOString().slice(0, 10)
-                  : ""
-              }
-              onChange={(e) =>
-                setUntilMs(
-                  e.target.value
-                    ? new Date(e.target.value).getTime()
-                    : null
-                )
-              }
-              className="rule-input"
-              placeholder="To"
-            />
+
+          <h3>Entity</h3>
+          <input
+            type="text"
+            placeholder="Filter by entity name…"
+            value={entityFilter}
+            onChange={(e) => setEntityFilter(e.target.value)}
+            className="entity-filter-input"
+          />
+
+          <h3>Date Range</h3>
+          <div className="date-inputs">
+            <label>
+              Since (ms)
+              <input
+                type="number"
+                value={sinceMs ?? ""}
+                onChange={(e) => setSinceMs(e.target.value ? parseInt(e.target.value) : null)}
+                placeholder="Leave empty for any"
+              />
+            </label>
+            <label>
+              Until (ms)
+              <input
+                type="number"
+                value={untilMs ?? ""}
+                onChange={(e) => setUntilMs(e.target.value ? parseInt(e.target.value) : null)}
+                placeholder="Leave empty for any"
+              />
+            </label>
           </div>
+
           {hasFilters && (
-            <button
-              className="tree-file"
-              onClick={clearFilters}
-              style={{ marginTop: 8 }}
-            >
+            <button onClick={clearFilters} className="clear-filters-btn">
               Clear filters
             </button>
           )}
         </div>
-      </div>
-      <main className="editor-pane editor-pane--active">
-        {error && <p className="editor-error">{error}</p>}
-        <TimelineFeed events={filteredEvents} />
-        {filteredEvents.length > 0 && (
-          <button
-            onClick={loadOlder}
-            className="load-older-btn"
-            disabled
-            title="Pagination coming soon"
-          >
-            Load older
-          </button>
+      </aside>
+
+      <main className="mode-main">
+        <div className="timeline-controls">
+          <label className="power-layer-toggle">
+            <input
+              type="checkbox"
+              checked={powerLayer}
+              onChange={(e) => setPowerLayer(e.target.checked)}
+            />
+            Power layer
+          </label>
+        </div>
+
+        {error && (
+          <div className="error-banner" role="alert">
+            {error}
+          </div>
         )}
+
+        <TimelineFeed events={filteredEvents} powerLayer={powerLayer} onNavigate={onNavigate} />
       </main>
     </div>
   );

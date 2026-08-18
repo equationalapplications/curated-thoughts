@@ -1,28 +1,34 @@
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   listTasks,
   createTask,
-  resolveTask,
+  setTaskStatus,
   archiveTask,
   listEntities,
   type TaskRow,
   type EntitySummary,
 } from "../../lib/tauri";
+import type { NavTarget } from "../../lib/navigation";
 
-type TaskStatus = "pending" | "done" | "archived";
+export interface TasksModeProps {
+  onNavigate: (target: NavTarget) => void;
+}
 
-export function TasksMode() {
+export function TasksMode({ onNavigate }: TasksModeProps) {
+  const [status, setStatus] = useState<"pending" | "done" | "archived">(
+    "pending",
+  );
   const [tasks, setTasks] = useState<TaskRow[]>([]);
-  const [entities, setEntities] = useState<EntitySummary[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<TaskStatus>("pending");
-  const [newDescription, setNewDescription] = useState("");
-  const [newEntityId, setNewEntityId] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [entities, setEntities] = useState<EntitySummary[]>([]);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createLoading, setCreateLoading] = useState(false);
+  const [selectedEntityId, setSelectedEntityId] = useState("");
+  const [taskDescription, setTaskDescription] = useState("");
 
   // Load tasks when status changes
   useEffect(() => {
-    let ignore = false;
     (async () => {
       setLoading(true);
       setError(null);
@@ -39,16 +45,13 @@ export function TasksMode() {
         }
 
         const loaded = await listTasks(taskStatus, includeArchived);
-        if (!ignore) setTasks(loaded);
+        setTasks(loaded);
       } catch (err) {
-        if (!ignore) setError(err instanceof Error ? err.message : String(err));
+        setError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (!ignore) setLoading(false);
+        setLoading(false);
       }
     })();
-    return () => {
-      ignore = true;
-    };
   }, [status]);
 
   // Load entities on mount
@@ -88,120 +91,208 @@ export function TasksMode() {
     }
   }, [status]);
 
-  const handleCreate = async () => {
-    if (!newDescription.trim() || !newEntityId) return;
-    try {
-      await createTask(newEntityId, newDescription.trim());
-      setNewDescription("");
-      await refreshTasks();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+  const handleCreateTask = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!selectedEntityId || !taskDescription.trim()) return;
+
+      setCreateError(null);
+      setCreateLoading(true);
+      try {
+        await createTask(selectedEntityId, taskDescription.trim());
+        setSelectedEntityId("");
+        setTaskDescription("");
+        await refreshTasks();
+      } catch (err) {
+        setCreateError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setCreateLoading(false);
+      }
+    },
+    [selectedEntityId, taskDescription, refreshTasks],
+  );
+
+  const handleToggleTaskStatus = useCallback(
+    async (taskId: string, currentStatus: string) => {
+      const newStatus = currentStatus === "pending" ? "done" : "pending";
+      setError(null);
+      try {
+        await setTaskStatus(taskId, newStatus as "pending" | "done");
+        await refreshTasks();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refreshTasks],
+  );
+
+  const handleArchiveTask = useCallback(
+    async (taskId: string) => {
+      setError(null);
+      try {
+        await archiveTask(taskId);
+        await refreshTasks();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refreshTasks],
+  );
+
+  // Group tasks by entity_id (curated_entities.name is not unique, so id is the
+  // only safe key). entity_name is kept only for display and sorting.
+  const groupedTasks = tasks.reduce(
+    (acc, task) => {
+      if (!acc[task.entity_id]) {
+        acc[task.entity_id] = [];
+      }
+      acc[task.entity_id].push(task);
+      return acc;
+    },
+    {} as Record<string, TaskRow[]>,
+  );
+
+  // Sort groups by their display name alphabetically
+  const sortedEntityIds = Object.keys(groupedTasks).sort((a, b) => {
+    const aName = groupedTasks[a][0]?.entity_name ?? "";
+    const bName = groupedTasks[b][0]?.entity_name ?? "";
+    return aName.localeCompare(bName);
+  });
+
+  // Format date (relative or absolute). `created_at` arrives in milliseconds
+  // from the backend (see db::tasks::create_task using now_timestamps().1),
+  // so the Date constructor takes it as-is.
+  const formatDate = (timestampMs: number) => {
+    const date = new Date(timestampMs);
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) {
+      return date.toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+    } else if (diffDays === 1) {
+      return "Yesterday";
+    } else if (diffDays < 7) {
+      return `${diffDays}d ago`;
+    } else {
+      return date.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      });
     }
   };
-
-  const handleResolve = async (taskId: string) => {
-    try {
-      await resolveTask(taskId);
-      await refreshTasks();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleArchive = async (taskId: string) => {
-    try {
-      await archiveTask(taskId);
-      await refreshTasks();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  if (loading && tasks.length === 0) {
-    return <div className="loading-screen">Loading tasks…</div>;
-  }
 
   return (
     <div className="mode-layout">
-      <div className="sidebar">
-        <h2>Tasks</h2>
-        <div className="search-bar">
-          <input
-            type="text"
-            placeholder="Filter tasks…"
-            // Filter logic omitted for brevity
-          />
-        </div>
-        <div className="folder-tree">
-          <button
-            className={`tree-file ${status === "pending" ? "tree-file--active" : ""}`}
-            onClick={() => setStatus("pending")}
+      <aside className="sidebar">
+        {/* Status filter */}
+        <div>
+          <label
+            style={{
+              fontSize: "11px",
+              fontWeight: 600,
+              display: "block",
+              marginBottom: "8px",
+            }}
           >
-            Pending
-          </button>
-          <button
-            className={`tree-file ${status === "done" ? "tree-file--active" : ""}`}
-            onClick={() => setStatus("done")}
-          >
-            Done
-          </button>
-          <button
-            className={`tree-file ${status === "archived" ? "tree-file--active" : ""}`}
-            onClick={() => setStatus("archived")}
-          >
-            Archived
-          </button>
-        </div>
-      </div>
-      <main className="editor-pane editor-pane--active">
-        {error && <p className="editor-error">{error}</p>}
-        <div className="review-proposal-section">
-          <h3 className="review-proposal-section-title">
-            {status === "pending"
-              ? "Pending tasks"
-              : status === "done"
-                ? "Completed tasks"
-                : "Archived tasks"}
-          </h3>
-          {tasks.length === 0 && (
-            <p className="review-hint">No tasks in this view.</p>
-          )}
-          <div className="proposal-item-list">
-            {tasks.map((task) => (
-              <div key={task.id} className="proposal-item-row">
-                <div className="proposal-item-body">
-                  <span className="proposal-item-label">
-                    {task.entity_id} — {task.status}
-                  </span>
-                  <p className="proposal-item-detail">{task.description}</p>
-                </div>
-                <div className="proposal-item-actions">
-                  {task.status === "pending" && (
-                    <button
-                      className="proposal-item-btn proposal-item-btn--accept"
-                      onClick={() => handleResolve(task.id)}
-                    >
-                      Done
-                    </button>
-                  )}
-                  <button
-                    className="proposal-item-btn proposal-item-btn--reject"
-                    onClick={() => handleArchive(task.id)}
-                  >
-                    Archive
-                  </button>
-                </div>
-              </div>
-            ))}
+            Status
+          </label>
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="radio"
+                name="status"
+                value="pending"
+                checked={status === "pending"}
+                onChange={() => setStatus("pending")}
+              />
+              Open
+            </label>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="radio"
+                name="status"
+                value="done"
+                checked={status === "done"}
+                onChange={() => setStatus("done")}
+              />
+              Done
+            </label>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="radio"
+                name="status"
+                value="archived"
+                checked={status === "archived"}
+                onChange={() => setStatus("archived")}
+              />
+              Archived
+            </label>
           </div>
         </div>
-        <div className="review-proposal-section">
-          <h3 className="review-proposal-section-title">New task</h3>
-          <div className="rule-form">
+
+        {/* Create new task form */}
+        <div>
+          <label
+            style={{
+              fontSize: "11px",
+              fontWeight: 600,
+              display: "block",
+              marginBottom: "8px",
+            }}
+          >
+            + New Task
+          </label>
+          {createError && (
+            <p
+              style={{
+                fontSize: "12px",
+                color: "var(--error)",
+                marginBottom: "8px",
+              }}
+            >
+              {createError}
+            </p>
+          )}
+          <form
+            onSubmit={handleCreateTask}
+            style={{ display: "flex", flexDirection: "column", gap: "6px" }}
+          >
             <select
-              value={newEntityId}
-              onChange={(e) => setNewEntityId(e.target.value)}
-              className="rule-select"
+              value={selectedEntityId}
+              onChange={(e) => setSelectedEntityId(e.target.value)}
+              style={{
+                padding: "6px",
+                borderRadius: "4px",
+                border: "1px solid var(--outline-var)",
+                fontSize: "13px",
+                backgroundColor: "var(--elev-2)",
+                color: "var(--on-surface)",
+              }}
             >
               <option value="">Select entity…</option>
               {entities.map((e) => (
@@ -212,20 +303,212 @@ export function TasksMode() {
             </select>
             <input
               type="text"
-              placeholder="Task description"
-              value={newDescription}
-              onChange={(e) => setNewDescription(e.target.value)}
-              className="rule-input"
+              placeholder="Description"
+              value={taskDescription}
+              onChange={(e) => setTaskDescription(e.target.value)}
+              style={{
+                padding: "6px",
+                borderRadius: "4px",
+                border: "1px solid var(--outline-var)",
+                fontSize: "13px",
+                backgroundColor: "var(--elev-2)",
+                color: "var(--on-surface)",
+              }}
             />
             <button
-              className="rule-add-btn"
-              onClick={handleCreate}
-              disabled={!newDescription.trim() || !newEntityId}
+              type="submit"
+              disabled={
+                createLoading ||
+                !selectedEntityId ||
+                !taskDescription.trim()
+              }
+              style={{
+                padding: "6px 12px",
+                backgroundColor: "var(--primary)",
+                color: "var(--on-primary)",
+                border: "none",
+                borderRadius: "4px",
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: createLoading ? "not-allowed" : "pointer",
+                opacity:
+                  createLoading ||
+                  !selectedEntityId ||
+                  !taskDescription.trim()
+                    ? 0.5
+                    : 1,
+              }}
             >
               Create
             </button>
-          </div>
+          </form>
         </div>
+      </aside>
+
+      <main
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "16px 24px",
+        }}
+      >
+        {error && (
+          <p
+            style={{
+              color: "var(--error)",
+              fontSize: "13px",
+              marginBottom: "16px",
+            }}
+            role="alert"
+          >
+            {error}
+          </p>
+        )}
+
+        {loading ? (
+          <p
+            style={{
+              color: "var(--outline)",
+              fontSize: "13px",
+              fontStyle: "italic",
+            }}
+          >
+            Loading tasks…
+          </p>
+        ) : tasks.length === 0 ? (
+          <div style={{ color: "var(--outline)", fontSize: "13px" }}>
+            <p style={{ fontStyle: "italic", marginBottom: "8px" }}>
+              No{" "}
+              {status === "archived"
+                ? "archived"
+                : status === "done"
+                  ? "done"
+                  : "open"}
+              {" "}
+              tasks.
+            </p>
+            {status === "pending" && (
+              <p style={{ fontSize: "12px", lineHeight: 1.5 }}>
+                The librarian proposes tasks through Review; approve one or
+                create your own.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "20px",
+            }}
+          >
+            {sortedEntityIds.map((entityId) => {
+              const group = groupedTasks[entityId];
+              const entityName = group[0]?.entity_name ?? "";
+              return (
+                <div key={entityId}>
+                  <button
+                    onClick={() => {
+                      onNavigate({
+                        mode: "brain",
+                        entityId,
+                      });
+                    }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                    fontSize: "14px",
+                    fontWeight: 600,
+                    color: "var(--primary)",
+                    padding: 0,
+                    marginBottom: "8px",
+                  }}
+                >
+                  {entityName}
+                </button>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    {group
+                      .sort((a, b) => {
+                        // Sort by priority DESC, then by created_at ASC
+                        if (a.priority !== b.priority) {
+                          return b.priority - a.priority;
+                        }
+                        return a.created_at - b.created_at;
+                      })
+                      .map((task) => (
+                        <div
+                          key={task.id}
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            alignItems: "flex-start",
+                            padding: "8px",
+                            backgroundColor: "var(--elev-2)",
+                            borderRadius: "6px",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={task.status === "done"}
+                            onChange={() =>
+                              handleToggleTaskStatus(task.id, task.status)
+                            }
+                            style={{ marginTop: "2px", cursor: "pointer" }}
+                            aria-label={`Mark "${task.description}" as ${task.status === "done" ? "pending" : "done"}`}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p
+                              style={{
+                                margin: 0,
+                                fontSize: "13px",
+                                color:
+                                  task.status === "done"
+                                    ? "var(--outline)"
+                                    : "var(--on-surface)",
+                                textDecoration:
+                                  task.status === "done"
+                                    ? "line-through"
+                                    : "none",
+                              }}
+                            >
+                              {task.description}
+                            </p>
+                            <p
+                              style={{
+                                margin: "2px 0 0",
+                                fontSize: "11px",
+                                color: "var(--outline)",
+                              }}
+                            >
+                              {formatDate(task.created_at)}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => handleArchiveTask(task.id)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor: "pointer",
+                              padding: "0 4px",
+                              fontSize: "16px",
+                              color: "var(--outline)",
+                              opacity: 0.6,
+                            }}
+                            aria-label={`Archive task "${task.description}"`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </main>
     </div>
   );

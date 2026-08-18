@@ -6,14 +6,19 @@ import { ActivityFeedPanel } from "./ActivityFeedPanel";
 import { BrainMode } from "../modes/BrainMode";
 import { LibraryMode } from "../modes/LibraryMode";
 import { ReviewMode } from "../modes/ReviewMode";
+import { TimelineMode } from "../modes/TimelineMode";
+import { TasksMode } from "../modes/TasksMode";
 import {
   SettingsScreen,
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
+import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
+import { useProposalNotifications } from "../../hooks/useProposalNotifications";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
+import { useErrorFeed } from "../../hooks/useErrorFeed";
 import { useNavigationState } from "../../lib/navigation";
 import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
 
@@ -26,12 +31,16 @@ const MODE_SHORTCUTS: Record<string, AppMode> = {
   "1": "brain",
   "2": "review",
   "3": "library",
+  "4": "timeline",
+  "5": "tasks",
 };
 
 const MODE_TITLES: Record<AppMode, string> = {
   brain: "Brain",
   review: "Review",
   library: "Library",
+  timeline: "Timeline",
+  tasks: "Tasks",
   settings: "Settings",
 };
 
@@ -49,15 +58,24 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
+  useProposalNotifications(queue.length);
   const {
     needs_migration_disclosure,
     loading: privacyLoading,
     mode: privacyMode,
   } = usePrivacyMode();
+  const { errors } = useErrorFeed();
   const [migrationDismissed, setMigrationDismissed] = useState(false);
 
   useEffect(() => {
-    startFileWatcher().catch(console.error);
+    const start = () =>
+      startFileWatcher().catch(() => {
+        reportBackgroundError(
+          "File watcher failed to start — new documents won't be detected.",
+          start
+        );
+      });
+    start();
   }, [vaultPath]);
 
   useEffect(() => {
@@ -165,6 +183,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
         <ModeRail
           mode={nav.current.mode}
           reviewCount={queue.length}
+          errorCount={errors.length}
           canGoBack={nav.canGoBack}
           canGoForward={nav.canGoForward}
           onModeChange={(next) => {
@@ -173,6 +192,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
           }}
           onBack={nav.goBack}
           onForward={nav.goForward}
+          onOpenActivity={() => setActivityOpen(true)}
         />
         <div className="app-main">
           {nav.current.mode === "brain" && (
@@ -207,8 +227,14 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
             <LibraryMode
               vaultPath={vaultPath}
               selectedDoc={libraryDoc}
-              onDocSelect={setLibraryDoc}
+              onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
             />
+          )}
+          {nav.current.mode === "timeline" && (
+            <TimelineMode onNavigate={nav.navigate} />
+          )}
+          {nav.current.mode === "tasks" && (
+            <TasksMode onNavigate={nav.navigate} />
           )}
           {nav.current.mode === "settings" && (
             <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} />
@@ -221,8 +247,13 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
         onOpenPrivacy={openPrivacySettings}
       />
       <ActivityFeedPanel
-        open={activityOpen}
+        isOpen={activityOpen}
         onClose={() => setActivityOpen(false)}
+        onNavigate={(t) => {
+          nav.navigate(t);
+          setActivityOpen(false);
+        }}
+        errors={errors}
       />
       {dragging && (
         <div className="drop-overlay">

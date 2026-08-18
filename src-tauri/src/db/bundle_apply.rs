@@ -317,6 +317,8 @@ pub fn apply_import(
                     task.priority,
                     task.created_at,
                     task.updated_at,
+                    task.resolved_at,
+                    task.deleted_at,
                 ),
                 now_ms,
             )?;

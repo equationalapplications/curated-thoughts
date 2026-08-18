@@ -1,7 +1,7 @@
 # Spec: OKF-Native Backend Migration (Phase 3)
 
 **Date:** 2026-07-05
-**Status:** Implemented (2026-07-06, v1.10.0). Deferred: `curated_agent_log` writers + 90-day pruning (§5), `healed` maintenance events (§5), maintenance `incremental_vacuum` (§4), `wiki_pages` drop in V8 (§1).
+**Status:** Implemented (2026-07-06, v1.10.0); Phase 5 additions: `curated_agent_log` writers + 90-day pruning, `healed` maintenance events (all implemented 2026-07-08). Deferred: maintenance `incremental_vacuum` (§4), `wiki_pages` drop in V8 (§1).
 **Branch:** `main` (shipped v1.10.0)
 **Related:** `2026-07-05-ux-vision-okf-native-design.md` (phases 4–5 block on this), `../../../clanker/docs/superpowers/specs/2026-07-03-okf-export-design.md`, `../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md`, `../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; see the addendum at the bottom)
 
@@ -237,9 +237,10 @@ Failure mid-conversion: guard key unwritten → next startup re-runs; step 2's d
 
 | Item | Spec ref | Status |
 |---|---|---|
-| `curated_agent_log` writers (`tool_dispatch`, `mcp_server`) | §5 | Table created; writers not wired |
-| Agent log 90-day startup pruning | §5 | Not implemented |
-| `healed` events on heal/prune/re-embed maintenance | §5 | Not implemented |
+| `curated_agent_log` writers (`tool_dispatch`, `mcp_server`) | §5 | Implemented (phase 5) |
+| Agent log 90-day startup pruning | §5 | Implemented (phase 5) |
+| `healed` events on heal/prune/re-embed maintenance | §5 | Implemented (phase 5) |
+| Proposal resolution events (taxonomy: `approved`/`rejected` per v1.10 spec) | §5 | Implemented; v1.10–v1.15 wrote `action`/`observation` for resolutions; fixed in phase 5 with startup data migration keyed on summary prefix |
 | Maintenance `incremental_vacuum` | §4 | One-time `VACUUM` at migration only |
 | `wiki_pages` table drop | §1 | Deferred to V8 per design |
 
