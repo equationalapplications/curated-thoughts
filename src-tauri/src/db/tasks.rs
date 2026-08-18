@@ -205,7 +205,7 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
     // Load current task to verify it exists and get full row for outbox.
     let task = tx
         .query_row(
-            "SELECT id, entity_id, description, status, priority, created_at, updated_at
+            "SELECT id, entity_id, description, status, priority, created_at, updated_at, resolved_at
              FROM llm_wiki_tasks
              WHERE id = ?1 AND deleted_at IS NULL",
             [task_id],
@@ -218,11 +218,12 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((id, entity_id, description, status, priority, created_at, _updated_at)) = task else {
+    let Some((id, entity_id, description, status, priority, created_at, _updated_at, resolved_at)) = task else {
         bail!("task not found or already archived: {task_id}");
     };
 
@@ -244,7 +245,7 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
             priority,
             created_at,
             now_ms,
-            None,
+            resolved_at,
             Some(now_ms),
         ),
         now_ms,

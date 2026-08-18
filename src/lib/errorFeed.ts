@@ -19,6 +19,15 @@ export function reportBackgroundError(
   message: string,
   retry?: () => Promise<void>
 ): void {
+  // Refresh existing entries with the same message instead of stacking
+  // duplicates (e.g. on every vault switch, or on every poll).
+  const existing = errors.find((e) => e.message === message);
+  if (existing) {
+    existing.at = Date.now();
+    if (retry) existing.retry = retry;
+    emit();
+    return;
+  }
   errors = [...errors, { id: nextId++, message, at: Date.now(), retry }];
   emit();
 }

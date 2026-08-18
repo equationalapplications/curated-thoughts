@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { listEvents, type TimelineEvent, type TimelineFilter } from "../lib/tauri";
 
 const POLL_MS = 5000;
@@ -7,11 +7,21 @@ export function useTimeline(filter: TimelineFilter) {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const key = JSON.stringify(filter);
+  const requestIdRef = useRef(0);
 
   const refresh = useCallback(() => {
-    listEvents(JSON.parse(key) as TimelineFilter)
-      .then((next) => { setEvents(next); setError(null); })
-      .catch(() => setError("Timeline is temporarily unavailable."));
+    const myId = ++requestIdRef.current;
+    const currentFilter = JSON.parse(key) as TimelineFilter;
+    listEvents(currentFilter)
+      .then((next) => {
+        if (myId !== requestIdRef.current) return; // stale, drop
+        setEvents(next);
+        setError(null);
+      })
+      .catch(() => {
+        if (myId !== requestIdRef.current) return; // stale, drop
+        setError("Timeline is temporarily unavailable.");
+      });
   }, [key]);
 
   useEffect(() => {

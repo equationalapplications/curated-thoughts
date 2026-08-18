@@ -11,17 +11,20 @@ interface Props {
   errors?: BackgroundError[];
 }
 
-export function ActivityFeedPanel({
-  isOpen,
+// Rendered only while the panel is open, so its polling hook is active
+// only when the user can actually see the feed.
+function ActivityFeedPanelBody({
   onClose,
   onNavigate,
-  errors: errorsProp,
-}: Props) {
+  errorsProp,
+}: {
+  onClose: () => void;
+  onNavigate: (target: NavTarget) => void;
+  errorsProp?: BackgroundError[];
+}) {
   const { events, error } = useTimeline({ limit: 50 });
   const { errors: errorsFromHook, dismiss, retry } = useErrorFeed();
   const errors = errorsProp ?? errorsFromHook;
-
-  if (!isOpen) return null;
 
   return (
     <>
@@ -98,5 +101,21 @@ export function ActivityFeedPanel({
         </footer>
       </aside>
     </>
+  );
+}
+
+export function ActivityFeedPanel({
+  isOpen,
+  onClose,
+  onNavigate,
+  errors: errorsProp,
+}: Props) {
+  if (!isOpen) return null;
+  return (
+    <ActivityFeedPanelBody
+      onClose={onClose}
+      onNavigate={onNavigate}
+      errorsProp={errorsProp}
+    />
   );
 }
