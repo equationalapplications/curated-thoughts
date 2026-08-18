@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md)
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md); Phase 5 — Timeline + Tasks modes + activity feed + notifications (Implemented 2026-07-08)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec (`2026-07-05-okf-backend-migration-design.md` — implemented).
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
@@ -114,6 +114,10 @@ Replaces `ReviewModal` entirely. Three columns:
 - Manual creation supported; librarian-proposed tasks arrive through Review like facts do.
 - Deliberately simple in v1: no due-date engine, no kanban, not project management.
 
+**Deferred notes (Tasks mode):**
+- Group-by-source-document for tasks requires a `source` column on `llm_wiki_tasks` that the schema doesn't carry; deferred until the librarian records task provenance.
+- Per-fact "…" power-layer menu (raw ids, embedding info, provenance JSON) deferred to Phase 7.
+
 **Activity feed (available from any mode):** a slide-over panel opened from the status bar or the rail pulse icon. The last ~50 events, live-updating, condensed, with an "Open full Timeline" link at the bottom. Same data as Timeline, ambient form.
 
 ## 6. Settings & Onboarding
@@ -176,18 +180,19 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 
 ### Phase 1 deferrals (shipped with documented gaps)
 
-| Item | Deferred to |
+| Item | Status / Target |
 |---|---|
-| `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Phase 5 (modes not built yet) |
+| `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Implemented (phase 5) |
 | Global `⌘K` command palette | Phase 1 follow-up or Phase 7 polish |
 | Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels → Phase 7 |
-| Activity rail pulse icon | Phase 1 follow-up |
-| Live Activity feed (beyond stub panel) | Phase 5 (Timeline data) |
+| Activity rail pulse icon | Implemented (phase 5) |
+| Live Activity feed (beyond stub panel) | Implemented (phase 5) |
 | Per-mode empty states (Brain, Library) | Phase 4 / Phase 7 |
 | Embedder/model down → inline feature notice | Phase 1 follow-up |
-| Background errors → Activity feed + retry | Phase 5 |
+| Background errors → Activity feed + retry | Implemented (phase 5) |
 | Review empty state richness (doc count, last-synthesis time) | Phase 2 |
 | Library protected badge copy ("Source document — read-only") | Phase 4 |
+| OS proposals notification + settings toggle | Implemented (phase 5) |
 
 ### Phase 2 deferrals (V7 backend shipped; UI wiring in progress)
 
@@ -198,7 +203,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Evidence panel chunk quotes + line ranges | Implemented (Slice 1, `feat-phase-2-review-wiring`) |
 | Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Implemented (Slice 4) |
 | Per-fact accept/reject toggles in editor | Implemented (Slice 3) |
-| Inline `edited_payload` editing | Follow-up after per-item toggles |
+| Inline `edited_payload` editing | Implemented (phase 5) |
 | Library deep-link from evidence | Implemented (Phase 4 navigation; opens document, chunk-level highlight → Phase 7) |
 
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// Pinned `package.json` dependency — keep in sync with `@equationalapplications/core-llm-wiki`.
-pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "4.19.0";
+pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "5.5.1";
 
 struct TableExpectation {
     name: &'static str,
@@ -33,6 +33,16 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "embedding",
             "embedding_blob",
             "okf_type",
+            "ontology_checked_at",
+            "heal_checked_at",
+            "lifecycle_status",
+            "stale_after",
+            "generated_by",
+            "last_verified_at",
+            "last_verified_by",
+            "okf_sources",
+            "okf_verified",
+            "okf_usage_window",
         ],
     },
     TableExpectation {
@@ -48,6 +58,25 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "resolved_at",
             "deleted_at",
             "okf_type",
+            "lifecycle_status",
+            "stale_after",
+            "generated_by",
+            "last_verified_at",
+            "last_verified_by",
+            "okf_sources",
+            "okf_verified",
+            "okf_usage_window",
+        ],
+    },
+    TableExpectation {
+        name: "llm_wiki_source_ref_index",
+        columns: &[
+            "id",
+            "entity_id",
+            "source_hash",
+            "source_ref",
+            "created_at",
+            "deleted_at",
         ],
     },
     TableExpectation {

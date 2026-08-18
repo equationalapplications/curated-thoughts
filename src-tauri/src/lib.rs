@@ -414,7 +414,7 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
             .unwrap()
             .as_millis() as i64;
         for (entity_id, n) in healed_by_entity {
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
                  VALUES (?1, ?2, 'healed', ?3, NULL, ?4)",
                 rusqlite::params![
@@ -423,7 +423,8 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
                     format!("Healed {n} invalid source reference(s)"),
                     now_ms,
                 ],
-            );
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 

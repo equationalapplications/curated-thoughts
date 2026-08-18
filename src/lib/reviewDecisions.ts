@@ -11,11 +11,17 @@ export function defaultItemDecisions(
 export function buildDecisions(
   detail: ProposalDetail,
   itemDecisions: Map<string, ItemDecisionState>,
+  itemEdits?: Map<string, Record<string, unknown>>,
 ): ItemDecision[] {
-  return detail.items.map((item) => ({
-    item_id: item.id,
-    decision: itemDecisions.get(item.id) ?? "accept",
-  }));
+  return detail.items.map((item) => {
+    const decision: ItemDecision = {
+      item_id: item.id,
+      decision: itemDecisions.get(item.id) ?? "accept",
+    };
+    const editedPayload = itemEdits?.get(item.id);
+    if (editedPayload) decision.edited_payload = editedPayload;
+    return decision;
+  });
 }
 
 export function hasAcceptedItems(

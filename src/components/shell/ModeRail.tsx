@@ -1,85 +1,117 @@
-import { type AppMode } from "./AppShell";
+export type AppMode = "brain" | "review" | "library" | "timeline" | "tasks" | "settings";
 
 interface Props {
   mode: AppMode;
   reviewCount: number;
+  errorCount?: number;
+  onModeChange: (mode: AppMode) => void;
   canGoBack: boolean;
   canGoForward: boolean;
-  onModeChange: (mode: AppMode) => void;
   onBack: () => void;
   onForward: () => void;
-  onOpenActivity?: () => void;
-  errorCount?: number;
+  onOpenActivity: () => void;
 }
 
-const MODE_LABELS: Record<AppMode, string> = {
-  brain: "Brain",
-  review: "Review",
-  library: "Library",
-  settings: "Settings",
-};
+const MAIN_MODES: { id: AppMode; label: string; icon: string }[] = [
+  { id: "brain", label: "Brain", icon: "🧠" },
+  { id: "review", label: "Review", icon: "📥" },
+  { id: "library", label: "Library", icon: "📚" },
+  { id: "timeline", label: "Timeline", icon: "🕘" },
+  { id: "tasks", label: "Tasks", icon: "☑️" },
+];
+
+function RailButton({
+  id,
+  label,
+  icon,
+  active,
+  badge,
+  onClick,
+}: {
+  id: AppMode;
+  label: string;
+  icon: string;
+  active: boolean;
+  badge?: number;
+  onClick: (mode: AppMode) => void;
+}) {
+  return (
+    <button
+      className={`mode-rail-btn${active ? " mode-rail-btn--active" : ""}`}
+      aria-label={label}
+      aria-current={active ? "page" : undefined}
+      title={label}
+      onClick={() => onClick(id)}
+    >
+      <span aria-hidden="true">{icon}</span>
+      {badge !== undefined && badge > 0 && (
+        <span className="mode-rail-badge">{badge}</span>
+      )}
+    </button>
+  );
+}
 
 export function ModeRail({
   mode,
   reviewCount,
+  errorCount,
+  onModeChange,
   canGoBack,
   canGoForward,
-  onModeChange,
   onBack,
   onForward,
   onOpenActivity,
-  errorCount = 0,
 }: Props) {
   return (
-    <nav className="mode-rail" aria-label="Mode navigation">
+    <nav className="mode-rail" aria-label="Primary">
       <button
-        className={`mode-rail-btn mode-rail-btn--back${canGoBack ? "" : " mode-rail-btn--disabled"}`}
+        className="mode-rail-history-btn"
         aria-label="Go back"
+        title="Go back"
         disabled={!canGoBack}
         onClick={onBack}
       >
-        ←
+        ‹
       </button>
       <button
-        className={`mode-rail-btn mode-rail-btn--forward${canGoForward ? "" : " mode-rail-btn--disabled"}`}
+        className="mode-rail-history-btn"
         aria-label="Go forward"
+        title="Go forward"
         disabled={!canGoForward}
         onClick={onForward}
       >
-        →
+        ›
       </button>
-
-      <div className="mode-rail-spacer" />
-
-      {(["brain", "review", "library", "settings"] as const).map((m) => (
-        <button
-          key={m}
-          className={`mode-rail-btn${mode === m ? " mode-rail-btn--active" : ""}`}
-          aria-current={mode === m ? "page" : undefined}
-          aria-label={MODE_LABELS[m]}
-          onClick={() => onModeChange(m)}
-        >
-          {m === "review" && reviewCount > 0 && (
-            <span className="mode-rail-badge">{reviewCount}</span>
-          )}
-          <span className="mode-rail-icon">{m === "brain" ? "🧠" : m === "review" ? "📋" : m === "library" ? "📚" : "⚙"}</span>
-        </button>
+      {MAIN_MODES.map((m) => (
+        <RailButton
+          key={m.id}
+          id={m.id}
+          label={m.label}
+          icon={m.icon}
+          active={mode === m.id}
+          badge={m.id === "review" ? reviewCount : undefined}
+          onClick={onModeChange}
+        />
       ))}
-
       <div className="mode-rail-spacer" />
-
-      {onOpenActivity && (
-        <button
-          className={`mode-rail-btn${errorCount > 0 ? " mode-rail-btn--active" : ""}`}
-          aria-label="Activity"
-          onClick={onOpenActivity}
-        >
-          {errorCount > 0 && (
-            <span className="mode-rail-badge">{errorCount}</span>
-          )}
-          <span className="mode-rail-icon">🔔</span>
-        </button>
-      )}
+      <button
+        className="mode-rail-btn"
+        aria-label="Activity"
+        title="Activity"
+        onClick={onOpenActivity}
+      >
+        <span aria-hidden="true">📡</span>
+        {errorCount !== undefined && errorCount > 0 && (
+          <span className="mode-rail-badge">{errorCount}</span>
+        )}
+      </button>
+      <RailButton
+        id="settings"
+        label="Settings"
+        icon="⚙"
+        active={mode === "settings"}
+        onClick={onModeChange}
+      />
     </nav>
   );
 }

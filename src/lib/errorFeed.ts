@@ -1,52 +1,40 @@
-//! Background error feed — accumulates errors from background operations
-//! (synthesis failures, indexing errors, etc.) and exposes them to the UI
-//! via a simple subscription pattern.
-
-type Listener = () => void;
-
 export interface BackgroundError {
   id: number;
   message: string;
-  at: number;
+  at: number; // timestamp
   retry?: () => Promise<void>;
 }
+
+type Listener = (errors: BackgroundError[]) => void;
 
 let nextId = 1;
 let errors: BackgroundError[] = [];
 const listeners = new Set<Listener>();
 
 function emit() {
-  for (const fn of listeners) {
-    fn();
-  }
-}
-
-export function subscribe(fn: Listener): () => void {
-  listeners.add(fn);
-  return () => {
-    listeners.delete(fn);
-  };
-}
-
-export function getErrors(): BackgroundError[] {
-  return errors;
+  for (const l of listeners) l(errors);
 }
 
 export function reportBackgroundError(
   message: string,
   retry?: () => Promise<void>
 ): void {
-  // Replace existing entry with same message to avoid duplicates
+  // Refresh existing entries with the same message instead of stacking
+  // duplicates (e.g. on every vault switch, or on every poll).
+  // Replace the matching entry AND the array with new references so that
+  // useSyncExternalStore observes the snapshot change. Mutating in place
+  // keeps the same array/entry identity and the subscriber skips the render.
   const existing = errors.find((e) => e.message === message);
   if (existing) {
     errors = errors.map((e) =>
       e.id === existing.id
-        ? { ...e, at: Date.now(), retry }
+        ? { ...e, at: Date.now(), retry: retry ?? e.retry }
         : e
     );
-  } else {
-    errors = [...errors, { id: nextId++, message, at: Date.now(), retry }];
+    emit();
+    return;
   }
+  errors = [...errors, { id: nextId++, message, at: Date.now(), retry }];
   emit();
 }
 
@@ -55,16 +43,26 @@ export function dismissError(id: number): void {
   emit();
 }
 
-export function retryError(id: number): Promise<void> {
+export async function retryError(id: number): Promise<void> {
   const entry = errors.find((e) => e.id === id);
-  if (!entry?.retry) return Promise.resolve();
-  return entry.retry().then(
-    () => {
-      dismissError(id);
-    },
-    (err) => {
-      // Re-throw so the caller can catch if needed
-      throw err;
-    }
-  );
+  if (!entry?.retry) return;
+  await entry.retry(); // throws if retry fails; entry stays
+  dismissError(id); // only dismiss on success
+}
+
+export function subscribeErrors(l: Listener): () => void {
+  listeners.add(l);
+  l(errors); // immediate emit of current state
+  return () => listeners.delete(l);
+}
+
+export function getErrorSnapshot(): BackgroundError[] {
+  return errors;
+}
+
+// Test utility: reset the error feed state
+export function __resetErrorFeed(): void {
+  nextId = 1;
+  errors = [];
+  listeners.clear();
 }

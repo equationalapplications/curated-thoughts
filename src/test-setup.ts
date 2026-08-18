@@ -145,6 +145,11 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_cloud_bridge_status") {
       return Promise.resolve({ configured: false, connection_status: "disconnected" });
     }
+    if (cmd === "list_events_cmd") return Promise.resolve([]);
+    if (cmd === "list_tasks_cmd") return Promise.resolve([]);
+    if (cmd === "create_task_cmd") return Promise.resolve(null);
+    if (cmd === "set_task_status_cmd") return Promise.resolve();
+    if (cmd === "archive_task_cmd") return Promise.resolve();
     if (cmd === "list_entities_cmd") return Promise.resolve([]);
     if (cmd === "get_entity_cmd") return Promise.resolve(null);
     if (cmd === "get_entity_connections_cmd") return Promise.resolve({ outgoing: [], backlinks: [] });

@@ -1,5 +1,10 @@
 import { useState, useEffect } from "react";
 import { getFolderRules, setFolderRule, deleteFolderRule, FolderRule } from "../../lib/tauri";
+import { reportBackgroundError } from "../../lib/errorFeed";
+import {
+  proposalNotificationsEnabled,
+  setProposalNotificationsEnabled,
+} from "../../hooks/useProposalNotifications";
 
 const MODES = ["index", "summarize", "synthesize"] as const;
 
@@ -9,8 +14,19 @@ export function FolderRulesPanel() {
   const [mode, setMode] = useState<string>("index");
   const [autoApprove, setAutoApprove] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    proposalNotificationsEnabled()
+  );
 
-  const load = () => getFolderRules().then(setRules).catch(() => {});
+  const load = () =>
+    getFolderRules()
+      .then(setRules)
+      .catch((e) => {
+        reportBackgroundError(
+          `Failed to load folder rules: ${String(e)}`,
+          () => getFolderRules().then(setRules)
+        );
+      });
 
   useEffect(() => { load(); }, []);
 
@@ -67,6 +83,20 @@ export function FolderRulesPanel() {
         <button className="rule-add-btn" onClick={handleAdd} disabled={saving || !folderPath.trim()}>
           {saving ? "Saving…" : "Add rule"}
         </button>
+      </div>
+      <div className="notification-settings">
+        <h3>Notifications</h3>
+        <label className="notification-label">
+          <input
+            type="checkbox"
+            checked={notificationsEnabled}
+            onChange={(e) => {
+              setNotificationsEnabled(e.target.checked);
+              setProposalNotificationsEnabled(e.target.checked);
+            }}
+          />
+          Notify me when new proposals arrive
+        </label>
       </div>
     </div>
   );

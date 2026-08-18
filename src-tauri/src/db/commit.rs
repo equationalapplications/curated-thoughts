@@ -263,6 +263,8 @@ pub(crate) fn wiki_task_outbox_payload(
     priority: i64,
     created_at: i64,
     updated_at: i64,
+    resolved_at: Option<i64>,
+    deleted_at: Option<i64>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -272,8 +274,8 @@ pub(crate) fn wiki_task_outbox_payload(
         "priority": priority,
         "created_at": created_at,
         "updated_at": updated_at,
-        "resolved_at": null,
-        "deleted_at": null,
+        "resolved_at": resolved_at,
+        "deleted_at": deleted_at,
     })
 }
 
@@ -658,6 +660,8 @@ fn commit_task_add(
             priority,
             ctx.now_ms,
             ctx.now_ms,
+            None,
+            None,
         ),
         ctx.now_ms,
     )?;
