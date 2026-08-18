@@ -118,4 +118,43 @@ describe("errorFeed", () => {
     // Listener should not be called after unsubscribe
     expect(listener).not.toHaveBeenCalled();
   });
+
+  it("refreshes an existing entry and emits a NEW snapshot reference", () => {
+    // Regression: prior impl mutated the matching entry in place, so
+    // useSyncExternalStore's Object.is check skipped the re-render.
+    reportBackgroundError("dup", undefined);
+    const listener = vi.fn();
+    subscribeErrors(listener);
+    const snapshotBefore = listener.mock.calls[0][0];
+    const entryBefore = snapshotBefore[0];
+
+    listener.mockClear();
+    reportBackgroundError("dup", undefined);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    const snapshotAfter = listener.mock.calls[0][0];
+    // New array reference AND new entry reference so the snapshot is
+    // observably different even though it has the same shape.
+    expect(snapshotAfter).not.toBe(snapshotBefore);
+    expect(snapshotAfter[0]).not.toBe(entryBefore);
+    expect(snapshotAfter[0].id).toBe(entryBefore.id);
+    expect(snapshotAfter[0].message).toBe("dup");
+    expect(snapshotAfter[0].at).toBeGreaterThanOrEqual(entryBefore.at);
+  });
+
+  it("preserves the existing retry callback when refresh omits one", () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    reportBackgroundError("keep retry", retry);
+    const listener = vi.fn();
+    subscribeErrors(listener);
+    const initialEntry = listener.mock.calls[0][0][0];
+
+    listener.mockClear();
+    // Refresh without a retry argument — the previous callback should stick.
+    reportBackgroundError("keep retry", undefined);
+
+    const refreshed = listener.mock.calls[0][0][0];
+    expect(refreshed.id).toBe(initialEntry.id);
+    expect(refreshed.retry).toBe(retry);
+  });
 });

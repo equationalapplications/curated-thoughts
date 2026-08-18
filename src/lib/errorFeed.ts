@@ -21,10 +21,16 @@ export function reportBackgroundError(
 ): void {
   // Refresh existing entries with the same message instead of stacking
   // duplicates (e.g. on every vault switch, or on every poll).
+  // Replace the matching entry AND the array with new references so that
+  // useSyncExternalStore observes the snapshot change. Mutating in place
+  // keeps the same array/entry identity and the subscriber skips the render.
   const existing = errors.find((e) => e.message === message);
   if (existing) {
-    existing.at = Date.now();
-    if (retry) existing.retry = retry;
+    errors = errors.map((e) =>
+      e.id === existing.id
+        ? { ...e, at: Date.now(), retry: retry ?? e.retry }
+        : e
+    );
     emit();
     return;
   }
