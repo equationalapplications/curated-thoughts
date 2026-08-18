@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { EntityDetail, ProposalItem } from "../../lib/tauri";
 import type { ItemDecisionState } from "../../lib/reviewDecisions";
 import {
@@ -29,6 +29,17 @@ export function ProposalItemRow({
   const [draft, setDraft] = useState(
     editableField ? String(currentPayload[editableField] ?? "") : "",
   );
+
+  // When the parent reuses this row for a different item, reset any in-flight
+  // edit so the form/draft don't bleed across items.
+  useEffect(() => {
+    setEditing(false);
+    setDraft(
+      editableField ? String(currentPayload[editableField] ?? "") : "",
+    );
+    // item.id is the stable identity for the proposal row.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id]);
 
   const startEdit = () => {
     setDraft(editableField ? String(currentPayload[editableField] ?? "") : "");

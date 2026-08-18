@@ -159,9 +159,11 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
     return aName.localeCompare(bName);
   });
 
-  // Format date (relative or absolute)
-  const formatDate = (timestamp: number) => {
-    const date = new Date(timestamp * 1000);
+  // Format date (relative or absolute). `created_at` arrives in milliseconds
+  // from the backend (see db::tasks::create_task using now_timestamps().1),
+  // so the Date constructor takes it as-is.
+  const formatDate = (timestampMs: number) => {
+    const date = new Date(timestampMs);
     const now = Date.now();
     const diffMs = now - date.getTime();
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));

@@ -61,13 +61,6 @@ export function TimelineMode({ onNavigate }: Props) {
     setUntilMs(null);
   }, []);
 
-  // Load older events (pagination)
-  const loadOlder = useCallback(() => {
-    if (filteredEvents.length === 0) return;
-    // Note: For pagination, we'd need to re-fetch with before_ms
-    // This is a simplified version that doesn't modify the current request
-  }, [filteredEvents]);
-
   const hasFilters = selectedKinds.size > 0 || entityFilter.trim() !== "" || sinceMs || untilMs;
 
   return (
@@ -146,12 +139,6 @@ export function TimelineMode({ onNavigate }: Props) {
         )}
 
         <TimelineFeed events={filteredEvents} powerLayer={powerLayer} onNavigate={onNavigate} />
-
-        {filteredEvents.length > 0 && (
-          <button onClick={loadOlder} className="load-older-btn">
-            Load older
-          </button>
-        )}
       </main>
     </div>
   );

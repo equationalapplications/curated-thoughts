@@ -2,7 +2,9 @@
 //! All timestamps normalized to milliseconds, reversed chronologically, with optional filtering.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+#[cfg(test)]
+use rusqlite::params;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 /// Unified timeline event across all three sources.
@@ -35,8 +37,22 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
     let limit = filter.limit.unwrap_or(100).min(500) as i64;
 
     // Build the UNION query that normalizes timestamps to milliseconds
-    // and maps event types to kinds.
-    let sql = r#"
+    // and maps event types to kinds. The kinds filter is applied at the outer
+    // WHERE so the LIMIT counts only matching rows.
+    let (kinds_clause, kinds_count) = match filter.kinds.as_ref() {
+        Some(kinds) if !kinds.is_empty() => {
+            let placeholders = std::iter::repeat("?")
+                .take(kinds.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("AND kind IN ({placeholders}) "), kinds.len())
+        }
+        _ => (String::new(), 0),
+    };
+    let limit_param = 5 + kinds_count;
+
+    let sql = format!(
+        r#"
         SELECT * FROM (
             -- llm_wiki_events (timestamps in seconds, need *1000)
             SELECT
@@ -92,50 +108,47 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
             WHERE d.tier = 'user_doc' AND d.last_indexed IS NOT NULL
         )
         WHERE
-            (:entity_id IS NULL OR entity_id = :entity_id)
-            AND (:before_ms IS NULL OR created_at_ms < :before_ms)
-            AND (:since_ms IS NULL OR created_at_ms >= :since_ms)
-            AND (:until_ms IS NULL OR created_at_ms <= :until_ms)
+            (?1 IS NULL OR entity_id = ?1)
+            AND (?2 IS NULL OR created_at_ms < ?2)
+            AND (?3 IS NULL OR created_at_ms >= ?3)
+            AND (?4 IS NULL OR created_at_ms <= ?4)
+            {kinds_clause}
         ORDER BY created_at_ms DESC
-        LIMIT :limit
-    "#;
+        LIMIT ?{limit_param}
+    "#
+    );
 
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(
-        params![
-            filter.entity_id.as_deref(),
-            filter.before_ms,
-            filter.since_ms,
-            filter.until_ms,
-            limit,
-        ],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, Option<String>>(7)?,
-                r.get::<_, i64>(8)?,
-            ))
-        },
-    )?;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    bound.push(&filter.entity_id);
+    bound.push(&filter.before_ms);
+    bound.push(&filter.since_ms);
+    bound.push(&filter.until_ms);
+    if let Some(kinds) = filter.kinds.as_ref() {
+        for k in kinds {
+            bound.push(k);
+        }
+    }
+    bound.push(&limit);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, i64>(8)?,
+        ))
+    })?;
 
     let mut events = Vec::new();
     for row in rows {
         let (id, kind, summary, entity_id, entity_name, doc_path, raw_type, client, created_at_ms) =
             row?;
-
-        // Filter by kinds if specified
-        if let Some(ref kinds) = filter.kinds {
-            if !kinds.contains(&kind) {
-                continue;
-            }
-        }
-
         events.push(TimelineEvent {
             id,
             kind,
