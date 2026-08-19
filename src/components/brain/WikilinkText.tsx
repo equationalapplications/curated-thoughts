@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listEntities } from "../../lib/tauri";
+import { listEntities, type EntitySummary } from "../../lib/tauri";
 
 export interface WikilinkSegment {
   type: "text" | "link";
@@ -41,7 +41,7 @@ interface Props {
  */
 type ResolverState =
   | { status: "loading"; promise: Promise<void>; version: number; fetchStarted: boolean }
-  | { status: "ready"; names: Set<string>; version: number };
+  | { status: "ready"; names: Set<string>; entities: EntitySummary[]; version: number };
 
 let resolverState: ResolverState = {
   status: "loading",
@@ -54,6 +54,13 @@ let resolverState: ResolverState = {
 };
 const resolverListeners = new Set<() => void>();
 
+function setReadyState(entities: EntitySummary[], version: number) {
+  const safeEntities = entities ?? [];
+  const names = new Set(safeEntities.map((e) => e.name.toLowerCase()));
+  resolverState = { status: "ready", names, entities: safeEntities, version };
+  resolverListeners.forEach((fn) => fn());
+}
+
 function ensureResolver(): ResolverState {
   if (resolverState.status === "ready") return resolverState;
   if (resolverState.fetchStarted) return resolverState;
@@ -62,9 +69,7 @@ function ensureResolver(): ResolverState {
   // mock of `invoke`) becomes a fulfilled promise instead of crashing here.
   const promise = Promise.resolve(listEntities("name_asc"))
     .then((entities) => {
-      const names = new Set((entities ?? []).map((e) => e.name.toLowerCase()));
-      resolverState = { status: "ready", names, version: existing.version + 1 };
-      resolverListeners.forEach((fn) => fn());
+      setReadyState(entities ?? [], existing.version + 1);
     })
     .catch(() => {
       // Reset so future mounts retry; otherwise we'd be stuck in "loading"
@@ -84,6 +89,33 @@ function ensureResolver(): ResolverState {
     fetchStarted: true,
   };
   return resolverState;
+}
+
+/**
+ * Force the resolver cache to re-fetch. Call this after any entity list
+ * mutation (create, import, delete, merge) so newly created entities render
+ * as resolved in subsequent `[[Name]]` chips. Returns the fetch promise so
+ * callers can await the refresh when ordering matters.
+ */
+export function refreshWikilinkResolver(): Promise<void> {
+  const existing = resolverState;
+  resolverState = {
+    status: "loading",
+    promise: Promise.resolve(),
+    version: existing.version + 1,
+    fetchStarted: false,
+  };
+  resolverListeners.forEach((fn) => fn());
+  const state = ensureResolver();
+  return state.promise;
+}
+
+/**
+ * Returns the currently cached entity list (or `[]` while loading). Used by
+ * the `[[Entity]]` autocomplete to avoid an IPC round-trip per keystroke.
+ */
+export function getWikilinkResolverEntities(): EntitySummary[] {
+  return resolverState.status === "ready" ? resolverState.entities : [];
 }
 
 /**
