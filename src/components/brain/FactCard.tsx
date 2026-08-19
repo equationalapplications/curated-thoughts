@@ -4,6 +4,7 @@ import {
   updateEntityFact,
   type EntityFact,
 } from "../../lib/tauri";
+import { FactPowerMenu } from "./FactPowerMenu";
 import { WikilinkText } from "./WikilinkText";
 
 function docLabel(path: string): string {
@@ -26,6 +27,7 @@ export function FactCard({
   onOpenSource,
 }: Props) {
   const [editing, setEditing] = useState(false);
+  const [powerOpen, setPowerOpen] = useState(false);
   const [draft, setDraft] = useState(fact.body);
   const [error, setError] = useState<string | null>(null);
 
@@ -104,6 +106,14 @@ export function FactCard({
             <button type="button" onClick={archive}>
               Archive
             </button>
+            <button
+              type="button"
+              onClick={() => setPowerOpen((v) => !v)}
+              aria-label="Fact details"
+              aria-expanded={powerOpen}
+            >
+              …
+            </button>
           </div>
         </>
       )}
@@ -112,6 +122,11 @@ export function FactCard({
           {error}
         </p>
       )}
+      <FactPowerMenu
+        fact={fact}
+        open={powerOpen}
+        onClose={() => setPowerOpen(false)}
+      />
     </article>
   );
 }
