@@ -68,9 +68,25 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
             &[],
             "confirmed",
             "user_stated",
+            None,
             MANUAL_SOURCE_REF,
+            None,
+            None,
+            None,
+            None,
             now_ms,
             now_ms,
+            None,
+            // Manual Brain-mode inserts start without OKF provenance;
+            // the OKF v0.2 fields default to null until something
+            // explicitly populates them (import, verified annotation, etc.).
+            // `lifecycle_status` defaults to "stable" so outbox consumers
+            // reconstruct the persisted lifecycle state without an extra
+            // round-trip to the database.
+            Some("stable"),
+            None,
+            None,
+            None,
             None,
         ),
         now_ms,
@@ -87,6 +103,14 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
         source_type: "user_stated".into(),
         source_docs: Vec::new(),
         updated_at: now_ms,
+        lifecycle_status: "stable".into(),
+        stale_after: None,
+        generated_by: None,
+        okf_sources: Vec::new(),
+        okf_verified: Vec::new(),
+        okf_usage_window: None,
+        last_verified_at: None,
+        last_verified_by: None,
     })
 }
 
@@ -103,7 +127,10 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
     assert_entity_active(&tx, entity_id)?;
     let existing = tx
         .query_row(
-            "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at
+            "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
+                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                    lifecycle_status, stale_after, generated_by,
+                    last_verified_at, last_verified_by
              FROM llm_wiki_entries
              WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
             params![fact_id, entity_id],
@@ -114,11 +141,38 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, Option<i64>>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<i64>>(13)?,
+                    r.get::<_, Option<String>>(14)?,
                 ))
             },
         )
         .optional()?;
-    let Some((tags_raw, confidence, source_type, source_ref, created_at)) = existing else {
+    let Some((
+        tags_raw,
+        confidence,
+        source_type,
+        source_ref,
+        created_at,
+        existing_source_hash,
+        existing_okf_type,
+        existing_okf_sources,
+        existing_okf_verified,
+        existing_okf_usage_window,
+        existing_lifecycle_status,
+        existing_stale_after,
+        existing_generated_by,
+        existing_last_verified_at,
+        existing_last_verified_by,
+    )) = existing
+    else {
         bail!("fact not found or archived: {fact_id}");
     };
 
@@ -140,10 +194,20 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
             &tags,
             &confidence,
             &source_type,
+            existing_source_hash.as_deref(),
             &source_ref,
+            existing_okf_type.as_deref(),
+            existing_okf_sources.as_deref(),
+            existing_okf_verified.as_deref(),
+            existing_okf_usage_window.as_deref(),
             created_at,
             now_ms,
             None,
+            Some(existing_lifecycle_status.as_str()),
+            existing_stale_after,
+            existing_generated_by.as_deref(),
+            existing_last_verified_at,
+            existing_last_verified_by.as_deref(),
         ),
         now_ms,
     )?;
@@ -234,6 +298,20 @@ mod tests {
         assert_eq!(loaded.facts.len(), 1);
         assert_eq!(outbox_count(&conn, &fact.id, "INSERT"), 1);
         assert!(loaded.updated_at > 1, "entity updated_at must be touched");
+
+        // Outbox payload must carry the persisted lifecycle_status so a
+        // consumer that reconstructs records from insert events does not
+        // lose it.
+        let payload_lifecycle: String = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.lifecycle_status')
+                 FROM llm_wiki_outbox
+                 WHERE record_id = ?1 AND table_name = 'entries' AND operation = 'INSERT'",
+                [&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_lifecycle, "stable");
     }
 
     #[test]

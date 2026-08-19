@@ -41,6 +41,7 @@ test("export flow: save dialog then command, then notice", async () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("okf_export_bundle_cmd", {
       destPath: "/tmp/brain-okf.zip",
       entityIds: null,
+      profile: null,
     }),
   );
   expect(await screen.findByText(/exported 2 entities/i)).toBeInTheDocument();

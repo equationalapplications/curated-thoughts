@@ -1,5 +1,7 @@
 import type { SearchResult } from "../../lib/tauri";
 import { MemoryChunk } from "../review/MemoryChunk";
+import { useProviderHealth } from "../../hooks/useProviderHealth";
+import { ProviderNotice } from "../health/ProviderNotice";
 
 interface Props {
   results: SearchResult[];
@@ -49,24 +51,35 @@ function ResultItem({ r, onSelect }: { r: SearchResult; onSelect: (path: string)
 }
 
 export function SearchResults({ results, onSelect }: Props) {
-  if (results.length === 0) return null;
+  const { generation, embedding } = useProviderHealth();
 
   const semanticResults = results.filter((r) => !r.structural);
   const structuralResults = results.filter((r) => r.structural === true);
 
   return (
     <div className="search-results">
-      {semanticResults.map((r) => (
-        <ResultItem key={`${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
-      ))}
-      {structuralResults.length > 0 && (
+      <ProviderNotice
+        feature="search"
+        embedding={embedding}
+        generation={generation}
+      />
+      {results.length === 0 ? (
+        <p className="placeholder">No results.</p>
+      ) : (
         <>
-          <div className="search-results-divider">
-            <span>Structural context</span>
-          </div>
-          {structuralResults.map((r) => (
-            <ResultItem key={`structural:${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
+          {semanticResults.map((r) => (
+            <ResultItem key={`${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
           ))}
+          {structuralResults.length > 0 && (
+            <>
+              <div className="search-results-divider">
+                <span>Structural context</span>
+              </div>
+              {structuralResults.map((r) => (
+                <ResultItem key={`structural:${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
+              ))}
+            </>
+          )}
         </>
       )}
     </div>

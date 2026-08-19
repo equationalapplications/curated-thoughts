@@ -47,7 +47,9 @@ pub fn load_export_entities(
 fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, body, tags, confidence, source_type, source_hash, source_ref,
-                created_at, updated_at, last_accessed_at, access_count, deleted_at, okf_type
+                created_at, updated_at, last_accessed_at, access_count, deleted_at, okf_type,
+                lifecycle_status, stale_after, generated_by, last_verified_at, last_verified_by,
+                okf_sources, okf_verified, okf_usage_window
          FROM llm_wiki_entries WHERE entity_id = ?1 ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([entity_id], |r| {
@@ -67,6 +69,14 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
             access_count: r.get(11)?,
             deleted_at: r.get(12)?,
             okf_type: r.get(13)?,
+            lifecycle_status: r.get(14)?,
+            stale_after: r.get(15)?,
+            generated_by: r.get(16)?,
+            last_verified_at: r.get(17)?,
+            last_verified_by: r.get(18)?,
+            okf_sources: r.get(19)?,
+            okf_verified: r.get(20)?,
+            okf_usage_window: r.get(21)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -75,7 +85,10 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
 fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<WikiTask>> {
     let mut stmt = conn.prepare(
         "SELECT id, description, status, priority, created_at, updated_at,
-                resolved_at, deleted_at, okf_type
+                resolved_at, deleted_at, okf_type,
+                lifecycle_status, stale_after, generated_by,
+                last_verified_at, last_verified_by,
+                okf_sources, okf_verified, okf_usage_window
          FROM llm_wiki_tasks WHERE entity_id = ?1 ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([entity_id], |r| {
@@ -90,6 +103,14 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<WikiTask>> {
             resolved_at: r.get(6)?,
             deleted_at: r.get(7)?,
             okf_type: r.get(8)?,
+            lifecycle_status: r.get(9)?,
+            stale_after: r.get(10)?,
+            generated_by: r.get(11)?,
+            last_verified_at: r.get(12)?,
+            last_verified_by: r.get(13)?,
+            okf_sources: r.get(14)?,
+            okf_verified: r.get(15)?,
+            okf_usage_window: r.get(16)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

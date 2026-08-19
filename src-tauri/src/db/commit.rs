@@ -232,10 +232,20 @@ pub(crate) fn wiki_fact_outbox_payload(
     tags: &[String],
     confidence: &str,
     source_type: &str,
+    source_hash: Option<&str>,
     source_ref: &str,
+    okf_type: Option<&str>,
+    okf_sources: Option<&str>,
+    okf_verified: Option<&str>,
+    okf_usage_window: Option<&str>,
     created_at: i64,
     updated_at: i64,
     deleted_at: Option<i64>,
+    lifecycle_status: Option<&str>,
+    stale_after: Option<i64>,
+    generated_by: Option<&str>,
+    last_verified_at: Option<i64>,
+    last_verified_by: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -245,8 +255,17 @@ pub(crate) fn wiki_fact_outbox_payload(
         "tags": tags,
         "confidence": confidence,
         "source_type": source_type,
-        "source_hash": null,
+        "source_hash": source_hash,
         "source_ref": source_ref,
+        "okf_type": okf_type,
+        "okf_sources": okf_sources,
+        "okf_verified": okf_verified,
+        "okf_usage_window": okf_usage_window,
+        "lifecycle_status": lifecycle_status,
+        "stale_after": stale_after,
+        "generated_by": generated_by,
+        "last_verified_at": last_verified_at,
+        "last_verified_by": last_verified_by,
         "created_at": created_at,
         "updated_at": updated_at,
         "last_accessed_at": null,
@@ -265,6 +284,15 @@ pub(crate) fn wiki_task_outbox_payload(
     updated_at: i64,
     resolved_at: Option<i64>,
     deleted_at: Option<i64>,
+    okf_type: Option<&str>,
+    okf_sources: Option<&str>,
+    okf_verified: Option<&str>,
+    okf_usage_window: Option<&str>,
+    lifecycle_status: Option<&str>,
+    stale_after: Option<i64>,
+    generated_by: Option<&str>,
+    last_verified_at: Option<i64>,
+    last_verified_by: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -276,6 +304,15 @@ pub(crate) fn wiki_task_outbox_payload(
         "updated_at": updated_at,
         "resolved_at": resolved_at,
         "deleted_at": deleted_at,
+        "okf_type": okf_type,
+        "okf_sources": okf_sources,
+        "okf_verified": okf_verified,
+        "okf_usage_window": okf_usage_window,
+        "lifecycle_status": lifecycle_status,
+        "stale_after": stale_after,
+        "generated_by": generated_by,
+        "last_verified_at": last_verified_at,
+        "last_verified_by": last_verified_by,
     })
 }
 
@@ -450,9 +487,21 @@ fn commit_fact_add(
             &tags,
             confidence,
             ctx.source_type,
+            None,
             &source_ref,
+            None,
+            None,
+            None,
+            None,
             ctx.now_ms,
             ctx.now_ms,
+            None,
+            // Proposal-created facts default to the stable lifecycle; the
+            // OKF v0.2 fields populate on import / verified annotation.
+            Some("stable"),
+            None,
+            None,
+            None,
             None,
         ),
         ctx.now_ms,
@@ -484,15 +533,64 @@ fn commit_fact_update(
         .unwrap_or("inferred");
     let tags = parse_tags(payload);
 
-    let existing: Option<(String, i64)> = conn
+    let existing: Option<(
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )> = conn
         .query_row(
-            "SELECT source_ref, created_at FROM llm_wiki_entries
+            // COALESCE handles imported facts with a NULL source_ref so
+            // the r.get::<_, String>(0) deserializer doesn't bail before
+            // the update and outbox write can proceed.
+            "SELECT COALESCE(source_ref, ''), created_at,
+                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                    lifecycle_status, stale_after, generated_by,
+                    last_verified_at, last_verified_by
+             FROM llm_wiki_entries
              WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
             params![fact_id, ctx.entity_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((existing_source_ref, created_at)) = existing else {
+    let Some((
+        existing_source_ref,
+        created_at,
+        existing_source_hash,
+        existing_okf_type,
+        existing_okf_sources,
+        existing_okf_verified,
+        existing_okf_usage_window,
+        existing_lifecycle_status,
+        existing_stale_after,
+        existing_generated_by,
+        existing_last_verified_at,
+        existing_last_verified_by,
+    )) = existing
+    else {
         bail!("fact_update target not found: {fact_id}");
     };
 
@@ -525,10 +623,20 @@ fn commit_fact_update(
             &tags,
             confidence,
             ctx.source_type,
+            existing_source_hash.as_deref(),
             &existing_source_ref,
+            existing_okf_type.as_deref(),
+            existing_okf_sources.as_deref(),
+            existing_okf_verified.as_deref(),
+            existing_okf_usage_window.as_deref(),
             created_at,
             ctx.now_ms,
             None,
+            Some(existing_lifecycle_status.as_str()),
+            existing_stale_after,
+            existing_generated_by.as_deref(),
+            existing_last_verified_at,
+            existing_last_verified_by.as_deref(),
         ),
         ctx.now_ms,
     )?;
@@ -660,6 +768,17 @@ fn commit_task_add(
             priority,
             ctx.now_ms,
             ctx.now_ms,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            // Proposal-created tasks default to the stable lifecycle; the
+            // OKF v0.2 fields populate on import / verified annotation.
+            Some("stable"),
+            None,
+            None,
             None,
             None,
         ),
@@ -1114,6 +1233,20 @@ mod tests {
             .unwrap();
         assert_eq!(outbox_count, 1);
 
+        // The proposal-insert outbox payload must carry the persisted
+        // lifecycle_status (defaults to "stable" for newly committed facts).
+        let payload_lifecycle: String = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.lifecycle_status')
+                 FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND operation = 'INSERT'
+                 ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_lifecycle, "stable");
+
         let event_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_events", [], |r| r.get(0))
             .unwrap();
@@ -1211,6 +1344,93 @@ mod tests {
             .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(body, "Edited body.");
+    }
+
+    #[test]
+    fn fact_update_succeeds_when_source_ref_is_null() {
+        // Regression: imported facts can carry a NULL source_ref. The
+        // row-mapping closure in commit_fact_update used to fail to
+        // deserialize NULL into String before the update ran, so the
+        // proposal resolution would error and the import + manual edit
+        // couldn't be reconciled.
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        // Seed an entry whose source_ref is NULL (the path bundle_apply
+        // can produce when a fact is imported without a `resource`).
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact-imported', 'ent-1', 'Original', 'Original body.',
+                     '[]', 'inferred', 'librarian_inferred',
+                     NULL, 100, 100)",
+            [],
+        )
+        .unwrap();
+
+        insert_test_proposal(
+            &conn,
+            "prop-null-ref",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![NewProposalItem {
+                id: "item-update-null-ref".into(),
+                item_type: "fact_update".into(),
+                target_id: Some("fact-imported".into()),
+                payload: serde_json::json!({
+                    "body": "Edited body.",
+                    "tags": [],
+                    "confidence": "inferred",
+                }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id,
+                    quote: "x".into(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+            }],
+            doc_id,
+        );
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-null-ref",
+            &[ItemDecision {
+                item_id: "item-update-null-ref".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+            },
+        )
+        .expect("fact_update must succeed when source_ref is NULL");
+
+        assert_eq!(result.proposal_status, "approved");
+        let body: String = conn
+            .query_row(
+                "SELECT body FROM llm_wiki_entries WHERE id = 'fact-imported'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(body, "Edited body.");
+        // The outbox UPDATE payload should carry the coalesced empty string
+        // (not error) so downstream consumers can decode the row.
+        let payload_source_ref: String = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.source_ref')
+                 FROM llm_wiki_outbox
+                 WHERE record_id = 'fact-imported' AND operation = 'UPDATE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_source_ref, "");
     }
 
     #[test]

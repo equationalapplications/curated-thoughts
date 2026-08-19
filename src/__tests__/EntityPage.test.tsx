@@ -71,7 +71,7 @@ const NOOPS = {
 
 test("shows empty state without a selection", () => {
   render(<EntityPage entityId={null} {...NOOPS} />);
-  expect(screen.getByText(/Select an entity/)).toBeInTheDocument();
+  expect(screen.getByText(/No entity selected/)).toBeInTheDocument();
 });
 
 test("renders header, facts, tasks, and events", async () => {

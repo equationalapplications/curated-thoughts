@@ -1,15 +1,18 @@
 import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const editorMock = {
   document: [],
   tryParseMarkdownToBlocks: vi.fn(async () => []),
   replaceBlocks: vi.fn(),
   blocksToMarkdownLossy: vi.fn(async () => "Edited summary."),
+  insertInlineContent: vi.fn(),
 };
 
 vi.mock("@blocknote/react", () => ({
   useCreateBlockNote: () => editorMock,
+  SuggestionMenuController: () => null,
 }));
 
 vi.mock("@blocknote/mantine", () => ({
@@ -17,12 +20,44 @@ vi.mock("@blocknote/mantine", () => ({
 }));
 
 import { EntitySummarySection } from "../components/brain/EntitySummarySection";
+import {
+  EntityWikilinkSuggestion,
+  filterEntitySuggestions,
+} from "../components/brain/EntityWikilinkSuggestion";
 import { renderWithTheme } from "./test-utils";
+import type { EntitySummary } from "../lib/tauri";
+
+function entity(overrides: Partial<EntitySummary>): EntitySummary {
+  return {
+    id: "ent_x",
+    name: "X",
+    entity_type: "concept",
+    summary_snippet: "",
+    fact_count: 0,
+    open_task_count: 0,
+    created_at: 100,
+    updated_at: 100,
+    ...overrides,
+  };
+}
+
+const ENTITIES = [
+  entity({ id: "ent_alpha", name: "Alpha", entity_type: "project" }),
+  entity({ id: "ent_beta", name: "Beta", entity_type: "project" }),
+  entity({ id: "ent_charlie", name: "Charlie", entity_type: "person" }),
+];
 
 beforeEach(() => {
   editorMock.tryParseMarkdownToBlocks.mockClear();
   editorMock.replaceBlocks.mockClear();
   editorMock.blocksToMarkdownLossy.mockClear();
+  editorMock.insertInlineContent.mockClear();
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "list_entities_cmd") return Promise.resolve(ENTITIES);
+    if (cmd === "update_entity_summary_cmd") return Promise.resolve();
+    return Promise.resolve(null);
+  });
 });
 
 test("renders summary prose with wikilink chips in view mode", () => {
@@ -59,5 +94,50 @@ test("edit loads markdown into BlockNote; save round-trips and persists", async 
   expect(invoke).toHaveBeenCalledWith("update_entity_summary_cmd", {
     entityId: "ent_1",
     summary: "Edited summary.",
+  });
+});
+
+describe("EntityWikilinkSuggestion", () => {
+  it("filters entities by case-insensitive prefix match on name", () => {
+    const matches = filterEntitySuggestions(ENTITIES, "al");
+    expect(matches.map((e) => e.name)).toEqual(["Alpha"]);
+  });
+
+  it("returns all entities when query is empty", () => {
+    const matches = filterEntitySuggestions(ENTITIES, "");
+    expect(matches).toHaveLength(3);
+  });
+
+  it("returns empty list when no match", () => {
+    const matches = filterEntitySuggestions(ENTITIES, "zz");
+    expect(matches).toEqual([]);
+  });
+
+  it("renders matching entities and calls onSelect on click", () => {
+    const onSelect = vi.fn();
+    renderWithTheme(
+      <EntityWikilinkSuggestion entities={ENTITIES} query="be" onSelect={onSelect} />,
+    );
+    expect(screen.getByRole("option", { name: /Beta/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Alpha/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Charlie/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /Beta/ }));
+    expect(onSelect).toHaveBeenCalledWith(ENTITIES[1]);
+  });
+
+  it("renders all entities when query is empty", () => {
+    renderWithTheme(
+      <EntityWikilinkSuggestion entities={ENTITIES} query="" onSelect={vi.fn()} />,
+    );
+    expect(screen.getByRole("option", { name: /Alpha/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Beta/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Charlie/ })).toBeInTheDocument();
+  });
+
+  it("shows empty placeholder when no matches", () => {
+    renderWithTheme(
+      <EntityWikilinkSuggestion entities={ENTITIES} query="zz" onSelect={vi.fn()} />,
+    );
+    expect(screen.getByText(/No entities match\./)).toBeInTheDocument();
   });
 });

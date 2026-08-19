@@ -4,6 +4,7 @@ import {
   updateEntityFact,
   type EntityFact,
 } from "../../lib/tauri";
+import { FactPowerMenu } from "./FactPowerMenu";
 import { WikilinkText } from "./WikilinkText";
 
 function docLabel(path: string): string {
@@ -15,7 +16,13 @@ interface Props {
   fact: EntityFact;
   onChanged: () => void;
   onNavigateEntity: (name: string) => void;
-  onOpenSource: (path: string) => void;
+  /**
+   * Called when the user clicks a source-document chip. The chunk id is the
+   * optional anchor within `path` that Library will scroll/highlight on
+   * open. v1: `source_docs` does not yet carry chunk ids so callers pass
+   * `null` here; the click path stays unchanged when chunk id is absent.
+   */
+  onOpenSource: (path: string, chunkId?: string | null) => void;
 }
 
 export function FactCard({
@@ -26,6 +33,7 @@ export function FactCard({
   onOpenSource,
 }: Props) {
   const [editing, setEditing] = useState(false);
+  const [powerOpen, setPowerOpen] = useState(false);
   const [draft, setDraft] = useState(fact.body);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,7 +96,7 @@ export function FactCard({
                 type="button"
                 className="fact-chip fact-chip--source"
                 title={path}
-                onClick={() => onOpenSource(path)}
+                onClick={() => onOpenSource(path, null)}
               >
                 {docLabel(path)}
               </button>
@@ -104,6 +112,14 @@ export function FactCard({
             <button type="button" onClick={archive}>
               Archive
             </button>
+            <button
+              type="button"
+              onClick={() => setPowerOpen((v) => !v)}
+              aria-label="Fact details"
+              aria-expanded={powerOpen}
+            >
+              …
+            </button>
           </div>
         </>
       )}
@@ -112,6 +128,11 @@ export function FactCard({
           {error}
         </p>
       )}
+      <FactPowerMenu
+        fact={fact}
+        open={powerOpen}
+        onClose={() => setPowerOpen(false)}
+      />
     </article>
   );
 }

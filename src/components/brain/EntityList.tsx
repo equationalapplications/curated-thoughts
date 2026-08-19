@@ -1,15 +1,18 @@
 import { useMemo, useState } from "react";
-import type { EntitySummary } from "../../lib/tauri";
+import type { EntitySort, EntitySummary } from "../../lib/tauri";
 
 interface Props {
   entities: EntitySummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCreate: (name: string) => void;
+  /** Fires when the user changes the sort dropdown, enabling parent to re-query. */
+  onSortChange?: (sort: EntitySort) => void;
 }
 
-export function EntityList({ entities, selectedId, onSelect, onCreate }: Props) {
+export function EntityList({ entities, selectedId, onSelect, onCreate, onSortChange }: Props) {
   const [filter, setFilter] = useState("");
+  const [sort, setSort] = useState<EntitySort>("updated_desc");
   const [creating, setCreating] = useState(false);
   const [draftName, setDraftName] = useState("");
 
@@ -45,6 +48,16 @@ export function EntityList({ entities, selectedId, onSelect, onCreate }: Props) 
           onChange={(e) => setFilter(e.target.value)}
         />
       </div>
+      <select aria-label="Sort entities" className="entity-sort-picker" value={sort} onChange={(e) => {
+        const next = e.target.value as EntitySort;
+        setSort(next);
+        onSortChange?.(next);
+      }}>
+        <option value="updated_desc">Recently updated</option>
+        <option value="name_asc">Name (A → Z)</option>
+        <option value="name_desc">Name (Z → A)</option>
+        <option value="created_desc">Recently created</option>
+      </select>
       {creating ? (
         <form
           className="entity-create-form"
