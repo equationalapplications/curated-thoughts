@@ -2,9 +2,9 @@ import { useState } from "react";
 import { useCreateBlockNote, SuggestionMenuController } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
-import { listEntities, type EntitySummary, updateEntitySummary } from "../../lib/tauri";
+import { updateEntitySummary } from "../../lib/tauri";
 import { useTheme } from "../../lib/ThemeContext";
-import { WikilinkText } from "./WikilinkText";
+import { WikilinkText, getWikilinkResolverEntities } from "./WikilinkText";
 import {
   EntityWikilinkSuggestion,
   filterEntitySuggestions,
@@ -90,7 +90,10 @@ export function EntitySummarySection({
 async function fetchEntityWikilinkItems(
   query: string,
 ): Promise<EntityWikilinkSuggestionItem[]> {
-  const entities: EntitySummary[] = await listEntities("name_asc");
+  // Reuse the shared WikilinkText resolver cache rather than firing a fresh
+  // `listEntities` IPC round-trip on every keystroke. The cache is refreshed
+  // by `useEntityList.refresh()` after entity create/import mutations.
+  const entities = getWikilinkResolverEntities();
   return filterEntitySuggestions(entities, query).map((entity) => ({
     entity,
   }));
