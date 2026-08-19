@@ -15,4 +15,8 @@ describe("ProviderNotice", () => {
     render(<ProviderNotice feature="synthesis" embedding="ok" generation="unconfigured" />);
     expect(screen.getByText(/synthesis needs a generation backend/i)).toBeInTheDocument();
   });
+  it("renders related-notes message when embedding is error", () => {
+    render(<ProviderNotice feature="related_notes" embedding="error" generation="ok" />);
+    expect(screen.getByText(/related notes need the embedder/i)).toBeInTheDocument();
+  });
 });

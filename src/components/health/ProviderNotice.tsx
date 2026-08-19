@@ -1,6 +1,11 @@
 import type { HealthState } from "../../hooks/useProviderHealth";
 
-type Feature = "search" | "synthesis" | "similarity" | "indexing";
+type Feature =
+  | "search"
+  | "synthesis"
+  | "similarity"
+  | "indexing"
+  | "related_notes";
 
 interface Props {
   feature: Feature;
@@ -13,8 +18,9 @@ interface Props {
  * triple, or `null` when no notice is warranted.
  *
  * Mapping rules (spec §7):
- *   - features that depend on the embedder: "search", "similarity", "indexing"
- *     show "<feature> needs the embedder — check Models" when embedding === "error".
+ *   - features that depend on the embedder: "search", "similarity", "indexing",
+ *     "related_notes" show "<feature> needs the embedder — check Models" when
+ *     embedding === "error".
  *   - features that depend on a generation backend: "synthesis"
  *     shows "<feature> needs a generation backend — check Models" when
  *     generation === "unconfigured".
@@ -29,10 +35,16 @@ function noticeFor(
   generation: HealthState,
 ): string | null {
   const dependsOnEmbedder =
-    feature === "search" || feature === "similarity" || feature === "indexing";
+    feature === "search" ||
+    feature === "similarity" ||
+    feature === "indexing" ||
+    feature === "related_notes";
   const dependsOnGeneration = feature === "synthesis";
 
   if (dependsOnEmbedder && embedding === "error") {
+    if (feature === "related_notes") {
+      return "Related notes need the embedder — check Models";
+    }
     return `${feature} needs the embedder — check Models`;
   }
   if (dependsOnGeneration && generation === "unconfigured") {
