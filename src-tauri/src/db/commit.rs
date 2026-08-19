@@ -241,6 +241,11 @@ pub(crate) fn wiki_fact_outbox_payload(
     created_at: i64,
     updated_at: i64,
     deleted_at: Option<i64>,
+    lifecycle_status: Option<&str>,
+    stale_after: Option<i64>,
+    generated_by: Option<&str>,
+    last_verified_at: Option<i64>,
+    last_verified_by: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -256,6 +261,11 @@ pub(crate) fn wiki_fact_outbox_payload(
         "okf_sources": okf_sources,
         "okf_verified": okf_verified,
         "okf_usage_window": okf_usage_window,
+        "lifecycle_status": lifecycle_status,
+        "stale_after": stale_after,
+        "generated_by": generated_by,
+        "last_verified_at": last_verified_at,
+        "last_verified_by": last_verified_by,
         "created_at": created_at,
         "updated_at": updated_at,
         "last_accessed_at": null,
@@ -278,6 +288,11 @@ pub(crate) fn wiki_task_outbox_payload(
     okf_sources: Option<&str>,
     okf_verified: Option<&str>,
     okf_usage_window: Option<&str>,
+    lifecycle_status: Option<&str>,
+    stale_after: Option<i64>,
+    generated_by: Option<&str>,
+    last_verified_at: Option<i64>,
+    last_verified_by: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -293,6 +308,11 @@ pub(crate) fn wiki_task_outbox_payload(
         "okf_sources": okf_sources,
         "okf_verified": okf_verified,
         "okf_usage_window": okf_usage_window,
+        "lifecycle_status": lifecycle_status,
+        "stale_after": stale_after,
+        "generated_by": generated_by,
+        "last_verified_at": last_verified_at,
+        "last_verified_by": last_verified_by,
     })
 }
 
@@ -476,6 +496,11 @@ fn commit_fact_add(
             ctx.now_ms,
             ctx.now_ms,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ),
         ctx.now_ms,
     )?;
@@ -506,15 +531,61 @@ fn commit_fact_update(
         .unwrap_or("inferred");
     let tags = parse_tags(payload);
 
-    let existing: Option<(String, i64)> = conn
+    let existing: Option<(
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )> = conn
         .query_row(
-            "SELECT source_ref, created_at FROM llm_wiki_entries
+            "SELECT source_ref, created_at,
+                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                    lifecycle_status, stale_after, generated_by,
+                    last_verified_at, last_verified_by
+             FROM llm_wiki_entries
              WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
             params![fact_id, ctx.entity_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((existing_source_ref, created_at)) = existing else {
+    let Some((
+        existing_source_ref,
+        created_at,
+        existing_source_hash,
+        existing_okf_type,
+        existing_okf_sources,
+        existing_okf_verified,
+        existing_okf_usage_window,
+        existing_lifecycle_status,
+        existing_stale_after,
+        existing_generated_by,
+        existing_last_verified_at,
+        existing_last_verified_by,
+    )) = existing
+    else {
         bail!("fact_update target not found: {fact_id}");
     };
 
@@ -547,15 +618,20 @@ fn commit_fact_update(
             &tags,
             confidence,
             ctx.source_type,
-            None,
+            existing_source_hash.as_deref(),
             &existing_source_ref,
-            None,
-            None,
-            None,
-            None,
+            existing_okf_type.as_deref(),
+            existing_okf_sources.as_deref(),
+            existing_okf_verified.as_deref(),
+            existing_okf_usage_window.as_deref(),
             created_at,
             ctx.now_ms,
             None,
+            Some(existing_lifecycle_status.as_str()),
+            existing_stale_after,
+            existing_generated_by.as_deref(),
+            existing_last_verified_at,
+            existing_last_verified_by.as_deref(),
         ),
         ctx.now_ms,
     )?;
@@ -687,6 +763,11 @@ fn commit_task_add(
             priority,
             ctx.now_ms,
             ctx.now_ms,
+            None,
+            None,
+            None,
+            None,
+            None,
             None,
             None,
             None,

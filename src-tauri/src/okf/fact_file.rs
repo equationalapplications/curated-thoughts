@@ -266,16 +266,30 @@ fn read_flow_value(s: &str) -> (String, usize) {
                     j += 1;
                 }
             }
-            let end = if j < bytes.len() { j + 1 } else { j };
-            (s[1..end.saturating_sub(1)].to_string(), end)
+            if j < bytes.len() {
+                // Properly terminated quote: the content is `s[1..j]` and
+                // the consumed span is `j + 1` (includes the close quote).
+                (s[1..j].to_string(), j + 1)
+            } else {
+                // Unterminated quote (malformed frontmatter): consume the
+                // rest of the input but never slice past the final byte —
+                // doing so on a value ending in a multi-byte UTF-8
+                // sequence would panic. Surface the null sentinel via an
+                // empty string so the upper layer classifies it.
+                (s[1..].to_string(), bytes.len())
+            }
         }
         b'\'' => {
             let mut j = 1;
             while j < bytes.len() && bytes[j] != b'\'' {
                 j += 1;
             }
-            let end = if j < bytes.len() { j + 1 } else { j };
-            (s[1..end.saturating_sub(1)].to_string(), end)
+            if j < bytes.len() {
+                (s[1..j].to_string(), j + 1)
+            } else {
+                // Unterminated single quote — see `b'"'` branch above.
+                (s[1..].to_string(), bytes.len())
+            }
         }
         _ => {
             // Bare value: until next `,` or end. Quoted spans are opaque —
@@ -800,6 +814,21 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
         // Unterminated flow mapping must also not panic; we just exercise
         // the slice path.
         let _ = parse_flow_value(r#"{ resource: "missing-close-quote"#);
+    }
+
+    #[test]
+    fn flow_value_with_unterminated_quote_ending_in_multibyte_does_not_panic() {
+        // Regression: previously, both `b'"'` and `b'\''` arms of
+        // `read_flow_value` sliced at `end.saturating_sub(1)` even when no
+        // closing quote was found. A value ending in a multi-byte UTF-8
+        // sequence (e.g. `é` = 0xC3 0xA9) would slice between the two
+        // bytes and panic. These tests exercise both arms with that shape.
+        let _ = parse_flow_value(r#"[ { resource: "missing-close-quote-é } ]"#);
+        let _ = parse_flow_value(r#"[ { resource: 'missing-close-quote-é } ]"#);
+        // Trailing multi-byte byte is the worst case: the slice would fall
+        // strictly between the two bytes of the last character.
+        let _ = parse_flow_value(r#"[ { resource: "missing-close-"\u{00e9} ]"#);
+        let _ = parse_flow_value(r#"[ { resource: 'missing-close-\u{00e9} ]"#);
     }
 
     fn normalize(s: &str) -> String {

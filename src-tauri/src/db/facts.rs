@@ -77,6 +77,14 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
             now_ms,
             now_ms,
             None,
+            // Manual Brain-mode inserts start without OKF provenance;
+            // the OKF v0.2 fields default to null until something
+            // explicitly populates them (import, verified annotation, etc.).
+            None,
+            None,
+            None,
+            None,
+            None,
         ),
         now_ms,
     )?;
@@ -116,7 +124,10 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
     assert_entity_active(&tx, entity_id)?;
     let existing = tx
         .query_row(
-            "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at
+            "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
+                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                    lifecycle_status, stale_after, generated_by,
+                    last_verified_at, last_verified_by
              FROM llm_wiki_entries
              WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
             params![fact_id, entity_id],
@@ -127,11 +138,38 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, Option<i64>>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<i64>>(13)?,
+                    r.get::<_, Option<String>>(14)?,
                 ))
             },
         )
         .optional()?;
-    let Some((tags_raw, confidence, source_type, source_ref, created_at)) = existing else {
+    let Some((
+        tags_raw,
+        confidence,
+        source_type,
+        source_ref,
+        created_at,
+        existing_source_hash,
+        existing_okf_type,
+        existing_okf_sources,
+        existing_okf_verified,
+        existing_okf_usage_window,
+        existing_lifecycle_status,
+        existing_stale_after,
+        existing_generated_by,
+        existing_last_verified_at,
+        existing_last_verified_by,
+    )) = existing
+    else {
         bail!("fact not found or archived: {fact_id}");
     };
 
@@ -153,15 +191,20 @@ pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: 
             &tags,
             &confidence,
             &source_type,
-            None,
+            existing_source_hash.as_deref(),
             &source_ref,
-            None,
-            None,
-            None,
-            None,
+            existing_okf_type.as_deref(),
+            existing_okf_sources.as_deref(),
+            existing_okf_verified.as_deref(),
+            existing_okf_usage_window.as_deref(),
             created_at,
             now_ms,
             None,
+            Some(existing_lifecycle_status.as_str()),
+            existing_stale_after,
+            existing_generated_by.as_deref(),
+            existing_last_verified_at,
+            existing_last_verified_by.as_deref(),
         ),
         now_ms,
     )?;

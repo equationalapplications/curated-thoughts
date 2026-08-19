@@ -103,6 +103,10 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
     const raf = requestAnimationFrame(() => {
       const blocks = lastBlocksRef.current;
       const target = blocks.find((b) => {
+        // Anchor chunk ids only ever identify heading blocks; rejecting
+        // paragraphs that happen to share the text prevents a duplicate-
+        // text earlier block from being matched.
+        if (b.type !== "heading") return false;
         const text = blockText(b);
         return text === anchorChunkId;
       });
@@ -124,6 +128,9 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
           : `[data-id="${target.id.replace(/(["\\])/g, "\\$1")}"]`;
       const node = root.querySelector(safeSelector) as HTMLElement | null;
       if (!node) return; // block not yet painted; skip rather than fight
+      // setTextCursorPosition only moves the editor selection; scroll the
+      // resolved DOM node into view so the user can see the anchor.
+      node.scrollIntoView({ block: "nearest", behavior: "auto" });
       cleanupHighlight();
       node.classList.add("editor-pane-block--anchor-highlight");
       highlightTimer = window.setTimeout(() => {
