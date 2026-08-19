@@ -70,6 +70,7 @@ use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
+struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
 struct PipelineHolder(
     Mutex<
         Option<(
@@ -2217,6 +2218,28 @@ fn copy_os_drop_paths_to_vault(
 
 pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root};
 
+#[tauri::command]
+fn ingest_document_cmd(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::DbState>,
+    embed_profile: tauri::State<'_, crate::EmbedProfileState>,
+    path: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?.clone();
+    let result = crate::pipeline::ingest_document(&conn.0, &profile, &path, false);
+    match &result {
+        Ok(()) => {
+            // The actual proposal-id wiring lives in Task 2; for now emit a generic done event.
+            let _ = app.emit("ingest-proposal-ready", serde_json::json!({"path": path}));
+        }
+        Err(e) => {
+            let _ = app.emit("ingest-error", serde_json::json!({"message": e.to_string()}));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
     let db_path = tmp_path.join("brain.db");
@@ -2344,6 +2367,10 @@ pub fn run() {
     });
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
+    let embed_profile = config
+        .get_embed_profile()
+        .unwrap_or_else(|_| crate::embedder::EmbedProfile::default());
+
     tauri::Builder::default()
         .manage(OutboxWorkerState(Mutex::new(None)))
         .manage(CloudBridgeState(Mutex::new(None)))
@@ -2425,6 +2452,7 @@ pub fn run() {
         })
         .manage(DbState(Mutex::new(db)))
         .manage(VaultConfigState(Mutex::new(config)))
+        .manage(EmbedProfileState(Mutex::new(embed_profile)))
         .manage(PipelineHolder(Mutex::new(Some(pipeline))))
         .manage(WikiStatusState(Mutex::new(WikiStatusFlags::default())))
         .manage(InferenceState(Mutex::new(GenerationProvider::Unconfigured)))
@@ -2511,6 +2539,7 @@ pub fn run() {
             acknowledge_ephemeral_disclosure,
             get_binary_path,
             get_brain_dir,
+            ingest_document_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
