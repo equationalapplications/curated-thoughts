@@ -78,6 +78,10 @@ function ensureResolver(): Promise<void> {
     .catch(() => {
       // Reset so future mounts retry; otherwise we'd be stuck in "loading"
       // with no fetch in flight and every `[[Name]]` would render unresolved.
+      // Skip if a newer fetch has been started since — a slow-arriving
+      // rejection must not wipe the fresher cache and roll `version`
+      // backwards (WikilinkText subscribers would re-render as unresolved).
+      if (resolverState.version > existing.version + 1) return;
       resolverState = {
         status: "loading",
         promise: Promise.resolve(),

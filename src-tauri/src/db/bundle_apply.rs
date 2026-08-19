@@ -81,12 +81,16 @@ fn extract_citations_urls(body: &str) -> Vec<String> {
     for line in body.lines() {
         if line.trim_start().starts_with("# Citations") {
             in_section = true;
+            // Standard markdown puts a blank line between a heading and its
+            // body — fall through to consume it instead of breaking out.
             continue;
         }
-        if in_section && line.trim().is_empty() {
-            break;
-        }
         if in_section {
+            // A second `# …` heading ends the section. Anything else (blank
+            // lines included) is part of the citation list.
+            if line.trim_start().starts_with('#') && !line.trim().is_empty() {
+                break;
+            }
             let mut rest = line;
             while let Some(idx) = find_http_ci(rest) {
                 let url_start = idx;
@@ -853,6 +857,32 @@ mod tests {
         assert_eq!(
             extract_citations_urls(body),
             vec!["hTtPs://example.com/path".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_citations_urls_tolerates_blank_line_after_heading() {
+        // Standard markdown: heading, blank line, then the bullet list. The
+        // pre-fix implementation broke on the blank line immediately after
+        // the heading, which is the exact shape every formatter emits.
+        let body = "Some intro text.\n\n# Citations\n\n- https://example.com/a\n- https://example.com/b\n";
+        assert_eq!(
+            extract_citations_urls(body),
+            vec![
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_citations_urls_terminates_at_next_heading() {
+        // A second `# …` heading (e.g. `# Notes`) must end the citations
+        // section; URLs after it must not be captured.
+        let body = "# Citations\n\n- https://example.com/a\n\n# Notes\n\n- https://example.com/b\n";
+        assert_eq!(
+            extract_citations_urls(body),
+            vec!["https://example.com/a".to_string()]
         );
     }
 }

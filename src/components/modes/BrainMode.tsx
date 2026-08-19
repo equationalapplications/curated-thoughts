@@ -113,23 +113,19 @@ export function BrainMode({
             {entityError ?? error}
           </p>
         )}
-        {entities.length > 0 && (
-          <>
-            {loading && (
-              <p className="placeholder brain-loading-overlay" aria-live="polite">
-                Refreshing entities…
-              </p>
-            )}
-            <EntityList
-              entities={entities}
-              selectedId={selectedEntityId}
-              onSelect={onEntitySelect}
-              onCreate={handleCreate}
-              onSortChange={setSort}
-            />
-            <OkfInteropBar onImported={refresh} />
-          </>
+        {loading && entities.length > 0 && (
+          <p className="placeholder brain-loading-overlay" aria-live="polite">
+            Refreshing entities…
+          </p>
         )}
+        <EntityList
+          entities={entities}
+          selectedId={selectedEntityId}
+          onSelect={onEntitySelect}
+          onCreate={handleCreate}
+          onSortChange={setSort}
+        />
+        <OkfInteropBar onImported={refresh} />
       </aside>
       <EntityPage
         entityId={selectedEntityId}
