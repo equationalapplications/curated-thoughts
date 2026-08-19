@@ -105,7 +105,7 @@ export function EntityPage({
   if (!entityId) {
     return (
       <main className="entity-page">
-        <p className="placeholder">Select an entity, or create one to start curating.</p>
+        <p className="placeholder">No entity selected. Pick one from the sidebar, or create a new one.</p>
       </main>
     );
   }

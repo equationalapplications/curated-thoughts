@@ -13,7 +13,13 @@ vi.mock("../components/brain/EntityPage", () => ({
       onEntityLoaded({ id: entityId, name: "Entity Alpha" });
     }
     return (
-      <main data-testid="entity-page" data-entity-id={entityId} />
+      <main data-testid="entity-page" data-entity-id={entityId}>
+        {!entityId && (
+          <p className="placeholder">
+            No entity selected. Pick one from the sidebar, or create a new one.
+          </p>
+        )}
+      </main>
     );
   },
 }));
@@ -27,8 +33,10 @@ vi.mock("../components/shell/OkfInteropBar", () => ({
 }));
 
 vi.mock("../components/shell/EditorPane", () => ({
-  EditorPane: ({ isWiki }: { isWiki: boolean }) => (
-    <div data-testid="editor-pane" data-is-wiki={String(isWiki)} />
+  EditorPane: ({ selectedDoc, isWiki }: { selectedDoc: string | null; isWiki: boolean }) => (
+    <div data-testid="editor-pane" data-is-wiki={String(isWiki)}>
+      {!selectedDoc && <p className="placeholder">Drop your first document</p>}
+    </div>
   ),
 }));
 
@@ -137,4 +145,31 @@ test("LibraryMode lists only user documents and renders a read-only editor", asy
   await waitFor(() =>
     expect(screen.queryByText("Alpha.md")).not.toBeInTheDocument(),
   );
+});
+
+test("BrainMode shows no-entity-selected placeholder when selectedEntityId is null", async () => {
+  render(
+    <BrainMode
+      selectedEntityId={null}
+      onEntitySelect={vi.fn()}
+      onOpenSource={vi.fn()}
+      onEntityName={vi.fn()}
+    />,
+  );
+  expect(
+    await screen.findByText(/no entity selected\. pick one from the sidebar, or create a new one/i),
+  ).toBeInTheDocument();
+});
+
+test("LibraryMode shows empty state when no document is selected", async () => {
+  render(
+    <LibraryMode
+      vaultPath="/Users/test/Curated-Thoughts"
+      selectedDoc={null}
+      onDocSelect={vi.fn()}
+    />,
+  );
+  expect(
+    await screen.findByText(/drop your first document/i),
+  ).toBeInTheDocument();
 });
