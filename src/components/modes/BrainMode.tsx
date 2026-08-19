@@ -105,17 +105,12 @@ export function BrainMode({
       />
       <div className="mode-layout">
         <aside className="sidebar">
-        {entityError && (
-          <p className="entity-error" role="alert">
-            {entityError}
-          </p>
-        )}
         {loading && entities.length === 0 && (
           <p className="placeholder">Loading entities…</p>
         )}
-        {error && (
+        {(entityError ?? error) && (
           <p className="entity-error" role="alert">
-            {error}
+            {entityError ?? error}
           </p>
         )}
         {entities.length > 0 && (

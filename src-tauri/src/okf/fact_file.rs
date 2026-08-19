@@ -240,54 +240,91 @@ fn split_flow_pairs(body: &str) -> Option<Vec<(String, serde_json::Value)>> {
         if i >= bytes.len() {
             return None; // malformed: key with no value
         }
-        let (val_str, next_i) = read_flow_value(&body[i..]);
-        out.push((key, classify_flow_scalar(val_str)));
+        let (val_str, next_i, was_quoted) = read_flow_value(&body[i..]);
+        // Quoted scalars are literal strings — skip type coercion so a
+        // quoted `"true"` round-trips as the string `true`, not Bool(true).
+        // Bare scalars still go through classify_flow_scalar for the
+        // boolean / null / numeric shortcut. An unterminated quote is
+        // detected by `was_quoted && val_str.is_empty()`; route that to
+        // classify_flow_scalar so empty → Null is preserved.
+        let value = if was_quoted && !val_str.is_empty() {
+            serde_json::Value::String(val_str)
+        } else {
+            classify_flow_scalar(val_str)
+        };
+        out.push((key, value));
         i += next_i;
     }
     Some(out)
 }
 
 /// Read a single flow value starting at position 0 of `s`. Returns the value
-/// string and how many bytes were consumed. Quoted values consume through the
-/// matching close-quote (with escape handling); bare values consume until the
-/// next `,` at depth 0 or end of input.
-fn read_flow_value(s: &str) -> (String, usize) {
+/// string, how many bytes were consumed, and whether the value was wrapped in
+/// `"` or `'` quotes. Quoted values consume through the matching close-quote
+/// (with escape handling); bare values consume until the next `,` at depth 0
+/// or end of input. The quoted flag lets callers skip `classify_flow_scalar`
+/// coercion: a quoted `"true"` is the literal string `true`, not the boolean.
+fn read_flow_value(s: &str) -> (String, usize, bool) {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
-        return (String::new(), 0);
+        return (String::new(), 0, false);
     }
     match bytes[0] {
         b'"' => {
             let mut j = 1;
             let mut out = String::new();
-            while j < bytes.len() && bytes[j] != b'"' {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+            // Iterate on UTF-8 character boundaries so non-ASCII content
+            // round-trips byte-for-byte; `bytes[j]` would otherwise read a
+            // mid-codepoint byte and `as char` would corrupt it.
+            while j < bytes.len() {
+                let c = match s[j..].chars().next() {
+                    Some(c) => c,
+                    None => break, // unterminated quote / malformed UTF-8
+                };
+                if c == '"' {
+                    break;
+                }
+                let char_len = c.len_utf8();
+                if c == '\\' && j + char_len < bytes.len() {
                     // Unescape the sequence: `\\` -> `\`, `\"` -> `"`. Any
                     // other backslash-escape is preserved verbatim so we
                     // don't lose data the encoder didn't intentionally emit.
-                    match bytes[j + 1] {
-                        b'\\' => out.push('\\'),
-                        b'"' => out.push('"'),
-                        other => {
+                    match s[j + char_len..].chars().next() {
+                        Some(next_c) => {
+                            match next_c {
+                                '\\' => out.push('\\'),
+                                '"' => out.push('"'),
+                                'n' => out.push('\n'),
+                                'r' => out.push('\r'),
+                                't' => out.push('\t'),
+                                other => {
+                                    out.push('\\');
+                                    out.push(other);
+                                }
+                            }
+                            j += char_len + next_c.len_utf8();
+                        }
+                        None => {
+                            // Trailing backslash with no escape: keep it
+                            // literal and stop so we don't overrun `bytes`.
                             out.push('\\');
-                            out.push(other as char);
+                            j += char_len;
                         }
                     }
-                    j += 2;
                 } else {
-                    out.push(bytes[j] as char);
-                    j += 1;
+                    out.push(c);
+                    j += char_len;
                 }
             }
             if j < bytes.len() {
                 // Properly terminated quote: the content is `out` and the
                 // consumed span is `j + 1` (includes the close quote).
-                (out, j + 1)
+                (out, j + 1, true)
             } else {
                 // Unterminated quote (malformed frontmatter): surface an
                 // empty value so `classify_flow_scalar` records Null rather
                 // than emitting a partial string into the JSON column.
-                (String::new(), bytes.len())
+                (String::new(), bytes.len(), true)
             }
         }
         b'\'' => {
@@ -296,11 +333,11 @@ fn read_flow_value(s: &str) -> (String, usize) {
                 j += 1;
             }
             if j < bytes.len() {
-                (s[1..j].to_string(), j + 1)
+                (s[1..j].to_string(), j + 1, true)
             } else {
                 // Unterminated single quote: surface as Null for the same
                 // reason as the double-quote branch.
-                (String::new(), bytes.len())
+                (String::new(), bytes.len(), true)
             }
         }
         _ => {
@@ -333,7 +370,7 @@ fn read_flow_value(s: &str) -> (String, usize) {
                     _ => j += 1,
                 }
             }
-            (s[..j].trim().to_string(), j)
+            (s[..j].trim().to_string(), j, false)
         }
     }
 }
@@ -412,22 +449,49 @@ fn flow_mapping_field(flow: &str, key: &str) -> Option<String> {
         let bytes = after.as_bytes();
         if bytes.first() == Some(&b'"') || bytes.first() == Some(&b'\'') {
             let quote = bytes[0];
+            let quote_char = quote as char;
             let mut j = 1;
             let mut out = String::new();
-            while j < bytes.len() && bytes[j] != quote {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    match bytes[j + 1] {
-                        b'\\' => out.push('\\'),
-                        q if q == quote => out.push(q as char),
-                        other => {
+            // Iterate on UTF-8 character boundaries so non-ASCII content
+            // round-trips byte-for-byte; the previous `bytes[j] as char`
+            // form read mid-codepoint bytes and corrupted non-ASCII metadata.
+            while j < bytes.len() {
+                let c = match after[j..].chars().next() {
+                    Some(c) => c,
+                    None => break, // malformed UTF-8
+                };
+                if c == quote_char {
+                    break;
+                }
+                let char_len = c.len_utf8();
+                if c == '\\' && j + char_len < bytes.len() {
+                    // Same escape semantics as `read_flow_value`: decode the
+                    // standard `\n` / `\r` / `\t` controls (emitted by
+                    // `encode_flow_scalar`) and preserve unknown escapes
+                    // verbatim so we don't lose data the encoder didn't emit.
+                    match after[j + char_len..].chars().next() {
+                        Some(next_c) => {
+                            match next_c {
+                                '\\' => out.push('\\'),
+                                q if q == quote_char => out.push(q),
+                                'n' => out.push('\n'),
+                                'r' => out.push('\r'),
+                                't' => out.push('\t'),
+                                other => {
+                                    out.push('\\');
+                                    out.push(other);
+                                }
+                            }
+                            j += char_len + next_c.len_utf8();
+                        }
+                        None => {
                             out.push('\\');
-                            out.push(other as char);
+                            j += char_len;
                         }
                     }
-                    j += 2;
                 } else {
-                    out.push(bytes[j] as char);
-                    j += 1;
+                    out.push(c);
+                    j += char_len;
                 }
             }
             if j >= bytes.len() {
@@ -560,37 +624,53 @@ fn collect_flow_mappings(body: &str) -> Vec<&str> {
 
 /// Quote a string as a YAML flow scalar, escaping `\` and `"` so the
 /// encoded form round-trips through the scalar decoder (see
-/// `read_flow_value`). Bare strings containing only safe characters are
+/// `read_flow_value`). Bare strings containing only safe characters AND
+/// that `classify_flow_scalar` would round-trip back as a `String` are
 /// emitted unquoted; anything with whitespace, structural YAML
-/// punctuation, or escape-significant characters is wrapped in double
-/// quotes with `\` → `\\` and `"` → `\"`. This is the single source of
+/// punctuation, escape-significant characters, or a value the classifier
+/// would coerce (boolean / null / numeric) is wrapped in double quotes
+/// with `\` → `\\`, `"` → `\"`, and the control chars `\n` / `\r` / `\t`
+/// escaped so a quoted scalar stays on one physical line and decodes
+/// back to the original control characters. This is the single source of
 /// truth for flow-scalar encoding; both `json_value_to_flow` and
 /// `serialize_actor_string` delegate here.
 pub(crate) fn encode_flow_scalar(s: &str) -> String {
-    if !s.is_empty()
-        && !s.contains(|c: char| {
-            c.is_whitespace()
-                || matches!(
-                    c,
-                    ':' | ','
-                        | '"'
-                        | '\''
-                        | '-'
-                        | '/'
-                        | '{'
-                        | '}'
-                        | '['
-                        | ']'
-                        | '#'
-                        | '\\'
-                )
-        })
-    {
+    let safe_chars = !s.contains(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ':' | ','
+                    | '"'
+                    | '\''
+                    | '-'
+                    | '/'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '#'
+                    | '\\'
+            )
+    });
+    // Bare form only safe if classify_flow_scalar would round-trip back
+    // to a String. "true" / "false" / "null" / "1.5" etc. would otherwise
+    // be silently coerced to Bool / Null / Number on import.
+    let round_trips_as_string =
+        matches!(classify_flow_scalar(s.to_string()), serde_json::Value::String(_));
+    if !s.is_empty() && safe_chars && round_trips_as_string {
         return s.to_string();
     }
     // Empty / needs-quoting: wrap in double quotes and escape backslashes
-    // first so a `\"` we add below is not itself escaped on the next pass.
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    // first so a `\"` we add below is not itself escaped on the next pass;
+    // then escape the control chars `\n` / `\r` / `\t` so the encoded
+    // scalar never spans physical lines and decodes back identically via
+    // `read_flow_value`.
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     format!("\"{escaped}\"")
 }
 
@@ -1004,5 +1084,98 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
 
     fn normalize(s: &str) -> String {
         format!("{}\n", s.trim_end())
+    }
+
+    /// CodeRabbit follow-up (data-integrity): encode_flow_scalar used to
+    /// cast individual bytes with `as char`, which truncated multi-byte
+    /// UTF-8 sequences (e.g. `"café"` decoded as `"cafÃ©"`). The decoder
+    /// now walks char boundaries.
+    #[test]
+    fn round_trips_non_ascii_source_metadata() {
+        let original = "café note — résumé du jour";
+        let decoded = round_trip_flow_value(original);
+        assert_eq!(decoded.as_str(), Some(original));
+    }
+
+    /// Same root cause, exercised on the actor (generated.by) path.
+    #[test]
+    fn round_trips_non_ascii_actor_string() {
+        let original = "human:josé — résumé";
+        let encoded = serialize_actor_string(original);
+        let raw = format!("{{ by: {encoded} }}");
+        let parsed = parse_flow_value(&raw).unwrap();
+        assert_eq!(
+            parsed["by"].as_str(),
+            Some(original),
+            "non-ASCII actor must round-trip via UTF-8 char boundaries; encoded={encoded:?}",
+        );
+    }
+
+    /// CodeRabbit follow-up (data-integrity): encode_flow_scalar used to
+    /// emit `"true"` / `"false"` / `"null"` / `"42"` as bare values; the
+    /// classifier then coerced them to Bool / Null / Number on import.
+    /// Quote them so they survive round-trip as String.
+    #[test]
+    fn round_trips_type_sensitive_strings_as_strings() {
+        for original in ["true", "false", "null", "42", "3.14", "-7", "0"] {
+            let decoded = round_trip_flow_value(original);
+            assert_eq!(
+                decoded.as_str(),
+                Some(original),
+                "{original:?} must round-trip as String, got {decoded:?}",
+            );
+        }
+    }
+
+    /// End-to-end regression for control-character handling: a generated_by
+    /// containing `\n` / `\r` / `\t` must encode inside a single quoted
+    /// scalar (no physical line split) and decode back to the original
+    /// control characters via build_fact_file / parse_fact_file.
+    #[test]
+    fn generated_by_with_control_chars_round_trips_through_build_and_parse() {
+        let fact = WikiFact {
+            id: "fact_cc".into(),
+            entity_id: "ent_cc".into(),
+            title: "Control chars".into(),
+            body: "B".into(),
+            tags: vec![],
+            confidence: "certain".into(),
+            source_type: "user_stated".into(),
+            source_hash: None,
+            source_ref: None,
+            created_at: 1719835200000,
+            updated_at: 1719835200000,
+            last_accessed_at: None,
+            access_count: 0,
+            deleted_at: None,
+            okf_type: None,
+            lifecycle_status: "stable".into(),
+            stale_after: None,
+            generated_by: Some("human:multi\nline\twith\rcarriage".into()),
+            okf_sources: None,
+            okf_verified: None,
+            okf_usage_window: None,
+            last_verified_at: None,
+            last_verified_by: None,
+        };
+        let md = build_fact_file(&fact, &[], "llm-wiki/2");
+        // The encoded scalar must stay on a single physical line — control
+        // chars escaped, not emitted raw, so the YAML frontmatter remains
+        // well-formed. We slice the `generated:` line directly rather
+        // than the whole frontmatter, which naturally spans many lines.
+        let front = md.split_once("\n---\n").unwrap().0;
+        let generated_line = front
+            .lines()
+            .find(|l| l.starts_with("generated:"))
+            .expect("generated line must be present");
+        assert!(
+            !generated_line.contains('\n'),
+            "encoded generated scalar must not contain literal newlines:\n{generated_line}",
+        );
+        let parsed = parse_fact_file(&md).unwrap();
+        assert_eq!(
+            parsed.fact.generated_by.as_deref(),
+            Some("human:multi\nline\twith\rcarriage"),
+        );
     }
 }
