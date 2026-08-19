@@ -16,7 +16,7 @@ function formatDay(secs: number): string {
 interface Props {
   entityId: string | null;
   onNavigateEntity: (name: string) => void;
-  onOpenSource: (path: string) => void;
+  onOpenSource: (path: string, chunkId?: string | null) => void;
   onEntityLoaded: (detail: EntityDetail) => void;
   /** Fired after any write so the sidebar can refresh counts. */
   onMutated: () => void;

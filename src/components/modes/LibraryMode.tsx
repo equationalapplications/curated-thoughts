@@ -10,9 +10,19 @@ interface Props {
   vaultPath: string;
   selectedDoc: string | null;
   onDocSelect: (path: string) => void;
+  /**
+   * Optional chunk id within `selectedDoc` to scroll/highlight on load.
+   * Driven by the active nav target's `chunkId` field in AppShell.
+   */
+  anchorChunkId?: string | null;
 }
 
-export function LibraryMode({ vaultPath, selectedDoc, onDocSelect }: Props) {
+export function LibraryMode({
+  vaultPath,
+  selectedDoc,
+  onDocSelect,
+  anchorChunkId = null,
+}: Props) {
   const { query, setQuery, results, searching } = useSearch(vaultPath);
   const files = useVaultFiles(vaultPath);
   const docFiles = files.filter((f) => f.tier === "user_doc");
@@ -43,7 +53,11 @@ export function LibraryMode({ vaultPath, selectedDoc, onDocSelect }: Props) {
           />
         )}
       </aside>
-      <EditorPane selectedDoc={selectedDoc} isWiki={isWiki} />
+      <EditorPane
+        selectedDoc={selectedDoc}
+        isWiki={isWiki}
+        anchorChunkId={anchorChunkId}
+      />
       <RelatedNotes selectedDoc={selectedDoc} />
     </div>
   );
