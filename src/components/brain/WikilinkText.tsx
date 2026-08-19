@@ -35,31 +35,53 @@ interface Props {
 }
 
 /**
+ * Shared, module-level cache so every `<WikilinkText>` instance subscribes to
+ * the same single `listEntities` fetch — a summary with N wikilink chips
+ * issues one round-trip, not N. Subscribers re-render when the cache updates.
+ */
+type ResolverState =
+  | { status: "loading"; promise: Promise<void>; version: number }
+  | { status: "ready"; names: Set<string>; version: number };
+
+let resolverState: ResolverState = { status: "loading", promise: Promise.resolve(), version: 0 };
+const resolverListeners = new Set<() => void>();
+
+function ensureResolver(): ResolverState {
+  if (resolverState.status === "ready") return resolverState;
+  const existing = resolverState;
+  // Wrap in Promise.resolve so a non-thenable (e.g. undefined from a test
+  // mock of `invoke`) becomes a fulfilled promise instead of crashing here.
+  const promise = Promise.resolve(listEntities("name_asc"))
+    .then((entities) => {
+      const names = new Set((entities ?? []).map((e) => e.name.toLowerCase()));
+      resolverState = { status: "ready", names, version: existing.version + 1 };
+      resolverListeners.forEach((fn) => fn());
+    })
+    .catch(() => {
+      // Stay in "loading" state so future mounts retry on the next refresh;
+      // unresolved is the fallback rendering state.
+    });
+  resolverState = { status: "loading", promise, version: existing.version + 1 };
+  return resolverState;
+}
+
+/**
  * Resolves entity names (case-insensitive) against the live entity list.
  * Returns a Set of lowercase names that have a matching entity.
  */
 function useResolvedEntityNames(): Set<string> {
-  const [resolved, setResolved] = useState<Set<string>>(new Set());
+  const [, setVersion] = useState(resolverState.version);
 
   useEffect(() => {
-    let cancelled = false;
-    const result = listEntities("name_asc");
-    if (!result) return;
-    result
-      .then((entities) => {
-        if (cancelled) return;
-        if (!entities) return;
-        setResolved(new Set(entities.map((e) => e.name.toLowerCase())));
-      })
-      .catch(() => {
-        /* silent — unresolved is the fallback state */
-      });
+    ensureResolver();
+    const listener = () => setVersion((v) => v + 1);
+    resolverListeners.add(listener);
     return () => {
-      cancelled = true;
+      resolverListeners.delete(listener);
     };
   }, []);
 
-  return resolved;
+  return resolverState.status === "ready" ? resolverState.names : new Set();
 }
 
 export function WikilinkText({ text, onNavigate }: Props) {
