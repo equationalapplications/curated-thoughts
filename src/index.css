@@ -1942,3 +1942,41 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .wizard-step-spinner { animation: none; }
 }
+
+/* ── StepIndicator ──────────────────────────────────────────────────────── */
+.step-indicator { margin-bottom: var(--space-4); }
+.step-indicator-strip {
+  display: flex;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-2);
+  flex-wrap: wrap;
+}
+.step-indicator-step {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.step-indicator-step::after { content: " · "; margin: 0 var(--space-1); }
+.step-indicator-step:last-child::after { content: ""; }
+.step-indicator-current { color: var(--text-primary); font-weight: 600; }
+.step-indicator-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 0 0 var(--space-1);
+}
+.step-indicator-bar {
+  height: 1px;
+  background: var(--text-muted);
+  position: relative;
+  overflow: hidden;
+}
+.step-indicator-fill {
+  display: block;
+  height: 1px;
+  background: var(--text-primary);
+  transition: width 240ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .step-indicator-fill { transition: none; }
+}
