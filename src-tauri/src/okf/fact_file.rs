@@ -259,24 +259,35 @@ fn read_flow_value(s: &str) -> (String, usize) {
     match bytes[0] {
         b'"' => {
             let mut j = 1;
+            let mut out = String::new();
             while j < bytes.len() && bytes[j] != b'"' {
                 if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    // Unescape the sequence: `\\` -> `\`, `\"` -> `"`. Any
+                    // other backslash-escape is preserved verbatim so we
+                    // don't lose data the encoder didn't intentionally emit.
+                    match bytes[j + 1] {
+                        b'\\' => out.push('\\'),
+                        b'"' => out.push('"'),
+                        other => {
+                            out.push('\\');
+                            out.push(other as char);
+                        }
+                    }
                     j += 2;
                 } else {
+                    out.push(bytes[j] as char);
                     j += 1;
                 }
             }
             if j < bytes.len() {
-                // Properly terminated quote: the content is `s[1..j]` and
-                // the consumed span is `j + 1` (includes the close quote).
-                (s[1..j].to_string(), j + 1)
+                // Properly terminated quote: the content is `out` and the
+                // consumed span is `j + 1` (includes the close quote).
+                (out, j + 1)
             } else {
-                // Unterminated quote (malformed frontmatter): consume the
-                // rest of the input but never slice past the final byte —
-                // doing so on a value ending in a multi-byte UTF-8
-                // sequence would panic. Surface the null sentinel via an
-                // empty string so the upper layer classifies it.
-                (s[1..].to_string(), bytes.len())
+                // Unterminated quote (malformed frontmatter): surface an
+                // empty value so `classify_flow_scalar` records Null rather
+                // than emitting a partial string into the JSON column.
+                (String::new(), bytes.len())
             }
         }
         b'\'' => {
@@ -287,8 +298,9 @@ fn read_flow_value(s: &str) -> (String, usize) {
             if j < bytes.len() {
                 (s[1..j].to_string(), j + 1)
             } else {
-                // Unterminated single quote — see `b'"'` branch above.
-                (s[1..].to_string(), bytes.len())
+                // Unterminated single quote: surface as Null for the same
+                // reason as the double-quote branch.
+                (String::new(), bytes.len())
             }
         }
         _ => {
@@ -401,17 +413,27 @@ fn flow_mapping_field(flow: &str, key: &str) -> Option<String> {
         if bytes.first() == Some(&b'"') || bytes.first() == Some(&b'\'') {
             let quote = bytes[0];
             let mut j = 1;
+            let mut out = String::new();
             while j < bytes.len() && bytes[j] != quote {
                 if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    match bytes[j + 1] {
+                        b'\\' => out.push('\\'),
+                        q if q == quote => out.push(q as char),
+                        other => {
+                            out.push('\\');
+                            out.push(other as char);
+                        }
+                    }
                     j += 2;
                 } else {
+                    out.push(bytes[j] as char);
                     j += 1;
                 }
             }
             if j >= bytes.len() {
                 return None; // unterminated quote
             }
-            return Some(after[1..j].to_string());
+            return Some(out);
         }
         let end = after
             .find(|c: char| c == ',' || c == '}')
@@ -536,13 +558,45 @@ fn collect_flow_mappings(body: &str) -> Vec<&str> {
     out
 }
 
+/// Quote a string as a YAML flow scalar, escaping `\` and `"` so the
+/// encoded form round-trips through the scalar decoder (see
+/// `read_flow_value`). Bare strings containing only safe characters are
+/// emitted unquoted; anything with whitespace, structural YAML
+/// punctuation, or escape-significant characters is wrapped in double
+/// quotes with `\` → `\\` and `"` → `\"`. This is the single source of
+/// truth for flow-scalar encoding; both `json_value_to_flow` and
+/// `serialize_actor_string` delegate here.
+pub(crate) fn encode_flow_scalar(s: &str) -> String {
+    if !s.is_empty()
+        && !s.contains(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    ':' | ','
+                        | '"'
+                        | '\''
+                        | '-'
+                        | '/'
+                        | '{'
+                        | '}'
+                        | '['
+                        | ']'
+                        | '#'
+                        | '\\'
+                )
+        })
+    {
+        return s.to_string();
+    }
+    // Empty / needs-quoting: wrap in double quotes and escape backslashes
+    // first so a `\"` we add below is not itself escaped on the next pass.
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 /// Quote actor strings containing `/` or `:` per upstream spec §4.1.
 pub(crate) fn serialize_actor_string(s: &str) -> String {
-    if s.contains('/') || s.contains(':') {
-        format!("\"{}\"", s)
-    } else {
-        s.to_string()
-    }
+    encode_flow_scalar(s)
 }
 
 /// Parse a JSON array string and re-emit it as a flow sequence of flow mappings:
@@ -581,18 +635,7 @@ pub(crate) fn flow_mapping_from_json(json: &str, _key: &str) -> Option<String> {
 
 pub(crate) fn json_value_to_flow(v: &serde_json::Value) -> String {
     match v {
-        serde_json::Value::String(s) => {
-            // Quote when the string contains anything YAML-meaningful inside a flow
-            // mapping/sequence: whitespace, separators, or characters that would
-            // otherwise be ambiguous (date `-`, path `/`, anchor/flow markers).
-            if s.contains(|c: char| {
-                c.is_whitespace() || matches!(c, ':' | ',' | '"' | '\'' | '-' | '/' | '{' | '}' | '[' | ']' | '#')
-            }) {
-                format!("\"{}\"", s.replace('"', "\\\""))
-            } else {
-                s.clone()
-            }
-        }
+        serde_json::Value::String(s) => encode_flow_scalar(s),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => "null".into(),
@@ -829,6 +872,134 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
         // strictly between the two bytes of the last character.
         let _ = parse_flow_value(r#"[ { resource: "missing-close-"\u{00e9} ]"#);
         let _ = parse_flow_value(r#"[ { resource: 'missing-close-\u{00e9} ]"#);
+    }
+
+    #[test]
+    fn unterminated_quoted_scalar_is_classified_as_null() {
+        // CodeRabbit follow-up: the previous decoder returned the entire
+        // post-quote span as the "value", so a malformed input like
+        // `{ resource: "missing-close }` would silently produce a string.
+        // Reject it as Null instead. A bare flow-mapping input lets us
+        // exercise the single-mapping walker (collect_flow_mappings on
+        // an array context fails first when the surrounding array is also
+        // truncated, which is correct behavior but masks the scalar
+        // fix).
+        let parsed = parse_flow_value(r#"{ resource: "missing-close }"#)
+            .expect("malformed mapping must still parse as an object");
+        let entry = parsed.as_object().unwrap();
+        assert!(
+            entry["resource"].is_null(),
+            "resource must be Null: {entry:?}"
+        );
+    }
+
+    /// Build a one-key flow mapping and round-trip the value through
+    /// encode → decode, asserting the decoded JSON equals the original.
+    /// Used to prove the encoder/decoder pair is symmetric for any
+    /// string shape we might persist via OKF v0.2 columns.
+    fn round_trip_flow_value(original: &str) -> serde_json::Value {
+        let encoded = encode_flow_scalar(original);
+        // Wrap in `{ k: <encoded> }` so we exercise the flow-mapping
+        // walker (split_flow_pairs → read_flow_value) on the encoded
+        // payload, not a bare scalar read.
+        let raw = format!("{{ k: {encoded} }}");
+        let parsed = parse_flow_value(&raw).unwrap();
+        parsed.as_object().unwrap()["k"].clone()
+    }
+
+    #[test]
+    fn round_trips_strings_with_quotes() {
+        let original = r#"she said "hello" and left"#;
+        let decoded = round_trip_flow_value(original);
+        assert_eq!(decoded.as_str(), Some(original));
+    }
+
+    #[test]
+    fn round_trips_strings_with_backslashes() {
+        // Windows-style path with both kinds of escape-significant chars.
+        let original = r#"C:\Users\alice\docs"#;
+        let decoded = round_trip_flow_value(original);
+        assert_eq!(decoded.as_str(), Some(original));
+    }
+
+    #[test]
+    fn round_trips_strings_with_commas() {
+        let original = "alpha, beta, gamma";
+        let decoded = round_trip_flow_value(original);
+        assert_eq!(decoded.as_str(), Some(original));
+    }
+
+    #[test]
+    fn round_trips_strings_with_line_breaks() {
+        let original = "line one\nline two\nline three";
+        let decoded = round_trip_flow_value(original);
+        assert_eq!(decoded.as_str(), Some(original));
+    }
+
+    #[test]
+    fn round_trips_actor_strings_with_punctuation() {
+        // serialize_actor_string is used for the `generated.by` field;
+        // its input is a free-form actor identifier, so quote+escape
+        // symmetry must hold for the same shapes as the columns above.
+        let cases = [
+            "human:alice",
+            "process:nightly-job",
+            "human:bot\\escape",
+            r#"human:has "quote""#,
+        ];
+        for original in cases {
+            let encoded = serialize_actor_string(original);
+            let raw = format!("{{ by: {encoded} }}");
+            let parsed = parse_flow_value(&raw).unwrap();
+            assert_eq!(
+                parsed["by"].as_str(),
+                Some(original),
+                "actor round-trip failed for {original:?}: encoded={encoded:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn generated_by_round_trips_through_build_and_parse() {
+        // End-to-end check: a generated_by string with both backslashes
+        // and quotes survives build_fact_file → parse_fact_file.
+        let mut fact = WikiFact {
+            id: "fact_rt".into(),
+            entity_id: "ent_rt".into(),
+            title: "Round trip".into(),
+            body: "B".into(),
+            tags: vec![],
+            confidence: "certain".into(),
+            source_type: "user_stated".into(),
+            source_hash: None,
+            source_ref: None,
+            created_at: 1719835200000,
+            updated_at: 1719835200000,
+            last_accessed_at: None,
+            access_count: 0,
+            deleted_at: None,
+            okf_type: None,
+            lifecycle_status: "stable".into(),
+            stale_after: None,
+            generated_by: Some(r#"human:has "quote" and \backslash"#.into()),
+            okf_sources: None,
+            okf_verified: None,
+            okf_usage_window: None,
+            last_verified_at: None,
+            last_verified_by: None,
+        };
+        let md = build_fact_file(&fact, &[], "llm-wiki/2");
+        let parsed = parse_fact_file(&md).unwrap();
+        assert_eq!(
+            parsed.fact.generated_by.as_deref(),
+            Some(r#"human:has "quote" and \backslash"#)
+        );
+        // And again, with a comma in the actor (would have been emitted
+        // unquoted by the old encoder, breaking the YAML flow mapping).
+        fact.generated_by = Some("process:a, b".into());
+        let md = build_fact_file(&fact, &[], "llm-wiki/2");
+        let parsed = parse_fact_file(&md).unwrap();
+        assert_eq!(parsed.fact.generated_by.as_deref(), Some("process:a, b"));
     }
 
     fn normalize(s: &str) -> String {

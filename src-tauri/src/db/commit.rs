@@ -496,7 +496,9 @@ fn commit_fact_add(
             ctx.now_ms,
             ctx.now_ms,
             None,
-            None,
+            // Proposal-created facts default to the stable lifecycle; the
+            // OKF v0.2 fields populate on import / verified annotation.
+            Some("stable"),
             None,
             None,
             None,
@@ -546,7 +548,10 @@ fn commit_fact_update(
         Option<String>,
     )> = conn
         .query_row(
-            "SELECT source_ref, created_at,
+            // COALESCE handles imported facts with a NULL source_ref so
+            // the r.get::<_, String>(0) deserializer doesn't bail before
+            // the update and outbox write can proceed.
+            "SELECT COALESCE(source_ref, ''), created_at,
                     source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
                     lifecycle_status, stale_after, generated_by,
                     last_verified_at, last_verified_by
@@ -769,7 +774,9 @@ fn commit_task_add(
             None,
             None,
             None,
-            None,
+            // Proposal-created tasks default to the stable lifecycle; the
+            // OKF v0.2 fields populate on import / verified annotation.
+            Some("stable"),
             None,
             None,
             None,
@@ -1226,6 +1233,20 @@ mod tests {
             .unwrap();
         assert_eq!(outbox_count, 1);
 
+        // The proposal-insert outbox payload must carry the persisted
+        // lifecycle_status (defaults to "stable" for newly committed facts).
+        let payload_lifecycle: String = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.lifecycle_status')
+                 FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND operation = 'INSERT'
+                 ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_lifecycle, "stable");
+
         let event_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_events", [], |r| r.get(0))
             .unwrap();
@@ -1323,6 +1344,93 @@ mod tests {
             .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(body, "Edited body.");
+    }
+
+    #[test]
+    fn fact_update_succeeds_when_source_ref_is_null() {
+        // Regression: imported facts can carry a NULL source_ref. The
+        // row-mapping closure in commit_fact_update used to fail to
+        // deserialize NULL into String before the update ran, so the
+        // proposal resolution would error and the import + manual edit
+        // couldn't be reconciled.
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        // Seed an entry whose source_ref is NULL (the path bundle_apply
+        // can produce when a fact is imported without a `resource`).
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact-imported', 'ent-1', 'Original', 'Original body.',
+                     '[]', 'inferred', 'librarian_inferred',
+                     NULL, 100, 100)",
+            [],
+        )
+        .unwrap();
+
+        insert_test_proposal(
+            &conn,
+            "prop-null-ref",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![NewProposalItem {
+                id: "item-update-null-ref".into(),
+                item_type: "fact_update".into(),
+                target_id: Some("fact-imported".into()),
+                payload: serde_json::json!({
+                    "body": "Edited body.",
+                    "tags": [],
+                    "confidence": "inferred",
+                }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id,
+                    quote: "x".into(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+            }],
+            doc_id,
+        );
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-null-ref",
+            &[ItemDecision {
+                item_id: "item-update-null-ref".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+            },
+        )
+        .expect("fact_update must succeed when source_ref is NULL");
+
+        assert_eq!(result.proposal_status, "approved");
+        let body: String = conn
+            .query_row(
+                "SELECT body FROM llm_wiki_entries WHERE id = 'fact-imported'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(body, "Edited body.");
+        // The outbox UPDATE payload should carry the coalesced empty string
+        // (not error) so downstream consumers can decode the row.
+        let payload_source_ref: String = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.source_ref')
+                 FROM llm_wiki_outbox
+                 WHERE record_id = 'fact-imported' AND operation = 'UPDATE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_source_ref, "");
     }
 
     #[test]
