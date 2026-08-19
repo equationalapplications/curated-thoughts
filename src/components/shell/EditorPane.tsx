@@ -56,7 +56,7 @@ export function EditorPane({ selectedDoc, isWiki }: Props) {
   if (!selectedDoc) {
     return (
       <main className="editor-pane">
-        <p className="placeholder">Select a document to read it</p>
+        <p className="placeholder">Drop your first document</p>
       </main>
     );
   }
