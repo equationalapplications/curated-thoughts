@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const LLM_WIKI_PROFILE: &str = "llm-wiki/1";
+pub const LLM_WIKI_PROFILE_V2: &str = "llm-wiki/2";
+pub const OKF_VERSION_V2: &str = "0.2";
 
 fn default_lifecycle_status() -> String { "stable".into() }
 
