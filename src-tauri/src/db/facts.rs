@@ -87,6 +87,14 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
         source_type: "user_stated".into(),
         source_docs: Vec::new(),
         updated_at: now_ms,
+        lifecycle_status: "stable".into(),
+        stale_after: None,
+        generated_by: None,
+        okf_sources: Vec::new(),
+        okf_verified: Vec::new(),
+        okf_usage_window: None,
+        last_verified_at: None,
+        last_verified_by: None,
     })
 }
 

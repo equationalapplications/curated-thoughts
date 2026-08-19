@@ -229,6 +229,40 @@ export interface EntityFact {
   source_type: string;
   source_docs: string[];
   updated_at: number;
+  lifecycle_status: string;
+  stale_after?: number | null;
+  generated_by?: string | null;
+  okf_sources: Array<{
+    id?: string | null;
+    resource: string;
+    title?: string | null;
+    author?: string | null;
+    usage_count?: number | null;
+    last_modified?: string | null;
+  }>;
+  okf_verified: Array<{ by: string; at: number }>;
+  okf_usage_window?: { from: string; to: string } | null;
+  last_verified_at?: number | null;
+  last_verified_by?: string | null;
+}
+
+export interface OkfSourceEntry {
+  id?: string | null;
+  resource: string;
+  title?: string | null;
+  author?: string | null;
+  usage_count?: number | null;
+  last_modified?: string | null;
+}
+
+export interface OkfVerifiedEntry {
+  by: string;
+  at: number;
+}
+
+export interface OkfUsageWindow {
+  from: string;
+  to: string;
 }
 
 export interface EntityTask {
