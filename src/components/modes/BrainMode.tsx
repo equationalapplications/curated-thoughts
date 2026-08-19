@@ -4,7 +4,9 @@ import { EntityList } from "../brain/EntityList";
 import { EntityPage } from "../brain/EntityPage";
 import { ConnectionsPanel } from "../brain/ConnectionsPanel";
 import { OkfInteropBar } from "../shell/OkfInteropBar";
+import { ProviderNotice } from "../health/ProviderNotice";
 import { useEntityList } from "../../hooks/useEntityList";
+import { useProviderHealth } from "../../hooks/useProviderHealth";
 
 interface Props {
   selectedEntityId: string | null;
@@ -20,6 +22,7 @@ export function BrainMode({
   onEntityName,
 }: Props) {
   const { entities, error, loading, refresh, setSort } = useEntityList();
+  const { generation, embedding } = useProviderHealth();
   const [entityError, setEntityError] = useState<string | null>(null);
 
   /**
@@ -94,8 +97,14 @@ export function BrainMode({
   }, [refresh]);
 
   return (
-    <div className="mode-layout">
-      <aside className="sidebar">
+    <div className="brain-mode">
+      <ProviderNotice
+        feature="search"
+        embedding={embedding}
+        generation={generation}
+      />
+      <div className="mode-layout">
+        <aside className="sidebar">
         {entityError && (
           <p className="entity-error" role="alert">
             {entityError}
@@ -135,6 +144,7 @@ export function BrainMode({
         entityId={selectedEntityId}
         onSelectEntity={onEntitySelect}
       />
+      </div>
     </div>
   );
 }

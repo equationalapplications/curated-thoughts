@@ -1765,3 +1765,43 @@ body {
   color: var(--on-surface);
   line-height: 1.5;
 }
+
+/* ── Provider notice (embedder / generation down) ──────────────── */
+.brain-mode {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.provider-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--error) 25%, transparent);
+  font-size: 12px;
+  color: var(--on-surface);
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.provider-notice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--error);
+  flex-shrink: 0;
+  box-shadow: 0 0 4px color-mix(in srgb, var(--error) 50%, transparent);
+}
+
+.provider-notice-message {
+  color: var(--on-surface);
+}
+
+[data-theme="dark"] .provider-notice {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--error) 35%, transparent);
+}
