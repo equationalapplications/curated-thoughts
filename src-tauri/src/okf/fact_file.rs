@@ -155,14 +155,14 @@ pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
 
 /// Parse OKF v0.2 `stale_after: YYYY-MM-DD` to epoch ms (UTC midnight).
 /// Returns None for absent or unparseable input.
-fn parse_stale_after_ms(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
+pub(crate) fn parse_stale_after_ms(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
     let s = fm.get_str("stale_after")?;
     crate::okf::timefmt::ms_from_utc_date(s)
 }
 
 /// Parse the v0.2 `generated: { by: ..., at: ... }` flow mapping to the actor string.
 /// Returns None when `generated` is absent or has no `by` (per upstream spec §2.4).
-fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
+pub(crate) fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
     let value = fm.fields.get("generated")?;
     let OkfFrontmatterValue::String(s) = value else { return None; };
     // Flow mapping parsed as raw text; Task 4's parser will replace this with a structured reader.
@@ -179,17 +179,17 @@ fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> 
 
 /// Latest verifier's `at` (epoch ms) from `verified: [...]` (or bare mapping).
 /// Walks the verbatim flow text and finds the rightmost `{ by: ..., at: ... }` entry.
-fn latest_verified_at(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
+pub(crate) fn latest_verified_at(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
     let raw = fm.get_str("verified")?;
     let last_at = last_verified_at_in_text(raw)?;
     crate::okf::timefmt::ms_from_iso(&last_at)
 }
-fn latest_verified_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
+pub(crate) fn latest_verified_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
     let raw = fm.get_str("verified")?;
     last_verified_by_in_text(raw)
 }
 
-fn last_verified_at_in_text(raw: &str) -> Option<String> {
+pub(crate) fn last_verified_at_in_text(raw: &str) -> Option<String> {
     // Find every `at: <quoted-or-bare>` substring; take the last ISO timestamp.
     let bytes = raw.as_bytes();
     let mut last: Option<String> = None;
@@ -210,7 +210,7 @@ fn last_verified_at_in_text(raw: &str) -> Option<String> {
     }
     last
 }
-fn last_verified_by_in_text(raw: &str) -> Option<String> {
+pub(crate) fn last_verified_by_in_text(raw: &str) -> Option<String> {
     // Symmetric to last_verified_at_in_text; reads the trailing `by:` value.
     let bytes = raw.as_bytes();
     let mut i = 0;
