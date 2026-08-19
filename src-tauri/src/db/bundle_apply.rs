@@ -53,6 +53,27 @@ fn synthesize_sources_from_body(bundle: &ParsedBundle) -> SyntheticSources {
     out
 }
 
+/// Byte index of the first ASCII `http` in `s`, case-insensitive.
+/// Returns `None` for empty inputs or strings shorter than `http`.
+/// Used by the v0.1 → v0.2 `# Citations` fallback so URLs whose protocol
+/// is upper- or mixed-case (`HTTPS://…`, `Https://…`, etc.) are still captured.
+fn find_http_ci(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 4 {
+        return None;
+    }
+    for i in 0..=bytes.len() - 4 {
+        if bytes[i].eq_ignore_ascii_case(&b'h')
+            && bytes[i + 1].eq_ignore_ascii_case(&b't')
+            && bytes[i + 2].eq_ignore_ascii_case(&b't')
+            && bytes[i + 3].eq_ignore_ascii_case(&b'p')
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Scan a body for a `# Citations` section and collect every URL on subsequent lines.
 fn extract_citations_urls(body: &str) -> Vec<String> {
     let mut urls = Vec::new();
@@ -67,7 +88,7 @@ fn extract_citations_urls(body: &str) -> Vec<String> {
         }
         if in_section {
             let mut rest = line;
-            while let Some(idx) = rest.find("http") {
+            while let Some(idx) = find_http_ci(rest) {
                 let url_start = idx;
                 let mut end = url_start;
                 let bytes = rest.as_bytes();
@@ -780,5 +801,32 @@ mod tests {
         assert_eq!(preview.entities[0].facts_new, 0);
         assert_eq!(preview.entities[0].facts_existing, 1);
         assert_eq!(preview.entities[0].events_duplicate, 1);
+    }
+
+    #[test]
+    fn extract_citations_urls_handles_uppercase_protocol() {
+        let body = "# Citations\nHTTPS://example.com/path\n";
+        assert_eq!(
+            extract_citations_urls(body),
+            vec!["HTTPS://example.com/path".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_citations_urls_handles_titlecase_protocol() {
+        let body = "# Citations\nHttps://example.com/path\n";
+        assert_eq!(
+            extract_citations_urls(body),
+            vec!["Https://example.com/path".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_citations_urls_handles_mixed_case_protocol() {
+        let body = "# Citations\nhTtPs://example.com/path\n";
+        assert_eq!(
+            extract_citations_urls(body),
+            vec!["hTtPs://example.com/path".to_string()]
+        );
     }
 }
