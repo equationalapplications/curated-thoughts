@@ -2225,16 +2225,50 @@ fn ingest_document_cmd(
     embed_profile: tauri::State<'_, crate::EmbedProfileState>,
     path: String,
 ) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?.clone();
+    run_ingest_with_app(&app, &db.0, &embed_profile.0, path)
+}
+
+/// Synchronous ingest + progress event emitter. Extracted from
+/// `ingest_document_cmd` so the event-emission sequence can be exercised in a
+/// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
+/// argument is not supported by `MockRuntime`'s `CommandArg` extractor).
+fn run_ingest_with_app<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    db: &Mutex<AppDb>,
+    embed_profile: &Mutex<crate::embedder::EmbedProfile>,
+    path: String,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let profile = embed_profile.lock().map_err(|e| e.to_string())?.clone();
+    let _ = app.emit(
+        "ingest-progress",
+        serde_json::json!({"phase": "chunking", "path": path}),
+    );
     let result = crate::pipeline::ingest_document(&conn.0, &profile, &path, false);
+    let _ = app.emit(
+        "ingest-progress",
+        serde_json::json!({"phase": "embedding", "path": path}),
+    );
     match &result {
         Ok(()) => {
-            // The actual proposal-id wiring lives in Task 2; for now emit a generic done event.
-            let _ = app.emit("ingest-proposal-ready", serde_json::json!({"path": path}));
+            // Look up the most-recent pending proposal citing this path (if any)
+            // and surface its id in the ready event. `None` is serialized as
+            // JSON `null` — Task 3's TypeScript contract is `proposalId: string | null`,
+            // and Task 7's `useEffect` skips routing when the value is `null`
+            // (it would otherwise route to a nonexistent proposal id).
+            let proposal_id = crate::db::proposals::latest_pending_for_path(&conn.0, &path)
+                .ok()
+                .flatten();
+            let _ = app.emit(
+                "ingest-proposal-ready",
+                serde_json::json!({"path": path, "proposalId": proposal_id}),
+            );
         }
         Err(e) => {
-            let _ = app.emit("ingest-error", serde_json::json!({"message": e.to_string()}));
+            let _ = app.emit(
+                "ingest-error",
+                serde_json::json!({"message": e.to_string()}),
+            );
         }
     }
     Ok(())
@@ -3224,6 +3258,144 @@ mod maintenance_command_tests {
         assert!(
             existing_deleted_at.is_none(),
             "existing source_ref should not be marked deleted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ingest_document_command_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tauri::Listener;
+    use tempfile::TempDir;
+
+    // `pipeline::ingest_document` reads `CURATED_EMBED_STUB` to bypass Ollama.
+    // The pipeline test suite uses the same env var, so guard it with a static
+    // mutex to keep tests from racing on the value.
+    static EMBED_STUB_GUARD: Mutex<()> = Mutex::new(());
+
+    struct StubUnset;
+    impl Drop for StubUnset {
+        fn drop(&mut self) {
+            std::env::remove_var("CURATED_EMBED_STUB");
+        }
+    }
+
+    /// Locks the embedding-stub guard, sets `CURATED_EMBED_STUB=constant8`, and
+    /// returns an RAII guard that will unset the var when dropped.
+    fn lock_stub() -> StubUnset {
+        let _stub_lock = EMBED_STUB_GUARD.lock().unwrap();
+        std::env::set_var("CURATED_EMBED_STUB", "constant8");
+        StubUnset
+    }
+
+    #[test]
+    fn ingest_document_command_emits_progress_and_proposal_ready() {
+        let _stub_cleanup = lock_stub();
+
+        let tmp = TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("brain.db");
+        let db = db::AppDb::open(&db_path).expect("open test db");
+        let config = vault::VaultConfig::new(tmp.path().join("config.json"));
+
+        // Real markdown doc with enough words for chunk_autodetect to produce
+        // at least one chunk — without a chunk, `ingest_document` returns Ok(())
+        // but the embedding leg still runs the same code path so we still emit
+        // both progress events.
+        let doc_path = tmp.path().join("note.md");
+        std::fs::write(
+            &doc_path,
+            "# Test Note\n\n".to_owned() + &"word ".repeat(40),
+        )
+        .expect("write doc");
+
+        // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
+        // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
+        // already hold works fine and listeners observe the events).
+        let app = tauri::test::mock_builder()
+            .manage(DbState(Mutex::new(db)))
+            .manage(VaultConfigState(Mutex::new(config)))
+            .manage(EmbedProfileState(Mutex::new(
+                crate::embedder::EmbedProfile::default(),
+            )))
+            .manage(PipelineHolder(Mutex::new(None)))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app");
+
+        // Capture emitted events into a shared vector. We don't care about the
+        // payload of `ingest-error` here — the happy-path event shapes are what
+        // we lock in.
+        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let progress_cap = captured.clone();
+        app.listen("ingest-progress", move |event| {
+            progress_cap
+                .lock()
+                .unwrap()
+                .push(("ingest-progress".into(), event.payload().into()));
+        });
+
+        let ready_cap = captured.clone();
+        app.listen("ingest-proposal-ready", move |event| {
+            ready_cap
+                .lock()
+                .unwrap()
+                .push(("ingest-proposal-ready".into(), event.payload().into()));
+        });
+
+        // Extract the state via `app.state::<T>()` — the same path the Tauri
+        // command argument extractor uses — and call the helper directly with
+        // the inner locks.
+        let db_state = app.state::<DbState>();
+        let profile_state = app.state::<EmbedProfileState>();
+        run_ingest_with_app(
+            app.handle(),
+            &db_state.0,
+            &profile_state.0,
+            doc_path.to_string_lossy().into_owned(),
+        )
+        .expect("run_ingest_with_app");
+
+        // Allow Tauri's event loop to deliver the listen notifications before
+        // we read the buffer.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let events = captured.lock().unwrap();
+        let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.iter().any(|n| *n == "ingest-progress"),
+            "expected at least one ingest-progress event, got: {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
+            "expected ingest-progress with phase=chunking, got: {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
+            "expected ingest-progress with phase=embedding, got: {events:?}",
+        );
+        assert!(
+            names.iter().any(|n| *n == "ingest-proposal-ready"),
+            "expected at least one ingest-proposal-ready event, got: {events:?}",
+        );
+        // The test document doesn't produce a pending proposal (synthesis is
+        // async), so `proposalId` must serialize as JSON `null` — not `""`,
+        // which the wizard would otherwise route to as a nonexistent id.
+        let ready_payload = events
+            .iter()
+            .find(|(n, _)| n == "ingest-proposal-ready")
+            .map(|(_, p)| p.clone())
+            .expect("ingest-proposal-ready payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(&ready_payload).expect("parse ingest-proposal-ready payload");
+        assert_eq!(
+            payload.get("proposalId"),
+            Some(&serde_json::Value::Null),
+            "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
         );
     }
 }
