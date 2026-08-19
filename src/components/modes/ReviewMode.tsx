@@ -24,7 +24,7 @@ interface Props {
   onAction: () => void;
   vaultPath: string;
   queueError?: string | null;
-  onOpenSource?: (path: string) => void;
+  onOpenSource?: (path: string, chunkId?: string | null) => void;
   focusProposalId?: string;
 }
 

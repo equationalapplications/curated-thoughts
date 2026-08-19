@@ -231,6 +231,16 @@ button {
   text-decoration: underline;
 }
 
+.wikilink-chip--resolved {
+  color: var(--primary);
+  opacity: 1;
+}
+
+.wikilink-chip--unresolved {
+  opacity: 0.5;
+  text-decoration: underline dashed;
+}
+
 .connections-panel { width: 260px; overflow-y: auto; padding: 12px; }
 .connections-section h4 { margin: 12px 0 4px; font-size: 12px; opacity: 0.7; }
 .connections-section ul { list-style: none; margin: 0; padding: 0; }

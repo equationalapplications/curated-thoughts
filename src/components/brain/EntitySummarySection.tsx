@@ -1,10 +1,15 @@
 import { useState } from "react";
-import { useCreateBlockNote } from "@blocknote/react";
+import { useCreateBlockNote, SuggestionMenuController } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
 import { updateEntitySummary } from "../../lib/tauri";
 import { useTheme } from "../../lib/ThemeContext";
-import { WikilinkText } from "./WikilinkText";
+import { WikilinkText, getWikilinkResolverEntities } from "./WikilinkText";
+import {
+  EntityWikilinkSuggestion,
+  filterEntitySuggestions,
+  type EntityWikilinkSuggestionItem,
+} from "./EntityWikilinkSuggestion";
 
 interface Props {
   entityId: string;
@@ -63,7 +68,9 @@ export function EntitySummarySection({
         )}
       </div>
       {editing ? (
-        <BlockNoteView editor={editor} editable theme={theme} />
+        <BlockNoteView editor={editor} editable theme={theme}>
+          <EntityWikilinkSuggestionMenu editor={editor} />
+        </BlockNoteView>
       ) : summary.trim() ? (
         <p className="entity-summary-prose">
           <WikilinkText text={summary} onNavigate={onNavigateEntity} />
@@ -77,5 +84,59 @@ export function EntitySummarySection({
         </p>
       )}
     </section>
+  );
+}
+
+async function fetchEntityWikilinkItems(
+  query: string,
+): Promise<EntityWikilinkSuggestionItem[]> {
+  // Reuse the shared WikilinkText resolver cache rather than firing a fresh
+  // `listEntities` IPC round-trip on every keystroke. The cache is refreshed
+  // by `useEntityList.refresh()` after entity create/import mutations.
+  const entities = getWikilinkResolverEntities();
+  return filterEntitySuggestions(entities, query).map((entity) => ({
+    entity,
+  }));
+}
+
+interface EntityWikilinkSuggestionMenuProps {
+  editor: ReturnType<typeof useCreateBlockNote>;
+}
+
+function EntityWikilinkSuggestionMenu({
+  editor,
+}: EntityWikilinkSuggestionMenuProps) {
+  function handleItemClick(item: EntityWikilinkSuggestionItem) {
+    editor.insertInlineContent(`[[${item.entity.name}]] `);
+  }
+
+  return (
+    <SuggestionMenuController<typeof fetchEntityWikilinkItems>
+      triggerCharacter="[["
+      getItems={fetchEntityWikilinkItems}
+      suggestionMenuComponent={EntityWikilinkSuggestionMenuView}
+      onItemClick={handleItemClick}
+    />
+  );
+}
+
+function EntityWikilinkSuggestionMenuView({
+  items,
+  onItemClick,
+}: {
+  items: EntityWikilinkSuggestionItem[];
+  selectedIndex: number | undefined;
+  onItemClick?: (item: EntityWikilinkSuggestionItem) => void;
+}) {
+  const entities = items.map((item) => item.entity);
+  return (
+    <EntityWikilinkSuggestion
+      entities={entities}
+      query=""
+      onSelect={(entity) => {
+        const item = items.find((i) => i.entity.id === entity.id);
+        if (item && onItemClick) onItemClick(item);
+      }}
+    />
   );
 }

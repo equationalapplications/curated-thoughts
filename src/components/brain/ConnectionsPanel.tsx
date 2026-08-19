@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { getEntityConnections, type EntityConnections } from "../../lib/tauri";
+import { useProviderHealth } from "../../hooks/useProviderHealth";
+import { ProviderNotice } from "../health/ProviderNotice";
 
 interface Props {
   entityId: string | null;
@@ -8,11 +10,19 @@ interface Props {
 
 export function ConnectionsPanel({ entityId, onSelectEntity }: Props) {
   const [connections, setConnections] = useState<EntityConnections | null>(null);
+  const { generation, embedding } = useProviderHealth();
 
   useEffect(() => {
     let cancelled = false;
     if (!entityId) {
       setConnections(null);
+      return;
+    }
+    // Gate the request on embedder health: if the embedder is down or
+    // unconfigured, the ProviderNotice is the user-facing surface — don't
+    // fire the request at all.
+    if (embedding === "error" || embedding === "unconfigured") {
+      setConnections({ outgoing: [], backlinks: [] });
       return;
     }
     getEntityConnections(entityId)
@@ -25,7 +35,7 @@ export function ConnectionsPanel({ entityId, onSelectEntity }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [entityId]);
+  }, [entityId, embedding]);
 
   if (!entityId || !connections) return null;
 
@@ -39,6 +49,11 @@ export function ConnectionsPanel({ entityId, onSelectEntity }: Props) {
   return (
     <aside className="connections-panel" aria-label="Connections">
       <h3>Connections</h3>
+      <ProviderNotice
+        feature="similarity"
+        embedding={embedding}
+        generation={generation}
+      />
 
       <section className="connections-section">
         <h4>Linked from</h4>

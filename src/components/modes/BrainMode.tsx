@@ -4,12 +4,14 @@ import { EntityList } from "../brain/EntityList";
 import { EntityPage } from "../brain/EntityPage";
 import { ConnectionsPanel } from "../brain/ConnectionsPanel";
 import { OkfInteropBar } from "../shell/OkfInteropBar";
+import { ProviderNotice } from "../health/ProviderNotice";
 import { useEntityList } from "../../hooks/useEntityList";
+import { useProviderHealth } from "../../hooks/useProviderHealth";
 
 interface Props {
   selectedEntityId: string | null;
   onEntitySelect: (id: string) => void;
-  onOpenSource: (path: string) => void;
+  onOpenSource: (path: string, chunkId?: string | null) => void;
   onEntityName: (name: string) => void;
 }
 
@@ -19,7 +21,8 @@ export function BrainMode({
   onOpenSource,
   onEntityName,
 }: Props) {
-  const { entities, error, loading, refresh } = useEntityList();
+  const { entities, error, loading, refresh, setSort } = useEntityList();
+  const { generation, embedding } = useProviderHealth();
   const [entityError, setEntityError] = useState<string | null>(null);
 
   /**
@@ -94,30 +97,35 @@ export function BrainMode({
   }, [refresh]);
 
   return (
-    <div className="mode-layout">
-      <aside className="sidebar">
-        {entityError && (
-          <p className="entity-error" role="alert">
-            {entityError}
-          </p>
-        )}
-        {loading ? (
+    <div className="brain-mode">
+      <ProviderNotice
+        feature="related_notes"
+        embedding={embedding}
+        generation={generation}
+      />
+      <div className="mode-layout">
+        <aside className="sidebar">
+        {loading && entities.length === 0 && (
           <p className="placeholder">Loading entities…</p>
-        ) : error ? (
-          <p className="entity-error" role="alert">
-            {error}
-          </p>
-        ) : (
-          <>
-            <EntityList
-              entities={entities}
-              selectedId={selectedEntityId}
-              onSelect={onEntitySelect}
-              onCreate={handleCreate}
-            />
-            <OkfInteropBar onImported={refresh} />
-          </>
         )}
+        {(entityError ?? error) && (
+          <p className="entity-error" role="alert">
+            {entityError ?? error}
+          </p>
+        )}
+        {loading && entities.length > 0 && (
+          <p className="placeholder brain-loading-overlay" aria-live="polite">
+            Refreshing entities…
+          </p>
+        )}
+        <EntityList
+          entities={entities}
+          selectedId={selectedEntityId}
+          onSelect={onEntitySelect}
+          onCreate={handleCreate}
+          onSortChange={setSort}
+        />
+        <OkfInteropBar onImported={refresh} />
       </aside>
       <EntityPage
         entityId={selectedEntityId}
@@ -134,6 +142,7 @@ export function BrainMode({
         entityId={selectedEntityId}
         onSelectEntity={onEntitySelect}
       />
+      </div>
     </div>
   );
 }

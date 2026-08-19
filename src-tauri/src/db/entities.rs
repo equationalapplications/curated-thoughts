@@ -37,7 +37,7 @@ pub struct EntitySummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityFact {
-    pub id: String,
+    pub id: String, // raw OKF fact id (displayed directly by the "..." power menu)
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
@@ -45,6 +45,57 @@ pub struct EntityFact {
     pub source_type: String,
     pub source_docs: Vec<String>,
     pub updated_at: i64,
+    // OKF v0.2 fields
+    pub lifecycle_status: String,
+    pub stale_after: Option<i64>,
+    pub generated_by: Option<String>,
+    pub okf_sources: Vec<OkfSourceEntry>,
+    pub okf_verified: Vec<OkfVerifiedEntry>,
+    pub okf_usage_window: Option<OkfUsageWindow>,
+    pub last_verified_at: Option<i64>,
+    pub last_verified_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkfSourceEntry {
+    pub id: Option<String>,
+    pub resource: String,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub usage_count: Option<i64>,
+    pub last_modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkfVerifiedEntry {
+    pub by: String,
+    /// epoch ms. The wire format may carry an ISO-8601 string
+    /// (e.g. `2026-07-02T00:00:00.000Z`); the deserializer normalizes both
+    /// shapes to `i64` so imported facts and direct writes share a single
+    /// `parse_okf_verified` path.
+    #[serde(deserialize_with = "deserialize_epoch_ms")]
+    pub at: i64,
+}
+
+fn deserialize_epoch_ms<'de, D>(d: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| Error::custom("okf_verified.at: expected integer epoch ms")),
+        serde_json::Value::String(s) => crate::okf::timefmt::ms_from_iso(&s)
+            .ok_or_else(|| Error::custom("okf_verified.at: expected ISO-8601 timestamp")),
+        _ => Err(Error::custom("okf_verified.at: expected number or ISO-8601 string")),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkfUsageWindow {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +156,25 @@ fn summary_snippet(summary: &str) -> String {
 
 fn parse_tags(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn parse_okf_sources(raw: Option<&str>) -> Vec<OkfSourceEntry> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn parse_okf_verified(raw: Option<&str>) -> Vec<OkfVerifiedEntry> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
+    let raw = raw?;
+    serde_json::from_str(raw).ok()
 }
 
 fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<String> {
@@ -238,7 +308,9 @@ pub fn list_entities(
 
 fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at
+        "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at,
+                lifecycle_status, stale_after, generated_by, okf_sources, okf_verified,
+                okf_usage_window, last_verified_at, last_verified_by
          FROM llm_wiki_entries
          WHERE entity_id = ?1 AND deleted_at IS NULL
          ORDER BY updated_at DESC",
@@ -253,11 +325,36 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
             r.get::<_, String>(5)?,
             r.get::<_, Option<String>>(6)?,
             r.get::<_, i64>(7)?,
+            r.get::<_, String>(8)?,
+            r.get::<_, Option<i64>>(9)?,
+            r.get::<_, Option<String>>(10)?,
+            r.get::<_, Option<String>>(11)?,
+            r.get::<_, Option<String>>(12)?,
+            r.get::<_, Option<String>>(13)?,
+            r.get::<_, Option<i64>>(14)?,
+            r.get::<_, Option<String>>(15)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, title, body, tags_raw, confidence, source_type, source_ref, updated_at) = row?;
+        let (
+            id,
+            title,
+            body,
+            tags_raw,
+            confidence,
+            source_type,
+            source_ref,
+            updated_at,
+            lifecycle_status,
+            stale_after,
+            generated_by,
+            okf_sources_raw,
+            okf_verified_raw,
+            okf_usage_window_raw,
+            last_verified_at,
+            last_verified_by,
+        ) = row?;
         out.push(EntityFact {
             id,
             title,
@@ -267,6 +364,14 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
             source_type,
             source_docs: source_docs_from_ref(conn, source_ref.as_deref()),
             updated_at,
+            lifecycle_status,
+            stale_after,
+            generated_by,
+            okf_sources: parse_okf_sources(okf_sources_raw.as_deref()),
+            okf_verified: parse_okf_verified(okf_verified_raw.as_deref()),
+            okf_usage_window: parse_okf_usage_window(okf_usage_window_raw.as_deref()),
+            last_verified_at,
+            last_verified_by,
         });
     }
     Ok(out)
@@ -627,5 +732,61 @@ mod tests {
         assert_eq!(sourced.source_docs, vec!["documents/notes.md".to_string()]);
         let plain = loaded.facts.iter().find(|f| f.id == "fact-plain").unwrap();
         assert!(plain.source_docs.is_empty());
+    }
+
+    #[test]
+    fn fact_v02_fields_populated_from_okf_sources_column() {
+        // Seed a fact with okf_sources / okf_verified populated, then load via get_entity
+        // and assert the parsed Vec<OkfSourceEntry> / Vec<OkfVerifiedEntry> round-trip.
+        let conn = open_in_memory().unwrap();
+        let detail = create_entity(&conn, &CreateEntityInput {
+            name: "V02".into(), entity_type: None, summary: None,
+        }).unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at, lifecycle_status, okf_sources, okf_verified, okf_usage_window)
+             VALUES ('fact-v02', ?1, 'T', 'B', '[]', 'certain', 'user_stated', 100, 100,
+                     'stable',
+                     '[{\"resource\":\"documents/notes.md\",\"usage_count\":3}]',
+                     '[{\"by\":\"process:nightly\",\"at\":1700000000000}]',
+                     '{\"from\":\"2026-07-01\",\"to\":\"2026-12-31\"}')",
+            params![detail.id],
+        ).unwrap();
+        let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
+        let fact = loaded.facts.iter().find(|f| f.id == "fact-v02").unwrap();
+        assert_eq!(fact.lifecycle_status, "stable");
+        assert_eq!(fact.okf_sources.len(), 1);
+        assert_eq!(fact.okf_sources[0].resource, "documents/notes.md");
+        assert_eq!(fact.okf_sources[0].usage_count, Some(3));
+        assert_eq!(fact.okf_verified.len(), 1);
+        assert_eq!(fact.okf_verified[0].by, "process:nightly");
+        assert_eq!(fact.okf_usage_window.as_ref().unwrap().from, "2026-07-01");
+    }
+
+    #[test]
+    fn fact_v02_okf_verified_accepts_iso_at_string() {
+        // The OKF v0.2 frontmatter reader writes `at` as an ISO-8601 string
+        // (e.g. `2026-07-02T00:00:00.000Z`); the importer round-trips that
+        // JSON into `llm_wiki_entries.okf_verified` verbatim. `parse_okf_verified`
+        // must normalize the ISO form to epoch ms so the UI sees the record.
+        let conn = open_in_memory().unwrap();
+        let detail = create_entity(&conn, &CreateEntityInput {
+            name: "Iso".into(), entity_type: None, summary: None,
+        }).unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at, lifecycle_status, okf_verified)
+             VALUES ('fact-iso', ?1, 'T', 'B', '[]', 'certain', 'user_stated', 100, 100,
+                     'stable',
+                     '[{\"by\":\"process:nightly\",\"at\":\"2026-07-02T00:00:00.000Z\"}]')",
+            params![detail.id],
+        ).unwrap();
+        let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
+        let fact = loaded.facts.iter().find(|f| f.id == "fact-iso").unwrap();
+        assert_eq!(fact.okf_verified.len(), 1, "ISO at must round-trip into a record");
+        assert_eq!(fact.okf_verified[0].by, "process:nightly");
+        // 2026-07-02T00:00:00.000Z = 1782950400000 ms; exact value locked in to
+        // catch silent deserializer regressions.
+        assert_eq!(fact.okf_verified[0].at, 1782950400000);
     }
 }

@@ -8,7 +8,8 @@ use tauri::State;
 use crate::db::bundle_apply::{apply_import, preview_import, ImportMode, ImportPreview, ImportResult};
 use crate::db::bundle_io::load_export_entities;
 use crate::okf::bundle_read::parse_bundle;
-use crate::okf::bundle_write::write_bundle;
+use crate::okf::bundle_write::write_bundle_with_profile;
+use crate::okf::types::{LLM_WIKI_PROFILE, LLM_WIKI_PROFILE_V2, OKF_VERSION_V2};
 use crate::okf::zip_io::{read_bundle_source, write_bundle_zip};
 use crate::db::commit::generate_llm_id;
 use crate::DbState;
@@ -39,8 +40,13 @@ pub fn write_exported_event(conn: &rusqlite::Connection, entity_id: &str, displa
 pub fn okf_export_bundle_cmd(
     dest_path: String,
     entity_ids: Option<Vec<String>>,
+    profile: Option<String>,
     db_state: State<DbState>,
 ) -> Result<ExportSummary, String> {
+    let (p, v) = match profile.as_deref() {
+        Some("llm-wiki/1") => (LLM_WIKI_PROFILE, "0.1"),
+        _ => (LLM_WIKI_PROFILE_V2, OKF_VERSION_V2),
+    };
     let entities = {
         let guard = db_state.0.lock().map_err(|e| e.to_string())?;
         load_export_entities(&guard.0, entity_ids.as_deref()).map_err(|e| e.to_string())?
@@ -49,7 +55,7 @@ pub fn okf_export_bundle_cmd(
         return Err("Nothing to export: no entities in the brain.".into());
     }
     let count = entities.len();
-    let files = write_bundle(&entities).map_err(|e| e)?;
+    let files = write_bundle_with_profile(&entities, p, v).map_err(|e| e)?;
     write_bundle_zip(&PathBuf::from(&dest_path), &files).map_err(|e| e.to_string())?;
 
     // Write exported event for each exported entity (after zip is finalized)

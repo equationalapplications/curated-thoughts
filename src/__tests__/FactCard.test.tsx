@@ -36,7 +36,8 @@ test("renders body with wikilink chip, meta chips, and source chip", () => {
   expect(onNavigateEntity).toHaveBeenCalledWith("Beta Team");
 
   fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
-  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md");
+  // v1: chunkId is null because source_docs does not yet carry chunk ids.
+  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", null);
 });
 
 test("inline edit saves via update_entity_fact_cmd and notifies", async () => {

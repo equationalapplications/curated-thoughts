@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use tauri_app_lib::okf::bundle_read::parse_bundle;
-use tauri_app_lib::okf::bundle_write::{write_bundle, ExportEntity};
-use tauri_app_lib::okf::types::OkfFile;
+use tauri_app_lib::okf::bundle_write::{write_bundle, write_bundle_with_profile, ExportEntity};
+use tauri_app_lib::okf::types::{OkfFile, LLM_WIKI_PROFILE};
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/okf")
@@ -138,8 +138,17 @@ fn export_from_parsed(bundle: &tauri_app_lib::okf::bundle_read::ParsedBundle) ->
 fn golden_v1_round_trips_losslessly() {
     let original = load_fixture_files("golden-v1");
     let parsed = parse_bundle(&original).unwrap();
-    let rebuilt = write_bundle(&export_from_parsed(&parsed)).expect("write_bundle");
+    let rebuilt = write_bundle_with_profile(
+        &export_from_parsed(&parsed),
+        LLM_WIKI_PROFILE,
+        "0.1",
+    )
+    .expect("write_bundle");
 
+    // Writer is now profile-aware: profile-1 emission drops every v0.2 key
+    // (status lifecycle on facts, execution_status on tasks, stale_after /
+    // generated / verified / sources / usage_window), so the rebuilt bytes
+    // match the v0.1 fixture byte-for-byte after trimming trailing whitespace.
     let norm = |files: &[OkfFile]| -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = files
             .iter()
@@ -149,6 +158,46 @@ fn golden_v1_round_trips_losslessly() {
         v
     };
     assert_eq!(norm(&rebuilt), norm(&original));
+}
+
+#[test]
+fn defaults_to_ll_wiki_2_on_export() {
+    let original = load_fixture_files("golden-v1");
+    let parsed = parse_bundle(&original).unwrap();
+    let rebuilt = write_bundle(&export_from_parsed(&parsed)).expect("write_bundle");
+    let root = rebuilt
+        .iter()
+        .find(|f| f.path == "index.md")
+        .expect("root index.md");
+    assert!(
+        root.content.contains("okf_version: 0.2"),
+        "default export must emit okf_version 0.2; got: {}",
+        root.content.lines().find(|l| l.starts_with("okf_version")).unwrap_or("(missing)"),
+    );
+    assert!(
+        root.content.contains("profile: llm-wiki/2"),
+        "default export must emit profile llm-wiki/2; got: {}",
+        root.content.lines().find(|l| l.starts_with("profile")).unwrap_or("(missing)"),
+    );
+}
+
+#[test]
+fn parses_golden_v2_bundle_with_status_rename_rule() {
+    let bundle = parse_bundle(&load_fixture_files("golden-v2")).unwrap();
+    assert_eq!(bundle.profile.as_deref(), Some("llm-wiki/2"));
+    assert_eq!(bundle.okf_version.as_deref(), Some("0.2"));
+    let entity = &bundle.entities[0];
+    // task has both lifecycle (status) and execution (execution_status) — wire format rename rule
+    let task = entity
+        .tasks
+        .iter()
+        .find(|t| t.id == "task_with_provenance")
+        .expect("task fixture");
+    assert_eq!(task.status, "in_progress", "execution_status -> status");
+    assert_eq!(
+        task.lifecycle_status, "draft",
+        "status (v0.2 wire) -> lifecycle_status"
+    );
 }
 
 #[test]

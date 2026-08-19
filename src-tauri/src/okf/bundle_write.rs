@@ -10,7 +10,8 @@ use crate::okf::log_md::build_log_md;
 use crate::okf::sanitize::{sanitize_concept_id, sanitize_for_filename};
 use crate::okf::task_file::build_task_file;
 use crate::okf::types::{
-    OkfFile, OkfIndexEntry, OkfIndexSection, OkfLogEntry, WikiFact, WikiTask, LLM_WIKI_PROFILE,
+    OkfFile, OkfIndexEntry, OkfIndexSection, OkfLogEntry, WikiFact, WikiTask,
+    LLM_WIKI_PROFILE_V2, OKF_VERSION_V2,
 };
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,14 @@ enum ConceptKind {
 }
 
 pub fn write_bundle(entities: &[ExportEntity]) -> Result<Vec<OkfFile>, String> {
+    write_bundle_with_profile(entities, LLM_WIKI_PROFILE_V2, OKF_VERSION_V2)
+}
+
+pub fn write_bundle_with_profile(
+    entities: &[ExportEntity],
+    profile: &str,
+    okf_version: &str,
+) -> Result<Vec<OkfFile>, String> {
     let mut files = Vec::new();
     let mut root_entries = Vec::new();
 
@@ -99,7 +108,11 @@ pub fn write_bundle(entities: &[ExportEntity]) -> Result<Vec<OkfFile>, String> {
             let file_name = &concepts[fact.id.as_str()].1;
             files.push(OkfFile {
                 path: format!("{base}/facts/{file_name}"),
-                content: build_fact_file(fact, &related_for(&fact.id, &ConceptKind::Fact)),
+                content: build_fact_file(
+                    fact,
+                    &related_for(&fact.id, &ConceptKind::Fact),
+                    profile,
+                ),
             });
             fact_entries.push(OkfIndexEntry {
                 title: fact.title.clone(),
@@ -113,7 +126,11 @@ pub fn write_bundle(entities: &[ExportEntity]) -> Result<Vec<OkfFile>, String> {
             let file_name = &concepts[task.id.as_str()].1;
             files.push(OkfFile {
                 path: format!("{base}/tasks/{file_name}"),
-                content: build_task_file(task, &related_for(&task.id, &ConceptKind::Task)),
+                content: build_task_file(
+                    task,
+                    &related_for(&task.id, &ConceptKind::Task),
+                    profile,
+                ),
             });
             task_entries.push(OkfIndexEntry {
                 title: task.description.clone(),
@@ -178,12 +195,12 @@ pub fn write_bundle(entities: &[ExportEntity]) -> Result<Vec<OkfFile>, String> {
     files.push(OkfFile {
         path: "index.md".into(),
         content: build_root_index_md(
-            "0.1",
+            okf_version,
             &[OkfIndexSection {
                 heading: "Entities".into(),
                 entries: root_entries,
             }],
-            Some(LLM_WIKI_PROFILE),
+            Some(profile),
         ),
     });
 

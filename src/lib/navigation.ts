@@ -7,6 +7,13 @@ export interface NavTarget {
   docPath?: string;
   proposalId?: string;
   taskId?: string;
+  /**
+   * Optional chunk anchor within the target document. When set together with
+   * `docPath`, the library editor scrolls to and transiently highlights the
+   * block identified by this id. v1: always undefined because `source_docs`
+   * does not yet expose chunk ids.
+   */
+  chunkId?: string;
 }
 
 export interface NavigationState {
