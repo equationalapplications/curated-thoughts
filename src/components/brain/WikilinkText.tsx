@@ -1,9 +1,15 @@
+import { useEffect, useState } from "react";
+import { listEntities } from "../../lib/tauri";
+
 export interface WikilinkSegment {
   type: "text" | "link";
   value: string;
 }
 
 const WIKILINK_RE = /\[\[([^[\]]+)\]\]/g;
+
+const RESOLVED_CLASS = "wikilink-chip--resolved";
+const UNRESOLVED_CLASS = "wikilink-chip--unresolved";
 
 export function parseWikilinks(text: string): WikilinkSegment[] {
   const segments: WikilinkSegment[] = [];
@@ -28,7 +34,33 @@ interface Props {
   onNavigate: (entityName: string) => void;
 }
 
+/**
+ * Resolves entity names (case-insensitive) against the live entity list.
+ * Returns a Set of lowercase names that have a matching entity.
+ */
+function useResolvedEntityNames(): Set<string> {
+  const [resolved, setResolved] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    listEntities("name_asc").then((entities) => {
+      if (cancelled) return;
+      if (!entities) return;
+      setResolved(
+        new Set(entities.map((e) => e.name.toLowerCase())),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return resolved;
+}
+
 export function WikilinkText({ text, onNavigate }: Props) {
+  const resolvedNames = useResolvedEntityNames();
+
   return (
     <span className="wikilink-text">
       {parseWikilinks(text).map((segment, index) =>
@@ -36,7 +68,11 @@ export function WikilinkText({ text, onNavigate }: Props) {
           <button
             key={index}
             type="button"
-            className="wikilink-chip"
+            className={`wikilink-chip ${
+              resolvedNames.has(segment.value.toLowerCase())
+                ? RESOLVED_CLASS
+                : UNRESOLVED_CLASS
+            }`}
             onClick={() => onNavigate(segment.value)}
           >
             {segment.value}
