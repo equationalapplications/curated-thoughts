@@ -14,6 +14,12 @@ use crate::okf::related_section::{append_related_section, split_related_section}
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
 use crate::okf::types::{OkfFrontmatterValue as V, OkfMarkdownLink, WikiTask};
 
+/// Valid lifecycle values per upstream spec §2.3. Used by `parse_task_file`
+/// to disambiguate profile-2 wire format (`status` = lifecycle) from profile-1
+/// (`status` = execution): a profile-1 task carrying a custom `execution_status:`
+/// field would otherwise misclassify as v0.2.
+const VALID_LIFECYCLE_STATUSES: &[&str] = &["draft", "stable", "deprecated"];
+
 pub struct ParsedTask {
     pub task: WikiTask,
     pub related: Vec<OkfMarkdownLink>,
@@ -127,7 +133,16 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
     // `execution_status:` custom field.
     let status_v = fm.get_str("status").filter(|s| !s.is_empty());
     let exec_v = fm.get_str("execution_status").filter(|s| !s.is_empty());
-    let is_profile_v2 = status_v.is_some() && exec_v.is_some();
+    // v0.2 detection requires BOTH `status` and `execution_status` to be
+    // present AND `status` must be a valid lifecycle value. Without the
+    // value check, a profile-1 task carrying a custom `execution_status:`
+    // field would be misclassified as v0.2 — `status` (an execution value
+    // in profile-1) would be routed to `lifecycle_status`, overwriting the
+    // authoritative value.
+    let is_profile_v2 = match (status_v, exec_v) {
+        (Some(s), Some(_)) if VALID_LIFECYCLE_STATUSES.contains(&s) => true,
+        _ => false,
+    };
     let (execution_status, lifecycle_status) = if is_profile_v2 {
         (
             exec_v.unwrap().to_string(),
