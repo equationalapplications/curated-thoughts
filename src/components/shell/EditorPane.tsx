@@ -40,11 +40,20 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
+  const [loadedDoc, setLoadedDoc] = useState<string | null>(null);
   const paneRef = useRef<HTMLElement | null>(null);
+  // Hold the most recently parsed blocks so the anchor-highlight effect can
+  // find the target without re-reading the file or relying on BlockNote's
+  // internal `editor.document` (which the tests mock as an empty array).
+  const lastBlocksRef = useRef<Array<{ type: string; content?: unknown; id: string }>>([]);
 
+  // Doc-load effect: only re-runs when `selectedDoc` changes. Critically, it
+  // does NOT depend on `anchorChunkId` — re-running on anchor change would
+  // overwrite the user's in-progress wiki edits with the freshly-read file.
   useEffect(() => {
     if (!selectedDoc) {
       setLoadError(null);
+      setLoadedDoc(null);
       return;
     }
     setLoadError(null);
@@ -54,45 +63,66 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
       .then(async (content) => {
         const blocks = await editor.tryParseMarkdownToBlocks(content);
         editor.replaceBlocks(editor.document, blocks);
-
-        // Anchor highlight: find the first block whose text matches
-        // `anchorChunkId` (case-sensitive heading match) and scroll to it.
-        if (anchorChunkId) {
-          // Defer to next frame so BlockNote has rendered the new blocks.
-          requestAnimationFrame(() => {
-            const target = blocks.find((b) => {
-              const text = blockText(b);
-              return text === anchorChunkId;
-            });
-            if (!target) return;
-            try {
-              editor.setTextCursorPosition(target.id, "end");
-            } catch {
-              // Block may not be addressable until rendered; skip silently.
-              return;
-            }
-            const root = paneRef.current;
-            if (!root) return;
-            const node = root.querySelector(
-              `[data-id="${target.id}"]`,
-            ) as HTMLElement | null;
-            if (node) {
-              node.classList.add("editor-pane-block--anchor-highlight");
-              window.setTimeout(() => {
-                node.classList.remove(
-                  "editor-pane-block--anchor-highlight",
-                );
-              }, 1500);
-            }
-          });
-        }
+        lastBlocksRef.current = (blocks as Array<{ type: string; content?: unknown; id?: string }>)
+          .map((b) => ({ ...b, id: b.id ?? "" }));
+        setLoadedDoc(selectedDoc);
       })
       .catch((err) => {
         setLoadError(
           err instanceof Error ? err.message : String(err) || "Failed to load document",
         );
       });
-  }, [selectedDoc, anchorChunkId, editor]);
+  }, [selectedDoc, editor]);
+
+  // Anchor-highlight effect: runs on doc-load (loadedDoc change) and on
+  // anchorChunkId change. Does NOT mutate editor blocks — only scrolls +
+  // transiently highlights a node.
+  useEffect(() => {
+    if (!selectedDoc || !anchorChunkId || loadedDoc !== selectedDoc) return;
+    let highlightTimer: number | undefined;
+    const cleanupHighlight = () => {
+      if (highlightTimer !== undefined) {
+        window.clearTimeout(highlightTimer);
+        highlightTimer = undefined;
+      }
+    };
+    // Defer to next frame so BlockNote has rendered the new blocks.
+    const raf = requestAnimationFrame(() => {
+      const blocks = lastBlocksRef.current;
+      const target = blocks.find((b) => {
+        const text = blockText(b);
+        return text === anchorChunkId;
+      });
+      if (!target) return;
+      try {
+        editor.setTextCursorPosition(target.id, "end");
+      } catch {
+        return;
+      }
+      const root = paneRef.current;
+      if (!root) return;
+      // Escape the id for CSS attribute matching — BlockNote generates
+      // hyphenated ids today, but attribute selectors interpret `"` and
+      // `]` specially, so interpolating raw breaks for any id containing
+      // those characters.
+      const safeSelector =
+        typeof CSS !== "undefined" && CSS.escape
+          ? `[data-id="${CSS.escape(target.id)}"]`
+          : `[data-id="${target.id.replace(/(["\\])/g, "\\$1")}"]`;
+      const node = root.querySelector(safeSelector) as HTMLElement | null;
+      if (!node) return; // block not yet painted; skip rather than fight
+      cleanupHighlight();
+      node.classList.add("editor-pane-block--anchor-highlight");
+      highlightTimer = window.setTimeout(() => {
+        node.classList.remove("editor-pane-block--anchor-highlight");
+        highlightTimer = undefined;
+      }, 1500);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      cleanupHighlight();
+    };
+  }, [selectedDoc, anchorChunkId, loadedDoc, editor]);
 
   async function handleSave() {
     if (!selectedDoc || !isWiki) return;
