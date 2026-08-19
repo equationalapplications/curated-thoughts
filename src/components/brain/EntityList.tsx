@@ -48,7 +48,7 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, onSortCha
           onChange={(e) => setFilter(e.target.value)}
         />
       </div>
-      <select aria-label="Sort entities" value={sort} onChange={(e) => {
+      <select aria-label="Sort entities" className="entity-sort-picker" value={sort} onChange={(e) => {
         const next = e.target.value as EntitySort;
         setSort(next);
         onSortChange?.(next);
