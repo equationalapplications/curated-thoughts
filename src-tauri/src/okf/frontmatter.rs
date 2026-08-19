@@ -287,11 +287,62 @@ pub fn parse_flow_mapping_text(raw: &str) -> Option<String> {
         return None;
     }
 
+    // Enforce the one-level-nesting rule: any `{` encountered inside the
+    // outer braces adds depth, and a second nested `{` would push us past
+    // the limit. Quoted braces are not counted.
+    if max_brace_depth(inner) > 1 {
+        return None;
+    }
+
     // For our v0.2 emit/read pass, the inner text is captured verbatim — the typed
     // readers in `fact_file.rs` / `task_file.rs` extract what they need from it.
     // This keeps the parser small and side-steps the need to model flow-mapped
     // values as a new `OkfFrontmatterValue` variant.
     Some(inner.to_string())
+}
+
+/// Count the deepest `{ … }` nesting inside `s`, ignoring braces that appear
+/// inside `"…"` or `'…'` quoted spans.
+fn max_brace_depth(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut depth: u32 = 0;
+    let mut max_depth: u32 = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+                i += 1; // skip closing quote
+            }
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'{' => {
+                depth += 1;
+                if depth > max_depth {
+                    max_depth = depth;
+                }
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    max_depth
 }
 
 fn has_unquoted_anchor(s: &str) -> bool {
@@ -438,6 +489,21 @@ pub fn parse_frontmatter(content: &str) -> (OkfFrontmatter, String) {
             i += 1;
             continue;
         }
+        if value_str.starts_with('[') {
+            // Same anchor-safety rule as `{ ... }`: a v0.2 `sources:` / `verified:`
+            // flow sequence with an unquoted `&` or `*` would otherwise round-trip
+            // into the typed readers as a raw scalar. The typed readers in
+            // `fact_file.rs` / `task_file.rs` re-parse the flow text, so storing
+            // an opaque null is the safe fallback.
+            if has_unquoted_anchor(value_str) {
+                frontmatter.fields.insert(key, OkfFrontmatterValue::Null);
+                i += 1;
+                continue;
+            }
+            frontmatter.fields.insert(key, OkfFrontmatterValue::String(value_str.to_string()));
+            i += 1;
+            continue;
+        }
         frontmatter.fields.insert(key, parse_scalar_value(&value));
         i += 1;
     }
@@ -536,6 +602,9 @@ mod tests {
         let fm = "---\ngenerated: { by: &bad anchor, at: 2026-07-01T00:00:00.000Z }\n---\n";
         let (parsed, _) = parse_frontmatter(fm);
         // The key is preserved; the value is opaque/null to avoid the anchor-expansion vector.
-        assert!(parsed.fields.contains_key("generated"));
+        assert!(matches!(
+            parsed.fields.get("generated"),
+            Some(OkfFrontmatterValue::Null)
+        ));
     }
 }

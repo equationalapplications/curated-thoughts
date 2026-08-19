@@ -52,7 +52,6 @@ function ResultItem({ r, onSelect }: { r: SearchResult; onSelect: (path: string)
 
 export function SearchResults({ results, onSelect }: Props) {
   const { generation, embedding } = useProviderHealth();
-  if (results.length === 0) return null;
 
   const semanticResults = results.filter((r) => !r.structural);
   const structuralResults = results.filter((r) => r.structural === true);
@@ -64,17 +63,23 @@ export function SearchResults({ results, onSelect }: Props) {
         embedding={embedding}
         generation={generation}
       />
-      {semanticResults.map((r) => (
-        <ResultItem key={`${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
-      ))}
-      {structuralResults.length > 0 && (
+      {results.length === 0 ? (
+        <p className="placeholder">No results.</p>
+      ) : (
         <>
-          <div className="search-results-divider">
-            <span>Structural context</span>
-          </div>
-          {structuralResults.map((r) => (
-            <ResultItem key={`structural:${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
+          {semanticResults.map((r) => (
+            <ResultItem key={`${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
           ))}
+          {structuralResults.length > 0 && (
+            <>
+              <div className="search-results-divider">
+                <span>Structural context</span>
+              </div>
+              {structuralResults.map((r) => (
+                <ResultItem key={`structural:${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
+              ))}
+            </>
+          )}
         </>
       )}
     </div>

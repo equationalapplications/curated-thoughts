@@ -207,10 +207,10 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Library deep-link from evidence | Implemented (Phase 4 navigation; opens document, chunk-level highlight → Phase 7) |
 
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
-4. **Brain mode entity pages** — implemented 2026-07-06 (see `2026-07-06-phase-4-brain-entity-pages.md`). Deferred: peek panels, `[[` autocomplete, similarity in Connections, entity sort picker.
-5. **Timeline + Tasks modes** — unblocked; not started.
+4. **Brain mode entity pages** — implemented 2026-07-06 (see `2026-07-06-phase-4-brain-entity-pages.md`). Deferred: peek panels, similarity in Connections.
+5. **Timeline + Tasks modes** — implemented 2026-07-08 (phase 5).
 6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes and Cloud Bridge gating split to a separate upcoming plan.
-7. **Onboarding rework + visual polish pass.**
+7. **OKF v0.2 first-class adoption + frontend power-layer + completeness** — in progress (phase 7, see `2026-08-18-phase-7-plan-ab.md`).
 
 ## Non-Goals (this vision, v1)
 

@@ -59,19 +59,32 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
     setLoadError(null);
     setSaveError(null);
     setSaveOk(false);
+    // Effect-local cancellation flag: if `selectedDoc` changes while
+    // `readDocument` / `tryParseMarkdownToBlocks` is in flight, the older
+    // resolution must NOT replace the newer editor blocks. The cleanup
+    // marks this effect as cancelled; the async chain checks the flag
+    // before every post-await mutation.
+    let cancelled = false;
     readDocument(selectedDoc)
       .then(async (content) => {
+        if (cancelled) return;
         const blocks = await editor.tryParseMarkdownToBlocks(content);
+        if (cancelled) return;
         editor.replaceBlocks(editor.document, blocks);
+        if (cancelled) return;
         lastBlocksRef.current = (blocks as Array<{ type: string; content?: unknown; id?: string }>)
           .map((b) => ({ ...b, id: b.id ?? "" }));
         setLoadedDoc(selectedDoc);
       })
       .catch((err) => {
+        if (cancelled) return;
         setLoadError(
           err instanceof Error ? err.message : String(err) || "Failed to load document",
         );
       });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedDoc, editor]);
 
   // Anchor-highlight effect: runs on doc-load (loadedDoc change) and on

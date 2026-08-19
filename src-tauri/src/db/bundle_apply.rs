@@ -100,7 +100,14 @@ fn extract_citations_urls(body: &str) -> Vec<String> {
                     end += 1;
                 }
                 let url = rest[url_start..end].to_string();
-                if url.len() > 4 {
+                // Reject prose matches such as `https headers are required`.
+                // Both `http://…` and `https://…` start with `http`; the bytes
+                // after position 4 are `://` or `s://` respectively (case-
+                // insensitive — the leading `http` was matched case-
+                // insensitively too). Anything else is not a valid URL.
+                let tail_lower = url[4..].to_ascii_lowercase();
+                let has_scheme = tail_lower.starts_with("://") || tail_lower.starts_with("s://");
+                if url.len() > 4 && has_scheme {
                     urls.push(url);
                 }
                 rest = &rest[end..];
@@ -389,7 +396,12 @@ pub fn apply_import(
                     &fact.tags,
                     &fact.confidence,
                     &fact.source_type,
+                    fact.source_hash.as_deref(),
                     fact.source_ref.as_deref().unwrap_or(""),
+                    fact.okf_type.as_deref(),
+                    fact.okf_sources.as_deref(),
+                    fact.okf_verified.as_deref(),
+                    fact.okf_usage_window.as_deref(),
                     fact.created_at,
                     fact.updated_at,
                     fact.deleted_at,
@@ -449,6 +461,10 @@ pub fn apply_import(
                     task.updated_at,
                     task.resolved_at,
                     task.deleted_at,
+                    task.okf_type.as_deref(),
+                    task.okf_sources.as_deref(),
+                    task.okf_verified.as_deref(),
+                    task.okf_usage_window.as_deref(),
                 ),
                 now_ms,
             )?;

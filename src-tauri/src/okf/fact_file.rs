@@ -6,7 +6,7 @@ use crate::okf::concept::parse_concept;
 use crate::okf::frontmatter::serialize_scalar_string;
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
-use crate::okf::types::{OkfFrontmatterValue, OkfFrontmatterValue as V, OkfMarkdownLink, WikiFact};
+use crate::okf::types::{OkfFrontmatterValue, OkfFrontmatterValue as V, OkfMarkdownLink, LLM_WIKI_PROFILE, WikiFact};
 
 pub struct ParsedFact {
     pub fact: WikiFact,
@@ -58,7 +58,7 @@ pub fn build_fact_file(
     // OKF v0.2 fields — emitted only when populated (omitted otherwise, per upstream §4.7).
     // Skipped entirely under profile 1 (`llm-wiki/1`) — v0.1 has no `status`
     // (lifecycle) or provenance keys.
-    if profile != "llm-wiki/1" {
+    if profile != LLM_WIKI_PROFILE {
         pairs.push(("status", V::String(fact.lifecycle_status.clone())));
         if let Some(ms) = fact.stale_after {
             let date = crate::okf::timefmt::utc_date_from_ms(ms);
@@ -176,7 +176,10 @@ fn parse_flow_value(raw: &str) -> Option<serde_json::Value> {
     let bytes = trimmed.as_bytes();
     match bytes.first()? {
         b'{' => {
-            let inner = trimmed[1..trimmed.len() - 1].trim();
+            // Require a matching closing `}`; an unterminated flow value is
+            // treated as malformed and returns None instead of slicing past
+            // the end (which can panic on multi-byte boundaries).
+            let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?.trim();
             let mut map = serde_json::Map::new();
             for (k, v) in split_flow_pairs(inner)? {
                 map.insert(k, v);
@@ -184,7 +187,8 @@ fn parse_flow_value(raw: &str) -> Option<serde_json::Value> {
             Some(serde_json::Value::Object(map))
         }
         b'[' => {
-            let inner = trimmed[1..trimmed.len() - 1].trim();
+            // Same guard as the `{ ... }` branch.
+            let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
             let mut arr = Vec::new();
             let mappings = collect_flow_mappings(inner);
             if mappings.is_empty() {
@@ -275,7 +279,9 @@ fn read_flow_value(s: &str) -> (String, usize) {
         }
         _ => {
             // Bare value: until next `,` or end. Quoted spans are opaque —
-            // we just look for the unquoted comma terminator.
+            // we just look for the unquoted comma terminator. Clamp the
+            // post-quote `j` to `bytes.len()` so an unterminated quote cannot
+            // push the index past the slice end (bundle files are untrusted).
             let mut j = 0;
             while j < bytes.len() {
                 match bytes[j] {
@@ -289,14 +295,14 @@ fn read_flow_value(s: &str) -> (String, usize) {
                                 j += 1;
                             }
                         }
-                        j += 1;
+                        j = (j + 1).min(bytes.len());
                     }
                     b'\'' => {
                         j += 1;
                         while j < bytes.len() && bytes[j] != b'\'' {
                             j += 1;
                         }
-                        j += 1;
+                        j = (j + 1).min(bytes.len());
                     }
                     _ => j += 1,
                 }
@@ -486,14 +492,16 @@ fn collect_flow_mappings(body: &str) -> Vec<&str> {
                                     i += 1;
                                 }
                             }
-                            i += 1; // skip closing quote
+                            // Clamp so an unterminated quote cannot push `i`
+                            // past `bytes.len()` and panic the slice below.
+                            i = (i + 1).min(bytes.len());
                         }
                         b'\'' => {
                             i += 1;
                             while i < bytes.len() && bytes[i] != b'\'' {
                                 i += 1;
                             }
-                            i += 1;
+                            i = (i + 1).min(bytes.len());
                         }
                         b'{' => {
                             depth += 1;
@@ -778,6 +786,20 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             .collect();
         let rebuilt = build_fact_file(&parsed.fact, &related, "llm-wiki/1");
         assert_eq!(normalize(&rebuilt), normalize(GOLDEN_FACT));
+    }
+
+    #[test]
+    fn flow_value_with_unterminated_quote_does_not_panic() {
+        // Bundle files are untrusted; the bare-value scanner used to advance
+        // `j` past `bytes.len()` on an unterminated quote and panic on the
+        // following `s[..j]` slice. The clamp keeps both code paths total.
+        // We only assert that parsing does not panic and that the parser
+        // returns Some/None without aborting the import.
+        let _ = parse_flow_value(r#"[ { resource: "missing-close-quote } ]"#);
+        let _ = parse_flow_value(r#"[ { resource: 'missing-close-quote } ]"#);
+        // Unterminated flow mapping must also not panic; we just exercise
+        // the slice path.
+        let _ = parse_flow_value(r#"{ resource: "missing-close-quote"#);
     }
 
     fn normalize(s: &str) -> String {

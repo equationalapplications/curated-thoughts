@@ -40,6 +40,7 @@ vi.mock("@blocknote/mantine", () => ({
 
 import { EditorPane } from "../components/shell/EditorPane";
 import { renderWithTheme } from "./test-utils";
+import { ThemeProvider } from "../lib/ThemeContext";
 
 beforeEach(() => {
   editorMock.tryParseMarkdownToBlocks.mockClear();
@@ -151,4 +152,47 @@ test("does not throw when anchorChunkId has no matching block", async () => {
   );
   await new Promise((r) => setTimeout(r, 10));
   expect(editorMock.setTextCursorPosition).not.toHaveBeenCalled();
+});
+
+test("ignores stale doc-load resolution after selectedDoc changes", async () => {
+  // Simulate a race: doc A's readDocument resolves AFTER doc B's. The
+  // cancellation guard must prevent A from clobbering B's editor blocks
+  // and load state.
+  let resolveA: (value: string) => void = () => {};
+  const aPromise = new Promise<string>((resolve) => {
+    resolveA = resolve;
+  });
+  const calls: string[] = [];
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+    if (cmd === "read_document") {
+      const path = (args as { path?: string } | undefined)?.path ?? "";
+      calls.push(path);
+      if (path === "A.md") return aPromise;
+      if (path === "B.md") return Promise.resolve("# B content");
+    }
+    return Promise.resolve(null);
+  });
+
+  const { rerender } = renderWithTheme(
+    <EditorPane selectedDoc="A.md" isWiki={true} />,
+  );
+  // Switch to B before A resolves. The rerender call must pass the full
+  // wrapped element (ThemeProvider) because renderWithTheme wraps the input.
+  rerender(
+    <ThemeProvider>
+      <EditorPane selectedDoc="B.md" isWiki={true} />
+    </ThemeProvider>,
+  );
+
+  // Now resolve A. The cancellation guard should drop this update.
+  resolveA("# A content");
+  await waitFor(() =>
+    expect(editorMock.tryParseMarkdownToBlocks).toHaveBeenCalled(),
+  );
+  // readDocument must have been called for both A and B in order.
+  expect(calls).toEqual(["A.md", "B.md"]);
+  // Only B's resolution should have produced a replaceBlocks mutation.
+  // If the cancellation guard regresses, A's resolution also calls
+  // replaceBlocks and this count becomes 2.
+  expect(editorMock.replaceBlocks).toHaveBeenCalledTimes(1);
 });

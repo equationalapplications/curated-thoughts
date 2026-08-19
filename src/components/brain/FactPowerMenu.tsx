@@ -22,7 +22,9 @@ export function FactPowerMenu({ fact, open, onClose }: Props) {
 
   if (!open) return null;
   const hasProvenance =
-    fact.okf_sources.length > 0 || fact.okf_verified.length > 0;
+    fact.okf_sources.length > 0 ||
+    fact.okf_verified.length > 0 ||
+    fact.okf_usage_window != null;
   return (
     <div
       ref={dialogRef}

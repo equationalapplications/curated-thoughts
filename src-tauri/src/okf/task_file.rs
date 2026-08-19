@@ -12,7 +12,7 @@ use crate::okf::fact_file::{
 };
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
-use crate::okf::types::{OkfFrontmatterValue as V, OkfMarkdownLink, WikiTask};
+use crate::okf::types::{OkfFrontmatterValue as V, OkfMarkdownLink, WikiTask, LLM_WIKI_PROFILE};
 
 /// Valid lifecycle values per upstream spec §2.3. Used by `parse_task_file`
 /// to disambiguate profile-2 wire format (`status` = lifecycle) from profile-1
@@ -53,7 +53,7 @@ pub fn build_task_file(
         ("entity_id", V::String(task.entity_id.clone())),
     ];
 
-    if profile == "llm-wiki/1" {
+    if profile == LLM_WIKI_PROFILE {
         // profile-1: execution status under `status` only (per upstream §2.3);
         // field order matches the v0.1 golden fixture (status then priority,
         // created_at, resolved_at, deleted_at).

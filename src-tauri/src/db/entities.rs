@@ -69,7 +69,27 @@ pub struct OkfSourceEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OkfVerifiedEntry {
     pub by: String,
-    pub at: i64, // epoch ms
+    /// epoch ms. The wire format may carry an ISO-8601 string
+    /// (e.g. `2026-07-02T00:00:00.000Z`); the deserializer normalizes both
+    /// shapes to `i64` so imported facts and direct writes share a single
+    /// `parse_okf_verified` path.
+    #[serde(deserialize_with = "deserialize_epoch_ms")]
+    pub at: i64,
+}
+
+fn deserialize_epoch_ms<'de, D>(d: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| Error::custom("okf_verified.at: expected integer epoch ms")),
+        serde_json::Value::String(s) => crate::okf::timefmt::ms_from_iso(&s)
+            .ok_or_else(|| Error::custom("okf_verified.at: expected ISO-8601 timestamp")),
+        _ => Err(Error::custom("okf_verified.at: expected number or ISO-8601 string")),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -741,5 +761,32 @@ mod tests {
         assert_eq!(fact.okf_verified.len(), 1);
         assert_eq!(fact.okf_verified[0].by, "process:nightly");
         assert_eq!(fact.okf_usage_window.as_ref().unwrap().from, "2026-07-01");
+    }
+
+    #[test]
+    fn fact_v02_okf_verified_accepts_iso_at_string() {
+        // The OKF v0.2 frontmatter reader writes `at` as an ISO-8601 string
+        // (e.g. `2026-07-02T00:00:00.000Z`); the importer round-trips that
+        // JSON into `llm_wiki_entries.okf_verified` verbatim. `parse_okf_verified`
+        // must normalize the ISO form to epoch ms so the UI sees the record.
+        let conn = open_in_memory().unwrap();
+        let detail = create_entity(&conn, &CreateEntityInput {
+            name: "Iso".into(), entity_type: None, summary: None,
+        }).unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at, lifecycle_status, okf_verified)
+             VALUES ('fact-iso', ?1, 'T', 'B', '[]', 'certain', 'user_stated', 100, 100,
+                     'stable',
+                     '[{\"by\":\"process:nightly\",\"at\":\"2026-07-02T00:00:00.000Z\"}]')",
+            params![detail.id],
+        ).unwrap();
+        let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
+        let fact = loaded.facts.iter().find(|f| f.id == "fact-iso").unwrap();
+        assert_eq!(fact.okf_verified.len(), 1, "ISO at must round-trip into a record");
+        assert_eq!(fact.okf_verified[0].by, "process:nightly");
+        // 2026-07-02T00:00:00.000Z = 1782950400000 ms; exact value locked in to
+        // catch silent deserializer regressions.
+        assert_eq!(fact.okf_verified[0].at, 1782950400000);
     }
 }

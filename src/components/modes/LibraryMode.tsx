@@ -43,7 +43,7 @@ export function LibraryMode({
             <span className="search-spinner" aria-label="Searching">↻</span>
           )}
         </div>
-        {results.length > 0 ? (
+        {query ? (
           <SearchResults results={results} onSelect={onDocSelect} />
         ) : (
           <FolderTree
