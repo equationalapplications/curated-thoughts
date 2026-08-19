@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 
 use crate::okf::concept::parse_concept;
 use crate::okf::fact_file::{
-    flow_mapping_from_json, json_array_to_flow_sequence, latest_verified_at, latest_verified_by,
-    parse_generated_by, parse_stale_after_ms, serialize_actor_string, serialize_pairs_with_flow,
+    flow_mapping_from_json, flow_to_json_string, json_array_to_flow_sequence,
+    latest_verified_at, latest_verified_by, parse_generated_by, parse_stale_after_ms,
+    serialize_actor_string, serialize_pairs_with_flow,
 };
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
@@ -120,18 +121,21 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
     // v0.2 status-rename rule (upstream §2.3):
     // - profile-2 wire format: `status` = lifecycle; `execution_status` = execution
     // - profile-1 wire format: `status` = execution; lifecycle defaults to "stable"
-    let is_profile_v2 =
-        fm.get_str("status").is_some() && fm.get_str("execution_status").is_some();
+    // Profile-2 detection requires BOTH keys present with non-empty values —
+    // an empty `status:` (e.g. an unrelated convention) should not flip the
+    // semantics, nor should a profile-1 task that happens to carry an
+    // `execution_status:` custom field.
+    let status_v = fm.get_str("status").filter(|s| !s.is_empty());
+    let exec_v = fm.get_str("execution_status").filter(|s| !s.is_empty());
+    let is_profile_v2 = status_v.is_some() && exec_v.is_some();
     let (execution_status, lifecycle_status) = if is_profile_v2 {
         (
-            fm.get_str("execution_status")
-                .unwrap_or("pending")
-                .to_string(),
-            fm.get_str("status").unwrap_or("stable").to_string(),
+            exec_v.unwrap().to_string(),
+            status_v.unwrap().to_string(),
         )
     } else {
         (
-            fm.get_str("status").unwrap_or("pending").to_string(),
+            status_v.unwrap_or("pending").to_string(),
             "stable".to_string(), // profile-1 default per upstream §2.3
         )
     };
@@ -156,9 +160,9 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
         lifecycle_status,
         stale_after: parse_stale_after_ms(&fm),
         generated_by: parse_generated_by(&fm),
-        okf_sources: fm.get_str("sources").map(str::to_string),
-        okf_verified: fm.get_str("verified").map(str::to_string),
-        okf_usage_window: fm.get_str("usage_window").map(str::to_string),
+        okf_sources: flow_to_json_string(fm.get_str("sources")),
+        okf_verified: flow_to_json_string(fm.get_str("verified")),
+        okf_usage_window: flow_to_json_string(fm.get_str("usage_window")),
         last_verified_at: latest_verified_at(&fm),
         last_verified_by: latest_verified_by(&fm),
     };

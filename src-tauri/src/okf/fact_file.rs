@@ -144,13 +144,199 @@ pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
         lifecycle_status: fm.get_str("status").unwrap_or("stable").to_string(),
         stale_after: parse_stale_after_ms(&fm),  // helper below; returns None for absent / unparseable
         generated_by: parse_generated_by(&fm),   // helper below; returns None when absent
-        okf_sources: fm.get_str("sources").map(str::to_string),
-        okf_verified: fm.get_str("verified").map(str::to_string),
-        okf_usage_window: fm.get_str("usage_window").map(str::to_string),
+        okf_sources: flow_to_json_string(fm.get_str("sources")),
+        okf_verified: flow_to_json_string(fm.get_str("verified")),
+        okf_usage_window: flow_to_json_string(fm.get_str("usage_window")),
         last_verified_at: latest_verified_at(&fm),
         last_verified_by: latest_verified_by(&fm),
     };
     Ok(ParsedFact { fact, related })
+}
+
+/// Convert a verbatim YAML flow-text value (`{ k: v }` or `[ { k: v }, … ]`)
+/// to its JSON-encoded form. Returns None if the input is missing or
+/// unparseable.
+///
+/// The DB columns (`okf_sources`, `okf_verified`, `okf_usage_window`) hold
+/// JSON strings per the typed-model contract; storing raw YAML flow text
+/// there would make the entities.rs reader fall back to empty defaults
+/// (`serde_json::from_str` fails on unquoted keys like `resource: …`).
+pub(crate) fn flow_to_json_string(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let value = parse_flow_value(raw)?;
+    serde_json::to_string(&value).ok()
+}
+
+/// Recursive-descent parser for single-level YAML flow syntax. Returns a
+/// `serde_json::Value` that mirrors the input structure. Single-level means
+/// nested flow mappings are returned as JSON strings (verbatim) so the outer
+/// walker can keep going without modeling deep structure.
+fn parse_flow_value(raw: &str) -> Option<serde_json::Value> {
+    let trimmed = raw.trim();
+    let bytes = trimmed.as_bytes();
+    match bytes.first()? {
+        b'{' => {
+            let inner = trimmed[1..trimmed.len() - 1].trim();
+            let mut map = serde_json::Map::new();
+            for (k, v) in split_flow_pairs(inner)? {
+                map.insert(k, v);
+            }
+            Some(serde_json::Value::Object(map))
+        }
+        b'[' => {
+            let inner = trimmed[1..trimmed.len() - 1].trim();
+            let mut arr = Vec::new();
+            let mappings = collect_flow_mappings(inner);
+            if mappings.is_empty() {
+                // Empty sequence.
+                if inner.is_empty() {
+                    return Some(serde_json::Value::Array(Vec::new()));
+                }
+                return None;
+            }
+            for m in mappings {
+                let v = parse_flow_value(m)?;
+                arr.push(v);
+            }
+            Some(serde_json::Value::Array(arr))
+        }
+        _ => None,
+    }
+}
+
+/// Split a flow-mapping body (`k: v, k2: v2`) into (key, JSON value) pairs,
+/// respecting `"…"` / `'…'` quoting so commas / braces inside quoted strings
+/// don't terminate the pair early.
+fn split_flow_pairs(body: &str) -> Option<Vec<(String, serde_json::Value)>> {
+    let mut out = Vec::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip leading separators.
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Read key until ':'.
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b':' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None; // malformed: key with no ':'
+        }
+        let key = body[key_start..i].trim().to_string();
+        i += 1; // skip ':'
+        // Skip whitespace.
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None; // malformed: key with no value
+        }
+        let (val_str, next_i) = read_flow_value(&body[i..]);
+        out.push((key, classify_flow_scalar(val_str)));
+        i += next_i;
+    }
+    Some(out)
+}
+
+/// Read a single flow value starting at position 0 of `s`. Returns the value
+/// string and how many bytes were consumed. Quoted values consume through the
+/// matching close-quote (with escape handling); bare values consume until the
+/// next `,` at depth 0 or end of input.
+fn read_flow_value(s: &str) -> (String, usize) {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return (String::new(), 0);
+    }
+    match bytes[0] {
+        b'"' => {
+            let mut j = 1;
+            while j < bytes.len() && bytes[j] != b'"' {
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            let end = if j < bytes.len() { j + 1 } else { j };
+            (s[1..end.saturating_sub(1)].to_string(), end)
+        }
+        b'\'' => {
+            let mut j = 1;
+            while j < bytes.len() && bytes[j] != b'\'' {
+                j += 1;
+            }
+            let end = if j < bytes.len() { j + 1 } else { j };
+            (s[1..end.saturating_sub(1)].to_string(), end)
+        }
+        _ => {
+            // Bare value: until next `,` or end. Quoted spans are opaque —
+            // we just look for the unquoted comma terminator.
+            let mut j = 0;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b',' => break,
+                    b'"' => {
+                        j += 1;
+                        while j < bytes.len() && bytes[j] != b'"' {
+                            if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                                j += 2;
+                            } else {
+                                j += 1;
+                            }
+                        }
+                        j += 1;
+                    }
+                    b'\'' => {
+                        j += 1;
+                        while j < bytes.len() && bytes[j] != b'\'' {
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                    _ => j += 1,
+                }
+            }
+            (s[..j].trim().to_string(), j)
+        }
+    }
+}
+
+/// Classify a bare or quoted scalar string into the appropriate JSON value.
+fn classify_flow_scalar(s: String) -> serde_json::Value {
+    if s.is_empty() {
+        return serde_json::Value::Null;
+    }
+    if s == "null" {
+        return serde_json::Value::Null;
+    }
+    if s == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if s == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    // Integer / float detection: digits with optional sign and decimal point.
+    if s.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        || (s.chars().enumerate().all(|(i, c)| {
+            c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')) || c == '.'
+        }) && s.chars().filter(|c| *c == '.').count() <= 1
+            && s.chars().any(|c| c.is_ascii_digit()))
+    {
+        if let Ok(n) = s.parse::<i64>() {
+            return serde_json::Value::Number(n.into());
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            if let Some(n) = serde_json::Number::from_f64(f) {
+                return serde_json::Value::Number(n);
+            }
+        }
+    }
+    serde_json::Value::String(s)
 }
 
 /// Parse OKF v0.2 `stale_after: YYYY-MM-DD` to epoch ms (UTC midnight).
@@ -165,16 +351,68 @@ pub(crate) fn parse_stale_after_ms(fm: &crate::okf::types::OkfFrontmatter) -> Op
 pub(crate) fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
     let value = fm.fields.get("generated")?;
     let OkfFrontmatterValue::String(s) = value else { return None; };
-    // Flow mapping parsed as raw text; Task 4's parser will replace this with a structured reader.
-    // For now: regex over `{ by: "...", at: "..." }` to extract the actor string.
-    let _bytes = s.as_bytes();
-    let by_idx = s.find("by:")?;
-    let rest = &s[by_idx + 3..];
-    let trimmed = rest.trim_start();
-    let trimmed = trimmed.trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
-    let end = trimmed.find(|c: char| c == ',' || c == '}' || c == '"' || c == '\'').unwrap_or(trimmed.len());
-    let actor = &trimmed[..end];
-    if actor.is_empty() { None } else { Some(actor.to_string()) }
+    flow_mapping_field(s, "by")
+}
+
+/// Read a single named field's value from a verbatim flow-mapping text (`{ k: v }`).
+/// Returns None if the key is absent. Quote-aware: respects `"…"` / `'…'` spans so
+/// commas or braces inside quoted strings don't terminate the value early.
+fn flow_mapping_field(flow: &str, key: &str) -> Option<String> {
+    let inner = flow
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))?
+        .trim();
+    let needle = format!("{key}:");
+    let mut chars = inner.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c.is_whitespace() || c == ',' {
+            continue;
+        }
+        if !inner[i..].starts_with(&needle) {
+            // Not our key — skip this key:value pair.
+            skip_flow_value(&mut chars);
+            continue;
+        }
+        // Skip past "key:" and any following whitespace.
+        let mut after = &inner[i + needle.len()..];
+        after = after.trim_start();
+        // Read the value: bare until `,` or `}`, or quoted until matching quote.
+        let bytes = after.as_bytes();
+        if bytes.first() == Some(&b'"') || bytes.first() == Some(&b'\'') {
+            let quote = bytes[0];
+            let mut j = 1;
+            while j < bytes.len() && bytes[j] != quote {
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            if j >= bytes.len() {
+                return None; // unterminated quote
+            }
+            return Some(after[1..j].to_string());
+        }
+        let end = after
+            .find(|c: char| c == ',' || c == '}')
+            .unwrap_or(after.len());
+        let value = after[..end].trim();
+        if value.is_empty() {
+            return None;
+        }
+        return Some(value.to_string());
+    }
+    None
+}
+
+fn skip_flow_value(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
+    // Skip until the next `,` at depth 0. Quotes don't carry depth here because
+    // our flow values are single-level (no nested mappings inside this walker).
+    while let Some((_, c)) = chars.next() {
+        if c == ',' {
+            return;
+        }
+    }
 }
 
 /// Latest verifier's `at` (epoch ms) from `verified: [...]` (or bare mapping).
@@ -190,45 +428,90 @@ pub(crate) fn latest_verified_by(fm: &crate::okf::types::OkfFrontmatter) -> Opti
 }
 
 pub(crate) fn last_verified_at_in_text(raw: &str) -> Option<String> {
-    // Find every `at: <quoted-or-bare>` substring; take the last ISO timestamp.
-    let bytes = raw.as_bytes();
-    let mut last: Option<String> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i..].starts_with(b"at:") {
-            let mut j = i + 3;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
-            let start = j;
-            // Read until a comma, closing brace, or end of value
-            while j < bytes.len() && bytes[j] != b',' && bytes[j] != b'}' { j += 1; }
-            let token = raw[start..j].trim().trim_matches('"').trim_matches('\'').to_string();
-            if !token.is_empty() { last = Some(token); }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    last
+    last_flow_mapping_field(raw, "at")
 }
 pub(crate) fn last_verified_by_in_text(raw: &str) -> Option<String> {
-    // Symmetric to last_verified_at_in_text; reads the trailing `by:` value.
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-    let mut last: Option<String> = None;
-    while i < bytes.len() {
-        if bytes[i..].starts_with(b"by:") {
-            let mut j = i + 3;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
-            let start = j;
-            while j < bytes.len() && bytes[j] != b',' && bytes[j] != b'}' { j += 1; }
-            let token = raw[start..j].trim().trim_matches('"').trim_matches('\'').to_string();
-            if !token.is_empty() { last = Some(token); }
-            i = j;
-        } else {
-            i += 1;
+    last_flow_mapping_field(raw, "by")
+}
+
+/// Walk a verbatim flow-sequence-of-flow-mappings (`[ { k: v }, { k: v } ]`) or
+/// bare flow-mapping text and return the named field's value from the LAST
+/// mapping element. Quote-aware so commas / braces inside `"…"` / `'…'` spans
+/// don't terminate the value early. Returns None when the input is malformed
+/// or no entry has the requested field.
+fn last_flow_mapping_field(raw: &str, key: &str) -> Option<String> {
+    let inner = raw.trim();
+    let mappings: Vec<&str> = if let Some(stripped) = inner
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        // Flow sequence — extract each `{ ... }` element via depth tracking.
+        collect_flow_mappings(stripped.trim())
+    } else if inner.starts_with('{') && inner.ends_with('}') {
+        vec![inner]
+    } else {
+        return None;
+    };
+    let mut result: Option<String> = None;
+    for mapping in mappings {
+        if let Some(v) = flow_mapping_field(mapping, key) {
+            result = Some(v);
         }
     }
-    last
+    result
+}
+
+/// Collect each `{ ... }` flow-mapping element from a flow-sequence body,
+/// respecting `"…"` / `'…'` quoting so braces inside quoted spans don't
+/// change nesting depth.
+fn collect_flow_mappings(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b',' | b' ' | b'\t' | b'\n' => i += 1,
+            b'{' => {
+                let start = i;
+                let mut depth: i32 = 1;
+                i += 1;
+                while i < bytes.len() && depth > 0 {
+                    match bytes[i] {
+                        b'"' => {
+                            i += 1;
+                            while i < bytes.len() && bytes[i] != b'"' {
+                                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                    i += 2;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            i += 1; // skip closing quote
+                        }
+                        b'\'' => {
+                            i += 1;
+                            while i < bytes.len() && bytes[i] != b'\'' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        b'{' => {
+                            depth += 1;
+                            i += 1;
+                        }
+                        b'}' => {
+                            depth -= 1;
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                out.push(&body[start..i]);
+            }
+            _ => return out, // unexpected token — bail
+        }
+    }
+    out
 }
 
 /// Quote actor strings containing `/` or `:` per upstream spec §4.1.
@@ -357,11 +640,23 @@ sources: [ { resource: documents/notes.md, title: notes, usage_count: 3, last_mo
         let parsed = parse_fact_file(V02_FACT).unwrap();
         assert_eq!(parsed.fact.lifecycle_status, "stable");
         assert_eq!(parsed.fact.generated_by.as_deref(), Some("human:alice"));
-        assert!(parsed.fact.okf_sources.as_deref().unwrap().contains("documents/notes.md"));
-        assert_eq!(parsed.fact.okf_usage_window.as_deref(), Some("{ from: 2026-07-01, to: 2026-12-31 }"));
+        // okf_sources / okf_verified / okf_usage_window are stored as JSON
+        // strings per the typed-model contract (entities.rs reads them via
+        // serde_json::from_str). The parser converts the YAML flow text.
+        let sources_json = parsed.fact.okf_sources.as_deref().unwrap();
+        let sources: serde_json::Value = serde_json::from_str(sources_json).unwrap();
+        assert_eq!(
+            sources[0]["resource"].as_str(),
+            Some("documents/notes.md")
+        );
+        assert_eq!(sources[0]["usage_count"].as_i64(), Some(3));
+        let window: serde_json::Value =
+            serde_json::from_str(parsed.fact.okf_usage_window.as_deref().unwrap()).unwrap();
+        assert_eq!(window["from"].as_str(), Some("2026-07-01"));
+        assert_eq!(window["to"].as_str(), Some("2026-12-31"));
         // stale_after: 2027-01-01 → ms at UTC midnight (we don't assert exact ms — just that it's Some)
         assert!(parsed.fact.stale_after.is_some());
-        // verified list has one entry → last_verified_at / last_verified_by populated by Task 4's flow-mapping walker
+        // verified list has one entry → last_verified_at / last_verified_by populated by the flow-mapping walker
         assert!(parsed.fact.last_verified_at.is_some());
         assert_eq!(parsed.fact.last_verified_by.as_deref(), Some("process:nightly"));
     }
