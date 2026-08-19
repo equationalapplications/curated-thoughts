@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useCreateBlockNote } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
@@ -8,14 +8,39 @@ import { useTheme } from "../../lib/ThemeContext";
 interface Props {
   selectedDoc: string | null;
   isWiki: boolean;
+  /**
+   * Optional chunk id within `selectedDoc`. When set, after the document
+   * loads we locate the matching block (a heading whose text equals the
+   * chunk id) and scroll to it with a transient 1.5s highlight.
+   */
+  anchorChunkId?: string | null;
 }
 
-export function EditorPane({ selectedDoc, isWiki }: Props) {
+/**
+ * Pull the plain-text content of a BlockNote block. Supports the default
+ * `paragraph`, `heading`, and `bulletListItem` types we use in this app.
+ */
+function blockText(block: { type: string; content?: unknown }): string {
+  const parts: string[] = [];
+  const content = block.content as
+    | Array<{ type: string; text?: string; content?: unknown }>
+    | undefined;
+  if (!Array.isArray(content)) return "";
+  for (const inline of content) {
+    if (inline.type === "text" && typeof inline.text === "string") {
+      parts.push(inline.text);
+    }
+  }
+  return parts.join("").trim();
+}
+
+export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props) {
   const editor = useCreateBlockNote();
   const { resolved: theme } = useTheme();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
+  const paneRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!selectedDoc) {
@@ -29,13 +54,45 @@ export function EditorPane({ selectedDoc, isWiki }: Props) {
       .then(async (content) => {
         const blocks = await editor.tryParseMarkdownToBlocks(content);
         editor.replaceBlocks(editor.document, blocks);
+
+        // Anchor highlight: find the first block whose text matches
+        // `anchorChunkId` (case-sensitive heading match) and scroll to it.
+        if (anchorChunkId) {
+          // Defer to next frame so BlockNote has rendered the new blocks.
+          requestAnimationFrame(() => {
+            const target = blocks.find((b) => {
+              const text = blockText(b);
+              return text === anchorChunkId;
+            });
+            if (!target) return;
+            try {
+              editor.setTextCursorPosition(target.id, "end");
+            } catch {
+              // Block may not be addressable until rendered; skip silently.
+              return;
+            }
+            const root = paneRef.current;
+            if (!root) return;
+            const node = root.querySelector(
+              `[data-id="${target.id}"]`,
+            ) as HTMLElement | null;
+            if (node) {
+              node.classList.add("editor-pane-block--anchor-highlight");
+              window.setTimeout(() => {
+                node.classList.remove(
+                  "editor-pane-block--anchor-highlight",
+                );
+              }, 1500);
+            }
+          });
+        }
       })
       .catch((err) => {
         setLoadError(
           err instanceof Error ? err.message : String(err) || "Failed to load document",
         );
       });
-  }, [selectedDoc, editor]);
+  }, [selectedDoc, anchorChunkId, editor]);
 
   async function handleSave() {
     if (!selectedDoc || !isWiki) return;
@@ -62,7 +119,10 @@ export function EditorPane({ selectedDoc, isWiki }: Props) {
   }
 
   return (
-    <main className="editor-pane editor-pane--active">
+    <main
+      ref={paneRef}
+      className="editor-pane editor-pane--active"
+    >
       {!isWiki && (
         <div className="editor-protected-badge">User Document — protected</div>
       )}

@@ -206,8 +206,8 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
                   nav.navigate({ mode: "brain", entityId: id });
                 }
               }}
-              onOpenSource={(path) => {
-                nav.navigate({ mode: "library", docPath: path });
+              onOpenSource={(path, chunkId) => {
+                nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
               }}
               onEntityName={setBrainEntityName}
             />
@@ -218,8 +218,8 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
               onAction={refresh}
               vaultPath={vaultPath}
               queueError={queueError}
-              onOpenSource={(path) => {
-                nav.navigate({ mode: "library", docPath: path });
+              onOpenSource={(path, chunkId) => {
+                nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
               }}
             />
           )}
@@ -227,6 +227,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
             <LibraryMode
               vaultPath={vaultPath}
               selectedDoc={libraryDoc}
+              anchorChunkId={nav.current.chunkId ?? null}
               onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
             />
           )}

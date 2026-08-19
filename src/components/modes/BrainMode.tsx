@@ -11,7 +11,7 @@ import { useProviderHealth } from "../../hooks/useProviderHealth";
 interface Props {
   selectedEntityId: string | null;
   onEntitySelect: (id: string) => void;
-  onOpenSource: (path: string) => void;
+  onOpenSource: (path: string, chunkId?: string | null) => void;
   onEntityName: (name: string) => void;
 }
 

@@ -16,7 +16,13 @@ interface Props {
   fact: EntityFact;
   onChanged: () => void;
   onNavigateEntity: (name: string) => void;
-  onOpenSource: (path: string) => void;
+  /**
+   * Called when the user clicks a source-document chip. The chunk id is the
+   * optional anchor within `path` that Library will scroll/highlight on
+   * open. v1: `source_docs` does not yet carry chunk ids so callers pass
+   * `null` here; the click path stays unchanged when chunk id is absent.
+   */
+  onOpenSource: (path: string, chunkId?: string | null) => void;
 }
 
 export function FactCard({
@@ -90,7 +96,7 @@ export function FactCard({
                 type="button"
                 className="fact-chip fact-chip--source"
                 title={path}
-                onClick={() => onOpenSource(path)}
+                onClick={() => onOpenSource(path, null)}
               >
                 {docLabel(path)}
               </button>

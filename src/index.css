@@ -1154,6 +1154,22 @@ body {
   color: var(--error);
 }
 
+/* ── Editor anchor highlight (chunk deep-link) ───────────────────── */
+.editor-pane-block--anchor-highlight {
+  animation: editor-anchor-fade 1.5s ease-out forwards;
+  border-radius: var(--r-sm);
+}
+@keyframes editor-anchor-fade {
+  0% {
+    background-color: color-mix(in srgb, var(--primary) 35%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 25%, transparent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
 /* ── Settings: privacy & appearance ─────────────────────────────────── */
 .privacy-options,
 .theme-options {
