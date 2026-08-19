@@ -43,13 +43,17 @@ function useResolvedEntityNames(): Set<string> {
 
   useEffect(() => {
     let cancelled = false;
-    listEntities("name_asc").then((entities) => {
-      if (cancelled) return;
-      if (!entities) return;
-      setResolved(
-        new Set(entities.map((e) => e.name.toLowerCase())),
-      );
-    });
+    const result = listEntities("name_asc");
+    if (!result) return;
+    result
+      .then((entities) => {
+        if (cancelled) return;
+        if (!entities) return;
+        setResolved(new Set(entities.map((e) => e.name.toLowerCase())));
+      })
+      .catch(() => {
+        /* silent — unresolved is the fallback state */
+      });
     return () => {
       cancelled = true;
     };
