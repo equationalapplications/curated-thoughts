@@ -15,6 +15,7 @@ use crate::db::outbox_format::OutboxOperation;
 use crate::okf::bundle_read::{ParsedBundle, ParsedEntity};
 use crate::okf::ids::generate_id;
 use crate::okf::timefmt::ms_from_utc_date;
+#[cfg(test)]
 use crate::okf::types::LLM_WIKI_PROFILE_V2;
 
 /// Per-fact synthesized `okf_sources` JSON, keyed by fact id.
