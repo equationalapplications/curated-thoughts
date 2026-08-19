@@ -135,13 +135,13 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
       const root = paneRef.current;
       if (!root) return;
       // Escape the id for CSS attribute matching — BlockNote generates
-      // hyphenated ids today, but attribute selectors interpret `"` and
-      // `]` specially, so interpolating raw breaks for any id containing
+      // hyphenated ids today, but attribute selectors interpret `"`, `\`,
+      // and `]` specially, so interpolating raw breaks for any id containing
       // those characters.
       const safeSelector =
         typeof CSS !== "undefined" && CSS.escape
           ? `[data-id="${CSS.escape(target.id)}"]`
-          : `[data-id="${target.id.replace(/(["\\])/g, "\\$1")}"]`;
+          : `[data-id="${target.id.replace(/(["\\\]])/g, "\\$1")}"]`;
       const node = root.querySelector(safeSelector) as HTMLElement | null;
       if (!node) return; // block not yet painted; skip rather than fight
       // setTextCursorPosition only moves the editor selection; scroll the

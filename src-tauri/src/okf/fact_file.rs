@@ -181,7 +181,7 @@ fn parse_flow_value(raw: &str) -> Option<serde_json::Value> {
             // the end (which can panic on multi-byte boundaries).
             let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?.trim();
             let mut map = serde_json::Map::new();
-            for (k, v) in split_flow_pairs(inner)? {
+            for (k, v) in split_flow_pairs(inner) {
                 map.insert(k, v);
             }
             Some(serde_json::Value::Object(map))
@@ -211,7 +211,13 @@ fn parse_flow_value(raw: &str) -> Option<serde_json::Value> {
 /// Split a flow-mapping body (`k: v, k2: v2`) into (key, JSON value) pairs,
 /// respecting `"…"` / `'…'` quoting so commas / braces inside quoted strings
 /// don't terminate the pair early.
-fn split_flow_pairs(body: &str) -> Option<Vec<(String, serde_json::Value)>> {
+///
+/// Malformed input (a key with no `:`, a key with no value) is skipped, not
+/// fatal — the surrounding valid pairs are preserved. This matters for
+/// hand-authored or partially-corrupt bundle files where one bad entry
+/// must not collapse the entire `okf_sources` / `okf_verified` /
+/// `okf_usage_window` column to `None`.
+fn split_flow_pairs(body: &str) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0;
@@ -223,13 +229,19 @@ fn split_flow_pairs(body: &str) -> Option<Vec<(String, serde_json::Value)>> {
         if i >= bytes.len() {
             break;
         }
-        // Read key until ':'.
+        // Read an unquoted key: stop at `:`, `,`, or `}` — a key without
+        // a `:` is malformed (no value follows) and we must NOT consume the
+        // trailing `, also_good: 2` into the key name.
         let key_start = i;
-        while i < bytes.len() && bytes[i] != b':' {
+        while i < bytes.len() && bytes[i] != b':' && bytes[i] != b',' && bytes[i] != b'}' {
             i += 1;
         }
-        if i >= bytes.len() {
-            return None; // malformed: key with no ':'
+        if i >= bytes.len() || bytes[i] != b':' {
+            // No `:` found — skip to the next comma (or end) and continue.
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' {
+                i += 1;
+            }
+            continue;
         }
         let key = body[key_start..i].trim().to_string();
         i += 1; // skip ':'
@@ -237,8 +249,9 @@ fn split_flow_pairs(body: &str) -> Option<Vec<(String, serde_json::Value)>> {
         while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
             i += 1;
         }
-        if i >= bytes.len() {
-            return None; // malformed: key with no value
+        if i >= bytes.len() || bytes[i] == b',' || bytes[i] == b'}' {
+            // Empty value — skip this pair.
+            continue;
         }
         let (val_str, next_i, was_quoted) = read_flow_value(&body[i..]);
         // Quoted scalars are literal strings — skip type coercion so a
@@ -255,7 +268,7 @@ fn split_flow_pairs(body: &str) -> Option<Vec<(String, serde_json::Value)>> {
         out.push((key, value));
         i += next_i;
     }
-    Some(out)
+    out
 }
 
 /// Read a single flow value starting at position 0 of `s`. Returns the value
@@ -689,12 +702,7 @@ pub(crate) fn json_array_to_flow_sequence(json: &str, _key: &str) -> Option<Stri
     for (i, entry) in arr.iter().enumerate() {
         if i > 0 { out.push_str(", "); }
         let obj = entry.as_object()?;
-        out.push_str("{ ");
-        for (j, (k, val)) in obj.iter().enumerate() {
-            if j > 0 { out.push_str(", "); }
-            out.push_str(&format!("{}: {}", k, json_value_to_flow(val)));
-        }
-        out.push_str(" }");
+        out.push_str(&flow_mapping_str(obj));
     }
     out.push_str(" ]");
     Some(out)
@@ -704,13 +712,20 @@ pub(crate) fn json_array_to_flow_sequence(json: &str, _key: &str) -> Option<Stri
 pub(crate) fn flow_mapping_from_json(json: &str, _key: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let obj = v.as_object()?;
+    Some(flow_mapping_str(obj))
+}
+
+/// Emit a JSON object as a single-line flow mapping. The `key` argument on
+/// the JSON-entry callers is reserved for future error messages; today both
+/// paths render the same shape so the helper exists once.
+fn flow_mapping_str(obj: &serde_json::Map<String, serde_json::Value>) -> String {
     let mut out = String::from("{ ");
     for (i, (k, val)) in obj.iter().enumerate() {
         if i > 0 { out.push_str(", "); }
         out.push_str(&format!("{}: {}", k, json_value_to_flow(val)));
     }
     out.push_str(" }");
-    Some(out)
+    out
 }
 
 pub(crate) fn json_value_to_flow(v: &serde_json::Value) -> String {
@@ -937,6 +952,31 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
         // Unterminated flow mapping must also not panic; we just exercise
         // the slice path.
         let _ = parse_flow_value(r#"{ resource: "missing-close-quote"#);
+    }
+
+    #[test]
+    fn split_flow_pairs_skips_malformed_entry_and_keeps_others() {
+        // A single bad entry (missing `:` after `bad`) must NOT collapse the
+        // whole mapping — surrounding valid pairs survive so callers
+        // reading `okf_sources` / `okf_verified` / `okf_usage_window` get
+        // partial data instead of an empty column.
+        let parsed = parse_flow_value("{ good: 1, bad, also_good: 2 }")
+            .expect("mapping must still parse");
+        let map = parsed.as_object().unwrap();
+        assert_eq!(map["good"].as_i64(), Some(1));
+        assert_eq!(map["also_good"].as_i64(), Some(2));
+        assert!(!map.contains_key("bad"), "malformed entry must be dropped");
+    }
+
+    #[test]
+    fn split_flow_pairs_skips_empty_value_and_keeps_others() {
+        // A key with no value (trailing comma) must NOT abort the mapping.
+        let parsed = parse_flow_value("{ a: 1, b, c: 3 }")
+            .expect("mapping must still parse");
+        let map = parsed.as_object().unwrap();
+        assert_eq!(map["a"].as_i64(), Some(1));
+        assert_eq!(map["c"].as_i64(), Some(3));
+        assert!(!map.contains_key("b"), "empty-value entry must be dropped");
     }
 
     #[test]
