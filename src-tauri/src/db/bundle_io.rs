@@ -67,6 +67,14 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
             access_count: r.get(11)?,
             deleted_at: r.get(12)?,
             okf_type: r.get(13)?,
+            lifecycle_status: "stable".into(),
+            stale_after: None,
+            generated_by: None,
+            okf_sources: None,
+            okf_verified: None,
+            okf_usage_window: None,
+            last_verified_at: None,
+            last_verified_by: None,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -90,6 +98,14 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<WikiTask>> {
             resolved_at: r.get(6)?,
             deleted_at: r.get(7)?,
             okf_type: r.get(8)?,
+            lifecycle_status: "stable".into(),
+            stale_after: None,
+            generated_by: None,
+            okf_sources: None,
+            okf_verified: None,
+            okf_usage_window: None,
+            last_verified_at: None,
+            last_verified_by: None,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

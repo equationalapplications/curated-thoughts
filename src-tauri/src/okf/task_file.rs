@@ -66,8 +66,45 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
             .get_str("type")
             .filter(|t| !t.is_empty() && *t != "task")
             .map(str::to_string),
+        lifecycle_status: fm.get_str("status").unwrap_or("stable").to_string(),
+        stale_after: parse_stale_after_ms_task(&fm),
+        generated_by: parse_generated_by_task(&fm),
+        okf_sources: fm.get_str("sources").map(str::to_string),
+        okf_verified: fm.get_str("verified").map(str::to_string),
+        okf_usage_window: fm.get_str("usage_window").map(str::to_string),
+        last_verified_at: latest_verified_at_task(&fm),
+        last_verified_by: latest_verified_by_task(&fm),
     };
     Ok(ParsedTask { task, related })
+}
+
+/// Parse OKF v0.2 `stale_after: YYYY-MM-DD` to epoch ms (UTC midnight).
+fn parse_stale_after_ms_task(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
+    let s = fm.get_str("stale_after")?;
+    crate::okf::timefmt::ms_from_utc_date(s)
+}
+
+/// Parse the v0.2 `generated: { by: ..., at: ... }` flow mapping to the actor string.
+fn parse_generated_by_task(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
+    let value = fm.fields.get("generated")?;
+    let crate::okf::types::OkfFrontmatterValue::String(s) = value else { return None; };
+    let _bytes = s.as_bytes();
+    let by_idx = s.find("by:")?;
+    let rest = &s[by_idx + 3..];
+    let trimmed = rest.trim_start();
+    let trimmed = trimmed.trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+    let end = trimmed.find(|c: char| c == ',' || c == '}' || c == '"' || c == '\'').unwrap_or(trimmed.len());
+    let actor = &trimmed[..end];
+    if actor.is_empty() { None } else { Some(actor.to_string()) }
+}
+
+fn latest_verified_at_task(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
+    let _ = fm;
+    None
+}
+fn latest_verified_by_task(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
+    let _ = fm;
+    None
 }
 
 #[cfg(test)]

@@ -512,6 +512,14 @@ mod tests {
             access_count: 0,
             deleted_at: None,
             okf_type: None,
+            lifecycle_status: "stable".into(),
+            stale_after: None,
+            generated_by: None,
+            okf_sources: None,
+            okf_verified: None,
+            okf_usage_window: None,
+            last_verified_at: None,
+            last_verified_by: None,
         }
     }
 

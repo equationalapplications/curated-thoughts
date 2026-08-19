@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 pub const LLM_WIKI_PROFILE: &str = "llm-wiki/1";
 
+fn default_lifecycle_status() -> String { "stable".into() }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OkfFile {
     pub path: String,
@@ -111,6 +113,30 @@ pub struct WikiFact {
     pub deleted_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub okf_type: Option<String>,
+    /// OKF v0.2 lifecycle state (`draft` | `stable` | `deprecated`). Defaults to `stable`.
+    #[serde(default = "default_lifecycle_status")]
+    pub lifecycle_status: String,
+    /// OKF v0.2 stale-after absolute date as epoch ms. NULL = never stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_after: Option<i64>,
+    /// OKF v0.2 §7 actor string (`<producer>/<version>`, `human:<id>`, `process:<id>`). NULL when the source did not record provenance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    /// OKF v0.2 sources array, JSON-encoded as a string. Each entry: `{id?, resource, title?, author?, usage_count?, last_modified?, usage_window?}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf_sources: Option<String>,
+    /// OKF v0.2 verified array, JSON-encoded as a string. Each entry: `{by, at}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf_verified: Option<String>,
+    /// OKF v0.2 sibling of `sources`, JSON-encoded as `{from, to}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf_usage_window: Option<String>,
+    /// Convenience: epoch ms of the latest verifier's `at`. NULL when `okf_verified` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_at: Option<i64>,
+    /// Convenience: actor string of the latest verifier. NULL when `okf_verified` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,6 +152,30 @@ pub struct WikiTask {
     pub deleted_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub okf_type: Option<String>,
+    /// OKF v0.2 lifecycle state (`draft` | `stable` | `deprecated`). Defaults to `stable`.
+    #[serde(default = "default_lifecycle_status")]
+    pub lifecycle_status: String,
+    /// OKF v0.2 stale-after absolute date as epoch ms. NULL = never stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_after: Option<i64>,
+    /// OKF v0.2 §7 actor string (`<producer>/<version>`, `human:<id>`, `process:<id>`). NULL when the source did not record provenance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
+    /// OKF v0.2 sources array, JSON-encoded as a string. Each entry: `{id?, resource, title?, author?, usage_count?, last_modified?, usage_window?}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf_sources: Option<String>,
+    /// OKF v0.2 verified array, JSON-encoded as a string. Each entry: `{by, at}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf_verified: Option<String>,
+    /// OKF v0.2 sibling of `sources`, JSON-encoded as `{from, to}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf_usage_window: Option<String>,
+    /// Convenience: epoch ms of the latest verifier's `at`. NULL when `okf_verified` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_at: Option<i64>,
+    /// Convenience: actor string of the latest verifier. NULL when `okf_verified` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
