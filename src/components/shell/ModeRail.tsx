@@ -1,4 +1,4 @@
-export type AppMode = "brain" | "review" | "library" | "timeline" | "tasks" | "settings";
+export type AppMode = "brain" | "review" | "library" | "timeline" | "tasks" | "settings" | "setup";
 
 interface Props {
   mode: AppMode;

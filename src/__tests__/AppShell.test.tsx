@@ -9,8 +9,19 @@ import { renderWithTheme } from "./test-utils";
 
 const VAULT = "/Users/test/Curated-Thoughts";
 
+function renderAppShell(overrides: Partial<React.ComponentProps<typeof AppShell>> = {}) {
+  return renderWithTheme(
+    <AppShell
+      vaultPath={VAULT}
+      onVaultChanged={vi.fn()}
+      needsSetup={false}
+      {...overrides}
+    />,
+  );
+}
+
 test("opens in Brain mode with rail and status bar", async () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   expect(screen.getByRole("button", { name: "Brain" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -21,19 +32,19 @@ test("opens in Brain mode with rail and status bar", async () => {
 });
 
 test("clicking Review in the rail shows the review screen", async () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   fireEvent.click(screen.getByRole("button", { name: "Review" }));
   expect(await screen.findByText(/queue clear/i)).toBeInTheDocument();
 });
 
 test("clicking Settings shows the settings screen", () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   expect(screen.getByRole("tab", { name: "Vault" })).toBeInTheDocument();
 });
 
 test("Cmd+3 switches to Library mode", () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   fireEvent.keyDown(window, { key: "3", metaKey: true });
   expect(screen.getByRole("button", { name: "Library" })).toHaveAttribute(
     "aria-current",
@@ -42,7 +53,7 @@ test("Cmd+3 switches to Library mode", () => {
 });
 
 test("status bar privacy shield navigates to Privacy settings", async () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   await screen.findByText(/Idle/);
   fireEvent.click(screen.getByLabelText(/Strict privacy/i));
   expect(screen.getByRole("tab", { name: "Privacy" })).toHaveAttribute(
@@ -52,14 +63,14 @@ test("status bar privacy shield navigates to Privacy settings", async () => {
 });
 
 test("status bar librarian segment opens activity panel", async () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   await screen.findByText(/Idle/);
   fireEvent.click(screen.getByRole("button", { name: /^Idle/i }));
   expect(screen.getByRole("dialog", { name: "Activity feed" })).toBeInTheDocument();
 });
 
 test("back button returns to previous mode after navigation", async () => {
-  renderWithTheme(<AppShell vaultPath={VAULT} onVaultChanged={vi.fn()} />);
+  renderAppShell();
   expect(screen.getByRole("button", { name: "Brain" })).toHaveAttribute(
     "aria-current",
     "page"
@@ -83,4 +94,14 @@ test("back button returns to previous mode after navigation", async () => {
     "aria-current",
     "page"
   );
+});
+
+// Lands in Task 9 — VaultPanel doesn't yet have the Re-run button
+it.skip("navigating to setup mode mounts the wizard", async () => {
+  renderAppShell();
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Vault" }));
+  const rerunButton = await screen.findByRole("button", { name: /re-run setup wizard/i });
+  fireEvent.click(rerunButton);
+  expect(await screen.findByRole("region", { name: /where is your vault/i })).toBeInTheDocument();
 });
