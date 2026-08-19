@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md); Phase 5 — Timeline + Tasks modes + activity feed + notifications (Implemented 2026-07-08)
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md); Phase 5 — Timeline + Tasks modes + activity feed + notifications (Implemented 2026-07-08); Phase 7 — OKF v0.2 first-class adoption + frontend power-layer + completeness (in progress, see plan 2026-08-18-phase-7-plan-ab.md)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec (`2026-07-05-okf-backend-migration-design.md` — implemented).
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
@@ -183,8 +183,8 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Item | Status / Target |
 |---|---|
 | `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Implemented (phase 5) |
-| Global `⌘K` command palette | Phase 1 follow-up or Phase 7 polish |
-| Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels → Phase 7 |
+| Global `⌘K` command palette | Deferred to Phase 8 |
+| Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels → Deferred to Phase 8 |
 | Activity rail pulse icon | Implemented (phase 5) |
 | Live Activity feed (beyond stub panel) | Implemented (phase 5) |
 | Per-mode empty states (Brain, Library) | Phase 4 / Phase 7 |

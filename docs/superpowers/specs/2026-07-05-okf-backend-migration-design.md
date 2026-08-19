@@ -243,6 +243,7 @@ Failure mid-conversion: guard key unwritten → next startup re-runs; step 2's d
 | Proposal resolution events (taxonomy: `approved`/`rejected` per v1.10 spec) | §5 | Implemented; v1.10–v1.15 wrote `action`/`observation` for resolutions; fixed in phase 5 with startup data migration keyed on summary prefix |
 | Maintenance `incremental_vacuum` | §4 | One-time `VACUUM` at migration only |
 | `wiki_pages` table drop | §1 | Deferred to V8 per design |
+| OKF v0.2 first-class adoption (wire format flip, `okf_sources`/`okf_verified`/`lifecycle_status` columns populated on import) | §1–§3 | Adopted (Phase 7, v1.17.0) |
 
 ## Known Limitations (documented, accepted for v1)
 
