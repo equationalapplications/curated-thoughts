@@ -592,3 +592,6 @@ export const applyOkfImport = (
   mode: OkfImportMode,
 ): Promise<OkfImportResult> =>
   invoke("okf_import_apply_cmd", { srcPath, mode });
+
+export const ingestDocument = (path: string): Promise<void> =>
+  invoke("ingest_document_cmd", { path });
