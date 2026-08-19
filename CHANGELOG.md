@@ -1,3 +1,46 @@
+## [1.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.16.0...v1.17.0) (2026-08-19)
+
+### Features
+
+* **brain:** [[Entity]] autocomplete in summary editor ([4ae049b](https://github.com/equationalapplications/curated-thoughts/commit/4ae049bbd42826e6a9ac0a45b0efc5c92889dd5e))
+* **brain:** entity sort picker (recently updated / name / created) ([e54c57f](https://github.com/equationalapplications/curated-thoughts/commit/e54c57f8e1cad91807d9f7a7efd2996e54805c55))
+* **brain:** expose OKF v0.2 fields on EntityFact ([8c30907](https://github.com/equationalapplications/curated-thoughts/commit/8c3090706c235dc907eece8c4604b224fae52ff9))
+* **brain:** per-fact '…' power-layer menu with OKF v0.2 provenance ([f16eabf](https://github.com/equationalapplications/curated-thoughts/commit/f16eabf1d2aac2c982a26cbeb42cb0aaf9158e1b))
+* **brain:** WikilinkText resolves names and styles broken links ([e611db6](https://github.com/equationalapplications/curated-thoughts/commit/e611db6e7f9daee8d708ce32b3dbb0838aab0a5b))
+* **health:** inline feature notice when embedder or generation is down ([8e43a0b](https://github.com/equationalapplications/curated-thoughts/commit/8e43a0b7416c51944a89eb8f9ea3ffe561e8650f))
+* **library:** chunk-level deep-link highlight ([2b715f7](https://github.com/equationalapplications/curated-thoughts/commit/2b715f7c135622359e6d7971739edcc0bf096aa0))
+* **modes:** per-mode empty states (Brain, Library, Review) ([3b86ddd](https://github.com/equationalapplications/curated-thoughts/commit/3b86dddaf192a9a0f34ae4f63ffc326420e34a10))
+* **okf:** default export to llm-wiki/2 + okf_version 0.2 ([bf2b81a](https://github.com/equationalapplications/curated-thoughts/commit/bf2b81a8e06633fb82042a34908b7fed3c3f8dfc))
+* **okf:** emit v0.2 frontmatter from fact_file / task_file ([de35deb](https://github.com/equationalapplications/curated-thoughts/commit/de35debbce8c3c97a0d2802c9ae59ddd130b9756))
+* **okf:** extend WikiFact/WikiTask typed models with v0.2 fields ([ab67c28](https://github.com/equationalapplications/curated-thoughts/commit/ab67c28776f7bdad586e1c6c07e21252e2ac4ebe))
+* **okf:** flow-mapping frontmatter parser for v0.2 emit/read ([e9f30df](https://github.com/equationalapplications/curated-thoughts/commit/e9f30df8bebd397e1cf84dc72bf9c28b9a7afbe5))
+* **okf:** v0.2 read path + status-rename rule + persist v0.2 columns on import ([74ab50d](https://github.com/equationalapplications/curated-thoughts/commit/74ab50d9c37d895ccb238d7c161d55f619fb23ca))
+* **styles:** power menu, sort picker, provider notice, anchor highlight ([754306f](https://github.com/equationalapplications/curated-thoughts/commit/754306ff993c7e05503c5bce186d7044d803010c))
+
+### Bug Fixes
+
+* **brain:** dedup listEntities round-trips in WikilinkText resolver ([5f4411e](https://github.com/equationalapplications/curated-thoughts/commit/5f4411e8258c3983b2dad48d503de13de61858cc))
+* **brain:** handle listEntities rejection silently in WikilinkText ([e28b233](https://github.com/equationalapplications/curated-thoughts/commit/e28b2331d88db6e7c188908a9de9f2aa14fb7123))
+* **brain:** keep WikilinkText resolver in sync with entity list changes ([3aeb845](https://github.com/equationalapplications/curated-thoughts/commit/3aeb84598cc1bf7f60c5cfa7e272011904436d83))
+* **brain:** render SuggestionMenuController as child of BlockNoteView ([78b336d](https://github.com/equationalapplications/curated-thoughts/commit/78b336df8b634eb85dc306c223d024a3193a4c9d))
+* **brain:** return Promise<void> from ensureResolver to satisfy discriminated-union narrowing ([c657fe0](https://github.com/equationalapplications/curated-thoughts/commit/c657fe0c7ea48f9071b2cea9522752193e22d348))
+* **ci:** unstick apt-get update on Ubuntu 22.04 runners ([d6bd9b2](https://github.com/equationalapplications/curated-thoughts/commit/d6bd9b2fb36ebb630aa7a03b3183e2eccc29261a))
+* **ci:** wrap apt-get update with process-level 5m timeout ([f8fe40e](https://github.com/equationalapplications/curated-thoughts/commit/f8fe40ecaa6f5a6cc69d29a76371dc2a63288c63))
+* **health:** label BrainMode feature correctly + gate ConnectionsPanel ([aaded88](https://github.com/equationalapplications/curated-thoughts/commit/aaded881fafbf134a04f185d765dffb74032f025))
+* **okf:** capture URLs regardless of protocol casing in # Citations fallback ([c971570](https://github.com/equationalapplications/curated-thoughts/commit/c97157091bc5747563f76de5ae8879d949352bdf))
+* **okf:** convert YAML flow text to JSON in v0.2 columns ([92fbab5](https://github.com/equationalapplications/curated-thoughts/commit/92fbab5114f824fa407c216f0af80ad6ae8620ca))
+* **okf:** gate LLM_WIKI_PROFILE_V2 import to test builds ([efa1644](https://github.com/equationalapplications/curated-thoughts/commit/efa164404f2efca72072df64194d7327a50bfefc))
+* **okf:** profile-aware writer so v0.1 export is genuinely v0.1-shaped ([0eba0c6](https://github.com/equationalapplications/curated-thoughts/commit/0eba0c69bcb20592998929e1b3b389d3d8512e95))
+* **okf:** read v0.2 columns on bundle import; update stale phase-7 tests ([8ef1dc5](https://github.com/equationalapplications/curated-thoughts/commit/8ef1dc50de2c1d803c4aba94c1eb7fc6cc49f33a))
+* **okf:** require valid lifecycle status when classifying tasks as v0.2 ([b1ea5dc](https://github.com/equationalapplications/curated-thoughts/commit/b1ea5dc6593f58f91c87b827e19588170ad4cc33))
+* **okf:** share verified_at parsers between fact and task files ([bd0a0f5](https://github.com/equationalapplications/curated-thoughts/commit/bd0a0f5ed1e7548ff432b44768e21947646bc15f))
+* **review:** address Phase 7 fifth review pass ([3088829](https://github.com/equationalapplications/curated-thoughts/commit/308882991a566946ad517f932b3949dbd660ceb1))
+* **review:** address Phase 7 fourth CodeRabbit pass ([a89dc5d](https://github.com/equationalapplications/curated-thoughts/commit/a89dc5d15fefa9ba6cc01dc65c394de73e88a0db))
+* **review:** address Phase 7 Plan A+B CodeRabbit review follow-ups ([e20b97d](https://github.com/equationalapplications/curated-thoughts/commit/e20b97ddccba1c0013acf5d51e7e1532d079a095)), closes [#34](https://github.com/equationalapplications/curated-thoughts/issues/34)
+* **review:** address Phase 7 second CodeRabbit pass ([a9f4dac](https://github.com/equationalapplications/curated-thoughts/commit/a9f4dacf0f3878513502377db70ee589b1ececd1))
+* **review:** address Phase 7 third CodeRabbit pass ([87452df](https://github.com/equationalapplications/curated-thoughts/commit/87452df101437b38a3a1e5237b542c05ea036e0d))
+* **shell:** split EditorPane doc-load from anchor-highlight ([fb260c4](https://github.com/equationalapplications/curated-thoughts/commit/fb260c486d2a8b550cf25d4d92f322f27323a771))
+
 ## [1.16.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.15.0...v1.16.0) (2026-08-18)
 
 ### Features
