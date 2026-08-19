@@ -65,10 +65,10 @@ describe("FactPowerMenu", () => {
     expect(screen.getByText(/2026-07-01.*2026-12-31/)).toBeInTheDocument();
   });
 
-  it("calls onClose on Escape", async () => {
+  it("calls onClose exactly once on Escape", async () => {
     const onClose = vi.fn();
     render(<FactPowerMenu fact={baseFact} open onClose={onClose} />);
     await userEvent.keyboard("{Escape}");
-    expect(onClose).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

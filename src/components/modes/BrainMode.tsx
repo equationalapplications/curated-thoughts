@@ -110,14 +110,21 @@ export function BrainMode({
             {entityError}
           </p>
         )}
-        {loading ? (
+        {loading && entities.length === 0 && (
           <p className="placeholder">Loading entities…</p>
-        ) : error ? (
+        )}
+        {error && entities.length === 0 && (
           <p className="entity-error" role="alert">
             {error}
           </p>
-        ) : (
+        )}
+        {entities.length > 0 && (
           <>
+            {loading && (
+              <p className="placeholder brain-loading-overlay" aria-live="polite">
+                Refreshing entities…
+              </p>
+            )}
             <EntityList
               entities={entities}
               selectedId={selectedEntityId}

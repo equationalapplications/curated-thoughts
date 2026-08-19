@@ -117,6 +117,13 @@ pub fn create_task(
             None,
             None,
             None,
+            // Manual tasks begin without OKF provenance — populate on
+            // import, verified annotation, or generation later.
+            None,
+            None,
+            None,
+            None,
+            None,
         ),
         now_ms,
     )?;
@@ -151,7 +158,10 @@ pub fn set_task_status(
     // Load current task to verify it exists and get full row for outbox.
     let task = tx
         .query_row(
-            "SELECT id, entity_id, description, priority, created_at
+            "SELECT id, entity_id, description, priority, created_at,
+                    okf_type, okf_sources, okf_verified, okf_usage_window,
+                    lifecycle_status, stale_after, generated_by,
+                    last_verified_at, last_verified_by
              FROM llm_wiki_tasks
              WHERE id = ?1 AND deleted_at IS NULL",
             [task_id],
@@ -162,11 +172,36 @@ pub fn set_task_status(
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, Option<i64>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, Option<i64>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
                 ))
             },
         )
         .optional()?;
-    let Some((id, entity_id, description, priority, created_at)) = task else {
+    let Some((
+        id,
+        entity_id,
+        description,
+        priority,
+        created_at,
+        existing_okf_type,
+        existing_okf_sources,
+        existing_okf_verified,
+        existing_okf_usage_window,
+        existing_lifecycle_status,
+        existing_stale_after,
+        existing_generated_by,
+        existing_last_verified_at,
+        existing_last_verified_by,
+    )) = task
+    else {
         bail!("task not found or archived: {task_id}");
     };
 
@@ -192,10 +227,15 @@ pub fn set_task_status(
             now_ms,
             resolved_at,
             None,
-            None,
-            None,
-            None,
-            None,
+            existing_okf_type.as_deref(),
+            existing_okf_sources.as_deref(),
+            existing_okf_verified.as_deref(),
+            existing_okf_usage_window.as_deref(),
+            Some(existing_lifecycle_status.as_str()),
+            existing_stale_after,
+            existing_generated_by.as_deref(),
+            existing_last_verified_at,
+            existing_last_verified_by.as_deref(),
         ),
         now_ms,
     )?;
@@ -213,7 +253,10 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
     // Load current task to verify it exists and get full row for outbox.
     let task = tx
         .query_row(
-            "SELECT id, entity_id, description, status, priority, created_at, updated_at, resolved_at
+            "SELECT id, entity_id, description, status, priority, created_at, updated_at, resolved_at,
+                    okf_type, okf_sources, okf_verified, okf_usage_window,
+                    lifecycle_status, stale_after, generated_by,
+                    last_verified_at, last_verified_by
              FROM llm_wiki_tasks
              WHERE id = ?1 AND deleted_at IS NULL",
             [task_id],
@@ -227,11 +270,39 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, String>(12)?,
+                    r.get::<_, Option<i64>>(13)?,
+                    r.get::<_, Option<String>>(14)?,
+                    r.get::<_, Option<i64>>(15)?,
+                    r.get::<_, Option<String>>(16)?,
                 ))
             },
         )
         .optional()?;
-    let Some((id, entity_id, description, status, priority, created_at, _updated_at, resolved_at)) = task else {
+    let Some((
+        id,
+        entity_id,
+        description,
+        status,
+        priority,
+        created_at,
+        _updated_at,
+        resolved_at,
+        existing_okf_type,
+        existing_okf_sources,
+        existing_okf_verified,
+        existing_okf_usage_window,
+        existing_lifecycle_status,
+        existing_stale_after,
+        existing_generated_by,
+        existing_last_verified_at,
+        existing_last_verified_by,
+    )) = task
+    else {
         bail!("task not found or already archived: {task_id}");
     };
 
@@ -255,10 +326,15 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
             now_ms,
             resolved_at,
             Some(now_ms),
-            None,
-            None,
-            None,
-            None,
+            existing_okf_type.as_deref(),
+            existing_okf_sources.as_deref(),
+            existing_okf_verified.as_deref(),
+            existing_okf_usage_window.as_deref(),
+            Some(existing_lifecycle_status.as_str()),
+            existing_stale_after,
+            existing_generated_by.as_deref(),
+            existing_last_verified_at,
+            existing_last_verified_by.as_deref(),
         ),
         now_ms,
     )?;

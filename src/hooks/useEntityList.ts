@@ -13,6 +13,7 @@ export function useEntityList(initialSort: EntitySort = "updated_desc") {
 
   const refresh = useCallback(async () => {
     const myGeneration = ++requestGeneration.current;
+    setLoading(true);
     try {
       const result = await listEntities(sort);
       if (requestGeneration.current !== myGeneration) return;

@@ -32,9 +32,6 @@ export function FactPowerMenu({ fact, open, onClose }: Props) {
       role="dialog"
       aria-label="Fact details"
       tabIndex={-1}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") onClose();
-      }}
     >
       <header className="fact-power-menu-header">
         <h3>Fact details</h3>
