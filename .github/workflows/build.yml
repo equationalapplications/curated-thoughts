@@ -41,7 +41,7 @@ jobs:
           sudo find /etc/apt -type f \
             \( -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \) \
             -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
-          sudo apt-get \
+          sudo timeout 5m apt-get \
             -o Acquire::http::Timeout=120 \
             -o Acquire::https::Timeout=120 \
             -o Acquire::Retries=0 \
