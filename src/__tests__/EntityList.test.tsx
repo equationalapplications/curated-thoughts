@@ -1,30 +1,73 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { EntityList } from "../components/brain/EntityList";
 import type { EntitySummary } from "../lib/tauri";
-import { describe, it, expect, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
-function entity(overrides: Partial<EntitySummary>): EntitySummary {
-  return {
-    id: "ent_x",
-    name: "X",
-    entity_type: "concept",
+const ENTITIES: EntitySummary[] = [
+  {
+    id: "ent_1",
+    name: "Alpha",
+    entity_type: "project",
+    summary_snippet: "",
+    fact_count: 3,
+    open_task_count: 0,
+    created_at: 100,
+    updated_at: 100,
+  },
+  {
+    id: "ent_2",
+    name: "Bob",
+    entity_type: "person",
     summary_snippet: "",
     fact_count: 0,
     open_task_count: 0,
     created_at: 100,
     updated_at: 100,
-    ...overrides,
-  };
-}
-
-const ENTITIES = [
-  entity({ id: "ent_1", name: "Alpha", entity_type: "project", fact_count: 3 }),
-  entity({ id: "ent_2", name: "Bob", entity_type: "person" }),
-  entity({ id: "ent_3", name: "Beta", entity_type: "project" }),
+  },
+  {
+    id: "ent_3",
+    name: "Beta",
+    entity_type: "project",
+    summary_snippet: "",
+    fact_count: 0,
+    open_task_count: 0,
+    created_at: 100,
+    updated_at: 100,
+  },
 ];
 
+vi.mock("../components/brain/EntityPage", () => ({
+  EntityPage: () => <main data-testid="entity-page" />,
+}));
+
+vi.mock("../components/brain/ConnectionsPanel", () => ({
+  ConnectionsPanel: () => <aside data-testid="connections-panel" />,
+}));
+
+vi.mock("../components/shell/OkfInteropBar", () => ({
+  OkfInteropBar: () => <div data-testid="okf-interop-bar" />,
+}));
+
+vi.mock("../components/shell/EditorPane", () => ({
+  EditorPane: () => <div data-testid="editor-pane" />,
+}));
+
 describe("EntityList", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_entities_cmd") return Promise.resolve(ENTITIES);
+      if (cmd === "get_entity_cmd") return Promise.resolve(null);
+      if (cmd === "list_vault_files") return Promise.resolve([]);
+      if (cmd === "search_vault") return Promise.resolve([]);
+      if (cmd === "get_related_chunks") return Promise.resolve([]);
+      if (cmd === "get_structural_neighbors") return Promise.resolve([]);
+      if (cmd === "get_indexing_status") return Promise.resolve({ indexed: 0, pending: 0 });
+      return Promise.resolve(null);
+    });
+  });
+
   it("groups entities by type and selects on click", () => {
     const onSelect = vi.fn();
     render(
@@ -73,16 +116,40 @@ describe("EntityList", () => {
       expect(screen.getByRole("option", { name: "Recently created" })).toBeInTheDocument();
     });
 
-    it("allows changing the sort selection", async () => {
+    it("calls listEntities via invoke with new sort value when selection changes", async () => {
       const user = userEvent.setup();
+      const { BrainMode } = await import("../components/modes/BrainMode");
       render(
-        <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} />,
+        <BrainMode
+          selectedEntityId={null}
+          onEntitySelect={vi.fn()}
+          onOpenSource={vi.fn()}
+          onEntityName={vi.fn()}
+        />,
       );
+      await waitFor(() =>
+        expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+          "list_entities_cmd",
+          expect.objectContaining({ sort: "updated_desc" }),
+        ),
+      );
+
       const select = screen.getByRole("combobox", { name: "Sort entities" });
       await user.selectOptions(select, "name_asc");
-      expect(select).toHaveValue("name_asc");
+      await waitFor(() =>
+        expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+          "list_entities_cmd",
+          expect.objectContaining({ sort: "name_asc" }),
+        ),
+      );
+
       await user.selectOptions(select, "created_desc");
-      expect(select).toHaveValue("created_desc");
+      await waitFor(() =>
+        expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+          "list_entities_cmd",
+          expect.objectContaining({ sort: "created_desc" }),
+        ),
+      );
     });
   });
 });
