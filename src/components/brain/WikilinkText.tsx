@@ -40,14 +40,23 @@ interface Props {
  * issues one round-trip, not N. Subscribers re-render when the cache updates.
  */
 type ResolverState =
-  | { status: "loading"; promise: Promise<void>; version: number }
+  | { status: "loading"; promise: Promise<void>; version: number; fetchStarted: boolean }
   | { status: "ready"; names: Set<string>; version: number };
 
-let resolverState: ResolverState = { status: "loading", promise: Promise.resolve(), version: 0 };
+let resolverState: ResolverState = {
+  status: "loading",
+  promise: Promise.resolve(),
+  version: 0,
+  // Tracks whether a fetch has already been launched. Without this flag,
+  // every mount while the cache is in "loading" would issue its own
+  // `listEntities` round-trip — defeating the dedup the comment promises.
+  fetchStarted: false,
+};
 const resolverListeners = new Set<() => void>();
 
 function ensureResolver(): ResolverState {
   if (resolverState.status === "ready") return resolverState;
+  if (resolverState.fetchStarted) return resolverState;
   const existing = resolverState;
   // Wrap in Promise.resolve so a non-thenable (e.g. undefined from a test
   // mock of `invoke`) becomes a fulfilled promise instead of crashing here.
@@ -58,10 +67,22 @@ function ensureResolver(): ResolverState {
       resolverListeners.forEach((fn) => fn());
     })
     .catch(() => {
-      // Stay in "loading" state so future mounts retry on the next refresh;
-      // unresolved is the fallback rendering state.
+      // Reset so future mounts retry; otherwise we'd be stuck in "loading"
+      // with no fetch in flight and every `[[Name]]` would render unresolved.
+      resolverState = {
+        status: "loading",
+        promise: Promise.resolve(),
+        version: existing.version + 1,
+        fetchStarted: false,
+      };
+      resolverListeners.forEach((fn) => fn());
     });
-  resolverState = { status: "loading", promise, version: existing.version + 1 };
+  resolverState = {
+    status: "loading",
+    promise,
+    version: existing.version + 1,
+    fetchStarted: true,
+  };
   return resolverState;
 }
 
