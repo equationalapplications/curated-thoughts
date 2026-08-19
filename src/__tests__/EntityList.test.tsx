@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { EntityList } from "../components/brain/EntityList";
 import type { EntitySummary } from "../lib/tauri";
 import { describe, it, expect, vi } from "vitest";
@@ -56,5 +57,32 @@ describe("EntityList", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(onCreate).toHaveBeenCalledWith("Project X");
+  });
+
+  describe("sort picker", () => {
+    it("renders sort picker with all four options", () => {
+      render(
+        <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} />,
+      );
+      const select = screen.getByRole("combobox", { name: "Sort entities" });
+      expect(select).toBeInTheDocument();
+      expect(select).toHaveValue("updated_desc");
+      expect(screen.getByRole("option", { name: "Recently updated" })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: "Name (A → Z)" })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: "Name (Z → A)" })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: "Recently created" })).toBeInTheDocument();
+    });
+
+    it("allows changing the sort selection", async () => {
+      const user = userEvent.setup();
+      render(
+        <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} />,
+      );
+      const select = screen.getByRole("combobox", { name: "Sort entities" });
+      await user.selectOptions(select, "name_asc");
+      expect(select).toHaveValue("name_asc");
+      await user.selectOptions(select, "created_desc");
+      expect(select).toHaveValue("created_desc");
+    });
   });
 });
