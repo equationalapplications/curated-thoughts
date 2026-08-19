@@ -183,8 +183,6 @@ fn defaults_to_ll_wiki_2_on_export() {
 
 #[test]
 fn parses_golden_v2_bundle_with_status_rename_rule() {
-    // golden-v2 fixture is vendored in Task 7; until then this test fails with
-    // "fixture not found" — that's expected and recorded in the Task 6 report.
     let bundle = parse_bundle(&load_fixture_files("golden-v2")).unwrap();
     assert_eq!(bundle.profile.as_deref(), Some("llm-wiki/2"));
     assert_eq!(bundle.okf_version.as_deref(), Some("0.2"));

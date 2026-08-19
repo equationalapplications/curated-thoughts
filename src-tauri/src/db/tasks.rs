@@ -113,6 +113,10 @@ pub fn create_task(
             now_ms,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
         ),
         now_ms,
     )?;
@@ -188,6 +192,10 @@ pub fn set_task_status(
             now_ms,
             resolved_at,
             None,
+            None,
+            None,
+            None,
+            None,
         ),
         now_ms,
     )?;
@@ -247,6 +255,10 @@ pub fn archive_task(conn: &mut Connection, task_id: &str) -> Result<()> {
             now_ms,
             resolved_at,
             Some(now_ms),
+            None,
+            None,
+            None,
+            None,
         ),
         now_ms,
     )?;

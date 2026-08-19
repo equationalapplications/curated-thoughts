@@ -233,7 +233,7 @@ Failure mid-conversion: guard key unwritten → next startup re-runs; step 2's d
 - Retrieval-ranking changes beyond removing the `tier_wisdom` chunk source.
 - Summary-edit merge UX (v1 ships the timestamp conflict check; a real merge flow is v2).
 
-### Implemented deferrals (v1.10.0)
+### Implemented deferrals
 
 | Item | Spec ref | Status |
 |---|---|---|

@@ -34,9 +34,35 @@ describe("FactPowerMenu", () => {
     expect(screen.getByText("stable")).toBeInTheDocument();
   });
 
-  it("renders empty state when okf_sources is empty", () => {
-    render(<FactPowerMenu fact={{ ...baseFact, okf_sources: [], okf_verified: [] }} open onClose={vi.fn()} />);
+  it("renders empty state when all provenance fields are empty", () => {
+    render(
+      <FactPowerMenu
+        fact={{
+          ...baseFact,
+          okf_sources: [],
+          okf_verified: [],
+          okf_usage_window: null,
+        }}
+        open
+        onClose={vi.fn()}
+      />,
+    );
     expect(screen.getByText(/no provenance recorded/i)).toBeInTheDocument();
+  });
+
+  it("renders the usage window section when only okf_usage_window is populated", () => {
+    render(
+      <FactPowerMenu
+        fact={{
+          ...baseFact,
+          okf_sources: [],
+          okf_verified: [],
+        }}
+        open
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/2026-07-01.*2026-12-31/)).toBeInTheDocument();
   });
 
   it("calls onClose on Escape", async () => {

@@ -55,6 +55,10 @@ let resolverState: ResolverState = {
 const resolverListeners = new Set<() => void>();
 
 function setReadyState(entities: EntitySummary[], version: number) {
+  // Reject stale completions: if a newer fetch has been started since this
+  // request was launched, the active version will be greater than `version`.
+  // Writing the older data would overwrite the fresher cache.
+  if (resolverState.version > version) return;
   const safeEntities = entities ?? [];
   const names = new Set(safeEntities.map((e) => e.name.toLowerCase()));
   resolverState = { status: "ready", names, entities: safeEntities, version };
