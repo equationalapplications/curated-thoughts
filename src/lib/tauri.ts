@@ -550,8 +550,9 @@ export type OkfImportMode = "merge" | "replace" | "clone";
 export const exportOkfBundle = (
   destPath: string,
   entityIds: string[] | null = null,
+  profile: "llm-wiki/1" | "llm-wiki/2" | null = null,
 ): Promise<OkfExportSummary> =>
-  invoke("okf_export_bundle_cmd", { destPath, entityIds });
+  invoke("okf_export_bundle_cmd", { destPath, entityIds, profile });
 
 export const previewOkfImport = (
   srcPath: string,
