@@ -26,18 +26,20 @@ const DEFAULT_BLOCKS: MockBlock[] = [
 ];
 
 // Heading and paragraph share the same text. The anchor resolver must
-// skip the paragraph and target the heading.
-const DUPLICATE_TEXT_DOC = "# chunk-42\n\nchunk-42";
+// skip the paragraph and target the heading. The paragraph is placed
+// before the heading so that an unrestricted "first match wins" search
+// would land on the paragraph and fail this fixture.
+const DUPLICATE_TEXT_DOC = "chunk-42\n\n# chunk-42";
 const DUPLICATE_TEXT_BLOCKS: MockBlock[] = [
   {
-    id: "block-dup-heading",
-    type: "heading",
+    id: "block-dup-paragraph",
+    type: "paragraph",
     content: [{ type: "text", text: "chunk-42" }],
     children: [],
   },
   {
-    id: "block-dup-paragraph",
-    type: "paragraph",
+    id: "block-dup-heading",
+    type: "heading",
     content: [{ type: "text", text: "chunk-42" }],
     children: [],
   },
@@ -113,7 +115,10 @@ import { ThemeProvider } from "../lib/ThemeContext";
 // throwing. Each test spies on the instance method to assert calls.
 if (
   typeof HTMLElement !== "undefined" &&
-  !HTMLElement.prototype.hasOwnProperty("scrollIntoView")
+  !Object.prototype.hasOwnProperty.call(
+    HTMLElement.prototype,
+    "scrollIntoView",
+  )
 ) {
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     value: function scrollIntoView() {},

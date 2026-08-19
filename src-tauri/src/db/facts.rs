@@ -80,7 +80,10 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
             // Manual Brain-mode inserts start without OKF provenance;
             // the OKF v0.2 fields default to null until something
             // explicitly populates them (import, verified annotation, etc.).
-            None,
+            // `lifecycle_status` defaults to "stable" so outbox consumers
+            // reconstruct the persisted lifecycle state without an extra
+            // round-trip to the database.
+            Some("stable"),
             None,
             None,
             None,
@@ -295,6 +298,20 @@ mod tests {
         assert_eq!(loaded.facts.len(), 1);
         assert_eq!(outbox_count(&conn, &fact.id, "INSERT"), 1);
         assert!(loaded.updated_at > 1, "entity updated_at must be touched");
+
+        // Outbox payload must carry the persisted lifecycle_status so a
+        // consumer that reconstructs records from insert events does not
+        // lose it.
+        let payload_lifecycle: String = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.lifecycle_status')
+                 FROM llm_wiki_outbox
+                 WHERE record_id = ?1 AND table_name = 'entries' AND operation = 'INSERT'",
+                [&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_lifecycle, "stable");
     }
 
     #[test]

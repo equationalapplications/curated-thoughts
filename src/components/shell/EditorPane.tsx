@@ -59,6 +59,13 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
     setLoadError(null);
     setSaveError(null);
     setSaveOk(false);
+    // Reset load identity so the anchor effect doesn't reuse blocks from
+    // a prior selection. Without this, a rapid A → B → A switch can leave
+    // `loadedDoc === "A.md"` while `lastBlocksRef` still points at the
+    // earlier A's blocks — the anchor effect would then "succeed" without
+    // actually resolving the new A's chunk anchor.
+    setLoadedDoc(null);
+    lastBlocksRef.current = [];
     // Effect-local cancellation flag: if `selectedDoc` changes while
     // `readDocument` / `tryParseMarkdownToBlocks` is in flight, the older
     // resolution must NOT replace the newer editor blocks. The cleanup
@@ -93,10 +100,19 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
   useEffect(() => {
     if (!selectedDoc || !anchorChunkId || loadedDoc !== selectedDoc) return;
     let highlightTimer: number | undefined;
+    // Track the node we added the highlight class to so we can remove it
+    // during cleanup. The timer may be cancelled mid-flight (selectedDoc
+    // or anchorChunkId changed before 1.5s elapsed) — without this the
+    // old node would stay highlighted until the next anchor resolution.
+    let highlightedNode: HTMLElement | null = null;
     const cleanupHighlight = () => {
       if (highlightTimer !== undefined) {
         window.clearTimeout(highlightTimer);
         highlightTimer = undefined;
+      }
+      if (highlightedNode) {
+        highlightedNode.classList.remove("editor-pane-block--anchor-highlight");
+        highlightedNode = null;
       }
     };
     // Defer to next frame so BlockNote has rendered the new blocks.
@@ -133,9 +149,11 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
       node.scrollIntoView({ block: "nearest", behavior: "auto" });
       cleanupHighlight();
       node.classList.add("editor-pane-block--anchor-highlight");
+      highlightedNode = node;
       highlightTimer = window.setTimeout(() => {
         node.classList.remove("editor-pane-block--anchor-highlight");
         highlightTimer = undefined;
+        highlightedNode = null;
       }, 1500);
     });
     return () => {

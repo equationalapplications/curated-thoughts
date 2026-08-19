@@ -113,7 +113,7 @@ export function BrainMode({
         {loading && entities.length === 0 && (
           <p className="placeholder">Loading entities…</p>
         )}
-        {error && entities.length === 0 && (
+        {error && (
           <p className="entity-error" role="alert">
             {error}
           </p>
