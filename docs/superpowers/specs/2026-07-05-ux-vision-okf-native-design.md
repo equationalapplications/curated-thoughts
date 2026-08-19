@@ -1,7 +1,7 @@
 # Spec: UX Vision — OKF-Native Curated Thoughts
 
 **Date:** 2026-07-05
-**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md); Phase 5 — Timeline + Tasks modes + activity feed + notifications (Implemented 2026-07-08); Phase 7 — OKF v0.2 first-class adoption + frontend power-layer + completeness (in progress, see plan 2026-08-18-phase-7-plan-ab.md)
+**Status:** Phase 1 — Shell (implemented); Phase 2 — Review editorial desk (Slices 1, 3–4 implemented; `edited_payload` editing + library deep-links remain); Phase 3 backend dependency (implemented, v1.10.0); Phase 4 — Brain entity pages + cross-mode routing (implemented 2026-07-06, see plan 2026-07-06-phase-4-brain-entity-pages.md); Phase 5 — Timeline + Tasks modes + activity feed + notifications (Implemented 2026-07-08); Phase 7 — OKF v0.2 first-class adoption + frontend power-layer + completeness (implemented 2026-08-19, see plan 2026-08-18-phase-7-plan-ab.md; chunk-level Library deep-link highlight remains — UI scaffolding shipped, source-chunk-id enrichment deferred to Phase 8)
 **Type:** North-star UX vision. Each phase below gets its own implementation plan; the backend OKF-native data-model migration gets its own separate spec (`2026-07-05-okf-backend-migration-design.md` — implemented).
 **Related:** `../../../../clanker/docs/superpowers/specs/2026-07-04-okf-import-support-design.md` (OKF bundle format and import semantics), `2026-05-05-second-brain-app-design.md` (original app design), `../../../../expo-llm-wiki/docs/okf-profile.md` (normative llm-wiki OKF profile v1 — postdates this spec; binds phase 6, see the backend spec's addendum)
 
@@ -116,7 +116,7 @@ Replaces `ReviewModal` entirely. Three columns:
 
 **Deferred notes (Tasks mode):**
 - Group-by-source-document for tasks requires a `source` column on `llm_wiki_tasks` that the schema doesn't carry; deferred until the librarian records task provenance.
-- Per-fact "…" power-layer menu (raw ids, embedding info, provenance JSON) deferred to Phase 7.
+- Per-fact "…" power-layer menu (raw ids, embedding info, provenance JSON) implemented in Phase 7 (`FactPowerMenu.tsx`).
 
 **Activity feed (available from any mode):** a slide-over panel opened from the status bar or the rail pulse icon. The last ~50 events, live-updating, condensed, with an "Open full Timeline" link at the bottom. Same data as Timeline, ambient form.
 
@@ -187,7 +187,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels → Deferred to Phase 8 |
 | Activity rail pulse icon | Implemented (phase 5) |
 | Live Activity feed (beyond stub panel) | Implemented (phase 5) |
-| Per-mode empty states (Brain, Library) | Phase 4 / Phase 7 |
+| Per-mode empty states (Brain, Library) | Implemented (Brain Phase 4; Library + Review Phase 7) |
 | Embedder/model down → inline feature notice | Phase 1 follow-up |
 | Background errors → Activity feed + retry | Implemented (phase 5) |
 | Review empty state richness (doc count, last-synthesis time) | Phase 2 |
@@ -204,13 +204,13 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Implemented (Slice 4) |
 | Per-fact accept/reject toggles in editor | Implemented (Slice 3) |
 | Inline `edited_payload` editing | Implemented (phase 5) |
-| Library deep-link from evidence | Implemented (Phase 4 navigation; opens document, chunk-level highlight → Phase 7) |
+| Library deep-link from evidence | Implemented (Phase 4 navigation; opens document). Chunk-level highlight: UI scaffolding shipped Phase 7 (`NavTarget.chunkId`, `anchorChunkId`, `editor-pane-block--anchor-highlight`) but `source_docs_from_ref` (`src-tauri/src/db/entities.rs`) still returns paths only, so `chunkId` is always null at runtime → Phase 8 |
 
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
 4. **Brain mode entity pages** — implemented 2026-07-06 (see `2026-07-06-phase-4-brain-entity-pages.md`). Deferred: peek panels, similarity in Connections.
 5. **Timeline + Tasks modes** — implemented 2026-07-08 (phase 5).
 6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes and Cloud Bridge gating split to a separate upcoming plan.
-7. **OKF v0.2 first-class adoption + frontend power-layer + completeness** — in progress (phase 7, see `2026-08-18-phase-7-plan-ab.md`).
+7. **OKF v0.2 first-class adoption + frontend power-layer + completeness** — implemented 2026-08-19 (phase 7, see `2026-08-18-phase-7-plan-ab.md`). Deferred: chunk-level Library deep-link highlight (see Phase 2 deferrals).
 
 ## Non-Goals (this vision, v1)
 
