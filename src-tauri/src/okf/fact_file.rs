@@ -129,15 +129,57 @@ fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> 
 }
 
 /// Latest verifier's `at` (epoch ms) from `verified: [...]` (or bare mapping).
+/// Walks the verbatim flow text and finds the rightmost `{ by: ..., at: ... }` entry.
 fn latest_verified_at(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
-    // Implemented in Task 4 once the flow-mapping parser is in. Stub returns None here so the
-    // struct literal compiles; Task 4 fills in the real implementation and the test below.
-    let _ = fm;
-    None
+    let raw = fm.get_str("verified")?;
+    let last_at = last_verified_at_in_text(raw)?;
+    crate::okf::timefmt::ms_from_iso(&last_at)
 }
 fn latest_verified_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
-    let _ = fm;
-    None
+    let raw = fm.get_str("verified")?;
+    last_verified_by_in_text(raw)
+}
+
+fn last_verified_at_in_text(raw: &str) -> Option<String> {
+    // Find every `at: <quoted-or-bare>` substring; take the last ISO timestamp.
+    let bytes = raw.as_bytes();
+    let mut last: Option<String> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"at:") {
+            let mut j = i + 3;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+            let start = j;
+            // Read until a comma, closing brace, or end of value
+            while j < bytes.len() && bytes[j] != b',' && bytes[j] != b'}' { j += 1; }
+            let token = raw[start..j].trim().trim_matches('"').trim_matches('\'').to_string();
+            if !token.is_empty() { last = Some(token); }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    last
+}
+fn last_verified_by_in_text(raw: &str) -> Option<String> {
+    // Symmetric to last_verified_at_in_text; reads the trailing `by:` value.
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    let mut last: Option<String> = None;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"by:") {
+            let mut j = i + 3;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+            let start = j;
+            while j < bytes.len() && bytes[j] != b',' && bytes[j] != b'}' { j += 1; }
+            let token = raw[start..j].trim().trim_matches('"').trim_matches('\'').to_string();
+            if !token.is_empty() { last = Some(token); }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    last
 }
 
 #[cfg(test)]
@@ -165,8 +207,20 @@ sources: [ { resource: documents/notes.md, title: notes, usage_count: 3, last_mo
         assert_eq!(parsed.fact.okf_usage_window.as_deref(), Some("{ from: 2026-07-01, to: 2026-12-31 }"));
         // stale_after: 2027-01-01 → ms at UTC midnight (we don't assert exact ms — just that it's Some)
         assert!(parsed.fact.stale_after.is_some());
-        // verified / latest_verified_at are stubs until Task 4 lands
-        assert!(parsed.fact.last_verified_at.is_none());
+        // verified list has one entry → last_verified_at / last_verified_by populated by Task 4's flow-mapping walker
+        assert!(parsed.fact.last_verified_at.is_some());
+        assert_eq!(parsed.fact.last_verified_by.as_deref(), Some("process:nightly"));
+    }
+
+    #[test]
+    fn parses_v02_fact_verified_list() {
+        let raw = "---\ntype: fact\ntitle: T\nid: f1\nentity_id: e1\n\
+verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice, at: 2026-07-02T00:00:00.000Z } ]\n---\nB\n";
+        let parsed = parse_fact_file(raw).unwrap();
+        assert!(parsed.fact.okf_verified.as_deref().unwrap().contains("human:alice"));
+        // ms_from_iso("2026-07-02T00:00:00.000Z") is implementation-defined; just check Some
+        assert!(parsed.fact.last_verified_at.is_some());
+        assert_eq!(parsed.fact.last_verified_by.as_deref(), Some("human:alice"));
     }
 
     #[test]
