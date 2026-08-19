@@ -18,6 +18,13 @@ export function ConnectionsPanel({ entityId, onSelectEntity }: Props) {
       setConnections(null);
       return;
     }
+    // Gate the request on embedder health: if the embedder is down or
+    // unconfigured, the ProviderNotice is the user-facing surface — don't
+    // fire the request at all.
+    if (embedding === "error" || embedding === "unconfigured") {
+      setConnections({ outgoing: [], backlinks: [] });
+      return;
+    }
     getEntityConnections(entityId)
       .then((loaded) => {
         if (!cancelled) setConnections(loaded);
@@ -28,7 +35,7 @@ export function ConnectionsPanel({ entityId, onSelectEntity }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [entityId]);
+  }, [entityId, embedding]);
 
   if (!entityId || !connections) return null;
 

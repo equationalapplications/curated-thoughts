@@ -99,7 +99,7 @@ export function BrainMode({
   return (
     <div className="brain-mode">
       <ProviderNotice
-        feature="search"
+        feature="related_notes"
         embedding={embedding}
         generation={generation}
       />
