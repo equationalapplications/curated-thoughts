@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 
 use crate::okf::concept::parse_concept;
-use crate::okf::frontmatter::serialize_frontmatter_pairs;
+use crate::okf::frontmatter::serialize_scalar_string;
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
 use crate::okf::types::{OkfFrontmatterValue, OkfFrontmatterValue as V, OkfMarkdownLink, WikiFact};
@@ -48,6 +48,44 @@ pub fn build_fact_file(fact: &WikiFact, related: &[(String, String)]) -> String 
         pairs.push(("deleted_at", V::Number(ms as f64)));
     }
 
+    // OKF v0.2 fields — emitted only when populated (omitted otherwise, per upstream §4.7).
+    pairs.push(("status", V::String(fact.lifecycle_status.clone())));
+    if let Some(ms) = fact.stale_after {
+        let date = crate::okf::timefmt::utc_date_from_ms(ms);
+        pairs.push(("stale_after", V::String(date))); // YYYY-MM-DD
+    }
+    if let Some(actor) = &fact.generated_by {
+        pairs.push((
+            "generated",
+            V::String(format!(
+                "{{ by: {}, at: {} }}",
+                serialize_actor_string(actor),
+                iso_from_ms(fact.updated_at),
+            )),
+        ));
+    }
+    if let Some(verified_json) = &fact.okf_verified {
+        if !verified_json.is_empty() && verified_json != "[]" {
+            // Re-shape JSON array into a flow sequence of flow mappings.
+            let flow = json_array_to_flow_sequence(verified_json, "verified")
+                .unwrap_or_else(|| format!("[{verified_json}]"));
+            pairs.push(("verified", V::String(flow)));
+        }
+    }
+    if let Some(sources_json) = &fact.okf_sources {
+        if !sources_json.is_empty() && sources_json != "[]" {
+            let flow = json_array_to_flow_sequence(sources_json, "sources")
+                .unwrap_or_else(|| format!("[{sources_json}]"));
+            pairs.push(("sources", V::String(flow)));
+        }
+    }
+    if let Some(window) = &fact.okf_usage_window {
+        pairs.push((
+            "usage_window",
+            V::String(flow_mapping_from_json(window, "usage_window").unwrap_or_else(|| window.clone())),
+        ));
+    }
+
     let refs: Vec<(&str, &str)> = related
         .iter()
         .map(|(t, p)| (t.as_str(), p.as_str()))
@@ -58,7 +96,7 @@ pub fn build_fact_file(fact: &WikiFact, related: &[(String, String)]) -> String 
     } else {
         format!("{body}\n")
     };
-    format!("{}\n{}", serialize_frontmatter_pairs(&pairs), body)
+    format!("{}\n{}", serialize_pairs_with_flow(&pairs), body)
 }
 
 pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
@@ -182,6 +220,111 @@ fn last_verified_by_in_text(raw: &str) -> Option<String> {
     last
 }
 
+/// Quote actor strings containing `/` or `:` per upstream spec §4.1.
+pub(crate) fn serialize_actor_string(s: &str) -> String {
+    if s.contains('/') || s.contains(':') {
+        format!("\"{}\"", s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Parse a JSON array string and re-emit it as a flow sequence of flow mappings:
+/// `[ { a: 1, b: 2 }, { a: 3, b: 4 } ]`. The `key` argument is the frontmatter
+/// key (for error messages). Returns `None` if the JSON is malformed.
+pub(crate) fn json_array_to_flow_sequence(json: &str, _key: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let arr = v.as_array()?;
+    let mut out = String::from("[ ");
+    for (i, entry) in arr.iter().enumerate() {
+        if i > 0 { out.push_str(", "); }
+        let obj = entry.as_object()?;
+        out.push_str("{ ");
+        for (j, (k, val)) in obj.iter().enumerate() {
+            if j > 0 { out.push_str(", "); }
+            out.push_str(&format!("{}: {}", k, json_value_to_flow(val)));
+        }
+        out.push_str(" }");
+    }
+    out.push_str(" ]");
+    Some(out)
+}
+
+/// Render a JSON object as a flow mapping: `{ k: v, k2: v2 }`.
+pub(crate) fn flow_mapping_from_json(json: &str, _key: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let obj = v.as_object()?;
+    let mut out = String::from("{ ");
+    for (i, (k, val)) in obj.iter().enumerate() {
+        if i > 0 { out.push_str(", "); }
+        out.push_str(&format!("{}: {}", k, json_value_to_flow(val)));
+    }
+    out.push_str(" }");
+    Some(out)
+}
+
+pub(crate) fn json_value_to_flow(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => {
+            // Quote when the string contains anything YAML-meaningful inside a flow
+            // mapping/sequence: whitespace, separators, or characters that would
+            // otherwise be ambiguous (date `-`, path `/`, anchor/flow markers).
+            if s.contains(|c: char| {
+                c.is_whitespace() || matches!(c, ':' | ',' | '"' | '\'' | '-' | '/' | '{' | '}' | '[' | ']' | '#')
+            }) {
+                format!("\"{}\"", s.replace('"', "\\\""))
+            } else {
+                s.clone()
+            }
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".into(),
+        other => format!("\"{}\"", other),
+    }
+}
+
+/// Serialize frontmatter pairs to a string, emitting flow-mapping values (whose
+/// underlying string starts with `{` and ends with `}`) and flow-sequence values
+/// (whose string starts with `[` and ends with `]`) without the outer double
+/// quotes that `serialize_frontmatter_pairs` / `serialize_scalar_string` would
+/// otherwise apply — quoting them would corrupt the YAML flow syntax.
+///
+/// This mirrors `serialize_frontmatter_pairs` exactly for non-flow values
+/// (delegating to `serialize_scalar_string` for strings and replicating the
+/// other variants inline).
+pub(crate) fn serialize_pairs_with_flow(pairs: &[(&str, OkfFrontmatterValue)]) -> String {
+    let mut lines = vec!["---".to_string()];
+    for (key, value) in pairs {
+        match value {
+            OkfFrontmatterValue::String(s)
+                if (s.starts_with('{') && s.ends_with('}'))
+                    || (s.starts_with('[') && s.ends_with(']')) =>
+            {
+                // Flow mapping or sequence — emit raw without outer quoting.
+                lines.push(format!("{key}: {s}"));
+            }
+            OkfFrontmatterValue::StringList(items) if items.is_empty() => {
+                lines.push(format!("{key}: []"));
+            }
+            OkfFrontmatterValue::StringList(items) => {
+                lines.push(format!("{key}:"));
+                for item in items {
+                    lines.push(format!("  - {}", serialize_scalar_string(item)));
+                }
+            }
+            OkfFrontmatterValue::String(s) => {
+                lines.push(format!("{key}: {}", serialize_scalar_string(s)));
+            }
+            OkfFrontmatterValue::Number(n) => lines.push(format!("{key}: {n}")),
+            OkfFrontmatterValue::Bool(b) => lines.push(format!("{key}: {b}")),
+            OkfFrontmatterValue::Null => lines.push(format!("{key}: null")),
+        }
+    }
+    lines.push("---".to_string());
+    format!("{}\n", lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +367,47 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
     }
 
     #[test]
+    fn builds_fact_with_v02_fields() {
+        let fact = WikiFact {
+            id: "fact_x".into(),
+            entity_id: "ent_demo".into(),
+            title: "Title".into(),
+            body: "Body".into(),
+            tags: vec![],
+            confidence: "certain".into(),
+            source_type: "user_stated".into(),
+            source_hash: None,
+            source_ref: None,
+            created_at: 1719835200000,
+            updated_at: 1719835200000,
+            last_accessed_at: None,
+            access_count: 0,
+            deleted_at: None,
+            okf_type: None,
+            lifecycle_status: "stable".into(),
+            stale_after: Some(crate::okf::timefmt::ms_from_utc_date("2027-01-01").unwrap()),
+            generated_by: Some("human:alice".into()),
+            okf_sources: Some(r#"[{"resource":"documents/notes.md"}]"#.into()),
+            okf_verified: Some(r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into()),
+            okf_usage_window: Some(r#"{"from":"2026-07-01","to":"2026-12-31"}"#.into()),
+            last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
+            last_verified_by: Some("process:nightly".into()),
+        };
+        let md = build_fact_file(&fact, &[]);
+        assert!(md.contains("status: stable"), "missing lifecycle status: {md}");
+        assert!(md.contains("stale_after: 2027-01-01"), "missing stale_after: {md}");
+        assert!(md.contains("generated: { by: \"human:alice\""), "missing generated flow mapping: {md}");
+        assert!(md.contains("verified:"), "missing verified key: {md}");
+        assert!(md.contains("sources:"), "missing sources key: {md}");
+        assert!(md.contains("usage_window: { from: \"2026-07-01\", to: \"2026-12-31\" }"), "missing usage_window: {md}");
+        // Round-trip: parse what we just emitted
+        let parsed = parse_fact_file(&md).unwrap();
+        assert_eq!(parsed.fact.lifecycle_status, "stable");
+        assert_eq!(parsed.fact.generated_by.as_deref(), Some("human:alice"));
+        assert!(parsed.fact.okf_sources.as_deref().unwrap().contains("documents/notes.md"));
+    }
+
+    #[test]
     fn parses_golden_fact() {
         let parsed = parse_fact_file(GOLDEN_FACT).unwrap();
         assert_eq!(parsed.fact.id, "fact_alpha");
@@ -251,7 +435,25 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             .map(|l| (l.text.clone(), l.path.clone()))
             .collect();
         let rebuilt = build_fact_file(&parsed.fact, &related);
-        assert_eq!(normalize(&rebuilt), normalize(GOLDEN_FACT));
+        // v0.2 fields are now emitted by default (Task 5); the golden-v1 fixture
+        // is the source of truth for v0.1 fields only — strip the v0.2 lines so
+        // the byte-comparison against the fixture stays meaningful.
+        let stripped = strip_v02_lines(&rebuilt);
+        assert_eq!(normalize(&stripped), normalize(GOLDEN_FACT));
+    }
+
+    fn strip_v02_lines(s: &str) -> String {
+        s.lines()
+            .filter(|line| {
+                !line.starts_with("status:")
+                    && !line.starts_with("stale_after:")
+                    && !line.starts_with("generated:")
+                    && !line.starts_with("verified:")
+                    && !line.starts_with("sources:")
+                    && !line.starts_with("usage_window:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn normalize(s: &str) -> String {
