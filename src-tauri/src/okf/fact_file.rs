@@ -15,7 +15,14 @@ pub struct ParsedFact {
 
 /// `related` is `(edge_type, relative_path)` per outgoing edge; dangling
 /// targets must already be filtered out by the caller (§6).
-pub fn build_fact_file(fact: &WikiFact, related: &[(String, String)]) -> String {
+/// `profile` selects the wire shape: `"llm-wiki/1"` emits only the v0.1 field
+/// set (no `status`/v0.2 keys); `"llm-wiki/2"` (and any other value) emits the
+/// v0.2 field set including `status` and provenance keys.
+pub fn build_fact_file(
+    fact: &WikiFact,
+    related: &[(String, String)],
+    profile: &str,
+) -> String {
     let mut pairs: Vec<(&str, V)> = vec![
         (
             "type",
@@ -49,41 +56,45 @@ pub fn build_fact_file(fact: &WikiFact, related: &[(String, String)]) -> String 
     }
 
     // OKF v0.2 fields — emitted only when populated (omitted otherwise, per upstream §4.7).
-    pairs.push(("status", V::String(fact.lifecycle_status.clone())));
-    if let Some(ms) = fact.stale_after {
-        let date = crate::okf::timefmt::utc_date_from_ms(ms);
-        pairs.push(("stale_after", V::String(date))); // YYYY-MM-DD
-    }
-    if let Some(actor) = &fact.generated_by {
-        pairs.push((
-            "generated",
-            V::String(format!(
-                "{{ by: {}, at: {} }}",
-                serialize_actor_string(actor),
-                iso_from_ms(fact.updated_at),
-            )),
-        ));
-    }
-    if let Some(verified_json) = &fact.okf_verified {
-        if !verified_json.is_empty() && verified_json != "[]" {
-            // Re-shape JSON array into a flow sequence of flow mappings.
-            let flow = json_array_to_flow_sequence(verified_json, "verified")
-                .unwrap_or_else(|| format!("[{verified_json}]"));
-            pairs.push(("verified", V::String(flow)));
+    // Skipped entirely under profile 1 (`llm-wiki/1`) — v0.1 has no `status`
+    // (lifecycle) or provenance keys.
+    if profile != "llm-wiki/1" {
+        pairs.push(("status", V::String(fact.lifecycle_status.clone())));
+        if let Some(ms) = fact.stale_after {
+            let date = crate::okf::timefmt::utc_date_from_ms(ms);
+            pairs.push(("stale_after", V::String(date))); // YYYY-MM-DD
         }
-    }
-    if let Some(sources_json) = &fact.okf_sources {
-        if !sources_json.is_empty() && sources_json != "[]" {
-            let flow = json_array_to_flow_sequence(sources_json, "sources")
-                .unwrap_or_else(|| format!("[{sources_json}]"));
-            pairs.push(("sources", V::String(flow)));
+        if let Some(actor) = &fact.generated_by {
+            pairs.push((
+                "generated",
+                V::String(format!(
+                    "{{ by: {}, at: {} }}",
+                    serialize_actor_string(actor),
+                    iso_from_ms(fact.updated_at),
+                )),
+            ));
         }
-    }
-    if let Some(window) = &fact.okf_usage_window {
-        pairs.push((
-            "usage_window",
-            V::String(flow_mapping_from_json(window, "usage_window").unwrap_or_else(|| window.clone())),
-        ));
+        if let Some(verified_json) = &fact.okf_verified {
+            if !verified_json.is_empty() && verified_json != "[]" {
+                // Re-shape JSON array into a flow sequence of flow mappings.
+                let flow = json_array_to_flow_sequence(verified_json, "verified")
+                    .unwrap_or_else(|| format!("[{verified_json}]"));
+                pairs.push(("verified", V::String(flow)));
+            }
+        }
+        if let Some(sources_json) = &fact.okf_sources {
+            if !sources_json.is_empty() && sources_json != "[]" {
+                let flow = json_array_to_flow_sequence(sources_json, "sources")
+                    .unwrap_or_else(|| format!("[{sources_json}]"));
+                pairs.push(("sources", V::String(flow)));
+            }
+        }
+        if let Some(window) = &fact.okf_usage_window {
+            pairs.push((
+                "usage_window",
+                V::String(flow_mapping_from_json(window, "usage_window").unwrap_or_else(|| window.clone())),
+            ));
+        }
     }
 
     let refs: Vec<(&str, &str)> = related
@@ -393,7 +404,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
             last_verified_by: Some("process:nightly".into()),
         };
-        let md = build_fact_file(&fact, &[]);
+        let md = build_fact_file(&fact, &[], "llm-wiki/2");
         assert!(md.contains("status: stable"), "missing lifecycle status: {md}");
         assert!(md.contains("stale_after: 2027-01-01"), "missing stale_after: {md}");
         assert!(md.contains("generated: { by: \"human:alice\""), "missing generated flow mapping: {md}");
@@ -405,6 +416,42 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
         assert_eq!(parsed.fact.lifecycle_status, "stable");
         assert_eq!(parsed.fact.generated_by.as_deref(), Some("human:alice"));
         assert!(parsed.fact.okf_sources.as_deref().unwrap().contains("documents/notes.md"));
+    }
+
+    #[test]
+    fn builds_fact_v01_omits_v02_fields() {
+        let fact = WikiFact {
+            id: "fact_x".into(),
+            entity_id: "ent_demo".into(),
+            title: "Title".into(),
+            body: "Body".into(),
+            tags: vec![],
+            confidence: "certain".into(),
+            source_type: "user_stated".into(),
+            source_hash: None,
+            source_ref: None,
+            created_at: 1719835200000,
+            updated_at: 1719835200000,
+            last_accessed_at: None,
+            access_count: 0,
+            deleted_at: None,
+            okf_type: None,
+            lifecycle_status: "stable".into(),
+            stale_after: Some(crate::okf::timefmt::ms_from_utc_date("2027-01-01").unwrap()),
+            generated_by: Some("human:alice".into()),
+            okf_sources: Some(r#"[{"resource":"documents/notes.md"}]"#.into()),
+            okf_verified: Some(r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into()),
+            okf_usage_window: Some(r#"{"from":"2026-07-01","to":"2026-12-31"}"#.into()),
+            last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
+            last_verified_by: Some("process:nightly".into()),
+        };
+        let md = build_fact_file(&fact, &[], "llm-wiki/1");
+        assert!(!md.contains("status:"), "v0.1 must not emit status: {md}");
+        assert!(!md.contains("stale_after:"), "v0.1 must not emit stale_after: {md}");
+        assert!(!md.contains("generated:"), "v0.1 must not emit generated: {md}");
+        assert!(!md.contains("verified:"), "v0.1 must not emit verified: {md}");
+        assert!(!md.contains("sources:"), "v0.1 must not emit sources: {md}");
+        assert!(!md.contains("usage_window:"), "v0.1 must not emit usage_window: {md}");
     }
 
     #[test]
@@ -434,26 +481,8 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             .iter()
             .map(|l| (l.text.clone(), l.path.clone()))
             .collect();
-        let rebuilt = build_fact_file(&parsed.fact, &related);
-        // v0.2 fields are now emitted by default (Task 5); the golden-v1 fixture
-        // is the source of truth for v0.1 fields only — strip the v0.2 lines so
-        // the byte-comparison against the fixture stays meaningful.
-        let stripped = strip_v02_lines(&rebuilt);
-        assert_eq!(normalize(&stripped), normalize(GOLDEN_FACT));
-    }
-
-    fn strip_v02_lines(s: &str) -> String {
-        s.lines()
-            .filter(|line| {
-                !line.starts_with("status:")
-                    && !line.starts_with("stale_after:")
-                    && !line.starts_with("generated:")
-                    && !line.starts_with("verified:")
-                    && !line.starts_with("sources:")
-                    && !line.starts_with("usage_window:")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let rebuilt = build_fact_file(&parsed.fact, &related, "llm-wiki/1");
+        assert_eq!(normalize(&rebuilt), normalize(GOLDEN_FACT));
     }
 
     fn normalize(s: &str) -> String {

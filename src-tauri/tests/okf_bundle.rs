@@ -145,40 +145,19 @@ fn golden_v1_round_trips_losslessly() {
     )
     .expect("write_bundle");
 
-    // Task 5 emits v0.2 keys (`status: stable`, `execution_status: ...`) on rebuild,
-    // and Task 6's status-rename rule adds `status: stable` to fixtures that didn't
-    // have it. The v0.1 fixtures pre-date these keys — strip them from both sides
-    // so the comparison focuses on v0.1-stable fields. Same pattern as
-    // `strip_v02_lines` in `task_file.rs::tests::round_trips_golden_task_bytes`.
+    // Writer is now profile-aware: profile-1 emission drops every v0.2 key
+    // (status lifecycle on facts, execution_status on tasks, stale_after /
+    // generated / verified / sources / usage_window), so the rebuilt bytes
+    // match the v0.1 fixture byte-for-byte after trimming trailing whitespace.
     let norm = |files: &[OkfFile]| -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = files
             .iter()
-            .map(|f| {
-                (
-                    f.path.clone(),
-                    format!("{}\n", strip_v02_lines(&f.content).trim_end()),
-                )
-            })
+            .map(|f| (f.path.clone(), format!("{}\n", f.content.trim_end())))
             .collect();
         v.sort();
         v
     };
     assert_eq!(norm(&rebuilt), norm(&original));
-}
-
-fn strip_v02_lines(s: &str) -> String {
-    s.lines()
-        .filter(|line| {
-            !line.starts_with("status:")
-                && !line.starts_with("execution_status:")
-                && !line.starts_with("stale_after:")
-                && !line.starts_with("generated:")
-                && !line.starts_with("verified:")
-                && !line.starts_with("sources:")
-                && !line.starts_with("usage_window:")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[test]

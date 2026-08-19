@@ -108,7 +108,11 @@ pub fn write_bundle_with_profile(
             let file_name = &concepts[fact.id.as_str()].1;
             files.push(OkfFile {
                 path: format!("{base}/facts/{file_name}"),
-                content: build_fact_file(fact, &related_for(&fact.id, &ConceptKind::Fact)),
+                content: build_fact_file(
+                    fact,
+                    &related_for(&fact.id, &ConceptKind::Fact),
+                    profile,
+                ),
             });
             fact_entries.push(OkfIndexEntry {
                 title: fact.title.clone(),
@@ -122,7 +126,11 @@ pub fn write_bundle_with_profile(
             let file_name = &concepts[task.id.as_str()].1;
             files.push(OkfFile {
                 path: format!("{base}/tasks/{file_name}"),
-                content: build_task_file(task, &related_for(&task.id, &ConceptKind::Task)),
+                content: build_task_file(
+                    task,
+                    &related_for(&task.id, &ConceptKind::Task),
+                    profile,
+                ),
             });
             task_entries.push(OkfIndexEntry {
                 title: task.description.clone(),
