@@ -95,6 +95,30 @@ pub fn build_task_file(task: &WikiTask, related: &[(String, String)]) -> String 
 pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
     let (fm, raw_body) = parse_concept(content);
     let (_body, related) = split_related_section(&raw_body);
+
+    // v0.1 → v0.2 fallback for tasks (mirror of the fact fallback).
+    // Per upstream §4.8, when both `generated.at` and `timestamp` are present,
+    // `generated.at` wins — Task 1 already routes timestamp → updated_at, so no change needed.
+
+    // v0.2 status-rename rule (upstream §2.3):
+    // - profile-2 wire format: `status` = lifecycle; `execution_status` = execution
+    // - profile-1 wire format: `status` = execution; lifecycle defaults to "stable"
+    let is_profile_v2 =
+        fm.get_str("status").is_some() && fm.get_str("execution_status").is_some();
+    let (execution_status, lifecycle_status) = if is_profile_v2 {
+        (
+            fm.get_str("execution_status")
+                .unwrap_or("pending")
+                .to_string(),
+            fm.get_str("status").unwrap_or("stable").to_string(),
+        )
+    } else {
+        (
+            fm.get_str("status").unwrap_or("pending").to_string(),
+            "stable".to_string(), // profile-1 default per upstream §2.3
+        )
+    };
+
     let task = WikiTask {
         id: fm.get_str("id").context("task file missing id")?.to_string(),
         entity_id: fm
@@ -102,7 +126,7 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
             .context("task file missing entity_id")?
             .to_string(),
         description: fm.get_str("title").unwrap_or_default().to_string(),
-        status: fm.get_str("status").unwrap_or("pending").to_string(),
+        status: execution_status,
         priority: fm.get_number("priority").map(|n| n as i64).unwrap_or(0),
         created_at: fm.get_number("created_at").map(|n| n as i64).unwrap_or(0),
         updated_at: fm.get_str("timestamp").and_then(ms_from_iso).unwrap_or(0),
@@ -112,7 +136,7 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
             .get_str("type")
             .filter(|t| !t.is_empty() && *t != "task")
             .map(str::to_string),
-        lifecycle_status: fm.get_str("status").unwrap_or("stable").to_string(),
+        lifecycle_status,
         stale_after: parse_stale_after_ms_task(&fm),
         generated_by: parse_generated_by_task(&fm),
         okf_sources: fm.get_str("sources").map(str::to_string),

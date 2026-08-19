@@ -145,15 +145,40 @@ fn golden_v1_round_trips_losslessly() {
     )
     .expect("write_bundle");
 
+    // Task 5 emits v0.2 keys (`status: stable`, `execution_status: ...`) on rebuild,
+    // and Task 6's status-rename rule adds `status: stable` to fixtures that didn't
+    // have it. The v0.1 fixtures pre-date these keys — strip them from both sides
+    // so the comparison focuses on v0.1-stable fields. Same pattern as
+    // `strip_v02_lines` in `task_file.rs::tests::round_trips_golden_task_bytes`.
     let norm = |files: &[OkfFile]| -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = files
             .iter()
-            .map(|f| (f.path.clone(), format!("{}\n", f.content.trim_end())))
+            .map(|f| {
+                (
+                    f.path.clone(),
+                    format!("{}\n", strip_v02_lines(&f.content).trim_end()),
+                )
+            })
             .collect();
         v.sort();
         v
     };
     assert_eq!(norm(&rebuilt), norm(&original));
+}
+
+fn strip_v02_lines(s: &str) -> String {
+    s.lines()
+        .filter(|line| {
+            !line.starts_with("status:")
+                && !line.starts_with("execution_status:")
+                && !line.starts_with("stale_after:")
+                && !line.starts_with("generated:")
+                && !line.starts_with("verified:")
+                && !line.starts_with("sources:")
+                && !line.starts_with("usage_window:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -174,6 +199,27 @@ fn defaults_to_ll_wiki_2_on_export() {
         root.content.contains("profile: llm-wiki/2"),
         "default export must emit profile llm-wiki/2; got: {}",
         root.content.lines().find(|l| l.starts_with("profile")).unwrap_or("(missing)"),
+    );
+}
+
+#[test]
+fn parses_golden_v2_bundle_with_status_rename_rule() {
+    // golden-v2 fixture is vendored in Task 7; until then this test fails with
+    // "fixture not found" — that's expected and recorded in the Task 6 report.
+    let bundle = parse_bundle(&load_fixture_files("golden-v2")).unwrap();
+    assert_eq!(bundle.profile.as_deref(), Some("llm-wiki/2"));
+    assert_eq!(bundle.okf_version.as_deref(), Some("0.2"));
+    let entity = &bundle.entities[0];
+    // task has both lifecycle (status) and execution (execution_status) — wire format rename rule
+    let task = entity
+        .tasks
+        .iter()
+        .find(|t| t.id == "task_with_provenance")
+        .expect("task fixture");
+    assert_eq!(task.status, "in_progress", "execution_status -> status");
+    assert_eq!(
+        task.lifecycle_status, "draft",
+        "status (v0.2 wire) -> lifecycle_status"
     );
 }
 

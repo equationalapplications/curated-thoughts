@@ -15,6 +15,78 @@ use crate::db::outbox_format::OutboxOperation;
 use crate::okf::bundle_read::{ParsedBundle, ParsedEntity};
 use crate::okf::ids::generate_id;
 use crate::okf::timefmt::ms_from_utc_date;
+use crate::okf::types::LLM_WIKI_PROFILE_V2;
+
+/// Per-fact synthesized `okf_sources` JSON, keyed by fact id.
+/// Populated by `synthesize_sources_from_body` when a profile-1 fact
+/// has no `sources` key but its body carries a `# Citations` section.
+type SyntheticSources = std::collections::HashMap<String, String>;
+
+/// v0.1 → v0.2 fallback (upstream §4.8): synthesize `okf_sources` from a
+/// `# Citations` body list when a profile-1 fact has no `sources` key.
+/// Captures every URL, not just the first.
+fn synthesize_sources_from_body(bundle: &ParsedBundle) -> SyntheticSources {
+    let mut out = SyntheticSources::new();
+    for entity in &bundle.entities {
+        for fact in &entity.facts {
+            if fact.okf_sources.is_some() {
+                continue;
+            }
+            if !fact.body.contains("# Citations") {
+                continue;
+            }
+            let urls = extract_citations_urls(&fact.body);
+            if urls.is_empty() {
+                continue;
+            }
+            let entries: Vec<serde_json::Value> = urls
+                .into_iter()
+                .map(|u| serde_json::json!({ "resource": u }))
+                .collect();
+            out.insert(
+                fact.id.clone(),
+                serde_json::to_string(&entries).unwrap_or_default(),
+            );
+        }
+    }
+    out
+}
+
+/// Scan a body for a `# Citations` section and collect every URL on subsequent lines.
+fn extract_citations_urls(body: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut in_section = false;
+    for line in body.lines() {
+        if line.trim_start().starts_with("# Citations") {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.trim().is_empty() {
+            break;
+        }
+        if in_section {
+            let mut rest = line;
+            while let Some(idx) = rest.find("http") {
+                let url_start = idx;
+                let mut end = url_start;
+                let bytes = rest.as_bytes();
+                while end < bytes.len()
+                    && !(bytes[end] as char).is_whitespace()
+                    && bytes[end] != b')'
+                    && bytes[end] != b']'
+                {
+                    end += 1;
+                }
+                let url = rest[url_start..end].to_string();
+                if url.len() > 4 {
+                    urls.push(url);
+                }
+                rest = &rest[end..];
+            }
+        }
+    }
+    urls
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -202,6 +274,11 @@ pub fn apply_import(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut result = ImportResult::default();
 
+    // v0.1 → v0.2 fallback (upstream §4.8): if a profile-1 fact has no `sources` key
+    // but its body carries a `# Citations` list, synthesize `okf_sources` from
+    // the URLs (capturing every URL, not just the first).
+    let synthetic_sources = synthesize_sources_from_body(bundle);
+
     for entity in &bundle.entities {
         let mut id_map: HashMap<String, String> = HashMap::new();
         let target_entity_id = match mode {
@@ -233,12 +310,24 @@ pub fn apply_import(
                 continue;
             }
             let tags_json = serde_json::to_string(&fact.tags)?;
+            // v0.1 → v0.2 fallback for `timestamp` ⇄ `generated.at`: Task 1 already
+            // routes timestamp → updated_at and generated → generated_by. No code
+            // change needed here — the synthesized sources sidecar covers
+            // the body → okf_sources fallback.
+            let effective_sources: Option<&str> = fact
+                .okf_sources
+                .as_deref()
+                .or_else(|| synthetic_sources.get(&fact.id).map(String::as_str));
             tx.execute(
                 "INSERT INTO llm_wiki_entries (
                     id, entity_id, title, body, tags, confidence, source_type,
-                    source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                    access_count, deleted_at, embedding_blob, embedding, okf_type
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15)",
+                    source_hash, source_ref, okf_type,
+                    lifecycle_status, stale_after, generated_by,
+                    okf_sources, okf_verified, okf_usage_window,
+                    last_verified_at, last_verified_by,
+                    created_at, updated_at, last_accessed_at,
+                    access_count, deleted_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
                 params![
                     fact_id,
                     target_entity_id,
@@ -249,12 +338,20 @@ pub fn apply_import(
                     fact.source_type,
                     fact.source_hash,
                     fact.source_ref,
+                    fact.okf_type,
+                    fact.lifecycle_status,
+                    fact.stale_after,
+                    fact.generated_by,
+                    effective_sources,
+                    fact.okf_verified,
+                    fact.okf_usage_window,
+                    fact.last_verified_at,
+                    fact.last_verified_by,
                     fact.created_at,
                     fact.updated_at,
                     fact.last_accessed_at,
                     fact.access_count,
                     fact.deleted_at,
-                    fact.okf_type,
                 ],
             )?;
             push_entries_outbox(
@@ -289,8 +386,11 @@ pub fn apply_import(
             tx.execute(
                 "INSERT INTO llm_wiki_tasks (
                     id, entity_id, description, status, priority,
-                    created_at, updated_at, resolved_at, deleted_at, okf_type
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    created_at, updated_at, resolved_at, deleted_at, okf_type,
+                    lifecycle_status, stale_after, generated_by,
+                    okf_sources, okf_verified, okf_usage_window,
+                    last_verified_at, last_verified_by
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 params![
                     task_id,
                     target_entity_id,
@@ -302,6 +402,14 @@ pub fn apply_import(
                     task.resolved_at,
                     task.deleted_at,
                     task.okf_type,
+                    task.lifecycle_status,
+                    task.stale_after,
+                    task.generated_by,
+                    task.okf_sources,
+                    task.okf_verified,
+                    task.okf_usage_window,
+                    task.last_verified_at,
+                    task.last_verified_by,
                 ],
             )?;
             push_tasks_outbox(
@@ -525,7 +633,7 @@ mod tests {
 
     fn sample_bundle() -> ParsedBundle {
         ParsedBundle {
-            profile: Some("llm-wiki/1".into()),
+            profile: Some(LLM_WIKI_PROFILE_V2.into()),
             entities: vec![ParsedEntity {
                 entity_id: "ent_a".into(),
                 display_name: Some("Project X".into()),
