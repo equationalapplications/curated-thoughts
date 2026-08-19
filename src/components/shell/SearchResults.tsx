@@ -1,5 +1,7 @@
 import type { SearchResult } from "../../lib/tauri";
 import { MemoryChunk } from "../review/MemoryChunk";
+import { useProviderHealth } from "../../hooks/useProviderHealth";
+import { ProviderNotice } from "../health/ProviderNotice";
 
 interface Props {
   results: SearchResult[];
@@ -49,6 +51,7 @@ function ResultItem({ r, onSelect }: { r: SearchResult; onSelect: (path: string)
 }
 
 export function SearchResults({ results, onSelect }: Props) {
+  const { generation, embedding } = useProviderHealth();
   if (results.length === 0) return null;
 
   const semanticResults = results.filter((r) => !r.structural);
@@ -56,6 +59,11 @@ export function SearchResults({ results, onSelect }: Props) {
 
   return (
     <div className="search-results">
+      <ProviderNotice
+        feature="search"
+        embedding={embedding}
+        generation={generation}
+      />
       {semanticResults.map((r) => (
         <ResultItem key={`${r.doc_path}:${r.chunk_position}`} r={r} onSelect={onSelect} />
       ))}
