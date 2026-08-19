@@ -33,7 +33,19 @@ jobs:
       - name: Install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          sudo apt-get update
+          # The GitHub-hosted Ubuntu 22.04 image ships `azure.archive.ubuntu.com`
+          # as a primary mirror, which times out from runner hosts and stalls
+          # `apt-get update` indefinitely. Strip the broken host from every
+          # sources file so apt never tries it, then bound the overall update
+          # with a hard timeout as a safety net against future mirror issues.
+          sudo find /etc/apt -type f \
+            \( -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \) \
+            -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
+          sudo timeout 5m apt-get \
+            -o Acquire::http::Timeout=120 \
+            -o Acquire::https::Timeout=120 \
+            -o Acquire::Retries=0 \
+            update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - uses: actions/setup-node@v4
