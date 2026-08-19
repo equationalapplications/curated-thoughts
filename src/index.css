@@ -1821,3 +1821,83 @@ body {
   background: color-mix(in srgb, var(--error) 12%, transparent);
   border-bottom-color: color-mix(in srgb, var(--error) 35%, transparent);
 }
+
+/* ── Entity sort picker (BrainMode EntityList) ────────────────────── */
+.entity-sort-picker {
+  padding: 4px 8px;
+  border: 1px solid var(--outline-var);
+  border-radius: var(--r-sm);
+  background: var(--elev-1);
+  color: var(--on-surface);
+  font-family: var(--font-body);
+  font-size: 12px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234f4539' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 28px;
+}
+
+.entity-sort-picker:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* ── Entity wikilink suggestion menu (BrainMode autocomplete) ─────── */
+.entity-wikilink-suggestion {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: var(--elev-1);
+  border: 1px solid var(--outline-var);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-md);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.entity-wikilink-suggestion--empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--on-surface-var);
+}
+
+.entity-wikilink-suggestion-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--on-surface);
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.entity-wikilink-suggestion-item:hover,
+.entity-wikilink-suggestion-item:focus {
+  background: var(--elev-2);
+  outline: none;
+}
+
+.entity-wikilink-suggestion-item:focus {
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+.entity-wikilink-suggestion-name {
+  font-weight: 500;
+  color: var(--on-surface);
+}
+
+.entity-wikilink-suggestion-type {
+  font-size: 11px;
+  color: var(--on-surface-var);
+  text-transform: capitalize;
+}
