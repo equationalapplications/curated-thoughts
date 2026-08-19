@@ -61,9 +61,9 @@ function setReadyState(entities: EntitySummary[], version: number) {
   resolverListeners.forEach((fn) => fn());
 }
 
-function ensureResolver(): ResolverState {
-  if (resolverState.status === "ready") return resolverState;
-  if (resolverState.fetchStarted) return resolverState;
+function ensureResolver(): Promise<void> {
+  if (resolverState.status === "ready") return Promise.resolve();
+  if (resolverState.fetchStarted) return resolverState.promise;
   const existing = resolverState;
   // Wrap in Promise.resolve so a non-thenable (e.g. undefined from a test
   // mock of `invoke`) becomes a fulfilled promise instead of crashing here.
@@ -88,7 +88,7 @@ function ensureResolver(): ResolverState {
     version: existing.version + 1,
     fetchStarted: true,
   };
-  return resolverState;
+  return promise;
 }
 
 /**
@@ -106,8 +106,7 @@ export function refreshWikilinkResolver(): Promise<void> {
     fetchStarted: false,
   };
   resolverListeners.forEach((fn) => fn());
-  const state = ensureResolver();
-  return state.promise;
+  return ensureResolver();
 }
 
 /**
