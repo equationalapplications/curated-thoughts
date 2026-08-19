@@ -68,10 +68,9 @@ export function EntitySummarySection({
         )}
       </div>
       {editing ? (
-        <>
-          <BlockNoteView editor={editor} editable theme={theme} />
+        <BlockNoteView editor={editor} editable theme={theme}>
           <EntityWikilinkSuggestionMenu editor={editor} />
-        </>
+        </BlockNoteView>
       ) : summary.trim() ? (
         <p className="entity-summary-prose">
           <WikilinkText text={summary} onNavigate={onNavigateEntity} />
