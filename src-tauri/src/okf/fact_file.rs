@@ -6,7 +6,7 @@ use crate::okf::concept::parse_concept;
 use crate::okf::frontmatter::serialize_frontmatter_pairs;
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
-use crate::okf::types::{OkfFrontmatterValue as V, OkfMarkdownLink, WikiFact};
+use crate::okf::types::{OkfFrontmatterValue, OkfFrontmatterValue as V, OkfMarkdownLink, WikiFact};
 
 pub struct ParsedFact {
     pub fact: WikiFact,
@@ -92,8 +92,52 @@ pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
             .get_str("type")
             .filter(|t| !t.is_empty() && *t != "fact")
             .map(str::to_string),
+        lifecycle_status: fm.get_str("status").unwrap_or("stable").to_string(),
+        stale_after: parse_stale_after_ms(&fm),  // helper below; returns None for absent / unparseable
+        generated_by: parse_generated_by(&fm),   // helper below; returns None when absent
+        okf_sources: fm.get_str("sources").map(str::to_string),
+        okf_verified: fm.get_str("verified").map(str::to_string),
+        okf_usage_window: fm.get_str("usage_window").map(str::to_string),
+        last_verified_at: latest_verified_at(&fm),
+        last_verified_by: latest_verified_by(&fm),
     };
     Ok(ParsedFact { fact, related })
+}
+
+/// Parse OKF v0.2 `stale_after: YYYY-MM-DD` to epoch ms (UTC midnight).
+/// Returns None for absent or unparseable input.
+fn parse_stale_after_ms(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
+    let s = fm.get_str("stale_after")?;
+    crate::okf::timefmt::ms_from_utc_date(s)
+}
+
+/// Parse the v0.2 `generated: { by: ..., at: ... }` flow mapping to the actor string.
+/// Returns None when `generated` is absent or has no `by` (per upstream spec §2.4).
+fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
+    let value = fm.fields.get("generated")?;
+    let OkfFrontmatterValue::String(s) = value else { return None; };
+    // Flow mapping parsed as raw text; Task 4's parser will replace this with a structured reader.
+    // For now: regex over `{ by: "...", at: "..." }` to extract the actor string.
+    let _bytes = s.as_bytes();
+    let by_idx = s.find("by:")?;
+    let rest = &s[by_idx + 3..];
+    let trimmed = rest.trim_start();
+    let trimmed = trimmed.trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+    let end = trimmed.find(|c: char| c == ',' || c == '}' || c == '"' || c == '\'').unwrap_or(trimmed.len());
+    let actor = &trimmed[..end];
+    if actor.is_empty() { None } else { Some(actor.to_string()) }
+}
+
+/// Latest verifier's `at` (epoch ms) from `verified: [...]` (or bare mapping).
+fn latest_verified_at(fm: &crate::okf::types::OkfFrontmatter) -> Option<i64> {
+    // Implemented in Task 4 once the flow-mapping parser is in. Stub returns None here so the
+    // struct literal compiles; Task 4 fills in the real implementation and the test below.
+    let _ = fm;
+    None
+}
+fn latest_verified_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
+    let _ = fm;
+    None
 }
 
 #[cfg(test)]
@@ -102,6 +146,28 @@ mod tests {
 
     const GOLDEN_FACT: &str =
         include_str!("../../fixtures/okf/golden-v1/entities/demo/facts/fact_alpha.md");
+
+    const V02_FACT: &str = "---\n\
+type: fact\ntitle: V02 fact\nid: fact_v02\nentity_id: ent_demo\n\
+confidence: certain\nsource_type: user_stated\n\
+timestamp: 2026-07-01T00:00:00.000Z\ncreated_at: 1719835200000\n\
+generated: { by: human:alice, at: 2026-07-01T00:00:00.000Z }\n\
+verified: [ { by: process:nightly, at: 2026-07-02T00:00:00.000Z } ]\n\
+status: stable\nstale_after: 2027-01-01\nusage_window: { from: 2026-07-01, to: 2026-12-31 }\n\
+sources: [ { resource: documents/notes.md, title: notes, usage_count: 3, last_modified: 2026-07-01 } ]\n---\nV02 body.\n";
+
+    #[test]
+    fn parses_v02_fact_fields() {
+        let parsed = parse_fact_file(V02_FACT).unwrap();
+        assert_eq!(parsed.fact.lifecycle_status, "stable");
+        assert_eq!(parsed.fact.generated_by.as_deref(), Some("human:alice"));
+        assert!(parsed.fact.okf_sources.as_deref().unwrap().contains("documents/notes.md"));
+        assert_eq!(parsed.fact.okf_usage_window.as_deref(), Some("{ from: 2026-07-01, to: 2026-12-31 }"));
+        // stale_after: 2027-01-01 → ms at UTC midnight (we don't assert exact ms — just that it's Some)
+        assert!(parsed.fact.stale_after.is_some());
+        // verified / latest_verified_at are stubs until Task 4 lands
+        assert!(parsed.fact.last_verified_at.is_none());
+    }
 
     #[test]
     fn parses_golden_fact() {
