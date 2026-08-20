@@ -19,11 +19,15 @@ vi.mock("@blocknote/mantine", () => ({
   BlockNoteView: () => <div data-testid="blocknote" />,
 }));
 
-import { EntitySummarySection } from "../components/brain/EntitySummarySection";
+import { EntitySummarySection, searchEntitiesByQuery } from "../components/brain/EntitySummarySection";
 import {
   EntityWikilinkSuggestion,
   filterEntitySuggestions,
 } from "../components/brain/EntityWikilinkSuggestion";
+import {
+  __resetWikilinkResolverForTests,
+  refreshWikilinkResolver,
+} from "../components/brain/WikilinkText";
 import { renderWithTheme } from "./test-utils";
 import type { EntitySummary } from "../lib/tauri";
 
@@ -57,6 +61,28 @@ beforeEach(() => {
     if (cmd === "list_entities_cmd") return Promise.resolve(ENTITIES);
     if (cmd === "update_entity_summary_cmd") return Promise.resolve();
     return Promise.resolve(null);
+  });
+});
+
+describe("searchEntitiesByQuery", () => {
+  beforeEach(async () => {
+    __resetWikilinkResolverForTests();
+    await refreshWikilinkResolver();
+  });
+
+  it("filters the cached entity list by case-insensitive prefix", () => {
+    const items = searchEntitiesByQuery("be");
+    expect(items.map((i) => i.entity.name)).toEqual(["Beta"]);
+  });
+
+  it("returns all entities for an empty query", () => {
+    const items = searchEntitiesByQuery("");
+    expect(items).toHaveLength(3);
+  });
+
+  it("returns an empty list for a non-matching query", () => {
+    const items = searchEntitiesByQuery("zz");
+    expect(items).toEqual([]);
   });
 });
 

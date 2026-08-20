@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useCreateBlockNote, SuggestionMenuController } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
@@ -10,6 +10,18 @@ import {
   filterEntitySuggestions,
   type EntityWikilinkSuggestionItem,
 } from "./EntityWikilinkSuggestion";
+
+const SUGGESTION_DEBOUNCE_MS = 50;
+
+/** Pure synchronous filter against the cached entity list. Exported for tests. */
+export function searchEntitiesByQuery(
+  query: string,
+): EntityWikilinkSuggestionItem[] {
+  const entities = getWikilinkResolverEntities();
+  return filterEntitySuggestions(entities, query).map((entity) => ({
+    entity,
+  }));
+}
 
 interface Props {
   entityId: string;
@@ -87,18 +99,6 @@ export function EntitySummarySection({
   );
 }
 
-async function fetchEntityWikilinkItems(
-  query: string,
-): Promise<EntityWikilinkSuggestionItem[]> {
-  // Reuse the shared WikilinkText resolver cache rather than firing a fresh
-  // `listEntities` IPC round-trip on every keystroke. The cache is refreshed
-  // by `useEntityList.refresh()` after entity create/import mutations.
-  const entities = getWikilinkResolverEntities();
-  return filterEntitySuggestions(entities, query).map((entity) => ({
-    entity,
-  }));
-}
-
 interface EntityWikilinkSuggestionMenuProps {
   editor: ReturnType<typeof useCreateBlockNote>;
 }
@@ -106,14 +106,34 @@ interface EntityWikilinkSuggestionMenuProps {
 function EntityWikilinkSuggestionMenu({
   editor,
 }: EntityWikilinkSuggestionMenuProps) {
+  const pendingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function handleItemClick(item: EntityWikilinkSuggestionItem) {
     editor.insertInlineContent(`[[${item.entity.name}]] `);
   }
 
+  function debouncedFetch(query: string): Promise<EntityWikilinkSuggestionItem[]> {
+    return new Promise((resolve) => {
+      if (pendingRef.current) clearTimeout(pendingRef.current);
+      pendingRef.current = setTimeout(
+        () => resolve(searchEntitiesByQuery(query)),
+        SUGGESTION_DEBOUNCE_MS,
+      );
+    });
+  }
+
+  // Cleanup the timer on unmount so a stale resolution can't fire after the
+  // editor is gone.
+  useEffect(() => {
+    return () => {
+      if (pendingRef.current) clearTimeout(pendingRef.current);
+    };
+  }, []);
+
   return (
-    <SuggestionMenuController<typeof fetchEntityWikilinkItems>
+    <SuggestionMenuController<typeof debouncedFetch>
       triggerCharacter="[["
-      getItems={fetchEntityWikilinkItems}
+      getItems={debouncedFetch}
       suggestionMenuComponent={EntityWikilinkSuggestionMenuView}
       onItemClick={handleItemClick}
     />
