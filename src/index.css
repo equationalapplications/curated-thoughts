@@ -1980,3 +1980,33 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .step-indicator-fill { transition: none; }
 }
+
+/* ── StepWatchItThink ───────────────────────────────────────────────────── */
+.step-watch-it-think {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.step-watch-it-think-pick {
+  align-self: flex-start; /* uses .setup-step button styles */
+}
+.step-watch-it-think-status p {
+  margin: 0;
+}
+.step-watch-it-think-path {
+  font-family: var(--font-mono);
+  color: var(--on-surface-var);
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+.step-watch-it-think-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--on-surface-var);
+}
+.step-watch-it-think-error p {
+  margin: 0;
+  color: var(--error);
+}
