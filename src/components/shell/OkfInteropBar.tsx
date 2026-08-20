@@ -7,6 +7,7 @@ import {
   type OkfImportMode,
   type OkfImportPreview,
 } from "../../lib/tauri";
+import { refreshWikilinkResolver } from "../brain/WikilinkText";
 
 interface Props {
   onImported?: () => void;
@@ -87,6 +88,12 @@ export function OkfInteropBar({ onImported }: Props) {
           `${result.edges_added} edge(s), ${result.events_added} event(s). ` +
           `New facts need embedding — run Maintenance → Re-embed.`,
       );
+      // Refresh the WikilinkText resolver so newly imported entities render as
+      // resolved in subsequent `[[Name]]` chips. Coalesces with the
+      // refreshWikilinkResolver call that the parent (BrainMode) makes via
+      // onImported → useEntityList.refresh → refreshWikilinkResolver — so
+      // the two together result in at most one IPC round-trip.
+      void refreshWikilinkResolver();
       onImported?.();
     } catch (e) {
       fail(e);
