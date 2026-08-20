@@ -2,6 +2,7 @@ import { useState } from "react";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { PrivacyModeCards } from "../privacy/PrivacyModeCards";
 import type { PrivacyMode } from "../../hooks/usePrivacyMode";
+import { WizardStep } from "./WizardStep";
 
 interface Props {
   onNext: () => void;
@@ -23,20 +24,18 @@ export function StepPrivacy({ onNext }: Props) {
   };
 
   return (
-    <div className="setup-step">
-      <h2>Choose your privacy posture</h2>
-      <p>
-        This controls whether external APIs and the Clanker Cloud Bridge can run.
-        You can change it later in Settings → Privacy.
-      </p>
+    <WizardStep
+      title="Choose your privacy posture"
+      subtitle="This controls whether external APIs and the Clanker Cloud Bridge can run. You can change it later in Settings → Privacy."
+      onNext={handleContinue}
+      nextDisabled={busy || loading || !selected}
+      isLoading={busy}
+    >
       {loading ? (
         <p>Loading…</p>
       ) : (
         <PrivacyModeCards mode={selected} onChange={setSelected} />
       )}
-      <button type="button" onClick={handleContinue} disabled={busy || loading}>
-        Continue
-      </button>
-    </div>
+    </WizardStep>
   );
 }

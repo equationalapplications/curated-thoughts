@@ -568,6 +568,28 @@ pub fn list_proposals_for_document(conn: &Connection, doc_id: i64) -> Result<Vec
     Ok(ids.into_iter().filter_map(|id| by_id.get(&id).cloned()).collect())
 }
 
+/// Most-recent pending proposal that cites the given document path as a source.
+/// Returns `Ok(None)` if no such proposal exists. Used by the ingest command to
+/// emit `ingest-proposal-ready` with the new proposal id (StepWatchItThink may
+/// also pick it up via the queued source path).
+pub fn latest_pending_for_path(conn: &Connection, path: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id
+         FROM curated_proposals p
+         JOIN curated_proposal_sources s ON s.proposal_id = p.id
+         JOIN documents d ON d.id = s.doc_id
+         WHERE d.path = ?1 AND p.status = 'pending'
+         ORDER BY p.created_at DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([path])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

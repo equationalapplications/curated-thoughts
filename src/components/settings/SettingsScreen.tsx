@@ -31,9 +31,10 @@ const TABS: { id: SettingsTab; label: string }[] = [
 interface Props {
   vaultPath: string;
   initialTab?: SettingsTab;
+  onRerunWizard?: () => void;
 }
 
-export function SettingsScreen({ vaultPath, initialTab }: Props) {
+export function SettingsScreen({ vaultPath, initialTab, onRerunWizard }: Props) {
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "vault");
   const [brainDir, setBrainDir] = useState<string | null>(null);
   const [brainDirError, setBrainDirError] = useState<string | null>(null);
@@ -86,7 +87,7 @@ export function SettingsScreen({ vaultPath, initialTab }: Props) {
         ))}
       </nav>
       <div className="settings-content" role="tabpanel">
-        {tab === "vault" && <VaultPanel vaultPath={vaultPath} />}
+        {tab === "vault" && <VaultPanel vaultPath={vaultPath} onRerunWizard={onRerunWizard} />}
         {tab === "privacy" && <PrivacyPanel />}
         {tab === "models" && (
           <>

@@ -11,6 +11,7 @@ import {
   onProviderError,
 } from "../../lib/events";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
+import { WizardStep } from "./WizardStep";
 
 interface Props {
   onNext: () => void;
@@ -136,8 +137,13 @@ export function StepModel({ onNext }: Props) {
   };
 
   return (
-    <div className="setup-step">
-      <h2>Set Up AI Generation</h2>
+    <WizardStep
+      title="Pick your AI"
+      subtitle="Choose how to power the Active Librarian."
+      onNext={onNext}
+      nextDisabled={false}
+      isLoading={false}
+    >
 
       {phase === "choice" && (
         <>
@@ -224,6 +230,6 @@ export function StepModel({ onNext }: Props) {
           {errorMsg && <p style={{ color: "red" }}>{errorMsg}</p>}
         </>
       )}
-    </div>
+    </WizardStep>
   );
 }

@@ -71,3 +71,30 @@ export const onGgufDownloadProgress = (
   cb: (progress: DownloadProgress) => void
 ): Promise<UnlistenFn> =>
   listen<DownloadProgress>("gguf-download-progress", (e) => cb(e.payload));
+
+export type IngestPhase = "chunking" | "embedding" | "ready";
+
+export interface IngestProgress {
+  phase: IngestPhase;
+  path: string;
+}
+
+export interface IngestProposalReady {
+  path: string;
+  proposalId: string | null;
+}
+
+export const onIngestProgress = (
+  cb: (progress: IngestProgress) => void,
+): Promise<UnlistenFn> =>
+  listen<IngestProgress>("ingest-progress", (e) => cb(e.payload));
+
+export const onIngestProposalReady = (
+  cb: (payload: IngestProposalReady) => void,
+): Promise<UnlistenFn> =>
+  listen<IngestProposalReady>("ingest-proposal-ready", (e) => cb(e.payload));
+
+export const onIngestError = (
+  cb: (payload: ErrorPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<ErrorPayload>("ingest-error", (e) => cb(e.payload));
