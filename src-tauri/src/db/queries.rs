@@ -58,10 +58,11 @@ pub fn insert_chunk(
     chunk: &crate::chunker::Chunk,
     position: usize,
     entity_id: &str,
+    content_hash: &str,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, defined_symbol, entity_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, defined_symbol, entity_id, content_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             doc_id,
             chunk.text,
@@ -72,6 +73,7 @@ pub fn insert_chunk(
             chunk.strategy.as_db_str(),
             chunk.defined_symbol,
             entity_id,
+            content_hash,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -214,7 +216,7 @@ mod tests {
             defined_symbol: None,
             strategy: ChunkStrategyTag::Prose,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
 
         let bytes: Vec<u8> = conn
@@ -239,7 +241,7 @@ mod tests {
             defined_symbol: None,
             strategy: ChunkStrategyTag::Scanner,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         insert_embedding(&conn, chunk_id, &[1.0_f32]).unwrap();
         delete_document(&conn, "/docs/b.md").unwrap();
 
@@ -286,7 +288,7 @@ mod tests {
             defined_symbol: None,
             strategy: ChunkStrategyTag::Declarative,
         };
-        insert_chunk(&conn, doc_id, &chunk, 2, "tier_fact").unwrap();
+        insert_chunk(&conn, doc_id, &chunk, 2, "tier_fact", "").unwrap();
         let row: (String, i64, i64, i64, Option<String>, String, Option<String>) = conn
             .query_row(
                 "SELECT chunk_text, position, start_line, end_line, symbol_name, strategy, entity_id FROM chunks WHERE doc_id = ?1 AND position = 2",
@@ -334,7 +336,7 @@ mod clear_vault_tables_tests {
             defined_symbol: None,
             strategy: crate::chunker::ChunkStrategyTag::Prose,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
 
         conn.execute(
@@ -371,5 +373,55 @@ mod clear_vault_tables_tests {
         assert_eq!(wiki_count, 0);
         assert_eq!(rule_count, 0);
         assert_eq!(rel_count, 0);
+    }
+}
+
+#[cfg(test)]
+mod content_hash_tests {
+    use super::*;
+    use crate::chunker::ChunkStrategyTag;
+    use crate::db::connection::open_in_memory;
+
+    #[test]
+    fn insert_chunk_persists_content_hash() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = upsert_document(&conn, "/docs/h.md", "hashH").unwrap();
+        let chunk = crate::chunker::Chunk {
+            text: "body".into(),
+            start_line: 1,
+            end_line: 2,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "abc123hash").unwrap();
+        let row: (String, i64) = conn
+            .query_row(
+                "SELECT content_hash, doc_id FROM chunks WHERE doc_id = ?1",
+                [doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "abc123hash");
+    }
+
+    #[test]
+    fn unique_index_on_doc_id_and_content_hash_rejects_duplicate() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = upsert_document(&conn, "/docs/dup.md", "hashD").unwrap();
+        let chunk = crate::chunker::Chunk {
+            text: "x".into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "dup").unwrap();
+        let err = insert_chunk(&conn, doc_id, &chunk, 1, "tier_fact", "dup").unwrap_err();
+        assert!(
+            err.to_string().contains("UNIQUE") || err.to_string().contains("unique"),
+            "expected unique-index violation, got: {err}"
+        );
     }
 }

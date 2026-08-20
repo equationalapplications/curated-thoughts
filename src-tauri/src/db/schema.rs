@@ -129,3 +129,15 @@ INSERT OR IGNORE INTO schema_version (version) VALUES (5);
 pub const MIGRATION_V6: &str = "
 INSERT OR IGNORE INTO schema_version (version) VALUES (6);
 ";
+
+pub const MIGRATION_V9: &str = "
+ALTER TABLE chunks ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
+
+-- Partial unique index: dedup by real hash, but allow multiple placeholder
+-- (empty) hashes per doc. Empty `content_hash` rows are pre-migration test
+-- fixtures / backfill-skip rows; real ingest always writes a non-empty hash.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_doc_hash
+    ON chunks(doc_id, content_hash) WHERE content_hash != '';
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (9);
+";

@@ -30,6 +30,7 @@ fn impact_radius_caps_at_five_hops() {
             &make_def_chunk(&format!("f{}", idx)),
             idx,
             "tier_fact",
+            "",
         )
         .expect("insert chunk");
         chunks.push(chunk_id);
@@ -69,15 +70,15 @@ fn impact_radius_traverses_recursive_call_graphs_in_both_directions() {
     mark_document_indexed(&conn, doc_id).expect("mark document indexed");
 
     let a =
-        insert_chunk(&conn, doc_id, &make_def_chunk("a"), 0, "tier_fact").expect("insert chunk a");
+        insert_chunk(&conn, doc_id, &make_def_chunk("a"), 0, "tier_fact", "").expect("insert chunk a");
     let b =
-        insert_chunk(&conn, doc_id, &make_def_chunk("b"), 1, "tier_fact").expect("insert chunk b");
+        insert_chunk(&conn, doc_id, &make_def_chunk("b"), 1, "tier_fact", "").expect("insert chunk b");
     let c =
-        insert_chunk(&conn, doc_id, &make_def_chunk("c"), 2, "tier_fact").expect("insert chunk c");
+        insert_chunk(&conn, doc_id, &make_def_chunk("c"), 2, "tier_fact", "").expect("insert chunk c");
     let d =
-        insert_chunk(&conn, doc_id, &make_def_chunk("d"), 3, "tier_fact").expect("insert chunk d");
+        insert_chunk(&conn, doc_id, &make_def_chunk("d"), 3, "tier_fact", "").expect("insert chunk d");
     let e =
-        insert_chunk(&conn, doc_id, &make_def_chunk("e"), 4, "tier_fact").expect("insert chunk e");
+        insert_chunk(&conn, doc_id, &make_def_chunk("e"), 4, "tier_fact", "").expect("insert chunk e");
 
     insert_relationship(&conn, a, b, "CALLS", "b", "tier_fact").expect("insert relationship a->b");
     insert_relationship(&conn, b, c, "CALLS", "c", "tier_fact").expect("insert relationship b->c");
