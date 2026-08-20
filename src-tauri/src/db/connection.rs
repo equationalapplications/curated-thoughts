@@ -1,6 +1,7 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+    MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -74,6 +75,9 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     }
     if version < 6 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))?;
+    }
+    if version < 9 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))?;
     }
     if version < 7 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
@@ -153,7 +157,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 8);
+        assert_eq!(max_version, 9);
     }
 
     #[test]
@@ -227,7 +231,7 @@ mod tests {
             defined_symbol: Some("mystruct".into()),
             strategy: crate::chunker::ChunkStrategyTag::AstSymbolRust,
         };
-        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         let (def_sym, eid): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT defined_symbol, entity_id FROM chunks WHERE id = ?1",
@@ -371,7 +375,7 @@ mod tests {
             strategy: crate::chunker::ChunkStrategyTag::Declarative,
         };
         let id =
-            crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_working").unwrap();
+            crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_working", "").unwrap();
         let (sl, el, sym, strat): (i64, i64, Option<String>, String) = conn
             .query_row(
                 "SELECT start_line, end_line, symbol_name, strategy FROM chunks WHERE id = ?1",
@@ -383,5 +387,85 @@ mod tests {
         assert_eq!(el, 7);
         assert_eq!(sym.as_deref(), Some("foo"));
         assert_eq!(strat, "declarative");
+    }
+
+    /// Regression test for the Phase 9 chunk-id resolution migration.
+    ///
+    /// Phase 5 already bumped `schema_version` to 8 on every released DB.
+    /// Gating the new migration on `version < 7` made the gate unreachable
+    /// on any production database — `ALTER TABLE chunks ADD COLUMN
+    /// content_hash` never ran, and `insert_chunk` crashed at runtime
+    /// (column missing). The fix renames the gate to `version < 9`.
+    ///
+    /// This test pre-seeds a connection with `schema_version = 8` and
+    /// the OKF V7 DDL (the state of a Phase 5 production DB), runs the
+    /// production migration gate (`migrate`), and asserts the
+    /// `content_hash` column exists.
+    #[test]
+    fn migration_v9_adds_content_hash_column_to_phase5_database() {
+        // Simulate a Phase 5 production database: V1..V6 + OKF V7 DDL,
+        // and `schema_version` is at 8 (set by Phase 5's data migration).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5
+        ))
+        .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nCOMMIT;",
+            okf_ddl::migration_v7_sql()
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (8)",
+            [],
+        )
+        .unwrap();
+
+        // Sanity: confirm the pre-seeded state matches a Phase 5 production DB.
+        let pre_version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pre_version, 8,
+            "test precondition: schema_version must be 8 before migrate()"
+        );
+
+        // Pre-fix bug: gating on `version < 7` skipped the ALTER TABLE,
+        // leaving `chunks` without `content_hash`. With the V9 gate the
+        // column is added.
+        migrate(&conn, None).expect("migrate must succeed on Phase 5 DB");
+
+        let has_content_hash: bool = conn
+            .prepare("PRAGMA table_info(chunks)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|name| name == "content_hash");
+        assert!(
+            has_content_hash,
+            "chunks.content_hash must exist after migrate() on a Phase 5 DB"
+        );
+
+        // Post-migration schema_version should be at least 9 (V9 bumped it).
+        let post_version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            post_version >= 9,
+            "schema_version must reach >= 9 after migrate(), got {post_version}"
+        );
     }
 }

@@ -557,7 +557,8 @@ fn ingest_file(
     })?;
 
     for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-        let chunk_id = insert_chunk(conn, doc_id, chunk, i, &eid)?;
+        let content_hash = crate::db::chunk_hash::compute_chunk_hash(&chunk.text, path, i);
+        let chunk_id = insert_chunk(conn, doc_id, chunk, i, &eid, &content_hash)?;
         insert_embedding(conn, chunk_id, vector)?;
     }
 
@@ -628,7 +629,7 @@ fn connect() {}
         }
 
         for (i, chunk) in chunks.iter().enumerate() {
-            insert_chunk(&conn, doc_id, chunk, i, &eid).unwrap();
+            insert_chunk(&conn, doc_id, chunk, i, &eid, "").unwrap();
         }
 
         let def_count: i64 = conn

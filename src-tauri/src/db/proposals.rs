@@ -610,7 +610,7 @@ mod tests {
             defined_symbol: None,
             strategy: ChunkStrategyTag::Prose,
         };
-        insert_chunk(conn, doc_id, &chunk, 0, "tier_fact").unwrap()
+        insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap()
     }
 
     fn sample_new_proposal(id: &str, proposed_name: &str) -> NewProposal {

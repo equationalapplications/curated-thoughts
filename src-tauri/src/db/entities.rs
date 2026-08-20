@@ -589,8 +589,8 @@ mod tests {
         let mut chunk_ids = Vec::new();
         for i in 0..count {
             conn.execute(
-                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy)
-                 VALUES (?1, ?2, ?3, 1, 3, NULL, 'prose')",
+                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, content_hash)
+                 VALUES (?1, ?2, ?3, 1, 3, NULL, 'prose', '')",
                 params![doc_id, format!("chunk text {i}"), i as i64],
             )
             .unwrap();
@@ -823,8 +823,8 @@ mod tests {
         .unwrap();
         let doc_id = conn.last_insert_rowid();
         conn.execute(
-            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy)
-             VALUES (?1, 'quoted text', 0, 1, 3, NULL, 'prose')",
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, content_hash)
+             VALUES (?1, 'quoted text', 0, 1, 3, NULL, 'prose', '')",
             [doc_id],
         )
         .unwrap();

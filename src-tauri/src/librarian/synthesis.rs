@@ -985,7 +985,7 @@ mod tests {
             defined_symbol: None,
             strategy: ChunkStrategyTag::Prose,
         };
-        let chunk_id = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact").unwrap();
+        let chunk_id = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         (doc_id, chunk_id)
     }
 
