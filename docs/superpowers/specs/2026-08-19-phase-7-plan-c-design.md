@@ -38,7 +38,7 @@ The split keeps the wizard diff and the empty-states diff independently reviewab
 
 - Re-implementing the BYOI model picker, privacy step, or Fastembed bootstrap. Plan C reframes copy and unifies chrome; underlying implementations are unchanged.
 - Settings tabs polish, status bar polish, app-wide design-token rewrite. Phase 8+.
-- Group-by-source for tasks UI (Phase 8 — depends on librarian writing `okf_sources`).
+- Group-by-source for tasks UI (Phase 8 — depends on the librarian populating `okf_sources` on task writes; column exists at `src-tauri/src/db/okf_ddl.rs:81`, gap is data not schema).
 - Similarity scores in Connections (Phase 8 — depends on `summary_embedding` backfill).
 - Peek panels (Phase 8 — depends on EditorPane anchor work; landed in Plan A+B Task 15).
 - Global `⌘K` command palette (Phase 8 — depends on peek).
