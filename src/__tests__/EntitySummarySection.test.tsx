@@ -10,20 +10,39 @@ const editorMock = {
   insertInlineContent: vi.fn(),
 };
 
+const suggestionMock = vi.hoisted(() => ({
+  getItems: null as
+    | ((query: string) => Promise<Array<{ entity: EntitySummary }>>)
+    | null,
+}));
+
 vi.mock("@blocknote/react", () => ({
   useCreateBlockNote: () => editorMock,
-  SuggestionMenuController: () => null,
+  SuggestionMenuController: (props: {
+    getItems: (query: string) => Promise<Array<{ entity: EntitySummary }>>;
+  }) => {
+    suggestionMock.getItems = props.getItems;
+    return null;
+  },
 }));
 
 vi.mock("@blocknote/mantine", () => ({
-  BlockNoteView: () => <div data-testid="blocknote" />,
+  // Must render children — the `[[` SuggestionMenuController is nested inside
+  // BlockNoteView, and dropping children would silently disable its tests.
+  BlockNoteView: ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="blocknote">{children}</div>
+  ),
 }));
 
-import { EntitySummarySection } from "../components/brain/EntitySummarySection";
+import { EntitySummarySection, searchEntitiesByQuery } from "../components/brain/EntitySummarySection";
 import {
   EntityWikilinkSuggestion,
   filterEntitySuggestions,
 } from "../components/brain/EntityWikilinkSuggestion";
+import {
+  __resetWikilinkResolverForTests,
+  refreshWikilinkResolver,
+} from "../components/brain/WikilinkText";
 import { renderWithTheme } from "./test-utils";
 import type { EntitySummary } from "../lib/tauri";
 
@@ -57,6 +76,28 @@ beforeEach(() => {
     if (cmd === "list_entities_cmd") return Promise.resolve(ENTITIES);
     if (cmd === "update_entity_summary_cmd") return Promise.resolve();
     return Promise.resolve(null);
+  });
+});
+
+describe("searchEntitiesByQuery", () => {
+  beforeEach(async () => {
+    __resetWikilinkResolverForTests();
+    await refreshWikilinkResolver();
+  });
+
+  it("filters the cached entity list by case-insensitive prefix", () => {
+    const items = searchEntitiesByQuery("be");
+    expect(items.map((i) => i.entity.name)).toEqual(["Beta"]);
+  });
+
+  it("returns all entities for an empty query", () => {
+    const items = searchEntitiesByQuery("");
+    expect(items).toHaveLength(3);
+  });
+
+  it("returns an empty list for a non-matching query", () => {
+    const items = searchEntitiesByQuery("zz");
+    expect(items).toEqual([]);
   });
 });
 
@@ -94,6 +135,48 @@ test("edit loads markdown into BlockNote; save round-trips and persists", async 
   expect(invoke).toHaveBeenCalledWith("update_entity_summary_cmd", {
     entityId: "ent_1",
     summary: "Edited summary.",
+  });
+});
+
+describe("wikilink suggestion debounce", () => {
+  async function mountEditor() {
+    suggestionMock.getItems = null;
+    __resetWikilinkResolverForTests();
+    await refreshWikilinkResolver();
+    const view = renderWithTheme(
+      <EntitySummarySection
+        entityId="ent_1"
+        summary="Original."
+        onChanged={vi.fn()}
+        onNavigateEntity={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit summary" }));
+    await screen.findByTestId("blocknote");
+    await waitFor(() => expect(suggestionMock.getItems).not.toBeNull());
+    return { view, getItems: suggestionMock.getItems! };
+  }
+
+  it("settles a superseded request with an empty list instead of leaving it pending", async () => {
+    const { getItems } = await mountEditor();
+
+    // Two keystrokes inside the debounce window: the first request is
+    // superseded and must still settle, or BlockNote's await never returns.
+    const first = getItems("A");
+    const second = getItems("Al");
+
+    await expect(first).resolves.toEqual([]);
+    const items = await second;
+    expect(items.map((i) => i.entity.name)).toEqual(["Alpha"]);
+  });
+
+  it("settles a pending request on unmount", async () => {
+    const { view, getItems } = await mountEditor();
+
+    const pending = getItems("A");
+    view.unmount();
+
+    await expect(pending).resolves.toEqual([]);
   });
 });
 

@@ -7,6 +7,7 @@ import {
   type OkfImportMode,
   type OkfImportPreview,
 } from "../../lib/tauri";
+import { refreshWikilinkResolver } from "../brain/WikilinkText";
 
 interface Props {
   onImported?: () => void;
@@ -87,6 +88,17 @@ export function OkfInteropBar({ onImported }: Props) {
           `${result.edges_added} edge(s), ${result.events_added} event(s). ` +
           `New facts need embedding — run Maintenance → Re-embed.`,
       );
+      // Refresh the WikilinkText resolver so newly imported entities render as
+      // resolved in subsequent `[[Name]]` chips. `onImported` is optional and
+      // not every parent wires it to something that refreshes the resolver, so
+      // this call is what guarantees the refresh happens at all.
+      //
+      // When the parent *is* BrainMode, onImported → useEntityList.refresh →
+      // refreshWikilinkResolver races this one: it may coalesce into this
+      // in-flight request or, if this one has already settled, start a second
+      // round-trip. One extra listEntities on a manual import is cheap enough
+      // that guaranteeing the refresh is the better trade.
+      void refreshWikilinkResolver();
       onImported?.();
     } catch (e) {
       fail(e);
