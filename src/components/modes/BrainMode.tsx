@@ -23,7 +23,7 @@ export function BrainMode({
   onEntityName,
   onGoToLibrary,
 }: Props) {
-  const { entities, error, loading, refresh, setSort } = useEntityList();
+  const { entities, sort, error, loading, refresh, setSort } = useEntityList();
   const { generation, embedding } = useProviderHealth();
   const [entityError, setEntityError] = useState<string | null>(null);
 
@@ -135,6 +135,7 @@ export function BrainMode({
           selectedId={selectedEntityId}
           onSelect={onEntitySelect}
           onCreate={handleCreate}
+          sort={sort}
           onSortChange={setSort}
         />
         <OkfInteropBar onImported={refresh} />

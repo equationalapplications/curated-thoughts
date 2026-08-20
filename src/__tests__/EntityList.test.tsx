@@ -71,7 +71,7 @@ describe("EntityList", () => {
   it("groups entities by type and selects on click", () => {
     const onSelect = vi.fn();
     render(
-      <EntityList entities={ENTITIES} selectedId={null} onSelect={onSelect} onCreate={vi.fn()} />,
+      <EntityList entities={ENTITIES} selectedId={null} onSelect={onSelect} onCreate={vi.fn()} sort="updated_desc" onSortChange={vi.fn()} />,
     );
     expect(screen.getByRole("heading", { name: "person" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "project" })).toBeInTheDocument();
@@ -82,7 +82,7 @@ describe("EntityList", () => {
 
   it("filter narrows the list by name", () => {
     render(
-      <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} />,
+      <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} sort="updated_desc" onSortChange={vi.fn()} />,
     );
     fireEvent.change(screen.getByPlaceholderText("Filter entities..."), {
       target: { value: "be" },
@@ -93,7 +93,7 @@ describe("EntityList", () => {
 
   it("new entity form submits trimmed name", () => {
     const onCreate = vi.fn();
-    render(<EntityList entities={[]} selectedId={null} onSelect={vi.fn()} onCreate={onCreate} />);
+    render(<EntityList entities={[]} selectedId={null} onSelect={vi.fn()} onCreate={onCreate} sort="updated_desc" onSortChange={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "+ New entity" }));
     fireEvent.change(screen.getByLabelText("New entity name"), {
       target: { value: "  Project X  " },
@@ -105,7 +105,7 @@ describe("EntityList", () => {
   describe("sort picker", () => {
     it("renders sort picker with all four options", () => {
       render(
-        <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} />,
+        <EntityList entities={ENTITIES} selectedId={null} onSelect={vi.fn()} onCreate={vi.fn()} sort="updated_desc" onSortChange={vi.fn()} />,
       );
       const select = screen.getByRole("combobox", { name: "Sort entities" });
       expect(select).toBeInTheDocument();
@@ -114,6 +114,40 @@ describe("EntityList", () => {
       expect(screen.getByRole("option", { name: "Name (A → Z)" })).toBeInTheDocument();
       expect(screen.getByRole("option", { name: "Name (Z → A)" })).toBeInTheDocument();
       expect(screen.getByRole("option", { name: "Recently created" })).toBeInTheDocument();
+    });
+
+    it("uses sort as a controlled prop — parent updates flow back to the picker", () => {
+      // Discriminator for the deferred #2 refactor: today the picker is driven
+      // by local state and ignores any `sort` prop, so a rerender with a new
+      // value leaves the picker on "updated_desc". After lifting sort to a prop,
+      // the rerender flips the picker to "name_desc".
+      const onSortChange = vi.fn();
+      const { rerender } = render(
+        <EntityList
+          entities={ENTITIES}
+          selectedId={null}
+          onSelect={vi.fn()}
+          onCreate={vi.fn()}
+          sort="updated_desc"
+          onSortChange={onSortChange}
+        />,
+      );
+      const select = screen.getByRole("combobox", { name: "Sort entities" }) as HTMLSelectElement;
+      expect(select).toHaveValue("updated_desc");
+
+      rerender(
+        <EntityList
+          entities={ENTITIES}
+          selectedId={null}
+          onSelect={vi.fn()}
+          onCreate={vi.fn()}
+          sort="name_desc"
+          onSortChange={onSortChange}
+        />,
+      );
+      expect(select).toHaveValue("name_desc");
+      // onSortChange is fired only by user interaction, not by the rerender itself.
+      expect(onSortChange).not.toHaveBeenCalled();
     });
 
     it("calls listEntities via invoke with new sort value when selection changes", async () => {

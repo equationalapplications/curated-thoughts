@@ -6,13 +6,14 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCreate: (name: string) => void;
-  /** Fires when the user changes the sort dropdown, enabling parent to re-query. */
-  onSortChange?: (sort: EntitySort) => void;
+  /** Owned by the parent (typically `useEntityList`). Controls the sort picker. */
+  sort: EntitySort;
+  /** Fires when the user changes the sort dropdown. Parent updates `sort` in response. */
+  onSortChange: (sort: EntitySort) => void;
 }
 
-export function EntityList({ entities, selectedId, onSelect, onCreate, onSortChange }: Props) {
+export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onSortChange }: Props) {
   const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState<EntitySort>("updated_desc");
   const [creating, setCreating] = useState(false);
   const [draftName, setDraftName] = useState("");
 
@@ -50,8 +51,7 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, onSortCha
       </div>
       <select aria-label="Sort entities" className="entity-sort-picker" value={sort} onChange={(e) => {
         const next = e.target.value as EntitySort;
-        setSort(next);
-        onSortChange?.(next);
+        onSortChange(next);
       }}>
         <option value="updated_desc">Recently updated</option>
         <option value="name_asc">Name (A → Z)</option>
