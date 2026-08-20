@@ -106,7 +106,21 @@ interface EntityWikilinkSuggestionMenuProps {
 function EntityWikilinkSuggestionMenu({
   editor,
 }: EntityWikilinkSuggestionMenuProps) {
-  const pendingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Holds the timer *and* the resolver for the request it belongs to. BlockNote
+  // awaits every `getItems` call, so a superseded request must be settled — not
+  // just have its timer cleared — or the await never completes.
+  const pendingRef = useRef<{
+    timer: ReturnType<typeof setTimeout>;
+    resolve: (items: EntityWikilinkSuggestionItem[]) => void;
+  } | null>(null);
+
+  function cancelPendingFetch() {
+    const pending = pendingRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingRef.current = null;
+    pending.resolve([]);
+  }
 
   function handleItemClick(item: EntityWikilinkSuggestionItem) {
     editor.insertInlineContent(`[[${item.entity.name}]] `);
@@ -114,21 +128,19 @@ function EntityWikilinkSuggestionMenu({
 
   function debouncedFetch(query: string): Promise<EntityWikilinkSuggestionItem[]> {
     return new Promise((resolve) => {
-      if (pendingRef.current) clearTimeout(pendingRef.current);
-      pendingRef.current = setTimeout(
-        () => resolve(searchEntitiesByQuery(query)),
-        SUGGESTION_DEBOUNCE_MS,
-      );
+      cancelPendingFetch();
+      const timer = setTimeout(() => {
+        pendingRef.current = null;
+        resolve(searchEntitiesByQuery(query));
+      }, SUGGESTION_DEBOUNCE_MS);
+      pendingRef.current = { timer, resolve };
     });
   }
 
-  // Cleanup the timer on unmount so a stale resolution can't fire after the
-  // editor is gone.
-  useEffect(() => {
-    return () => {
-      if (pendingRef.current) clearTimeout(pendingRef.current);
-    };
-  }, []);
+  // Cancel the pending fetch on unmount so a stale resolution can't fire after
+  // the editor is gone — and so the dangling promise settles rather than
+  // hanging forever.
+  useEffect(() => cancelPendingFetch, []);
 
   return (
     <SuggestionMenuController<typeof debouncedFetch>

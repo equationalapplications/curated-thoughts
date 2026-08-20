@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 **Branch:** `phase-7-plan-c`
-**Status:** Approved
+**Status:** Implemented
 **Anchored by:**
 - `docs/superpowers/specs/2026-07-05-ux-vision-okf-native-design.md` §6 (Settings & Onboarding) + §7 (Visual direction), Phasing item 7.
 - `docs/superpowers/plans/2026-08-18-phase-7-discovery.md` (Phase 7 discovery memo, Plan C section).

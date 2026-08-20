@@ -89,10 +89,15 @@ export function OkfInteropBar({ onImported }: Props) {
           `New facts need embedding — run Maintenance → Re-embed.`,
       );
       // Refresh the WikilinkText resolver so newly imported entities render as
-      // resolved in subsequent `[[Name]]` chips. Coalesces with the
-      // refreshWikilinkResolver call that the parent (BrainMode) makes via
-      // onImported → useEntityList.refresh → refreshWikilinkResolver — so
-      // the two together result in at most one IPC round-trip.
+      // resolved in subsequent `[[Name]]` chips. `onImported` is optional and
+      // not every parent wires it to something that refreshes the resolver, so
+      // this call is what guarantees the refresh happens at all.
+      //
+      // When the parent *is* BrainMode, onImported → useEntityList.refresh →
+      // refreshWikilinkResolver races this one: it may coalesce into this
+      // in-flight request or, if this one has already settled, start a second
+      // round-trip. One extra listEntities on a manual import is cheap enough
+      // that guaranteeing the refresh is the better trade.
       void refreshWikilinkResolver();
       onImported?.();
     } catch (e) {
