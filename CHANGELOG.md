@@ -1,3 +1,10 @@
+## [1.18.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.17.1...v1.18.0) (2026-08-20)
+
+### Features
+
+* **brain:** pass source_docs chunk ids through fact source chips ([b07afca](https://github.com/equationalapplications/curated-thoughts/commit/b07afcac6a8a7d5853caa68c726574be77df6c6e))
+* **entities:** surface chunk ids in source_docs_from_ref ([a2ca99e](https://github.com/equationalapplications/curated-thoughts/commit/a2ca99ed6567f449db8388055909560764cec814))
+
 ## [1.17.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.17.0...v1.17.1) (2026-08-20)
 
 ### Bug Fixes
