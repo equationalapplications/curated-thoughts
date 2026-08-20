@@ -529,10 +529,12 @@ fn resolve_evidence(
         let normalized = label.trim().trim_start_matches('[').trim_end_matches(']');
         if let Some(chunk) = chunk_by_label.get(normalized) {
             out.push(StoredEvidenceChunk {
-                chunk_id: chunk.chunk_id,
+                chunk_id: Some(chunk.chunk_id),
+                content_hash: String::new(),
                 quote: chunk.text.clone(),
-                start_line: chunk.start_line,
-                end_line: chunk.end_line,
+                start_line: Some(chunk.start_line as i32),
+                end_line: Some(chunk.end_line as i32),
+                source_kind: None,
             });
         }
     }
@@ -551,12 +553,14 @@ fn collect_sources(
     let mut seen = HashSet::from([trigger_doc_id]);
     for item in items {
         for ev in &item.evidence {
-            if let Some(&doc_id) = chunk_doc_ids.get(&ev.chunk_id) {
-                if seen.insert(doc_id) {
-                    sources.push(NewProposalSource {
-                        doc_id,
-                        role: ProposalSourceRole::Evidence,
-                    });
+            if let Some(chunk_id) = ev.chunk_id {
+                if let Some(&doc_id) = chunk_doc_ids.get(&chunk_id) {
+                    if seen.insert(doc_id) {
+                        sources.push(NewProposalSource {
+                            doc_id,
+                            role: ProposalSourceRole::Evidence,
+                        });
+                    }
                 }
             }
         }
@@ -1115,7 +1119,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(validated[0].items[0].evidence.len(), 1);
-        assert_eq!(validated[0].items[0].evidence[0].chunk_id, 1);
+        assert_eq!(validated[0].items[0].evidence[0].chunk_id, Some(1));
     }
 
     #[test]
