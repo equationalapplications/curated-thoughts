@@ -67,6 +67,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "search_vault") return Promise.resolve([]);
     if (cmd === "get_related_chunks") return Promise.resolve([]);
     if (cmd === "list_vault_files") return Promise.resolve([]);
+    if (cmd === "ingest_document_cmd") return Promise.resolve();
     if (cmd === "read_document") return Promise.resolve("# Hello\n\nTest document.");
     if (cmd === "list_proposals_cmd") return Promise.resolve([]);
     if (cmd === "get_proposal_detail_cmd") {

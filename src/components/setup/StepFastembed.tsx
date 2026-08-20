@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { initFastembed } from "../../lib/tauri";
 import { onEmbedInitDone, onEmbedInitError } from "../../lib/events";
+import { WizardStep } from "./WizardStep";
 
 interface Props {
   onNext: () => void;
@@ -50,8 +51,13 @@ export function StepFastembed({ onNext }: Props) {
   }, [onNext]);
 
   return (
-    <div className="setup-step">
-      <h2>Setting up local search engine…</h2>
+    <WizardStep
+      title="Set up local search"
+      subtitle="Initializing the vector model on first launch."
+      onNext={onNext}
+      nextLabel="Continue anyway"
+      isLoading={phase === "loading"}
+    >
       {phase === "loading" && (
         <>
           <p>Initializing vector model. This may take a moment on first launch.</p>
@@ -62,9 +68,8 @@ export function StepFastembed({ onNext }: Props) {
         <>
           <p style={{ color: "red" }}>Error: {errorMsg}</p>
           <p>Search will fall back to keyword mode. You can retry from Settings.</p>
-          <button onClick={onNext}>Continue anyway</button>
         </>
       )}
-    </div>
+    </WizardStep>
   );
 }

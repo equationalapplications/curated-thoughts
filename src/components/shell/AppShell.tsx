@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
@@ -12,6 +12,7 @@ import {
   SettingsScreen,
   type SettingsTab,
 } from "../settings/SettingsScreen";
+import { SetupWizard } from "../setup/SetupWizard";
 import { startFileWatcher } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
@@ -25,6 +26,7 @@ import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
 interface Props {
   vaultPath: string;
   onVaultChanged: (newPath: string) => void;
+  needsSetup: boolean;
 }
 
 const MODE_SHORTCUTS: Record<string, AppMode> = {
@@ -42,6 +44,7 @@ const MODE_TITLES: Record<AppMode, string> = {
   timeline: "Timeline",
   tasks: "Tasks",
   settings: "Settings",
+  setup: "Setup",
 };
 
 function docTitleSegment(path: string | null): string | null {
@@ -49,7 +52,7 @@ function docTitleSegment(path: string | null): string | null {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? path;
 }
 
-export function AppShell({ vaultPath, onVaultChanged }: Props) {
+export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   const nav = useNavigationState({ mode: "brain" });
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
   const [activityOpen, setActivityOpen] = useState(false);
@@ -59,6 +62,7 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   const [dragging, setDragging] = useState(false);
   const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
   useProposalNotifications(queue.length);
+  const wizardActive = needsSetup || nav.current.mode === "setup";
   const {
     needs_migration_disclosure,
     loading: privacyLoading,
@@ -172,6 +176,14 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
     }
   }, [nav.current.mode, nav.current.entityId, nav.current.docPath]);
 
+  const onRouteToReview = useCallback(
+    (proposalId: string | null) =>
+      proposalId
+        ? nav.navigate({ mode: "review", proposalId })
+        : nav.navigate({ mode: "review" }),
+    [nav.navigate],
+  );
+
   function openPrivacySettings() {
     setSettingsTab("privacy");
     nav.navigate({ mode: "settings" });
@@ -180,67 +192,80 @@ export function AppShell({ vaultPath, onVaultChanged }: Props) {
   return (
     <div className="app-root">
       <div className="app-body">
-        <ModeRail
-          mode={nav.current.mode}
-          reviewCount={queue.length}
-          errorCount={errors.length}
-          canGoBack={nav.canGoBack}
-          canGoForward={nav.canGoForward}
-          onModeChange={(next) => {
-            setSettingsTab(undefined);
-            nav.navigate({ mode: next });
-          }}
-          onBack={nav.goBack}
-          onForward={nav.goForward}
-          onOpenActivity={() => setActivityOpen(true)}
-        />
-        <div className="app-main">
-          {nav.current.mode === "brain" && (
-            <BrainMode
-              selectedEntityId={brainEntityId}
-              onEntitySelect={(id) => {
-                if (!id) {
-                  setBrainEntityId(null);
-                  setBrainEntityName(null);
-                } else {
-                  nav.navigate({ mode: "brain", entityId: id });
-                }
+        {wizardActive ? (
+          <SetupWizard
+            onComplete={() => {
+              nav.navigate({ mode: "brain" });
+            }}
+            initialStep={0}
+            vaultPath={vaultPath}
+            onRouteToReview={onRouteToReview}
+          />
+        ) : (
+          <>
+            <ModeRail
+              mode={nav.current.mode}
+              reviewCount={queue.length}
+              errorCount={errors.length}
+              canGoBack={nav.canGoBack}
+              canGoForward={nav.canGoForward}
+              onModeChange={(next) => {
+                setSettingsTab(undefined);
+                nav.navigate({ mode: next });
               }}
-              onOpenSource={(path, chunkId) => {
-                nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
-              }}
-              onEntityName={setBrainEntityName}
+              onBack={nav.goBack}
+              onForward={nav.goForward}
+              onOpenActivity={() => setActivityOpen(true)}
             />
-          )}
-          {nav.current.mode === "review" && (
-            <ReviewMode
-              queue={queue}
-              onAction={refresh}
-              vaultPath={vaultPath}
-              queueError={queueError}
-              onOpenSource={(path, chunkId) => {
-                nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
-              }}
-            />
-          )}
-          {nav.current.mode === "library" && (
-            <LibraryMode
-              vaultPath={vaultPath}
-              selectedDoc={libraryDoc}
-              anchorChunkId={nav.current.chunkId ?? null}
-              onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
-            />
-          )}
-          {nav.current.mode === "timeline" && (
-            <TimelineMode onNavigate={nav.navigate} />
-          )}
-          {nav.current.mode === "tasks" && (
-            <TasksMode onNavigate={nav.navigate} />
-          )}
-          {nav.current.mode === "settings" && (
-            <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} />
-          )}
-        </div>
+            <div className="app-main">
+              {nav.current.mode === "brain" && (
+                <BrainMode
+                  selectedEntityId={brainEntityId}
+                  onEntitySelect={(id) => {
+                    if (!id) {
+                      setBrainEntityId(null);
+                      setBrainEntityName(null);
+                    } else {
+                      nav.navigate({ mode: "brain", entityId: id });
+                    }
+                  }}
+                  onOpenSource={(path, chunkId) => {
+                    nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
+                  }}
+                  onEntityName={setBrainEntityName}
+                />
+              )}
+              {nav.current.mode === "review" && (
+                <ReviewMode
+                  queue={queue}
+                  onAction={refresh}
+                  vaultPath={vaultPath}
+                  queueError={queueError}
+                  onOpenSource={(path, chunkId) => {
+                    nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
+                  }}
+                />
+              )}
+              {nav.current.mode === "library" && (
+                <LibraryMode
+                  vaultPath={vaultPath}
+                  selectedDoc={libraryDoc}
+                  anchorChunkId={nav.current.chunkId ?? null}
+                  onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
+                />
+              )}
+              {nav.current.mode === "timeline" && (
+                <TimelineMode onNavigate={nav.navigate} />
+              )}
+              {nav.current.mode === "tasks" && (
+                <TasksMode onNavigate={nav.navigate} />
+              )}
+              {nav.current.mode === "settings" && (
+                <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} onRerunWizard={() => nav.navigate({ mode: "setup" })} />
+              )}
+            </div>
+          </>
+        )}
       </div>
       <StatusBar
         vaultPath={vaultPath}
