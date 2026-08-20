@@ -1,3 +1,9 @@
+## [1.17.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.17.0...v1.17.1) (2026-08-20)
+
+### Bug Fixes
+
+* **brain:** suppress empty Connections sections when embedder is unavailable ([#38](https://github.com/equationalapplications/curated-thoughts/issues/38)) ([0e6833a](https://github.com/equationalapplications/curated-thoughts/commit/0e6833a59e9d57c8d7c2d18f796881b22213a401))
+
 ## [1.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.16.0...v1.17.0) (2026-08-19)
 
 ### Features
