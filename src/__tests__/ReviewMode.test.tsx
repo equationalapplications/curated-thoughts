@@ -90,7 +90,7 @@ test("shows the queue-clear empty state when queue is empty", async () => {
   renderWithTheme(<ReviewMode queue={[]} onAction={vi.fn()} vaultPath={VAULT} />);
   expect(screen.getByText(/queue clear/i)).toBeInTheDocument();
   expect(
-    await screen.findByText(/librarian watching 0 documents/i),
+    await screen.findByText(/librarian is watching 0 documents/i),
   ).toBeInTheDocument();
 });
 
@@ -104,7 +104,7 @@ test("empty state shows indexed document count from backend", async () => {
 
   renderWithTheme(<ReviewMode queue={[]} onAction={vi.fn()} vaultPath={VAULT} />);
   expect(
-    await screen.findByText(/librarian watching 142 documents/i),
+    await screen.findByText(/librarian is watching 142 documents/i),
   ).toBeInTheDocument();
 });
 
