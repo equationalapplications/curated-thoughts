@@ -31,7 +31,7 @@ describe("StepFastembed", () => {
 
   it("shows spinner while initializing", () => {
     render(<StepFastembed onNext={onNext} />);
-    expect(screen.getByText(/Setting up local search engine/i)).toBeInTheDocument();
+    expect(screen.getByText(/Set up local search/i)).toBeInTheDocument();
   });
 
   it("calls onNext when embed-init-done fires", async () => {

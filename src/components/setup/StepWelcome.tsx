@@ -1,11 +1,15 @@
-interface Props { onNext: () => void }
+import { WizardStep } from "./WizardStep";
 
-export function StepWelcome({ onNext }: Props) {
+interface Props { onNext: () => void; vaultPath?: string | null }
+
+export function StepWelcome({ onNext, vaultPath }: Props) {
   return (
-    <div className="setup-step">
-      <h1>Your Second Brain</h1>
-      <p>Private by default. Your documents never leave your machine.</p>
-      <button onClick={onNext}>Get Started</button>
-    </div>
+    <WizardStep
+      title="Where is your vault?"
+      subtitle="Read-only: the folder your notes live in."
+      onNext={onNext}
+    >
+      {vaultPath ? <p>{vaultPath}</p> : <p>Your vault path will appear here once selected.</p>}
+    </WizardStep>
   );
 }

@@ -1944,37 +1944,37 @@ body {
 }
 
 /* ── StepIndicator ──────────────────────────────────────────────────────── */
-.step-indicator { margin-bottom: var(--space-4); }
+.step-indicator { margin-bottom: 16px; }
 .step-indicator-strip {
   display: flex;
-  gap: var(--space-2);
+  gap: 8px;
   list-style: none;
   padding: 0;
-  margin: 0 0 var(--space-2);
+  margin: 0 0 8px;
   flex-wrap: wrap;
 }
 .step-indicator-step {
-  color: var(--text-muted);
+  color: var(--on-surface-var);
   font-size: 0.85rem;
 }
-.step-indicator-step::after { content: " · "; margin: 0 var(--space-1); }
+.step-indicator-step::after { content: " · "; margin: 0 4px; }
 .step-indicator-step:last-child::after { content: ""; }
-.step-indicator-current { color: var(--text-primary); font-weight: 600; }
+.step-indicator-current { color: var(--outline); font-weight: 600; }
 .step-indicator-label {
   font-size: 0.8rem;
-  color: var(--text-muted);
-  margin: 0 0 var(--space-1);
+  color: var(--on-surface-var);
+  margin: 0 0 4px;
 }
 .step-indicator-bar {
   height: 1px;
-  background: var(--text-muted);
+  background: var(--on-surface-var);
   position: relative;
   overflow: hidden;
 }
 .step-indicator-fill {
   display: block;
   height: 1px;
-  background: var(--text-primary);
+  background: var(--outline);
   transition: width 240ms ease-out;
 }
 @media (prefers-reduced-motion: reduce) {

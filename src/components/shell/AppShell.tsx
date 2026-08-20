@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
@@ -176,6 +176,14 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
     }
   }, [nav.current.mode, nav.current.entityId, nav.current.docPath]);
 
+  const onRouteToReview = useCallback(
+    (proposalId: string | null) =>
+      proposalId
+        ? nav.navigate({ mode: "review", proposalId })
+        : nav.navigate({ mode: "review" }),
+    [nav.navigate],
+  );
+
   function openPrivacySettings() {
     setSettingsTab("privacy");
     nav.navigate({ mode: "settings" });
@@ -190,6 +198,8 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
               nav.navigate({ mode: "brain" });
             }}
             initialStep={0}
+            vaultPath={vaultPath}
+            onRouteToReview={onRouteToReview}
           />
         ) : (
           <>
