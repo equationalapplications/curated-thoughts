@@ -180,6 +180,10 @@ pub fn compute_chunk_hash(text: &str, doc_path: &str, position: usize) -> String
 }
 ```
 
+`position` is the 0-indexed position of the chunk in the chunker's output array for that document (i.e., the value passed to `insert_chunk` as `i` in `src-tauri/src/pipeline/mod.rs:560`). It is **not** the markdown line number.
+
+**Chunker determinism requirement.** The hash is stable only if the chunker enumerates chunks in the same order for a given document. The existing chunker (`src-tauri/src/chunker/mod.rs`) is deterministic for a given input — strategies (`AstSymbol`, `Prose`, `CodeLike`, `Declarative`, `Fallback`) iterate the AST/text in source order and emit chunks in iteration order. The hash short-circuit in `pipeline/mod.rs:518-520` (skip re-chunk when `documents.hash == hash_bytes`) guarantees that a chunk is only re-inserted if the file changes, so the position tie-break is reliable on stable content. If the chunker is ever changed to non-deterministic chunk-ordering, the hash strategy breaks silently — a comment on `chunk_hash.rs` flags this as a guard.
+
 ### Wire shape
 
 ```rust
