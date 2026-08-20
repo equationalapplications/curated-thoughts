@@ -204,13 +204,13 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Entity-aware diff (`getEntity` + `ProposalDiff` for `update_entity`) | Implemented (Slice 4) |
 | Per-fact accept/reject toggles in editor | Implemented (Slice 3) |
 | Inline `edited_payload` editing | Implemented (phase 5) |
-| Library deep-link from evidence | Implemented (Phase 4 navigation; opens document). Chunk-level highlight: UI scaffolding shipped Phase 7 (`NavTarget.chunkId`, `anchorChunkId`, `editor-pane-block--anchor-highlight`) but `source_docs_from_ref` (`src-tauri/src/db/entities.rs`) still returns paths only, so `chunkId` is always null at runtime → Phase 8 |
+| Library deep-link from evidence | Implemented (Phase 4 navigation; opens document). Chunk-level highlight: UI scaffolding shipped Phase 7 (`NavTarget.chunkId`, `anchorChunkId`, `editor-pane-block--anchor-highlight`); `source_docs_from_ref` chunk-id plumbing landed Phase 8 Plan A (PR `phase-8-plan-a`), so `chunkId` is now populated end-to-end from fact evidence to `EditorPane`'s anchor effect. Id-to-block resolution for numeric chunk ids remains a follow-up spec (Phase 8 design §2 caveat — the anchor effect still matches by heading-text). Peek panels and global ⌘K palette remain → Phase 8 Plans B / C. |
 
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
 4. **Brain mode entity pages** — implemented 2026-07-06 (see `2026-07-06-phase-4-brain-entity-pages.md`). Deferred: peek panels, similarity in Connections.
 5. **Timeline + Tasks modes** — implemented 2026-07-08 (phase 5).
 6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes + Cloud Bridge gating implemented 2026-07-06 in PR #29 (see `2026-07-06-privacy-modes.md`); migration disclosure (`MigrationDisclosureModal.tsx`) ships mode-3 users with a live paired token into the new posture without dropping them to Strict.
-7. **OKF v0.2 first-class adoption + frontend power-layer + completeness** — implemented 2026-08-19 (phase 7, see `2026-08-18-phase-7-plan-ab.md`). Deferred: chunk-level Library deep-link highlight (see Phase 2 deferrals).
+7. **OKF v0.2 first-class adoption + frontend power-layer + completeness** — implemented 2026-08-19 (phase 7, see `2026-08-18-phase-7-plan-ab.md`). Chunk-level Library deep-link highlight — id plumbing landed Phase 8 Plan A; id-to-block resolution for numeric chunk ids remains a follow-up spec. Deferred: peek panels (Phase 8 Plan B), global ⌘K command palette (Phase 8 Plan C).
 
 ## Non-Goals (this vision, v1)
 

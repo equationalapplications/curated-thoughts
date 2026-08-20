@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-20
 **Branch:** `chore/phase-8-design-and-status-polish` (this spec is the only artifact in that branch)
-**Status:** Approved
+**Status:** Plan A (chunk-id plumbing) shipped; Plan B (peek panels) and Plan C (global ⌘K palette) pending
 **Anchored by:**
 - `docs/superpowers/specs/2026-07-05-ux-vision-okf-native-design.md` §1 (line 33 — global command palette; line 37 — peek views), §"Phasing" item 7 deferral rows (lines 186–187).
 - `docs/superpowers/specs/2026-08-19-phase-7-plan-c-design.md` lines 41, 43–45 (Phase 8 sub-deferrals enumerated at end of Phase 7 planning).
