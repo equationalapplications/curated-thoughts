@@ -220,6 +220,11 @@ export interface EntitySummary {
   updated_at: number;
 }
 
+export interface SourceDocRef {
+  path: string;
+  chunkId: number | null;
+}
+
 export interface EntityFact {
   id: string;
   title: string;
@@ -227,7 +232,7 @@ export interface EntityFact {
   tags: string[];
   confidence: string;
   source_type: string;
-  source_docs: string[];
+  source_docs: SourceDocRef[];
   updated_at: number;
   lifecycle_status: string;
   stale_after?: number | null;
