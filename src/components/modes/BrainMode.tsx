@@ -13,6 +13,7 @@ interface Props {
   onEntitySelect: (id: string) => void;
   onOpenSource: (path: string, chunkId?: string | null) => void;
   onEntityName: (name: string) => void;
+  onGoToLibrary?: () => void;
 }
 
 export function BrainMode({
@@ -20,6 +21,7 @@ export function BrainMode({
   onEntitySelect,
   onOpenSource,
   onEntityName,
+  onGoToLibrary,
 }: Props) {
   const { entities, error, loading, refresh, setSort } = useEntityList();
   const { generation, embedding } = useProviderHealth();
@@ -117,6 +119,16 @@ export function BrainMode({
           <p className="placeholder brain-loading-overlay" aria-live="polite">
             Refreshing entities…
           </p>
+        )}
+        {entities.length === 0 && selectedEntityId === null && !loading && (
+          <div className="brain-empty" role="region" aria-label="Brain first-run empty state">
+            <p className="placeholder">
+              No entities yet. Drop a document in Library or import a wiki bundle.
+            </p>
+            {onGoToLibrary && (
+              <button type="button" onClick={onGoToLibrary}>Go to Library</button>
+            )}
+          </div>
         )}
         <EntityList
           entities={entities}
