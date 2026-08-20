@@ -162,6 +162,13 @@ test("BrainMode shows no-entity-selected placeholder when selectedEntityId is nu
 });
 
 test("LibraryMode shows empty state when no document is selected", async () => {
+  // Override list_vault_files to return no user_doc files so isFirstRun is true
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "list_vault_files") return Promise.resolve([]);
+    if (cmd === "list_entities_cmd") return Promise.resolve(ENTITIES);
+    if (cmd === "get_indexing_status") return Promise.resolve({ indexed: 0, pending: 0 });
+    return Promise.resolve(null);
+  });
   render(
     <LibraryMode
       vaultPath="/Users/test/Curated-Thoughts"
@@ -169,7 +176,50 @@ test("LibraryMode shows empty state when no document is selected", async () => {
       onDocSelect={vi.fn()}
     />,
   );
+  // isFirstRun: no docFiles (empty vault) + no selectedDoc + no query
   expect(
-    await screen.findByText(/drop your first document/i),
+    await screen.findByText(/drop your first document to get started/i),
   ).toBeInTheDocument();
+});
+
+test("BrainMode shows first-run empty state with Go to Library CTA when entities is empty", async () => {
+  const onGoToLibrary = vi.fn();
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "list_entities_cmd") return Promise.resolve([]);
+    if (cmd === "get_indexing_status") return Promise.resolve({ indexed: 0, pending: 0 });
+    return Promise.resolve(null);
+  });
+  render(
+    <BrainMode
+      selectedEntityId={null}
+      onEntitySelect={vi.fn()}
+      onOpenSource={vi.fn()}
+      onEntityName={vi.fn()}
+      onGoToLibrary={onGoToLibrary}
+    />,
+  );
+  expect(await screen.findByText(/no entities yet/i)).toBeInTheDocument();
+  const cta = screen.getByRole("button", { name: /go to library/i });
+  fireEvent.click(cta);
+  expect(onGoToLibrary).toHaveBeenCalledOnce();
+});
+
+test("LibraryMode shows first-run empty state with file picker CTA when no docs", async () => {
+  const onPickFile = vi.fn();
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "list_vault_files") return Promise.resolve([]);
+    return Promise.resolve(null);
+  });
+  render(
+    <LibraryMode
+      vaultPath="/Users/test/vault"
+      selectedDoc={null}
+      onDocSelect={vi.fn()}
+      onPickFile={onPickFile}
+    />,
+  );
+  expect(await screen.findByText(/drop your first document to get started/i)).toBeInTheDocument();
+  const cta = screen.getByRole("button", { name: /choose a folder/i });
+  fireEvent.click(cta);
+  expect(onPickFile).toHaveBeenCalledOnce();
 });

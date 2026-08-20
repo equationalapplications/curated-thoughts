@@ -233,6 +233,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                     nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
                   }}
                   onEntityName={setBrainEntityName}
+                  onGoToLibrary={() => nav.navigate({ mode: "library" })}
                 />
               )}
               {nav.current.mode === "review" && (
@@ -252,6 +253,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                   selectedDoc={libraryDoc}
                   anchorChunkId={nav.current.chunkId ?? null}
                   onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
+                  onPickFile={() => nav.navigate({ mode: "setup" })}
                 />
               )}
               {nav.current.mode === "timeline" && (
