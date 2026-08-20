@@ -11,6 +11,7 @@ pub mod outbox_format;
 pub mod proposals;
 pub mod queries;
 pub mod entities;
+pub mod chunk_hash;
 pub mod facts;
 pub mod tasks;
 pub mod review_shim;
