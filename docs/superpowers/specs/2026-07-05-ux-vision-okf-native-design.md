@@ -142,7 +142,7 @@ A three-way privacy mode, presented as radio cards with plain-language consequen
 
 **Enforcement, not just preference:** the mode gates the UI. Strict hides/disables cloud fields in the Models tab; the Cloud Bridge configuration (CloudBridgePanel) moves under the Privacy tab and is active only in mode 3. Downgrading to Strict prompts: "Disconnect cloud bridge and clear remote config?"
 
-**Sequencing debt (flagged in the 2026-07-06 cross-repo architecture review):** the Cloud Bridge shipped (v1.8.0/v1.9.0) *before* this gating exists — today it is configurable regardless of privacy posture. The privacy-modes plan (split out of phase 6) must land before privacy modes are presented to users as enforced, and its migration step must handle the existing state: a user with a paired token but no chosen mode is placed in mode 3 (their current reality) and shown the disclosure, not silently downgraded to Strict with a live token in the keychain.
+**Sequencing debt (flagged in the 2026-07-06 cross-repo architecture review, resolved 2026-07-06):** the Cloud Bridge shipped (v1.8.0/v1.9.0) *before* privacy-mode gating existed; the gating shipped subsequently in PR #29 (commit `a512051 feat(privacy): enforce three-mode posture with Cloud Bridge gating`, plan `2026-07-06-privacy-modes.md`). On downgrading a previously-paired user to Strict, the migration places them in mode 3 (their current reality) and surfaces `MigrationDisclosureModal.tsx` rather than clearing the live token silently. Strict now disables cloud fields; Cloud Bridge configuration is active only in mode 3.
 
 **Ambient indicator:** the status bar shows a privacy-mode shield glyph (filled / half / outline). Clicking it opens the Privacy tab. The user always knows the data posture at a glance.
 
@@ -188,7 +188,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Activity rail pulse icon | Implemented (phase 5) |
 | Live Activity feed (beyond stub panel) | Implemented (phase 5) |
 | Per-mode empty states (Brain, Library) | Implemented (Brain Phase 4; Library + Review Phase 7) |
-| Embedder/model down → inline feature notice | Phase 1 follow-up |
+| Embedder/model down → inline feature notice | Shipped (Phase 7 — `src/components/health/ProviderNotice.tsx`) |
 | Background errors → Activity feed + retry | Implemented (phase 5) |
 | Review empty state richness (doc count, last-synthesis time) | Phase 2 |
 | Library protected badge copy ("Source document — read-only") | Phase 4 |
@@ -209,7 +209,7 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 3. **Backend OKF-native migration** — schema, librarian synthesis output, event log. *(Implemented 2026-07-06, v1.10.0 — see `2026-07-05-okf-backend-migration-design.md`.)*
 4. **Brain mode entity pages** — implemented 2026-07-06 (see `2026-07-06-phase-4-brain-entity-pages.md`). Deferred: peek panels, similarity in Connections.
 5. **Timeline + Tasks modes** — implemented 2026-07-08 (phase 5).
-6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes and Cloud Bridge gating split to a separate upcoming plan.
+6. **OKF import/export** — implemented 2026-07-06 (see `2026-07-06-phase-6-okf-bundle-io.md`). Privacy modes + Cloud Bridge gating implemented 2026-07-06 in PR #29 (see `2026-07-06-privacy-modes.md`); migration disclosure (`MigrationDisclosureModal.tsx`) ships mode-3 users with a live paired token into the new posture without dropping them to Strict.
 7. **OKF v0.2 first-class adoption + frontend power-layer + completeness** — implemented 2026-08-19 (phase 7, see `2026-08-18-phase-7-plan-ab.md`). Deferred: chunk-level Library deep-link highlight (see Phase 2 deferrals).
 
 ## Non-Goals (this vision, v1)
