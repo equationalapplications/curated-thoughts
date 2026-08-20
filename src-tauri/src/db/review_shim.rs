@@ -274,10 +274,12 @@ mod tests {
                     "confidence": "inferred"
                 }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "evidence".into(),
-                    start_line: 1,
-                    end_line: 2,
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    source_kind: None,
                 }],
             }],
             &[NewProposalSource {

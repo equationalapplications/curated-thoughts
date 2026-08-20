@@ -216,12 +216,47 @@ pub(crate) fn fact_title_from_body(body: &str) -> String {
     }
 }
 
-fn source_ref_json(proposal_id: &str, evidence: &[StoredEvidenceChunk]) -> String {
-    serde_json::json!({
+/// Build a `source_ref` payload where each evidence entry's `content_hash`
+/// is resolved from the `chunks` table. The chunk row is the authoritative
+/// source of truth — the proposal's in-memory value (which may be empty for
+/// legacy fixtures) is preferred only when non-empty, otherwise we look up
+/// the chunk row. Returns an empty string when the chunk row is missing so
+/// stale proposals don't surface a bogus hash.
+fn evidence_json_with_hashes(
+    conn: &Connection,
+    proposal_id: &str,
+    evidence: &[StoredEvidenceChunk],
+) -> Result<String> {
+    let mut entries = Vec::with_capacity(evidence.len());
+    for e in evidence {
+        // Always prefer the chunk row's content_hash (truth on disk)
+        // over the proposal's in-memory value (which may be empty).
+        let resolved_hash: String = if !e.content_hash.is_empty() {
+            e.content_hash.clone()
+        } else if let Some(cid) = e.chunk_id {
+            conn.query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [cid],
+                |r| r.get(0),
+            )
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        entries.push(serde_json::json!({
+            "chunk_id": e.chunk_id,
+            "content_hash": resolved_hash,
+            "quote": e.quote,
+            "start_line": e.start_line,
+            "end_line": e.end_line,
+            "source_kind": e.source_kind,
+        }));
+    }
+    Ok(serde_json::json!({
         "proposal_id": proposal_id,
-        "evidence": evidence,
+        "evidence": entries,
     })
-    .to_string()
+    .to_string())
 }
 
 pub(crate) fn wiki_fact_outbox_payload(
@@ -453,7 +488,7 @@ fn commit_fact_add(
     let tags = parse_tags(payload);
     let fact_id = generate_llm_id("fact_");
     let title = fact_title_from_body(&body);
-    let source_ref = source_ref_json(&ctx.proposal_id, &item.evidence);
+    let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
 
     conn.execute(
         "INSERT INTO llm_wiki_entries (
@@ -1169,10 +1204,12 @@ mod tests {
             target_id: None,
             payload: serde_json::json!({ "body": body, "tags": [], "confidence": "inferred" }),
             evidence: vec![StoredEvidenceChunk {
-                chunk_id,
+                chunk_id: Some(chunk_id),
+                content_hash: String::new(),
                 quote: "evidence".into(),
-                start_line: 1,
-                end_line: 2,
+                start_line: Some(1),
+                end_line: Some(2),
+                source_kind: None,
             }],
         }
     }
@@ -1386,10 +1423,12 @@ mod tests {
                     "confidence": "inferred",
                 }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "x".into(),
-                    start_line: 1,
-                    end_line: 1,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
                 }],
             }],
             doc_id,
@@ -1508,10 +1547,12 @@ mod tests {
                     "edge_type": "related_to"
                 }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "x".into(),
-                    start_line: 1,
-                    end_line: 1,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
                 }],
             }],
             doc_id,
@@ -1569,10 +1610,12 @@ mod tests {
                     "edge_type": "related_to"
                 }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "x".into(),
-                    start_line: 1,
-                    end_line: 1,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
                 }],
             }],
             doc_id,
@@ -1618,10 +1661,12 @@ mod tests {
                 target_id: Some("missing-fact".into()),
                 payload: serde_json::json!({ "body": "nope", "tags": [], "confidence": "inferred" }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "x".into(),
-                    start_line: 1,
-                    end_line: 1,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
                 }],
             }],
             doc_id,
@@ -1730,5 +1775,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rejected_type, "rejected");
+    }
+
+    #[test]
+    fn resolve_proposal_writes_content_hash_in_source_ref() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/note.pdf");
+        // Pre-seed a chunk with a real content_hash; the commit must
+        // look this up and write it into the source_ref JSON.
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let hash = crate::db::chunk_hash::compute_chunk_hash("quoted", "/vault/documents/note.pdf", 0);
+        conn.execute(
+            "UPDATE chunks SET content_hash = ?1 WHERE id = ?2",
+            params![hash, chunk_id],
+        )
+        .unwrap();
+
+        insert_test_proposal(
+            &conn,
+            "prop-hash",
+            ProposalKind::NewEntity,
+            None,
+            vec![NewProposalItem {
+                id: "item-h".into(),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({ "body": "Hashed fact.", "tags": [], "confidence": "inferred" }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(), // commit must look up the real hash
+                    quote: "quoted".into(),
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    source_kind: None,
+                }],
+            }],
+            doc_id,
+        );
+
+        resolve_proposal(
+            &mut conn,
+            "prop-hash",
+            &[ItemDecision {
+                item_id: "item-h".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions { auto_approve: false },
+        )
+        .unwrap();
+
+        let source_ref: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&source_ref).unwrap();
+        let evidence = parsed.get("evidence").unwrap().as_array().unwrap();
+        let entry = evidence[0].as_object().unwrap();
+        assert_eq!(
+            entry.get("content_hash").and_then(|v| v.as_str()).unwrap(),
+            hash,
+            "commit must populate content_hash from the chunk row"
+        );
     }
 }

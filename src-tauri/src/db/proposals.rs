@@ -47,10 +47,16 @@ impl ProposalSourceRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredEvidenceChunk {
-    pub chunk_id: i64,
+    /// Legacy rowid; nullable after migration. New writes always carry
+    /// `content_hash` and may leave `chunk_id` as `None`.
+    pub chunk_id: Option<i64>,
+    /// Stable SHA-256 first-16-bytes hex. Required: empty string for
+    /// pre-migration fixtures, real hash for post-migration inserts.
+    pub content_hash: String,
     pub quote: String,
-    pub start_line: i64,
-    pub end_line: i64,
+    pub start_line: Option<i32>,
+    pub end_line: Option<i32>,
+    pub source_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,10 +115,10 @@ pub struct ProposalSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HydratedEvidenceChunk {
-    pub chunk_id: i64,
+    pub chunk_id: Option<i64>,
     pub quote: String,
-    pub start_line: i64,
-    pub end_line: i64,
+    pub start_line: Option<i32>,
+    pub end_line: Option<i32>,
     pub doc_path: Option<String>,
     pub source_deleted: bool,
 }
@@ -422,16 +428,19 @@ fn hydrate_evidence(
 ) -> Result<Vec<HydratedEvidenceChunk>> {
     let mut out = Vec::with_capacity(stored.len());
     for chunk in stored {
-        let resolved: Option<(String,)> = conn
-            .query_row(
-                "SELECT d.path
-                 FROM chunks c
-                 JOIN documents d ON d.id = c.doc_id
-                 WHERE c.id = ?1",
-                [chunk.chunk_id],
-                |r| Ok((r.get(0)?,)),
-            )
-            .optional()?;
+        let resolved: Option<(String,)> = match chunk.chunk_id {
+            Some(cid) => conn
+                .query_row(
+                    "SELECT d.path
+                     FROM chunks c
+                     JOIN documents d ON d.id = c.doc_id
+                     WHERE c.id = ?1",
+                    [cid],
+                    |r| Ok((r.get(0)?,)),
+                )
+                .optional()?,
+            None => None,
+        };
         let (doc_path, source_deleted) = match resolved {
             Some((path,)) => (Some(path), false),
             None => (None, true),
@@ -636,10 +645,12 @@ mod tests {
                 "confidence": "inferred"
             }),
             evidence: vec![StoredEvidenceChunk {
-                chunk_id,
+                chunk_id: Some(chunk_id),
+                content_hash: String::new(),
                 quote: quote.into(),
-                start_line: 2,
-                end_line: 4,
+                start_line: Some(2),
+                end_line: Some(4),
+                source_kind: None,
             }],
         }
     }
