@@ -261,7 +261,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                 <TasksMode onNavigate={nav.navigate} />
               )}
               {nav.current.mode === "settings" && (
-                <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} />
+                <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} onRerunWizard={() => nav.navigate({ mode: "setup" })} />
               )}
             </div>
           </>

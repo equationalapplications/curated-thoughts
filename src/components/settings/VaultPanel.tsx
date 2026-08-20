@@ -3,6 +3,7 @@ import { useVaultSwitcher } from "../../hooks/useVaultSwitcher";
 
 interface Props {
   vaultPath: string;
+  onRerunWizard?: () => void;
 }
 
 function revealLabel(): string {
@@ -13,7 +14,7 @@ function revealLabel(): string {
   return "Reveal in file manager";
 }
 
-export function VaultPanel({ vaultPath }: Props) {
+export function VaultPanel({ vaultPath, onRerunWizard }: Props) {
   const { changeVault, switching, isSystemBusy } = useVaultSwitcher(vaultPath);
 
   const folderName =
@@ -44,6 +45,11 @@ export function VaultPanel({ vaultPath }: Props) {
           {revealLabel()}
         </button>
       </div>
+      {onRerunWizard && (
+        <button type="button" onClick={onRerunWizard} className="vault-rerun-wizard-btn">
+          Re-run setup wizard
+        </button>
+      )}
       {isSystemBusy && (
         <p className="vault-hint vault-busy-hint">
           Background wiki maintenance is active. Wait for it to finish before
