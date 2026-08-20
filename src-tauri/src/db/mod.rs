@@ -13,6 +13,7 @@ pub mod queries;
 pub mod entities;
 pub mod chunk_hash;
 pub mod facts;
+pub mod migration;
 pub mod tasks;
 pub mod review_shim;
 pub mod schema;
