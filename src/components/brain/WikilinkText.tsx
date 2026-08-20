@@ -53,6 +53,7 @@ let resolverState: ResolverState = {
   fetchStarted: false,
 };
 const resolverListeners = new Set<() => void>();
+let refreshInFlight: Promise<void> | null = null;
 
 function setReadyState(entities: EntitySummary[], version: number) {
   // Reject stale completions: if a newer fetch has been started since this
@@ -104,8 +105,15 @@ function ensureResolver(): Promise<void> {
  * mutation (create, import, delete, merge) so newly created entities render
  * as resolved in subsequent `[[Name]]` chips. Returns the fetch promise so
  * callers can await the refresh when ordering matters.
+ *
+ * Coalesces: concurrent callers share the same in-flight promise so we
+ * never issue more than one `listEntities` round-trip at a time. A second
+ * call after the previous one settles starts a fresh round-trip (the
+ * underlying data may have changed).
  */
 export function refreshWikilinkResolver(): Promise<void> {
+  if (refreshInFlight) return refreshInFlight;
+
   const existing = resolverState;
   resolverState = {
     status: "loading",
@@ -114,7 +122,31 @@ export function refreshWikilinkResolver(): Promise<void> {
     fetchStarted: false,
   };
   resolverListeners.forEach((fn) => fn());
-  return ensureResolver();
+
+  refreshInFlight = ensureResolver().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+/**
+ * Test-only: reset the module-level resolver state to its initial loading
+ * state without firing any IPC. Clears the in-flight refresh, the cached
+ * entity list, and all subscribers. Use this in Vitest `beforeEach` blocks
+ * to avoid leaking resolver state across tests.
+ *
+ * Not for production use — there's no equivalent in the real app; an app
+ * reload is the closest analogue.
+ */
+export function __resetWikilinkResolverForTests(): void {
+  refreshInFlight = null;
+  resolverState = {
+    status: "loading",
+    promise: Promise.resolve(),
+    version: 0,
+    fetchStarted: false,
+  };
+  resolverListeners.clear();
 }
 
 /**

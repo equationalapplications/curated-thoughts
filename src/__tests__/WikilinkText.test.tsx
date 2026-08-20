@@ -6,6 +6,7 @@ import {
   WikilinkText,
   refreshWikilinkResolver,
   getWikilinkResolverEntities,
+  __resetWikilinkResolverForTests,
 } from "../components/brain/WikilinkText";
 
 describe("parseWikilinks", () => {
@@ -124,5 +125,55 @@ describe("WikilinkText resolver cache", () => {
     await refreshWikilinkResolver();
     const cached = getWikilinkResolverEntities();
     expect(cached.map((e) => e.name)).toEqual(["Alpha", "Beta"]);
+  });
+});
+
+describe("WikilinkText resolver coalescing + test reset", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    __resetWikilinkResolverForTests();
+  });
+
+  test("refreshWikilinkResolver coalesces concurrent calls into one IPC round-trip", async () => {
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_entities_cmd") {
+        listCallCount += 1;
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    // Two concurrent refreshes share one promise.
+    const p1 = refreshWikilinkResolver();
+    const p2 = refreshWikilinkResolver();
+    await Promise.all([p1, p2]);
+
+    expect(listCallCount).toBe(1);
+  });
+
+  test("refreshWikilinkResolver launches a fresh round-trip after the previous one settles", async () => {
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_entities_cmd") {
+        listCallCount += 1;
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    await refreshWikilinkResolver();
+    expect(listCallCount).toBe(1);
+
+    await refreshWikilinkResolver();
+    expect(listCallCount).toBe(2);
+  });
+
+  test("__resetWikilinkResolverForTests clears state without firing an IPC round-trip", () => {
+    vi.mocked(invoke).mockReset();
+    __resetWikilinkResolverForTests();
+    // getWikilinkResolverEntities returns [] on a freshly-reset cache (loading state).
+    expect(getWikilinkResolverEntities()).toEqual([]);
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
