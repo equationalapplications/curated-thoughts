@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-20
 **Branch:** `chore/phase-8-design-and-status-polish` (this spec is the only artifact in that branch)
-**Status:** Design
+**Status:** Approved
 **Anchored by:**
 - `docs/superpowers/specs/2026-07-05-ux-vision-okf-native-design.md` §1 (line 33 — global command palette; line 37 — peek views), §"Phasing" item 7 deferral rows (lines 186–187).
 - `docs/superpowers/specs/2026-08-19-phase-7-plan-c-design.md` lines 41, 43–45 (Phase 8 sub-deferrals enumerated at end of Phase 7 planning).
@@ -12,7 +12,7 @@
 
 ## Goal
 
-Phase 8 ships the three Phase 1/4/7 deferrals that remain open — **chunk-level Library deep-link highlight**, **peek panels**, **global ⌘K command palette** — gated by a small Rust plumbing change that surfaces `chunk_id` from `source_docs_from_ref`. Together they close the cross-link story (Brain/Review → Library with the right chunk lit up) and the editorial-flow story (peek at a source without leaving the current mode). Compact density toggle remains Phase 9.
+Phase 8 ships the three Phase 1/4/7 deferrals that remain open — **chunk-level Library deep-link highlight**, **peek panels**, **global ⌘K command palette** — gated by a small Rust plumbing change that surfaces `chunk_id` from `source_docs_from_ref`. Together they close the cross-link story (Brain/Review → Library deep-linking, with chunk ids delivered end-to-end to the existing highlight effect — id-to-block resolution itself is a follow-up spec; see the Scope §2 caveat) and the editorial-flow story (peek at a source without leaving the current mode). Compact density toggle remains Phase 9.
 
 **One design, three plans (mirroring Phase 7's Plan A/B/C layering):**
 - **Plan A — chunk-id plumbing + chunk highlight.** Rust signature change; `EntityFact.source_docs` shape change; closes Phase 7 deferred #6.
@@ -27,9 +27,9 @@ The split lets each plan's diff stay narrow enough for a focused code-review pas
 
 ### Scope (in)
 
-1. **Chunk-id plumbing (Plan A).** `source_docs_from_ref` returns `Vec<(String, Option<i64>)>` (path, chunk_id) instead of `Vec<String>`. `EntityFact.source_docs` becomes `Array<{ path: string; chunkId: number | null }>`. Closes Phase 7 deferred #6. The frontend target side is fully pre-wired — `NavTarget.chunkId` (`src/lib/navigation.ts:16`) → `LibraryMode.anchorChunkId` (line 254) → `EditorPane` effect (`src/components/shell/EditorPane.tsx:101+`) → `.editor-pane-block--anchor-highlight` (CSS at `src/index.css:1158`) — so §4 lights up automatically when §1 lands.
+1. **Chunk-id plumbing (Plan A).** `source_docs_from_ref` returns `Vec<(String, Option<i64>)>` (path, chunk_id) instead of `Vec<String>`. `EntityFact.source_docs` becomes `Array<{ path: string; chunkId: number | null }>`. Closes Phase 7 deferred #6. The frontend target side is pre-wired — `NavTarget.chunkId` (`src/lib/navigation.ts:16`) → `LibraryMode.anchorChunkId` (line 254) → `EditorPane` effect (`src/components/shell/EditorPane.tsx:101+`) → `.editor-pane-block--anchor-highlight` (CSS at `src/index.css:1158`) — so §1 delivers ids all the way to the highlight effect. The final hop resolves by heading-text match, not by id, so numeric chunk ids do not light up yet — see the caveat in §2.
 
-2. **Chunk-level Library deep-link highlight (Plan A + Plan B prep).** Already plumbed through the entire chain. No new UI work; the existing anchor effect and CSS class are sufficient.
+2. **Chunk-level Library deep-link highlight (Plan A + Plan B prep).** Already plumbed through the entire chain; no new UI work in Plan A. **Caveat — resolution is heading-text match, not id match.** The `EditorPane` anchor effect (`src/components/shell/EditorPane.tsx:121–128`) resolves `anchorChunkId` by exact-matching it against *heading block text* (`b.type === "heading" && blockText(b) === anchorChunkId`). That is reliable when callers pass a heading *name* as the anchor; the numeric `chunkId`s Plan A surfaces will not match any heading text and the effect silently no-ops (`if (!target) return` — no highlight, no scroll). Plan A therefore lands the id at the effect end-to-end but does not, by itself, make the highlight fire. Making numeric chunk ids resolve reliably needs something like: chunk ids resolved to line ranges, then searching for a line-number match; or storing chunk heading names alongside the id in `source_docs`; or changing the highlight mechanism from "block text match" to "line range scroll". All of those are new UI/IPC surface beyond Plan A's constraints — deferred to a follow-up spec (see "Open Questions" below). Plan A's constraints remain intact.
 
 3. **Peek panels (Plan B).** New `<PeekPanel>` slide-over read-only surface; one peek at a time, owned by `AppShell`; `Esc` and click-outside dismiss; "Open in [mode]" button promotes to real navigation. Triggered by `Option`+click on wikilinks, fact chips, evidence chunks. Reuses `EditorPane` and `EntityPage` with an `isPeek` prop. Spec line 37 is canonical: "Peek panels are read-only and dismiss on `Esc` or click-outside; 'Open in [mode]' inside the peek promotes it to full navigation."
 
@@ -130,7 +130,7 @@ fn source_docs_from_ref(
   - `__tests__/PeekPanel.test.tsx` (new) — opens, dismisses on `Esc`, dismisses on click-outside, "Open in [mode]" promotes to `nav.navigate(...)`.
   - `__tests__/CommandPalette.test.tsx` (new) — opens on `⌘K`, registry match surfaces expected commands, `Enter` dispatches, `Esc` closes, mode-scoped commands only appear when palette is opened from that mode.
   - **Fixture updates** (existing tests): `__tests__/FactCard.test.tsx`, `__tests__/ReviewMode.test.tsx`, `__tests__/ReviewEvidencePanel.test.tsx`, `__tests__/proposalPreview.test.ts`, `__tests__/proposalEntityPreview.test.ts`, `__tests__/FactPowerMenu.test.tsx` — change `source_docs: ["documents/notes.md"]` to `source_docs: [{ path: "documents/notes.md", chunkId: null }]` (or to a real `chunkId` for tests that want to assert anchor behavior).
-- **Manual verification** — every existing fact-source chip click highlights the corresponding chunk in Library; `Option`+click opens a peek instead of navigating; `⌘K` opens the palette from any mode.
+- **Manual verification** — every existing fact-source chip click deep-links to Library with the correct document loaded and the `chunkId` reaching `EditorPane` (block-level highlight for numeric ids is the deferred follow-up — Scope §2 caveat; verify no console errors on the no-op path); `Option`+click opens a peek instead of navigating; `⌘K` opens the palette from any mode.
 
 ---
 
@@ -144,6 +144,7 @@ fn source_docs_from_ref(
 
 ## Open Questions Deferred to Follow-up Specs
 
+- **Chunk-id → block resolution for the Library deep-link highlight.** Plan A surfaces numeric `chunk_id`s, but the `EditorPane` anchor effect resolves anchors by matching the string against heading block text, so numeric ids silently no-op (see Scope §2 caveat). Candidate approaches: resolve chunk ids to line ranges and scroll/match by line number; store chunk heading names alongside the id in `source_docs`; or change the highlight mechanism from "block text match" to "line range scroll". All are new UI/IPC surface beyond Plan A's constraints.
 - Per-mode sidebar search fields (independent of the global palette).
 - Compact density toggle (Phase 9 — needs token system stability).
 - Group-by-source for tasks UI (Phase 9 — depends on librarian populating `okf_sources` on task writes; column exists, gap is data not schema).
