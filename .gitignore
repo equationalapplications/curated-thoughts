@@ -27,6 +27,7 @@ src-tauri/.fastembed_cache/
 *.sw?
 
 # Superpowers planning (work-in-progress)
+.superpowers/
 docs/superpowers/plans/
 
 # Git worktrees
