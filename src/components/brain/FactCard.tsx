@@ -18,9 +18,13 @@ interface Props {
   onNavigateEntity: (name: string) => void;
   /**
    * Called when the user clicks a source-document chip. The chunk id is the
-   * optional anchor within `path` that Library will scroll/highlight on
-   * open. v1: `source_docs` does not yet carry chunk ids so callers pass
-   * `null` here; the click path stays unchanged when chunk id is absent.
+   * optional chunk ID that navigation can use when opening `path`; `null`
+   * when the fact's evidence did not resolve to a chunk.
+   *
+   * Note: Library's `EditorPane` anchor effect resolves the anchor by
+   * heading-text match, not by id, so numeric chunk ids do not currently
+   * trigger the highlight. The id is plumbed end-to-end so a follow-up
+   * spec can wire id-to-block resolution without re-touching this surface.
    */
   onOpenSource: (path: string, chunkId?: string | null) => void;
 }
@@ -90,15 +94,20 @@ export function FactCard({
           <div className="fact-card-meta">
             <span className="fact-chip fact-chip--confidence">{fact.confidence}</span>
             <span className="fact-chip">{fact.source_type}</span>
-            {fact.source_docs.map((path) => (
+            {fact.source_docs.map((doc) => (
               <button
-                key={path}
+                key={doc.path}
                 type="button"
                 className="fact-chip fact-chip--source"
-                title={path}
-                onClick={() => onOpenSource(path, null)}
+                title={doc.path}
+                onClick={() =>
+                  onOpenSource(
+                    doc.path,
+                    doc.chunkId != null ? String(doc.chunkId) : null,
+                  )
+                }
               >
-                {docLabel(path)}
+                {docLabel(doc.path)}
               </button>
             ))}
             <span className="fact-card-date">

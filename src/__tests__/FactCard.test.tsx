@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { FactCard } from "../components/brain/FactCard";
-import type { EntityFact } from "../lib/tauri";
+import { type EntityFact } from "../lib/tauri";
 import { vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core");
@@ -13,7 +13,7 @@ const FACT: EntityFact = {
   tags: [],
   confidence: "confirmed",
   source_type: "user_stated",
-  source_docs: ["documents/notes.md"],
+  source_docs: [{ path: "documents/notes.md", chunkId: null }],
   updated_at: 1750000000000,
 };
 
@@ -36,8 +36,28 @@ test("renders body with wikilink chip, meta chips, and source chip", () => {
   expect(onNavigateEntity).toHaveBeenCalledWith("Beta Team");
 
   fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
-  // v1: chunkId is null because source_docs does not yet carry chunk ids.
+  // chunkId is null here because this fixture's source_docs entry has none.
   expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", null);
+});
+
+test("source chip passes the enriched chunkId to onOpenSource", () => {
+  const onOpenSource = vi.fn();
+  const fact: EntityFact = {
+    ...FACT,
+    id: "fact_chunked",
+    source_docs: [{ path: "documents/notes.md", chunkId: 42 }],
+  };
+  render(
+    <FactCard
+      entityId="ent_1"
+      fact={fact}
+      onChanged={vi.fn()}
+      onNavigateEntity={vi.fn()}
+      onOpenSource={onOpenSource}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
+  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", "42");
 });
 
 test("inline edit saves via update_entity_fact_cmd and notifies", async () => {
