@@ -10,8 +10,8 @@ export interface NavTarget {
   /**
    * Optional chunk anchor within the target document. When set together with
    * `docPath`, the library editor scrolls to and transiently highlights the
-   * block identified by this id. v1: always undefined because `source_docs`
-   * does not yet expose chunk ids.
+   * block identified by this id. Populated from a fact's `source_docs`
+   * `chunkId` when present; absent otherwise.
    */
   chunkId?: string;
 }

@@ -38,7 +38,6 @@ export function ProposalItemRow({
       editableField ? String(currentPayload[editableField] ?? "") : "",
     );
     // item.id is the stable identity for the proposal row.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.id]);
 
   const startEdit = () => {
