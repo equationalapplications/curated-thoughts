@@ -6,7 +6,22 @@ import {
   WikilinkText,
   refreshWikilinkResolver,
   getWikilinkResolverEntities,
+  __resetWikilinkResolverForTests,
 } from "../components/brain/WikilinkText";
+import type { EntitySummary } from "../lib/tauri";
+
+function entity(name: string): EntitySummary {
+  return {
+    id: `ent_${name.toLowerCase()}`,
+    name,
+    entity_type: "concept",
+    summary_snippet: "",
+    fact_count: 0,
+    open_task_count: 0,
+    created_at: 0,
+    updated_at: 0,
+  };
+}
 
 describe("parseWikilinks", () => {
   test("splits text and link segments", () => {
@@ -124,5 +139,110 @@ describe("WikilinkText resolver cache", () => {
     await refreshWikilinkResolver();
     const cached = getWikilinkResolverEntities();
     expect(cached.map((e) => e.name)).toEqual(["Alpha", "Beta"]);
+  });
+});
+
+describe("WikilinkText resolver coalescing + test reset", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    __resetWikilinkResolverForTests();
+  });
+
+  test("refreshWikilinkResolver coalesces concurrent calls into one IPC round-trip", async () => {
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_entities_cmd") {
+        listCallCount += 1;
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    // Two concurrent refreshes share one promise.
+    const p1 = refreshWikilinkResolver();
+    const p2 = refreshWikilinkResolver();
+    await Promise.all([p1, p2]);
+
+    expect(listCallCount).toBe(1);
+  });
+
+  test("refreshWikilinkResolver launches a fresh round-trip after the previous one settles", async () => {
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_entities_cmd") {
+        listCallCount += 1;
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    await refreshWikilinkResolver();
+    expect(listCallCount).toBe(1);
+
+    await refreshWikilinkResolver();
+    expect(listCallCount).toBe(2);
+  });
+
+  test("__resetWikilinkResolverForTests clears state without firing an IPC round-trip", () => {
+    vi.mocked(invoke).mockReset();
+    __resetWikilinkResolverForTests();
+    // getWikilinkResolverEntities returns [] on a freshly-reset cache (loading state).
+    expect(getWikilinkResolverEntities()).toEqual([]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  test("a refresh started before the reset cannot repopulate the cache after it", async () => {
+    let releaseFirst: (entities: EntitySummary[]) => void = () => {};
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd !== "list_entities_cmd") return Promise.resolve(null);
+      listCallCount += 1;
+      if (listCallCount === 1) {
+        return new Promise<EntitySummary[]>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    const stale = refreshWikilinkResolver();
+
+    // Tear the module state down while the first fetch is still in flight,
+    // then let it land. Without the generation guard it would write its
+    // entities into the post-reset cache.
+    __resetWikilinkResolverForTests();
+    releaseFirst([entity("Stale")]);
+    await stale;
+
+    expect(getWikilinkResolverEntities()).toEqual([]);
+  });
+
+  test("a pre-reset refresh settling later does not clear a newer refreshInFlight", async () => {
+    const releases: Array<(entities: EntitySummary[]) => void> = [];
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd !== "list_entities_cmd") return Promise.resolve(null);
+      listCallCount += 1;
+      return new Promise<EntitySummary[]>((resolve) => {
+        releases.push(resolve);
+      });
+    });
+
+    const stale = refreshWikilinkResolver();
+    __resetWikilinkResolverForTests();
+
+    // Newer refresh starts and stays in flight; then the stale one settles.
+    // Its `finally` must not null out the newer promise, or `alsoFresh` below
+    // would start a third round-trip instead of coalescing.
+    const fresh = refreshWikilinkResolver();
+    releases[0]([entity("Stale")]);
+    await stale;
+
+    const alsoFresh = refreshWikilinkResolver();
+    releases[1]([entity("Fresh")]);
+    await Promise.all([fresh, alsoFresh]);
+
+    // 1 stale + 1 fresh; `alsoFresh` coalesced into `fresh`.
+    expect(listCallCount).toBe(2);
   });
 });

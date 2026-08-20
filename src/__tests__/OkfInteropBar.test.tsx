@@ -2,6 +2,10 @@ import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { OkfInteropBar } from "../components/shell/OkfInteropBar";
+import {
+  __resetWikilinkResolverForTests,
+  getWikilinkResolverEntities,
+} from "../components/brain/WikilinkText";
 import { renderWithTheme } from "./test-utils";
 
 const PREVIEW = {
@@ -28,6 +32,7 @@ beforeEach(() => {
   vi.mocked(invoke).mockReset();
   vi.mocked(open).mockReset();
   vi.mocked(save).mockReset();
+  __resetWikilinkResolverForTests();
 });
 
 test("export flow: save dialog then command, then notice", async () => {
@@ -145,4 +150,40 @@ test("errors surface as notice", async () => {
   renderWithTheme(<OkfInteropBar />);
   fireEvent.click(screen.getByRole("button", { name: /import bundle/i }));
   expect(await screen.findByText(/not an okf bundle/i)).toBeInTheDocument();
+});
+
+test("successful import refreshes the WikilinkText resolver cache", async () => {
+  vi.mocked(open).mockResolvedValue("/tmp/incoming.zip");
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "okf_import_preview_cmd") return Promise.resolve(PREVIEW);
+    if (cmd === "okf_import_apply_cmd") {
+      return Promise.resolve({
+        entities_touched: 1,
+        facts_added: 3,
+        facts_skipped: 0,
+        tasks_added: 1,
+        tasks_skipped: 0,
+        edges_added: 2,
+        events_added: 4,
+        events_skipped: 0,
+      });
+    }
+    if (cmd === "list_entities_cmd") {
+      return Promise.resolve([
+        { id: "ent_a", name: "Project X", entity_type: "concept", summary_snippet: "", fact_count: 0, open_task_count: 0, created_at: 0, updated_at: 0 },
+      ]);
+    }
+    return Promise.resolve(null);
+  });
+
+  renderWithTheme(<OkfInteropBar onImported={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: /import bundle/i }));
+  await screen.findByText(/project x/i);
+  fireEvent.click(screen.getByRole("button", { name: /confirm import/i }));
+
+  // After confirm, the resolver cache has been refreshed — getWikilinkResolverEntities
+  // returns the freshly-imported entity.
+  await waitFor(() =>
+    expect(getWikilinkResolverEntities().map((e) => e.name)).toContain("Project X"),
+  );
 });
