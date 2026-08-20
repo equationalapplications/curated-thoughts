@@ -43,7 +43,7 @@ pub struct EntityFact {
     pub tags: Vec<String>,
     pub confidence: String,
     pub source_type: String,
-    pub source_docs: Vec<String>,
+    pub source_docs: Vec<SourceDocRef>,
     pub updated_at: i64,
     // OKF v0.2 fields
     pub lifecycle_status: String,
@@ -96,6 +96,17 @@ where
 pub struct OkfUsageWindow {
     pub from: String,
     pub to: String,
+}
+
+/// One resolved source-document reference on an [`EntityFact`].
+/// Wire shape is `{ "path": ..., "chunkId": ... }` — `chunkId` is the
+/// camelCase exception to `EntityFact`'s snake_case fields because it
+/// feeds the frontend `NavTarget.chunkId` deep-link surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceDocRef {
+    pub path: String,
+    #[serde(rename = "chunkId")]
+    pub chunk_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,7 +188,7 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
     serde_json::from_str(raw).ok()
 }
 
-fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<String> {
+fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<(String, Option<i64>)> {
     let Some(raw) = source_ref else {
         return Vec::new();
     };
@@ -187,7 +198,7 @@ fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<Stri
     let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, Option<i64>)> = Vec::new();
     for chunk in evidence {
         let Some(chunk_id) = chunk.get("chunk_id").and_then(|v| v.as_i64()) else {
             continue;
@@ -201,8 +212,8 @@ fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<Stri
             .optional()
             .unwrap_or(None);
         if let Some(path) = resolved {
-            if !out.contains(&path) {
-                out.push(path);
+            if !out.iter().any(|(existing, _)| existing == &path) {
+                out.push((path, Some(chunk_id)));
             }
         }
     }
@@ -362,7 +373,10 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
             tags: parse_tags(&tags_raw),
             confidence,
             source_type,
-            source_docs: source_docs_from_ref(conn, source_ref.as_deref()),
+            source_docs: source_docs_from_ref(conn, source_ref.as_deref())
+                .into_iter()
+                .map(|(path, chunk_id)| SourceDocRef { path, chunk_id })
+                .collect(),
             updated_at,
             lifecycle_status,
             stale_after,
@@ -564,6 +578,108 @@ mod tests {
         .unwrap();
     }
 
+    /// Seed a document with `count` prose chunks; returns the chunk ids.
+    fn seed_doc_with_chunks(conn: &Connection, path: &str, count: usize) -> Vec<i64> {
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES (?1, 'h', 'user_doc', 'indexed')",
+            params![path],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        let mut chunk_ids = Vec::new();
+        for i in 0..count {
+            conn.execute(
+                "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy)
+                 VALUES (?1, ?2, ?3, 1, 3, NULL, 'prose')",
+                params![doc_id, format!("chunk text {i}"), i as i64],
+            )
+            .unwrap();
+            chunk_ids.push(conn.last_insert_rowid());
+        }
+        chunk_ids
+    }
+
+    fn source_ref_json(chunk_ids: &[i64]) -> String {
+        let evidence: Vec<String> = chunk_ids
+            .iter()
+            .map(|id| format!(r#"{{"chunk_id":{id},"quote":"q","start_line":1,"end_line":3}}"#))
+            .collect();
+        format!(r#"{{"proposal_id":"prop_1","evidence":[{}]}}"#, evidence.join(","))
+    }
+
+    #[test]
+    fn source_docs_from_ref_returns_paths_with_chunk_ids() {
+        // Two chunks in the SAME document → 1 entry (path dedup), chunkId set.
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 2);
+        let source_ref = source_ref_json(&chunks);
+        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        assert_eq!(docs, vec![("documents/notes.md".to_string(), Some(chunks[0]))]);
+    }
+
+    #[test]
+    fn source_docs_from_ref_returns_distinct_entries_per_chunk() {
+        // Two chunks in DIFFERENT documents → 2 entries, each with its own chunkId.
+        let conn = open_in_memory().unwrap();
+        let chunks_a = seed_doc_with_chunks(&conn, "documents/a.md", 1);
+        let chunks_b = seed_doc_with_chunks(&conn, "documents/b.md", 1);
+        let source_ref = source_ref_json(&[chunks_a[0], chunks_b[0]]);
+        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        assert_eq!(
+            docs,
+            vec![
+                ("documents/a.md".to_string(), Some(chunks_a[0])),
+                ("documents/b.md".to_string(), Some(chunks_b[0])),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_docs_from_ref_dedupes_paths() {
+        // Regression guard for today's path-dedup: interleaved evidence keeps
+        // first-seen order, one entry per path, first occurrence's chunk id.
+        let conn = open_in_memory().unwrap();
+        let chunks_a = seed_doc_with_chunks(&conn, "documents/a.md", 2);
+        let chunks_b = seed_doc_with_chunks(&conn, "documents/b.md", 1);
+        let source_ref = source_ref_json(&[chunks_b[0], chunks_a[0], chunks_a[1]]);
+        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        assert_eq!(
+            docs,
+            vec![
+                ("documents/b.md".to_string(), Some(chunks_b[0])),
+                ("documents/a.md".to_string(), Some(chunks_a[0])),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_docs_from_ref_handles_missing_chunks() {
+        // chunk_id that doesn't resolve to any document → no entry.
+        let conn = open_in_memory().unwrap();
+        let source_ref = source_ref_json(&[9999]);
+        assert!(source_docs_from_ref(&conn, Some(&source_ref)).is_empty());
+    }
+
+    #[test]
+    fn source_docs_from_ref_handles_evidence_without_chunk_id() {
+        // Evidence entry with no chunk_id is skipped; a valid sibling still resolves.
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
+        let source_ref = format!(
+            r#"{{"proposal_id":"prop_1","evidence":[{{"quote":"no chunk id","start_line":1,"end_line":3}},{{"chunk_id":{},"quote":"q","start_line":1,"end_line":3}}]}}"#,
+            chunks[0]
+        );
+        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        assert_eq!(docs, vec![("documents/notes.md".to_string(), Some(chunks[0]))]);
+    }
+
+    #[test]
+    fn source_docs_from_ref_handles_malformed_source_ref() {
+        let conn = open_in_memory().unwrap();
+        assert!(source_docs_from_ref(&conn, Some("not json")).is_empty());
+        assert!(source_docs_from_ref(&conn, None).is_empty());
+    }
+
     #[test]
     fn create_and_get_entity_round_trip() {
         let conn = open_in_memory().unwrap();
@@ -729,7 +845,13 @@ mod tests {
 
         let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
         let sourced = loaded.facts.iter().find(|f| f.id == "fact-src").unwrap();
-        assert_eq!(sourced.source_docs, vec!["documents/notes.md".to_string()]);
+        assert_eq!(
+            sourced.source_docs,
+            vec![SourceDocRef {
+                path: "documents/notes.md".to_string(),
+                chunk_id: Some(chunk_id),
+            }],
+        );
         let plain = loaded.facts.iter().find(|f| f.id == "fact-plain").unwrap();
         assert!(plain.source_docs.is_empty());
     }
