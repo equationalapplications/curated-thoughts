@@ -37,6 +37,12 @@ export const getRecommendedModel = (): Promise<string> =>
 export const getBrainDir = (): Promise<string> => invoke("get_brain_dir");
 export const getBinaryPath = (): Promise<string> => invoke("get_binary_path");
 
+export const resolveChunkOverlay = (
+  path: string,
+  hash: string,
+): Promise<{ startLine: number; endLine: number } | null> =>
+  invoke("resolve_chunk_overlay", { path, hash });
+
 export interface GenerationConfig {
   provider: "unconfigured" | "sidecar" | "external";
   model_path: string | null;
@@ -222,7 +228,7 @@ export interface EntitySummary {
 
 export interface SourceDocRef {
   path: string;
-  chunkId: number | null;
+  chunkId: string | null;
 }
 
 export interface EntityFact {
