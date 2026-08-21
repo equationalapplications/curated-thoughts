@@ -220,6 +220,27 @@ test("renders source-moved-notice when resolveChunkOverlay returns null", async 
   expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
 });
 
+test("hides source-moved-notice when × button is clicked", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "read_document") return Promise.resolve("# Heading\n\nBody");
+    if (cmd === "resolve_chunk_overlay") return Promise.resolve(null);
+    return Promise.resolve(null);
+  });
+  renderWithTheme(
+    <EditorPane
+      selectedDoc="documents/notes.md"
+      isWiki={false}
+      anchorChunkId={HASH_MISSING}
+    />,
+  );
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /×/u }));
+  await waitFor(() =>
+    expect(screen.queryByText(/source may have moved/i)).not.toBeInTheDocument(),
+  );
+});
+
 test("renders nothing when anchorChunkId is null", async () => {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === "read_document") return Promise.resolve("# Heading");
