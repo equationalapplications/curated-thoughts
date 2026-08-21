@@ -428,22 +428,15 @@ fn hydrate_evidence(
 ) -> Result<Vec<HydratedEvidenceChunk>> {
     let mut out = Vec::with_capacity(stored.len());
     for chunk in stored {
-        // Resolve the doc path the evidence came from. Prefer the legacy
-        // `chunk_id` lookup (covers pre-migration fixtures); fall back
-        // to `content_hash` for hash-only evidence written after the
-        // Phase 9 migration. Empty `content_hash` is a placeholder for
-        // orphaned legacy chunks and never resolves.
-        let resolved: Option<(String,)> = if let Some(cid) = chunk.chunk_id {
-            conn.query_row(
-                "SELECT d.path
-                 FROM chunks c
-                 JOIN documents d ON d.id = c.doc_id
-                 WHERE c.id = ?1",
-                [cid],
-                |r| Ok((r.get(0)?,)),
-            )
-            .optional()?
-        } else if !chunk.content_hash.is_empty() {
+        // Resolve the doc path the evidence came from. Prefer the stable
+        // `content_hash` lookup (covers post-migration evidence); fall
+        // back to the legacy `chunk_id` for pre-migration fixtures that
+        // carry no hash. The hash must win when both are present —
+        // `chunk_id` is a SQLite rowid and is re-issued every time the
+        // chunker rechunks a document, so a rowid-based lookup can
+        // point at an unrelated chunk after a re-chunk and silently
+        // orphan a proposal's anchor.
+        let resolved: Option<(String,)> = if !chunk.content_hash.is_empty() {
             conn.query_row(
                 "SELECT d.path
                  FROM chunks c
@@ -451,6 +444,16 @@ fn hydrate_evidence(
                  WHERE c.content_hash = ?1
                  LIMIT 1",
                 [&chunk.content_hash],
+                |r| Ok((r.get(0)?,)),
+            )
+            .optional()?
+        } else if let Some(cid) = chunk.chunk_id {
+            conn.query_row(
+                "SELECT d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE c.id = ?1",
+                [cid],
                 |r| Ok((r.get(0)?,)),
             )
             .optional()?
