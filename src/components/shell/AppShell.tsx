@@ -22,6 +22,7 @@ import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { useErrorFeed } from "../../hooks/useErrorFeed";
 import { useNavigationState } from "../../lib/navigation";
 import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
+import { SplashScreen } from "./SplashScreen";
 
 interface Props {
   vaultPath: string;
@@ -70,6 +71,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   } = usePrivacyMode();
   const { errors } = useErrorFeed();
   const [migrationDismissed, setMigrationDismissed] = useState(false);
+  const [migrationComplete, setMigrationComplete] = useState(true);
 
   useEffect(() => {
     const start = () =>
@@ -191,111 +193,117 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
 
   return (
     <div className="app-root">
-      <div className="app-body">
-        {wizardActive ? (
-          <SetupWizard
-            onComplete={() => {
-              nav.navigate({ mode: "brain" });
-            }}
-            initialStep={0}
+      {!migrationComplete ? (
+        <SplashScreen onComplete={() => setMigrationComplete(true)} />
+      ) : (
+        <>
+          <div className="app-body">
+            {wizardActive ? (
+              <SetupWizard
+                onComplete={() => {
+                  nav.navigate({ mode: "brain" });
+                }}
+                initialStep={0}
+                vaultPath={vaultPath}
+                onRouteToReview={onRouteToReview}
+              />
+            ) : (
+              <>
+                <ModeRail
+                  mode={nav.current.mode}
+                  reviewCount={queue.length}
+                  errorCount={errors.length}
+                  canGoBack={nav.canGoBack}
+                  canGoForward={nav.canGoForward}
+                  onModeChange={(next) => {
+                    setSettingsTab(undefined);
+                    nav.navigate({ mode: next });
+                  }}
+                  onBack={nav.goBack}
+                  onForward={nav.goForward}
+                  onOpenActivity={() => setActivityOpen(true)}
+                />
+                <div className="app-main">
+                  {nav.current.mode === "brain" && (
+                    <BrainMode
+                      selectedEntityId={brainEntityId}
+                      onEntitySelect={(id) => {
+                        if (!id) {
+                          setBrainEntityId(null);
+                          setBrainEntityName(null);
+                        } else {
+                          nav.navigate({ mode: "brain", entityId: id });
+                        }
+                      }}
+                      onOpenSource={(path, chunkId) => {
+                        nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
+                      }}
+                      onEntityName={setBrainEntityName}
+                      onGoToLibrary={() => nav.navigate({ mode: "library" })}
+                    />
+                  )}
+                  {nav.current.mode === "review" && (
+                    <ReviewMode
+                      queue={queue}
+                      onAction={refresh}
+                      vaultPath={vaultPath}
+                      queueError={queueError}
+                      onOpenSource={(path, chunkId) => {
+                        nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
+                      }}
+                    />
+                  )}
+                  {nav.current.mode === "library" && (
+                    <LibraryMode
+                      vaultPath={vaultPath}
+                      selectedDoc={libraryDoc}
+                      anchorChunkId={nav.current.chunkId ?? null}
+                      onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
+                      onPickFile={() => nav.navigate({ mode: "setup" })}
+                    />
+                  )}
+                  {nav.current.mode === "timeline" && (
+                    <TimelineMode onNavigate={nav.navigate} />
+                  )}
+                  {nav.current.mode === "tasks" && (
+                    <TasksMode onNavigate={nav.navigate} />
+                  )}
+                  {nav.current.mode === "settings" && (
+                    <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} onRerunWizard={() => nav.navigate({ mode: "setup" })} />
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <StatusBar
             vaultPath={vaultPath}
-            onRouteToReview={onRouteToReview}
+            onOpenActivity={() => setActivityOpen(true)}
+            onOpenPrivacy={openPrivacySettings}
           />
-        ) : (
-          <>
-            <ModeRail
-              mode={nav.current.mode}
-              reviewCount={queue.length}
-              errorCount={errors.length}
-              canGoBack={nav.canGoBack}
-              canGoForward={nav.canGoForward}
-              onModeChange={(next) => {
-                setSettingsTab(undefined);
-                nav.navigate({ mode: next });
-              }}
-              onBack={nav.goBack}
-              onForward={nav.goForward}
-              onOpenActivity={() => setActivityOpen(true)}
-            />
-            <div className="app-main">
-              {nav.current.mode === "brain" && (
-                <BrainMode
-                  selectedEntityId={brainEntityId}
-                  onEntitySelect={(id) => {
-                    if (!id) {
-                      setBrainEntityId(null);
-                      setBrainEntityName(null);
-                    } else {
-                      nav.navigate({ mode: "brain", entityId: id });
-                    }
-                  }}
-                  onOpenSource={(path, chunkId) => {
-                    nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
-                  }}
-                  onEntityName={setBrainEntityName}
-                  onGoToLibrary={() => nav.navigate({ mode: "library" })}
-                />
-              )}
-              {nav.current.mode === "review" && (
-                <ReviewMode
-                  queue={queue}
-                  onAction={refresh}
-                  vaultPath={vaultPath}
-                  queueError={queueError}
-                  onOpenSource={(path, chunkId) => {
-                    nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
-                  }}
-                />
-              )}
-              {nav.current.mode === "library" && (
-                <LibraryMode
-                  vaultPath={vaultPath}
-                  selectedDoc={libraryDoc}
-                  anchorChunkId={nav.current.chunkId ?? null}
-                  onDocSelect={(path) => path ? nav.navigate({ mode: "library", docPath: path }) : setLibraryDoc(null)}
-                  onPickFile={() => nav.navigate({ mode: "setup" })}
-                />
-              )}
-              {nav.current.mode === "timeline" && (
-                <TimelineMode onNavigate={nav.navigate} />
-              )}
-              {nav.current.mode === "tasks" && (
-                <TasksMode onNavigate={nav.navigate} />
-              )}
-              {nav.current.mode === "settings" && (
-                <SettingsScreen vaultPath={vaultPath} initialTab={settingsTab} onRerunWizard={() => nav.navigate({ mode: "setup" })} />
-              )}
+          <ActivityFeedPanel
+            isOpen={activityOpen}
+            onClose={() => setActivityOpen(false)}
+            onNavigate={(t) => {
+              nav.navigate(t);
+              setActivityOpen(false);
+            }}
+            errors={errors}
+          />
+          {dragging && (
+            <div className="drop-overlay">
+              <span>Drop to add to Library</span>
             </div>
-          </>
-        )}
-      </div>
-      <StatusBar
-        vaultPath={vaultPath}
-        onOpenActivity={() => setActivityOpen(true)}
-        onOpenPrivacy={openPrivacySettings}
-      />
-      <ActivityFeedPanel
-        isOpen={activityOpen}
-        onClose={() => setActivityOpen(false)}
-        onNavigate={(t) => {
-          nav.navigate(t);
-          setActivityOpen(false);
-        }}
-        errors={errors}
-      />
-      {dragging && (
-        <div className="drop-overlay">
-          <span>Drop to add to Library</span>
-        </div>
+          )}
+          {!privacyLoading &&
+          needs_migration_disclosure &&
+          !migrationDismissed &&
+          privacyMode === "connected" ? (
+            <MigrationDisclosureModal
+              onAcknowledged={() => setMigrationDismissed(true)}
+            />
+          ) : null}
+        </>
       )}
-      {!privacyLoading &&
-      needs_migration_disclosure &&
-      !migrationDismissed &&
-      privacyMode === "connected" ? (
-        <MigrationDisclosureModal
-          onAcknowledged={() => setMigrationDismissed(true)}
-        />
-      ) : null}
     </div>
   );
 }
