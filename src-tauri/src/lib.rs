@@ -2426,7 +2426,15 @@ pub fn run() {
         let pb = PathBuf::from(&p);
         pb.canonicalize().unwrap_or(pb)
     });
-    let migration_vault_root = config.get_vault_path().ok().flatten();
+    // The migration derives `chunks.entity_id` from this root. It must
+    // match the canonical spelling used by the pipeline and by the
+    // graph readers, otherwise the hashed `tier_working::` prefix
+    // diverges for non-`documents/` paths and neighbor lookups return
+    // nothing. Reuse the canonicalized value before `initial_vault_root`
+    // is moved into `start_pipeline`.
+    let migration_vault_root = initial_vault_root
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     let embed_profile = config

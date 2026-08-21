@@ -297,13 +297,21 @@ test("auto-dismisses overlay after 1.5s when visible", async () => {
 
 test("re-shows source-moved-notice after a visible overlay auto-dismisses", async () => {
   // Regression test: the auto-dismiss timer sets `dismissed = true`
-  // after 1.5s. If a later anchor resolves to `source-moved`, the
-  // presentation effect must reset `dismissed` so the notice can
-  // render — otherwise the user sees nothing after the visible
-  // overlay times out.
+  // after 1.5s when the overlay becomes visible. If a later anchor
+  // resolves to `source-moved`, the presentation effect must reset
+  // `dismissed` so the notice can render — otherwise the user sees
+  // nothing after the visible overlay times out.
+  let overlayCalls = 0;
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === "read_document") return Promise.resolve("Some body text.");
-    if (cmd === "resolve_chunk_overlay") return Promise.resolve(null);
+    if (cmd === "resolve_chunk_overlay") {
+      // First call resolves to a valid line range so the overlay
+      // mounts and runs the 1.5s dismissal timer; every subsequent
+      // call resolves to null (source-moved).
+      return Promise.resolve(
+        overlayCalls++ === 0 ? { startLine: 1, endLine: 1 } : null,
+      );
+    }
     return Promise.resolve(null);
   });
   const { rerender } = renderWithTheme(
@@ -314,14 +322,12 @@ test("re-shows source-moved-notice after a visible overlay auto-dismisses", asyn
     />,
   );
   await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
-  // First anchor: resolves to source-moved, the notice appears.
-  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
-  // Dismiss it via the × button.
-  fireEvent.click(screen.getByRole("button", { name: /×/u }));
-  await waitFor(() =>
-    expect(screen.queryByText(/source may have moved/i)).not.toBeInTheDocument(),
-  );
-  // Now switch to a different anchor that also resolves to source-moved.
+  // First anchor: resolves to a valid line range, the overlay mounts.
+  expect(await screen.findByTestId("editor-line-overlay")).toBeInTheDocument();
+  // The auto-dismiss timer fires after 1.5s; advance real timers past it.
+  await new Promise((resolve) => setTimeout(resolve, 1600));
+  expect(screen.queryByTestId("editor-line-overlay")).not.toBeInTheDocument();
+  // Now switch to a different anchor that resolves to source-moved.
   rerender(
     <ThemeProvider>
       <EditorPane
