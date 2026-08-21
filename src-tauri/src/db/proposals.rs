@@ -428,18 +428,34 @@ fn hydrate_evidence(
 ) -> Result<Vec<HydratedEvidenceChunk>> {
     let mut out = Vec::with_capacity(stored.len());
     for chunk in stored {
-        let resolved: Option<(String,)> = match chunk.chunk_id {
-            Some(cid) => conn
-                .query_row(
-                    "SELECT d.path
-                     FROM chunks c
-                     JOIN documents d ON d.id = c.doc_id
-                     WHERE c.id = ?1",
-                    [cid],
-                    |r| Ok((r.get(0)?,)),
-                )
-                .optional()?,
-            None => None,
+        // Resolve the doc path the evidence came from. Prefer the legacy
+        // `chunk_id` lookup (covers pre-migration fixtures); fall back
+        // to `content_hash` for hash-only evidence written after the
+        // Phase 9 migration. Empty `content_hash` is a placeholder for
+        // orphaned legacy chunks and never resolves.
+        let resolved: Option<(String,)> = if let Some(cid) = chunk.chunk_id {
+            conn.query_row(
+                "SELECT d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE c.id = ?1",
+                [cid],
+                |r| Ok((r.get(0)?,)),
+            )
+            .optional()?
+        } else if !chunk.content_hash.is_empty() {
+            conn.query_row(
+                "SELECT d.path
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 WHERE c.content_hash = ?1
+                 LIMIT 1",
+                [&chunk.content_hash],
+                |r| Ok((r.get(0)?,)),
+            )
+            .optional()?
+        } else {
+            None
         };
         let (doc_path, source_deleted) = match resolved {
             Some((path,)) => (Some(path), false),
@@ -774,6 +790,72 @@ mod tests {
         assert!(ev.source_deleted);
         assert!(ev.doc_path.is_none());
         assert_eq!(ev.quote, "will vanish");
+    }
+
+    #[test]
+    fn get_proposal_detail_resolves_hash_only_evidence_by_content_hash() {
+        // Phase 9: post-migration evidence carries `chunk_id: None` and
+        // a real `content_hash`. The hydrator must fall back to the
+        // content_hash lookup so the proposal doesn't render as
+        // "source deleted" while the underlying chunk still exists.
+        let conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/hashed.pdf");
+        // Use a non-empty content_hash and a known text so the lookup
+        // resolves to the seeded chunk.
+        let chunk_id = seed_chunk(&conn, doc_id, "evidence quote");
+        let hash = crate::db::chunk_hash::compute_chunk_hash(
+            "evidence quote",
+            "/vault/documents/hashed.pdf",
+            0,
+        );
+        // Move the chunk_id out of reach so the legacy-rowid branch
+        // can't succeed: simulate a chunk that has been replaced by
+        // deleting the rowid and re-inserting under a fresh one. We
+        // keep the same content_hash so the hash-based lookup resolves.
+        let replacement_id: i64 = {
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO chunks
+                         (doc_id, chunk_text, position, start_line, end_line,
+                          symbol_name, strategy, defined_symbol, entity_id,
+                          content_hash)
+                     VALUES (?1, ?2, 1, 2, 4, NULL, 'prose', NULL, 'tier_fact', ?3)
+                     RETURNING id",
+                )
+                .unwrap();
+            stmt.query_row(
+                rusqlite::params![doc_id, "evidence quote", hash],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            chunk_id, replacement_id,
+            "precondition: replacement must be a different rowid"
+        );
+
+        let proposal = sample_new_proposal("prop-hash", "Hash");
+        let mut item = sample_fact_item("item-hash", chunk_id, "evidence quote");
+        item.evidence[0].chunk_id = None;
+        item.evidence[0].content_hash = hash.clone();
+        insert_proposal(
+            &conn,
+            &proposal,
+            &[item],
+            &[NewProposalSource {
+                doc_id,
+                role: ProposalSourceRole::Trigger,
+            }],
+        )
+        .unwrap();
+
+        let detail = get_proposal_detail(&conn, "prop-hash").unwrap().unwrap();
+        let ev = &detail.items[0].evidence[0];
+        assert!(
+            !ev.source_deleted,
+            "hash-only evidence must not be marked deleted when the chunk exists"
+        );
+        assert!(ev.doc_path.as_ref().unwrap().contains("hashed.pdf"));
     }
 
     #[test]

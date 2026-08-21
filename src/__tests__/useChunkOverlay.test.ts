@@ -17,8 +17,6 @@ function makeContainerWithBlock(
   const container = document.createElement("div");
   const block = document.createElement("div");
   block.setAttribute("data-id", blockId);
-  block.setAttribute("data-start-line", String(startLine));
-  block.setAttribute("data-end-line", String(endLine));
   container.appendChild(block);
   // give the block a measurable size for getBoundingClientRect to work
   Object.defineProperty(block, "getBoundingClientRect", {

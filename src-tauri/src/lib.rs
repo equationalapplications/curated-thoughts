@@ -2414,18 +2414,19 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
-    // Phase 9: one-time content_hash migration gate. The V7 schema adds
+    // Phase 9: one-time content_hash migration gate. The V9 schema adds
     // the column; this returns true on the first start after the schema
     // ships. The actual data migration is dispatched in the setup
     // closure (below) once the AppHandle is available; this block only
     // captures the flag for that closure to pick up. On error from the
     // check, default to "needs migration" so the gate self-heals.
     let needs_migration = !crate::db::migration::chunks_have_content_hash(&db.0)
-        .unwrap_or(true);
+        .unwrap_or(false);
     let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
         let pb = PathBuf::from(&p);
         pb.canonicalize().unwrap_or(pb)
     });
+    let migration_vault_root = config.get_vault_path().ok().flatten();
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     let embed_profile = config
@@ -2479,6 +2480,7 @@ pub fn run() {
                             };
                         match crate::db::migration::run_chunk_hash_migration(
                             &mut guard.0,
+                            migration_vault_root.as_deref(),
                             emit,
                         ) {
                             Ok(()) => {
