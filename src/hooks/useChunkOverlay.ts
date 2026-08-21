@@ -8,137 +8,204 @@ export interface ChunkOverlayRect {
   height: number;
 }
 
+export type BlockLineRange = readonly [startLine: number, endLine: number];
+
+/** Map of `BlockNote` block id → (startLine, endLine) in the original
+ * markdown source. The EditorPane builds this once per doc-load by
+ * walking the markdown source alongside the parsed BlockNote blocks
+ * and writing it onto each block's DOM element as `data-start-line` /
+ * `data-end-line` attributes.
+ *
+ * The hook reads it back via the cached block-id list — no DOM walks
+ * needed for the rect on scroll. */
+export type BlockLineMap = Map<string, BlockLineRange>;
+
 export interface UseChunkOverlayResult {
   status: ChunkOverlayStatus;
   overlay: ChunkOverlayRect | null;
-  /** The raw line range the hook resolved; useful for tests + EditorPane. */
+  /** Raw line range the IPC resolved; useful for tests + callers. */
   range: { startLine: number; endLine: number } | null;
 }
 
+const MAX_RETRY_FRAMES = 5;
+
 /**
- * Resolves a chunk-hash anchor to a line range, then asks the editor's
- * block DOM for a pixel-positioned rect. Returns idle for empty hash
- * (no-op) and source-moved for null/error results.
+ * Resolves a chunk-hash anchor to a line range, then looks up the
+ * matching BlockNote block IDs in `lineMap` and computes a pixel
+ * rect from those DOM elements.
  *
- * The `containerRef` is the scrollable editor pane root; the hook uses
- * it to translate document-relative top/height into client-relative
- * coordinates that a position-absolute overlay can consume.
+ * Returns idle for empty hash (no-op), source-moved when the IPC
+ * returns null or rejects, and source-moved when no blocks cover
+ * the resolved range OR the matching DOM nodes never paint (after
+ * up to MAX_RETRY_FRAMES rAF retries). When everything succeeds,
+ * status is 'visible' and `overlay` carries top/height.
  *
- * The line-to-block map is built from `BlockNote` blocks whose
- * `startLine`/`endLine` props are injected at markdown-parse time (see
- * spec §Components §Line-to-block mapping failure for the contract).
+ * The `container` is the editor pane root (passed as state, not a
+ * RefObject — using state means the effect re-runs once the pane
+ * mounts, so the rect computation isn't gated on a stale ref).
  */
 export function useChunkOverlay(
   path: string | null,
   hash: string | null,
-  containerRef?: React.RefObject<HTMLElement | null>,
+  container: HTMLElement | null,
+  lineMap: BlockLineMap,
 ): UseChunkOverlayResult {
   const [status, setStatus] = useState<ChunkOverlayStatus>("idle");
   const [overlay, setOverlay] = useState<ChunkOverlayRect | null>(null);
   const [range, setRange] = useState<{ startLine: number; endLine: number } | null>(null);
   const cancelledRef = useRef(false);
+  /** Cached block ids matching the current `range`. Populated by the
+   * rect-computation effect; read by the scroll listener (so we don't
+   * re-query `[data-id]` on every scroll event). */
+  const cachedBlockIdsRef = useRef<string[]>([]);
+  /** Latest lineMap, accessed by the scroll listener without forcing
+   * the listener to re-subscribe on every EditorPane re-render. */
+  const lineMapRef = useRef<BlockLineMap>(lineMap);
+  lineMapRef.current = lineMap;
 
+  // Effect A: IPC resolution — depends only on (path, hash).
   useEffect(() => {
     cancelledRef.current = false;
     if (!hash) {
       setStatus("idle");
       setOverlay(null);
       setRange(null);
+      cachedBlockIdsRef.current = [];
       return;
     }
     setStatus("idle");
     setOverlay(null);
+    setRange(null);
+    cachedBlockIdsRef.current = [];
     resolveChunkOverlay(path ?? "", hash)
       .then((res) => {
         if (cancelledRef.current) return;
         if (!res) {
           setStatus("source-moved");
-          setOverlay(null);
-          setRange(null);
           return;
         }
         setRange(res);
-        // Resolution succeeded — the editor pane will show a visible
-        // anchor overlay (or a source-moved notice only when the IPC
-        // itself returned null/rejected). If the container ref isn't
-        // attached yet, status is still 'visible' but `overlay` stays
-        // null until BlockNote renders the blocks. Callers that need a
-        // pixel rect re-render once `containerRef` mounts.
-        setStatus("visible");
-        // Defer to next frame so BlockNote has rendered its blocks.
-        requestAnimationFrame(() => {
-          if (cancelledRef.current) return;
-          const rect = computeOverlayRect(
-            res.startLine,
-            res.endLine,
-            containerRef?.current ?? null,
-          );
-          if (rect) setOverlay(rect);
-        });
+        // Don't set status here — Effect B handles it once the rect
+        // is computed (or falls back to source-moved).
       })
       .catch(() => {
         if (cancelledRef.current) return;
         setStatus("source-moved");
-        setOverlay(null);
-        setRange(null);
       });
     return () => {
       cancelledRef.current = true;
     };
-  }, [path, hash, containerRef]);
+  }, [path, hash]);
 
-  // Track scroll inside the editor container and update the overlay's
-  // top so it stays anchored to the lines as the user scrolls within
-  // BlockNote.
+  // Effect B: rect computation — re-runs whenever the resolved range,
+  // the line-to-block map, or the container element changes. Retries
+  // up to MAX_RETRY_FRAMES animation frames before giving up and
+  // surfacing the source-moved notice (handles slow paint: BlockNote
+  // may take a frame or two to mount after `replaceBlocks`).
+  useEffect(() => {
+    if (!range) return;
+    let cancelled = false;
+    let retryCount = 0;
+    let scrolledRef = false;
+
+    const attempt = () => {
+      if (cancelled) return;
+      const ids = findOverlappingBlocks(range, lineMapRef.current);
+      cachedBlockIdsRef.current = ids;
+      const rect = computeRectFromBlockIds(ids, container);
+      if (rect) {
+        setOverlay(rect);
+        setStatus("visible");
+        // Scroll the first matching block into view once. Subsequent
+        // status flips (e.g., lineMap updates) reset the flag.
+        if (!scrolledRef && ids.length > 0 && container) {
+          scrolledRef = true;
+          const firstId = ids[0];
+          const firstEl = container.querySelector<HTMLElement>(
+            `[data-id="${escapeSelector(firstId)}"]`,
+          );
+          if (firstEl && typeof firstEl.scrollIntoView === "function") {
+            firstEl.scrollIntoView({ block: "nearest", behavior: "auto" });
+          }
+        }
+        return;
+      }
+      if (retryCount < MAX_RETRY_FRAMES) {
+        retryCount++;
+        requestAnimationFrame(attempt);
+        return;
+      }
+      // Out of retries — no matching DOM nodes. Per spec, this is the
+      // "line-to-block mapping failure" case: surface source-moved so
+      // the user at least sees the badge instead of silent nothing.
+      setStatus("source-moved");
+      setOverlay(null);
+    };
+
+    // First attempt on next frame (so BlockNote has a chance to paint).
+    requestAnimationFrame(attempt);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [range, lineMap, container]);
+
+  // Effect C: scroll tracking — re-reads the cached block ids' rect
+  // on scroll. Uses the cached ids (no fresh DOM walk); only the
+  // getBoundingClientRect call, which is necessary for accurate
+  // top/height relative to the scrolling container.
   useEffect(() => {
     if (status !== "visible") return;
-    const root: HTMLElement | null = containerRef?.current ?? null;
+    const root = container;
     if (!root) return;
     function onScroll() {
-      // Trigger a re-render by recomputing from the current range.
-      // (In a fuller impl, the EditorPane reads scrollTop itself; here
-      // we simply update via setOverlay on scroll.)
-      if (!range) return;
-      const rect = computeOverlayRect(range.startLine, range.endLine, root);
+      const ids = cachedBlockIdsRef.current;
+      if (ids.length === 0) return;
+      const rect = computeRectFromBlockIds(ids, root);
       if (rect) setOverlay(rect);
     }
     root.addEventListener("scroll", onScroll, { passive: true });
     return () => root.removeEventListener("scroll", onScroll);
-  }, [status, range, containerRef]);
+  }, [status, container]);
 
   return { status, overlay, range };
 }
 
 /**
- * Walk the BlockNote DOM in the container, find every block element
- * whose `data-start-line` / `data-end-line` attributes cover the
- * requested range, and return the union top/height. Returns `null`
- * if no block covers the range (e.g., the range is past EOF).
- *
- * The Markdown→BlockNote parser injects these attributes on each
- * block's DOM node at parse time (see spec §Components §Line-to-block
- * mapping). If they are missing (older BlockNote versions), this
- * returns `null` and the caller surfaces the source-moved-notice.
+ * Find every block whose (startLine, endLine) intersects the resolved
+ * range. Range intersection is inclusive at both ends; a block whose
+ * `startLine === range.endLine + 1` is NOT considered overlapping.
  */
-function computeOverlayRect(
-  startLine: number,
-  endLine: number,
+function findOverlappingBlocks(
+  range: { startLine: number; endLine: number },
+  lineMap: BlockLineMap,
+): string[] {
+  const ids: string[] = [];
+  for (const [id, [bs, be]] of lineMap) {
+    if (be < range.startLine || bs > range.endLine) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Compute the union top/height of the supplied block ids within the
+ * container's coordinate system. Returns `null` if any block id is
+ * missing from the DOM (caller retries on next frame).
+ */
+function computeRectFromBlockIds(
+  blockIds: string[],
   container: HTMLElement | null,
 ): ChunkOverlayRect | null {
-  if (!container) return null;
-  const nodes = Array.from(
-    container.querySelectorAll<HTMLElement>("[data-start-line][data-end-line]"),
-  );
-  if (nodes.length === 0) return null;
+  if (!container || blockIds.length === 0) return null;
   const containerRect = container.getBoundingClientRect();
   let minTop: number | null = null;
   let maxBottom: number | null = null;
-  for (const node of nodes) {
-    const nodeStart = Number(node.dataset.startLine);
-    const nodeEnd = Number(node.dataset.endLine);
-    if (Number.isNaN(nodeStart) || Number.isNaN(nodeEnd)) continue;
-    // Range [startLine, endLine] intersects [nodeStart, nodeEnd]?
-    if (nodeEnd < startLine || nodeStart > endLine) continue;
+  for (const id of blockIds) {
+    const node = container.querySelector<HTMLElement>(
+      `[data-id="${escapeSelector(id)}"]`,
+    );
+    if (!node) return null;
     const rect = node.getBoundingClientRect();
     const top = rect.top - containerRect.top + container.scrollTop;
     const bottom = rect.bottom - containerRect.top + container.scrollTop;
@@ -147,4 +214,11 @@ function computeOverlayRect(
   }
   if (minTop === null || maxBottom === null) return null;
   return { top: minTop, height: Math.max(0, maxBottom - minTop) };
+}
+
+function escapeSelector(s: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return s.replace(/(["\\\]])/g, "\\$1");
 }
