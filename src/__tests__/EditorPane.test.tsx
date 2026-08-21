@@ -271,10 +271,10 @@ test("auto-dismisses overlay after 1.5s when visible", async () => {
     }
     return Promise.resolve(null);
   });
-  // Real timers (not fake): the rect-computation effect is rAF-gated,
-  // and @testing-library's findByTestId polls via setInterval. Both
-  // would hang under vi.useFakeTimers() unless we manually advanced
-  // the clock between every wait. Real timers keep the test honest.
+  // Real timers, deliberately: the rect-computation effect is rAF-gated,
+  // so a blanket vi.useFakeTimers() hangs every wait — and even selective
+  // toFake:["setTimeout","clearTimeout"] deadlocks RTL's findBy*/waitFor,
+  // which abandons its polling path as soon as it detects fake timers.
   renderWithTheme(
     <EditorPane
       selectedDoc="documents/notes.md"
@@ -289,10 +289,16 @@ test("auto-dismisses overlay after 1.5s when visible", async () => {
   expect(overlay).toBeInTheDocument();
   // The EditorPane's auto-dismiss effect (see EditorPane.tsx) fires a
   // setTimeout(1500ms) when overlayStatus becomes "visible" and calls
-  // setDismissed(true), which unmounts the overlay div. After 1.6s the
-  // overlay must be gone.
-  await new Promise((resolve) => setTimeout(resolve, 1600));
-  expect(screen.queryByTestId("editor-line-overlay")).not.toBeInTheDocument();
+  // setDismissed(true), which unmounts the overlay div. Poll for the
+  // unmount instead of a fixed sleep so the test can't race a slow
+  // dismissal; timeout must exceed the 1.5s timer.
+  await waitFor(
+    () =>
+      expect(
+        screen.queryByTestId("editor-line-overlay"),
+      ).not.toBeInTheDocument(),
+    { timeout: 3000 },
+  );
 });
 
 test("re-shows source-moved-notice after a visible overlay auto-dismisses", async () => {
@@ -314,6 +320,8 @@ test("re-shows source-moved-notice after a visible overlay auto-dismisses", asyn
     }
     return Promise.resolve(null);
   });
+  // Real timers (see the auto-dismiss test above for why fake timers
+  // are not an option in this suite).
   const { rerender } = renderWithTheme(
     <EditorPane
       selectedDoc="documents/notes.md"
@@ -324,9 +332,14 @@ test("re-shows source-moved-notice after a visible overlay auto-dismisses", asyn
   await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
   // First anchor: resolves to a valid line range, the overlay mounts.
   expect(await screen.findByTestId("editor-line-overlay")).toBeInTheDocument();
-  // The auto-dismiss timer fires after 1.5s; advance real timers past it.
-  await new Promise((resolve) => setTimeout(resolve, 1600));
-  expect(screen.queryByTestId("editor-line-overlay")).not.toBeInTheDocument();
+  // Poll past the auto-dismiss timer (1.5s) rather than a fixed sleep.
+  await waitFor(
+    () =>
+      expect(
+        screen.queryByTestId("editor-line-overlay"),
+      ).not.toBeInTheDocument(),
+    { timeout: 3000 },
+  );
   // Now switch to a different anchor that resolves to source-moved.
   rerender(
     <ThemeProvider>
