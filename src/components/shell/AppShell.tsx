@@ -13,7 +13,7 @@ import {
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { SetupWizard } from "../setup/SetupWizard";
-import { startFileWatcher } from "../../lib/tauri";
+import { startFileWatcher, needsChunkHashMigration } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
@@ -71,7 +71,35 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   } = usePrivacyMode();
   const { errors } = useErrorFeed();
   const [migrationDismissed, setMigrationDismissed] = useState(false);
-  const [migrationComplete, setMigrationComplete] = useState(true);
+  // `null` while we're checking the backend gate; `true` once we know no
+  // migration is needed (or it has already completed); `false` while we
+  // still need to mount the splash and wait for `migration-complete`.
+  // Defaults to `true` (skips splash) in environments without the IPC
+  // bridge so the app still renders for tests/storybooks that mock the
+  // command away.
+  const [migrationComplete, setMigrationComplete] = useState<boolean | null>(true);
+
+  useEffect(() => {
+    let active = true;
+    needsChunkHashMigration()
+      .then((needed) => {
+        if (!active) return;
+        // `needed === true` → mount splash and wait for `migration-complete`
+        // to flip this back. `needed === false` → the migration is done
+        // (or never had work to do), so the rest of the UI is safe to show.
+        setMigrationComplete(!needed);
+      })
+      .catch(() => {
+        // On gate-query failure default to "no migration needed" — the
+        // app should still render rather than hang on a stuck splash.
+        // The startup migration in `lib.rs` already handles its own
+        // error path and emits `migration-error` if it fails.
+        if (active) setMigrationComplete(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const start = () =>
@@ -193,8 +221,12 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
 
   return (
     <div className="app-root">
-      {!migrationComplete ? (
+      {migrationComplete === false ? (
         <SplashScreen onComplete={() => setMigrationComplete(true)} />
+      ) : migrationComplete === null ? (
+        // Gate query hasn't returned yet; render an empty shell so the
+        // OS window has something to attach to while we wait.
+        null
       ) : (
         <>
           <div className="app-body">

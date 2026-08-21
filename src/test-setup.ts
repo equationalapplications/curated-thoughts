@@ -143,6 +143,11 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "acknowledge_ephemeral_disclosure") {
       return Promise.resolve();
     }
+    if (cmd === "needs_chunk_hash_migration") {
+      // Default to "no migration needed" so existing AppShell tests keep
+      // rendering the main UI without mounting the splash.
+      return Promise.resolve(false);
+    }
     if (cmd === "get_cloud_bridge_status") {
       return Promise.resolve({ configured: false, connection_status: "disconnected" });
     }

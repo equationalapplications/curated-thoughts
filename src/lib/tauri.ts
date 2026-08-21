@@ -43,6 +43,14 @@ export const resolveChunkOverlay = (
 ): Promise<{ startLine: number; endLine: number } | null> =>
   invoke("resolve_chunk_overlay", { path, hash });
 
+/** Phase 9: gate query for the one-time chunk-hash migration. Returns
+ * `true` while at least one chunk row lacks `content_hash` (i.e. the
+ * migration still has work to do and the splash should mount). Mirrors
+ * the check the backend uses internally in `lib.rs` to dispatch
+ * `run_chunk_hash_migration` at startup. */
+export const needsChunkHashMigration = (): Promise<boolean> =>
+  invoke("needs_chunk_hash_migration");
+
 export interface GenerationConfig {
   provider: "unconfigured" | "sidecar" | "external";
   model_path: string | null;

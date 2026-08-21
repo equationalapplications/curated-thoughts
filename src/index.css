@@ -146,6 +146,12 @@ body {
   align-items: center;
   justify-content: center;
   background: var(--bg);
+  /* Positioning context for `.editor-pane-line-overlay--anchor`, which
+     is `position: absolute` with a dynamically-computed `top`. Without
+     this the overlay anchors to the next positioned ancestor up the
+     tree (often `body`), drifting away from the line range on long
+     docs that scroll within the pane. */
+  position: relative;
 }
 
 /* Related notes */

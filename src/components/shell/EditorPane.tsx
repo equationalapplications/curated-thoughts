@@ -4,6 +4,7 @@ import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
 import { readDocument, saveWikiPage } from "../../lib/tauri";
 import { useTheme } from "../../lib/ThemeContext";
+import { escapeSelector } from "../../lib/cssEscape";
 import {
   useChunkOverlay,
   type BlockLineMap,
@@ -96,13 +97,6 @@ function injectLineAttributesIntoDom(
     node.setAttribute("data-start-line", String(start));
     node.setAttribute("data-end-line", String(end));
   }
-}
-
-function escapeSelector(s: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(s);
-  }
-  return s.replace(/(["\\\]])/g, "\\$1");
 }
 
 export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props) {
