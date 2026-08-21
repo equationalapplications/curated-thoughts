@@ -1,3 +1,27 @@
+## [1.19.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.18.0...v1.19.0) (2026-08-21)
+
+### Features
+
+* **chunks:** resolve_chunk_overlay Tauri command + frontend binding ([9bddf74](https://github.com/equationalapplications/curated-thoughts/commit/9bddf74fdd8b4378e4e573c0485b6c3f56658c2c))
+* **commit:** write content_hash on every evidence commit ([c30f141](https://github.com/equationalapplications/curated-thoughts/commit/c30f141458c1beed4dc5b9733bbc7dccab8ba074))
+* **db:** add compute_chunk_hash for stable content-derived ids ([32fa105](https://github.com/equationalapplications/curated-thoughts/commit/32fa105de7c09a82dacbd5b98f2986aac495771a))
+* **db:** bulk content_hash migration (idempotent, transactional, progress events) ([806e27a](https://github.com/equationalapplications/curated-thoughts/commit/806e27a9943fffd0b91f2f96456ae230b09b9ee8))
+* **db:** bulk content_hash migration preserves embeddings + relationships ([b11043c](https://github.com/equationalapplications/curated-thoughts/commit/b11043cc9b9d5fdbe4fb7ace51731a28f0f07a56))
+* **db:** schema V9 adds chunks.content_hash + pipeline computes it on ingest ([064c4d7](https://github.com/equationalapplications/curated-thoughts/commit/064c4d727fa76114f39b9f796e3595167f7e88d2))
+* **editor:** hash-based line-range overlay (replaces heading-text match) ([4ca1d48](https://github.com/equationalapplications/curated-thoughts/commit/4ca1d4863b4ca705fb614acafaa97dd12256bba9))
+* **editor:** inject line metadata into BlockNote + cached line-to-block map ([1f703a0](https://github.com/equationalapplications/curated-thoughts/commit/1f703a09d7159f81227ad6c7965807f79af69685))
+* **entities:** source_docs join on content_hash (stable chunk id) ([edc841a](https://github.com/equationalapplications/curated-thoughts/commit/edc841a159e71f1062c756989725dce5375a2598))
+* **startup:** run chunk_hash migration at first start, emit progress events ([10372e8](https://github.com/equationalapplications/curated-thoughts/commit/10372e8e11b38458ef051d38a9cb922ab0e0c99b))
+* **ui:** SplashScreen + AppShell mount for chunk-hash migration ([c2f7cb2](https://github.com/equationalapplications/curated-thoughts/commit/c2f7cb22f5865a967ef997b9d5e3f4306844ec68))
+
+### Bug Fixes
+
+* **editor:** hide source-moved notice when × clicked ([1daa011](https://github.com/equationalapplications/curated-thoughts/commit/1daa011b30753f29bd69f2830ef76dd80e4a235d))
+* **editor:** wire auto-dismiss after 1.5s for chunk overlay ([e2ba5c7](https://github.com/equationalapplications/curated-thoughts/commit/e2ba5c72c7a8f2b5ec1098aacf95f730f1d095a5))
+* **phase-9:** address 3 post-review findings before merge ([c1e1735](https://github.com/equationalapplications/curated-thoughts/commit/c1e1735c51c86c1924c9bd2a9d3afe93d24e836a))
+* **phase-9:** address 4 review findings before PR ([fae40bf](https://github.com/equationalapplications/curated-thoughts/commit/fae40bfe89a9dbd6f43e023d712508fdda96f671)), closes [#1](https://github.com/equationalapplications/curated-thoughts/issues/1) [#2](https://github.com/equationalapplications/curated-thoughts/issues/2) [#3](https://github.com/equationalapplications/curated-thoughts/issues/3) [#4](https://github.com/equationalapplications/curated-thoughts/issues/4)
+* **phase-9:** address CodeRabbit review feedback before PR ([42729c5](https://github.com/equationalapplications/curated-thoughts/commit/42729c50e79bd309e450182fe14d32dc5cc82a84)), closes [#43](https://github.com/equationalapplications/curated-thoughts/issues/43)
+
 ## [1.18.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.17.1...v1.18.0) (2026-08-20)
 
 ### Features
