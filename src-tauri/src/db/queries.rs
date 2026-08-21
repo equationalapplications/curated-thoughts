@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub struct DocRow {
     pub id: i64,
@@ -186,6 +186,34 @@ pub fn delete_relationships_for_chunk(conn: &Connection, chunk_id: i64) -> Resul
     Ok(())
 }
 
+/// Resolve a (path, content_hash) to the matching chunk's line range.
+/// Returns `Ok(None)` if either the path or hash doesn't match.
+pub fn find_chunk_overlay(
+    conn: &Connection,
+    path: &str,
+    hash: &str,
+) -> Result<Option<(u32, u32)>> {
+    let row: Option<(i64,)> = conn
+        .query_row(
+            "SELECT c.id FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.path = ?1 AND c.content_hash = ?2
+             LIMIT 1",
+            rusqlite::params![path, hash],
+            |r| Ok((r.get::<_, i64>(0)?,)),
+        )
+        .optional()?;
+    let Some((chunk_id,)) = row else {
+        return Ok(None);
+    };
+    let (start, end): (i64, i64) = conn.query_row(
+        "SELECT start_line, end_line FROM chunks WHERE id = ?1",
+        [chunk_id],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    )?;
+    Ok(Some((start as u32, end as u32)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +341,36 @@ mod tests {
         assert_eq!(row.4.as_deref(), Some("root_key"));
         assert_eq!(row.5, "declarative");
         assert_eq!(row.6.as_deref(), Some("tier_fact"));
+    }
+
+    #[test]
+    fn find_chunk_overlay_returns_line_range_by_hash() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = upsert_document(&conn, "/docs/a.md", "h").unwrap();
+        let chunk = crate::chunker::Chunk {
+            text: "body".into(),
+            start_line: 7,
+            end_line: 12,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "abc").unwrap();
+        let overlay = find_chunk_overlay(&conn, "/docs/a.md", "abc").unwrap();
+        assert_eq!(overlay, Some((7, 12)));
+    }
+
+    #[test]
+    fn find_chunk_overlay_returns_none_for_unknown_hash() {
+        let conn = open_in_memory().unwrap();
+        let _ = upsert_document(&conn, "/docs/a.md", "h").unwrap();
+        assert_eq!(find_chunk_overlay(&conn, "/docs/a.md", "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn find_chunk_overlay_returns_none_for_missing_doc() {
+        let conn = open_in_memory().unwrap();
+        assert_eq!(find_chunk_overlay(&conn, "/nope.md", "abc").unwrap(), None);
     }
 }
 
