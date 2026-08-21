@@ -2397,6 +2397,14 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
+    // Phase 9: one-time content_hash migration gate. The V7 schema adds
+    // the column; this returns true on the first start after the schema
+    // ships. The actual data migration is dispatched in the setup
+    // closure (below) once the AppHandle is available; this block only
+    // captures the flag for that closure to pick up. On error from the
+    // check, default to "needs migration" so the gate self-heals.
+    let needs_migration = !crate::db::migration::chunks_have_content_hash(&db.0)
+        .unwrap_or(true);
     let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
         let pb = PathBuf::from(&p);
         pb.canonicalize().unwrap_or(pb)
@@ -2414,6 +2422,64 @@ pub fn run() {
         .setup({
             let db_path = db_path.clone();
             move |app| {
+                // Phase 9: run the chunk-hash migration if the gate
+                // flagged it. The frontend SplashScreen (Task 9)
+                // listens to `migration-progress` /
+                // `migration-complete` / `migration-error` events and
+                // gates the rest of the UI until the migration
+                // finishes; spawn_blocking keeps the runtime
+                // responsive while the transaction runs. The DbState
+                // wraps Mutex<AppDb> and Connection isn't Clone, so
+                // we re-take the lock inside the spawn_blocking
+                // closure (Option B from the brief) instead of
+                // trying to move the lock across threads.
+                if needs_migration {
+                    let app_handle = app.app_handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let db_state = app_handle.state::<DbState>();
+                        let mut guard = match db_state.0.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                let _ = app_handle.emit(
+                                    "migration-error",
+                                    serde_json::json!({
+                                        "message": format!("db lock poisoned: {e}"),
+                                    }),
+                                );
+                                return;
+                            }
+                        };
+                        let emit =
+                            |p: crate::db::migration::MigrationProgress| {
+                                let _ = app_handle.emit(
+                                    "migration-progress",
+                                    serde_json::json!({
+                                        "current": p.current,
+                                        "total": p.total,
+                                        "phase": p.phase,
+                                    }),
+                                );
+                            };
+                        match crate::db::migration::run_chunk_hash_migration(
+                            &mut guard.0,
+                            emit,
+                        ) {
+                            Ok(()) => {
+                                let _ =
+                                    app_handle.emit("migration-complete", ());
+                            }
+                            Err(e) => {
+                                let _ = app_handle.emit(
+                                    "migration-error",
+                                    serde_json::json!({
+                                        "message": e.to_string(),
+                                    }),
+                                );
+                            }
+                        }
+                    });
+                }
+
                 if let Some(db_url) = configured_database_url() {
                     let config = OutboxConfig {
                         sqlite_path: db_path.clone(),
