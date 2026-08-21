@@ -45,7 +45,7 @@ test("source chip passes the enriched chunkId to onOpenSource", () => {
   const fact: EntityFact = {
     ...FACT,
     id: "fact_chunked",
-    source_docs: [{ path: "documents/notes.md", chunkId: 42 }],
+    source_docs: [{ path: "documents/notes.md", chunkId: "0123456789abcdef0123456789abcdef" }],
   };
   render(
     <FactCard
@@ -57,7 +57,7 @@ test("source chip passes the enriched chunkId to onOpenSource", () => {
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
-  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", "42");
+  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", "0123456789abcdef0123456789abcdef");
 });
 
 test("inline edit saves via update_entity_fact_cmd and notifies", async () => {
