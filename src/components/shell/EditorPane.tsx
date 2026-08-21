@@ -4,34 +4,90 @@ import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
 import { readDocument, saveWikiPage } from "../../lib/tauri";
 import { useTheme } from "../../lib/ThemeContext";
+import {
+  useChunkOverlay,
+  type BlockLineMap,
+  type BlockLineRange,
+} from "../../hooks/useChunkOverlay";
 
 interface Props {
   selectedDoc: string | null;
   isWiki: boolean;
   /**
-   * Optional chunk id within `selectedDoc`. When set, after the document
-   * loads we locate the matching block (a heading whose text equals the
-   * chunk id) and scroll to it with a transient 1.5s highlight.
+   * Optional chunk-hash anchor within `selectedDoc`. When set, after the
+   * document loads we resolve the hash to a line range, position-absolute
+   * overlay the highlight on those lines, and auto-dismiss after 1.5s.
    */
   anchorChunkId?: string | null;
 }
 
 /**
- * Pull the plain-text content of a BlockNote block. Supports the default
- * `paragraph`, `heading`, and `bulletListItem` types we use in this app.
+ * Walk the markdown source once and compute (startLine, endLine) for
+ * every top-level BlockNote block. BlockNote parses one block per
+ * top-level markdown construct (heading / paragraph / code block /
+ * list item / etc.), separated by blank lines or fenced code-block
+ * boundaries. We use the same boundary rules to assign line numbers.
+ *
+ * The returned array is index-aligned with the `blocks` array — both
+ * BlockNote's `tryParseMarkdownToBlocks` and this walk split the
+ * document at the same boundaries, so block index `i` in `blocks`
+ * corresponds to range index `i` in the returned array.
+ *
+ * **Known limitation:** tight lists (no blank lines between items),
+ * tables, and multi-paragraph blockquotes parse into different
+ * block counts in BlockNote than this walker produces. The
+ * alignment breaks for those shapes and the overlay will land on
+ * the wrong region. The hook falls back to the source-moved badge
+ * when no blocks cover the resolved range, so the failure is
+ * visible rather than silent.
  */
-function blockText(block: { type: string; content?: unknown }): string {
-  const parts: string[] = [];
-  const content = block.content as
-    | Array<{ type: string; text?: string; content?: unknown }>
-    | undefined;
-  if (!Array.isArray(content)) return "";
-  for (const inline of content) {
-    if (inline.type === "text" && typeof inline.text === "string") {
-      parts.push(inline.text);
+function computeMarkdownLineRanges(
+  content: string,
+): Array<{ startLine: number; endLine: number }> {
+  const lines = content.split("\n");
+  const ranges: Array<{ startLine: number; endLine: number }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    // Skip blank lines between blocks.
+    while (i < lines.length && lines[i].trim() === "") i++;
+    if (i >= lines.length) break;
+    const startLine = i + 1; // 1-indexed (matches `start_line` in Rust)
+    if (lines[i].trimStart().startsWith("```")) {
+      // Fenced code block: consume from opening fence to closing fence
+      // (the closing fence's line is included so subsequent blocks are
+      // correctly attributed to the next non-blank line).
+      i++;
+      while (i < lines.length && !lines[i].trimStart().startsWith("```")) i++;
+      if (i < lines.length) i++;
+      ranges.push({ startLine, endLine: i });
+    } else {
+      // Regular block: extends until next blank line or EOF.
+      while (i < lines.length && lines[i].trim() !== "") i++;
+      ranges.push({ startLine, endLine: i });
     }
   }
-  return parts.join("").trim();
+  return ranges;
+}
+
+/** Build the blockId → (startLine, endLine) map by index-aligning the
+ * markdown ranges with the BlockNote blocks array. When the counts
+ * disagree, we stop at the shorter array so any extra BlockNote
+ * blocks get no range (the hook then surfaces source-moved). */
+function buildBlockLineMap(
+  content: string,
+  blocks: Array<{ id: string }>,
+): BlockLineMap {
+  const ranges = computeMarkdownLineRanges(content);
+  const map: BlockLineMap = new Map();
+  const len = Math.min(blocks.length, ranges.length);
+  for (let i = 0; i < len; i++) {
+    const range: BlockLineRange = [
+      ranges[i].startLine,
+      ranges[i].endLine,
+    ];
+    map.set(blocks[i].id, range);
+  }
+  return map;
 }
 
 export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props) {
@@ -40,48 +96,52 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
-  const [loadedDoc, setLoadedDoc] = useState<string | null>(null);
-  const paneRef = useRef<HTMLElement | null>(null);
-  // Hold the most recently parsed blocks so the anchor-highlight effect can
-  // find the target without re-reading the file or relying on BlockNote's
-  // internal `editor.document` (which the tests mock as an empty array).
-  const lastBlocksRef = useRef<Array<{ type: string; content?: unknown; id: string }>>([]);
+  // State-based container ref: state change re-renders the hook effect,
+  // unlike a plain RefObject (which would leave the hook stuck with
+  // `null` until the next path/hash change).
+  const [container, setContainer] = useState<HTMLElement | null>(null);
+  const [lineMap, setLineMap] = useState<BlockLineMap>(new Map());
+  const overlayDismissTimerRef = useRef<number | undefined>(undefined);
+  // Local dismissal flag: when true, the line overlay is hidden even if
+  // `useChunkOverlay` still reports `"visible"`. The hook's status is a
+  // pure data signal (IPC + rect); presentation/dismissal is a concern
+  // local to the pane and lives here so the hook's contract stays narrow.
+  const [dismissed, setDismissed] = useState(false);
 
-  // Doc-load effect: only re-runs when `selectedDoc` changes. Critically, it
-  // does NOT depend on `anchorChunkId` — re-running on anchor change would
-  // overwrite the user's in-progress wiki edits with the freshly-read file.
+  const { status: overlayStatus, overlay } = useChunkOverlay(
+    selectedDoc,
+    anchorChunkId,
+    container,
+    lineMap,
+  );
+
+  // Doc-load effect: re-runs only on `selectedDoc` change. After the
+  // markdown is parsed into BlockNote blocks, we compute the line map
+  // once and hand it to the overlay hook.
   useEffect(() => {
     if (!selectedDoc) {
       setLoadError(null);
-      setLoadedDoc(null);
+      setLineMap(new Map());
       return;
     }
     setLoadError(null);
     setSaveError(null);
     setSaveOk(false);
-    // Reset load identity so the anchor effect doesn't reuse blocks from
-    // a prior selection. Without this, a rapid A → B → A switch can leave
-    // `loadedDoc === "A.md"` while `lastBlocksRef` still points at the
-    // earlier A's blocks — the anchor effect would then "succeed" without
-    // actually resolving the new A's chunk anchor.
-    setLoadedDoc(null);
-    lastBlocksRef.current = [];
-    // Effect-local cancellation flag: if `selectedDoc` changes while
-    // `readDocument` / `tryParseMarkdownToBlocks` is in flight, the older
-    // resolution must NOT replace the newer editor blocks. The cleanup
-    // marks this effect as cancelled; the async chain checks the flag
-    // before every post-await mutation.
+    setLineMap(new Map());
     let cancelled = false;
     readDocument(selectedDoc)
       .then(async (content) => {
         if (cancelled) return;
-        const blocks = await editor.tryParseMarkdownToBlocks(content);
+        const blocks = (await editor.tryParseMarkdownToBlocks(content)) as Array<{
+          id: string;
+        }>;
         if (cancelled) return;
         editor.replaceBlocks(editor.document, blocks);
         if (cancelled) return;
-        lastBlocksRef.current = (blocks as Array<{ type: string; content?: unknown; id?: string }>)
-          .map((b) => ({ ...b, id: b.id ?? "" }));
-        setLoadedDoc(selectedDoc);
+        // Compute the line map from the markdown source. The hook reads
+        // line ranges from this map (not from DOM attributes) so no DOM
+        // stamping is needed.
+        setLineMap(buildBlockLineMap(content, blocks));
       })
       .catch((err) => {
         if (cancelled) return;
@@ -94,73 +154,32 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
     };
   }, [selectedDoc, editor]);
 
-  // Anchor-highlight effect: runs on doc-load (loadedDoc change) and on
-  // anchorChunkId change. Does NOT mutate editor blocks — only scrolls +
-  // transiently highlights a node.
+  // Auto-dismiss the overlay 1.5s after it becomes visible. Any
+  // non-visible status is treated as a fresh presentation decision —
+  // we clear the previous auto-dismissal so the source-moved notice
+  // can render even after a visible overlay has timed out.
   useEffect(() => {
-    if (!selectedDoc || !anchorChunkId || loadedDoc !== selectedDoc) return;
-    let highlightTimer: number | undefined;
-    // Track the node we added the highlight class to so we can remove it
-    // during cleanup. The timer may be cancelled mid-flight (selectedDoc
-    // or anchorChunkId changed before 1.5s elapsed) — without this the
-    // old node would stay highlighted until the next anchor resolution.
-    let highlightedNode: HTMLElement | null = null;
-    const cleanupHighlight = () => {
-      if (highlightTimer !== undefined) {
-        window.clearTimeout(highlightTimer);
-        highlightTimer = undefined;
+    if (overlayStatus !== "visible") {
+      if (overlayDismissTimerRef.current !== undefined) {
+        window.clearTimeout(overlayDismissTimerRef.current);
+        overlayDismissTimerRef.current = undefined;
       }
-      if (highlightedNode) {
-        highlightedNode.classList.remove("editor-pane-block--anchor-highlight");
-        highlightedNode = null;
-      }
-    };
-    // Defer to next frame so BlockNote has rendered the new blocks.
-    const raf = requestAnimationFrame(() => {
-      const blocks = lastBlocksRef.current;
-      const target = blocks.find((b) => {
-        // Anchor chunk ids only ever identify heading blocks; rejecting
-        // paragraphs that happen to share the text prevents a duplicate-
-        // text earlier block from being matched.
-        if (b.type !== "heading") return false;
-        const text = blockText(b);
-        return text === anchorChunkId;
-      });
-      if (!target) return;
-      try {
-        editor.setTextCursorPosition(target.id, "end");
-      } catch {
-        return;
-      }
-      const root = paneRef.current;
-      if (!root) return;
-      // Escape the id for CSS attribute matching — BlockNote generates
-      // hyphenated ids today, but attribute selectors interpret `"`, `\`,
-      // and `]` specially, so interpolating raw breaks for any id containing
-      // those characters.
-      const safeSelector =
-        typeof CSS !== "undefined" && CSS.escape
-          ? `[data-id="${CSS.escape(target.id)}"]`
-          : `[data-id="${target.id.replace(/(["\\\]])/g, "\\$1")}"]`;
-      const node = root.querySelector(safeSelector) as HTMLElement | null;
-      if (!node) return; // block not yet painted; skip rather than fight
-      // setTextCursorPosition only moves the editor selection; scroll the
-      // resolved DOM node into view so the user can see the anchor.
-      node.scrollIntoView({ block: "nearest", behavior: "auto" });
-      cleanupHighlight();
-      node.classList.add("editor-pane-block--anchor-highlight");
-      highlightedNode = node;
-      highlightTimer = window.setTimeout(() => {
-        node.classList.remove("editor-pane-block--anchor-highlight");
-        highlightTimer = undefined;
-        highlightedNode = null;
-      }, 1500);
-    });
+      setDismissed(false);
+      return;
+    }
+    // Fresh visible overlay → ensure not pre-dismissed by a prior render.
+    setDismissed(false);
+    overlayDismissTimerRef.current = window.setTimeout(() => {
+      overlayDismissTimerRef.current = undefined;
+      setDismissed(true);
+    }, 1500);
     return () => {
-      cancelAnimationFrame(raf);
-      cleanupHighlight();
+      if (overlayDismissTimerRef.current !== undefined) {
+        window.clearTimeout(overlayDismissTimerRef.current);
+        overlayDismissTimerRef.current = undefined;
+      }
     };
-  }, [selectedDoc, anchorChunkId, loadedDoc, editor]);
+  }, [overlayStatus]);
 
   async function handleSave() {
     if (!selectedDoc || !isWiki) return;
@@ -188,7 +207,7 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
 
   return (
     <main
-      ref={paneRef}
+      ref={setContainer}
       className="editor-pane editor-pane--active"
     >
       {!isWiki && (
@@ -209,6 +228,22 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
           )}
         </div>
       )}
+      {overlayStatus === "source-moved" && !dismissed && (
+        <div className="editor-pane-source-moved-notice" role="status">
+          <span>The source may have moved since this fact was created.</span>
+          <button
+            type="button"
+            className="editor-pane-source-moved-notice__dismiss"
+            onClick={() => {
+              // Dismissing hides the badge for this navigation only; a
+              // fresh navigation will re-resolve and may show it again.
+              setDismissed(true);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
       {loadError ? (
         <div className="editor-error" role="alert">
           <p>Could not open this document.</p>
@@ -216,6 +251,14 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
         </div>
       ) : (
         <BlockNoteView editor={editor} editable={isWiki} theme={theme} />
+      )}
+      {overlayStatus === "visible" && overlay && !dismissed && (
+        <div
+          className="editor-pane-line-overlay--anchor"
+          aria-hidden="true"
+          data-testid="editor-line-overlay"
+          style={{ top: `${overlay.top}px`, height: `${overlay.height}px` }}
+        />
       )}
     </main>
   );

@@ -1,6 +1,9 @@
 import { screen, waitFor, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 
+const HASH_42 = "0123456789abcdef0123456789abcdef"; // 32-char hex
+const HASH_MISSING = "ffffffffffffffffffffffffffffffff";
+
 type MockBlock = {
   id: string;
   type: string;
@@ -21,26 +24,6 @@ const DEFAULT_BLOCKS: MockBlock[] = [
     id: "block-body",
     type: "paragraph",
     content: [{ type: "text", text: "Body text" }],
-    children: [],
-  },
-];
-
-// Heading and paragraph share the same text. The anchor resolver must
-// skip the paragraph and target the heading. The paragraph is placed
-// before the heading so that an unrestricted "first match wins" search
-// would land on the paragraph and fail this fixture.
-const DUPLICATE_TEXT_DOC = "chunk-42\n\n# chunk-42";
-const DUPLICATE_TEXT_BLOCKS: MockBlock[] = [
-  {
-    id: "block-dup-paragraph",
-    type: "paragraph",
-    content: [{ type: "text", text: "chunk-42" }],
-    children: [],
-  },
-  {
-    id: "block-dup-heading",
-    type: "heading",
-    content: [{ type: "text", text: "chunk-42" }],
     children: [],
   },
 ];
@@ -82,7 +65,6 @@ const editorMock = {
     // are applied, so the parser must distinguish documents by content.
     if (content === "# A content") return A_BLOCKS;
     if (content === "# B content") return B_BLOCKS;
-    if (content === DUPLICATE_TEXT_DOC) return DUPLICATE_TEXT_BLOCKS;
     return DEFAULT_BLOCKS;
   }),
   replaceBlocks: vi.fn((_doc: unknown, blocks: MockBlock[]) => {
@@ -136,6 +118,8 @@ beforeEach(() => {
   editorMock.setTextCursorPosition.mockClear();
   // Reset the mock document so each test sees a clean state.
   editorMock.document = [];
+  // Clear the invoke mock so each test sees only its own IPC calls.
+  vi.mocked(invoke).mockReset();
   scrollIntoViewSpy = vi
     .spyOn(HTMLElement.prototype, "scrollIntoView")
     .mockImplementation(() => {});
@@ -181,118 +165,194 @@ test("shows save error when save_wiki_page fails", async () => {
   );
 });
 
-test("scrolls to anchor when anchorChunkId is provided", async () => {
+test("renders line-range overlay when resolveChunkOverlay returns line range", async () => {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === "read_document") {
-      return Promise.resolve("# chunk-42\n\nBody text");
+    if (cmd === "read_document") return Promise.resolve("Body text spanning many lines.");
+    if (cmd === "resolve_chunk_overlay") {
+      return Promise.resolve({ startLine: 1, endLine: 3 });
     }
     return Promise.resolve(null);
   });
-
   renderWithTheme(
     <EditorPane
       selectedDoc="documents/notes.md"
       isWiki={false}
-      anchorChunkId="chunk-42"
+      anchorChunkId={HASH_42}
     />,
   );
-
-  // Wait for the document to load and parse.
-  await waitFor(() =>
-    expect(editorMock.tryParseMarkdownToBlocks).toHaveBeenCalled(),
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  // jsdom reports 0-rect for every element, so the overlay renders
+  // with top=0, height=0 — still visible in the DOM.
+  expect(await screen.findByTestId("editor-line-overlay")).toBeInTheDocument();
+  expect(invoke).toHaveBeenCalledWith(
+    "resolve_chunk_overlay",
+    { path: "documents/notes.md", hash: HASH_42 },
   );
-  await waitFor(() =>
-    expect(editorMock.setTextCursorPosition).toHaveBeenCalledWith(
-      "block-heading",
-      "end",
-    ),
-  );
-  // setTextCursorPosition only moves the selection; the resolved DOM node
-  // must also be scrolled into view so the user can see the anchor.
-  await waitFor(() => {
-    const calls = scrollIntoViewSpy.mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    const target = calls.find((args) => args[0] === calls[0]?.[0]);
-    expect(target).toBeDefined();
-  });
-  // Verify the heading block (not the paragraph) was the scroll target.
-  const headingEl = document.querySelector('[data-id="block-heading"]');
-  expect(headingEl).not.toBeNull();
-  expect(scrollIntoViewSpy.mock.instances).toContain(headingEl);
 });
 
-test("does not scroll when anchorChunkId is omitted", async () => {
+test("renders source-moved-notice when resolveChunkOverlay returns null", async () => {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === "read_document") return Promise.resolve("# chunk-42\n\nBody");
+    if (cmd === "read_document") return Promise.resolve("# Heading\n\nBody");
+    if (cmd === "resolve_chunk_overlay") return Promise.resolve(null);
     return Promise.resolve(null);
   });
+  renderWithTheme(
+    <EditorPane
+      selectedDoc="documents/notes.md"
+      isWiki={false}
+      anchorChunkId={HASH_MISSING}
+    />,
+  );
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
+});
 
+test("hides source-moved-notice when × button is clicked", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "read_document") return Promise.resolve("# Heading\n\nBody");
+    if (cmd === "resolve_chunk_overlay") return Promise.resolve(null);
+    return Promise.resolve(null);
+  });
+  renderWithTheme(
+    <EditorPane
+      selectedDoc="documents/notes.md"
+      isWiki={false}
+      anchorChunkId={HASH_MISSING}
+    />,
+  );
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /×/u }));
+  await waitFor(() =>
+    expect(screen.queryByText(/source may have moved/i)).not.toBeInTheDocument(),
+  );
+});
+
+test("renders nothing when anchorChunkId is null", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "read_document") return Promise.resolve("# Heading");
+    return Promise.resolve(null);
+  });
   renderWithTheme(
     <EditorPane selectedDoc="documents/notes.md" isWiki={false} />,
   );
-
-  await waitFor(() =>
-    expect(editorMock.tryParseMarkdownToBlocks).toHaveBeenCalled(),
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  expect(screen.queryByText(/source may have moved/i)).not.toBeInTheDocument();
+  expect(invoke).not.toHaveBeenCalledWith(
+    "resolve_chunk_overlay",
+    expect.anything(),
   );
-  // Give the rAF tick a chance to run.
-  await new Promise((r) => setTimeout(r, 10));
-  expect(editorMock.setTextCursorPosition).not.toHaveBeenCalled();
 });
 
-test("does not throw when anchorChunkId has no matching block", async () => {
+test("renders source-moved-notice when line range past EOF cannot map", async () => {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === "read_document") return Promise.resolve("# other-heading\n\nBody");
-    return Promise.resolve(null);
-  });
-
-  renderWithTheme(
-    <EditorPane
-      selectedDoc="documents/notes.md"
-      isWiki={false}
-      anchorChunkId="missing-chunk"
-    />,
-  );
-
-  await waitFor(() =>
-    expect(editorMock.tryParseMarkdownToBlocks).toHaveBeenCalled(),
-  );
-  await new Promise((r) => setTimeout(r, 10));
-  expect(editorMock.setTextCursorPosition).not.toHaveBeenCalled();
-});
-
-test("anchors to heading when paragraph shares anchorChunkId text", async () => {
-  // Regression for the case where a paragraph block earlier in the document
-  // happens to use the same text as the target heading.
-  vi.mocked(invoke).mockImplementation((cmd: string) => {
-    if (cmd === "read_document") {
-      return Promise.resolve(DUPLICATE_TEXT_DOC);
+    if (cmd === "read_document") return Promise.resolve("Tiny doc.");
+    if (cmd === "resolve_chunk_overlay") {
+      return Promise.resolve({ startLine: 900, endLine: 910 });
     }
     return Promise.resolve(null);
   });
-
   renderWithTheme(
     <EditorPane
       selectedDoc="documents/notes.md"
       isWiki={false}
-      anchorChunkId="chunk-42"
+      anchorChunkId={HASH_42}
     />,
   );
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
+});
 
-  await waitFor(() =>
-    expect(editorMock.tryParseMarkdownToBlocks).toHaveBeenCalled(),
+test("auto-dismisses overlay after 1.5s when visible", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "read_document") return Promise.resolve("Block body.");
+    if (cmd === "resolve_chunk_overlay") {
+      return Promise.resolve({ startLine: 1, endLine: 1 });
+    }
+    return Promise.resolve(null);
+  });
+  // Real timers, deliberately: the rect-computation effect is rAF-gated,
+  // so a blanket vi.useFakeTimers() hangs every wait — and even selective
+  // toFake:["setTimeout","clearTimeout"] deadlocks RTL's findBy*/waitFor,
+  // which abandons its polling path as soon as it detects fake timers.
+  renderWithTheme(
+    <EditorPane
+      selectedDoc="documents/notes.md"
+      isWiki={false}
+      anchorChunkId={HASH_42}
+    />,
   );
-  // The cursor must land on the heading, not on the duplicate-text
-  // paragraph above it.
   await waitFor(() =>
-    expect(editorMock.setTextCursorPosition).toHaveBeenCalledWith(
-      "block-dup-heading",
-      "end",
-    ),
+    expect(screen.getByTestId("blocknote")).toBeInTheDocument(),
   );
-  // And the scrollIntoView target must be the heading DOM node.
-  const headingEl = document.querySelector('[data-id="block-dup-heading"]');
-  expect(headingEl).not.toBeNull();
-  expect(scrollIntoViewSpy.mock.instances).toContain(headingEl);
+  const overlay = await screen.findByTestId("editor-line-overlay");
+  expect(overlay).toBeInTheDocument();
+  // The EditorPane's auto-dismiss effect (see EditorPane.tsx) fires a
+  // setTimeout(1500ms) when overlayStatus becomes "visible" and calls
+  // setDismissed(true), which unmounts the overlay div. Poll for the
+  // unmount instead of a fixed sleep so the test can't race a slow
+  // dismissal; timeout must exceed the 1.5s timer.
+  await waitFor(
+    () =>
+      expect(
+        screen.queryByTestId("editor-line-overlay"),
+      ).not.toBeInTheDocument(),
+    { timeout: 3000 },
+  );
+});
+
+test("re-shows source-moved-notice after a visible overlay auto-dismisses", async () => {
+  // Regression test: the auto-dismiss timer sets `dismissed = true`
+  // after 1.5s when the overlay becomes visible. If a later anchor
+  // resolves to `source-moved`, the presentation effect must reset
+  // `dismissed` so the notice can render — otherwise the user sees
+  // nothing after the visible overlay times out.
+  let overlayCalls = 0;
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "read_document") return Promise.resolve("Some body text.");
+    if (cmd === "resolve_chunk_overlay") {
+      // First call resolves to a valid line range so the overlay
+      // mounts and runs the 1.5s dismissal timer; every subsequent
+      // call resolves to null (source-moved).
+      return Promise.resolve(
+        overlayCalls++ === 0 ? { startLine: 1, endLine: 1 } : null,
+      );
+    }
+    return Promise.resolve(null);
+  });
+  // Real timers (see the auto-dismiss test above for why fake timers
+  // are not an option in this suite).
+  const { rerender } = renderWithTheme(
+    <EditorPane
+      selectedDoc="documents/notes.md"
+      isWiki={false}
+      anchorChunkId={HASH_42}
+    />,
+  );
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  // First anchor: resolves to a valid line range, the overlay mounts.
+  expect(await screen.findByTestId("editor-line-overlay")).toBeInTheDocument();
+  // Poll past the auto-dismiss timer (1.5s) rather than a fixed sleep.
+  await waitFor(
+    () =>
+      expect(
+        screen.queryByTestId("editor-line-overlay"),
+      ).not.toBeInTheDocument(),
+    { timeout: 3000 },
+  );
+  // Now switch to a different anchor that resolves to source-moved.
+  rerender(
+    <ThemeProvider>
+      <EditorPane
+        selectedDoc="documents/notes.md"
+        isWiki={false}
+        anchorChunkId={HASH_MISSING}
+      />
+    </ThemeProvider>,
+  );
+  // The notice must re-appear because the new status is a fresh
+  // presentation decision that resets `dismissed` to false.
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
 });
 
 test("ignores stale doc-load resolution after selectedDoc changes", async () => {

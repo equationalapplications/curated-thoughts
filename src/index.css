@@ -146,6 +146,12 @@ body {
   align-items: center;
   justify-content: center;
   background: var(--bg);
+  /* Positioning context for `.editor-pane-line-overlay--anchor`, which
+     is `position: absolute` with a dynamically-computed `top`. Without
+     this the overlay anchors to the next positioned ancestor up the
+     tree (often `body`), drifting away from the line range on long
+     docs that scroll within the pane. */
+  position: relative;
 }
 
 /* Related notes */
@@ -1154,20 +1160,40 @@ body {
   color: var(--error);
 }
 
-/* ── Editor anchor highlight (chunk deep-link) ───────────────────── */
-.editor-pane-block--anchor-highlight {
-  animation: editor-anchor-fade 1.5s ease-out forwards;
-  border-radius: var(--r-sm);
+/* ── Editor line-range overlay (chunk deep-link) ─────────────────── */
+.editor-pane-line-overlay--anchor {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background-color: color-mix(in srgb, var(--primary) 18%, transparent);
+  border-left: 3px solid var(--primary);
+  pointer-events: none;
+  animation: editor-line-overlay-slide-in 200ms ease-out;
+  z-index: 1;
 }
-@keyframes editor-anchor-fade {
-  0% {
-    background-color: color-mix(in srgb, var(--primary) 35%, transparent);
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 25%, transparent);
-  }
-  100% {
-    background-color: transparent;
-    box-shadow: 0 0 0 4px transparent;
-  }
+@keyframes editor-line-overlay-slide-in {
+  from { transform: translateX(8px); opacity: 0; }
+  to   { transform: translateX(0);   opacity: 1; }
+}
+
+.editor-pane-source-moved-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--elev-1);
+  color: var(--on-surface-var);
+  border-bottom: 1px solid var(--outline-var);
+  font-size: 12px;
+}
+.editor-pane-source-moved-notice__dismiss {
+  background: transparent;
+  border: 0;
+  color: var(--on-surface-var);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
 }
 
 /* ── Settings: privacy & appearance ─────────────────────────────────── */

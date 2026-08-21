@@ -80,7 +80,7 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         defined_symbol: None,
         strategy: ChunkStrategyTag::Prose,
     };
-    let cid = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact")?;
+    let cid = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "")?;
     let profile = EmbedProfile::default();
     let v = embed_one(&profile, "q".into())?;
     insert_embedding(conn, cid, &v)?;
@@ -95,7 +95,7 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         defined_symbol: None,
         strategy: ChunkStrategyTag::Prose,
     };
-    let cid_b = insert_chunk(conn, doc_b, &chunk_b, 0, "tier_fact")?;
+    let cid_b = insert_chunk(conn, doc_b, &chunk_b, 0, "tier_fact", "")?;
     let v_b = embed_one(&profile, chunk_b.text.clone())?;
     insert_embedding(conn, cid_b, &v_b)?;
     mark_document_indexed(conn, doc_b)?;
