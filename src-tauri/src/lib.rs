@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod commands;
 pub mod db;
 pub mod embedder;
 pub mod graph;
@@ -2228,6 +2229,22 @@ fn ingest_document_cmd(
     run_ingest_with_app(&app, &db.0, &embed_profile.0, path)
 }
 
+/// Phase 9: gate query so the frontend knows whether to mount the
+/// `SplashScreen` and wait for `migration-complete`. Returns `true` when
+/// at least one chunk row is missing `content_hash` (i.e. the one-time
+/// chunk-hash migration still has work to do). The migration itself is
+/// dispatched by the `setup` hook at startup; this command is the
+/// read-side companion the frontend polls on mount. Defaults to `true`
+/// on error so the splash mounts and the user at least sees a stuck UI
+/// rather than a silent dead-load if the gate query itself fails.
+#[tauri::command]
+fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bool, String> {
+    let guard = db.0.lock().map_err(|e| format!("db lock poisoned: {e}"))?;
+    crate::db::migration::chunks_have_content_hash(&guard.0)
+        .map(|ok| !ok)
+        .map_err(|e| e.to_string())
+}
+
 /// Synchronous ingest + progress event emitter. Extracted from
 /// `ingest_document_cmd` so the event-emission sequence can be exercised in a
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
@@ -2326,6 +2343,8 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_impact_radius,
             get_binary_path,
             get_brain_dir,
+            commands::chunks::resolve_chunk_overlay_cmd,
+            needs_chunk_hash_migration,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -2395,10 +2414,27 @@ pub fn run() {
     }
 
     let db = AppDb::open(&db_path).expect("failed to open database");
+    // Phase 9: one-time content_hash migration gate. The V9 schema adds
+    // the column; this returns true on the first start after the schema
+    // ships. The actual data migration is dispatched in the setup
+    // closure (below) once the AppHandle is available; this block only
+    // captures the flag for that closure to pick up. On error from the
+    // check, default to "needs migration" so the gate self-heals.
+    let needs_migration = !crate::db::migration::chunks_have_content_hash(&db.0)
+        .unwrap_or(false);
     let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
         let pb = PathBuf::from(&p);
         pb.canonicalize().unwrap_or(pb)
     });
+    // The migration derives `chunks.entity_id` from this root. It must
+    // match the canonical spelling used by the pipeline and by the
+    // graph readers, otherwise the hashed `tier_working::` prefix
+    // diverges for non-`documents/` paths and neighbor lookups return
+    // nothing. Reuse the canonicalized value before `initial_vault_root`
+    // is moved into `start_pipeline`.
+    let migration_vault_root = initial_vault_root
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
     let embed_profile = config
@@ -2412,6 +2448,65 @@ pub fn run() {
         .setup({
             let db_path = db_path.clone();
             move |app| {
+                // Phase 9: run the chunk-hash migration if the gate
+                // flagged it. The frontend SplashScreen (Task 9)
+                // listens to `migration-progress` /
+                // `migration-complete` / `migration-error` events and
+                // gates the rest of the UI until the migration
+                // finishes; spawn_blocking keeps the runtime
+                // responsive while the transaction runs. The DbState
+                // wraps Mutex<AppDb> and Connection isn't Clone, so
+                // we re-take the lock inside the spawn_blocking
+                // closure (Option B from the brief) instead of
+                // trying to move the lock across threads.
+                if needs_migration {
+                    let app_handle = app.app_handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let db_state = app_handle.state::<DbState>();
+                        let mut guard = match db_state.0.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                let _ = app_handle.emit(
+                                    "migration-error",
+                                    serde_json::json!({
+                                        "message": format!("db lock poisoned: {e}"),
+                                    }),
+                                );
+                                return;
+                            }
+                        };
+                        let emit =
+                            |p: crate::db::migration::MigrationProgress| {
+                                let _ = app_handle.emit(
+                                    "migration-progress",
+                                    serde_json::json!({
+                                        "current": p.current,
+                                        "total": p.total,
+                                        "phase": p.phase,
+                                    }),
+                                );
+                            };
+                        match crate::db::migration::run_chunk_hash_migration(
+                            &mut guard.0,
+                            migration_vault_root.as_deref(),
+                            emit,
+                        ) {
+                            Ok(()) => {
+                                let _ =
+                                    app_handle.emit("migration-complete", ());
+                            }
+                            Err(e) => {
+                                let _ = app_handle.emit(
+                                    "migration-error",
+                                    serde_json::json!({
+                                        "message": e.to_string(),
+                                    }),
+                                );
+                            }
+                        }
+                    });
+                }
+
                 if let Some(db_url) = configured_database_url() {
                     let config = OutboxConfig {
                         sqlite_path: db_path.clone(),
@@ -2573,7 +2668,9 @@ pub fn run() {
             acknowledge_ephemeral_disclosure,
             get_binary_path,
             get_brain_dir,
+            commands::chunks::resolve_chunk_overlay_cmd,
             ingest_document_cmd,
+            needs_chunk_hash_migration,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

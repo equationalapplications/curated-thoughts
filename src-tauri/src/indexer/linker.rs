@@ -135,8 +135,8 @@ mod tests {
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash1").unwrap();
         mark_document_indexed(&conn, doc_id).unwrap();
 
-        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact").unwrap();
-        let ref_id = insert_chunk(&conn, doc_id, &ref_chunk("init_db"), 1, "tier_fact").unwrap();
+        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
+        let ref_id = insert_chunk(&conn, doc_id, &ref_chunk("init_db"), 1, "tier_fact", "").unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
 
@@ -161,9 +161,9 @@ mod tests {
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash2").unwrap();
         mark_document_indexed(&conn, doc_id).unwrap();
 
-        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact").unwrap();
+        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
         let ref_id =
-            insert_chunk(&conn, doc_id, &import_ref_chunk("init_db"), 1, "tier_fact").unwrap();
+            insert_chunk(&conn, doc_id, &import_ref_chunk("init_db"), 1, "tier_fact", "").unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
 
@@ -191,8 +191,8 @@ mod tests {
         mark_document_indexed(&conn, doc_a).unwrap();
         mark_document_indexed(&conn, doc_b).unwrap();
 
-        insert_chunk(&conn, doc_a, &def_chunk("shared_fn"), 0, "tier_fact").unwrap();
-        insert_chunk(&conn, doc_b, &ref_chunk("shared_fn"), 0, "tier_wisdom").unwrap();
+        insert_chunk(&conn, doc_a, &def_chunk("shared_fn"), 0, "tier_fact", "").unwrap();
+        insert_chunk(&conn, doc_b, &ref_chunk("shared_fn"), 0, "tier_wisdom", "").unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
         run_linker(&conn, "tier_wisdom", 0).unwrap();
@@ -212,8 +212,8 @@ mod tests {
 
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash1").unwrap();
         mark_document_indexed(&conn, doc_id).unwrap();
-        let def_id = insert_chunk(&conn, doc_id, &def_chunk("foo"), 0, "tier_fact").unwrap();
-        let ref_id = insert_chunk(&conn, doc_id, &ref_chunk("foo"), 1, "tier_fact").unwrap();
+        let def_id = insert_chunk(&conn, doc_id, &def_chunk("foo"), 0, "tier_fact", "").unwrap();
+        let ref_id = insert_chunk(&conn, doc_id, &ref_chunk("foo"), 1, "tier_fact", "").unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
         let before: i64 = conn
@@ -252,7 +252,7 @@ mod tests {
     fn entity_ids_needing_link_returns_ids_with_unresolved_refs() {
         let conn = open_in_memory().unwrap();
         let doc_id = upsert_document(&conn, "/vault/documents/a.rs", "h1").unwrap();
-        insert_chunk(&conn, doc_id, &ref_chunk("something"), 0, "tier_fact").unwrap();
+        insert_chunk(&conn, doc_id, &ref_chunk("something"), 0, "tier_fact", "").unwrap();
 
         let ids = entity_ids_needing_link(&conn).unwrap();
         assert!(ids.contains(&"tier_fact".to_string()));

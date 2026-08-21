@@ -42,10 +42,12 @@ fn seed_pending_proposal(app: &TestApp, proposal_id: &str, target_name: &str, fa
                 "confidence": "inferred"
             }),
             evidence: vec![StoredEvidenceChunk {
-                chunk_id,
+                chunk_id: Some(chunk_id),
+                content_hash: String::new(),
                 quote: "evidence quote".into(),
-                start_line: 1,
-                end_line: 3,
+                start_line: Some(1),
+                end_line: Some(3),
+                source_kind: None,
             }],
         }],
         &[NewProposalSource {
@@ -240,10 +242,12 @@ fn resolve_proposal_cmd_partial_approval() {
                 target_id: None,
                 payload: serde_json::json!({ "body": "Keep", "tags": [], "confidence": "inferred" }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "x".into(),
-                    start_line: 1,
-                    end_line: 1,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
                 }],
             },
             NewProposalItem {
@@ -252,10 +256,12 @@ fn resolve_proposal_cmd_partial_approval() {
                 target_id: None,
                 payload: serde_json::json!({ "body": "Drop", "tags": [], "confidence": "inferred" }),
                 evidence: vec![StoredEvidenceChunk {
-                    chunk_id,
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
                     quote: "x".into(),
-                    start_line: 1,
-                    end_line: 1,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
                 }],
             },
         ],
