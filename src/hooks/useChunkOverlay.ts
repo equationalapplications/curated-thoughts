@@ -12,13 +12,10 @@ export interface ChunkOverlayRect {
 export type BlockLineRange = readonly [startLine: number, endLine: number];
 
 /** Map of `BlockNote` block id → (startLine, endLine) in the original
- * markdown source. The EditorPane builds this once per doc-load by
- * walking the markdown source alongside the parsed BlockNote blocks
- * and writing it onto each block's DOM element as `data-start-line` /
- * `data-end-line` attributes.
- *
- * The hook reads it back via the cached block-id list — no DOM walks
- * needed for the rect on scroll. */
+ * markdown source. Built once per doc-load in EditorPane from a parallel
+ * walk of the markdown source alongside the BlockNote block array; this
+ * map is the single source of truth for line ranges used by the
+ * overlay rect calculation. */
 export type BlockLineMap = Map<string, BlockLineRange>;
 
 export interface UseChunkOverlayResult {
@@ -54,19 +51,17 @@ export function useChunkOverlay(
   const [status, setStatus] = useState<ChunkOverlayStatus>("idle");
   const [overlay, setOverlay] = useState<ChunkOverlayRect | null>(null);
   const [range, setRange] = useState<{ startLine: number; endLine: number } | null>(null);
-  const cancelledRef = useRef(false);
   /** Cached block ids matching the current `range`. Populated by the
    * rect-computation effect; read by the scroll listener (so we don't
    * re-query `[data-id]` on every scroll event). */
   const cachedBlockIdsRef = useRef<string[]>([]);
-  /** Latest lineMap, accessed by the scroll listener without forcing
-   * the listener to re-subscribe on every EditorPane re-render. */
-  const lineMapRef = useRef<BlockLineMap>(lineMap);
-  lineMapRef.current = lineMap;
 
   // Effect A: IPC resolution — depends only on (path, hash).
+  // The cancellation flag is captured per-effect-run so a stale
+  // response from a previous (path, hash) cannot overwrite the
+  // current overlay.
   useEffect(() => {
-    cancelledRef.current = false;
+    let cancelled = false;
     if (!hash) {
       setStatus("idle");
       setOverlay(null);
@@ -80,7 +75,7 @@ export function useChunkOverlay(
     cachedBlockIdsRef.current = [];
     resolveChunkOverlay(path ?? "", hash)
       .then((res) => {
-        if (cancelledRef.current) return;
+        if (cancelled) return;
         if (!res) {
           setStatus("source-moved");
           return;
@@ -90,11 +85,11 @@ export function useChunkOverlay(
         // is computed (or falls back to source-moved).
       })
       .catch(() => {
-        if (cancelledRef.current) return;
+        if (cancelled) return;
         setStatus("source-moved");
       });
     return () => {
-      cancelledRef.current = true;
+      cancelled = true;
     };
   }, [path, hash]);
 
@@ -111,7 +106,7 @@ export function useChunkOverlay(
 
     const attempt = () => {
       if (cancelled) return;
-      const ids = findOverlappingBlocks(range, lineMapRef.current);
+      const ids = findOverlappingBlocks(range, lineMap);
       cachedBlockIdsRef.current = ids;
       const rect = computeRectFromBlockIds(ids, container);
       if (rect) {

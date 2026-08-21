@@ -33,6 +33,10 @@ struct NumberedChunk {
     text: String,
     start_line: i64,
     end_line: i64,
+    /// Stable SHA-256 first-16-bytes hex. Carried into evidence so
+    /// pending proposals survive chunk replacement — `chunk_id` may
+    /// orphan but `content_hash` resolves through the Phase 9 index.
+    content_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -232,10 +236,10 @@ fn load_numbered_chunks(conn: &Connection, source_chunks: &[ChunkRow]) -> Result
         if !seen_chunk_ids.insert(chunk.id) {
             continue;
         }
-        let doc_id: i64 = conn.query_row(
-            "SELECT doc_id FROM chunks WHERE id = ?1",
+        let (doc_id, content_hash): (i64, String) = conn.query_row(
+            "SELECT doc_id, content_hash FROM chunks WHERE id = ?1",
             [chunk.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let label = format!("C{}", out.len() + 1);
         out.push(NumberedChunk {
@@ -245,6 +249,7 @@ fn load_numbered_chunks(conn: &Connection, source_chunks: &[ChunkRow]) -> Result
             text: chunk.text.clone(),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
+            content_hash,
         });
     }
 
@@ -278,7 +283,7 @@ fn load_numbered_chunks(conn: &Connection, source_chunks: &[ChunkRow]) -> Result
                 continue;
             }
             let row = conn.query_row(
-                "SELECT doc_id, chunk_text, start_line, end_line FROM chunks WHERE id = ?1",
+                "SELECT doc_id, chunk_text, start_line, end_line, content_hash FROM chunks WHERE id = ?1",
                 [chunk_id],
                 |r| {
                     Ok((
@@ -286,10 +291,11 @@ fn load_numbered_chunks(conn: &Connection, source_chunks: &[ChunkRow]) -> Result
                         r.get::<_, String>(1)?,
                         r.get::<_, i64>(2)?,
                         r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
                 },
             );
-            if let Ok((doc_id, text, start_line, end_line)) = row {
+            if let Ok((doc_id, text, start_line, end_line, content_hash)) = row {
                 let label = format!("C{}", out.len() + 1);
                 out.push(NumberedChunk {
                     label,
@@ -298,6 +304,7 @@ fn load_numbered_chunks(conn: &Connection, source_chunks: &[ChunkRow]) -> Result
                     text,
                     start_line,
                     end_line,
+                    content_hash,
                 });
             }
         }
@@ -530,7 +537,7 @@ fn resolve_evidence(
         if let Some(chunk) = chunk_by_label.get(normalized) {
             out.push(StoredEvidenceChunk {
                 chunk_id: Some(chunk.chunk_id),
-                content_hash: String::new(),
+                content_hash: chunk.content_hash.clone(),
                 quote: chunk.text.clone(),
                 start_line: Some(chunk.start_line as i32),
                 end_line: Some(chunk.end_line as i32),
@@ -990,6 +997,14 @@ mod tests {
             strategy: ChunkStrategyTag::Prose,
         };
         let chunk_id = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
+        // Backfill the post-migration content_hash so resolve_evidence
+        // can persist a real hash onto proposal evidence.
+        let hash = crate::db::chunk_hash::compute_chunk_hash(text, path, 0);
+        conn.execute(
+            "UPDATE chunks SET content_hash = ?1 WHERE id = ?2",
+            params![hash, chunk_id],
+        )
+        .unwrap();
         (doc_id, chunk_id)
     }
 
@@ -1023,6 +1038,7 @@ mod tests {
             text: "quote".into(),
             start_line: 1,
             end_line: 2,
+            content_hash: "a".repeat(32),
         }];
         let candidates = vec![CandidateEntity {
             id: "ent-1".into(),
@@ -1086,6 +1102,7 @@ mod tests {
             text: "quote".into(),
             start_line: 1,
             end_line: 2,
+            content_hash: "a".repeat(32),
         }];
         let raw = LlmSynthesisOutput {
             proposals: vec![LlmProposal {
@@ -1131,6 +1148,7 @@ mod tests {
             text: "quote".into(),
             start_line: 1,
             end_line: 2,
+            content_hash: "a".repeat(32),
         }];
         let raw = LlmSynthesisOutput {
             proposals: vec![LlmProposal {
@@ -1270,6 +1288,27 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].target_name, "Alpha");
         assert_eq!(queue[0].item_counts.facts, 1);
+
+        // Phase 9: persisted evidence must carry the source chunk's
+        // `content_hash` so a later chunk replacement (which re-issues
+        // the rowid) cannot orphan the proposal's anchor.
+        let evidence_json: String = conn
+            .query_row(
+                "SELECT evidence FROM curated_proposal_items
+                 WHERE proposal_id = ?1",
+                [queue[0].id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let evidence: serde_json::Value = serde_json::from_str(&evidence_json).unwrap();
+        let entry = evidence.as_array().unwrap()[0].as_object().unwrap();
+        let hash = entry.get("content_hash").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            hash.len(),
+            32,
+            "persisted evidence content_hash must be the 32-char hex"
+        );
+        assert_ne!(hash, "", "persisted evidence content_hash must not be empty");
     }
 
     #[test]

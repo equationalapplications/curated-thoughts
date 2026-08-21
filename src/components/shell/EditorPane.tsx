@@ -4,7 +4,6 @@ import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
 import { readDocument, saveWikiPage } from "../../lib/tauri";
 import { useTheme } from "../../lib/ThemeContext";
-import { escapeSelector } from "../../lib/cssEscape";
 import {
   useChunkOverlay,
   type BlockLineMap,
@@ -33,6 +32,14 @@ interface Props {
  * BlockNote's `tryParseMarkdownToBlocks` and this walk split the
  * document at the same boundaries, so block index `i` in `blocks`
  * corresponds to range index `i` in the returned array.
+ *
+ * **Known limitation:** tight lists (no blank lines between items),
+ * tables, and multi-paragraph blockquotes parse into different
+ * block counts in BlockNote than this walker produces. The
+ * alignment breaks for those shapes and the overlay will land on
+ * the wrong region. The hook falls back to the source-moved badge
+ * when no blocks cover the resolved range, so the failure is
+ * visible rather than silent.
  */
 function computeMarkdownLineRanges(
   content: string,
@@ -63,14 +70,17 @@ function computeMarkdownLineRanges(
 }
 
 /** Build the blockId → (startLine, endLine) map by index-aligning the
- * markdown ranges with the BlockNote blocks array. */
+ * markdown ranges with the BlockNote blocks array. When the counts
+ * disagree, we stop at the shorter array so any extra BlockNote
+ * blocks get no range (the hook then surfaces source-moved). */
 function buildBlockLineMap(
   content: string,
   blocks: Array<{ id: string }>,
 ): BlockLineMap {
   const ranges = computeMarkdownLineRanges(content);
   const map: BlockLineMap = new Map();
-  for (let i = 0; i < blocks.length && i < ranges.length; i++) {
+  const len = Math.min(blocks.length, ranges.length);
+  for (let i = 0; i < len; i++) {
     const range: BlockLineRange = [
       ranges[i].startLine,
       ranges[i].endLine,
@@ -78,25 +88,6 @@ function buildBlockLineMap(
     map.set(blocks[i].id, range);
   }
   return map;
-}
-
-/** Walk every entry in `lineMap`, look up the matching BlockNote DOM
- * node under `root` by `[data-id]`, and stamp `data-start-line` /
- * `data-end-line` onto it. BlockNote does not generate these
- * attributes on its own; we add them at parse time so the overlay
- * hook can read line metadata straight from the DOM. */
-function injectLineAttributesIntoDom(
-  root: HTMLElement,
-  lineMap: BlockLineMap,
-): void {
-  for (const [id, [start, end]] of lineMap) {
-    const node = root.querySelector<HTMLElement>(
-      `[data-id="${escapeSelector(id)}"]`,
-    );
-    if (!node) continue;
-    node.setAttribute("data-start-line", String(start));
-    node.setAttribute("data-end-line", String(end));
-  }
 }
 
 export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props) {
@@ -110,11 +101,6 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
   // `null` until the next path/hash change).
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const [lineMap, setLineMap] = useState<BlockLineMap>(new Map());
-  // Mirror of `container` for the doc-load rAF callback. The doc-load
-  // effect must NOT depend on `container` (its mount would otherwise
-  // re-fire readDocument and clobber the cancellation race-test), so
-  // this ref is kept in sync via a separate effect.
-  const containerRef = useRef<HTMLElement | null>(null);
   const overlayDismissTimerRef = useRef<number | undefined>(undefined);
   // Local dismissal flag: when true, the line overlay is hidden even if
   // `useChunkOverlay` still reports `"visible"`. The hook's status is a
@@ -131,8 +117,7 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
 
   // Doc-load effect: re-runs only on `selectedDoc` change. After the
   // markdown is parsed into BlockNote blocks, we compute the line map
-  // and inject data-start-line / data-end-line attributes onto the
-  // BlockNote DOM on the next frame (so BlockNote has time to render).
+  // once and hand it to the overlay hook.
   useEffect(() => {
     if (!selectedDoc) {
       setLoadError(null);
@@ -153,16 +138,10 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
         if (cancelled) return;
         editor.replaceBlocks(editor.document, blocks);
         if (cancelled) return;
-        // Compute the line map and inject DOM attributes on the next
-        // animation frame so BlockNote has rendered its blocks.
-        const newMap = buildBlockLineMap(content, blocks);
-        setLineMap(newMap);
-        requestAnimationFrame(() => {
-          if (cancelled) return;
-          const root = containerRef.current;
-          if (!root) return;
-          injectLineAttributesIntoDom(root, newMap);
-        });
+        // Compute the line map from the markdown source. The hook reads
+        // line ranges from this map (not from DOM attributes) so no DOM
+        // stamping is needed.
+        setLineMap(buildBlockLineMap(content, blocks));
       })
       .catch((err) => {
         if (cancelled) return;
@@ -175,26 +154,20 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
     };
   }, [selectedDoc, editor]);
 
-  // Mirror `container` state into `containerRef` so the doc-load rAF
-  // can read the latest mounted element without the doc-load effect
-  // having to depend on `container` (which would re-fire readDocument
-  // on mount and break the cancellation race-test).
-  useEffect(() => {
-    containerRef.current = container;
-  }, [container]);
-
-  // Auto-dismiss the overlay 1.5s after it becomes visible.
+  // Auto-dismiss the overlay 1.5s after it becomes visible. Any
+  // non-visible status is treated as a fresh presentation decision —
+  // we clear the previous auto-dismissal so the source-moved notice
+  // can render even after a visible overlay has timed out.
   useEffect(() => {
     if (overlayStatus !== "visible") {
       if (overlayDismissTimerRef.current !== undefined) {
         window.clearTimeout(overlayDismissTimerRef.current);
         overlayDismissTimerRef.current = undefined;
       }
+      setDismissed(false);
       return;
     }
     // Fresh visible overlay → ensure not pre-dismissed by a prior render.
-    // (Anchor transitions route through `idle` first inside the hook, so
-    // this effect re-runs and resets `dismissed` for each new overlay.)
     setDismissed(false);
     overlayDismissTimerRef.current = window.setTimeout(() => {
       overlayDismissTimerRef.current = undefined;

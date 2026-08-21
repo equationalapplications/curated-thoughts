@@ -82,14 +82,7 @@ vi.mock("@blocknote/mantine", () => ({
   BlockNoteView: ({ editor }: { editor: typeof editorMock }) => (
     <div data-testid="blocknote">
       {editor.document.map((b: MockBlock) => (
-        <div
-          key={b.id}
-          data-id={b.id}
-          {...((globalThis as { __BLOKCNOTE_HAS_LINE_ATTRS__?: boolean })
-            .__BLOKCNOTE_HAS_LINE_ATTRS__
-            ? { "data-start-line": "1", "data-end-line": "1" }
-            : {})}
-        />
+        <div key={b.id} data-id={b.id} />
       ))}
     </div>
   ),
@@ -180,12 +173,6 @@ test("renders line-range overlay when resolveChunkOverlay returns line range", a
     }
     return Promise.resolve(null);
   });
-  // The EditorPane injects data-start-line / data-end-line attributes
-  // onto the blocknote DOM nodes itself (see injectLineAttributesIntoDom
-  // in EditorPane.tsx). The mock here does not render those attrs, but
-  // the inject step adds them on the next animation frame after parse.
-  // Once they're present, the hook's rect computation succeeds and the
-  // overlay renders.
   renderWithTheme(
     <EditorPane
       selectedDoc="documents/notes.md"
@@ -277,9 +264,6 @@ test("renders source-moved-notice when line range past EOF cannot map", async ()
 });
 
 test("auto-dismisses overlay after 1.5s when visible", async () => {
-  // Toggle a global flag the @blocknote/mantine mock (above) checks to
-  // decide whether to render data-start-line / data-end-line attributes.
-  (globalThis as { __BLOKCNOTE_HAS_LINE_ATTRS__?: boolean }).__BLOKCNOTE_HAS_LINE_ATTRS__ = true;
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === "read_document") return Promise.resolve("Block body.");
     if (cmd === "resolve_chunk_overlay") {
@@ -309,7 +293,47 @@ test("auto-dismisses overlay after 1.5s when visible", async () => {
   // overlay must be gone.
   await new Promise((resolve) => setTimeout(resolve, 1600));
   expect(screen.queryByTestId("editor-line-overlay")).not.toBeInTheDocument();
-  (globalThis as { __BLOKCNOTE_HAS_LINE_ATTRS__?: boolean }).__BLOKCNOTE_HAS_LINE_ATTRS__ = false;
+});
+
+test("re-shows source-moved-notice after a visible overlay auto-dismisses", async () => {
+  // Regression test: the auto-dismiss timer sets `dismissed = true`
+  // after 1.5s. If a later anchor resolves to `source-moved`, the
+  // presentation effect must reset `dismissed` so the notice can
+  // render — otherwise the user sees nothing after the visible
+  // overlay times out.
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "read_document") return Promise.resolve("Some body text.");
+    if (cmd === "resolve_chunk_overlay") return Promise.resolve(null);
+    return Promise.resolve(null);
+  });
+  const { rerender } = renderWithTheme(
+    <EditorPane
+      selectedDoc="documents/notes.md"
+      isWiki={false}
+      anchorChunkId={HASH_42}
+    />,
+  );
+  await waitFor(() => expect(screen.getByTestId("blocknote")).toBeInTheDocument());
+  // First anchor: resolves to source-moved, the notice appears.
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
+  // Dismiss it via the × button.
+  fireEvent.click(screen.getByRole("button", { name: /×/u }));
+  await waitFor(() =>
+    expect(screen.queryByText(/source may have moved/i)).not.toBeInTheDocument(),
+  );
+  // Now switch to a different anchor that also resolves to source-moved.
+  rerender(
+    <ThemeProvider>
+      <EditorPane
+        selectedDoc="documents/notes.md"
+        isWiki={false}
+        anchorChunkId={HASH_MISSING}
+      />
+    </ThemeProvider>,
+  );
+  // The notice must re-appear because the new status is a fresh
+  // presentation decision that resets `dismissed` to false.
+  expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
 });
 
 test("ignores stale doc-load resolution after selectedDoc changes", async () => {

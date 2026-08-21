@@ -10,7 +10,6 @@
 
 use crate::chunker::{chunk_autodetect, Chunk};
 use crate::db::chunk_hash::compute_chunk_hash;
-use crate::db::queries::upsert_document;
 use crate::pipeline::entity_id_for_path;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -40,26 +39,18 @@ pub fn chunks_have_content_hash(conn: &Connection) -> Result<bool> {
 /// One-time content_hash migration. See module docs.
 pub fn run_chunk_hash_migration(
     conn: &mut Connection,
+    vault_root: Option<&str>,
     emit: impl Fn(MigrationProgress),
 ) -> Result<()> {
     let tx = conn.transaction()?;
 
-    // Phase 0: snapshot every legacy chunk rowid, every embedding, and every
-    // curated_relationship edge that touches those chunks. The FK CASCADE on
-    // `chunks.id` (see schema.rs:53,106-107) will DELETE these rows when we
-    // DELETE chunks per-doc; we must capture them first and re-INSERT after
-    // the new chunks are issued.
-    let all_legacy_rowids: Vec<i64> = {
-        let mut stmt = tx.prepare("SELECT id FROM chunks")?;
-        let rows = stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-
-    let legacy_embeddings: Vec<(i64, Vec<u8>)> = capture_embeddings(&tx, &all_legacy_rowids)?;
+    // Phase 0: snapshot every embedding and every curated_relationship
+    // edge. The FK CASCADE on `chunks.id` (see schema.rs:53,106-107)
+    // DELETEs these rows when we DELETE chunks per-doc; we must capture
+    // them first and re-INSERT after the new chunks are issued.
+    let legacy_embeddings: Vec<(i64, Vec<u8>)> = capture_embeddings(&tx)?;
     let legacy_relationships: Vec<(i64, i64, String, String, String, i64)> =
-        capture_relationships(&tx, &all_legacy_rowids)?;
+        capture_relationships(&tx)?;
 
     // Phase 1: enumerate documents.
     let docs: Vec<(i64, String)> = {
@@ -80,21 +71,39 @@ pub fn run_chunk_hash_migration(
     let mut legacy_rowid_to_hash: HashMap<i64, String> = HashMap::new();
 
     for (idx, (doc_id, path)) in docs.iter().enumerate() {
-        let text = std::fs::read_to_string(Path::new(path))
-            .with_context(|| format!("read {path} for chunk-hash migration"))?;
+        let text = match std::fs::read_to_string(Path::new(path)) {
+            Ok(t) => t,
+            Err(e) => {
+                // A `documents` row can survive the file being deleted or
+                // moved (the watcher purges missing files only after it
+                // starts; see `start_file_watcher_inner`). Skipping the
+                // doc leaves its chunks with empty `content_hash`; the
+                // splash screen will still fire briefly on each startup
+                // until the doc is re-indexed, but the migration no
+                // longer aborts and permanently strands the user.
+                eprintln!("[chunk-hash-migration] skip unreadable {path}: {e}");
+                emit(MigrationProgress { current: idx + 1, total, phase: "rechunk" });
+                continue;
+            }
+        };
         let chunks: Vec<Chunk> = chunk_autodetect(Path::new(path), &text);
 
-        // Capture legacy rowids in insertion (position) order before
-        // deleting the doc's chunks.
-        let legacy_rowids_by_position: Vec<i64> = {
+        // Capture (legacy rowid, chunk_text) tuples in insertion order
+        // before deleting the doc's chunks. We keep the text so the
+        // content-based remap below can match legacy chunks against the
+        // freshly-chunked output by source text rather than position.
+        let mut legacy_chunks_by_text: HashMap<String, Vec<i64>> = {
             let mut stmt = tx.prepare(
-                "SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY position",
+                "SELECT id, chunk_text FROM chunks WHERE doc_id = ?1 ORDER BY position",
             )?;
-            let collected = stmt
-                .query_map([doc_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            collected
+            let mut map: HashMap<String, Vec<i64>> = HashMap::new();
+            let mut rows = stmt.query([doc_id])?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                let text: String = row.get(1)?;
+                map.entry(text).or_default().push(id);
+            }
+            map
         };
 
         tx.execute("DELETE FROM chunks WHERE doc_id = ?1", [doc_id])?;
@@ -114,18 +123,25 @@ pub fn run_chunk_hash_migration(
                     chunk.symbol_name,
                     chunk.strategy.as_db_str(),
                     chunk.defined_symbol,
-                    entity_id_for_path(path, None),
+                    entity_id_for_path(path, vault_root),
                     hash,
                 ],
             )?;
             let new_chunk_id = tx.last_insert_rowid();
-            // Legacy rowid at position i maps to the new rowid + content_hash.
-            // If the legacy chunk count differs from the new count, the
-            // tail of legacy rowids has no mapping and the rewrite phase
-            // drops the orphan evidence entries.
-            if let Some(&legacy_rowid) = legacy_rowids_by_position.get(i) {
-                legacy_rowid_to_new_rowid.insert(legacy_rowid, new_chunk_id);
-                legacy_rowid_to_hash.insert(legacy_rowid, hash);
+            // Content-based remap: a new chunk's text can be matched
+            // against any legacy rowid that carried the same text. If
+            // multiple legacy chunks shared this text we assign them in
+            // FIFO order so each evidence entry receives the first still
+            // available hash. Legacy rowids that no longer have a
+            // matching chunk (text edited / removed) are left unmapped
+            // and the rewrite phase writes an empty `content_hash` for
+            // their evidence.
+            if let Some(legacy_rowids) = legacy_chunks_by_text.get_mut(&chunk.text) {
+                if let Some(legacy_rowid) = legacy_rowids.first().copied() {
+                    legacy_rowids.remove(0);
+                    legacy_rowid_to_new_rowid.insert(legacy_rowid, new_chunk_id);
+                    legacy_rowid_to_hash.insert(legacy_rowid, hash);
+                }
             }
         }
 
@@ -220,65 +236,33 @@ pub fn run_chunk_hash_migration(
     Ok(())
 }
 
-/// Capture `(chunk_id, vector)` for every embedding whose chunk_id is in the
-/// given legacy-rowid set. Returns an empty vec when the set is empty.
+/// Capture `(chunk_id, vector)` for every embedding. Returns an empty
+/// vec when the table is empty. We capture the entire table — the
+/// `IN (...)` form on the legacy rowid set would otherwise blow past
+/// `SQLITE_MAX_VARIABLE_NUMBER` for large corpora and abort the
+/// migration on every start.
 fn capture_embeddings(
     tx: &rusqlite::Transaction<'_>,
-    legacy_rowids: &[i64],
 ) -> Result<Vec<(i64, Vec<u8>)>> {
-    if legacy_rowids.is_empty() {
-        return Ok(vec![]);
-    }
-    let placeholders = std::iter::repeat("?")
-        .take(legacy_rowids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT chunk_id, vector FROM embeddings WHERE chunk_id IN ({})",
-        placeholders
-    );
-    let params: Vec<&dyn rusqlite::ToSql> = legacy_rowids
-        .iter()
-        .map(|x| x as &dyn rusqlite::ToSql)
-        .collect();
-    let rows = tx
-        .prepare(&sql)?
-        .query_map(&params[..], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?
+    let mut stmt = tx.prepare("SELECT chunk_id, vector FROM embeddings")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// Capture every relationship edge that touches any legacy rowid as either
-/// `from_id` or `to_id`. Returns an empty vec when the set is empty.
+/// Capture every curated_relationship edge. Same rationale as
+/// `capture_embeddings`: a full-table scan avoids the unbounded
+/// `IN (?,?,...)` placeholder list.
 fn capture_relationships(
     tx: &rusqlite::Transaction<'_>,
-    legacy_rowids: &[i64],
 ) -> Result<Vec<(i64, i64, String, String, String, i64)>> {
-    if legacy_rowids.is_empty() {
-        return Ok(vec![]);
-    }
-    let placeholders = std::iter::repeat("?")
-        .take(legacy_rowids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
+    let mut stmt = tx.prepare(
         "SELECT from_id, to_id, rel_type, symbol, entity_id, created_at
-         FROM curated_relationships
-         WHERE from_id IN ({0}) OR to_id IN ({0})",
-        placeholders
-    );
-    // Each legacy rowid binds twice (once for the from_id IN clause, once
-    // for the to_id IN clause).
-    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(legacy_rowids.len() * 2);
-    for id in legacy_rowids {
-        params.push(id as &dyn rusqlite::ToSql);
-        params.push(id as &dyn rusqlite::ToSql);
-    }
-    let rows = tx
-        .prepare(&sql)?
-        .query_map(&params[..], |r| {
+         FROM curated_relationships",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
@@ -296,6 +280,7 @@ fn capture_relationships(
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
+    use crate::db::queries::upsert_document;
     use std::sync::{Arc, Mutex};
 
     /// Collect every progress event into a vec for assertion.
@@ -369,7 +354,7 @@ mod tests {
         seed_chunk_with_legacy_id(&conn, doc_id, 101, "legacy-b", 3, 3);
 
         let (emit, log) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
 
         let populated: i64 = conn
             .query_row(
@@ -401,7 +386,7 @@ mod tests {
         seed_entry_with_source_ref(&conn, "fact-mig", source_ref);
 
         let (emit, _log) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
 
         let new_ref: String = conn
             .query_row(
@@ -437,7 +422,7 @@ mod tests {
         );
 
         let (emit1, _) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit1).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit1).unwrap();
         let first_hash: String = conn
             .query_row(
                 "SELECT source_ref FROM llm_wiki_entries WHERE id = 'fact-idem'",
@@ -446,7 +431,7 @@ mod tests {
             )
             .unwrap();
         let (emit2, _) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit2).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit2).unwrap();
         let second_hash: String = conn
             .query_row(
                 "SELECT source_ref FROM llm_wiki_entries WHERE id = 'fact-idem'",
@@ -471,7 +456,7 @@ mod tests {
         }
 
         let (emit, log) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
         let events = log.lock().unwrap();
         let rechunk_cur: Vec<usize> = events
             .iter()
@@ -484,17 +469,18 @@ mod tests {
     }
 
     #[test]
-    fn run_chunk_hash_migration_rolls_back_on_failure() {
-        // Build a doc that does not exist on disk so chunk_autodetect's
-        // read inside run_chunk_hash_migration fails. The transaction
-        // must roll back, leaving chunks.content_hash empty.
+    fn run_chunk_hash_migration_completes_when_only_unreadable_docs_exist() {
+        // Edge case: every doc is unreadable. The migration must
+        // complete (not error) and leave all chunks with empty
+        // `content_hash`. The splash gate then keeps firing on each
+        // startup until the user restores the missing files; this is
+        // documented behaviour rather than a permanent failure.
         let mut conn = open_in_memory().unwrap();
         let doc_id = seed_doc(&conn, "/nonexistent/doc.md");
         seed_chunk_with_legacy_id(&conn, doc_id, 500, "x", 1, 1);
 
         let (emit, _) = capture_progress();
-        let result = run_chunk_hash_migration(&mut conn, emit);
-        assert!(result.is_err(), "must error when doc is unreadable");
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
         let empty_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM chunks WHERE content_hash = ''",
@@ -502,7 +488,54 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(empty_count, 1, "chunks.content_hash must be unchanged after rollback");
+        assert_eq!(
+            empty_count, 1,
+            "unreadable doc's chunks remain empty by design"
+        );
+    }
+
+    #[test]
+    fn run_chunk_hash_migration_skips_unreadable_documents() {
+        // A document row whose file is missing must not abort the
+        // migration; the other docs must still get their hashes
+        // populated.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let good_path = tmp.path().join("documents").join("good.md");
+        std::fs::create_dir_all(good_path.parent().unwrap()).unwrap();
+        std::fs::write(&good_path, "Good body.").unwrap();
+        let good_path_str = good_path.to_string_lossy().to_string();
+
+        let mut conn = open_in_memory().unwrap();
+        let good_doc = seed_doc(&conn, &good_path_str);
+        let bad_doc = seed_doc(&conn, "/nonexistent/doc.md");
+        seed_chunk_with_legacy_id(&conn, good_doc, 600, "Good body.", 1, 1);
+        seed_chunk_with_legacy_id(&conn, bad_doc, 601, "x", 1, 1);
+
+        let (emit, _) = capture_progress();
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
+
+        let good_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE doc_id = ?1",
+                [good_doc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !good_hash.is_empty(),
+            "readable doc must have its content_hash populated"
+        );
+        let bad_empty: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id = ?1 AND content_hash = ''",
+                [bad_doc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            bad_empty, 1,
+            "unreadable doc's chunks are intentionally left empty"
+        );
     }
 
     #[test]
@@ -542,10 +575,30 @@ mod tests {
         std::fs::write(&doc_path, &long_text).unwrap();
         let path_str = doc_path.to_string_lossy().to_string();
 
+        // Content-based remap requires the seeded legacy text to match
+        // the chunker's output. Pre-compute the chunks the chunker will
+        // produce and seed legacy rows with their exact `chunk_text`.
+        let expected_chunks = chunk_autodetect(&doc_path, &long_text);
+        assert_eq!(expected_chunks.len(), 2, "chunker must produce 2 chunks");
+
         let mut conn = open_in_memory().unwrap();
         let doc_id = seed_doc(&conn, &path_str);
-        seed_chunk_with_legacy_id(&conn, doc_id, 600, "legacy-a", 1, 1);
-        seed_chunk_with_legacy_id(&conn, doc_id, 601, "legacy-b", 3, 3);
+        seed_chunk_with_legacy_id(
+            &conn,
+            doc_id,
+            600,
+            &expected_chunks[0].text,
+            expected_chunks[0].start_line as i64,
+            expected_chunks[0].end_line as i64,
+        );
+        seed_chunk_with_legacy_id(
+            &conn,
+            doc_id,
+            601,
+            &expected_chunks[1].text,
+            expected_chunks[1].start_line as i64,
+            expected_chunks[1].end_line as i64,
+        );
         // Distinct vectors per legacy chunk so we can verify mapping.
         let vec_a: Vec<f32> = vec![1.0_f32, 2.0, 3.0, 4.0];
         let vec_b: Vec<f32> = vec![5.0_f32, 6.0, 7.0, 8.0];
@@ -563,7 +616,7 @@ mod tests {
         .unwrap();
 
         let (emit, _) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
 
         // Every embedding that pointed at legacy rowid 600 or 601 must
         // survive (now pointing at the new rowids). Vector bytes must be
@@ -613,10 +666,29 @@ mod tests {
         std::fs::write(&doc_path, &long_text).unwrap();
         let path_str = doc_path.to_string_lossy().to_string();
 
+        // Content-based remap requires the seeded legacy text to match
+        // the chunker's output exactly.
+        let expected_chunks = chunk_autodetect(&doc_path, &long_text);
+        assert_eq!(expected_chunks.len(), 2);
+
         let mut conn = open_in_memory().unwrap();
         let doc_id = seed_doc(&conn, &path_str);
-        seed_chunk_with_legacy_id(&conn, doc_id, 700, "legacy-a", 1, 1);
-        seed_chunk_with_legacy_id(&conn, doc_id, 701, "legacy-b", 3, 3);
+        seed_chunk_with_legacy_id(
+            &conn,
+            doc_id,
+            700,
+            &expected_chunks[0].text,
+            expected_chunks[0].start_line as i64,
+            expected_chunks[0].end_line as i64,
+        );
+        seed_chunk_with_legacy_id(
+            &conn,
+            doc_id,
+            701,
+            &expected_chunks[1].text,
+            expected_chunks[1].start_line as i64,
+            expected_chunks[1].end_line as i64,
+        );
         // Edge from chunk 700 → chunk 701, plus a self-edge on 700 for coverage.
         conn.execute(
             "INSERT INTO curated_relationships (from_id, to_id, rel_type, symbol, entity_id, created_at)
@@ -632,7 +704,7 @@ mod tests {
         .unwrap();
 
         let (emit, _) = capture_progress();
-        run_chunk_hash_migration(&mut conn, emit).unwrap();
+        run_chunk_hash_migration(&mut conn, None, emit).unwrap();
 
         // Both edges must still exist; the from_id/to_id must point at the
         // NEW rowids, not the legacy ones.
