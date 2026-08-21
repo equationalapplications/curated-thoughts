@@ -2229,6 +2229,22 @@ fn ingest_document_cmd(
     run_ingest_with_app(&app, &db.0, &embed_profile.0, path)
 }
 
+/// Phase 9: gate query so the frontend knows whether to mount the
+/// `SplashScreen` and wait for `migration-complete`. Returns `true` when
+/// at least one chunk row is missing `content_hash` (i.e. the one-time
+/// chunk-hash migration still has work to do). The migration itself is
+/// dispatched by the `setup` hook at startup; this command is the
+/// read-side companion the frontend polls on mount. Defaults to `true`
+/// on error so the splash mounts and the user at least sees a stuck UI
+/// rather than a silent dead-load if the gate query itself fails.
+#[tauri::command]
+fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bool, String> {
+    let guard = db.0.lock().map_err(|e| format!("db lock poisoned: {e}"))?;
+    crate::db::migration::chunks_have_content_hash(&guard.0)
+        .map(|ok| !ok)
+        .map_err(|e| e.to_string())
+}
+
 /// Synchronous ingest + progress event emitter. Extracted from
 /// `ingest_document_cmd` so the event-emission sequence can be exercised in a
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
@@ -2328,6 +2344,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_binary_path,
             get_brain_dir,
             commands::chunks::resolve_chunk_overlay_cmd,
+            needs_chunk_hash_migration,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -2643,6 +2660,7 @@ pub fn run() {
             get_brain_dir,
             commands::chunks::resolve_chunk_overlay_cmd,
             ingest_document_cmd,
+            needs_chunk_hash_migration,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

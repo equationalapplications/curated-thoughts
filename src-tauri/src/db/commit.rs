@@ -221,7 +221,10 @@ pub(crate) fn fact_title_from_body(body: &str) -> String {
 /// source of truth — the proposal's in-memory value (which may be empty for
 /// legacy fixtures) is preferred only when non-empty, otherwise we look up
 /// the chunk row. Returns an empty string when the chunk row is missing so
-/// stale proposals don't surface a bogus hash.
+/// stale proposals don't surface a bogus hash. Real SQLite errors from the
+/// lookup propagate as `Err` rather than being silently swallowed — a
+/// poisoned connection or schema drift should fail the commit, not write
+/// an empty hash into `source_ref`.
 fn evidence_json_with_hashes(
     conn: &Connection,
     proposal_id: &str,
@@ -234,12 +237,18 @@ fn evidence_json_with_hashes(
         let resolved_hash: String = if !e.content_hash.is_empty() {
             e.content_hash.clone()
         } else if let Some(cid) = e.chunk_id {
-            conn.query_row(
-                "SELECT content_hash FROM chunks WHERE id = ?1",
-                [cid],
-                |r| r.get(0),
-            )
-            .unwrap_or_default()
+            // `.optional()` collapses the "row missing" case to `Ok(None)`
+            // (legitimate — stale proposals reference chunks that no
+            // longer exist) while letting rusqlite errors propagate so a
+            // poisoned connection or schema drift fails the commit.
+            let from_row: Option<String> = conn
+                .query_row(
+                    "SELECT content_hash FROM chunks WHERE id = ?1",
+                    [cid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            from_row.unwrap_or_default()
         } else {
             String::new()
         };

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { resolveChunkOverlay } from "../lib/tauri";
+import { escapeSelector } from "../lib/cssEscape";
 
 export type ChunkOverlayStatus = "idle" | "source-moved" | "visible";
 
@@ -214,11 +215,4 @@ function computeRectFromBlockIds(
   }
   if (minTop === null || maxBottom === null) return null;
   return { top: minTop, height: Math.max(0, maxBottom - minTop) };
-}
-
-function escapeSelector(s: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(s);
-  }
-  return s.replace(/(["\\\]])/g, "\\$1");
 }
