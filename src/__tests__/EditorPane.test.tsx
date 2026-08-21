@@ -282,14 +282,12 @@ test("auto-dismisses overlay after 1.5s when visible", async () => {
   );
   const overlay = await screen.findByTestId("editor-line-overlay");
   expect(overlay).toBeInTheDocument();
-  // NOTE: The EditorPane's auto-dismiss timer fires after 1500ms and
-  // sets the dismiss ref to undefined — but the timer's callback does
-  // not currently clear the overlay state (the dismiss logic is a
-  // stub pending a follow-up; see task 8's "Concerns for Task 9/10").
-  // We assert that the overlay survives the 1500ms mark for now;
-  // verifying the dismiss wiring belongs in a follow-up spec.
+  // The EditorPane's auto-dismiss effect (see EditorPane.tsx) fires a
+  // setTimeout(1500ms) when overlayStatus becomes "visible" and calls
+  // setDismissed(true), which unmounts the overlay div. After 1.6s the
+  // overlay must be gone.
   await new Promise((resolve) => setTimeout(resolve, 1600));
-  expect(screen.queryByTestId("editor-line-overlay")).toBeInTheDocument();
+  expect(screen.queryByTestId("editor-line-overlay")).not.toBeInTheDocument();
   (globalThis as { __BLOKCNOTE_HAS_LINE_ATTRS__?: boolean }).__BLOKCNOTE_HAS_LINE_ATTRS__ = false;
 });
 

@@ -122,6 +122,11 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
   // this ref is kept in sync via a separate effect.
   const containerRef = useRef<HTMLElement | null>(null);
   const overlayDismissTimerRef = useRef<number | undefined>(undefined);
+  // Local dismissal flag: when true, the line overlay is hidden even if
+  // `useChunkOverlay` still reports `"visible"`. The hook's status is a
+  // pure data signal (IPC + rect); presentation/dismissal is a concern
+  // local to the pane and lives here so the hook's contract stays narrow.
+  const [dismissed, setDismissed] = useState(false);
 
   const { status: overlayStatus, overlay } = useChunkOverlay(
     selectedDoc,
@@ -193,8 +198,13 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
       }
       return;
     }
+    // Fresh visible overlay → ensure not pre-dismissed by a prior render.
+    // (Anchor transitions route through `idle` first inside the hook, so
+    // this effect re-runs and resets `dismissed` for each new overlay.)
+    setDismissed(false);
     overlayDismissTimerRef.current = window.setTimeout(() => {
       overlayDismissTimerRef.current = undefined;
+      setDismissed(true);
     }, 1500);
     return () => {
       if (overlayDismissTimerRef.current !== undefined) {
@@ -260,8 +270,7 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
             onClick={() => {
               // Dismissing hides the badge for this navigation only; a
               // fresh navigation will re-resolve and may show it again.
-              // (We rely on overlayStatus flipping to 'idle' when the
-              // user navigates away; here we just nudge the timer.)
+              setDismissed(true);
             }}
           >
             ×
@@ -276,7 +285,7 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
       ) : (
         <BlockNoteView editor={editor} editable={isWiki} theme={theme} />
       )}
-      {overlayStatus === "visible" && overlay && (
+      {overlayStatus === "visible" && overlay && !dismissed && (
         <div
           className="editor-pane-line-overlay--anchor"
           aria-hidden="true"
