@@ -1,8 +1,8 @@
 # Chunk-Id Resolution for Library Deep-Link Highlight (Design Spec)
 
 **Date:** 2026-08-20
-**Branch:** TBD
-**Status:** Approved
+**Branch:** phase-9-chunk-id-resolution
+**Status:** Implemented
 **Anchored by:**
 - `docs/superpowers/specs/2026-08-20-phase-8-design.md` §2 (line 32 caveat) + Open Questions (line 147) — the "chunk-id → block resolution" follow-up that Phase 8 Plan A deferred.
 - `docs/superpowers/specs/2026-08-19-phase-7-plan-c-design.md` — Plan A+B shipped `EditorPane` anchor infrastructure at `src/components/shell/EditorPane.tsx:101+`; this spec replaces the heading-text-match mechanism with hash-based line-range overlay.
