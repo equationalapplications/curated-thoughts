@@ -261,7 +261,7 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
           )}
         </div>
       )}
-      {overlayStatus === "source-moved" && (
+      {overlayStatus === "source-moved" && !dismissed && (
         <div className="editor-pane-source-moved-notice" role="status">
           <span>The source may have moved since this fact was created.</span>
           <button
