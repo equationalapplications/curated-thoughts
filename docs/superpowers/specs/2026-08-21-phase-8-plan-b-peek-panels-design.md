@@ -42,9 +42,9 @@ This is the v2 of Plan B. The August 20 phase-8 design described mounting a read
 ## New Tauri command
 
 ```rust
-// src-tauri/src/commands/chunks.rs — beside resolve_chunk_overlay_cmd
+// src-tauri/src/commands/chunks.rs — beside resolve_chunk_overlay
 #[tauri::command]
-pub fn fetch_chunk_content_cmd(db: State<DbState>, path: String, hash: String)
+pub fn fetch_chunk_content(db: State<DbState>, path: String, hash: String)
     -> Result<Option<String>, String>
 ```
 
