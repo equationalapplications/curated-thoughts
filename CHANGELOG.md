@@ -1,3 +1,9 @@
+## [1.21.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.20.0...v1.21.0) (2026-08-22)
+
+### Features
+
+* **shell:** global ⌘K command palette (Phase 8 Plan C) ([#46](https://github.com/equationalapplications/curated-thoughts/issues/46)) ([90f60ca](https://github.com/equationalapplications/curated-thoughts/commit/90f60ca28a1437a5ef1b52bda7a4a1ec58933d2c))
+
 ## [1.20.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.19.0...v1.20.0) (2026-08-22)
 
 ### Features
