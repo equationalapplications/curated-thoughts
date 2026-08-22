@@ -1,3 +1,14 @@
+## [1.23.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.22.0...v1.23.0) (2026-08-22)
+
+### Features
+
+* add Curated Thoughts MCP tools for context recall and code search ([8c4d40e](https://github.com/equationalapplications/curated-thoughts/commit/8c4d40e62bb65c8afed069708de075e9dbab61b3))
+* add curated_superpowers_setup tool and Superpowers skill file ([922f4ad](https://github.com/equationalapplications/curated-thoughts/commit/922f4adccb69e240deabd59025dfae32f46aa576))
+
+### Bug Fixes
+
+* **tools:** compile curated_thoughts_mcp against rmcp 3.x / rusqlite 0.32 (params_from_iter, clone before move) ([ee661cf](https://github.com/equationalapplications/curated-thoughts/commit/ee661cfc4e9bf9d97722b3a8596e971531b558f5))
+
 ## [1.22.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.21.2...v1.22.0) (2026-08-22)
 
 ### Features
