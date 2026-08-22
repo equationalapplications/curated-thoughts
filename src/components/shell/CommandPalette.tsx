@@ -103,6 +103,10 @@ export function CommandPalette({ scope, onClose }: Props) {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Tab") {
+      // The input is the panel's only focusable stop while open; pinning Tab
+      // keeps the aria-modal promise truthful without a full focus trap.
+      e.preventDefault();
     } else if (e.key === "Enter") {
       e.preventDefault();
       dispatch(visible[index]);

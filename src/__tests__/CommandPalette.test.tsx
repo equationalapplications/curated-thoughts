@@ -114,3 +114,18 @@ test("clicking the backdrop closes the palette", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Close command palette" }));
   expect(onClose).toHaveBeenCalledTimes(1);
 });
+
+test("Tab is pinned to the input while the palette is open", async () => {
+  renderPalette();
+  const input = await screen.findByLabelText("Search commands");
+  // Native dispatch + defaultPrevented: jsdom implements no default Tab
+  // focus movement, so cancelling is only observable via the event itself.
+  const tabEvent = new KeyboardEvent("keydown", {
+    key: "Tab",
+    bubbles: true,
+    cancelable: true,
+  });
+  fireEvent(input, tabEvent);
+  expect(tabEvent.defaultPrevented).toBe(true);
+  expect(input).toHaveFocus();
+});
