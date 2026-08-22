@@ -128,6 +128,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
 
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
+      setPeekTarget(null);
       setBrainEntityId(null);
       setBrainEntityName(null);
       setLibraryDoc(null);
