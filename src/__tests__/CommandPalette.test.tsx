@@ -14,6 +14,21 @@ const FILES = [
   { path: "documents/apollo-notes.md", name: "apollo-notes.md", tier: "user_doc" },
   { path: "wiki/Apollo.md", name: "Apollo.md", tier: "wiki" },
 ];
+const MANY_ENTITIES = Array.from({ length: 10 }, (_, i) => ({
+  id: `ent_${i}`,
+  name: `Entity ${i} alpha`,
+  entity_type: "project",
+  summary_snippet: "",
+  fact_count: 0,
+  open_task_count: 0,
+  created_at: 1,
+  updated_at: 1,
+}));
+const MANY_FILES = Array.from({ length: 10 }, (_, i) => ({
+  path: `documents/doc-${i}-alpha.md`,
+  name: `doc-${i}-alpha.md`,
+  tier: "user_doc",
+}));
 
 let navigate: ReturnType<typeof vi.fn>;
 let unregister: () => void;
@@ -128,4 +143,21 @@ test("Tab is pinned to the input while the palette is open", async () => {
   fireEvent(input, tabEvent);
   expect(tabEvent.defaultPrevented).toBe(true);
   expect(input).toHaveFocus();
+});
+
+test("dynamic results are capped at 8 entities + 8 documents", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === "list_entities_cmd") return Promise.resolve(MANY_ENTITIES);
+    if (cmd === "list_vault_files") return Promise.resolve(MANY_FILES);
+    return Promise.resolve(null);
+  });
+  renderPalette();
+  const input = await screen.findByLabelText("Search commands");
+  fireEvent.change(input, { target: { value: "alpha" } });
+  await screen.findAllByText(/^Open entity:/);
+  expect(screen.getAllByText(/^Open entity:/)).toHaveLength(8);
+  expect(screen.getAllByText(/^Open document:/)).toHaveLength(8);
+  // Overflow items exist in the source lists but must not render.
+  expect(screen.queryByText("Open entity: Entity 9 alpha")).not.toBeInTheDocument();
+  expect(screen.queryByText("Open document: doc-9-alpha.md")).not.toBeInTheDocument();
 });

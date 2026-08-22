@@ -12,6 +12,9 @@ import {
   type CommandScope,
 } from "../../lib/commands";
 
+/** Dynamic results are capped post-filter to bound the DOM on large vaults. */
+const MAX_DYNAMIC_RESULTS = 8;
+
 interface Props {
   /** Scope the palette was opened from — `mode:${nav.current.mode}`. */
   scope: CommandScope;
@@ -64,25 +67,27 @@ export function CommandPalette({ scope, onClose }: Props) {
     const scoped = commands.filter((c) => !q || c.label.toLowerCase().includes(q));
     const dynamic: Command[] = [];
     if (q) {
-      for (const entity of entities) {
-        if (entity.name.toLowerCase().includes(q)) {
-          dynamic.push({
-            id: `entity:${entity.id}`,
-            label: `Open entity: ${entity.name}`,
-            scope: "global",
-            run: () => commandNavigate({ mode: "brain", entityId: entity.id }),
-          });
-        }
+      const matchedEntities = entities.filter((entity) =>
+        entity.name.toLowerCase().includes(q),
+      );
+      const matchedFiles = files.filter(
+        (file) => file.tier === "user_doc" && file.name.toLowerCase().includes(q),
+      );
+      for (const entity of matchedEntities.slice(0, MAX_DYNAMIC_RESULTS)) {
+        dynamic.push({
+          id: `entity:${entity.id}`,
+          label: `Open entity: ${entity.name}`,
+          scope: "global",
+          run: () => commandNavigate({ mode: "brain", entityId: entity.id }),
+        });
       }
-      for (const file of files) {
-        if (file.tier === "user_doc" && file.name.toLowerCase().includes(q)) {
-          dynamic.push({
-            id: `document:${file.path}`,
-            label: `Open document: ${file.name}`,
-            scope: "global",
-            run: () => commandNavigate({ mode: "library", docPath: file.path }),
-          });
-        }
+      for (const file of matchedFiles.slice(0, MAX_DYNAMIC_RESULTS)) {
+        dynamic.push({
+          id: `document:${file.path}`,
+          label: `Open document: ${file.name}`,
+          scope: "global",
+          run: () => commandNavigate({ mode: "library", docPath: file.path }),
+        });
       }
     }
     return [...scoped, ...dynamic];
