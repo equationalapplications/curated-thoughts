@@ -12,6 +12,8 @@ interface Props {
   selectedEntityId: string | null;
   onEntitySelect: (id: string) => void;
   onOpenSource: (path: string, chunkId?: string | null) => void;
+  /** Option/Alt+click peek — forwarded to EntityPage → FactCard. Optional. */
+  onPeekSource?: (path: string, chunkId: string | null) => void;
   onEntityName: (name: string) => void;
   onGoToLibrary?: () => void;
 }
@@ -20,6 +22,7 @@ export function BrainMode({
   selectedEntityId,
   onEntitySelect,
   onOpenSource,
+  onPeekSource,
   onEntityName,
   onGoToLibrary,
 }: Props) {
@@ -147,6 +150,7 @@ export function BrainMode({
           if (id) onEntitySelect(id);
         }}
         onOpenSource={onOpenSource}
+        onPeekSource={onPeekSource}
         onEntityLoaded={handleLoaded}
         onMutated={handleMutated}
         onArchived={handleArchived}
