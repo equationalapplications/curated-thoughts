@@ -126,6 +126,9 @@ export function CommandPalette({ scope, onClose }: Props) {
   useEffect(() => {
     function onWindowKeyDown(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
+      // Esc cancelling an active CJK composition must not dismiss the
+      // palette — same guard as the Enter handler above.
+      if (e.isComposing) return;
       e.preventDefault();
       e.stopPropagation();
       onClose();

@@ -138,6 +138,17 @@ test("Escape closes the palette", async () => {
   expect(onClose).toHaveBeenCalledTimes(1);
 });
 
+test("Esc during IME composition does not close the palette", async () => {
+  const { onClose } = renderPalette();
+  await screen.findByRole("dialog", { name: "Command palette" });
+  // Esc cancelling an active CJK composition carries isComposing; it must
+  // not dismiss the palette. Plain Esc still closes.
+  fireEvent.keyDown(window, { key: "Escape", isComposing: true });
+  expect(onClose).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
 test("clicking the backdrop closes the palette", async () => {
   const { onClose } = renderPalette();
   await screen.findByRole("dialog", { name: "Command palette" });
