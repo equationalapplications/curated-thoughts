@@ -88,6 +88,21 @@ test("Enter dispatches the active command and closes", async () => {
   expect(onClose).toHaveBeenCalledTimes(1);
 });
 
+test("Enter during IME composition is ignored; plain Enter dispatches", async () => {
+  const { onClose } = renderPalette();
+  const input = await screen.findByLabelText("Search commands");
+  expect(screen.getByText("Go to Brain")).toBeInTheDocument();
+  expect(input).toHaveFocus();
+  // Confirming an IME candidate (CJK input) sends Enter with isComposing;
+  // that keydown must not dispatch mid-composition.
+  fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+  expect(navigate).not.toHaveBeenCalled();
+  expect(onClose).not.toHaveBeenCalled();
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(navigate).toHaveBeenCalledWith({ mode: "brain" });
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
 test("ArrowDown then Enter dispatches the second command", async () => {
   const { onClose } = renderPalette();
   const input = await screen.findByLabelText("Search commands");

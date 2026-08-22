@@ -113,6 +113,9 @@ export function CommandPalette({ scope, onClose }: Props) {
       // keeps the aria-modal promise truthful without a full focus trap.
       e.preventDefault();
     } else if (e.key === "Enter") {
+      // Confirming an IME candidate (CJK input) must not dispatch
+      // mid-composition.
+      if (e.nativeEvent.isComposing) return;
       e.preventDefault();
       dispatch(visible[index]);
     }

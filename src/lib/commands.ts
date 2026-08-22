@@ -70,7 +70,10 @@ export const COMMAND_REGISTRY: Command[] = [
  * only in its own mode. Palette-internal commands are excluded — they
  * are dispatched by the palette's key handling, not chosen from the list.
  */
-export function useCommands(scope: CommandScope, extras: Command[] = []): Command[] {
+/** Stable default so omitting `extras` doesn't bust the useMemo each render. */
+const NO_EXTRAS: Command[] = [];
+
+export function useCommands(scope: CommandScope, extras: Command[] = NO_EXTRAS): Command[] {
   return useMemo(() => {
     const inScope = (c: Command) => c.scope === "global" || c.scope === scope;
     const fromRegistry = COMMAND_REGISTRY.filter((c) => !c.internal && inScope(c));
