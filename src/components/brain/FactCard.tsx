@@ -22,6 +22,12 @@ interface Props {
    * on open; `null` when the fact's evidence did not resolve to a chunk.
    */
   onOpenSource: (path: string, chunkId?: string | null) => void;
+  /**
+   * Called on Option/Alt+click of a source chip to open the read-only
+   * source-peek panel instead of navigating. Absent (e.g. in contexts
+   * without peek support) → alt+click behaves as a plain click.
+   */
+  onPeekSource?: (path: string, chunkId: string | null) => void;
 }
 
 export function FactCard({
@@ -30,6 +36,7 @@ export function FactCard({
   onChanged,
   onNavigateEntity,
   onOpenSource,
+  onPeekSource,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [powerOpen, setPowerOpen] = useState(false);
@@ -95,7 +102,13 @@ export function FactCard({
                 type="button"
                 className="fact-chip fact-chip--source"
                 title={doc.path}
-                onClick={() => onOpenSource(doc.path, doc.chunkId)}
+                onClick={(e) => {
+                  if (e.altKey && onPeekSource && doc.chunkId) {
+                    onPeekSource(doc.path, doc.chunkId);
+                  } else {
+                    onOpenSource(doc.path, doc.chunkId);
+                  }
+                }}
               >
                 {docLabel(doc.path)}
               </button>
