@@ -246,23 +246,24 @@ impl VaultMcpServer {
         let Parameters(CuratedGetWikiEntryParams { topic, entity_id }) = args;
         let conn = lock_conn(&self.conn)?;
 
-        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(eid) = entity_id {
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
+        {
             (
                 "SELECT c.text, c.position, d.path, c.start_line, c.end_line
                  FROM chunks c
                  JOIN documents d ON c.doc_id = d.id
                  WHERE d.tier = 'wiki' AND c.entity_id = ?1
                  ORDER BY c.position",
-                vec![Box::new(eid)],
+                vec![Box::new(eid.clone())],
             )
-        } else if let Some(topic) = topic {
+        } else if let Some(ref topic) = topic {
             (
                 "SELECT c.text, c.position, d.path, c.start_line, c.end_line
                  FROM chunks c
                  JOIN documents d ON c.doc_id = d.id
                  WHERE d.tier = 'wiki' AND d.path LIKE '%' || ?1 || '%'
                  ORDER BY c.position",
-                vec![Box::new(topic)],
+                vec![Box::new(topic.clone())],
             )
         } else {
             return Err(rmcp::ErrorData::invalid_params(
@@ -275,7 +276,7 @@ impl VaultMcpServer {
             rmcp::ErrorData::internal_error(format!("prepare wiki entry query: {e}"), None)
         })?;
         let rows = stmt
-            .query_map(params.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,      // text
                     row.get::<_, usize>(1)?,       // position
@@ -351,16 +352,16 @@ impl VaultMcpServer {
         .to_string();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if let Some(sym) = symbol {
+        if let Some(ref sym) = symbol {
             sql.push_str(" AND c.symbol LIKE '%' || ?1 || '%'");
-            params.push(Box::new(sym));
+            params.push(Box::new(sym.clone()));
         }
 
         let mut stmt = conn.prepare(&sql).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("prepare code search query: {e}"), None)
         })?;
         let rows = stmt
-            .query_map(params.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,            // id
                     row.get::<_, String>(1)?,         // text
