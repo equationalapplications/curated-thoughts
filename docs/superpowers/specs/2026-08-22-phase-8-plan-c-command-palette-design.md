@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-22
 **Branch:** `phase-8-plan-c-command-palette`
-**Status:** Draft (→ Implemented on ship)
+**Status:** Implemented 2026-08-22
 **Anchored by:**
 - UX vision spec line 33 (canonical): *"Search is not a mode. Global `⌘K` command palette plus a search field in each mode's sidebar."* This feature ships the **palette half only**; per-mode sidebar search fields stay deferred.
 - `docs/superpowers/specs/2026-08-20-phase-8-design.md` §Scope item 4 + the §Components `<CommandPalette>` / `src/lib/commands.ts` / `AppShell` bullets — **elaborated by this spec, not superseded**.

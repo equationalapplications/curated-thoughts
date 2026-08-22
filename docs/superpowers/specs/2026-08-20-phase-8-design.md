@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-20
 **Branch:** `chore/phase-8-design-and-status-polish` (this spec is the only artifact in that branch)
-**Status:** Plan A (chunk-id plumbing) shipped; Phase 9 chunk-id resolution shipped on `phase-9-chunk-id-resolution` (replaces heading-text match with hash-based line-range overlay); Plan B shipped 2026-08-21 (v2 chunk-slice peeks); Plan C (global ⌘K palette) pending
+**Status:** Plan A (chunk-id plumbing) shipped; Phase 9 chunk-id resolution shipped on `phase-9-chunk-id-resolution` (replaces heading-text match with hash-based line-range overlay); Plan B shipped 2026-08-21 (v2 chunk-slice peeks); Plan C shipped 2026-08-22 (global ⌘K command palette) — Phase 8 fully Implemented
 **Anchored by:**
 - `docs/superpowers/specs/2026-07-05-ux-vision-okf-native-design.md` §1 (line 33 — global command palette; line 37 — peek views), §"Phasing" item 7 deferral rows (lines 186–187).
 - `docs/superpowers/specs/2026-08-19-phase-7-plan-c-design.md` lines 41, 43–45 (Phase 8 sub-deferrals enumerated at end of Phase 7 planning).
