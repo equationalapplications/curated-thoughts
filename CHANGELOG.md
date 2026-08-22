@@ -1,3 +1,19 @@
+## [1.20.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.19.0...v1.20.0) (2026-08-22)
+
+### Features
+
+* **brain:** alt+click dispatch rule on fact source chips ([187a034](https://github.com/equationalapplications/curated-thoughts/commit/187a034b164e1412e11420cb009bd0a90e28dbe7))
+* **brain:** thread onPeekSource through EntityPage and BrainMode ([800fca2](https://github.com/equationalapplications/curated-thoughts/commit/800fca2afa57778da805f2b090aaf0b2c31d24b8))
+* **chunks:** fetch_chunk_content command returning chunk text by (path, hash) ([7055a43](https://github.com/equationalapplications/curated-thoughts/commit/7055a43d839445d0a760e7df3f533b954be39358))
+* **chunks:** find_chunk_text query for peek panels ([c4ee6f1](https://github.com/equationalapplications/curated-thoughts/commit/c4ee6f140bc5f3e79290c1dc9ee4e6b464297ed2))
+* **shell:** AppShell owns peekTarget state and promotion navigation ([6d1edac](https://github.com/equationalapplications/curated-thoughts/commit/6d1edac9b3087593f7a024fb6874d08bc9fa763e))
+* **shell:** PeekPanel slide-over with focus trap and chunk-slice body states ([8388d24](https://github.com/equationalapplications/curated-thoughts/commit/8388d2455fb58a4a3c12ee4c90556d5184ea3b71))
+
+### Bug Fixes
+
+* **phase-8-plan-b:** register overlay command under its frontend wire name ([902eeb8](https://github.com/equationalapplications/curated-thoughts/commit/902eeb8bdb6f41cb94d5f18a5ce2ef7b7e072386))
+* **shell:** clear peek target on vault switch; drop deprecated word-break ([a718add](https://github.com/equationalapplications/curated-thoughts/commit/a718add2046a57139cc9ad715a8216e04b7877ed))
+
 ## [1.19.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.18.0...v1.19.0) (2026-08-21)
 
 ### Features
