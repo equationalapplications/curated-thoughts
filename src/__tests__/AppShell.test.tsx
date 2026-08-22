@@ -1,4 +1,4 @@
-import { screen, fireEvent } from "@testing-library/react";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 
 vi.mock("../components/shell/EditorPane", () => ({
   EditorPane: () => <div data-testid="editor-pane" />,
@@ -104,4 +104,45 @@ it.skip("navigating to setup mode mounts the wizard", async () => {
   const rerunButton = await screen.findByRole("button", { name: /re-run setup wizard/i });
   fireEvent.click(rerunButton);
   expect(await screen.findByRole("region", { name: /where is your vault/i })).toBeInTheDocument();
+});
+
+test("Cmd/Ctrl+K opens the command palette; Esc closes it", async () => {
+  renderAppShell();
+  // metaKey+ctrlKey together satisfies whichever platform branch the
+  // listener takes (jsdom reports an empty navigator.platform).
+  fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+  expect(
+    await screen.findByRole("dialog", { name: "Command palette" }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Search commands")).toHaveFocus();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).not.toBeInTheDocument(),
+  );
+
+  // Toggle reopens.
+  fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+  expect(
+    await screen.findByRole("dialog", { name: "Command palette" }),
+  ).toBeInTheDocument();
+});
+
+test("dispatching a palette command navigates and closes the palette", async () => {
+  renderAppShell();
+  fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+  const input = await screen.findByLabelText("Search commands");
+  fireEvent.change(input, { target: { value: "Library" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("button", { name: "Library" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
 });
