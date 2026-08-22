@@ -128,17 +128,19 @@ Verify: `cargo check --manifest-path tools/Cargo.toml --tests` → compiles clea
 ```json
 "pnpm": {
   "overrides": {
-    "undici@6": ">=6.28.0",
-    "undici@7": ">=7.29.0",
-    "js-yaml": ">=4.3.1",
-    "postcss": ">=8.5.23",
-    "brace-expansion@1": ">=1.1.16",
-    "brace-expansion@5": ">=5.0.7"
+    "undici@6": ">=6.28.0 <7",
+    "undici@7": ">=7.29.0 <8",
+    "js-yaml": ">=4.3.1 <5",
+    "postcss": ">=8.5.23 <9",
+    "brace-expansion@1": ">=1.1.16 <2",
+    "brace-expansion@5": ">=5.0.7 <6"
   }
 }
 ```
 
-Then regenerate and prove the lock took them: `pnpm install` (not frozen), then `pnpm why undici js-yaml postcss brace-expansion` shows floors met; `pnpm install --frozen-lockfile` succeeds; full frontend suite green.
+Ceilings are required: under pnpm 10.33.2 an override value is resolved as a standalone specifier with no relation to the dependent's original range, so a bare `>=floor` drags packages across majors (observed: http-client → undici 7.25.0 out-of-slot, js-yaml → 5.x, the v1 brace-expansion slot dissolved). The cap keeps each floor inside its per-major slot.
+
+Then regenerate and prove the lock took them: `pnpm install` (not frozen), then per-package `pnpm why` shows floors met in-slot (combined multi-name invocation emits nothing on pnpm 10.33.2); `pnpm install --frozen-lockfile` succeeds; full frontend suite green.
 
 ## Stage 2 — automation & supply-chain hardening
 
