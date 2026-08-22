@@ -1,9 +1,8 @@
 //! `#[tauri::command]` handlers for the chunk overlay surface.
 
-use crate::db::queries::find_chunk_overlay;
+use crate::db::queries::{find_chunk_overlay, find_chunk_text};
 use crate::DbState;
 use serde::Serialize;
-use std::sync::Mutex;
 use tauri::State;
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,4 +26,18 @@ pub fn resolve_chunk_overlay(
     find_chunk_overlay(&guard.0, &path, &hash)
         .map(|opt| opt.map(|(s, e)| ChunkOverlay { start_line: s, end_line: e }))
         .map_err(|e| e.to_string())
+}
+
+/// Phase 8 Plan B: raw text of the chunk matching (`path`, `hash`) for the
+/// source-peek panel. `Ok(None)` = the hash no longer resolves ("source
+/// moved"); `Err` = real backend failure. The panel surfaces the two
+/// distinctly. Wire name is this fn's exact name (see Task 1 note).
+#[tauri::command]
+pub fn fetch_chunk_content(
+    db: State<'_, DbState>,
+    path: String,
+    hash: String,
+) -> Result<Option<String>, String> {
+    let guard = db.0.lock().map_err(|e| format!("db lock poisoned: {e}"))?;
+    find_chunk_text(&guard.0, &path, &hash).map_err(|e| e.to_string())
 }
