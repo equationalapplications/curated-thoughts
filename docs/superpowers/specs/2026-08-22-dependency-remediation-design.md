@@ -41,6 +41,8 @@ The two-lock drift is real and bidirectional (`cmov` fixed in tools but not src-
 
 `glib ^0.18` comes from the gtk-rs 0.18 stack pulled by `webkit2gtk` ← `wry 0.55.1` ← `tauri 2.x`. Semver cannot resolve `^0.18` to 0.20, so no lockfile command fixes it. Stage 1 attempts `cargo update -p tauri -p wry` within existing requirements first; if gtk stays on 0.18 (expected while tauri 2.x targets webkit2gtk-4.1/gtk 0.18), record accepted risk here and track upstream (tauri/wry bump that moves to gtk 0.20+) rather than force anything.
 
+**Outcome (2026-08-22, executed):** `cargo update -p tauri -p wry` was a no-op (`Locking 0 packages`) — tauri 2.11.1 / wry 0.55.1 / glib 0.18.5 / gtk 0.18.2 are already the latest semver-compatible set, so glib stays 0.18.5. Accepted risk stands; revisit when tauri ships a wry/gtk 0.20+ bump.
+
 ### npm alerts
 
 All transitive, all dev/CI tooling — nothing ships in the app bundle. Exposure is pipeline integrity (e.g. `undici` CVE sits in the semantic-release publish path). Fixes are pnpm overrides in `package.json` + regenerated `pnpm-lock.yaml`:

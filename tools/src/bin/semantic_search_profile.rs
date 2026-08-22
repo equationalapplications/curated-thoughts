@@ -52,7 +52,9 @@ fn main() {
     };
 
     for i in 0..n {
-        let cid = insert_chunk(conn, doc_id, &proto, i, "tier_working").expect("chunk");
+        let cid =
+            insert_chunk(conn, doc_id, &proto, i, "tier_working", &format!("bench-hash-{i}"))
+                .expect("chunk");
         insert_embedding(conn, cid, &query_vec).expect("embedding");
     }
     mark_document_indexed(conn, doc_id).expect("indexed");

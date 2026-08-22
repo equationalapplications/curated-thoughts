@@ -12,7 +12,7 @@ flate2 = "1"
 anyhow = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 rmcp = { version = "1.6", features = ["macros", "transport-io", "schemars"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 schemars = { version = "1", features = ["derive"] }
 
 [[bin]]
