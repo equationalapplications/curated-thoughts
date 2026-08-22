@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
 import { ActivityFeedPanel } from "./ActivityFeedPanel";
+import { PeekPanel, type PeekTarget } from "./PeekPanel";
 import { BrainMode } from "../modes/BrainMode";
 import { LibraryMode } from "../modes/LibraryMode";
 import { ReviewMode } from "../modes/ReviewMode";
@@ -57,6 +58,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   const nav = useNavigationState({ mode: "brain" });
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
   const [activityOpen, setActivityOpen] = useState(false);
+  const [peekTarget, setPeekTarget] = useState<PeekTarget | null>(null);
   const [brainEntityId, setBrainEntityId] = useState<string | null>(null);
   const [brainEntityName, setBrainEntityName] = useState<string | null>(null);
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
@@ -111,6 +113,18 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
       });
     start();
   }, [vaultPath]);
+
+  function handlePeekSource(path: string, chunkId: string | null) {
+    // Unreachable via FactCard's dispatch rule (it never calls onPeekSource
+    // with a null hash); the guard keeps PeekTarget.hash: string honest.
+    if (!chunkId) return;
+    setPeekTarget({ path, hash: chunkId });
+  }
+
+  function handlePromote(path: string, hash: string) {
+    setPeekTarget(null);
+    nav.navigate({ mode: "library", docPath: path, chunkId: hash });
+  }
 
   useEffect(() => {
     const promise = onVaultSwitched((newPath) => {
@@ -270,6 +284,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                       onOpenSource={(path, chunkId) => {
                         nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
                       }}
+                      onPeekSource={handlePeekSource}
                       onEntityName={setBrainEntityName}
                       onGoToLibrary={() => nav.navigate({ mode: "library" })}
                     />
@@ -320,6 +335,11 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
               setActivityOpen(false);
             }}
             errors={errors}
+          />
+          <PeekPanel
+            target={peekTarget}
+            onDismiss={() => setPeekTarget(null)}
+            onPromote={handlePromote}
           />
           {dragging && (
             <div className="drop-overlay">
