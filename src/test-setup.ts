@@ -165,6 +165,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "archive_entity_fact_cmd") return Promise.resolve();
     if (cmd === "update_entity_summary_cmd") return Promise.resolve();
     if (cmd === "archive_entity_cmd") return Promise.resolve();
+    if (cmd === "fetch_chunk_content") return Promise.resolve("Chunk passage text.");
     return Promise.resolve(null);
   }),
 }));

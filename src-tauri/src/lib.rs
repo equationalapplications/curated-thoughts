@@ -2343,7 +2343,8 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_impact_radius,
             get_binary_path,
             get_brain_dir,
-            commands::chunks::resolve_chunk_overlay_cmd,
+            commands::chunks::resolve_chunk_overlay,
+            commands::chunks::fetch_chunk_content,
             needs_chunk_hash_migration,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -2668,7 +2669,8 @@ pub fn run() {
             acknowledge_ephemeral_disclosure,
             get_binary_path,
             get_brain_dir,
-            commands::chunks::resolve_chunk_overlay_cmd,
+            commands::chunks::resolve_chunk_overlay,
+            commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
             needs_chunk_hash_migration,
         ])
