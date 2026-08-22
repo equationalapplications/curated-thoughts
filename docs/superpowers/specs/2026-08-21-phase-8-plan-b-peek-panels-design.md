@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-21
 **Branch:** `phase-8-plan-b-peek-panels`
-**Status:** Design approved in chat 2026-08-21; implementation pending
+**Status:** Implemented 2026-08-21 (PR #44)
 **Anchored by:**
 - `docs/superpowers/specs/2026-08-20-phase-8-design.md` §Scope item 3 — **superseded by this spec** for the document/chunk side (that section's `isPeek`-on-`EditorPane` full-doc approach predates Phase 9; see "Relationship to prior specs").
 - UX vision spec line 37 (canonical): *"Peek panels are read-only and dismiss on `Esc` or click-outside; 'Open in [mode]' inside the peek promotes it to full navigation."*
