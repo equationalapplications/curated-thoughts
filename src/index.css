@@ -929,6 +929,92 @@ body {
   overflow-y: auto;
 }
 
+/* ── Source peek panel ─────────────────────────────────────────────── */
+.peek-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  border: none;
+  padding: 0;
+  background: rgba(31, 27, 22, 0.25);
+  cursor: default;
+}
+.peek-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 26px;
+  z-index: 51;
+  width: min(420px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-left: 1px solid var(--outline-var);
+  box-shadow: var(--shadow-lg);
+  animation: peek-slide-in 180ms ease-out;
+}
+.peek-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--outline-var);
+}
+.peek-panel-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.peek-open-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--primary-container);
+  color: var(--on-primary-cont);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: none;
+}
+.peek-panel-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+.peek-chunk-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--on-surface);
+  background: var(--elev-1);
+  border: 1px solid var(--outline-var);
+  border-radius: var(--r-sm);
+  padding: 12px;
+}
+.peek-notice {
+  font-size: 13px;
+  color: var(--on-surface-var);
+}
+.peek-notice--error {
+  color: var(--error);
+}
+@keyframes peek-slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .peek-panel { animation: none; }
+}
+
 /* ── Timeline styles ────────────────────────────────────────────────── */
 .timeline-day-header {
   position: sticky;
@@ -1635,6 +1721,9 @@ body {
   --shadow-lg: 0 12px 24px rgba(0,0,0,.45), 0 4px 8px rgba(0,0,0,.30);
 }
 [data-theme="dark"] .activity-backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+[data-theme="dark"] .peek-backdrop {
   background: rgba(0, 0, 0, 0.45);
 }
 
