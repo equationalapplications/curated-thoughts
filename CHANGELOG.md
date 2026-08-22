@@ -1,3 +1,9 @@
+## [1.22.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.21.2...v1.22.0) (2026-08-22)
+
+### Features
+
+* **tools:** add ingest_vault_once for headless initial vault ingestion ([#66](https://github.com/equationalapplications/curated-thoughts/issues/66)) ([d0fe992](https://github.com/equationalapplications/curated-thoughts/commit/d0fe992b02acf7883168c39e7cc5c974c4996083))
+
 ## [1.21.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.21.1...v1.21.2) (2026-08-22)
 
 ### Bug Fixes
