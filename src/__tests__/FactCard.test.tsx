@@ -103,3 +103,88 @@ test("archive calls archive_entity_fact_cmd and notifies", async () => {
     factId: "fact_1",
   });
 });
+
+test("alt+click invokes onPeekSource, not onOpenSource", () => {
+  const onOpenSource = vi.fn();
+  const onPeekSource = vi.fn();
+  const fact: EntityFact = {
+    ...FACT,
+    id: "fact_peek",
+    source_docs: [{ path: "documents/notes.md", chunkId: "abc123" }],
+  };
+  render(
+    <FactCard
+      entityId="ent_1"
+      fact={fact}
+      onChanged={vi.fn()}
+      onNavigateEntity={vi.fn()}
+      onOpenSource={onOpenSource}
+      onPeekSource={onPeekSource}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "notes.md" }), { altKey: true });
+  expect(onPeekSource).toHaveBeenCalledWith("documents/notes.md", "abc123");
+  expect(onOpenSource).not.toHaveBeenCalled();
+});
+
+test("plain click still invokes onOpenSource even with onPeekSource set", () => {
+  const onOpenSource = vi.fn();
+  const onPeekSource = vi.fn();
+  const fact: EntityFact = {
+    ...FACT,
+    id: "fact_plain",
+    source_docs: [{ path: "documents/notes.md", chunkId: "abc123" }],
+  };
+  render(
+    <FactCard
+      entityId="ent_1"
+      fact={fact}
+      onChanged={vi.fn()}
+      onNavigateEntity={vi.fn()}
+      onOpenSource={onOpenSource}
+      onPeekSource={onPeekSource}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
+  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", "abc123");
+  expect(onPeekSource).not.toHaveBeenCalled();
+});
+
+test("alt+click with chunkId null falls back to onOpenSource", () => {
+  const onOpenSource = vi.fn();
+  const onPeekSource = vi.fn();
+  render(
+    <FactCard
+      entityId="ent_1"
+      fact={FACT}
+      onChanged={vi.fn()}
+      onNavigateEntity={vi.fn()}
+      onOpenSource={onOpenSource}
+      onPeekSource={onPeekSource}
+    />,
+  );
+  // The FACT fixture's source_docs entry has chunkId: null.
+  fireEvent.click(screen.getByRole("button", { name: "notes.md" }), { altKey: true });
+  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", null);
+  expect(onPeekSource).not.toHaveBeenCalled();
+});
+
+test("alt+click without onPeekSource prop behaves as plain click", () => {
+  const onOpenSource = vi.fn();
+  const fact: EntityFact = {
+    ...FACT,
+    id: "fact_nopeek",
+    source_docs: [{ path: "documents/notes.md", chunkId: "abc123" }],
+  };
+  render(
+    <FactCard
+      entityId="ent_1"
+      fact={fact}
+      onChanged={vi.fn()}
+      onNavigateEntity={vi.fn()}
+      onOpenSource={onOpenSource}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "notes.md" }), { altKey: true });
+  expect(onOpenSource).toHaveBeenCalledWith("documents/notes.md", "abc123");
+});

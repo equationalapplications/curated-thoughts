@@ -17,6 +17,8 @@ interface Props {
   entityId: string | null;
   onNavigateEntity: (name: string) => void;
   onOpenSource: (path: string, chunkId?: string | null) => void;
+  /** Option/Alt+click peek — forwarded to FactCard. Optional; absent = no peek. */
+  onPeekSource?: (path: string, chunkId: string | null) => void;
   onEntityLoaded: (detail: EntityDetail) => void;
   /** Fired after any write so the sidebar can refresh counts. */
   onMutated: () => void;
@@ -27,6 +29,7 @@ export function EntityPage({
   entityId,
   onNavigateEntity,
   onOpenSource,
+  onPeekSource,
   onEntityLoaded,
   onMutated,
   onArchived,
@@ -178,6 +181,7 @@ export function EntityPage({
             onChanged={() => void handleMutation(async () => {})}
             onNavigateEntity={onNavigateEntity}
             onOpenSource={onOpenSource}
+            onPeekSource={onPeekSource}
           />
         ))}
       </section>

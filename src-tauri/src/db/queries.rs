@@ -214,6 +214,22 @@ pub fn find_chunk_overlay(
     Ok(Some((start as u32, end as u32)))
 }
 
+/// Fetch the raw text of the chunk matching (`path`, `content_hash`).
+/// Returns `Ok(None)` when either the path or hash doesn't resolve —
+/// "source moved", which callers surface distinctly from backend errors.
+pub fn find_chunk_text(conn: &Connection, path: &str, hash: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT c.chunk_text
+             FROM chunks c JOIN documents d ON d.id = c.doc_id
+             WHERE d.path = ?1 AND c.content_hash = ?2
+             LIMIT 1",
+            rusqlite::params![path, hash],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +387,36 @@ mod tests {
     fn find_chunk_overlay_returns_none_for_missing_doc() {
         let conn = open_in_memory().unwrap();
         assert_eq!(find_chunk_overlay(&conn, "/nope.md", "abc").unwrap(), None);
+    }
+
+    #[test]
+    fn find_chunk_text_returns_text_by_path_and_hash() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = upsert_document(&conn, "/docs/a.md", "h").unwrap();
+        let chunk = crate::chunker::Chunk {
+            text: "the passage".into(),
+            start_line: 7,
+            end_line: 12,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "abc").unwrap();
+        let text = find_chunk_text(&conn, "/docs/a.md", "abc").unwrap();
+        assert_eq!(text.as_deref(), Some("the passage"));
+    }
+
+    #[test]
+    fn find_chunk_text_returns_none_for_unknown_hash() {
+        let conn = open_in_memory().unwrap();
+        let _ = upsert_document(&conn, "/docs/a.md", "h").unwrap();
+        assert_eq!(find_chunk_text(&conn, "/docs/a.md", "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn find_chunk_text_returns_none_for_missing_doc() {
+        let conn = open_in_memory().unwrap();
+        assert_eq!(find_chunk_text(&conn, "/nope.md", "abc").unwrap(), None);
     }
 }
 

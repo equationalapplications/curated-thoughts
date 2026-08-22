@@ -43,6 +43,12 @@ export const resolveChunkOverlay = (
 ): Promise<{ startLine: number; endLine: number } | null> =>
   invoke("resolve_chunk_overlay", { path, hash });
 
+/** Phase 8 Plan B: fetch the raw text of the chunk identified by
+ * `(path, hash)` for the source-peek panel. Resolves `null` when the
+ * hash no longer resolves ("source moved"); rejects on backend failure. */
+export const fetchChunkContent = (path: string, hash: string): Promise<string | null> =>
+  invoke("fetch_chunk_content", { path, hash });
+
 /** Phase 9: gate query for the one-time chunk-hash migration. Returns
  * `true` while at least one chunk row lacks `content_hash` (i.e. the
  * migration still has work to do and the splash should mount). Mirrors
