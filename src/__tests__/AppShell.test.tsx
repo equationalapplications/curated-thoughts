@@ -146,3 +146,20 @@ test("dispatching a palette command navigates and closes the palette", async () 
     "page",
   );
 });
+
+test("closing the palette returns focus to the element that opened it", async () => {
+  renderAppShell();
+  const opener = screen.getByRole("button", { name: "Review" });
+  opener.focus();
+  fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+  const input = await screen.findByLabelText("Search commands");
+  expect(input).toHaveFocus();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("button", { name: "Review" })).toHaveFocus();
+});

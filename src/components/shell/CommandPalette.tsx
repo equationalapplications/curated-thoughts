@@ -26,8 +26,14 @@ export function CommandPalette({ scope, onClose }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Focus contract (mirrors PeekPanel): remember what had focus before the
+  // palette opened, put focus on the input, and give it back on unmount.
+  // Every close path — Esc, backdrop, dispatch — funnels through onClose →
+  // unmount, so this single cleanup covers them all.
   useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
     inputRef.current?.focus();
+    return () => opener?.focus();
   }, []);
 
   // Client-side search over already-available data — the existing
