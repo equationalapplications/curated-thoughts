@@ -1,4 +1,4 @@
-import { screen, fireEvent, waitFor } from "@testing-library/react";
+import { screen, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { registerCommandContext } from "../lib/commands";
 import { CommandPalette } from "../components/shell/CommandPalette";
