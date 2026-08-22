@@ -102,7 +102,7 @@ Files touched by pinning: `.github/workflows/ci.yml`, `build.yml`, `release.yml`
 
 ```bash
 cargo update --manifest-path src-tauri/Cargo.toml -p sqlx -p serde_with -p cmov
-cargo update --manifest-path tools/Cargo.toml -p tar -p serde_with
+cargo update --manifest-path tools/Cargo.toml -p sqlx -p tar -p serde_with
 # glib attempt (expected: no-op or still-0.18 outcome):
 cargo update --manifest-path src-tauri/Cargo.toml -p tauri -p wry || true
 ```
