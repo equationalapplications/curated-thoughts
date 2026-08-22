@@ -8,10 +8,16 @@ use serde::Deserialize;
 use super::EmbedProfile;
 
 static CLIENT: LazyLock<reqwest::blocking::Client> =
-    LazyLock::new(|| reqwest::blocking::Client::builder().build().unwrap());
+    LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .expect("failed to build reqwest client")
+    });
 
 fn default_ollama_base() -> String {
-    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into())
+    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://[REDACTED-IP]".into())
 }
 
 #[derive(Debug)]
