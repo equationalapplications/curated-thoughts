@@ -13,8 +13,12 @@ pub struct ChunkOverlay {
     pub end_line: u32,
 }
 
+/// Resolve a (path, content_hash) to the matching chunk's line range.
+/// NOTE: the fn name IS the IPC wire name (Tauri v2 registers commands by
+/// exact fn ident) — do not add a `_cmd` suffix; the frontend invokes
+/// "resolve_chunk_overlay" (src/lib/tauri.ts).
 #[tauri::command]
-pub fn resolve_chunk_overlay_cmd(
+pub fn resolve_chunk_overlay(
     db: State<'_, DbState>,
     path: String,
     hash: String,
