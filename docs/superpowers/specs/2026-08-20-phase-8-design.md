@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-20
 **Branch:** `chore/phase-8-design-and-status-polish` (this spec is the only artifact in that branch)
-**Status:** Plan A (chunk-id plumbing) shipped; Phase 9 chunk-id resolution shipped on `phase-9-chunk-id-resolution` (replaces heading-text match with hash-based line-range overlay); Plan B (peek panels) and Plan C (global ⌘K palette) pending
+**Status:** Plan A (chunk-id plumbing) shipped; Phase 9 chunk-id resolution shipped on `phase-9-chunk-id-resolution` (replaces heading-text match with hash-based line-range overlay); Plan B shipped 2026-08-21 (v2 chunk-slice peeks); Plan C (global ⌘K palette) pending
 **Anchored by:**
 - `docs/superpowers/specs/2026-07-05-ux-vision-okf-native-design.md` §1 (line 33 — global command palette; line 37 — peek views), §"Phasing" item 7 deferral rows (lines 186–187).
 - `docs/superpowers/specs/2026-08-19-phase-7-plan-c-design.md` lines 41, 43–45 (Phase 8 sub-deferrals enumerated at end of Phase 7 planning).
@@ -16,7 +16,7 @@ Phase 8 ships the three Phase 1/4/7 deferrals that remain open — **chunk-level
 
 **One design, three plans (mirroring Phase 7's Plan A/B/C layering):**
 - **Plan A — chunk-id plumbing + chunk highlight.** Rust signature change; `EntityFact.source_docs` shape change; closes Phase 7 deferred #6.
-- **Plan B — peek panels.** New `<PeekPanel>` + Option+click dispatch + `isPeek` read-only mode on `EditorPane` / `EntityPage`.
+- **Plan B — peek panels.** New `<PeekPanel>` + Option+click dispatch + `isPeek` read-only mode on `EditorPane` / `EntityPage`. **Superseded (2026-08-21):** implemented as v2 chunk-slice peeks — see docs/superpowers/specs/2026-08-21-phase-8-plan-b-peek-panels-design.md.
 - **Plan C — global ⌘K command palette.** New `<CommandPalette>` + static command registry + global key listener.
 
 The split lets each plan's diff stay narrow enough for a focused code-review pass; Plan A unblocks B and C, B and C depend on A.
