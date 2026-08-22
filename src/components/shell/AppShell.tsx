@@ -4,6 +4,7 @@ import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
 import { ActivityFeedPanel } from "./ActivityFeedPanel";
 import { PeekPanel, type PeekTarget } from "./PeekPanel";
+import { CommandPalette } from "./CommandPalette";
 import { BrainMode } from "../modes/BrainMode";
 import { LibraryMode } from "../modes/LibraryMode";
 import { ReviewMode } from "../modes/ReviewMode";
@@ -22,6 +23,7 @@ import { useProposalNotifications } from "../../hooks/useProposalNotifications";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { useErrorFeed } from "../../hooks/useErrorFeed";
 import { useNavigationState } from "../../lib/navigation";
+import { registerCommandContext } from "../../lib/commands";
 import { MigrationDisclosureModal } from "../privacy/MigrationDisclosureModal";
 import { SplashScreen } from "./SplashScreen";
 
@@ -59,6 +61,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
   const [activityOpen, setActivityOpen] = useState(false);
   const [peekTarget, setPeekTarget] = useState<PeekTarget | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [brainEntityId, setBrainEntityId] = useState<string | null>(null);
   const [brainEntityName, setBrainEntityName] = useState<string | null>(null);
   const [libraryDoc, setLibraryDoc] = useState<string | null>(null);
@@ -171,6 +174,26 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
     };
   }, [vaultPath]);
 
+  useEffect(
+    () => registerCommandContext({ navigate: nav.navigate }),
+    [nav.navigate],
+  );
+
+  useEffect(() => {
+    function handlePaletteShortcut(e: KeyboardEvent) {
+      // ⌘K on macOS, Ctrl+K elsewhere. Capture phase: nested editors
+      // (BlockNote) bind bubble-phase key handlers and would swallow it.
+      const isMac = navigator.platform.toUpperCase().includes("MAC");
+      const modifier = isMac ? e.metaKey : e.ctrlKey;
+      if (!modifier || e.key.toLowerCase() !== "k") return;
+      e.preventDefault(); // keep Chromium's built-in ⌘K bar from firing
+      setPaletteOpen((open) => !open);
+    }
+    window.addEventListener("keydown", handlePaletteShortcut, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", handlePaletteShortcut, { capture: true });
+  }, []);
+
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -178,10 +201,6 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
       if (target) {
         e.preventDefault();
         nav.navigate({ mode: target });
-      }
-      if (e.key === "k") {
-        e.preventDefault();
-        // Command palette ships in a later phase.
       }
     }
     window.addEventListener("keydown", handleKeyDown);
@@ -342,6 +361,12 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
             onDismiss={() => setPeekTarget(null)}
             onPromote={handlePromote}
           />
+          {paletteOpen && (
+            <CommandPalette
+              scope={`mode:${nav.current.mode}`}
+              onClose={() => setPaletteOpen(false)}
+            />
+          )}
           {dragging && (
             <div className="drop-overlay">
               <span>Drop to add to Library</span>

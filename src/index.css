@@ -1015,6 +1015,62 @@ body {
   .peek-panel { animation: none; }
 }
 
+/* ── Command palette ──────────────────────────────────────────────── */
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  border: none;
+  padding: 0;
+  background: rgba(31, 27, 22, 0.25);
+  cursor: default;
+}
+.palette-panel {
+  position: fixed;
+  top: 12vh;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 71;
+  width: min(560px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--outline-var);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+}
+.palette-input {
+  padding: 12px 16px;
+  border: none;
+  border-bottom: 1px solid var(--outline-var);
+  background: transparent;
+  font: inherit;
+  color: var(--on-surface);
+}
+.palette-input:focus {
+  outline: none;
+}
+.palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.palette-option {
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  color: var(--on-surface);
+  cursor: pointer;
+}
+.palette-option--active {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+.palette-empty {
+  padding: 12px 16px;
+  color: var(--on-surface-var);
+}
+
 /* ── Timeline styles ────────────────────────────────────────────────── */
 .timeline-day-header {
   position: sticky;
@@ -1724,6 +1780,9 @@ body {
   background: rgba(0, 0, 0, 0.45);
 }
 [data-theme="dark"] .peek-backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+[data-theme="dark"] .palette-backdrop {
   background: rgba(0, 0, 0, 0.45);
 }
 

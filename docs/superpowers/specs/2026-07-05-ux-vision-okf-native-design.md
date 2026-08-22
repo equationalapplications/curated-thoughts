@@ -183,8 +183,8 @@ Each phase gets its own implementation plan. Phases 1–2 are shippable immediat
 | Item | Status / Target |
 |---|---|
 | `⌘4` / `⌘5` mode shortcuts (Timeline, Tasks) | Implemented (phase 5) |
-| Global `⌘K` command palette | Deferred to Phase 8 |
-| Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels → Deferred to Phase 8 |
+| Global `⌘K` command palette | Implemented (Phase 8); per-mode sidebar search fields remain deferred |
+| Cross-mode links, back/forward history, peek panels | Cross-mode links + back/forward implemented Phase 4; peek panels implemented Phase 8 (v2 chunk-slice peeks) |
 | Activity rail pulse icon | Implemented (phase 5) |
 | Live Activity feed (beyond stub panel) | Implemented (phase 5) |
 | Per-mode empty states (Brain, Library) | Implemented (Brain Phase 4; Library + Review Phase 7) |
