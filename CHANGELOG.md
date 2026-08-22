@@ -1,3 +1,9 @@
+## [1.21.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.21.0...v1.21.1) (2026-08-22)
+
+### Bug Fixes
+
+* **deps:** remediate 30 of 31 Dependabot alerts + supply-chain hardening ([#45](https://github.com/equationalapplications/curated-thoughts/issues/45)) ([bbc3122](https://github.com/equationalapplications/curated-thoughts/commit/bbc31221f7ee70bbb7e9b170dcc2149dba9b467c))
+
 ## [1.21.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.20.0...v1.21.0) (2026-08-22)
 
 ### Features
