@@ -75,7 +75,9 @@ struct CuratedSuperpowersSetupParams {
     include_vscode: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, rmcp::ErrorData> {
     conn.lock()
@@ -126,39 +128,58 @@ impl VaultMcpServer {
         &self,
         args: Parameters<CuratedRecallContextParams>,
     ) -> Result<String, rmcp::ErrorData> {
-        let Parameters(CuratedRecallContextParams { query, limit_wiki, limit_code }) = args;
+        let Parameters(CuratedRecallContextParams {
+            query,
+            limit_wiki,
+            limit_code,
+        }) = args;
         let limit_wiki = limit_wiki.unwrap_or(5);
         let limit_code = limit_code.unwrap_or(10);
         let conn = lock_conn(&self.conn)?;
 
         // Embed the query
         let query_embedding = embed_batch(&self.profile, vec![query.clone()])
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("failed to embed query: {e}"), None))?
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("failed to embed query: {e}"), None)
+            })?
             .into_iter()
             .next()
-            .ok_or_else(|| rmcp::ErrorData::internal_error("no embedding returned for query", None))?;
+            .ok_or_else(|| {
+                rmcp::ErrorData::internal_error("no embedding returned for query", None)
+            })?;
 
         // Helper to fetch and rank chunks by similarity
-        let fetch_ranked_chunks = |conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql], query_emb: &[f32], limit: usize| -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
-            let mut stmt = conn.prepare(sql)
-                .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare chunk query: {e}"), None))?;
-            let rows = stmt.query_map(params, |row| {
-                Ok((
-                    row.get::<_, i64>(0)?, // id
-                    row.get::<_, String>(1)?, // text
-                    row.get::<_, Vec<u8>>(2)?, // embedding bytes
-                    row.get::<_, String>(3)?, // doc_path
-                    row.get::<_, Option<u32>>(4)?, // start_line
-                    row.get::<_, Option<u32>>(5)?, // end_line
-                    row.get::<_, Option<String>>(6)?, // symbol (optional)
-                ))
-            })
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("execute chunk query: {e}"), None))?;
+        let fetch_ranked_chunks = |conn: &Connection,
+                                   sql: &str,
+                                   params: &[&dyn rusqlite::ToSql],
+                                   query_emb: &[f32],
+                                   limit: usize|
+         -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
+            let mut stmt = conn.prepare(sql).map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("prepare chunk query: {e}"), None)
+            })?;
+            let rows = stmt
+                .query_map(params, |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,            // id
+                        row.get::<_, String>(1)?,         // text
+                        row.get::<_, Vec<u8>>(2)?,        // embedding bytes
+                        row.get::<_, String>(3)?,         // doc_path
+                        row.get::<_, Option<u32>>(4)?,    // start_line
+                        row.get::<_, Option<u32>>(5)?,    // end_line
+                        row.get::<_, Option<String>>(6)?, // symbol (optional)
+                    ))
+                })
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("execute chunk query: {e}"), None)
+                })?;
 
             let mut chunks_with_scores: Vec<(f32, serde_json::Value)> = Vec::new();
             for row in rows {
-                let (id, text, emb_bytes, doc_path, start_line, end_line, symbol) = row
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("read chunk row: {e}"), None))?;
+                let (id, text, emb_bytes, doc_path, start_line, end_line, symbol) =
+                    row.map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("read chunk row: {e}"), None)
+                    })?;
                 let chunk_emb = bytes_to_f32(&emb_bytes);
                 if chunk_emb.len() != query_emb.len() {
                     continue; // skip chunks with mismatched embedding dimensions
@@ -177,8 +198,13 @@ impl VaultMcpServer {
             }
 
             // Sort descending by score, take top limit
-            chunks_with_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            Ok(chunks_with_scores.into_iter().take(limit).map(|(_, v)| v).collect())
+            chunks_with_scores
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(chunks_with_scores
+                .into_iter()
+                .take(limit)
+                .map(|(_, v)| v)
+                .collect())
         };
 
         // Fetch wiki entries (wisdom layer): tier = 'wiki'
@@ -227,7 +253,7 @@ impl VaultMcpServer {
                  JOIN documents d ON c.doc_id = d.id
                  WHERE d.tier = 'wiki' AND c.entity_id = ?1
                  ORDER BY c.position",
-                vec![Box::new(eid)]
+                vec![Box::new(eid)],
             )
         } else if let Some(topic) = topic {
             (
@@ -236,30 +262,38 @@ impl VaultMcpServer {
                  JOIN documents d ON c.doc_id = d.id
                  WHERE d.tier = 'wiki' AND d.path LIKE '%' || ?1 || '%'
                  ORDER BY c.position",
-                vec![Box::new(topic)]
+                vec![Box::new(topic)],
             )
         } else {
-            return Err(rmcp::ErrorData::invalid_params("must provide either topic or entity_id", None));
+            return Err(rmcp::ErrorData::invalid_params(
+                "must provide either topic or entity_id",
+                None,
+            ));
         };
 
-        let mut stmt = conn.prepare(sql)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare wiki entry query: {e}"), None))?;
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?, // text
-                row.get::<_, usize>(1)?, // position
-                row.get::<_, String>(2)?, // doc_path
-                row.get::<_, Option<u32>>(3)?, // start_line
-                row.get::<_, Option<u32>>(4)?, // end_line
-            ))
-        })
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("execute wiki entry query: {e}"), None))?;
+        let mut stmt = conn.prepare(sql).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("prepare wiki entry query: {e}"), None)
+        })?;
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,      // text
+                    row.get::<_, usize>(1)?,       // position
+                    row.get::<_, String>(2)?,      // doc_path
+                    row.get::<_, Option<u32>>(3)?, // start_line
+                    row.get::<_, Option<u32>>(4)?, // end_line
+                ))
+            })
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("execute wiki entry query: {e}"), None)
+            })?;
 
         let mut full_text = String::new();
         let mut chunks = Vec::new();
         for row in rows {
-            let (text, position, doc_path, start_line, end_line) = row
-                .map_err(|e| rmcp::ErrorData::internal_error(format!("read wiki entry row: {e}"), None))?;
+            let (text, position, doc_path, start_line, end_line) = row.map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("read wiki entry row: {e}"), None)
+            })?;
             full_text.push_str(&text);
             full_text.push('\n');
             chunks.push(serde_json::json!({
@@ -289,23 +323,32 @@ impl VaultMcpServer {
         &self,
         args: Parameters<CuratedSearchCodeParams>,
     ) -> Result<String, rmcp::ErrorData> {
-        let Parameters(CuratedSearchCodeParams { query, limit, symbol }) = args;
+        let Parameters(CuratedSearchCodeParams {
+            query,
+            limit,
+            symbol,
+        }) = args;
         let limit = limit.unwrap_or(10);
         let conn = lock_conn(&self.conn)?;
 
         // Embed the query
         let query_embedding = embed_batch(&self.profile, vec![query.clone()])
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("failed to embed query: {e}"), None))?
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("failed to embed query: {e}"), None)
+            })?
             .into_iter()
             .next()
-            .ok_or_else(|| rmcp::ErrorData::internal_error("no embedding returned for query", None))?;
+            .ok_or_else(|| {
+                rmcp::ErrorData::internal_error("no embedding returned for query", None)
+            })?;
 
         let mut sql = "
             SELECT c.id, c.text, c.embedding, d.path, c.start_line, c.end_line, c.symbol, c.language
             FROM chunks c
             JOIN documents d ON c.doc_id = d.id
             WHERE d.tier = 'user_doc' AND c.strategy = 'CodeLike' AND c.embedding IS NOT NULL
-        ".to_string();
+        "
+        .to_string();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(sym) = symbol {
@@ -313,26 +356,32 @@ impl VaultMcpServer {
             params.push(Box::new(sym));
         }
 
-        let mut stmt = conn.prepare(&sql)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare code search query: {e}"), None))?;
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            Ok((
-                row.get::<_, i64>(0)?, // id
-                row.get::<_, String>(1)?, // text
-                row.get::<_, Vec<u8>>(2)?, // embedding bytes
-                row.get::<_, String>(3)?, // doc_path
-                row.get::<_, Option<u32>>(4)?, // start_line
-                row.get::<_, Option<u32>>(5)?, // end_line
-                row.get::<_, Option<String>>(6)?, // symbol
-                row.get::<_, Option<String>>(7)?, // language
-            ))
-        })
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("execute code search query: {e}"), None))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("prepare code search query: {e}"), None)
+        })?;
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,            // id
+                    row.get::<_, String>(1)?,         // text
+                    row.get::<_, Vec<u8>>(2)?,        // embedding bytes
+                    row.get::<_, String>(3)?,         // doc_path
+                    row.get::<_, Option<u32>>(4)?,    // start_line
+                    row.get::<_, Option<u32>>(5)?,    // end_line
+                    row.get::<_, Option<String>>(6)?, // symbol
+                    row.get::<_, Option<String>>(7)?, // language
+                ))
+            })
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("execute code search query: {e}"), None)
+            })?;
 
         let mut chunks_with_scores: Vec<(f32, serde_json::Value)> = Vec::new();
         for row in rows {
             let (id, text, emb_bytes, doc_path, start_line, end_line, symbol, language) = row
-                .map_err(|e| rmcp::ErrorData::internal_error(format!("read code chunk row: {e}"), None))?;
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("read code chunk row: {e}"), None)
+                })?;
             let chunk_emb = bytes_to_f32(&emb_bytes);
             if chunk_emb.len() != query_embedding.len() {
                 continue;
@@ -352,8 +401,13 @@ impl VaultMcpServer {
         }
 
         // Sort by score descending, take top limit
-        chunks_with_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let results: Vec<serde_json::Value> = chunks_with_scores.into_iter().take(limit).map(|(_, v)| v).collect();
+        chunks_with_scores
+            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let results: Vec<serde_json::Value> = chunks_with_scores
+            .into_iter()
+            .take(limit)
+            .map(|(_, v)| v)
+            .collect();
 
         let response = serde_json::json!({
             "code_chunks": results,
@@ -372,23 +426,33 @@ impl VaultMcpServer {
         &self,
         args: Parameters<CuratedSuperpowersSetupParams>,
     ) -> Result<String, rmcp::ErrorData> {
-        let Parameters(CuratedSuperpowersSetupParams { include_aider, include_vscode }) = args;
+        let Parameters(CuratedSuperpowersSetupParams {
+            include_aider,
+            include_vscode,
+        }) = args;
         let mut instructions = String::new();
 
         if include_aider {
             instructions.push_str("# Superpowers Setup for Aider\n");
-            instructions.push_str("Follow these steps to use Superpowers with Aider and Curated Thoughts:\n\n");
+            instructions.push_str(
+                "Follow these steps to use Superpowers with Aider and Curated Thoughts:\n\n",
+            );
             instructions.push_str("## Step 1: Install OpenSkills Globally\n");
             instructions.push_str("Open your system terminal (outside of Aider) and run:\n");
-            instructions.push_str("```bash\nbun add -g openskills\n# OR: npm install -g openskills\n```\n\n");
+            instructions.push_str(
+                "```bash\nbun add -g openskills\n# OR: npm install -g openskills\n```\n\n",
+            );
             instructions.push_str("## Step 2: Fetch Superpowers Framework\n");
             instructions.push_str("Install Superpowers globally:\n");
-            instructions.push_str("```bash\nopenskills install obra/superpowers --universal --global\n```\n\n");
+            instructions.push_str(
+                "```bash\nopenskills install obra/superpowers --universal --global\n```\n\n",
+            );
             instructions.push_str("## Step 3: Sync Skills into Your Project\n");
             instructions.push_str("Navigate to your project directory and run:\n");
             instructions.push_str("```bash\ncd /path/to/your/project\nopenskills sync\n```\n\n");
             instructions.push_str("## Step 4: Configure Aider\n");
-            instructions.push_str("Create or update `.aider.conf.yml` in your project root with:\n");
+            instructions
+                .push_str("Create or update `.aider.conf.yml` in your project root with:\n");
             instructions.push_str("```yaml\nmcp:\n  servers:\n    curated-thoughts:\n      command: \"curated-thoughts-mcp\"\n      args: []\nread:\n  - \".skills/superpowers/**/*\"\n  - \".skills/curated-thoughts/**/*\"\n```\n");
             instructions.push_str("Start Aider: `aider`. Aider will automatically load the Superpowers skills and Curated Thoughts MCP tools.\n\n");
             instructions.push_str("## Step 5: Execute Commands\n");
@@ -404,11 +468,15 @@ impl VaultMcpServer {
             instructions.push_str("# Superpowers Setup for VS Code Copilot\n");
             instructions.push_str("Follow these steps to use Superpowers with VS Code Copilot and Curated Thoughts:\n\n");
             instructions.push_str("## Step 1: Install OpenSkills Globally\n");
-            instructions.push_str("Same as Aider Step 1: `bun add -g openskills` or `npm install -g openskills`\n\n");
+            instructions.push_str(
+                "Same as Aider Step 1: `bun add -g openskills` or `npm install -g openskills`\n\n",
+            );
             instructions.push_str("## Step 2: Fetch Superpowers Framework\n");
             instructions.push_str("Same as Aider Step 2: `openskills install obra/superpowers --universal --global`\n\n");
             instructions.push_str("## Step 3: Sync Skills into Your Project\n");
-            instructions.push_str("Same as Aider Step 3: `cd /path/to/your/project && openskills sync`\n\n");
+            instructions.push_str(
+                "Same as Aider Step 3: `cd /path/to/your/project && openskills sync`\n\n",
+            );
             instructions.push_str("## Step 4: Configure VS Code Copilot\n");
             instructions.push_str("Create `.vscode/mcp.json` in your project root with:\n");
             instructions.push_str("```json\n{\n  \"servers\": {\n    \"curated-thoughts\": {\n      \"type\": \"stdio\",\n      \"command\": \"curated-thoughts-mcp\",\n      \"args\": []\n    }\n  }\n}\n```\n");
@@ -421,12 +489,17 @@ impl VaultMcpServer {
         instructions.push_str("\n## Curated Thoughts MCP Tools Available\n");
         instructions.push_str("Once set up, the following tools are available via the `curated-thoughts` MCP server:\n");
         instructions.push_str("1. `vault_semantic_search`: Semantic search over vault chunks.\n");
-        instructions.push_str("2. `vault_related_chunks`: List chunks related to a document path.\n");
-        instructions.push_str("3. `curated_recall_context`: Recall wisdom layer and code chunks for coding tasks.\n");
+        instructions
+            .push_str("2. `vault_related_chunks`: List chunks related to a document path.\n");
+        instructions.push_str(
+            "3. `curated_recall_context`: Recall wisdom layer and code chunks for coding tasks.\n",
+        );
         instructions.push_str("4. `curated_get_wiki_entry`: Fetch full wiki entry content.\n");
         instructions.push_str("5. `curated_search_code`: Search code chunks by query or symbol.\n");
         instructions.push_str("6. `curated_add_wisdom`: Add new entries to the wisdom layer.\n");
-        instructions.push_str("7. `curated_superpowers_setup`: Get this setup instructions (you just ran this!).\n");
+        instructions.push_str(
+            "7. `curated_superpowers_setup`: Get this setup instructions (you just ran this!).\n",
+        );
 
         let response = serde_json::json!({
             "instructions": instructions,

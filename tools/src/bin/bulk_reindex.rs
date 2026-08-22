@@ -14,9 +14,9 @@ use std::{collections::HashSet, path::Path};
 
 use tauri_app_lib::db::{list_indexed_user_doc_paths, AppDb};
 use tauri_app_lib::indexer::linker::run_linker;
-use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
 use tauri_app_lib::retrieval;
 use tauri_app_lib::vault::VaultConfig;
+use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
 
 struct Args {
     dry_run: bool,
