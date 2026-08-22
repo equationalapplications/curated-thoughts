@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-22
 **Branch:** `worktree-security-dependabot-remediation` (worktree `.claude/worktrees/security-dependabot-remediation`, based on main @ `fd918cc`)
-**Status:** Draft — research sweep of 2026-08-22 (main clean at time of sweep)
+**Status:** Executed 2026-08-22 — shipped as PR #45 (all CI checks green incl. both CodeQL legs). Post-execution outcomes recorded at the end of this file.
 **Anchored by:** passive security sweep 2026-08-22: 31 open Dependabot alerts (24 npm, 7 Rust across two manifests), secret scanning enabled with 0 alerts, code scanning never run.
 
 ---
@@ -271,9 +271,18 @@ Replace every `uses:` per the table (including `# vX` comments), in all three wo
 - **Override too aggressive for @actions/http-client** → mitigated by per-major undici selectors; verify `@actions/http-client` still resolves to undici 6.x via `pnpm why`.
 - **CodeQL rust build fails on runner** → the apt block mirrors proven ci.yml incantation; if autobuild chokes on workspace features, scope init with `paths`/`path-filters` in a follow-up rather than weakening security-extended.
 - **cargo update pulls surprise majors** → use `--precise` fallback; diff lockfiles before committing.
-- **Pinned dtolnay `stable` freezes toolchain freshness** → intended; Dependabot PRs move the pin when the branch advances.
+- **Pinned dtolnay `stable`** → Outcome (2026-08-22): the SHA pin freezes action logic only — the installed stable toolchain still floats at runtime. Dependabot cannot auto-update this ref (`stable` is not a comparable version); manual refresh cadence accepted. See Post-execution outcomes.
 
 ## Relationship to prior specs/PRs
 
 - Supersedes open PRs **#30** (`cmov 0.5.4` in src-tauri) and **#33** (`serde_with 3.21.0` in src-tauri): both fixes land here across both locks; those branches get closed with a pointer.
 - No prior design spec covers dependency posture; this becomes the canonical reference for the two-Cargo.lock rule ("dependency changes touch BOTH locks").
+
+---
+
+## Post-execution outcomes (2026-08-22, after final whole-branch review)
+
+- **Shipped:** PR #45, all checks green including both CodeQL legs; review verdict ready-to-merge. Release surface: only `fix(deps)` (d899d37) triggers — merge cuts a patch.
+- **CodeQL Rust extraction is buildless.** Analyze (rust) passed its first real run (2m32s); autobuild reported "None of the languages in this project require extra build steps" (~2s). Under CodeQL 2.26.3 no cargo build occurs, so the WebKit apt block in `codeql.yml` is currently inert (~40s/leg). Kept as future-proofing in case a future CodeQL mode builds the workspace. The research-phase expectation "first rust run builds the full workspace cold" did not hold.
+- **Two-lock drift posture going forward.** `dependabot.yml` resolves `/src-tauri` and `/tools` independently, so a future shared-crate bump can move one lock only — recreating the drift this remediation fixed. Until the dual-lock drift assertion is built (stays out of scope, see Scope out), the binding rule stays manual: any PR touching either Cargo.lock moves both whenever the crate exists in both manifests. Escalation trigger: if the convention is violated once in practice, land the CI assertion as the immediate follow-up instead of re-documenting. Live evidence drift predates this branch: hashbrown 0.17.0 (src-tauri) vs 0.17.1 (tools) — transitive-only, benign today.
+- **Pin provenance.** Four pinned refs are annotated tag-object SHAs that peel cleanly to their major tags — `codeql-action`→v3, `tauri-action`→v0, `pnpm/action-setup`→v4, `rust-cache`→v2; the remaining pins are commit SHAs. Both forms are tamper-evident; audit conventions that require commit SHAs should know which refs are which.
