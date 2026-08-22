@@ -1,3 +1,9 @@
+## [1.21.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.21.1...v1.21.2) (2026-08-22)
+
+### Bug Fixes
+
+* **embedder:** disable proxy resolution and raise request timeout ([#64](https://github.com/equationalapplications/curated-thoughts/issues/64)) ([98be2af](https://github.com/equationalapplications/curated-thoughts/commit/98be2afda8cccc948acce5a901e6321574b627a1))
+
 ## [1.21.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.21.0...v1.21.1) (2026-08-22)
 
 ### Bug Fixes
