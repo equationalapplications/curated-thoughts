@@ -97,7 +97,10 @@ jobs:
               exit 1
               ;;
           esac
+          # cp onto the existing placeholder preserves its 0644 mode, so
+          # restore the exec bit explicitly (smoke test requires -x).
           cp "$SRC" "$DEST"
+          chmod +x "$DEST"
 
       - name: Smoke test MCP sidecar
         if: matrix.platform == 'ubuntu-22.04'
