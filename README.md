@@ -166,4 +166,23 @@ Learn more about the Equational Applications memory and wiki packages powering t
 
 ---
 
+## Connecting AI agents (MCP)
+
+Release bundles include an MCP server (stdio JSON-RPC). Point any MCP client at:
+
+    <install-dir>/curated-thoughts --mcp
+
+Configuration lives in `~/.brain` (override with the `CURATED_BRAIN_DIR` env var).
+The server speaks stdio only — tracing goes to stderr, protocol traffic on stdout.
+
+Tool inventory and client examples: see `specs/curated-thoughts-mcp-coding-spec.md`.
+
+Known limitation (Windows): agent-spawned sidecars may briefly flash a console window
+unless the client passes `CREATE_NO_WINDOW`. Standard for MCP servers on Windows.
+
+Developers: the `curated-thoughts-mcp` binary in the `tools/` crate remains the
+manual/dev path (`cargo build --manifest-path tools/Cargo.toml --bin curated-thoughts-mcp`).
+
+---
+
 Made with ❤️ by Equational Applications LLC. [https://equationalapplications.com/](https://equationalapplications.com/)
