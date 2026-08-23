@@ -1,3 +1,9 @@
+## [1.24.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.23.1...v1.24.0) (2026-08-23)
+
+### Features
+
+* ship MCP server as bundled sidecar ([#67](https://github.com/equationalapplications/curated-thoughts/issues/67)) ([5eab8fa](https://github.com/equationalapplications/curated-thoughts/commit/5eab8fa962d97672134a39519453c51bb9d0262a))
+
 ## [1.23.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.23.0...v1.23.1) (2026-08-23)
 
 ### Bug Fixes
