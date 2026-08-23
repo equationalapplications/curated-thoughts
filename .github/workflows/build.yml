@@ -67,6 +67,73 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      - name: Build MCP sidecar
+        if: matrix.platform != 'macos-latest'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Placeholder satisfies tauri-build's externalBin check, which runs
+          # inside the same cargo build that produces the real sidecar.
+          mkdir -p src-tauri/binaries
+          case "${{ matrix.platform }}" in
+            ubuntu-*)
+              touch src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu ;;
+            windows-*)
+              touch src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe ;;
+          esac
+          cargo build --release --manifest-path src-tauri/Cargo.toml \
+            --features mcp-server --bin curated-thoughts
+          case "${{ matrix.platform }}" in
+            ubuntu-*)
+              SRC=src-tauri/target/release/curated-thoughts
+              DEST=src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
+              ;;
+            windows-*)
+              SRC=src-tauri/target/release/curated-thoughts.exe
+              DEST=src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe
+              ;;
+            *)
+              echo "Unsupported platform: ${{ matrix.platform }}" >&2
+              exit 1
+              ;;
+          esac
+          # cp onto the existing placeholder preserves its 0644 mode, so
+          # restore the exec bit explicitly (smoke test requires -x).
+          cp "$SRC" "$DEST"
+          chmod +x "$DEST"
+
+      - name: Smoke test MCP sidecar
+        if: matrix.platform == 'ubuntu-22.04'
+        # The server requires an existing brain DB + embed profile before it
+        # will serve; CI has no real brain, so seed a minimal one.
+        run: |
+          mkdir -p ~/.brain
+          printf '{"embed_profile":{"type":"local","model":"smoke-test"},"vault_path":null}' > ~/.brain/config.json
+          python3 -c "import sqlite3; sqlite3.connect('$HOME/.brain/brain.db').execute('CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY)')"
+          ./tools/smoke_test_mcp_sidecar.sh src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
+
+      - name: Build MCP sidecar (macOS universal)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          set -euxo pipefail
+          # Placeholders satisfy tauri-build's externalBin check, which runs
+          # inside each cargo build that produces the real sidecar slices.
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/curated-thoughts-mcp-aarch64-apple-darwin
+          touch src-tauri/binaries/curated-thoughts-mcp-x86_64-apple-darwin
+          # The bundler resolves externalBin against the universal triple.
+          touch src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
+          for T in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --manifest-path src-tauri/Cargo.toml \
+              --features mcp-server --bin curated-thoughts --target $T
+          done
+          mkdir -p src-tauri/binaries
+          lipo -create \
+            src-tauri/target/aarch64-apple-darwin/release/curated-thoughts \
+            src-tauri/target/x86_64-apple-darwin/release/curated-thoughts \
+            -output src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
+          lipo -info src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

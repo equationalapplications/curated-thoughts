@@ -75,6 +75,15 @@ jobs:
       # locally first to confirm no regression.
       # mcp-server feature included so cargo builds curated-thoughts with --mcp support;
       # cargo sets CARGO_BIN_EXE_curated_thoughts automatically for mcp_integration.rs.
+      # tauri-build validates externalBin paths at compile time (see build.yml
+      # "Build MCP sidecar"), so placeholders are required before any cargo
+      # invocation with the mcp-server feature.
+      - name: Pre-create placeholder sidecar binaries
+        run: |
+          set -euxo pipefail
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
+
       - name: Tests + MCP integration
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
         env:
@@ -110,6 +119,13 @@ jobs:
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: ./src-tauri -> target
+
+      # Placeholders satisfy tauri-build's externalBin check (see build.yml).
+      - name: Pre-create placeholder sidecar binaries
+        run: |
+          set -euxo pipefail
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/curated-thoughts-mcp-aarch64-apple-darwin
 
       - name: Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
