@@ -4,11 +4,34 @@ use std::{fs, path::PathBuf};
 
 use crate::embedder::EmbedProfile;
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 struct ConfigFile {
     vault_path: Option<String>,
     #[serde(default)]
     embed_profile: Option<EmbedProfile>,
+}
+
+impl ConfigFile {
+    /// Lenient read: a config file containing an unrecognized `embed_profile`
+    /// variant (e.g. `external` written by an older schema) must not poison the
+    /// whole file — that silently reset the vault path and forced users back
+    /// through onboarding. Instead, keep every field that still parses and drop
+    /// only the offending one.
+    fn from_text(text: &str) -> Self {
+        match serde_json::from_str::<ConfigFile>(text) {
+            Ok(cfg) => cfg,
+            Err(_) => {
+                let mut value: serde_json::Value = match serde_json::from_str(text) {
+                    Ok(v) => v,
+                    Err(_) => return ConfigFile::default(),
+                };
+                if let Some(obj) = value.as_object_mut() {
+                    obj.remove("embed_profile");
+                }
+                serde_json::from_value(value).unwrap_or_default()
+            }
+        }
+    }
 }
 
 pub struct VaultConfig {
@@ -38,7 +61,7 @@ impl VaultConfig {
             return Ok(ConfigFile::default());
         }
         let text = fs::read_to_string(&self.config_path)?;
-        Ok(serde_json::from_str(&text)?)
+        Ok(ConfigFile::from_text(&text))
     }
 
     fn write(&self, cfg: &ConfigFile) -> Result<()> {
@@ -135,6 +158,28 @@ mod tests {
         assert_eq!(
             cfg.vault_root().unwrap(),
             Some(std::path::PathBuf::from("/vault/root"))
+        );
+    }
+
+    #[test]
+    fn legacy_embed_profile_variant_does_not_poison_config() {
+        // Written by an older schema (`external` embed variant). The whole file
+        // used to fail deserialization, resetting the vault path and re-triggering
+        // onboarding. Now only the embed profile is dropped.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "embed_profile": { "type": "external", "base_url": "https://example.test/v1", "model": "text-embedding-3-small" },
+  "vault_path": "/home/tester/vault"
+}"#,
+        )
+        .unwrap();
+        let cfg = VaultConfig::new(path);
+        assert_eq!(
+            cfg.get_vault_path().unwrap(),
+            Some("/home/tester/vault".to_string())
         );
     }
 
