@@ -25,7 +25,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/curated-thoughts"
+      "binaries/curated-thoughts-mcp"
     ],
     "icon": [
       "icons/32x32.png",

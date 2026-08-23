@@ -170,7 +170,10 @@ Learn more about the Equational Applications memory and wiki packages powering t
 
 Release bundles include an MCP server (stdio JSON-RPC). Point any MCP client at:
 
-    <install-dir>/curated-thoughts --mcp
+    <install-dir>/curated-thoughts-mcp --mcp
+
+(The sidecar is named `curated-thoughts-mcp` because Tauri requires a sidecar's
+name to differ from the Cargo package name.)
 
 Configuration lives in `~/.brain` (override with the `CURATED_BRAIN_DIR` env var).
 The server speaks stdio only — tracing goes to stderr, protocol traffic on stdout.

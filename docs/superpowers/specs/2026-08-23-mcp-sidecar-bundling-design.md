@@ -13,13 +13,13 @@ The MCP server (`rmcp`, stdio JSON-RPC) is compiled into the main binary behind 
 Every GitHub release bundle ships a working MCP server as a Tauri sidecar binary, invocable as:
 
 ```
-<install-dir>/curated-thoughts --mcp
+<install-dir>/curated-thoughts-mcp --mcp
 ```
 
 ## Decision record
 
 - **Approach:** Ship the *main* app binary, built with `--features mcp-server`, as the sidecar. One code path; the sidecar is literally the same code users run. The separate `tools/` crate bin `curated-thoughts-mcp` stays dev-only.
-- **Sidecar name:** `curated-thoughts` (same as the app). On disk in the repo it is `src-tauri/binaries/curated-thoughts-<target-triple>` per Tauri's `externalBin` convention; Tauri strips the triple when installing.
+- **Sidecar name:** `curated-thoughts-mcp`. On disk in the repo it is `src-tauri/binaries/curated-thoughts-mcp-<target-triple>` per Tauri's `externalBin` convention; Tauri strips the triple when installing. The name `curated-thoughts` was rejected because tauri-build forbids a sidecar sharing the Cargo package name.
 - **Windows console flash:** accepted for v1. Agent clients spawn sidecars with `CREATE_NO_WINDOW`; this is standard for MCP servers on Windows. Documented as a known limitation, not worked around.
 
 ## Architecture
@@ -32,14 +32,14 @@ Every GitHub release bundle ships a working MCP server as a Tauri sidecar binary
    cargo build --release --manifest-path src-tauri/Cargo.toml --features mcp-server --bin curated-thoughts
    ```
 3. **New step "Stage sidecar":** copy the built binary to
-   `src-tauri/binaries/curated-thoughts-$TARGET_TRIPLE`
+   `src-tauri/binaries/curated-thoughts-mcp-$TARGET_TRIPLE`
    where `$TARGET_TRIPLE` resolves per matrix leg:
    - ubuntu-22.04 → `x86_64-unknown-linux-gnu`
    - windows-latest → `x86_64-pc-windows-msvc.exe`
-   - macos-latest → built twice (`--target aarch64-apple-darwin`, `--target x86_64-apple-darwin`), then merged into a single fat binary with `lipo -create` staged as `curated-thoughts-universal-apple-darwin` — Tauri's `externalBin` lookup under the `universal-apple-darwin` build expects exactly that one file, not the per-slice binaries.
+   - macos-latest → built twice (`--target aarch64-apple-darwin`, `--target x86_64-apple-darwin`), then merged into a single fat binary with `lipo -create` staged as `curated-thoughts-mcp-universal-apple-darwin` — Tauri's `externalBin` lookup under the `universal-apple-darwin` build expects exactly that one file, not the per-slice binaries.
 
    Staged sidecars are build artifacts (not committed); implementation must create `src-tauri/binaries/` with a `.gitignore` covering `curated-thoughts-*` (the directory does not exist today).
-4. `tauri-action` runs unchanged otherwise; `tauri.conf.json` now contains `"bundle": { "externalBin": ["binaries/curated-thoughts"] }`.
+4. `tauri-action` runs unchanged otherwise; `tauri.conf.json` now contains `"bundle": { "externalBin": ["binaries/curated-thoughts-mcp"] }`.
 
 ### Runtime contract (unchanged)
 
