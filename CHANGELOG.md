@@ -1,3 +1,9 @@
+## [1.24.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.24.0...v1.24.1) (2026-08-23)
+
+### Bug Fixes
+
+* **embed:** guard embed inputs against model context length ([#69](https://github.com/equationalapplications/curated-thoughts/issues/69)) ([a7ecc23](https://github.com/equationalapplications/curated-thoughts/commit/a7ecc23fb83585fc69dcc8d55b672e2f70f08f8d))
+
 ## [1.24.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.23.1...v1.24.0) (2026-08-23)
 
 ### Features
