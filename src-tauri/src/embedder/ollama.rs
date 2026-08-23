@@ -7,30 +7,36 @@ use serde::Deserialize;
 
 use super::EmbedProfile;
 
-static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 
 fn shared_client() -> Result<reqwest::blocking::Client, String> {
-    // Unlike a LazyLock, a build failure is not cached forever: retry on next call
-    // once whatever transient condition broke the builder has cleared.
-    if let Some(res) = CLIENT.get() {
-        return res.clone();
+    // Only a successfully built client is cached; a build failure is returned
+    // without being stored, so the next call retries the builder once whatever
+    // transient condition broke it has cleared.
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
     }
-    let res = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(600))
         .build()
-        .map_err(|e| format!("{e:#}")); // full anyhow-style chain, not just top-level msg
-    let _ = CLIENT.set(res.clone());
-    res
+        .map_err(|e| format!("{e:#}"))?; // full anyhow-style chain, not just top-level msg
+    let _ = CLIENT.set(client.clone());
+    Ok(client)
 }
 
 fn default_ollama_base() -> String {
     std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://[REDACTED-IP]".into())
 }
 
-/// Default char budget per embed input. Approximates a safe margin under the
+/// Default byte budget per embed input. Approximates a safe margin under the
 /// 2048-token context of common local embed models (e.g. nomic-embed-text).
-pub const DEFAULT_MAX_EMBED_CHARS: usize = 7000;
+///
+/// Caveat: 7000 bytes ≈ 2048 tokens only holds for English ASCII text (~3.4
+/// bytes/token). CJK text can cost one or more tokens per 3-byte code point,
+/// and dense code tokenizes worse than prose, so such chunks can exceed the
+/// model's token limit even under this byte budget.
+pub const DEFAULT_MAX_EMBED_BYTES: usize = 7000;
 
 /// Max bytes read from a non-success response body before decoding for display.
 const ERROR_BODY_MAX_BYTES: u64 = 8192;
@@ -38,24 +44,24 @@ const ERROR_BODY_MAX_BYTES: u64 = 8192;
 /// Minimum byte budget for a single split window. A UTF-8 code point can be up
 /// to 4 bytes long; smaller windows could produce zero progress on inputs that
 /// begin with a multi-byte character (infinite loop).
-pub const MIN_MAX_EMBED_CHARS: usize = 4;
+pub const MIN_MAX_EMBED_BYTES: usize = 4;
 
-/// Char budget for a single embed input. Env override: `CURATED_MAX_EMBED_CHARS`.
-fn max_embed_chars() -> usize {
-    std::env::var("CURATED_MAX_EMBED_CHARS")
+/// Byte budget for a single embed input. Env override: `CURATED_MAX_EMBED_BYTES`.
+fn max_embed_bytes() -> usize {
+    std::env::var("CURATED_MAX_EMBED_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n >= MIN_MAX_EMBED_CHARS)
-        .unwrap_or(DEFAULT_MAX_EMBED_CHARS)
+        .filter(|&n| n >= MIN_MAX_EMBED_BYTES)
+        .unwrap_or(DEFAULT_MAX_EMBED_BYTES)
 }
 
-/// Split any input longer than `max_chars` into slices of at most `max_chars`,
+/// Split any input longer than `max_bytes` into slices of at most `max_bytes`,
 /// preferring whitespace boundaries. Inputs already within budget are passed
 /// through unchanged; output count/order corresponds 1:1 with the flattened
 /// inputs fed to the embed endpoint.
-#[allow(dead_code)] // kept as the simple public wrapper over split_for_context_indexed
-pub fn split_for_context(texts: Vec<String>, max_chars: usize) -> Vec<String> {
-    split_for_context_indexed(texts, max_chars)
+#[cfg(test)] // convenience wrapper used by the unit tests below
+fn split_for_context(texts: Vec<String>, max_bytes: usize) -> Vec<String> {
+    split_for_context_indexed(texts, max_bytes)
         .into_iter()
         .map(|(_, slice)| slice)
         .collect()
@@ -64,13 +70,13 @@ pub fn split_for_context(texts: Vec<String>, max_chars: usize) -> Vec<String> {
 /// Like [`split_for_context`], but each slice carries the index of the original
 /// input text it came from, so callers can re-aggregate per-source results.
 ///
-/// Budgets below [`MIN_MAX_EMBED_CHARS`] are clamped up to it so the split
+/// Budgets below [`MIN_MAX_EMBED_BYTES`] are clamped up to it so the split
 /// always makes forward progress, even on multi-byte UTF-8 input.
-pub fn split_for_context_indexed(texts: Vec<String>, max_chars: usize) -> Vec<(usize, String)> {
-    let max_chars = max_chars.max(MIN_MAX_EMBED_CHARS);
+pub fn split_for_context_indexed(texts: Vec<String>, max_bytes: usize) -> Vec<(usize, String)> {
+    let max_bytes = max_bytes.max(MIN_MAX_EMBED_BYTES);
     let mut out = Vec::with_capacity(texts.len());
     for (idx, text) in texts.into_iter().enumerate() {
-        if text.len() <= max_chars {
+        if text.len() <= max_bytes {
             out.push((idx, text));
             continue;
         }
@@ -83,14 +89,14 @@ pub fn split_for_context_indexed(texts: Vec<String>, max_chars: usize) -> Vec<(u
                 }
                 continue;
             }
-            let mut end = std::cmp::min(start + max_chars, text.len());
+            let mut end = std::cmp::min(start + max_bytes, text.len());
             if end < text.len() {
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
                 // Prefer splitting on whitespace near the window edge so we
                 // don't cut words in half.
-                let search_start = start + max_chars / 2;
+                let search_start = start + max_bytes / 2;
                 if search_start < end && text.is_char_boundary(search_start) {
                     let slice = &text[search_start..end];
                     if let Some(pos) = slice.rfind(char::is_whitespace) {
@@ -202,7 +208,7 @@ impl OllamaEmbedder {
         // vector per original input text, in original order. Callers zip this
         // list with the original chunks.
         let (sources, batch): (Vec<usize>, Vec<String>) =
-            split_for_context_indexed(texts, max_embed_chars())
+            split_for_context_indexed(texts, max_embed_bytes())
                 .into_iter()
                 .unzip();
         let resp = client
@@ -270,13 +276,14 @@ mod tests {
         for s in &out {
             assert!(s.len() <= 1000, "slice too long: {}", s.len());
         }
-        // content preserved (modulo split positions): rejoin and compare sorted chars
+        // content preserved exactly (splits are pure concatenation): the sorted
+        // character multisets of input and rejoined output must be identical.
         let rejoined: String = out.concat();
         let mut a: Vec<char> = text.chars().collect();
         let mut b: Vec<char> = rejoined.chars().collect();
         a.sort();
         b.sort_by(|x, y| x.cmp(y));
-        assert_eq!(a.len(), b.len());
+        assert_eq!(a, b, "rejoined slices must preserve all characters");
     }
 
     #[test]
@@ -330,7 +337,7 @@ mod tests {
             assert!(!out.is_empty());
             for s in &out {
                 assert!(!s.is_empty(), "empty slice at budget {budget}");
-                assert!(s.len() <= MIN_MAX_EMBED_CHARS.max(budget));
+                assert!(s.len() <= MIN_MAX_EMBED_BYTES.max(budget));
             }
             // Every split advances through the input: slices reassemble the text.
             let rejoined: String = out.concat();
