@@ -14,12 +14,13 @@ BIN="${1:?usage: smoke_test_mcp_sidecar.sh <binary>}"
 
 REQ='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke-test","version":"0.0.1"}}}'
 
-# Capture full stdout first, then take line 1. Do NOT pipe through head under
-# pipefail: once head exits after line 1 the server dies of SIGPIPE (141) or
-# blocks until timeout reaps it (124), failing the gate even when the
-# initialize handshake succeeded.
-RESP=$(printf '%s\n' "$REQ" | timeout 30 "$BIN" --mcp 2>/dev/null)
-FIRST_LINE=$(printf '%s' "$RESP" | head -n1)
+# Capture full stdout, then take line 1 with `read` (no head-in-pipeline).
+# Both stages are status-neutralized: once the handshake line arrives the
+# server may sleep forever (timeout reaps it -> 124) or spew output that
+# triggers SIGPIPE (141); neither may fail the gate. A server that never
+# responds leaves RESP empty, so FIRST_LINE is empty and grep fails below.
+RESP=$(printf '%s\n' "$REQ" | timeout 30 "$BIN" --mcp 2>/dev/null || true)
+IFS= read -r FIRST_LINE <<<"$RESP" || true
 
 echo "$FIRST_LINE" | grep -q '"serverInfo"' || {
   echo "FAIL: no serverInfo in response: $FIRST_LINE" >&2
