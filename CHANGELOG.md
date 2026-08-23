@@ -1,3 +1,9 @@
+## [1.23.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.23.0...v1.23.1) (2026-08-23)
+
+### Bug Fixes
+
+* **config:** tolerate unknown embed_profile variants in config.json ([#68](https://github.com/equationalapplications/curated-thoughts/issues/68)) ([b3de0b9](https://github.com/equationalapplications/curated-thoughts/commit/b3de0b9d46d383c96976e002218b62244e30917f))
+
 ## [1.23.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.22.0...v1.23.0) (2026-08-22)
 
 ### Features
