@@ -170,7 +170,9 @@ Learn more about the Equational Applications memory and wiki packages powering t
 
 Release bundles include an MCP server (stdio JSON-RPC). Point any MCP client at:
 
-    <install-dir>/curated-thoughts-mcp --mcp
+```text
+<install-dir>/curated-thoughts-mcp --mcp
+```
 
 (The sidecar is named `curated-thoughts-mcp` because Tauri requires a sidecar's
 name to differ from the Cargo package name.)

@@ -123,7 +123,17 @@ impl AppDb {
             .parent()
             .map(|p| p.join("config.json"))
             .unwrap_or_else(|| VaultConfig::default_config_path());
-        let vault_root = VaultConfig::new(config_path)
+        Self::open_with_config(path, config_path)
+    }
+
+    /// Open the brain database, resolving the vault root from an explicit
+    /// config path. Callers that honor split `CURATED_BRAIN_DB` /
+    /// `CURATED_BRAIN_CONFIG` environments must use this instead of [`AppDb::open`],
+    /// which derives config.json from the database's parent directory.
+    pub fn open_with_config(path: &Path, config_path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
+        let vault_root = VaultConfig::new(config_path.as_ref().to_path_buf())
             .vault_root()
             .unwrap_or(None)
             .map(|root| {

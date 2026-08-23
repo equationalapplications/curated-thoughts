@@ -9,7 +9,16 @@ use tauri_app_lib::retrieval;
 
 fn main() -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
-    let mut db = AppDb::open(&paths.db_path).context("open brain database")?;
+    if !paths.db_path.is_file() {
+        anyhow::bail!(
+            "brain database not found at {} — run the app (or ingest_vault_once) first",
+            paths.db_path.display()
+        );
+    }
+    // Honor split CURATED_BRAIN_DB / CURATED_BRAIN_CONFIG: resolve the vault
+    // root from the resolved config path, not from db_path's parent.
+    let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
+        .with_context(|| format!("open brain database {}", paths.db_path.display()))?;
     let conn = &db.0;
 
     let docs: Vec<(i64, String)> = {

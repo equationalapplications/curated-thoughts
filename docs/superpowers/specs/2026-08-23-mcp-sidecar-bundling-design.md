@@ -12,7 +12,7 @@ The MCP server (`rmcp`, stdio JSON-RPC) is compiled into the main binary behind 
 
 Every GitHub release bundle ships a working MCP server as a Tauri sidecar binary, invocable as:
 
-```
+```text
 <install-dir>/curated-thoughts-mcp --mcp
 ```
 
@@ -28,7 +28,7 @@ Every GitHub release bundle ships a working MCP server as a Tauri sidecar binary
 
 1. Existing setup steps run unchanged (deps, node, pnpm, rust-toolchain with `targets:` for macOS universal).
 2. **New step "Build MCP sidecar":**
-   ```
+   ```text
    cargo build --release --manifest-path src-tauri/Cargo.toml --features mcp-server --bin curated-thoughts
    ```
 3. **New step "Stage sidecar":** copy the built binary to
