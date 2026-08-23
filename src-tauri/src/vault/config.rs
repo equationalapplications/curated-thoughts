@@ -12,23 +12,29 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
-    /// Lenient read: a config file containing an unrecognized `embed_profile`
-    /// variant (e.g. `external` written by an older schema) must not poison the
-    /// whole file — that silently reset the vault path and forced users back
-    /// through onboarding. Instead, keep every field that still parses and drop
-    /// only the offending one.
-    fn from_text(text: &str) -> Self {
+    /// Lenient read: a config file whose `embed_profile` field uses an
+    /// unrecognized variant (e.g. `external` written by an older schema) must
+    /// not poison the whole file — that silently reset the vault path and
+    /// forced users back through onboarding. Leniency applies ONLY to
+    /// `embed_profile`: it is dropped (falling back to the default profile)
+    /// when it fails to parse. Malformed JSON or an invalid `vault_path` is a
+    /// real error and propagates.
+    fn from_text(text: &str) -> Result<Self> {
         match serde_json::from_str::<ConfigFile>(text) {
-            Ok(cfg) => cfg,
-            Err(_) => {
-                let mut value: serde_json::Value = match serde_json::from_str(text) {
-                    Ok(v) => v,
-                    Err(_) => return ConfigFile::default(),
-                };
+            Ok(cfg) => Ok(cfg),
+            Err(first_err) => {
+                // Retry with embed_profile removed; only tolerate failure that
+                // is attributable to embed_profile itself.
+                let mut value: serde_json::Value = serde_json::from_str(text)?;
                 if let Some(obj) = value.as_object_mut() {
                     obj.remove("embed_profile");
                 }
-                serde_json::from_value(value).unwrap_or_default()
+                let cfg: ConfigFile = serde_json::from_value(value)?;
+                if cfg.vault_path.is_none() && text.contains("\"vault_path\"") {
+                    // vault_path was present but unparseable — do not mask it.
+                    return Err(anyhow::anyhow!(first_err));
+                }
+                Ok(cfg)
             }
         }
     }
@@ -61,7 +67,7 @@ impl VaultConfig {
             return Ok(ConfigFile::default());
         }
         let text = fs::read_to_string(&self.config_path)?;
-        Ok(ConfigFile::from_text(&text))
+        Ok(ConfigFile::from_text(&text)?)
     }
 
     fn write(&self, cfg: &ConfigFile) -> Result<()> {
@@ -181,6 +187,27 @@ mod tests {
             cfg.get_vault_path().unwrap(),
             Some("/home/tester/vault".to_string())
         );
+        // The invalid embed_profile is discarded; default profile applies.
+        assert_eq!(cfg.get_embed_profile().unwrap(), EmbedProfile::default());
+    }
+
+    #[test]
+    fn malformed_json_is_an_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{ not json at all").unwrap();
+        let cfg = VaultConfig::new(path);
+        assert!(cfg.get_vault_path().is_err());
+    }
+
+    #[test]
+    fn invalid_vault_path_type_is_an_error() {
+        // vault_path: 42 must propagate as an error, not silently reset config.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, r#"{"vault_path": 42}"#).unwrap();
+        let cfg = VaultConfig::new(path);
+        assert!(cfg.get_vault_path().is_err());
     }
 
     #[test]
