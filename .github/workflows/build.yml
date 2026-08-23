@@ -72,9 +72,17 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # Placeholder satisfies tauri-build's externalBin check, which runs
+          # inside the same cargo build that produces the real sidecar.
+          mkdir -p src-tauri/binaries
+          case "${{ matrix.platform }}" in
+            ubuntu-*)
+              touch src-tauri/binaries/curated-thoughts-x86_64-unknown-linux-gnu ;;
+            windows-*)
+              touch src-tauri/binaries/curated-thoughts-x86_64-pc-windows-msvc.exe ;;
+          esac
           cargo build --release --manifest-path src-tauri/Cargo.toml \
             --features mcp-server --bin curated-thoughts
-          mkdir -p src-tauri/binaries
           case "${{ matrix.platform }}" in
             ubuntu-*)
               SRC=src-tauri/target/release/curated-thoughts
@@ -99,6 +107,13 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: |
           set -euxo pipefail
+          # Placeholders satisfy tauri-build's externalBin check, which runs
+          # inside each cargo build that produces the real sidecar slices.
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/curated-thoughts-aarch64-apple-darwin
+          touch src-tauri/binaries/curated-thoughts-x86_64-apple-darwin
+          # The bundler resolves externalBin against the universal triple.
+          touch src-tauri/binaries/curated-thoughts-universal-apple-darwin
           for T in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --manifest-path src-tauri/Cargo.toml \
               --features mcp-server --bin curated-thoughts --target $T
