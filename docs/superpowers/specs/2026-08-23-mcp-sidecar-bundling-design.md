@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-23
 **Status:** Approved design (pending implementation)
-**Repo:** curated-thoughts v1.21.x
+**Repo:** curated-thoughts v1.22.0
 
 ## Problem
 
@@ -36,9 +36,9 @@ Every GitHub release bundle ships a working MCP server as a Tauri sidecar binary
    where `$TARGET_TRIPLE` resolves per matrix leg:
    - ubuntu-22.04 → `x86_64-unknown-linux-gnu`
    - windows-latest → `x86_64-pc-windows-msvc.exe`
-   - macos-latest → built twice (`aarch64-apple-darwin`, `x86_64-apple-darwin`) via `--target` so both universal slices exist; both staged files must be present before `tauri-action`.
-   
-   Staged sidecars are build artifacts (not committed); `src-tauri/binaries/.gitignore` covers `curated-thoughts-*`.
+   - macos-latest → built twice (`--target aarch64-apple-darwin`, `--target x86_64-apple-darwin`), then merged into a single fat binary with `lipo -create` staged as `curated-thoughts-universal-apple-darwin` — Tauri's `externalBin` lookup under the `universal-apple-darwin` build expects exactly that one file, not the per-slice binaries.
+
+   Staged sidecars are build artifacts (not committed); implementation must create `src-tauri/binaries/` with a `.gitignore` covering `curated-thoughts-*` (the directory does not exist today).
 4. `tauri-action` runs unchanged otherwise; `tauri.conf.json` now contains `"bundle": { "externalBin": ["binaries/curated-thoughts"] }`.
 
 ### Runtime contract (unchanged)
