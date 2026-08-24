@@ -69,6 +69,22 @@ struct CuratedSearchCodeParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct GraphNeighborsParams {
+    /// Chunk ID of the root symbol (from curated_search_code results)
+    #[serde(default)]
+    chunk_id: Option<i64>,
+    /// Symbol name to resolve to the root chunk (e.g., function name). Used when chunk_id is omitted.
+    #[serde(default)]
+    symbol: Option<String>,
+    /// Traversal direction: callees, callers, or both (default)
+    #[serde(default)]
+    direction: Option<String>,
+    /// Max traversal hops, 1-5 (default: 2)
+    #[serde(default)]
+    max_hops: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct CuratedSuperpowersSetupParams {
     /// Include Aider setup instructions (default: true)
     #[serde(default = "default_true")]
@@ -432,6 +448,121 @@ impl VaultMcpServer {
         self.log_access("curated_search_code", None);
         serde_json::to_string(&response)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "graph_neighbors",
+        description = "Walk the code call/import graph from a root symbol using recursive traversal over curated_relationships (CALLS/IMPORTS edges). Returns neighbor chunks ranked by hop depth with doc path and symbol names. Resolve the root via curated_search_code first (chunk_id) or pass a symbol name directly."
+    )]
+    async fn graph_neighbors(
+        &self,
+        args: Parameters<GraphNeighborsParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(GraphNeighborsParams {
+            chunk_id,
+            symbol,
+            direction,
+            max_hops,
+        }) = args;
+        let conn = lock_conn(&self.conn)?;
+
+        // Resolve root chunk id: explicit chunk_id wins, else match against
+        // defined_symbol (definitions, lowercased+trimmed by the linker) with
+        // symbol_name fallback. Definitions are the correct traversal root —
+        // a ref chunk only has outgoing edges pointing AT the definition.
+        let root_chunk_id: i64 = if let Some(id) = chunk_id {
+            id
+        } else if let Some(ref sym) = symbol {
+            let normalized = sym.trim().to_lowercase();
+            conn.query_row(
+                "SELECT c.id FROM chunks c
+                 WHERE c.defined_symbol = ?1 OR (c.defined_symbol IS NULL AND c.symbol_name = ?1)
+                 ORDER BY CASE WHEN c.defined_symbol IS NOT NULL THEN 0 ELSE 1 END, c.id
+                 LIMIT 1",
+                rusqlite::params![normalized],
+                |r| r.get(0),
+            )
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    format!("no chunk found with symbol '{sym}'"),
+                    None,
+                )
+            })?
+        } else {
+            return Err(rmcp::ErrorData::invalid_params(
+                "provide either chunk_id or symbol",
+                None,
+            ));
+        };
+
+        // Root chunk's entity scope (matches how edges were written).
+        let entity_id: String = conn
+            .query_row(
+                "SELECT entity_id FROM chunks WHERE id = ?1",
+                rusqlite::params![root_chunk_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("root chunk not found: {e}"), None)
+            })?;
+
+        let hops = max_hops.unwrap_or(2).clamp(1, 5);
+        let dir = direction.as_deref();
+        if let Some(d) = dir {
+            if !matches!(d, "callees" | "callers" | "both") {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!("invalid direction '{d}': expected callees, callers, or both"),
+                    None,
+                ));
+            }
+        }
+        let neighbors =
+            tauri_app_lib::graph::get_neighbors(&conn, root_chunk_id, &entity_id, hops, dir)
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("traversal failed: {e}"), None))?;
+
+        // Hard cap BEFORE enrichment: hub symbols at high depth can return
+        // thousands of rows; don't run per-row lookups on all of them while
+        // holding the DB lock.
+        const MAX_NEIGHBORS: usize = 200;
+        let total = neighbors.len();
+        let capped: Vec<_> = neighbors.into_iter().take(MAX_NEIGHBORS).collect();
+
+        // Enrich rows with doc path + symbol for agent consumption.
+        let mut enriched = Vec::with_capacity(capped.len());
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT c.symbol_name, d.path FROM chunks c
+                     JOIN documents d ON c.doc_id = d.id
+                     WHERE c.id = ?1",
+                )
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare: {e}"), None))?;
+            for n in &capped {
+                let detail = stmt
+                    .query_row(rusqlite::params![n.chunk_id], |r| {
+                        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .unwrap_or_else(|_| (None, String::from("<deleted>")));
+                enriched.push(serde_json::json!({
+                    "chunk_id": n.chunk_id,
+                    "depth": n.depth,
+                    "rel_type": n.rel_type,
+                    "symbol": detail.0,
+                    "doc_path": detail.1,
+                }));
+            }
+        }
+
+        self.log_access("graph_neighbors", Some(&entity_id));
+        serde_json::to_string(&serde_json::json!({
+            "root_chunk_id": root_chunk_id,
+            "direction": direction.as_deref().unwrap_or("both"),
+            "max_hops": hops,
+            "total_neighbors": total,
+            "truncated": total > MAX_NEIGHBORS,
+            "neighbors": enriched
+        }))
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 
     #[tool(
