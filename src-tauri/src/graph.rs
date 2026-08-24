@@ -155,7 +155,8 @@ mod tests {
         let doc = upsert_document(&conn, "/vault/documents/priority.rs", "h").unwrap();
         mark_document_indexed(&conn, doc).unwrap();
         let root = insert_chunk(&conn, doc, &make_def_chunk("root"), 0, "tier_fact", "").unwrap();
-        let target = insert_chunk(&conn, doc, &make_def_chunk("target"), 1, "tier_fact", "").unwrap();
+        let target =
+            insert_chunk(&conn, doc, &make_def_chunk("target"), 1, "tier_fact", "").unwrap();
         insert_relationship(&conn, root, target, "CALLS", "target", "tier_fact").unwrap();
         insert_relationship(&conn, root, target, "IMPORTS", "target", "tier_fact").unwrap();
 
@@ -232,7 +233,8 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let (_a, _b, _c, d) = setup_diamond(&conn);
         let doc2 = upsert_document(&conn, "/vault/documents/b.rs", "h2").unwrap();
-        let b2 = insert_chunk(&conn, doc2, &make_def_chunk("b_direct"), 0, "tier_fact", "").unwrap();
+        let b2 =
+            insert_chunk(&conn, doc2, &make_def_chunk("b_direct"), 0, "tier_fact", "").unwrap();
         let doc_a2 = upsert_document(&conn, "/vault/documents/a2.rs", "h3").unwrap();
         let a2 = insert_chunk(&conn, doc_a2, &make_def_chunk("a2"), 0, "tier_fact", "").unwrap();
         insert_relationship(&conn, a2, b2, "CALLS", "b_direct", "tier_fact").unwrap();

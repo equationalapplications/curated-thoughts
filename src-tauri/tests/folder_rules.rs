@@ -1,7 +1,9 @@
 mod helpers;
 use helpers::TestApp;
 use serde_json::json;
-use tauri_app_lib::inference::config::{write_config, GenerationConfig, GenerationProviderKind, LlmConfig};
+use tauri_app_lib::inference::config::{
+    write_config, GenerationConfig, GenerationProviderKind, LlmConfig,
+};
 use tauri_app_lib::librarian::generate_summary;
 
 struct EnvVarGuard {
@@ -163,7 +165,10 @@ fn auto_approve_commits_proposal_via_resolve_path() {
         .create();
 
     let _brain_dir_guard = EnvVarGuard::new("CURATED_BRAIN_DIR");
-    std::env::set_var("CURATED_BRAIN_DIR", app.tmp.path().to_string_lossy().to_string());
+    std::env::set_var(
+        "CURATED_BRAIN_DIR",
+        app.tmp.path().to_string_lossy().to_string(),
+    );
     write_config(
         app.tmp.path(),
         &LlmConfig {
@@ -200,7 +205,10 @@ fn auto_approve_commits_proposal_via_resolve_path() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(fact_count, 1, "auto-approve should commit fact to llm_wiki_entries");
+    assert_eq!(
+        fact_count, 1,
+        "auto-approve should commit fact to llm_wiki_entries"
+    );
 
     // Legacy review queue still uses wiki_pages until Task 9 shims
     let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));

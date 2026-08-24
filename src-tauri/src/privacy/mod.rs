@@ -64,7 +64,8 @@ pub fn write_privacy_config(brain_dir: &Path, privacy: &PrivacyConfig) -> Result
 
     let mut existing = if path.exists() {
         let contents = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str::<serde_json::Value>(&contents)
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };

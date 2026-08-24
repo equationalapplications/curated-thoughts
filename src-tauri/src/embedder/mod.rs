@@ -11,19 +11,130 @@ static LOCAL_EMBEDDER: OnceLock<Mutex<Option<Embedder>>> = OnceLock::new();
 
 pub fn get_or_init_local_embedder() -> Result<MutexGuard<'static, Option<Embedder>>> {
     let mutex = LOCAL_EMBEDDER.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|_| anyhow!("embedder mutex poisoned"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|_| anyhow!("embedder mutex poisoned"))?;
     if guard.is_none() {
         *guard = Some(Embedder::new()?);
     }
     Ok(guard)
 }
 
-#[derive(Clone, Eq, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudProvider {
     OpenAi,
     Voyage,
     Cohere,
+}
+
+/// External OpenAI-compatible embedding endpoint (`POST {base_url}/embeddings`,
+/// request `{model, input}`, response `data[].embedding`). Works with
+/// OpenRouter, OpenAI, and any compatible gateway. API key resolution order:
+/// profile field → `EMBED_API_KEY` env → provider default env
+/// (`OPENROUTER_API_KEY` for openrouter bases, `OPENAI_API_KEY` otherwise).
+/// Default base for external embedding endpoints. OpenRouter per spec; the
+/// config file intentionally stores no endpoint so secret-redaction on this
+/// machine cannot corrupt it.
+fn default_external_base_url() -> String {
+    "https://openrouter.ai/api/v1".into()
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub struct ExternalEmbedProfile {
+    #[serde(default = "default_external_base_url")]
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl ExternalEmbedProfile {
+    fn resolved_api_key(&self) -> Result<String> {
+        if let Some(k) = self.api_key.as_deref() {
+            let k = k.trim();
+            if !k.is_empty() {
+                return Ok(k.to_string());
+            }
+        }
+        if let Ok(k) = std::env::var("EMBED_API_KEY") {
+            if !k.trim().is_empty() {
+                return Ok(k);
+            }
+        }
+        let default_var = if self.base_url.contains("openrouter") {
+            "OPENROUTER_API_KEY"
+        } else {
+            "OPENAI_API_KEY"
+        };
+        if let Ok(k) = std::env::var(default_var) {
+            if !k.trim().is_empty() {
+                return Ok(k);
+            }
+        }
+        anyhow::bail!(
+            "external embed profile has no api key: set it in the profile, EMBED_API_KEY, or {default_var}"
+        );
+    }
+
+    /// Batch texts into <=64-input requests so large vaults don't blow up
+    /// provider payload limits; each batch is one HTTP call.
+    pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        let api_key = self.resolved_api_key()?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+        let base = self.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        let url = format!("{base}/v1/embeddings");
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(64) {
+            let resp = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&serde_json::json!({
+                    "model": self.model,
+                    "input": batch,
+                }))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("external embeddings {} status {}", url, resp.status());
+            }
+            let body: serde_json::Value = resp.json()?;
+            let data = body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .ok_or_else(|| anyhow!("missing data[] in embeddings response"))?;
+            if data.len() != batch.len() {
+                anyhow::bail!(
+                    "embeddings response count mismatch: sent {} got {}",
+                    batch.len(),
+                    data.len()
+                );
+            }
+            // Response items carry an `index`; honor it in case ordering differs.
+            let mut batch_out: Vec<Option<Vec<f32>>> = vec![None; batch.len()];
+            for item in data {
+                let idx = item.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let emb = item
+                    .get("embedding")
+                    .and_then(|e| e.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_f64().map(|f| f as f32))
+                            .collect::<Vec<f32>>()
+                    })
+                    .ok_or_else(|| anyhow!("missing embedding vector in response item"))?;
+                if idx >= batch.len() {
+                    anyhow::bail!("embedding index {idx} out of range");
+                }
+                batch_out[idx] = Some(emb);
+            }
+            out.extend(batch_out.into_iter().map(|o| o.unwrap_or_default()));
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -37,6 +148,10 @@ pub enum EmbedProfile {
         model: String,
         #[serde(default)]
         api_key: String,
+    },
+    External {
+        #[serde(flatten)]
+        profile: ExternalEmbedProfile,
     },
 }
 
@@ -69,6 +184,7 @@ pub fn embed_batch(profile: &EmbedProfile, texts: Vec<String>) -> Result<Vec<Vec
             embedder.embed(texts)
         }
         EmbedProfile::Cloud { .. } => Err(anyhow!("cloud embed not implemented")),
+        EmbedProfile::External { profile } => profile.embed(texts),
     }
 }
 
@@ -113,5 +229,55 @@ mod tests {
             api_key: "k".to_string(),
         };
         assert!(embed_batch(&p, vec!["a".into()]).is_err());
+    }
+
+    #[test]
+    fn external_profile_requires_api_key() {
+        // No key in profile; env vars must not leak a value into tests, so this
+        // should fail with the "no api key" message unless CI sets one.
+        let p = EmbedProfile::External {
+            profile: ExternalEmbedProfile {
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                model: "openai/text-embedding-3-small".to_string(),
+                api_key: None,
+            },
+        };
+        match std::env::var("OPENROUTER_API_KEY") {
+            Ok(k) if !k.trim().is_empty() => {} // env-provided: fine
+            _ => assert!(embed_batch(&p, vec!["a".into()]).is_err()),
+        }
+    }
+
+    #[test]
+    fn external_profile_serializes_flat() {
+        let p = EmbedProfile::External {
+            profile: ExternalEmbedProfile {
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                model: "openai/text-embedding-3-small".to_string(),
+                api_key: Some("k".into()),
+            },
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["type"], "external");
+        assert_eq!(
+            json["base_url"],
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(json["model"], "openai/text-embedding-3-small");
+        let back: EmbedProfile = serde_json::from_value(json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn external_embed_strips_v1_suffix() {
+        // Verify URL construction without hitting the network: an unreachable
+        // host must produce a connect error mentioning our normalized path.
+        let p = ExternalEmbedProfile {
+            base_url: "https://openrouter.invalid.example/api/v1/".to_string(),
+            model: "m".to_string(),
+            api_key: Some("k".into()),
+        };
+        let err = p.embed(vec!["a".into()]).unwrap_err().to_string();
+        assert!(err.contains("/v1/embeddings"), "got: {err}");
     }
 }

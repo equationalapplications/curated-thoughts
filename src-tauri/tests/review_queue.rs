@@ -6,7 +6,12 @@ use tauri_app_lib::db::proposals::{
     ProposalSourceRole, StoredEvidenceChunk,
 };
 
-fn seed_pending_proposal(app: &TestApp, proposal_id: &str, target_name: &str, fact_body: &str) -> i64 {
+fn seed_pending_proposal(
+    app: &TestApp,
+    proposal_id: &str,
+    target_name: &str,
+    fact_body: &str,
+) -> i64 {
     let conn = app.open_db();
     conn.execute(
         "INSERT INTO documents (path, hash, tier, status) VALUES ('/vault/documents/src.pdf', 'hash1', 'user_doc', 'indexed')",
@@ -139,7 +144,9 @@ fn approve_wiki_page_commits_proposal_and_clears_queue() {
     assert_eq!(fact_count, 1);
 
     let body: String = conn
-        .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
+        .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(body, "Approved fact body.");
 }
@@ -159,7 +166,9 @@ fn approve_wiki_page_ignores_content_parameter() {
 
     let conn = app.open_db();
     let body: String = conn
-        .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
+        .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(body, "Stored fact.");
 }

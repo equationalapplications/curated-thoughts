@@ -9,8 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use protocol::{classify_dispatch_error, IncomingFrame, OutgoingMessage, TaskErrorBody, TaskErrorCode};
 use crate::tool_dispatch::{self, ToolDispatchContext};
+use protocol::{
+    classify_dispatch_error, IncomingFrame, OutgoingMessage, TaskErrorBody, TaskErrorCode,
+};
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 pub const DEAD_CONNECTION_TIMEOUT: Duration = Duration::from_secs(45);
@@ -300,14 +302,7 @@ async fn run<T, F>(
             Ok(transport) => {
                 attempt = 0;
                 auth_rejected = false;
-                let end = run_session(
-                    &ctx,
-                    transport,
-                    &pairing_token,
-                    &cancel,
-                    &status,
-                )
-                .await;
+                let end = run_session(&ctx, transport, &pairing_token, &cancel, &status).await;
 
                 if cancel.load(Ordering::SeqCst) {
                     break;
@@ -531,9 +526,13 @@ mod config_tests {
 
     #[test]
     fn resolve_none_for_insecure_ws_url() {
-        with_var("CURATED_CLANKER_WS_URL", Some("ws://evil.example/agent/desktop"), || {
-            assert_eq!(CloudBridgeConfig::resolve(), None);
-        });
+        with_var(
+            "CURATED_CLANKER_WS_URL",
+            Some("ws://evil.example/agent/desktop"),
+            || {
+                assert_eq!(CloudBridgeConfig::resolve(), None);
+            },
+        );
     }
 }
 
@@ -748,7 +747,10 @@ mod session_tests {
         let _auth = out_rx.recv().await;
         // Stay within AUTH_READY_TIMEOUT so the session survives until ready is sent.
         tokio::time::advance(AUTH_READY_TIMEOUT - Duration::from_secs(1)).await;
-        assert!(out_rx.try_recv().is_err(), "ping must not fire before ready");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "ping must not fire before ready"
+        );
 
         in_tx
             .send(RecvEvent::Text(r#"{"type":"ready"}"#.into()))
@@ -831,10 +833,10 @@ mod session_tests {
 
 #[cfg(test)]
 mod reconnect_loop_tests {
+    use super::session_tests::MockTransport;
     use super::*;
     use rusqlite::Connection;
     use tokio::sync::mpsc;
-    use super::session_tests::MockTransport;
 
     #[tokio::test(start_paused = true)]
     async fn run_retries_connect_with_backoff_until_it_succeeds() {
@@ -872,7 +874,8 @@ mod reconnect_loop_tests {
                         let (in_tx, in_rx) = mpsc::unbounded_channel::<RecvEvent>();
                         let keepalive_tx = in_tx.clone();
                         tokio::spawn(async move {
-                            let _ = keepalive_tx.send(RecvEvent::Text(r#"{"type":"ready"}"#.into()));
+                            let _ =
+                                keepalive_tx.send(RecvEvent::Text(r#"{"type":"ready"}"#.into()));
                             loop {
                                 tokio::time::sleep(Duration::from_secs(30)).await;
                                 if keepalive_tx.send(RecvEvent::Keepalive).is_err() {

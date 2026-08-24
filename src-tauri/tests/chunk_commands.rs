@@ -11,8 +11,10 @@ use tauri_app_lib::db::{insert_chunk, mark_document_indexed, upsert_document};
 #[test]
 fn resolve_chunk_overlay_is_invocable_by_frontend_name() {
     let app = TestApp::new();
-    let resolved: Option<serde_json::Value> =
-        app.invoke("resolve_chunk_overlay", json!({ "path": "/nope.md", "hash": "h" }));
+    let resolved: Option<serde_json::Value> = app.invoke(
+        "resolve_chunk_overlay",
+        json!({ "path": "/nope.md", "hash": "h" }),
+    );
     assert_eq!(resolved, None);
 }
 
@@ -44,8 +46,10 @@ fn fetch_chunk_content_returns_text_by_path_and_hash() {
     let conn = app.open_db();
     let hash = seed_doc_with_hashed_chunk(&conn, "documents/notes.md");
     drop(conn);
-    let text: Option<String> =
-        app.invoke("fetch_chunk_content", json!({ "path": "documents/notes.md", "hash": hash }));
+    let text: Option<String> = app.invoke(
+        "fetch_chunk_content",
+        json!({ "path": "documents/notes.md", "hash": hash }),
+    );
     assert_eq!(text.as_deref(), Some("the exact passage"));
 }
 
@@ -55,7 +59,9 @@ fn fetch_chunk_content_returns_null_for_unknown_hash() {
     let conn = app.open_db();
     let _ = seed_doc_with_hashed_chunk(&conn, "documents/notes.md");
     drop(conn);
-    let text: Option<String> =
-        app.invoke("fetch_chunk_content", json!({ "path": "documents/notes.md", "hash": "missing" }));
+    let text: Option<String> = app.invoke(
+        "fetch_chunk_content",
+        json!({ "path": "documents/notes.md", "hash": "missing" }),
+    );
     assert_eq!(text, None);
 }

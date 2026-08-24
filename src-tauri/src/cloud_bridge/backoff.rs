@@ -40,8 +40,14 @@ mod tests {
 
     #[test]
     fn full_jitter_is_capped_at_thirty_seconds() {
-        assert_eq!(next_delay(10, BASE, CAP, 1.0), Duration::from_millis(30_000));
-        assert_eq!(next_delay(30, BASE, CAP, 1.0), Duration::from_millis(30_000));
+        assert_eq!(
+            next_delay(10, BASE, CAP, 1.0),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            next_delay(30, BASE, CAP, 1.0),
+            Duration::from_millis(30_000)
+        );
     }
 
     #[test]

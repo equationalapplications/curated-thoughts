@@ -115,7 +115,12 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
 }
 
 /// Rewrite a fact's body (title re-derived); pushes full-payload outbox UPDATE.
-pub fn update_fact(conn: &mut Connection, entity_id: &str, fact_id: &str, body: &str) -> Result<()> {
+pub fn update_fact(
+    conn: &mut Connection,
+    entity_id: &str,
+    fact_id: &str,
+    body: &str,
+) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
         bail!("fact body must not be empty");
@@ -328,7 +333,13 @@ mod tests {
         let entity_id = make_entity(&conn);
         let fact = add_fact(&mut conn, &entity_id, "Old body.").unwrap();
 
-        update_fact(&mut conn, &entity_id, &fact.id, "New body with more detail.").unwrap();
+        update_fact(
+            &mut conn,
+            &entity_id,
+            &fact.id,
+            "New body with more detail.",
+        )
+        .unwrap();
 
         let loaded = get_entity(&conn, &entity_id).unwrap().unwrap();
         assert_eq!(loaded.facts[0].body, "New body with more detail.");
@@ -357,6 +368,9 @@ mod tests {
         let loaded = get_entity(&conn, &entity_id).unwrap().unwrap();
         assert!(loaded.facts.is_empty(), "archived fact must not be listed");
         assert_eq!(outbox_count(&conn, &fact.id, "DELETE"), 1);
-        assert!(archive_fact(&mut conn, &entity_id, &fact.id).is_err(), "double archive errors");
+        assert!(
+            archive_fact(&mut conn, &entity_id, &fact.id).is_err(),
+            "double archive errors"
+        );
     }
 }

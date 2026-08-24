@@ -312,8 +312,8 @@ mod tests {
             [id],
             |row| {
                 let payload_str: String = row.get(5)?;
-                let payload: serde_json::Value = serde_json::from_str(&payload_str)
-                    .expect("outbox payload must be valid JSON");
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_str).expect("outbox payload must be valid JSON");
                 Ok(StoredOutboxRow {
                     id: row.get(0)?,
                     entity_id: row.get(1)?,
@@ -328,7 +328,11 @@ mod tests {
         .expect("outbox row must exist")
     }
 
-    fn assert_row_matches_params(stored: &StoredOutboxRow, params: &OutboxPushParams, created_at: i64) {
+    fn assert_row_matches_params(
+        stored: &StoredOutboxRow,
+        params: &OutboxPushParams,
+        created_at: i64,
+    ) {
         assert_eq!(stored.entity_id, params.entity_id);
         assert_eq!(stored.table_name, params.table_name);
         assert!(!stored.table_name.starts_with("llm_wiki_"));

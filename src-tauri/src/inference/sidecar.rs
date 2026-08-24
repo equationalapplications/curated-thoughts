@@ -15,8 +15,7 @@ impl Drop for SidecarProcess {
 }
 
 pub fn pick_port() -> Result<u16> {
-    portpicker::pick_unused_port()
-        .ok_or_else(|| anyhow::anyhow!("no free TCP port available"))
+    portpicker::pick_unused_port().ok_or_else(|| anyhow::anyhow!("no free TCP port available"))
 }
 
 pub fn spawn_sidecar(binary_path: &Path, model_path: &Path, port: u16) -> Result<SidecarProcess> {
@@ -48,10 +47,16 @@ fn await_sidecar_ready_impl(
 
     loop {
         if start.elapsed() > timeout {
-            return Err(anyhow::anyhow!("sidecar startup timed out after {}s", timeout.as_secs()));
+            return Err(anyhow::anyhow!(
+                "sidecar startup timed out after {}s",
+                timeout.as_secs()
+            ));
         }
         if let Ok(Some(status)) = sidecar.child.try_wait() {
-            return Err(anyhow::anyhow!("sidecar exited during startup ({})", status));
+            return Err(anyhow::anyhow!(
+                "sidecar exited during startup ({})",
+                status
+            ));
         }
         if let Ok(resp) = client.get(&url).send() {
             if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -66,16 +71,12 @@ fn await_sidecar_ready_impl(
 }
 
 pub fn await_sidecar_ready(sidecar: &mut SidecarProcess, app: &AppHandle) -> Result<()> {
-    await_sidecar_ready_impl(
-        sidecar,
-        std::time::Duration::from_secs(120),
-        |elapsed_s| {
-            let _ = app.emit(
-                "provider-loading",
-                serde_json::json!({ "elapsed_s": elapsed_s }),
-            );
-        },
-    )
+    await_sidecar_ready_impl(sidecar, std::time::Duration::from_secs(120), |elapsed_s| {
+        let _ = app.emit(
+            "provider-loading",
+            serde_json::json!({ "elapsed_s": elapsed_s }),
+        );
+    })
 }
 
 #[cfg(test)]
@@ -100,15 +101,18 @@ mod tests {
                 .unwrap(),
         };
 
-        let result = await_sidecar_ready_impl(
-            &mut sidecar,
-            std::time::Duration::from_millis(200),
-            |_| {},
-        );
+        let result =
+            await_sidecar_ready_impl(&mut sidecar, std::time::Duration::from_millis(200), |_| {});
 
-        assert!(result.is_err(), "await_sidecar_ready_impl should detect child exit");
+        assert!(
+            result.is_err(),
+            "await_sidecar_ready_impl should detect child exit"
+        );
         if let Err(err) = result {
-            assert!(err.to_string().contains("sidecar exited"), "unexpected error: {err}");
+            assert!(
+                err.to_string().contains("sidecar exited"),
+                "unexpected error: {err}"
+            );
         }
     }
 
@@ -139,12 +143,12 @@ mod tests {
                 .unwrap(),
         };
 
-        let result = await_sidecar_ready_impl(
-            &mut sidecar,
-            std::time::Duration::from_millis(200),
-            |_| {},
-        );
+        let result =
+            await_sidecar_ready_impl(&mut sidecar, std::time::Duration::from_millis(200), |_| {});
 
-        assert!(result.is_err(), "await_sidecar_ready should time out if health never becomes ok");
+        assert!(
+            result.is_err(),
+            "await_sidecar_ready should time out if health never becomes ok"
+        );
     }
 }

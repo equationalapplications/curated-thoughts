@@ -89,9 +89,7 @@ pub fn clamp_max_depth(requested: usize) -> usize {
 }
 
 pub fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
-    v.iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 pub fn wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntologyResult> {
@@ -207,17 +205,16 @@ fn fetch_neighbors(
 
     let mut out = Vec::new();
 
-    if matches!(direction, TraverseDirection::Outbound | TraverseDirection::Both) {
-        fetch_outbound_neighbors(
-            conn,
-            entity_id,
-            node_id,
-            &edge_filter,
-            edge_types,
-            &mut out,
-        )?;
+    if matches!(
+        direction,
+        TraverseDirection::Outbound | TraverseDirection::Both
+    ) {
+        fetch_outbound_neighbors(conn, entity_id, node_id, &edge_filter, edge_types, &mut out)?;
     }
-    if matches!(direction, TraverseDirection::Inbound | TraverseDirection::Both) {
+    if matches!(
+        direction,
+        TraverseDirection::Inbound | TraverseDirection::Both
+    ) {
         fetch_inbound_neighbors(conn, entity_id, node_id, &edge_filter, edge_types, &mut out)?;
     }
     Ok(out)
@@ -239,13 +236,14 @@ fn fetch_outbound_neighbors(
          WHERE e.entity_id = ?1 AND e.source_id = ?2{edge_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-        vec![Box::new(entity_id.to_string()), Box::new(node_id.to_string())];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(entity_id.to_string()),
+        Box::new(node_id.to_string()),
+    ];
     for et in edge_types {
         params.push(Box::new(et.to_string()));
     }
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut rows = stmt.query(param_refs.as_slice())?;
     while let Some(row) = rows.next()? {
         let edge = WikiTraverseEdge {
@@ -275,13 +273,14 @@ fn fetch_inbound_neighbors(
          WHERE e.entity_id = ?1 AND e.target_id = ?2{edge_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-        vec![Box::new(entity_id.to_string()), Box::new(node_id.to_string())];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(entity_id.to_string()),
+        Box::new(node_id.to_string()),
+    ];
     for et in edge_types {
         params.push(Box::new(et.to_string()));
     }
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut rows = stmt.query(param_refs.as_slice())?;
     while let Some(row) = rows.next()? {
         let edge = WikiTraverseEdge {

@@ -62,11 +62,7 @@ pub fn list_tasks(
 }
 
 /// Create a new task with status 'pending', priority 0.
-pub fn create_task(
-    conn: &mut Connection,
-    entity_id: &str,
-    description: &str,
-) -> Result<TaskRow> {
+pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) -> Result<TaskRow> {
     let description = description.trim();
     if description.is_empty() {
         bail!("task description must not be empty");
@@ -146,11 +142,7 @@ pub fn create_task(
 }
 
 /// Update task status to 'pending' or 'done'; 'done' sets resolved_at.
-pub fn set_task_status(
-    conn: &mut Connection,
-    task_id: &str,
-    status: &str,
-) -> Result<()> {
+pub fn set_task_status(conn: &mut Connection, task_id: &str, status: &str) -> Result<()> {
     if !matches!(status, "pending" | "done") {
         bail!("status must be 'pending' or 'done'");
     }

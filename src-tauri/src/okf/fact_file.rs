@@ -6,7 +6,9 @@ use crate::okf::concept::parse_concept;
 use crate::okf::frontmatter::serialize_scalar_string;
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
-use crate::okf::types::{OkfFrontmatterValue, OkfFrontmatterValue as V, OkfMarkdownLink, LLM_WIKI_PROFILE, WikiFact};
+use crate::okf::types::{
+    OkfFrontmatterValue, OkfFrontmatterValue as V, OkfMarkdownLink, WikiFact, LLM_WIKI_PROFILE,
+};
 
 pub struct ParsedFact {
     pub fact: WikiFact,
@@ -18,11 +20,7 @@ pub struct ParsedFact {
 /// `profile` selects the wire shape: `"llm-wiki/1"` emits only the v0.1 field
 /// set (no `status`/v0.2 keys); `"llm-wiki/2"` (and any other value) emits the
 /// v0.2 field set including `status` and provenance keys.
-pub fn build_fact_file(
-    fact: &WikiFact,
-    related: &[(String, String)],
-    profile: &str,
-) -> String {
+pub fn build_fact_file(fact: &WikiFact, related: &[(String, String)], profile: &str) -> String {
     let mut pairs: Vec<(&str, V)> = vec![
         (
             "type",
@@ -92,7 +90,10 @@ pub fn build_fact_file(
         if let Some(window) = &fact.okf_usage_window {
             pairs.push((
                 "usage_window",
-                V::String(flow_mapping_from_json(window, "usage_window").unwrap_or_else(|| window.clone())),
+                V::String(
+                    flow_mapping_from_json(window, "usage_window")
+                        .unwrap_or_else(|| window.clone()),
+                ),
             ));
         }
     }
@@ -114,7 +115,10 @@ pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
     let (fm, raw_body) = parse_concept(content);
     let (body, related) = split_related_section(&raw_body);
     let fact = WikiFact {
-        id: fm.get_str("id").context("fact file missing id")?.to_string(),
+        id: fm
+            .get_str("id")
+            .context("fact file missing id")?
+            .to_string(),
         entity_id: fm
             .get_str("entity_id")
             .context("fact file missing entity_id")?
@@ -142,8 +146,8 @@ pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
             .filter(|t| !t.is_empty() && *t != "fact")
             .map(str::to_string),
         lifecycle_status: fm.get_str("status").unwrap_or("stable").to_string(),
-        stale_after: parse_stale_after_ms(&fm),  // helper below; returns None for absent / unparseable
-        generated_by: parse_generated_by(&fm),   // helper below; returns None when absent
+        stale_after: parse_stale_after_ms(&fm), // helper below; returns None for absent / unparseable
+        generated_by: parse_generated_by(&fm),  // helper below; returns None when absent
         okf_sources: flow_to_json_string(fm.get_str("sources")),
         okf_verified: flow_to_json_string(fm.get_str("verified")),
         okf_usage_window: flow_to_json_string(fm.get_str("usage_window")),
@@ -245,7 +249,7 @@ fn split_flow_pairs(body: &str) -> Vec<(String, serde_json::Value)> {
         }
         let key = body[key_start..i].trim().to_string();
         i += 1; // skip ':'
-        // Skip whitespace.
+                // Skip whitespace.
         while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
             i += 1;
         }
@@ -403,10 +407,13 @@ fn classify_flow_scalar(s: String) -> serde_json::Value {
         return serde_json::Value::Bool(false);
     }
     // Integer / float detection: digits with optional sign and decimal point.
-    if s.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+')
-        || (s.chars().enumerate().all(|(i, c)| {
-            c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')) || c == '.'
-        }) && s.chars().filter(|c| *c == '.').count() <= 1
+    if s.chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        || (s
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')) || c == '.')
+            && s.chars().filter(|c| *c == '.').count() <= 1
             && s.chars().any(|c| c.is_ascii_digit()))
     {
         if let Ok(n) = s.parse::<i64>() {
@@ -432,7 +439,9 @@ pub(crate) fn parse_stale_after_ms(fm: &crate::okf::types::OkfFrontmatter) -> Op
 /// Returns None when `generated` is absent or has no `by` (per upstream spec §2.4).
 pub(crate) fn parse_generated_by(fm: &crate::okf::types::OkfFrontmatter) -> Option<String> {
     let value = fm.fields.get("generated")?;
-    let OkfFrontmatterValue::String(s) = value else { return None; };
+    let OkfFrontmatterValue::String(s) = value else {
+        return None;
+    };
     flow_mapping_field(s, "by")
 }
 
@@ -560,17 +569,15 @@ pub(crate) fn last_verified_by_in_text(raw: &str) -> Option<String> {
 /// or no entry has the requested field.
 fn last_flow_mapping_field(raw: &str, key: &str) -> Option<String> {
     let inner = raw.trim();
-    let mappings: Vec<&str> = if let Some(stripped) = inner
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-    {
-        // Flow sequence — extract each `{ ... }` element via depth tracking.
-        collect_flow_mappings(stripped.trim())
-    } else if inner.starts_with('{') && inner.ends_with('}') {
-        vec![inner]
-    } else {
-        return None;
-    };
+    let mappings: Vec<&str> =
+        if let Some(stripped) = inner.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            // Flow sequence — extract each `{ ... }` element via depth tracking.
+            collect_flow_mappings(stripped.trim())
+        } else if inner.starts_with('{') && inner.ends_with('}') {
+            vec![inner]
+        } else {
+            return None;
+        };
     let mut result: Option<String> = None;
     for mapping in mappings {
         if let Some(v) = flow_mapping_field(mapping, key) {
@@ -652,24 +659,16 @@ pub(crate) fn encode_flow_scalar(s: &str) -> String {
         c.is_whitespace()
             || matches!(
                 c,
-                ':' | ','
-                    | '"'
-                    | '\''
-                    | '-'
-                    | '/'
-                    | '{'
-                    | '}'
-                    | '['
-                    | ']'
-                    | '#'
-                    | '\\'
+                ':' | ',' | '"' | '\'' | '-' | '/' | '{' | '}' | '[' | ']' | '#' | '\\'
             )
     });
     // Bare form only safe if classify_flow_scalar would round-trip back
     // to a String. "true" / "false" / "null" / "1.5" etc. would otherwise
     // be silently coerced to Bool / Null / Number on import.
-    let round_trips_as_string =
-        matches!(classify_flow_scalar(s.to_string()), serde_json::Value::String(_));
+    let round_trips_as_string = matches!(
+        classify_flow_scalar(s.to_string()),
+        serde_json::Value::String(_)
+    );
     if !s.is_empty() && safe_chars && round_trips_as_string {
         return s.to_string();
     }
@@ -700,7 +699,9 @@ pub(crate) fn json_array_to_flow_sequence(json: &str, _key: &str) -> Option<Stri
     let arr = v.as_array()?;
     let mut out = String::from("[ ");
     for (i, entry) in arr.iter().enumerate() {
-        if i > 0 { out.push_str(", "); }
+        if i > 0 {
+            out.push_str(", ");
+        }
         let obj = entry.as_object()?;
         out.push_str(&flow_mapping_str(obj));
     }
@@ -721,7 +722,9 @@ pub(crate) fn flow_mapping_from_json(json: &str, _key: &str) -> Option<String> {
 fn flow_mapping_str(obj: &serde_json::Map<String, serde_json::Value>) -> String {
     let mut out = String::from("{ ");
     for (i, (k, val)) in obj.iter().enumerate() {
-        if i > 0 { out.push_str(", "); }
+        if i > 0 {
+            out.push_str(", ");
+        }
         out.push_str(&format!("{}: {}", k, json_value_to_flow(val)));
     }
     out.push_str(" }");
@@ -805,10 +808,7 @@ sources: [ { resource: documents/notes.md, title: notes, usage_count: 3, last_mo
         // serde_json::from_str). The parser converts the YAML flow text.
         let sources_json = parsed.fact.okf_sources.as_deref().unwrap();
         let sources: serde_json::Value = serde_json::from_str(sources_json).unwrap();
-        assert_eq!(
-            sources[0]["resource"].as_str(),
-            Some("documents/notes.md")
-        );
+        assert_eq!(sources[0]["resource"].as_str(), Some("documents/notes.md"));
         assert_eq!(sources[0]["usage_count"].as_i64(), Some(3));
         let window: serde_json::Value =
             serde_json::from_str(parsed.fact.okf_usage_window.as_deref().unwrap()).unwrap();
@@ -818,7 +818,10 @@ sources: [ { resource: documents/notes.md, title: notes, usage_count: 3, last_mo
         assert!(parsed.fact.stale_after.is_some());
         // verified list has one entry → last_verified_at / last_verified_by populated by the flow-mapping walker
         assert!(parsed.fact.last_verified_at.is_some());
-        assert_eq!(parsed.fact.last_verified_by.as_deref(), Some("process:nightly"));
+        assert_eq!(
+            parsed.fact.last_verified_by.as_deref(),
+            Some("process:nightly")
+        );
     }
 
     #[test]
@@ -826,7 +829,12 @@ sources: [ { resource: documents/notes.md, title: notes, usage_count: 3, last_mo
         let raw = "---\ntype: fact\ntitle: T\nid: f1\nentity_id: e1\n\
 verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice, at: 2026-07-02T00:00:00.000Z } ]\n---\nB\n";
         let parsed = parse_fact_file(raw).unwrap();
-        assert!(parsed.fact.okf_verified.as_deref().unwrap().contains("human:alice"));
+        assert!(parsed
+            .fact
+            .okf_verified
+            .as_deref()
+            .unwrap()
+            .contains("human:alice"));
         // ms_from_iso("2026-07-02T00:00:00.000Z") is implementation-defined; just check Some
         assert!(parsed.fact.last_verified_at.is_some());
         assert_eq!(parsed.fact.last_verified_by.as_deref(), Some("human:alice"));
@@ -854,23 +862,44 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             stale_after: Some(crate::okf::timefmt::ms_from_utc_date("2027-01-01").unwrap()),
             generated_by: Some("human:alice".into()),
             okf_sources: Some(r#"[{"resource":"documents/notes.md"}]"#.into()),
-            okf_verified: Some(r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into()),
+            okf_verified: Some(
+                r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into(),
+            ),
             okf_usage_window: Some(r#"{"from":"2026-07-01","to":"2026-12-31"}"#.into()),
-            last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
+            last_verified_at: Some(
+                crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap(),
+            ),
             last_verified_by: Some("process:nightly".into()),
         };
         let md = build_fact_file(&fact, &[], "llm-wiki/2");
-        assert!(md.contains("status: stable"), "missing lifecycle status: {md}");
-        assert!(md.contains("stale_after: 2027-01-01"), "missing stale_after: {md}");
-        assert!(md.contains("generated: { by: \"human:alice\""), "missing generated flow mapping: {md}");
+        assert!(
+            md.contains("status: stable"),
+            "missing lifecycle status: {md}"
+        );
+        assert!(
+            md.contains("stale_after: 2027-01-01"),
+            "missing stale_after: {md}"
+        );
+        assert!(
+            md.contains("generated: { by: \"human:alice\""),
+            "missing generated flow mapping: {md}"
+        );
         assert!(md.contains("verified:"), "missing verified key: {md}");
         assert!(md.contains("sources:"), "missing sources key: {md}");
-        assert!(md.contains("usage_window: { from: \"2026-07-01\", to: \"2026-12-31\" }"), "missing usage_window: {md}");
+        assert!(
+            md.contains("usage_window: { from: \"2026-07-01\", to: \"2026-12-31\" }"),
+            "missing usage_window: {md}"
+        );
         // Round-trip: parse what we just emitted
         let parsed = parse_fact_file(&md).unwrap();
         assert_eq!(parsed.fact.lifecycle_status, "stable");
         assert_eq!(parsed.fact.generated_by.as_deref(), Some("human:alice"));
-        assert!(parsed.fact.okf_sources.as_deref().unwrap().contains("documents/notes.md"));
+        assert!(parsed
+            .fact
+            .okf_sources
+            .as_deref()
+            .unwrap()
+            .contains("documents/notes.md"));
     }
 
     #[test]
@@ -895,18 +924,34 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             stale_after: Some(crate::okf::timefmt::ms_from_utc_date("2027-01-01").unwrap()),
             generated_by: Some("human:alice".into()),
             okf_sources: Some(r#"[{"resource":"documents/notes.md"}]"#.into()),
-            okf_verified: Some(r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into()),
+            okf_verified: Some(
+                r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into(),
+            ),
             okf_usage_window: Some(r#"{"from":"2026-07-01","to":"2026-12-31"}"#.into()),
-            last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
+            last_verified_at: Some(
+                crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap(),
+            ),
             last_verified_by: Some("process:nightly".into()),
         };
         let md = build_fact_file(&fact, &[], "llm-wiki/1");
         assert!(!md.contains("status:"), "v0.1 must not emit status: {md}");
-        assert!(!md.contains("stale_after:"), "v0.1 must not emit stale_after: {md}");
-        assert!(!md.contains("generated:"), "v0.1 must not emit generated: {md}");
-        assert!(!md.contains("verified:"), "v0.1 must not emit verified: {md}");
+        assert!(
+            !md.contains("stale_after:"),
+            "v0.1 must not emit stale_after: {md}"
+        );
+        assert!(
+            !md.contains("generated:"),
+            "v0.1 must not emit generated: {md}"
+        );
+        assert!(
+            !md.contains("verified:"),
+            "v0.1 must not emit verified: {md}"
+        );
         assert!(!md.contains("sources:"), "v0.1 must not emit sources: {md}");
-        assert!(!md.contains("usage_window:"), "v0.1 must not emit usage_window: {md}");
+        assert!(
+            !md.contains("usage_window:"),
+            "v0.1 must not emit usage_window: {md}"
+        );
     }
 
     #[test]
@@ -960,8 +1005,8 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
         // whole mapping — surrounding valid pairs survive so callers
         // reading `okf_sources` / `okf_verified` / `okf_usage_window` get
         // partial data instead of an empty column.
-        let parsed = parse_flow_value("{ good: 1, bad, also_good: 2 }")
-            .expect("mapping must still parse");
+        let parsed =
+            parse_flow_value("{ good: 1, bad, also_good: 2 }").expect("mapping must still parse");
         let map = parsed.as_object().unwrap();
         assert_eq!(map["good"].as_i64(), Some(1));
         assert_eq!(map["also_good"].as_i64(), Some(2));
@@ -971,8 +1016,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
     #[test]
     fn split_flow_pairs_skips_empty_value_and_keeps_others() {
         // A key with no value (trailing comma) must NOT abort the mapping.
-        let parsed = parse_flow_value("{ a: 1, b, c: 3 }")
-            .expect("mapping must still parse");
+        let parsed = parse_flow_value("{ a: 1, b, c: 3 }").expect("mapping must still parse");
         let map = parsed.as_object().unwrap();
         assert_eq!(map["a"].as_i64(), Some(1));
         assert_eq!(map["c"].as_i64(), Some(3));
