@@ -169,12 +169,16 @@ fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> St
         .clone()
         .filter(|name| !name.trim().is_empty())
         .or_else(|| {
-            llm_config.generation.model_path.as_deref().and_then(|path| {
-                Path::new(path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.to_string())
-            })
+            llm_config
+                .generation
+                .model_path
+                .as_deref()
+                .and_then(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_string())
+                })
         })
         .unwrap_or_else(|| fallback_model.to_string())
 }
@@ -196,7 +200,11 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
             })
         }
         GenerationProviderKind::External => {
-            let base = llm_config.generation.external_url.clone().unwrap_or_default();
+            let base = llm_config
+                .generation
+                .external_url
+                .clone()
+                .unwrap_or_default();
             let base = base.trim_end_matches('/');
             let base = base.strip_suffix("/v1").unwrap_or(base);
             Box::new(HttpLlmCompleter {
@@ -228,7 +236,10 @@ pub(crate) fn strip_json_fences(raw: &str) -> String {
         .to_string()
 }
 
-fn load_numbered_chunks(conn: &Connection, source_chunks: &[ChunkRow]) -> Result<Vec<NumberedChunk>> {
+fn load_numbered_chunks(
+    conn: &Connection,
+    source_chunks: &[ChunkRow],
+) -> Result<Vec<NumberedChunk>> {
     let mut out = Vec::new();
     let mut seen_chunk_ids = HashSet::new();
 
@@ -317,14 +328,8 @@ fn mean_chunk_embedding(conn: &Connection, chunk_ids: &[i64]) -> Result<Option<V
     if chunk_ids.is_empty() {
         return Ok(None);
     }
-    let placeholders = chunk_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT e.vector FROM embeddings e WHERE e.chunk_id IN ({placeholders})"
-    );
+    let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT e.vector FROM embeddings e WHERE e.chunk_id IN ({placeholders})");
     let mut stmt = conn.prepare(&sql)?;
     let params: Vec<&dyn rusqlite::ToSql> = chunk_ids
         .iter()
@@ -354,15 +359,18 @@ fn mean_chunk_embedding(conn: &Connection, chunk_ids: &[i64]) -> Result<Option<V
     Ok(Some(avg))
 }
 
-fn name_match_entities(conn: &Connection, source_path: &str, chunk_text: &str) -> Result<Vec<String>> {
+fn name_match_entities(
+    conn: &Connection,
+    source_path: &str,
+    chunk_text: &str,
+) -> Result<Vec<String>> {
     let stem = Path::new(source_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let mut stmt = conn.prepare(
-        "SELECT id, name FROM curated_entities WHERE deleted_at IS NULL",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, name FROM curated_entities WHERE deleted_at IS NULL")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let haystack = format!("{chunk_text}\n{stem}").to_lowercase();
     let mut matched = Vec::new();
@@ -422,7 +430,13 @@ fn load_candidate_entities(
             "SELECT name, entity_type, summary FROM curated_entities
              WHERE id = ?1 AND deleted_at IS NULL",
             [&entity_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         );
         if let Ok((name, entity_type, summary)) = row {
             let snippet: String = summary.chars().take(200).collect();
@@ -575,7 +589,7 @@ fn collect_sources(
     sources
 }
 
-    fn validate_llm_output(
+fn validate_llm_output(
     raw: &LlmSynthesisOutput,
     mode: SynthesisMode,
     candidates: &[CandidateEntity],
@@ -588,14 +602,10 @@ fn collect_sources(
         .iter()
         .flat_map(|c| c.facts.iter().map(|f| f.id.as_str()))
         .collect();
-    let chunk_by_label: HashMap<String, &NumberedChunk> = numbered
-        .iter()
-        .map(|c| (c.label.clone(), c))
-        .collect();
-    let chunk_doc_ids: HashMap<i64, i64> = numbered
-        .iter()
-        .map(|c| (c.chunk_id, c.doc_id))
-        .collect();
+    let chunk_by_label: HashMap<String, &NumberedChunk> =
+        numbered.iter().map(|c| (c.label.clone(), c)).collect();
+    let chunk_doc_ids: HashMap<i64, i64> =
+        numbered.iter().map(|c| (c.chunk_id, c.doc_id)).collect();
 
     let mut validated = Vec::new();
     for llm_prop in &raw.proposals {
@@ -621,7 +631,11 @@ fn collect_sources(
 
         let mut items = Vec::new();
 
-        if let Some(summary) = llm_prop.summary_update.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(summary) = llm_prop
+            .summary_update
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
             items.push(NewProposalItem {
                 id: generate_id("item_"),
                 item_type: "summary_update".into(),
@@ -796,11 +810,7 @@ fn parse_and_validate(
     validate_llm_output(&parsed, mode, candidates, numbered, model, trigger_doc_id)
 }
 
-fn call_llm_with_retry(
-    completer: &dyn LlmCompleter,
-    system: &str,
-    user: &str,
-) -> Result<String> {
+fn call_llm_with_retry(completer: &dyn LlmCompleter, system: &str, user: &str) -> Result<String> {
     let first = completer.complete(system, user)?;
     match parse_json_only(&first) {
         Ok(_) => return Ok(first),
@@ -823,8 +833,8 @@ fn parse_json_only(raw: &str) -> Result<()> {
 }
 
 fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()> {
-    let detail = get_proposal_detail(conn, proposal_id)?
-        .context("proposal missing after insert")?;
+    let detail =
+        get_proposal_detail(conn, proposal_id)?.context("proposal missing after insert")?;
     let decisions: Vec<ItemDecision> = detail
         .items
         .iter()
@@ -839,9 +849,7 @@ fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()>
         proposal_id,
         &decisions,
         None,
-        ResolveOptions {
-            auto_approve: true,
-        },
+        ResolveOptions { auto_approve: true },
     )?;
     Ok(())
 }
@@ -883,7 +891,8 @@ pub(crate) fn run_synthesis_with_completer(
 ) -> Result<()> {
     let chunk_ids: Vec<i64> = source_chunks.iter().map(|c| c.id).collect();
     let mean_embedding = mean_chunk_embedding(conn, &chunk_ids)?;
-    let candidates = load_candidate_entities(conn, source_path, source_chunks, mean_embedding.as_deref())?;
+    let candidates =
+        load_candidate_entities(conn, source_path, source_chunks, mean_embedding.as_deref())?;
     let numbered = load_numbered_chunks(conn, source_chunks)?;
 
     let context_body = assemble_numbered_context(source_chunks, &numbered);
@@ -908,21 +917,15 @@ pub(crate) fn run_synthesis_with_completer(
         }
     };
 
-    let validated = match parse_and_validate(
-        &raw,
-        mode,
-        &candidates,
-        &numbered,
-        model,
-        trigger_doc_id,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            let msg = format!("synthesis validation failure for {source_path}: {e:#}");
-            write_synthesis_error(vault_root, &msg);
-            return Ok(());
-        }
-    };
+    let validated =
+        match parse_and_validate(&raw, mode, &candidates, &numbered, model, trigger_doc_id) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = format!("synthesis validation failure for {source_path}: {e:#}");
+                write_synthesis_error(vault_root, &msg);
+                return Ok(());
+            }
+        };
 
     if validated.is_empty() {
         return Ok(());
@@ -957,10 +960,10 @@ pub(crate) fn run_synthesis_with_completer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunker::{Chunk, ChunkStrategyTag};
     use crate::db::connection::open_in_memory;
     use crate::db::proposals::{list_proposals, ProposalFilter};
     use crate::db::queries::{insert_chunk, upsert_document};
-    use crate::chunker::{Chunk, ChunkStrategyTag};
 
     struct MockCompleter {
         responses: Vec<String>,
@@ -1126,15 +1129,9 @@ mod tests {
                 tasks: vec![],
             }],
         };
-        let validated = validate_llm_output(
-            &raw,
-            SynthesisMode::Synthesize,
-            &[],
-            &numbered,
-            "test",
-            10,
-        )
-        .unwrap();
+        let validated =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &[], &numbered, "test", 10)
+                .unwrap();
         assert_eq!(validated[0].items[0].evidence.len(), 1);
         assert_eq!(validated[0].items[0].evidence[0].chunk_id, Some(1));
     }
@@ -1179,15 +1176,9 @@ mod tests {
                 }],
             }],
         };
-        let validated = validate_llm_output(
-            &raw,
-            SynthesisMode::Summarize,
-            &[],
-            &numbered,
-            "test",
-            10,
-        )
-        .unwrap();
+        let validated =
+            validate_llm_output(&raw, SynthesisMode::Summarize, &[], &numbered, "test", 10)
+                .unwrap();
         assert_eq!(validated.len(), 1);
         assert_eq!(validated[0].items.len(), 1);
         assert_eq!(validated[0].items[0].item_type, "summary_update");
@@ -1196,8 +1187,11 @@ mod tests {
     #[test]
     fn malformed_json_retries_then_writes_no_proposal() {
         let mut conn = open_in_memory().unwrap();
-        let (doc_id, chunk_id) =
-            seed_doc_and_chunk(&conn, "/vault/documents/note.md", "content about Alpha project");
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "content about Alpha project",
+        );
         let chunks = vec![ChunkRow {
             id: chunk_id,
             entity_id: "tier_working::abc".into(),
@@ -1209,10 +1203,7 @@ mod tests {
             path: "/vault/documents/note.md".into(),
         }];
 
-        let mock = MockCompleter::new(vec![
-            "not json".into(),
-            "still not json".into(),
-        ]);
+        let mock = MockCompleter::new(vec!["not json".into(), "still not json".into()]);
         let tmp = tempfile::tempdir().unwrap();
         let result = run_synthesis_with_completer(
             &mut conn,
@@ -1236,8 +1227,11 @@ mod tests {
     #[test]
     fn valid_synthesis_inserts_proposal() {
         let mut conn = open_in_memory().unwrap();
-        let (doc_id, chunk_id) =
-            seed_doc_and_chunk(&conn, "/vault/documents/note.md", "Alpha project details here");
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Alpha project details here",
+        );
         seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
 
         let json = serde_json::json!({
@@ -1308,7 +1302,10 @@ mod tests {
             32,
             "persisted evidence content_hash must be the 32-char hex"
         );
-        assert_ne!(hash, "", "persisted evidence content_hash must not be empty");
+        assert_ne!(
+            hash, "",
+            "persisted evidence content_hash must not be empty"
+        );
     }
 
     #[test]

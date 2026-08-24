@@ -1,12 +1,12 @@
 pub mod config;
 pub mod sidecar;
 
+use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
 use crate::inference::config::{
     read_config, resolve_model_path, write_config, GenerationConfig, GenerationProviderKind,
 };
-use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
-use crate::privacy::{self, allows_external_generation};
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
+use crate::privacy::{self, allows_external_generation};
 use anyhow::Result;
 use reqwest::blocking::Client;
 use serde::Serialize;

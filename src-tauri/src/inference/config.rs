@@ -68,7 +68,8 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
 
     let mut existing = if path.exists() {
         let contents = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<serde_json::Value>(&contents).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str::<serde_json::Value>(&contents)
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -93,7 +94,11 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
 
 pub fn resolve_model_path(brain_dir: &Path, relative: &str) -> PathBuf {
     let relative_path = std::path::Path::new(relative);
-    if relative_path.is_absolute() || relative_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         brain_dir.join("models").join(
             relative_path
                 .file_name()
@@ -115,7 +120,10 @@ mod tests {
         let config = LlmConfig::default();
         write_config(dir.path(), &config).unwrap();
         let loaded = read_config(dir.path());
-        assert_eq!(loaded.generation.provider, GenerationProviderKind::Unconfigured);
+        assert_eq!(
+            loaded.generation.provider,
+            GenerationProviderKind::Unconfigured
+        );
         assert_eq!(loaded.embedding.provider, EmbeddingProviderKind::Fastembed);
     }
 
@@ -135,21 +143,30 @@ mod tests {
         write_config(dir.path(), &config).unwrap();
         let loaded = read_config(dir.path());
         assert_eq!(loaded.generation.provider, GenerationProviderKind::Sidecar);
-        assert_eq!(loaded.generation.model_path.as_deref(), Some("models/llama-3.2-3b.gguf"));
+        assert_eq!(
+            loaded.generation.model_path.as_deref(),
+            Some("models/llama-3.2-3b.gguf")
+        );
     }
 
     #[test]
     fn relative_model_path_joins_with_brain_dir() {
         let brain = Path::new("/home/user/.brain");
         let abs = resolve_model_path(brain, "models/llama-3.2-3b.gguf");
-        assert_eq!(abs, PathBuf::from("/home/user/.brain/models/llama-3.2-3b.gguf"));
+        assert_eq!(
+            abs,
+            PathBuf::from("/home/user/.brain/models/llama-3.2-3b.gguf")
+        );
     }
 
     #[test]
     fn missing_config_returns_default() {
         let dir = TempDir::new().unwrap();
         let loaded = read_config(dir.path());
-        assert_eq!(loaded.generation.provider, GenerationProviderKind::Unconfigured);
+        assert_eq!(
+            loaded.generation.provider,
+            GenerationProviderKind::Unconfigured
+        );
     }
 
     #[test]

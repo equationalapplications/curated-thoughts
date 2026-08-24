@@ -55,7 +55,10 @@ pub enum OutgoingMessage {
 
 /// Classify a dispatch error into the CT-side error-code taxonomy (design spec §6).
 pub fn classify_dispatch_error(err: &anyhow::Error) -> TaskErrorCode {
-    if err.downcast_ref::<crate::tool_dispatch::UnknownToolError>().is_some() {
+    if err
+        .downcast_ref::<crate::tool_dispatch::UnknownToolError>()
+        .is_some()
+    {
         TaskErrorCode::UnknownTool
     } else if err.downcast_ref::<serde_json::Error>().is_some() {
         TaskErrorCode::BadParams
@@ -161,7 +164,9 @@ mod tests {
 
     #[test]
     fn classify_bad_params_from_serde_json_error() {
-        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>("not json").unwrap_err().into();
+        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>("not json")
+            .unwrap_err()
+            .into();
         assert_eq!(classify_dispatch_error(&err), TaskErrorCode::BadParams);
     }
 }

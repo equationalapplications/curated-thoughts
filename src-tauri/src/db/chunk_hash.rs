@@ -50,7 +50,10 @@ mod tests {
     fn compute_chunk_hash_differs_on_position_change() {
         let h1 = compute_chunk_hash("hello", "documents/a.md", 0);
         let h2 = compute_chunk_hash("hello", "documents/a.md", 1);
-        assert_ne!(h1, h2, "position tie-break must avoid duplicate-chunk collisions");
+        assert_ne!(
+            h1, h2,
+            "position tie-break must avoid duplicate-chunk collisions"
+        );
     }
 
     #[test]
@@ -64,7 +67,10 @@ mod tests {
     fn compute_chunk_hash_returns_32_hex_chars() {
         let h = compute_chunk_hash("hello", "documents/a.md", 0);
         assert_eq!(h.len(), 32, "first 16 bytes of SHA-256 = 32 hex chars");
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "must be lowercase hex");
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be lowercase hex"
+        );
         assert!(h.chars().all(|c| !c.is_ascii_uppercase()), "lowercase only");
     }
 }

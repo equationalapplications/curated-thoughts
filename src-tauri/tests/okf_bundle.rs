@@ -27,7 +27,10 @@ fn vendored_fixtures_match_checksum_manifest() {
         assert_eq!(actual, expected, "fixture drifted: {rel}");
         checked += 1;
     }
-    assert!(checked >= 12, "manifest suspiciously small: {checked} entries");
+    assert!(
+        checked >= 12,
+        "manifest suspiciously small: {checked} entries"
+    );
 }
 
 fn load_fixture_files(name: &str) -> Vec<OkfFile> {
@@ -59,7 +62,10 @@ fn parses_golden_v1_bundle() {
     assert_eq!(bundle.entities.len(), 1);
     let entity = &bundle.entities[0];
     assert_eq!(entity.entity_id, "demo");
-    assert_eq!(entity.summary.as_deref(), Some("Demo entity summary prose."));
+    assert_eq!(
+        entity.summary.as_deref(),
+        Some("Demo entity summary prose.")
+    );
     assert_eq!(entity.facts.len(), 2);
     assert_eq!(entity.tasks.len(), 1);
     let mut edges = entity.edges.clone();
@@ -83,7 +89,10 @@ fn parses_golden_v1_bundle() {
     assert!(!alpha.body.contains("## Related"));
     assert_eq!(entity.events.len(), 2);
     assert_eq!(entity.events[0].event_id.as_deref(), Some("evt_golden_1"));
-    assert_eq!(entity.events[0].related_entry_id.as_deref(), Some("fact_alpha"));
+    assert_eq!(
+        entity.events[0].related_entry_id.as_deref(),
+        Some("fact_alpha")
+    );
     assert_eq!(entity.events[0].date, "2026-07-05");
 }
 
@@ -114,7 +123,10 @@ fn export_from_parsed(bundle: &tauri_app_lib::okf::bundle_read::ParsedBundle) ->
         .iter()
         .map(|e| ExportEntity {
             entity_id: e.entity_id.clone(),
-            display_name: e.display_name.clone().unwrap_or_else(|| e.entity_id.clone()),
+            display_name: e
+                .display_name
+                .clone()
+                .unwrap_or_else(|| e.entity_id.clone()),
             summary: e.summary.clone(),
             facts: e.facts.clone(),
             tasks: e.tasks.clone(),
@@ -138,12 +150,8 @@ fn export_from_parsed(bundle: &tauri_app_lib::okf::bundle_read::ParsedBundle) ->
 fn golden_v1_round_trips_losslessly() {
     let original = load_fixture_files("golden-v1");
     let parsed = parse_bundle(&original).unwrap();
-    let rebuilt = write_bundle_with_profile(
-        &export_from_parsed(&parsed),
-        LLM_WIKI_PROFILE,
-        "0.1",
-    )
-    .expect("write_bundle");
+    let rebuilt = write_bundle_with_profile(&export_from_parsed(&parsed), LLM_WIKI_PROFILE, "0.1")
+        .expect("write_bundle");
 
     // Writer is now profile-aware: profile-1 emission drops every v0.2 key
     // (status lifecycle on facts, execution_status on tasks, stale_after /
@@ -172,12 +180,18 @@ fn defaults_to_ll_wiki_2_on_export() {
     assert!(
         root.content.contains("okf_version: 0.2"),
         "default export must emit okf_version 0.2; got: {}",
-        root.content.lines().find(|l| l.starts_with("okf_version")).unwrap_or("(missing)"),
+        root.content
+            .lines()
+            .find(|l| l.starts_with("okf_version"))
+            .unwrap_or("(missing)"),
     );
     assert!(
         root.content.contains("profile: llm-wiki/2"),
         "default export must emit profile llm-wiki/2; got: {}",
-        root.content.lines().find(|l| l.starts_with("profile")).unwrap_or("(missing)"),
+        root.content
+            .lines()
+            .find(|l| l.starts_with("profile"))
+            .unwrap_or("(missing)"),
     );
 }
 
@@ -202,8 +216,8 @@ fn parses_golden_v2_bundle_with_status_rename_rule() {
 
 #[test]
 fn export_writes_exported_event_per_entity() {
-    use tauri_app_lib::db::connection::open_in_memory;
     use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::connection::open_in_memory;
 
     let conn = open_in_memory().unwrap();
 
@@ -212,7 +226,8 @@ fn export_writes_exported_event_per_entity() {
         "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
          VALUES ('ent-1', 'Project X', 'concept', 'A test entity', 100, 100)",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.execute(
         "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type, created_at, updated_at)
@@ -227,7 +242,8 @@ fn export_writes_exported_event_per_entity() {
 
     // Write exported event for each entity (as okf_export_bundle_cmd does after zip is finalized)
     let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
         .as_millis() as i64;
     for entity in &entities {
         conn.execute(

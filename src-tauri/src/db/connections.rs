@@ -68,7 +68,11 @@ fn get_endpoint_labels_batch(
         .filter(|id| !labels.contains_key(id.as_str()))
         .collect();
     if !remaining_ids.is_empty() {
-        let placeholders = remaining_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = remaining_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let query_str = format!(
             "SELECT id, description FROM llm_wiki_tasks WHERE entity_id = ? AND id IN ({})",
             placeholders
@@ -178,7 +182,10 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    Ok(EntityConnections { outgoing, backlinks })
+    Ok(EntityConnections {
+        outgoing,
+        backlinks,
+    })
 }
 
 #[cfg(test)]
@@ -241,14 +248,24 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let alpha = make_entity(&conn, "Alpha", "");
         let by_fact = make_entity(&conn, "Fact Referrer", "");
-        seed_fact(&conn, &by_fact, "fact_1", "T", "Works with [[Alpha]] weekly.");
+        seed_fact(
+            &conn,
+            &by_fact,
+            "fact_1",
+            "T",
+            "Works with [[Alpha]] weekly.",
+        );
         let by_summary = make_entity(&conn, "Summary Referrer", "Depends on [[Alpha]].");
         // Self-mention and unrelated entity must not appear.
         seed_fact(&conn, &alpha, "fact_self", "T", "I am [[Alpha]].");
         make_entity(&conn, "Bystander", "Nothing relevant.");
 
         let connections = get_entity_connections(&conn, &alpha).unwrap();
-        let names: Vec<&str> = connections.backlinks.iter().map(|b| b.name.as_str()).collect();
+        let names: Vec<&str> = connections
+            .backlinks
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Fact Referrer", "Summary Referrer"]);
         assert_eq!(connections.backlinks[0].entity_id, by_fact);
         assert_eq!(connections.backlinks[1].entity_id, by_summary);
@@ -265,7 +282,11 @@ mod tests {
         let _ = exact;
 
         let connections = get_entity_connections(&conn, &pct).unwrap();
-        let names: Vec<&str> = connections.backlinks.iter().map(|b| b.name.as_str()).collect();
+        let names: Vec<&str> = connections
+            .backlinks
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Exact Referrer"]);
     }
 }

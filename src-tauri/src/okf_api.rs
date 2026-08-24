@@ -5,13 +5,15 @@ use std::path::PathBuf;
 use serde::Serialize;
 use tauri::State;
 
-use crate::db::bundle_apply::{apply_import, preview_import, ImportMode, ImportPreview, ImportResult};
+use crate::db::bundle_apply::{
+    apply_import, preview_import, ImportMode, ImportPreview, ImportResult,
+};
 use crate::db::bundle_io::load_export_entities;
+use crate::db::commit::generate_llm_id;
 use crate::okf::bundle_read::parse_bundle;
 use crate::okf::bundle_write::write_bundle_with_profile;
 use crate::okf::types::{LLM_WIKI_PROFILE, LLM_WIKI_PROFILE_V2, OKF_VERSION_V2};
 use crate::okf::zip_io::{read_bundle_source, write_bundle_zip};
-use crate::db::commit::generate_llm_id;
 use crate::DbState;
 
 #[derive(Debug, Serialize)]
@@ -22,7 +24,12 @@ pub struct ExportSummary {
 }
 
 /// Write an exported event for a single entity. Used by both the command and tests.
-pub fn write_exported_event(conn: &rusqlite::Connection, entity_id: &str, display_name: &str, now_ms: i64) -> rusqlite::Result<()> {
+pub fn write_exported_event(
+    conn: &rusqlite::Connection,
+    entity_id: &str,
+    display_name: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
          VALUES (?1, ?2, 'exported', ?3, NULL, ?4)",

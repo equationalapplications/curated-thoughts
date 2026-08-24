@@ -24,7 +24,12 @@ pub fn resolve_chunk_overlay(
 ) -> Result<Option<ChunkOverlay>, String> {
     let guard = db.0.lock().map_err(|e| format!("db lock poisoned: {e}"))?;
     find_chunk_overlay(&guard.0, &path, &hash)
-        .map(|opt| opt.map(|(s, e)| ChunkOverlay { start_line: s, end_line: e }))
+        .map(|opt| {
+            opt.map(|(s, e)| ChunkOverlay {
+                start_line: s,
+                end_line: e,
+            })
+        })
         .map_err(|e| e.to_string())
 }
 
