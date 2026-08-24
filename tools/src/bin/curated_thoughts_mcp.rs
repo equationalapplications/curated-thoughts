@@ -552,6 +552,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("curated-thoughts-mcp: agent-log db unavailable ({e}); logging disabled");
         retrieval::open_brain_readonly(&p.db_path).expect("readonly fallback")
     });
+// Tolerate brief write contention from the desktop app / librarian instead of
+// dropping audit rows (best-effort: failures still never fail a tool call).
+let _ = log_conn.busy_timeout(std::time::Duration::from_millis(5000));
 
     fn configured_database_url() -> Option<String> {
         let db_url = std::env::var("DATABASE_URL").ok()?;
