@@ -1,3 +1,10 @@
+## [1.25.3](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.2...v1.25.3) (2026-08-24)
+
+### Bug Fixes
+
+* **mcp:** add busy_timeout to agent-log connection ([93393f2](https://github.com/equationalapplications/curated-thoughts/commit/93393f2a44be838aa066b3894d5e7e3151122ac2))
+* **mcp:** wire agent-access logging into sidecar tool handlers ([47877dd](https://github.com/equationalapplications/curated-thoughts/commit/47877dd29aedd8a4fa54fd0e7ff11bcd94b7a7e0))
+
 ## [1.25.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.1...v1.25.2) (2026-08-24)
 
 ### Bug Fixes
