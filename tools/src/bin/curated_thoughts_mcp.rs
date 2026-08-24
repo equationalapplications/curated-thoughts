@@ -14,6 +14,9 @@ use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
 #[derive(Clone)]
 struct VaultMcpServer {
     conn: Arc<Mutex<Connection>>,
+    /// Separate read-write connection for best-effort agent-access logging;
+    /// the primary connection is read-only, so INSERTs on it always fail.
+    log_conn: Arc<Mutex<Connection>>,
     profile: EmbedProfile,
 }
 
@@ -86,6 +89,13 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>
 
 #[tool_router(server_handler)]
 impl VaultMcpServer {
+
+    /// Best-effort agent-access logging via the dedicated read-write connection.
+    fn log_access(&self, tool: &str, entity_id: Option<&str>) {
+        if let Ok(guard) = self.log_conn.lock() {
+            tauri_app_lib::tool_dispatch::log_agent_access(&guard, "mcp-sidecar", tool, entity_id);
+        }
+    }
     #[tool(
         name = "vault_semantic_search",
         description = "Semantic search over vault chunks using the configured embedding profile."
@@ -99,6 +109,7 @@ impl VaultMcpServer {
         let conn = lock_conn(&self.conn)?;
         let hits = retrieval::semantic_search_chunks(&conn, &self.profile, &query, limit)
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        self.log_access("vault_semantic_search", None);
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -116,6 +127,7 @@ impl VaultMcpServer {
         let conn = lock_conn(&self.conn)?;
         let hits = retrieval::related_chunks_facade(&conn, &doc_path, limit)
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        self.log_access("vault_related_chunks", None);
         serde_json::to_string(&hits)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -231,6 +243,7 @@ impl VaultMcpServer {
             "code_chunks": code_chunks,
             "query": query
         });
+        self.log_access("curated_recall_context", None);
         serde_json::to_string(&response)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -312,6 +325,7 @@ impl VaultMcpServer {
             "topic": topic,
             "entity_id": entity_id
         });
+        self.log_access("curated_get_wiki_entry", entity_id.as_deref());
         serde_json::to_string(&response)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -415,6 +429,7 @@ impl VaultMcpServer {
             "query": query,
             "symbol_filter": symbol
         });
+        self.log_access("curated_search_code", None);
         serde_json::to_string(&response)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
@@ -526,6 +541,17 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("curated-thoughts-mcp: {}", e);
         e
     })?;
+    // Read-write connection used only for curated_agent_log inserts. Best-effort:
+    // if the DB is genuinely read-only (or the file is missing), logging stays
+    // silent but the server still runs.
+    let log_conn = rusqlite::Connection::open_with_flags(
+        &p.db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("curated-thoughts-mcp: agent-log db unavailable ({e}); logging disabled");
+        retrieval::open_brain_readonly(&p.db_path).expect("readonly fallback")
+    });
 
     fn configured_database_url() -> Option<String> {
         let db_url = std::env::var("DATABASE_URL").ok()?;
@@ -548,6 +574,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server = VaultMcpServer {
         conn: Arc::new(Mutex::new(conn)),
+        log_conn: Arc::new(Mutex::new(log_conn)),
         profile,
     };
 
