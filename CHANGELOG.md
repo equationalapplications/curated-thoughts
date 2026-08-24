@@ -1,3 +1,9 @@
+## [1.25.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.0...v1.25.1) (2026-08-24)
+
+### Bug Fixes
+
+* **ingest:** restrict symlink follow to documents/ children; count traversal errors; tighten multibyte regression test ([cccd349](https://github.com/equationalapplications/curated-thoughts/commit/cccd349d4748606ea8bbca1ace6b7028e7f3f050))
+
 ## [1.25.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.24.2...v1.25.0) (2026-08-24)
 
 ### Features
