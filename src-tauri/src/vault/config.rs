@@ -187,8 +187,10 @@ mod tests {
             cfg.get_vault_path().unwrap(),
             Some("/home/tester/vault".to_string())
         );
-        // The invalid embed_profile is discarded; default profile applies.
-        assert_eq!(cfg.get_embed_profile().unwrap(), EmbedProfile::default());
+        // `external` is now a REAL variant (was legacy/unsupported when this
+        // test was written), so it round-trips instead of falling back.
+        let prof = cfg.get_embed_profile().unwrap();
+        assert!(matches!(prof, EmbedProfile::External { .. }));
     }
 
     #[test]
