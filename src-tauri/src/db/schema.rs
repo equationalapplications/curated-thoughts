@@ -141,3 +141,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_doc_hash
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (9);
 ";
+
+pub const MIGRATION_V10: &str = "
+-- Per-doc ingest history: documents.last_indexed is overwritten on every
+-- re-ingest, so temporal questions ('when did X last change BEFORE today?')
+-- were unanswerable. This table preserves one row per ingest attempt.
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id  INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    run_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    outcome TEXT    NOT NULL CHECK(outcome IN ('indexed', 'error'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_runs_doc_time
+    ON ingest_runs (doc_id, run_at);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (10);
+";
