@@ -1,8 +1,6 @@
 /// Profile §1 / §8: only bundle layout paths may be parsed as concepts.
 pub fn is_allowed_okf_path(file_path: &str) -> bool {
-    let normalized = file_path
-        .trim_start_matches("./")
-        .replace('\\', "/");
+    let normalized = file_path.trim_start_matches("./").replace('\\', "/");
     if normalized.split('/').any(|seg| seg == "." || seg == "..") {
         return false;
     }

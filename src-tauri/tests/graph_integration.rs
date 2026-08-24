@@ -169,7 +169,17 @@ fn impact_radius_max_hops_clamped_to_five_by_command() {
     let doc = upsert_document(&conn, "/vault/documents/deep_chain.rs", "h2").unwrap();
     mark_document_indexed(&conn, doc).unwrap();
     let nodes: Vec<i64> = (0..7usize)
-        .map(|i| insert_chunk(&conn, doc, &make_chunk(&format!("n{i}")), i, "tier_fact", "").unwrap())
+        .map(|i| {
+            insert_chunk(
+                &conn,
+                doc,
+                &make_chunk(&format!("n{i}")),
+                i,
+                "tier_fact",
+                "",
+            )
+            .unwrap()
+        })
         .collect();
     for i in 0..6 {
         insert_relationship(

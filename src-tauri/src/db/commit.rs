@@ -1,9 +1,7 @@
 //! Proposal resolution — commits accepted items to `llm_wiki_*` + outbox in one transaction.
 
 use crate::db::outbox_format::{self, OutboxOperation, OutboxPushParams};
-use crate::db::proposals::{
-    ItemDecision, ItemDecisionKind, ProposalKind, StoredEvidenceChunk,
-};
+use crate::db::proposals::{ItemDecision, ItemDecisionKind, ProposalKind, StoredEvidenceChunk};
 use anyhow::{bail, Context, Result};
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -694,7 +692,11 @@ fn commit_fact_update(
     Ok(())
 }
 
-fn commit_fact_archive(conn: &Connection, ctx: &mut CommitContext, item: &LoadedItem) -> Result<()> {
+fn commit_fact_archive(
+    conn: &Connection,
+    ctx: &mut CommitContext,
+    item: &LoadedItem,
+) -> Result<()> {
     let fact_id = item
         .target_id
         .as_deref()
@@ -971,10 +973,8 @@ pub fn resolve_proposal(
         bail!("proposal has no items");
     }
 
-    let decisions_by_id: std::collections::HashMap<&str, &ItemDecision> = decisions
-        .iter()
-        .map(|d| (d.item_id.as_str(), d))
-        .collect();
+    let decisions_by_id: std::collections::HashMap<&str, &ItemDecision> =
+        decisions.iter().map(|d| (d.item_id.as_str(), d)).collect();
 
     let accepted_any = items.iter().any(|item| {
         decisions_by_id
@@ -1053,37 +1053,35 @@ pub fn resolve_proposal(
         }
 
         let payload = effective_payload(item, decision);
-        let item_outcome: Result<ItemCommitOutcome> = match item.item_type.as_str() {
-            "fact_add" => commit_fact_add(&tx, &mut ctx, item, &payload).map(|_| ItemCommitOutcome::Applied),
-            "fact_update" => {
-                commit_fact_update(&tx, &mut ctx, item, &payload).map(|_| ItemCommitOutcome::Applied)
-            }
-            "fact_archive" => {
-                commit_fact_archive(&tx, &mut ctx, item).map(|_| ItemCommitOutcome::Applied)
-            }
-            "summary_update" => commit_summary_update(
-                &tx,
-                &mut ctx,
-                item,
-                &payload,
-                options.auto_approve,
-            )
-            .map(|outcome| match outcome {
-                SummaryUpdateOutcome::Applied => ItemCommitOutcome::Applied,
-                SummaryUpdateOutcome::Conflict | SummaryUpdateOutcome::SkippedSilent => {
-                    ItemCommitOutcome::Rejected
+        let item_outcome: Result<ItemCommitOutcome> =
+            match item.item_type.as_str() {
+                "fact_add" => commit_fact_add(&tx, &mut ctx, item, &payload)
+                    .map(|_| ItemCommitOutcome::Applied),
+                "fact_update" => commit_fact_update(&tx, &mut ctx, item, &payload)
+                    .map(|_| ItemCommitOutcome::Applied),
+                "fact_archive" => {
+                    commit_fact_archive(&tx, &mut ctx, item).map(|_| ItemCommitOutcome::Applied)
                 }
-            }),
-            "task_add" => commit_task_add(&tx, &mut ctx, item, &payload).map(|_| ItemCommitOutcome::Applied),
-            "edge_add" => commit_edge_add(&tx, &mut ctx, item, &payload).map(|_| {
-                if ctx.dropped_edges.iter().any(|id| id == &item.id) {
-                    ItemCommitOutcome::Rejected
-                } else {
-                    ItemCommitOutcome::Applied
+                "summary_update" => {
+                    commit_summary_update(&tx, &mut ctx, item, &payload, options.auto_approve).map(
+                        |outcome| match outcome {
+                            SummaryUpdateOutcome::Applied => ItemCommitOutcome::Applied,
+                            SummaryUpdateOutcome::Conflict
+                            | SummaryUpdateOutcome::SkippedSilent => ItemCommitOutcome::Rejected,
+                        },
+                    )
                 }
-            }),
-            other => bail!("unsupported item_type: {other}"),
-        };
+                "task_add" => commit_task_add(&tx, &mut ctx, item, &payload)
+                    .map(|_| ItemCommitOutcome::Applied),
+                "edge_add" => commit_edge_add(&tx, &mut ctx, item, &payload).map(|_| {
+                    if ctx.dropped_edges.iter().any(|id| id == &item.id) {
+                        ItemCommitOutcome::Rejected
+                    } else {
+                        ItemCommitOutcome::Applied
+                    }
+                }),
+                other => bail!("unsupported item_type: {other}"),
+            };
 
         match item_outcome {
             Ok(ItemCommitOutcome::Applied) => {
@@ -1124,12 +1122,7 @@ pub fn resolve_proposal(
         "UPDATE curated_proposals
          SET status = ?1, resolved_at = ?2, reject_reason = ?3
          WHERE id = ?4",
-        params![
-            proposal_status,
-            now_secs,
-            reject_reason,
-            proposal_id,
-        ],
+        params![proposal_status, now_secs, reject_reason, proposal_id,],
     )?;
 
     tx.commit()?;
@@ -1145,13 +1138,13 @@ pub fn resolve_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunker::{Chunk, ChunkStrategyTag};
     use crate::db::connection::open_in_memory;
     use crate::db::proposals::{
         insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalKind,
         ProposalSourceRole, StoredEvidenceChunk,
     };
     use crate::db::queries::{insert_chunk, upsert_document};
-    use crate::chunker::{Chunk, ChunkStrategyTag};
 
     fn seed_document(conn: &Connection, path: &str) -> i64 {
         upsert_document(conn, path, "hash").unwrap()
@@ -1387,7 +1380,9 @@ mod tests {
         .unwrap();
 
         let body: String = conn
-            .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(body, "Edited body.");
     }
@@ -1793,7 +1788,8 @@ mod tests {
         // Pre-seed a chunk with a real content_hash; the commit must
         // look this up and write it into the source_ref JSON.
         let chunk_id = seed_chunk(&conn, doc_id);
-        let hash = crate::db::chunk_hash::compute_chunk_hash("quoted", "/vault/documents/note.pdf", 0);
+        let hash =
+            crate::db::chunk_hash::compute_chunk_hash("quoted", "/vault/documents/note.pdf", 0);
         conn.execute(
             "UPDATE chunks SET content_hash = ?1 WHERE id = ?2",
             params![hash, chunk_id],
@@ -1831,7 +1827,9 @@ mod tests {
                 edited_payload: None,
             }],
             None,
-            ResolveOptions { auto_approve: false },
+            ResolveOptions {
+                auto_approve: false,
+            },
         )
         .unwrap();
 

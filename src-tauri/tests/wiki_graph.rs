@@ -98,7 +98,14 @@ fn wiki_search_applies_tier_weight_before_sort() {
     let fact = f32_vec_to_blob(&[1.0, 0.0]);
     let wisdom = f32_vec_to_blob(&[0.0, 1.0]); // sim 0.0
     insert_entry(&conn, "f1", "tier_fact", "Fact node", Some(&fact), None);
-    insert_entry(&conn, "w1", "tier_wisdom", "Wisdom node", Some(&wisdom), None);
+    insert_entry(
+        &conn,
+        "w1",
+        "tier_wisdom",
+        "Wisdom node",
+        Some(&wisdom),
+        None,
+    );
 
     let hits = wiki_search(&conn, &q, &["tier_fact", "tier_wisdom"], 10).unwrap();
     assert_eq!(hits.len(), 1);
@@ -133,7 +140,14 @@ fn wiki_search_skips_null_embedding_blob_without_error() {
     let q = vec![1.0_f32, 0.0];
     let blob = f32_vec_to_blob(&[1.0, 0.0]);
     insert_entry(&conn, "null-blob", "tier_fact", "No embedding", None, None);
-    insert_entry(&conn, "good", "tier_fact", "Has embedding", Some(&blob), None);
+    insert_entry(
+        &conn,
+        "good",
+        "tier_fact",
+        "Has embedding",
+        Some(&blob),
+        None,
+    );
     let hits = wiki_search(&conn, &q, &["tier_fact"], 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "good");
@@ -233,15 +247,8 @@ fn wiki_traverse_graph_multi_hop_bfs() {
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
     insert_edge(&conn, "e2", "tier_fact", "b", "c", "relates");
 
-    let got = wiki_traverse_graph(
-        &conn,
-        "tier_fact",
-        "a",
-        2,
-        TraverseDirection::Outbound,
-        &[],
-    )
-    .unwrap();
+    let got =
+        wiki_traverse_graph(&conn, "tier_fact", "a", 2, TraverseDirection::Outbound, &[]).unwrap();
 
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert!(ids.contains("a") && ids.contains("b") && ids.contains("c"));
@@ -256,15 +263,8 @@ fn wiki_traverse_graph_direction_inbound_only() {
     insert_node(&conn, "b", "tier_fact", "B", false);
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
 
-    let got = wiki_traverse_graph(
-        &conn,
-        "tier_fact",
-        "b",
-        1,
-        TraverseDirection::Inbound,
-        &[],
-    )
-    .unwrap();
+    let got =
+        wiki_traverse_graph(&conn, "tier_fact", "b", 1, TraverseDirection::Inbound, &[]).unwrap();
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, HashSet::from(["a", "b"]));
 }
@@ -298,15 +298,8 @@ fn wiki_traverse_graph_excludes_deleted_endpoint() {
     insert_node(&conn, "b", "tier_fact", "B", true);
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
 
-    let got = wiki_traverse_graph(
-        &conn,
-        "tier_fact",
-        "a",
-        1,
-        TraverseDirection::Outbound,
-        &[],
-    )
-    .unwrap();
+    let got =
+        wiki_traverse_graph(&conn, "tier_fact", "a", 1, TraverseDirection::Outbound, &[]).unwrap();
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, HashSet::from(["a"]));
     assert!(got.edges.is_empty());
@@ -361,15 +354,8 @@ fn wiki_traverse_graph_excludes_cross_tier_endpoints() {
     insert_node(&conn, "b", "tier_wisdom", "B", false);
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
 
-    let got = wiki_traverse_graph(
-        &conn,
-        "tier_fact",
-        "a",
-        1,
-        TraverseDirection::Outbound,
-        &[],
-    )
-    .unwrap();
+    let got =
+        wiki_traverse_graph(&conn, "tier_fact", "a", 1, TraverseDirection::Outbound, &[]).unwrap();
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, HashSet::from(["a"]));
     assert!(got.edges.is_empty());

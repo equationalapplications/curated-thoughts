@@ -5,9 +5,9 @@
 
 mod synthesis;
 
-use anyhow::{Context, Result};
 use crate::db::queries::get_document_by_path;
 use crate::librarian::synthesis::{run_synthesis, SynthesisMode};
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 pub struct ChunkRow {
@@ -388,5 +388,4 @@ mod tests {
             "expected symbol in header, got:\n{context}"
         );
     }
-
 }

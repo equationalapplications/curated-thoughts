@@ -61,7 +61,11 @@ pub fn run_chunk_hash_migration(
         rows
     };
     let total = docs.len();
-    emit(MigrationProgress { current: 0, total, phase: "rechunk" });
+    emit(MigrationProgress {
+        current: 0,
+        total,
+        phase: "rechunk",
+    });
 
     // Map legacy chunk_id (rowid) -> new chunk rowid (re-issued by SQLite).
     // Built up per-doc as we INSERT the new chunks.
@@ -82,7 +86,11 @@ pub fn run_chunk_hash_migration(
                 // until the doc is re-indexed, but the migration no
                 // longer aborts and permanently strands the user.
                 eprintln!("[chunk-hash-migration] skip unreadable {path}: {e}");
-                emit(MigrationProgress { current: idx + 1, total, phase: "rechunk" });
+                emit(MigrationProgress {
+                    current: idx + 1,
+                    total,
+                    phase: "rechunk",
+                });
                 continue;
             }
         };
@@ -93,9 +101,8 @@ pub fn run_chunk_hash_migration(
         // content-based remap below can match legacy chunks against the
         // freshly-chunked output by source text rather than position.
         let mut legacy_chunks_by_text: HashMap<String, Vec<i64>> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, chunk_text FROM chunks WHERE doc_id = ?1 ORDER BY position",
-            )?;
+            let mut stmt = tx
+                .prepare("SELECT id, chunk_text FROM chunks WHERE doc_id = ?1 ORDER BY position")?;
             let mut map: HashMap<String, Vec<i64>> = HashMap::new();
             let mut rows = stmt.query([doc_id])?;
             while let Some(row) = rows.next()? {
@@ -181,26 +188,37 @@ pub fn run_chunk_hash_migration(
     }
 
     // Phase 2: rewrite every llm_wiki_entries.source_ref JSON in place.
-    emit(MigrationProgress { current: 0, total, phase: "rewrite" });
+    emit(MigrationProgress {
+        current: 0,
+        total,
+        phase: "rewrite",
+    });
     let entries: Vec<(String, Option<String>)> = {
-        let mut stmt = tx.prepare(
-            "SELECT id, source_ref FROM llm_wiki_entries WHERE source_ref IS NOT NULL",
-        )?;
+        let mut stmt =
+            tx.prepare("SELECT id, source_ref FROM llm_wiki_entries WHERE source_ref IS NOT NULL")?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
     for (idx, (entry_id, raw)) in entries.iter().enumerate() {
         let Some(raw) = raw else { continue };
-        let Ok(mut value) = serde_json::from_str::<Value>(raw) else { continue };
+        let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+            continue;
+        };
         let Some(evidence) = value.get_mut("evidence").and_then(|v| v.as_array_mut()) else {
             continue;
         };
         let mut changed = false;
         for entry in evidence.iter_mut() {
-            let Some(obj) = entry.as_object_mut() else { continue };
-            let Some(chunk_id) = obj.get("chunk_id").and_then(|v| v.as_i64()) else { continue };
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
+            let Some(chunk_id) = obj.get("chunk_id").and_then(|v| v.as_i64()) else {
+                continue;
+            };
             match legacy_rowid_to_hash.get(&chunk_id) {
                 Some(hash) if !hash.is_empty() => {
                     obj.insert("content_hash".into(), Value::String(hash.clone()));
@@ -241,9 +259,7 @@ pub fn run_chunk_hash_migration(
 /// `IN (...)` form on the legacy rowid set would otherwise blow past
 /// `SQLITE_MAX_VARIABLE_NUMBER` for large corpora and abort the
 /// migration on every start.
-fn capture_embeddings(
-    tx: &rusqlite::Transaction<'_>,
-) -> Result<Vec<(i64, Vec<u8>)>> {
+fn capture_embeddings(tx: &rusqlite::Transaction<'_>) -> Result<Vec<(i64, Vec<u8>)>> {
     let mut stmt = tx.prepare("SELECT chunk_id, vector FROM embeddings")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
@@ -284,7 +300,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// Collect every progress event into a vec for assertion.
-    fn capture_progress() -> (impl Fn(MigrationProgress) + Send + 'static, Arc<Mutex<Vec<MigrationProgress>>>) {
+    fn capture_progress() -> (
+        impl Fn(MigrationProgress) + Send + 'static,
+        Arc<Mutex<Vec<MigrationProgress>>>,
+    ) {
         let log = Arc::new(Mutex::new(Vec::<MigrationProgress>::new()));
         let sink = log.clone();
         let emit = move |p: MigrationProgress| {
@@ -398,8 +417,14 @@ mod tests {
         let parsed: Value = serde_json::from_str(&new_ref).unwrap();
         let evidence = parsed.get("evidence").unwrap().as_array().unwrap();
         let entry = evidence[0].as_object().unwrap();
-        assert!(entry.contains_key("content_hash"), "chunk_id must be replaced by content_hash");
-        assert!(!entry.contains_key("chunk_id"), "old chunk_id key must be removed");
+        assert!(
+            entry.contains_key("content_hash"),
+            "chunk_id must be replaced by content_hash"
+        );
+        assert!(
+            !entry.contains_key("chunk_id"),
+            "old chunk_id key must be removed"
+        );
         let hash = entry.get("content_hash").unwrap().as_str().unwrap();
         assert_eq!(hash.len(), 32, "rewritten hash must be the 32-char hex");
     }
@@ -720,7 +745,9 @@ mod tests {
         let new_b = new_rowids[1];
 
         let edge_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM curated_relationships", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM curated_relationships", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(edge_count, 2, "both edges must survive migration");
 
@@ -732,7 +759,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(call_edge.0, new_a, "calls edge from_id remapped to new rowid");
+        assert_eq!(
+            call_edge.0, new_a,
+            "calls edge from_id remapped to new rowid"
+        );
         assert_eq!(call_edge.1, new_b, "calls edge to_id remapped to new rowid");
         assert_eq!(call_edge.2, "calls");
 

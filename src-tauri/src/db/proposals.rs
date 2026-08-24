@@ -359,7 +359,9 @@ fn item_counts_for_proposal(conn: &Connection, proposal_id: &str) -> Result<Prop
         tasks: 0,
         summary_updates: 0,
     };
-    let rows = stmt.query_map([proposal_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = stmt.query_map([proposal_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
     for row in rows {
         let (item_type, n) = row?;
         counts.total += n;
@@ -589,11 +591,17 @@ pub fn list_proposals_for_document(conn: &Connection, doc_id: i64) -> Result<Vec
         .query_map([doc_id], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let pending = list_proposals(conn, &ProposalFilter {
-        status: Some("pending".into()),
-    })?;
+    let pending = list_proposals(
+        conn,
+        &ProposalFilter {
+            status: Some("pending".into()),
+        },
+    )?;
     let by_id: HashMap<_, _> = pending.into_iter().map(|p| (p.id.clone(), p)).collect();
-    Ok(ids.into_iter().filter_map(|id| by_id.get(&id).cloned()).collect())
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| by_id.get(&id).cloned())
+        .collect())
 }
 
 /// Most-recent pending proposal that cites the given document path as a source.
@@ -621,9 +629,9 @@ pub fn latest_pending_for_path(conn: &Connection, path: &str) -> Result<Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunker::{Chunk, ChunkStrategyTag};
     use crate::db::connection::open_in_memory;
     use crate::db::queries::{insert_chunk, upsert_document};
-    use crate::chunker::{Chunk, ChunkStrategyTag};
 
     fn seed_document(conn: &Connection, path: &str) -> i64 {
         upsert_document(conn, path, "hash").unwrap()
@@ -765,7 +773,10 @@ mod tests {
         assert!(!ev.source_deleted);
         assert_eq!(ev.quote, "evidence quote");
         assert!(ev.doc_path.as_ref().unwrap().contains("ev.pdf"));
-        assert_eq!(detail.reasoning.as_deref(), Some("Because the doc mentions it."));
+        assert_eq!(
+            detail.reasoning.as_deref(),
+            Some("Because the doc mentions it.")
+        );
     }
 
     #[test]
@@ -826,10 +837,9 @@ mod tests {
                      RETURNING id",
                 )
                 .unwrap();
-            stmt.query_row(
-                rusqlite::params![doc_id, "evidence quote", hash],
-                |r| r.get(0),
-            )
+            stmt.query_row(rusqlite::params![doc_id, "evidence quote", hash], |r| {
+                r.get(0)
+            })
             .unwrap()
         };
         assert_ne!(

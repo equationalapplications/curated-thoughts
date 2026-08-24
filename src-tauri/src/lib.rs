@@ -1,40 +1,44 @@
 pub mod chunker;
+pub mod cloud_bridge;
 pub mod commands;
 pub mod db;
 pub mod embedder;
+mod entities_api;
 pub mod graph;
 mod hasher;
 pub mod indexer;
+pub mod inference;
 pub mod librarian;
-pub mod okf;
-mod entities_api;
-mod okf_api;
-mod proposals_api;
-mod timeline_api;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
+pub mod okf;
+mod okf_api;
 pub mod outbox;
 mod pipeline;
+pub mod privacy;
+mod proposals_api;
 pub mod recall_bench_fixture;
 pub mod retrieval;
 pub mod scifact_fixture;
 pub mod search;
-pub mod tool_dispatch;
-pub mod cloud_bridge;
-pub mod privacy;
 mod setup;
-pub mod inference;
+mod timeline_api;
+pub mod tool_dispatch;
 pub mod vault;
-pub mod wiki_graph;
 mod watcher;
+pub mod wiki_graph;
 
+use crate::inference::{
+    download_model_weights, download_sidecar_engine, generate_text, get_provider_config,
+    initialize_provider, update_provider, GenerationProvider, InferenceState,
+};
 use chunker::should_ingest_extension;
+use cloud_bridge::pairing::PairingTokenStore;
 use db::AppDb;
 use outbox::{
     postgres::{spawn_postgres_worker, OutboxWorkerHandle},
     OutboxConfig,
 };
-use cloud_bridge::pairing::PairingTokenStore;
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
@@ -46,16 +50,6 @@ use serde_json::{json, Value as JsonVal};
 use setup::{
     check_ollama as ollama_check, list_local_models as ollama_models, pull_model as ollama_pull,
     recommended_model as ollama_recommended, start_ollama_server as ollama_start, OllamaStatus,
-};
-use crate::inference::{
-    download_model_weights,
-    download_sidecar_engine,
-    generate_text,
-    get_provider_config,
-    initialize_provider,
-    update_provider,
-    InferenceState,
-    GenerationProvider,
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -391,7 +385,8 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
         v
     };
 
-    let mut healed_by_entity: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut healed_by_entity: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (rowid, source_ref, entity_id) in entries {
         let safe = crate::vault::safe_vault_path(
             &vault_root,
@@ -2421,8 +2416,7 @@ pub fn run() {
     // closure (below) once the AppHandle is available; this block only
     // captures the flag for that closure to pick up. On error from the
     // check, default to "needs migration" so the gate self-heals.
-    let needs_migration = !crate::db::migration::chunks_have_content_hash(&db.0)
-        .unwrap_or(false);
+    let needs_migration = !crate::db::migration::chunks_have_content_hash(&db.0).unwrap_or(false);
     let initial_vault_root = config.get_vault_path().ok().flatten().map(|p| {
         let pb = PathBuf::from(&p);
         pb.canonicalize().unwrap_or(pb)
@@ -2476,25 +2470,23 @@ pub fn run() {
                                 return;
                             }
                         };
-                        let emit =
-                            |p: crate::db::migration::MigrationProgress| {
-                                let _ = app_handle.emit(
-                                    "migration-progress",
-                                    serde_json::json!({
-                                        "current": p.current,
-                                        "total": p.total,
-                                        "phase": p.phase,
-                                    }),
-                                );
-                            };
+                        let emit = |p: crate::db::migration::MigrationProgress| {
+                            let _ = app_handle.emit(
+                                "migration-progress",
+                                serde_json::json!({
+                                    "current": p.current,
+                                    "total": p.total,
+                                    "phase": p.phase,
+                                }),
+                            );
+                        };
                         match crate::db::migration::run_chunk_hash_migration(
                             &mut guard.0,
                             migration_vault_root.as_deref(),
                             emit,
                         ) {
                             Ok(()) => {
-                                let _ =
-                                    app_handle.emit("migration-complete", ());
+                                let _ = app_handle.emit("migration-complete", ());
                             }
                             Err(e) => {
                                 let _ = app_handle.emit(
@@ -2884,9 +2876,7 @@ async fn set_cloud_bridge_pairing_token(
     )
     .map_err(|e| e.to_string())?;
     if !privacy::allows_cloud_bridge(privacy_state.mode) {
-        return Err(
-            "Cloud Bridge is only available in Connected agent privacy mode".to_string(),
-        );
+        return Err("Cloud Bridge is only available in Connected agent privacy mode".to_string());
     }
     let _guard = lifecycle.0.lock().await;
     cloud_bridge::pairing::KeyringPairingTokenStore
@@ -3025,7 +3015,13 @@ mod heal_invalid_sources_tests {
                     id, entity_id, title, body, tags, confidence, source_type, source_ref,
                     created_at, updated_at, deleted_at
                  ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', ?5, 1, 1, NULL)",
-                params!["entry-missing", "tier_fact", "Missing", "body", "documents/missing.md"],
+                params![
+                    "entry-missing",
+                    "tier_fact",
+                    "Missing",
+                    "body",
+                    "documents/missing.md"
+                ],
             )
             .unwrap();
 
@@ -3199,7 +3195,13 @@ mod maintenance_command_tests {
                 id, entity_id, title, body, tags, confidence, source_type, source_ref,
                 created_at, updated_at, deleted_at
              ) VALUES (?1, 'tier_fact', ?2, 'body', '[]', 'inferred', ?3, ?4, 1, 1, ?5)",
-            params![id, format!("Title {id}"), source_type, source_ref, deleted_at],
+            params![
+                id,
+                format!("Title {id}"),
+                source_type,
+                source_ref,
+                deleted_at
+            ],
         )
         .unwrap();
     }

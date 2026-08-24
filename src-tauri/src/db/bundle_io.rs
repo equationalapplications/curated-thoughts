@@ -193,7 +193,10 @@ mod tests {
         assert_eq!(e.summary.as_deref(), Some("Summary prose."));
         assert_eq!(e.facts.len(), 1);
         assert_eq!(e.tasks.len(), 1);
-        assert_eq!(e.edges, vec![("fact_1".into(), "task_1".into(), "blocks".into())]);
+        assert_eq!(
+            e.edges,
+            vec![("fact_1".into(), "task_1".into(), "blocks".into())]
+        );
         assert_eq!(e.events.len(), 1);
         assert_eq!(e.events[0].event_id, "evt_1");
         assert_eq!(

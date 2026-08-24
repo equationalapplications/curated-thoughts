@@ -82,7 +82,20 @@ fn needs_quoting(value: &str) -> bool {
         }
         if matches!(
             first,
-            '[' | ']' | '{' | '}' | '&' | ',' | '*' | '%' | '!' | '|' | '>' | '\'' | '"' | '@' | '`'
+            '[' | ']'
+                | '{'
+                | '}'
+                | '&'
+                | ','
+                | '*'
+                | '%'
+                | '!'
+                | '|'
+                | '>'
+                | '\''
+                | '"'
+                | '@'
+                | '`'
         ) {
             return true;
         }
@@ -173,7 +186,11 @@ pub fn serialize_frontmatter_pairs(pairs: &[(&str, OkfFrontmatterValue)]) -> Str
                 }
             }
             other => {
-                lines.push(format!("{}: {}", serialize_key(key), serialize_value(other)));
+                lines.push(format!(
+                    "{}: {}",
+                    serialize_key(key),
+                    serialize_value(other)
+                ));
             }
         }
     }
@@ -235,7 +252,9 @@ fn parse_quoted_scalar(raw: &str) -> Option<String> {
         return Some(unescape_frontmatter_string(&trimmed[1..trimmed.len() - 1]));
     }
     if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
-        return Some(unescape_single_quoted_string(&trimmed[1..trimmed.len() - 1]));
+        return Some(unescape_single_quoted_string(
+            &trimmed[1..trimmed.len() - 1],
+        ));
     }
     None
 }
@@ -353,14 +372,19 @@ fn has_unquoted_anchor(s: &str) -> bool {
             b'"' => {
                 i += 1;
                 while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
                     i += 1;
                 }
                 i += 1; // skip closing quote
             }
             b'\'' => {
                 i += 1;
-                while i < bytes.len() && bytes[i] != b'\'' { i += 1; }
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
                 i += 1;
             }
             b'&' | b'*' => return true,
@@ -477,10 +501,9 @@ pub fn parse_frontmatter(content: &str) -> (OkfFrontmatter, String) {
         let value_str = value.trim();
         if value_str.starts_with('{') {
             if let Some(inner) = parse_flow_mapping_text(value_str) {
-                frontmatter.fields.insert(
-                    key,
-                    OkfFrontmatterValue::String(format!("{{{inner}}}")),
-                );
+                frontmatter
+                    .fields
+                    .insert(key, OkfFrontmatterValue::String(format!("{{{inner}}}")));
                 i += 1;
                 continue;
             }
@@ -500,7 +523,9 @@ pub fn parse_frontmatter(content: &str) -> (OkfFrontmatter, String) {
                 i += 1;
                 continue;
             }
-            frontmatter.fields.insert(key, OkfFrontmatterValue::String(value_str.to_string()));
+            frontmatter
+                .fields
+                .insert(key, OkfFrontmatterValue::String(value_str.to_string()));
             i += 1;
             continue;
         }
@@ -584,11 +609,15 @@ mod tests {
     #[test]
     fn flow_value_with_anchor_is_opaque_not_expanded() {
         // `&` inside a flow value must not trigger YAML anchor semantics
-        let fm = "---\ngenerated: { by: \"https://x/a?p=1&q=2\", at: 2026-07-01T00:00:00.000Z }\n---\n";
+        let fm =
+            "---\ngenerated: { by: \"https://x/a?p=1&q=2\", at: 2026-07-01T00:00:00.000Z }\n---\n";
         let (parsed, _) = parse_frontmatter(fm);
         let v = parsed.fields.get("generated").expect("generated present");
         if let OkfFrontmatterValue::String(s) = v {
-            assert!(s.contains("https://x/a?p=1&q=2"), "anchor-shaped URL preserved verbatim: {s}");
+            assert!(
+                s.contains("https://x/a?p=1&q=2"),
+                "anchor-shaped URL preserved verbatim: {s}"
+            );
         } else {
             panic!("expected String; got {v:?}");
         }
