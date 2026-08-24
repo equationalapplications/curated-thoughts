@@ -1,3 +1,11 @@
+## [1.27.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.27.0...v1.27.1) (2026-08-24)
+
+### Bug Fixes
+
+* **mcp:** aggregate+rank wiki candidates across all query terms; TEXT column types ([d2b2ca9](https://github.com/equationalapplications/curated-thoughts/commit/d2b2ca9e1f3a211afac01f38b92a38076b75aedc))
+* **mcp:** harden wiki-entry NULL handling per review gate ([badeaec](https://github.com/equationalapplications/curated-thoughts/commit/badeaec3d4d722cdf51e045eaa50b0df95954317))
+* **mcp:** rewrite recall_context/search_code/get_wiki_entry SQL to real schema ([ee1d08c](https://github.com/equationalapplications/curated-thoughts/commit/ee1d08c6c25cc5166c514f817398817b654f71dd))
+
 ## [1.27.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.26.0...v1.27.0) (2026-08-24)
 
 ### Features
