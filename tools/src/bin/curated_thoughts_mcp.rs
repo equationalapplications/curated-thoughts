@@ -466,13 +466,20 @@ impl VaultMcpServer {
         }) = args;
         let conn = lock_conn(&self.conn)?;
 
-        // Resolve root chunk id: explicit chunk_id wins, else first exact-symbol match.
+        // Resolve root chunk id: explicit chunk_id wins, else match against
+        // defined_symbol (definitions, lowercased+trimmed by the linker) with
+        // symbol_name fallback. Definitions are the correct traversal root —
+        // a ref chunk only has outgoing edges pointing AT the definition.
         let root_chunk_id: i64 = if let Some(id) = chunk_id {
             id
         } else if let Some(ref sym) = symbol {
+            let normalized = sym.trim().to_lowercase();
             conn.query_row(
-                "SELECT c.id FROM chunks c WHERE c.symbol_name = ?1 ORDER BY c.id LIMIT 1",
-                rusqlite::params![sym],
+                "SELECT c.id FROM chunks c
+                 WHERE c.defined_symbol = ?1 OR (c.defined_symbol IS NULL AND c.symbol_name = ?1)
+                 ORDER BY CASE WHEN c.defined_symbol IS NOT NULL THEN 0 ELSE 1 END, c.id
+                 LIMIT 1",
+                rusqlite::params![normalized],
                 |r| r.get(0),
             )
             .map_err(|_| {
@@ -482,7 +489,7 @@ impl VaultMcpServer {
                 )
             })?
         } else {
-            return Err(rmcp::ErrorData::internal_error(
+            return Err(rmcp::ErrorData::invalid_params(
                 "provide either chunk_id or symbol",
                 None,
             ));
@@ -531,10 +538,16 @@ impl VaultMcpServer {
         }
 
         self.log_access("graph_neighbors", Some(&entity_id));
+        // Hard cap: hub symbols at high depth can serialize thousands of rows.
+        const MAX_NEIGHBORS: usize = 200;
+        let total = enriched.len();
+        enriched.truncate(MAX_NEIGHBORS);
         serde_json::to_string(&serde_json::json!({
             "root_chunk_id": root_chunk_id,
             "direction": direction.as_deref().unwrap_or("both"),
             "max_hops": hops,
+            "total_neighbors": total,
+            "truncated": total > MAX_NEIGHBORS,
             "neighbors": enriched
         }))
         .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
