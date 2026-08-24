@@ -242,8 +242,7 @@ impl VaultMcpServer {
         let wiki_entries: Vec<serde_json::Value> = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, entity_id, title, body, source_ref, confidence,
-                            length(body) AS body_len
+                    "SELECT id, entity_id, title, body, source_ref, confidence
                      FROM llm_wiki_entries
                      WHERE deleted_at IS NULL
                        AND (title LIKE '%' || ?1 || '%'
@@ -329,7 +328,7 @@ impl VaultMcpServer {
         let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
         {
             (
-                "SELECT body, 0 AS position, source_ref, NULL, NULL
+                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
                  FROM llm_wiki_entries
                  WHERE deleted_at IS NULL AND entity_id = ?1
                  ORDER BY updated_at",
@@ -337,7 +336,7 @@ impl VaultMcpServer {
             )
         } else if let Some(ref topic) = topic {
             (
-                "SELECT body, 0 AS position, source_ref, NULL, NULL
+                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
                  FROM llm_wiki_entries
                  WHERE deleted_at IS NULL
                    AND (title LIKE '%' || ?1 || '%'
