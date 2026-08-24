@@ -1,3 +1,14 @@
+## [1.27.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.26.0...v1.27.0) (2026-08-24)
+
+### Features
+
+* **mcp:** graph_neighbors tool — walk call/import graph without SQL ([dd2de9f](https://github.com/equationalapplications/curated-thoughts/commit/dd2de9f5e374a4cfb94bdca554a247e23e1649d7))
+
+### Bug Fixes
+
+* **mcp:** address CodeRabbit review — validate direction, cap before enrichment ([52503e4](https://github.com/equationalapplications/curated-thoughts/commit/52503e49838211cea01a8f4641a494feff6f572d))
+* **mcp:** graph_neighbors review fixes — resolve defs, normalize case, cap results ([cd83a7b](https://github.com/equationalapplications/curated-thoughts/commit/cd83a7bf8d62fdf5746b87bd9d1ecc7c5e73a59a))
+
 ## [1.26.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.3...v1.26.0) (2026-08-24)
 
 ### Features
