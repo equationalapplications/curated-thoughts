@@ -33,8 +33,16 @@ pub enum CloudProvider {
 /// OpenRouter, OpenAI, and any compatible gateway. API key resolution order:
 /// profile field → `EMBED_API_KEY` env → provider default env
 /// (`OPENROUTER_API_KEY` for openrouter bases, `OPENAI_API_KEY` otherwise).
+/// Default base for external embedding endpoints. OpenRouter per spec; the
+/// config file intentionally stores no endpoint so secret-redaction on this
+/// machine cannot corrupt it.
+fn default_external_base_url() -> String {
+    "https://openrouter.ai/api/v1".into()
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct ExternalEmbedProfile {
+    #[serde(default = "default_external_base_url")]
     pub base_url: String,
     pub model: String,
     #[serde(default)]
@@ -74,6 +82,7 @@ impl ExternalEmbedProfile {
     pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         let api_key = self.resolved_api_key()?;
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
         let base = self.base_url.trim_end_matches('/');
