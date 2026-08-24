@@ -39,6 +39,36 @@ fn is_excluded_dir(dir_name: &str) -> bool {
     EXCLUDED_DIRS.contains(&dir_name)
 }
 
+/// File-name patterns never ingested: machine-generated dependency manifests
+/// and generated schemas. The chunker bounds chunk size, so this is not about
+/// file length — these files carry no retrieval value and just burn embedding
+/// API calls (all 20 failures in the Aug 24 full-corpus run were these).
+const EXCLUDED_FILE_NAMES: &[&str] = &[
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "uv.lock",
+    "CHANGELOG.md",
+    "CHANGELOG.md.generated", // commitizen-style generated changelogs
+];
+
+/// Path segments (matched anywhere in the relative path) that mark generated
+/// machine output rather than authored knowledge.
+const EXCLUDED_PATH_SEGMENTS: &[&str] = &["drizzle/meta/", "gen/schemas/"];
+
+fn is_excluded_file(path: &Path) -> bool {
+    if let Some(name) = path.file_name() {
+        let name = name.to_string_lossy();
+        if EXCLUDED_FILE_NAMES.contains(&name.as_ref()) {
+            return true;
+        }
+    }
+    let p = path.to_string_lossy();
+    EXCLUDED_PATH_SEGMENTS.iter().any(|seg| p.contains(seg))
+}
+
 /// Collect files from a directory tree. `follow_symlinked_doc_dirs` enables
 /// following symlinked directories whose parent is exactly
 /// `<vault_root>/documents` (the staging contract); nested symlinks and
@@ -69,6 +99,9 @@ fn collect_files(
             }
         };
         let p = entry.path();
+        if entry.file_type().is_file() && is_excluded_file(p) {
+            continue;
+        }
         let ft = entry.file_type();
         if ft.is_file()
             && p.extension()
