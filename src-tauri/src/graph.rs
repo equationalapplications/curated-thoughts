@@ -119,6 +119,22 @@ pub fn get_both(
     Ok(callees)
 }
 
+/// Direction-aware traversal entry point used by the MCP `graph_neighbors` tool.
+/// `direction`: "callees", "callers", or "both" (default).
+pub fn get_neighbors(
+    conn: &Connection,
+    root_chunk_id: i64,
+    entity_id: &str,
+    max_hops: u32,
+    direction: Option<&str>,
+) -> Result<Vec<NeighborRow>> {
+    match direction.unwrap_or("both") {
+        "callees" => get_callees(conn, root_chunk_id, entity_id, max_hops),
+        "callers" => get_callers(conn, root_chunk_id, entity_id, max_hops),
+        _ => get_both(conn, root_chunk_id, entity_id, max_hops),
+    }
+}
+
 fn run_cte(
     conn: &Connection,
     cte: &str,
