@@ -1,4 +1,4 @@
-import { screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { ReviewMode } from "../components/modes/ReviewMode";
 import { renderWithTheme } from "./test-utils";
@@ -59,6 +59,9 @@ function detailFor(summary: typeof PAGE) {
 
 async function waitForProposalPreview() {
   await screen.findAllByText(/Test fact for preview/i);
+  // Flush React 18 passive effects so window keydown listeners hold fresh
+  // callbacks (e.g. handleReject with detail loaded) before tests fire keys.
+  await act(async () => {});
 }
 
 function defaultInvoke(cmd: string, args?: Record<string, unknown>) {
