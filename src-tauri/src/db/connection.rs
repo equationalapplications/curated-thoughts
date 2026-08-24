@@ -79,6 +79,12 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     if version < 9 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))?;
     }
+    if version < 10 {
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nCOMMIT;",
+            crate::db::schema::MIGRATION_V10
+        ))?;
+    }
     if version < 7 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
     }

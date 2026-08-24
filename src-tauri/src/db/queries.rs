@@ -93,6 +93,12 @@ pub fn mark_document_indexed(conn: &Connection, doc_id: i64) -> Result<()> {
         "UPDATE documents SET status = 'indexed', last_indexed = unixepoch() WHERE id = ?1",
         [doc_id],
     )?;
+    // Preserve per-doc ingest history (documents.last_indexed is overwritten
+    // on every re-ingest; this table keeps one row per attempt).
+    let _ = conn.execute(
+        "INSERT INTO ingest_runs (doc_id, outcome) VALUES (?1, 'indexed')",
+        [doc_id],
+    );
     Ok(())
 }
 
@@ -101,6 +107,10 @@ pub fn mark_document_error(conn: &Connection, doc_id: i64) -> Result<()> {
         "UPDATE documents SET status = 'error' WHERE id = ?1",
         [doc_id],
     )?;
+    let _ = conn.execute(
+        "INSERT INTO ingest_runs (doc_id, outcome) VALUES (?1, 'error')",
+        [doc_id],
+    );
     Ok(())
 }
 
