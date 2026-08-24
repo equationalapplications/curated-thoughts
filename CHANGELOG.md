@@ -1,3 +1,9 @@
+## [1.25.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.1...v1.25.2) (2026-08-24)
+
+### Bug Fixes
+
+* **ingest:** exclude machine-generated files instead of failing on them ([c452983](https://github.com/equationalapplications/curated-thoughts/commit/c4529831bc59b1a1e697f6013a6df68093530601))
+
 ## [1.25.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.0...v1.25.1) (2026-08-24)
 
 ### Bug Fixes
