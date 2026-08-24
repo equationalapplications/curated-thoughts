@@ -1,3 +1,15 @@
+## [1.25.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.24.2...v1.25.0) (2026-08-24)
+
+### Features
+
+* **embedder:** add External profile for OpenAI-compatible embedding endpoints ([b7619e7](https://github.com/equationalapplications/curated-thoughts/commit/b7619e7ec4412710751dfd67d1d2bf1956ee984f))
+
+### Bug Fixes
+
+* **embedder:** restore exhaustive EmbedProfile match arm lost in fmt commit ([6caf82a](https://github.com/equationalapplications/curated-thoughts/commit/6caf82afe8db49c2b00607aa5ea10a5925fc135c))
+* **embedder:** serde default for external base_url; no_proxy on external client ([2f28e5f](https://github.com/equationalapplications/curated-thoughts/commit/2f28e5fa929b92f61b6885e3c0b7f803c9b68b1a))
+* **embedder:** strict response validation; never persist external api_key; spec default model correction ([af6ff55](https://github.com/equationalapplications/curated-thoughts/commit/af6ff55dd594ad3032a03508b9e776e107347633))
+
 ## [1.24.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.24.1...v1.24.2) (2026-08-24)
 
 ### Bug Fixes
