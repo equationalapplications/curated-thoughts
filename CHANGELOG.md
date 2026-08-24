@@ -1,3 +1,13 @@
+## [1.26.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.3...v1.26.0) (2026-08-24)
+
+### Features
+
+* **db:** preserve per-doc ingest history (ingest_runs, V10) ([68701d4](https://github.com/equationalapplications/curated-thoughts/commit/68701d4d3272ca93159f1de1915f6e41886505f7))
+
+### Bug Fixes
+
+* **db:** bump schema-version test to 10; use MIGRATION_V10 import ([4535426](https://github.com/equationalapplications/curated-thoughts/commit/4535426380a5e9fed39113670335486de83e8eca))
+
 ## [1.25.3](https://github.com/equationalapplications/curated-thoughts/compare/v1.25.2...v1.25.3) (2026-08-24)
 
 ### Bug Fixes
