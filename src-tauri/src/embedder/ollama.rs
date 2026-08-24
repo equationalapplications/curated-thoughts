@@ -26,7 +26,12 @@ fn shared_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 fn default_ollama_base() -> String {
-    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://[REDACTED-IP]".into())
+    // NOTE: never use an IP-literal placeholder here — Hermes-style secret
+    // redaction rewrites IPs to `[IP_ADDRESS]`, which reqwest rejects with
+    // "builder error: invalid IPv6 address" (bracketed host must be valid
+    // IPv6). Ollama is loopback-only in supported setups, so localhost is the
+    // safe default.
+    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".into())
 }
 
 /// Default byte budget per embed input. Approximates a safe margin under the
@@ -242,6 +247,19 @@ impl OllamaEmbedder {
 mod tests {
     use super::*;
     use crate::embedder::{CloudProvider, EmbedProfile};
+
+    #[test]
+    fn default_base_url_parses_as_valid_url() {
+        // Regression: the old fallback was an IP-redaction placeholder
+        // (`[IP_ADDRESS]`-style literal). reqwest rejects any bracketed host
+        // that is not valid IPv6 with "builder error: invalid IPv6 address",
+        // which broke every embed call on paths without OLLAMA_HOST set.
+        let base = default_ollama_base();
+        let parsed = reqwest::Url::parse(&base)
+            .unwrap_or_else(|e| panic!("default base {base:?} failed to parse: {e}"));
+        assert_eq!(parsed.host_str(), Some("localhost"));
+        assert_eq!(parsed.port(), Some(11434));
+    }
 
     #[test]
     fn rejects_cloud_profile() {
