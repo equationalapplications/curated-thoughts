@@ -238,58 +238,96 @@ impl VaultMcpServer {
         // Wisdom layer: llm_wiki_entries is the librarian's synthesis
         // destination. It has no embeddings populated yet, so rank entries by
         // title/body keyword overlap with the query terms (BM25-lite); when
-        // the table is empty this leg returns [] without error.
+        // the table is empty this leg returns [] without error. Candidates
+        // are aggregated across all query terms, ranked by term overlap then
+        // confidence/updated_at, and truncated to limit_wiki only at the end.
         let wiki_entries: Vec<serde_json::Value> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, entity_id, title, body, source_ref, confidence
-                     FROM llm_wiki_entries
-                     WHERE deleted_at IS NULL
-                       AND (title LIKE '%' || ?1 || '%'
-                            OR body LIKE '%' || ?1 || '%')
-                     ORDER BY confidence DESC, updated_at DESC
-                     LIMIT ?2",
-                )
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("prepare wiki query: {e}"), None)
-                })?;
+            // Keep terms of any length >= 2; short technical terms ("sql",
+            // "rag") are often the most meaningful.
             let terms: Vec<String> = query
                 .split_whitespace()
-                .filter(|t| t.len() >= 4)
+                .filter(|t| t.len() >= 2)
                 .map(|t| t.to_lowercase())
                 .collect();
-            let mut rows_out = Vec::new();
-            for term in &terms {
-                let rows = stmt
-                    .query_map(rusqlite::params![term, limit_wiki], |row| {
-                        Ok(serde_json::json!({
-                            "id": row.get::<_, i64>(0)?,
-                            "entity_id": row.get::<_, Option<String>>(1)?,
-                            "title": row.get::<_, Option<String>>(2)?,
-                            "text": row.get::<_, Option<String>>(3)?,
-                            "source_ref": row.get::<_, Option<String>>(4)?,
-                            "confidence": row.get::<_, Option<f64>>(5)?,
-                        }))
-                    })
+            if terms.is_empty() {
+                Vec::new()
+            } else {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, entity_id, title, body, source_ref, confidence,
+                                updated_at
+                         FROM llm_wiki_entries
+                         WHERE deleted_at IS NULL
+                           AND (title LIKE '%' || ?1 || '%'
+                                OR body LIKE '%' || ?1 || '%')",
+                    )
                     .map_err(|e| {
-                        rmcp::ErrorData::internal_error(format!("execute wiki query: {e}"), None)
+                        rmcp::ErrorData::internal_error(format!("prepare wiki query: {e}"), None)
                     })?;
-                for row in rows {
-                    let v = row.map_err(|e| {
-                        rmcp::ErrorData::internal_error(format!("read wiki row: {e}"), None)
-                    })?;
-                    if !rows_out.iter().any(|existing| existing == &v) {
-                        rows_out.push(v);
-                    }
-                    if rows_out.len() >= limit_wiki {
-                        break;
+                // id -> (overlap_count, json_value, confidence_rank, updated_at)
+                use std::collections::HashMap;
+                let mut candidates: HashMap<String, (usize, serde_json::Value, String, String)> =
+                    HashMap::new();
+                for term in &terms {
+                    let rows = stmt
+                        .query_map(rusqlite::params![term], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,          // id (TEXT PK)
+                                row.get::<_, Option<String>>(1)?,  // entity_id
+                                row.get::<_, Option<String>>(2)?,  // title
+                                row.get::<_, Option<String>>(3)?,  // body
+                                row.get::<_, Option<String>>(4)?,  // source_ref
+                                row.get::<_, Option<String>>(5)?,  // confidence (TEXT)
+                                row.get::<_, Option<String>>(6)?,  // updated_at
+                            ))
+                        })
+                        .map_err(|e| {
+                            rmcp::ErrorData::internal_error(
+                                format!("execute wiki query: {e}"),
+                                None,
+                            )
+                        })?;
+                    for row in rows {
+                        let (id, entity_id, title, text, source_ref, confidence, updated_at) =
+                            row.map_err(|e| {
+                                rmcp::ErrorData::internal_error(
+                                    format!("read wiki row: {e}"),
+                                    None,
+                                )
+                            })?;
+                        let entry = candidates.entry(id.clone()).or_insert_with(|| {
+                            let v = serde_json::json!({
+                                "id": id,
+                                "entity_id": entity_id,
+                                "title": title,
+                                "text": text,
+                                "source_ref": source_ref,
+                                "confidence": confidence,
+                            });
+                            // Higher confidence string sorts later; rank key is
+                            // inverted for descending sort convenience.
+                            (
+                                0,
+                                v,
+                                confidence.clone().unwrap_or_default(),
+                                updated_at.clone().unwrap_or_default(),
+                            )
+                        });
+                        entry.0 += 1; // one overlap point per matching term
                     }
                 }
-                if rows_out.len() >= limit_wiki {
-                    break;
-                }
+                let mut ranked: Vec<_> = candidates.into_iter().collect();
+                ranked.sort_by(|a, b| {
+                    b.1 .0.cmp(&a.1 .0) // term overlap desc
+                        .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+                        .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc
+                });
+                ranked
+                    .into_iter()
+                    .take(limit_wiki)
+                    .map(|(_, (_, v, _, _))| v)
+                    .collect()
             }
-            rows_out
         };
 
         // Code chunks: real chunker strategies (ast_*). Vectors live in the
