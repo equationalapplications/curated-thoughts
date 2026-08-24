@@ -188,11 +188,7 @@ pub fn delete_relationships_for_chunk(conn: &Connection, chunk_id: i64) -> Resul
 
 /// Resolve a (path, content_hash) to the matching chunk's line range.
 /// Returns `Ok(None)` if either the path or hash doesn't match.
-pub fn find_chunk_overlay(
-    conn: &Connection,
-    path: &str,
-    hash: &str,
-) -> Result<Option<(u32, u32)>> {
+pub fn find_chunk_overlay(conn: &Connection, path: &str, hash: &str) -> Result<Option<(u32, u32)>> {
     let row: Option<(i64,)> = conn
         .query_row(
             "SELECT c.id FROM chunks c
@@ -380,7 +376,10 @@ mod tests {
     fn find_chunk_overlay_returns_none_for_unknown_hash() {
         let conn = open_in_memory().unwrap();
         let _ = upsert_document(&conn, "/docs/a.md", "h").unwrap();
-        assert_eq!(find_chunk_overlay(&conn, "/docs/a.md", "nope").unwrap(), None);
+        assert_eq!(
+            find_chunk_overlay(&conn, "/docs/a.md", "nope").unwrap(),
+            None
+        );
     }
 
     #[test]

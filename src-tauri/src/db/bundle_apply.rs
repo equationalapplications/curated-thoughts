@@ -515,9 +515,7 @@ pub fn apply_import(
                         &ev.date,
                     )?;
                     (
-                        ev.event_id
-                            .clone()
-                            .unwrap_or_else(|| generate_id("evt_")),
+                        ev.event_id.clone().unwrap_or_else(|| generate_id("evt_")),
                         dup,
                     )
                 }
@@ -527,10 +525,7 @@ pub fn apply_import(
                 continue;
             }
             let created_at = ms_from_utc_date(&ev.date).unwrap_or(now_ms);
-            let related = ev
-                .related_entry_id
-                .as_deref()
-                .map(|id| mapped(id, &id_map));
+            let related = ev.related_entry_id.as_deref().map(|id| mapped(id, &id_map));
             tx.execute(
                 "INSERT OR IGNORE INTO llm_wiki_events
                     (id, entity_id, event_type, summary, related_entry_id, created_at)
@@ -641,10 +636,16 @@ fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result
             now_ms,
         )?;
     }
-    tx.execute("DELETE FROM llm_wiki_entries WHERE entity_id=?1", [entity_id])?;
+    tx.execute(
+        "DELETE FROM llm_wiki_entries WHERE entity_id=?1",
+        [entity_id],
+    )?;
     tx.execute("DELETE FROM llm_wiki_tasks WHERE entity_id=?1", [entity_id])?;
     tx.execute("DELETE FROM llm_wiki_edges WHERE entity_id=?1", [entity_id])?;
-    tx.execute("DELETE FROM llm_wiki_events WHERE entity_id=?1", [entity_id])?;
+    tx.execute(
+        "DELETE FROM llm_wiki_events WHERE entity_id=?1",
+        [entity_id],
+    )?;
     Ok(())
 }
 
@@ -865,7 +866,8 @@ mod tests {
         // Standard markdown: heading, blank line, then the bullet list. The
         // pre-fix implementation broke on the blank line immediately after
         // the heading, which is the exact shape every formatter emits.
-        let body = "Some intro text.\n\n# Citations\n\n- https://example.com/a\n- https://example.com/b\n";
+        let body =
+            "Some intro text.\n\n# Citations\n\n- https://example.com/a\n- https://example.com/b\n";
         assert_eq!(
             extract_citations_urls(body),
             vec![

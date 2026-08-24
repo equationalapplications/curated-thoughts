@@ -175,7 +175,11 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
                 match parse_fact_file(&file.content) {
                     Ok(parsed) => {
                         concept_ids.insert(path.clone(), parsed.fact.id.clone());
-                        pending_links.push((parsed.fact.id.clone(), "facts".into(), parsed.related));
+                        pending_links.push((
+                            parsed.fact.id.clone(),
+                            "facts".into(),
+                            parsed.related,
+                        ));
                         entity.facts.push(parsed.fact);
                     }
                     Err(e) => bundle.warnings.push(format!("skipped {path}: {e}")),
@@ -184,7 +188,11 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
                 match parse_task_file(&file.content) {
                     Ok(parsed) => {
                         concept_ids.insert(path.clone(), parsed.task.id.clone());
-                        pending_links.push((parsed.task.id.clone(), "tasks".into(), parsed.related));
+                        pending_links.push((
+                            parsed.task.id.clone(),
+                            "tasks".into(),
+                            parsed.related,
+                        ));
                         entity.tasks.push(parsed.task);
                     }
                     Err(e) => bundle.warnings.push(format!("skipped {path}: {e}")),
@@ -215,21 +223,22 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
         for (source_id, subdir, links) in pending_links {
             for link in links {
                 let Some(target_path) = resolve_link(&dir, &subdir, &link.path) else {
-                    bundle.warnings.push(format!(
-                        "unresolvable link {} from {source_id}",
-                        link.path
-                    ));
+                    bundle
+                        .warnings
+                        .push(format!("unresolvable link {} from {source_id}", link.path));
                     continue;
                 };
                 match concept_ids.get(&target_path) {
                     Some(target_id) => {
-                        entity
-                            .edges
-                            .push((source_id.clone(), target_id.clone(), link.text.clone()));
+                        entity.edges.push((
+                            source_id.clone(),
+                            target_id.clone(),
+                            link.text.clone(),
+                        ));
                     }
-                    None => bundle
-                        .warnings
-                        .push(format!("dangling edge target {target_path} from {source_id}")),
+                    None => bundle.warnings.push(format!(
+                        "dangling edge target {target_path} from {source_id}"
+                    )),
                 }
             }
         }

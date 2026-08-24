@@ -40,11 +40,7 @@ fn ingest_skips_vault_wiki_markdown_under_vault_root() {
     let vault = tmp.path().join("vault");
     let wiki_file = vault.join("wiki").join("legacy.md");
     std::fs::create_dir_all(wiki_file.parent().unwrap()).unwrap();
-    std::fs::write(
-        &wiki_file,
-        "# Legacy\n\n".to_owned() + &"word ".repeat(20),
-    )
-    .unwrap();
+    std::fs::write(&wiki_file, "# Legacy\n\n".to_owned() + &"word ".repeat(20)).unwrap();
 
     let _stub_lock = PIPELINE_STUB_GUARD.lock().unwrap();
     std::env::set_var("CURATED_EMBED_STUB", "constant8");

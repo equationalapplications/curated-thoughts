@@ -208,9 +208,7 @@ impl OllamaEmbedder {
     pub fn from_profile(profile: &EmbedProfile) -> Result<Self> {
         match profile {
             EmbedProfile::Local { model } => Ok(Self::new_local(model.clone())),
-            EmbedProfile::Cloud { .. } | EmbedProfile::External { .. } => {
-                Err(anyhow!("cloud embed not implemented"))
-            }
+            EmbedProfile::Cloud { .. } => Err(anyhow!("cloud embed not implemented")),
         }
     }
 

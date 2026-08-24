@@ -147,7 +147,10 @@ async fn unknown_tool_produces_a_typed_task_error_frame() {
         assert_eq!(json["type"], "task_error");
         assert_eq!(json["taskId"], "t2");
         assert_eq!(json["error"]["code"], "UNKNOWN_TOOL");
-        assert!(json["error"]["message"].as_str().unwrap().contains("unknown tool"));
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"));
         assert!(json.get("result").is_none());
 
         ws.close(None).await.unwrap();

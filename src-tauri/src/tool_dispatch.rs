@@ -117,7 +117,9 @@ pub fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<St
                     }
                     push(doc_path.to_string());
                     push(candidate_string.clone());
-                    if let Ok(rel) = std::path::Path::new(&candidate_string).strip_prefix(&vault_normalized) {
+                    if let Ok(rel) =
+                        std::path::Path::new(&candidate_string).strip_prefix(&vault_normalized)
+                    {
                         if !rel.as_os_str().is_empty() {
                             push(rel.to_string_lossy().into_owned());
                         }
@@ -128,7 +130,10 @@ pub fn build_path_candidates(doc_path: &str, vault_dir: Option<&Path>) -> Vec<St
             let is_safe_relative = || {
                 !doc_path.as_bytes().contains(&0)
                     && p.components().all(|c| {
-                        !matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+                        !matches!(
+                            c,
+                            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                        )
                     })
             };
 
@@ -191,13 +196,20 @@ pub fn dispatch_wiki_search(
     limit: Option<usize>,
 ) -> Result<Vec<WikiSearchHit>> {
     let limit = limit.unwrap_or(10).clamp(1, 25);
-    let entity_ids: Vec<String> = entity_ids
-        .unwrap_or_else(|| DEFAULT_ENTITY_IDS.iter().map(|s| (*s).to_string()).collect());
+    let entity_ids: Vec<String> = entity_ids.unwrap_or_else(|| {
+        DEFAULT_ENTITY_IDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    });
     let entity_refs: Vec<&str> = entity_ids.iter().map(|s| s.as_str()).collect();
     wiki_graph::wiki_search(conn, query_vec, &entity_refs, limit)
 }
 
-pub fn dispatch_wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntologyResult> {
+pub fn dispatch_wiki_get_ontology(
+    conn: &Connection,
+    entity_id: &str,
+) -> Result<WikiOntologyResult> {
     wiki_graph::wiki_get_ontology(conn, entity_id)
 }
 
@@ -215,7 +227,14 @@ pub fn dispatch_wiki_traverse_graph(
     let direction = TraverseDirection::parse(direction.as_deref().unwrap_or("both"));
     let edge_types = edge_types.unwrap_or_default();
     let edge_type_refs: Vec<&str> = edge_types.iter().map(|s| s.as_str()).collect();
-    wiki_graph::wiki_traverse_graph(conn, entity_id, source_id, max_depth, direction, &edge_type_refs)
+    wiki_graph::wiki_traverse_graph(
+        conn,
+        entity_id,
+        source_id,
+        max_depth,
+        direction,
+        &edge_type_refs,
+    )
 }
 
 #[derive(Clone)]
@@ -284,7 +303,8 @@ async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> 
 }
 
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, Connection>> {
-    conn.lock().map_err(|_| anyhow::anyhow!("database mutex poisoned"))
+    conn.lock()
+        .map_err(|_| anyhow::anyhow!("database mutex poisoned"))
 }
 
 /// Best-effort audit log for agent tool access. A failed log write must never fail
@@ -302,9 +322,16 @@ fn log_agent_access(conn: &Connection, client: &str, tool: &str, entity_id: Opti
 /// during it would block concurrent callers), then dispatches to the matching pure
 /// `dispatch_*` function on a blocking task. Both `mcp_server.rs`'s `#[tool]` methods and
 /// `cloud_bridge::CloudBridgeClient` call this — it is the one code path behind two callers.
-pub async fn dispatch_tool_call(ctx: &ToolDispatchContext, tool: &str, params: Value) -> Result<Value> {
+pub async fn dispatch_tool_call(
+    ctx: &ToolDispatchContext,
+    tool: &str,
+    params: Value,
+) -> Result<Value> {
     // Extract entity_id from params for agent logging (before deserialization consumes params)
-    let entity_id = params.get("entity_id").and_then(|v| v.as_str()).map(str::to_string);
+    let entity_id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let tool_owned = tool.to_string();
 
     let client = ctx.client.clone();
@@ -507,7 +534,8 @@ mod path_candidate_tests {
         let doc_path = vault_alias.join("notes/meeting.md");
         let expected_canonical = vault_real.join("notes/meeting.md");
 
-        let candidates = build_path_candidates(doc_path.to_string_lossy().as_ref(), Some(&vault_real));
+        let candidates =
+            build_path_candidates(doc_path.to_string_lossy().as_ref(), Some(&vault_real));
 
         assert!(candidates.contains(&doc_path.to_string_lossy().into_owned()));
         assert!(candidates.contains(&expected_canonical.to_string_lossy().into_owned()));
@@ -519,7 +547,10 @@ mod path_candidate_tests {
     fn absolute_path_outside_vault_dir_no_strip() {
         let vault = std::path::Path::new("/home/user/vault");
         let candidates = build_path_candidates("/tmp/other/file.md", Some(vault));
-        assert!(candidates.is_empty(), "Outside-vault absolute paths should not be accepted");
+        assert!(
+            candidates.is_empty(),
+            "Outside-vault absolute paths should not be accepted"
+        );
     }
 
     #[cfg(unix)]
@@ -539,7 +570,10 @@ mod path_candidate_tests {
     fn absolute_path_with_parent_segments_outside_vault_is_rejected() {
         let vault = std::path::Path::new("/vault");
         let candidates = build_path_candidates("/vault/../outside.md", Some(vault));
-        assert!(candidates.is_empty(), "Paths that normalize outside the vault must not be accepted");
+        assert!(
+            candidates.is_empty(),
+            "Paths that normalize outside the vault must not be accepted"
+        );
     }
 
     #[cfg(unix)]
@@ -547,7 +581,10 @@ mod path_candidate_tests {
     fn relative_path_with_parent_segments_outside_vault_is_rejected() {
         let vault = std::path::Path::new("/vault");
         let candidates = build_path_candidates("../outside.md", Some(vault));
-        assert!(candidates.is_empty(), "Relative paths that resolve outside the vault must not be accepted");
+        assert!(
+            candidates.is_empty(),
+            "Relative paths that resolve outside the vault must not be accepted"
+        );
     }
 
     #[cfg(unix)]
@@ -555,7 +592,10 @@ mod path_candidate_tests {
     fn absolute_path_with_invalid_vault_path_is_rejected() {
         let vault = std::path::Path::new("/home/user/vault");
         let candidates = build_path_candidates("/home/user/vault/documents/evil\0.md", Some(vault));
-        assert!(candidates.is_empty(), "Paths containing invalid characters must not be accepted");
+        assert!(
+            candidates.is_empty(),
+            "Paths containing invalid characters must not be accepted"
+        );
     }
 }
 
@@ -585,7 +625,9 @@ mod dispatch_tool_call_tests {
     async fn wiki_get_ontology_round_trips_through_json() {
         let ctx = seeded_ctx();
         let params = serde_json::json!({ "entityId": "tier_fact" });
-        let result = dispatch_tool_call(&ctx, "wiki_get_ontology", params).await.unwrap();
+        let result = dispatch_tool_call(&ctx, "wiki_get_ontology", params)
+            .await
+            .unwrap();
         assert_eq!(result["mode"], "off");
     }
 
@@ -593,7 +635,9 @@ mod dispatch_tool_call_tests {
     async fn wiki_traverse_graph_round_trips_defaults() {
         let ctx = seeded_ctx();
         let params = serde_json::json!({ "entityId": "tier_fact", "sourceId": "a" });
-        let result = dispatch_tool_call(&ctx, "wiki_traverse_graph", params).await.unwrap();
+        let result = dispatch_tool_call(&ctx, "wiki_traverse_graph", params)
+            .await
+            .unwrap();
         assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
     }
 

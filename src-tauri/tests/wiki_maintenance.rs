@@ -29,14 +29,25 @@ fn open_migrated_db(tmp: &TempDir) -> Connection {
     conn
 }
 
-fn insert_entry(conn: &Connection, entity_id: &str, source_ref: Option<&str>, source_type: &str) -> i64 {
+fn insert_entry(
+    conn: &Connection,
+    entity_id: &str,
+    source_ref: Option<&str>,
+    source_type: &str,
+) -> i64 {
     let id = format!("entry-{}", conn.last_insert_rowid() + 1);
     conn.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type, source_ref,
             created_at, updated_at
          ) VALUES (?1, ?2, ?3, 'body', '[]', 'inferred', ?4, ?5, 1, 1)",
-        rusqlite::params![id, entity_id, format!("Title {id}"), source_type, source_ref],
+        rusqlite::params![
+            id,
+            entity_id,
+            format!("Title {id}"),
+            source_type,
+            source_ref
+        ],
     )
     .unwrap();
     conn.last_insert_rowid()
@@ -55,7 +66,14 @@ fn insert_entry_soft_deleted(
             id, entity_id, title, body, tags, confidence, source_type, source_ref,
             created_at, updated_at, deleted_at
          ) VALUES (?1, ?2, ?3, 'body', '[]', 'inferred', ?4, ?5, 1, 1, ?6)",
-        rusqlite::params![id, entity_id, format!("Title {id}"), source_type, source_ref, deleted_at],
+        rusqlite::params![
+            id,
+            entity_id,
+            format!("Title {id}"),
+            source_type,
+            source_ref,
+            deleted_at
+        ],
     )
     .unwrap();
     conn.last_insert_rowid()
@@ -102,7 +120,8 @@ fn run_heal(conn: &Connection, vault_root: &std::path::Path) {
         }
         v
     };
-    let mut healed_by_entity: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut healed_by_entity: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (rowid, source_ref, entity_id) in entries {
         let safe = safe_vault_path(vault_root, &source_ref, &["."], PathMode::MustExist);
         if safe.is_err() {
@@ -177,7 +196,12 @@ fn heal_soft_deletes_absolute_source_ref() {
     std::fs::create_dir_all(&vault).unwrap();
 
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, "tier_fact", Some("/etc/passwd"), "librarian_inferred");
+    let rowid = insert_entry(
+        &conn,
+        "tier_fact",
+        Some("/etc/passwd"),
+        "librarian_inferred",
+    );
 
     run_heal(&conn, &vault);
 
@@ -194,7 +218,12 @@ fn heal_soft_deletes_traversal_source_ref() {
     std::fs::create_dir_all(&vault).unwrap();
 
     let conn = open_migrated_db(&tmp);
-    let rowid = insert_entry(&conn, "tier_fact", Some("../escape.md"), "librarian_inferred");
+    let rowid = insert_entry(
+        &conn,
+        "tier_fact",
+        Some("../escape.md"),
+        "librarian_inferred",
+    );
 
     run_heal(&conn, &vault);
 
@@ -212,8 +241,13 @@ fn heal_ignores_already_soft_deleted_entries() {
 
     let conn = open_migrated_db(&tmp);
     let original_ts: i64 = 1_000_000;
-    let rowid =
-        insert_entry_soft_deleted(&conn, "tier_fact", Some("ghost.md"), "librarian_inferred", original_ts);
+    let rowid = insert_entry_soft_deleted(
+        &conn,
+        "tier_fact",
+        Some("ghost.md"),
+        "librarian_inferred",
+        original_ts,
+    );
 
     run_heal(&conn, &vault);
 
@@ -236,7 +270,8 @@ fn heal_writes_healed_event() {
         "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
          VALUES ('ent-1', 'Test Entity', 'concept', 'Summary', 100, 100)",
         [],
-    ).unwrap();
+    )
+    .unwrap();
     // Insert an entry with invalid source_ref
     let _rowid = insert_entry(&conn, "ent-1", Some("../escape.md"), "librarian_inferred");
 
@@ -276,7 +311,13 @@ fn prune_hard_deletes_old_librarian_inferred_entry() {
             .unwrap();
         ts - 8 * 86400
     };
-    let rowid = insert_entry_soft_deleted(&conn, "tier_fact", Some("stale.md"), "librarian_inferred", old_ts);
+    let rowid = insert_entry_soft_deleted(
+        &conn,
+        "tier_fact",
+        Some("stale.md"),
+        "librarian_inferred",
+        old_ts,
+    );
 
     run_prune(&conn);
 
@@ -296,8 +337,13 @@ fn prune_retains_recently_soft_deleted_librarian_inferred_entry() {
             .unwrap();
         ts - 6 * 86400
     };
-    let rowid =
-        insert_entry_soft_deleted(&conn, "tier_fact", Some("recent.md"), "librarian_inferred", six_days_ago);
+    let rowid = insert_entry_soft_deleted(
+        &conn,
+        "tier_fact",
+        Some("recent.md"),
+        "librarian_inferred",
+        six_days_ago,
+    );
 
     run_prune(&conn);
 
@@ -312,7 +358,8 @@ fn prune_retains_non_librarian_inferred_entries_regardless_of_age() {
     let tmp = TempDir::new().unwrap();
     let conn = open_migrated_db(&tmp);
     let very_old: i64 = 1_000_000;
-    let rowid = insert_entry_soft_deleted(&conn, "tier_fact", Some("manual.md"), "manual", very_old);
+    let rowid =
+        insert_entry_soft_deleted(&conn, "tier_fact", Some("manual.md"), "manual", very_old);
 
     run_prune(&conn);
 

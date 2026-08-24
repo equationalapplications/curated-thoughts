@@ -88,7 +88,9 @@ where
             .ok_or_else(|| Error::custom("okf_verified.at: expected integer epoch ms")),
         serde_json::Value::String(s) => crate::okf::timefmt::ms_from_iso(&s)
             .ok_or_else(|| Error::custom("okf_verified.at: expected ISO-8601 timestamp")),
-        _ => Err(Error::custom("okf_verified.at: expected number or ISO-8601 string")),
+        _ => Err(Error::custom(
+            "okf_verified.at: expected number or ISO-8601 string",
+        )),
     }
 }
 
@@ -190,7 +192,10 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
     serde_json::from_str(raw).ok()
 }
 
-fn source_docs_from_ref(conn: &Connection, source_ref: Option<&str>) -> Vec<(String, Option<String>)> {
+fn source_docs_from_ref(
+    conn: &Connection,
+    source_ref: Option<&str>,
+) -> Vec<(String, Option<String>)> {
     let Some(raw) = source_ref else {
         return Vec::new();
     };
@@ -524,8 +529,7 @@ pub fn create_entity(conn: &Connection, input: &CreateEntityInput) -> Result<Ent
         params![id, name, entity_type, summary, now],
     )?;
 
-    get_entity(conn, &id)?
-        .context("entity missing immediately after insert")
+    get_entity(conn, &id)?.context("entity missing immediately after insert")
 }
 
 /// Replace entity summary; clears `summary_embedding` for lazy re-embed.
@@ -618,7 +622,10 @@ mod tests {
             .iter()
             .map(|h| format!(r#"{{"content_hash":"{h}","quote":"q","start_line":1,"end_line":3}}"#))
             .collect();
-        format!(r#"{{"proposal_id":"prop_1","evidence":[{}]}}"#, evidence.join(","))
+        format!(
+            r#"{{"proposal_id":"prop_1","evidence":[{}]}}"#,
+            evidence.join(",")
+        )
     }
 
     #[test]
@@ -629,7 +636,10 @@ mod tests {
         let hashes: Vec<String> = chunks.iter().map(|(_, h)| h.clone()).collect();
         let source_ref = source_ref_json(&hashes);
         let docs = source_docs_from_ref(&conn, Some(&source_ref));
-        assert_eq!(docs, vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]);
+        assert_eq!(
+            docs,
+            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
+        );
     }
 
     #[test]
@@ -657,7 +667,11 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let chunks_a = seed_doc_with_chunks(&conn, "documents/a.md", 2);
         let chunks_b = seed_doc_with_chunks(&conn, "documents/b.md", 1);
-        let hashes = vec![chunks_b[0].1.clone(), chunks_a[0].1.clone(), chunks_a[1].1.clone()];
+        let hashes = vec![
+            chunks_b[0].1.clone(),
+            chunks_a[0].1.clone(),
+            chunks_a[1].1.clone(),
+        ];
         let source_ref = source_ref_json(&hashes);
         let docs = source_docs_from_ref(&conn, Some(&source_ref));
         assert_eq!(
@@ -688,7 +702,10 @@ mod tests {
             chunks[0].1
         );
         let docs = source_docs_from_ref(&conn, Some(&source_ref));
-        assert_eq!(docs, vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]);
+        assert_eq!(
+            docs,
+            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
+        );
     }
 
     #[test]
@@ -796,7 +813,11 @@ mod tests {
         assert_eq!(loaded.facts[0].body, "A fact.");
         assert_eq!(loaded.tasks.len(), 1);
         assert_eq!(loaded.events.len(), 1);
-        assert_eq!(list_entities(&conn, EntitySort::default(), &EntityListFilter::default()).unwrap()[0].fact_count, 1);
+        assert_eq!(
+            list_entities(&conn, EntitySort::default(), &EntityListFilter::default()).unwrap()[0]
+                .fact_count,
+            1
+        );
     }
 
     #[test]
@@ -895,9 +916,15 @@ mod tests {
         // Seed a fact with okf_sources / okf_verified populated, then load via get_entity
         // and assert the parsed Vec<OkfSourceEntry> / Vec<OkfVerifiedEntry> round-trip.
         let conn = open_in_memory().unwrap();
-        let detail = create_entity(&conn, &CreateEntityInput {
-            name: "V02".into(), entity_type: None, summary: None,
-        }).unwrap();
+        let detail = create_entity(
+            &conn,
+            &CreateEntityInput {
+                name: "V02".into(),
+                entity_type: None,
+                summary: None,
+            },
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type,
                 created_at, updated_at, lifecycle_status, okf_sources, okf_verified, okf_usage_window)
@@ -926,9 +953,15 @@ mod tests {
         // JSON into `llm_wiki_entries.okf_verified` verbatim. `parse_okf_verified`
         // must normalize the ISO form to epoch ms so the UI sees the record.
         let conn = open_in_memory().unwrap();
-        let detail = create_entity(&conn, &CreateEntityInput {
-            name: "Iso".into(), entity_type: None, summary: None,
-        }).unwrap();
+        let detail = create_entity(
+            &conn,
+            &CreateEntityInput {
+                name: "Iso".into(),
+                entity_type: None,
+                summary: None,
+            },
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type,
                 created_at, updated_at, lifecycle_status, okf_verified)
@@ -939,7 +972,11 @@ mod tests {
         ).unwrap();
         let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
         let fact = loaded.facts.iter().find(|f| f.id == "fact-iso").unwrap();
-        assert_eq!(fact.okf_verified.len(), 1, "ISO at must round-trip into a record");
+        assert_eq!(
+            fact.okf_verified.len(),
+            1,
+            "ISO at must round-trip into a record"
+        );
         assert_eq!(fact.okf_verified[0].by, "process:nightly");
         // 2026-07-02T00:00:00.000Z = 1782950400000 ms; exact value locked in to
         // catch silent deserializer regressions.

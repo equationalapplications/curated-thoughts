@@ -34,17 +34,14 @@ fn entity_crud_via_tauri_commands() {
         json!({ "entityId": entity_id, "summary": "Updated summary." }),
     );
 
-    let detail: serde_json::Value =
-        app.invoke("get_entity_cmd", json!({ "entityId": entity_id }));
+    let detail: serde_json::Value = app.invoke("get_entity_cmd", json!({ "entityId": entity_id }));
     assert_eq!(detail["summary"], "Updated summary.");
     assert!(detail["facts"].as_array().unwrap().is_empty());
 
     app.invoke::<()>("archive_entity_cmd", json!({ "entityId": entity_id }));
 
-    let after_archive: Vec<serde_json::Value> = app.invoke(
-        "list_entities_cmd",
-        json!({ "sort": null, "filter": {} }),
-    );
+    let after_archive: Vec<serde_json::Value> =
+        app.invoke("list_entities_cmd", json!({ "sort": null, "filter": {} }));
     assert!(after_archive.is_empty());
 
     let with_archived: Vec<serde_json::Value> = app.invoke(

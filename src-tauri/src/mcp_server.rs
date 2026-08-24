@@ -114,9 +114,7 @@ pub fn run() -> anyhow::Result<()> {
         .finish();
     let dispatcher = Dispatch::new(subscriber);
     if let Err(err) = tracing::dispatcher::set_global_default(dispatcher.clone()) {
-        eprintln!(
-            "curated-thoughts [--mcp]: failed to set global tracing subscriber: {err}"
-        );
+        eprintln!("curated-thoughts [--mcp]: failed to set global tracing subscriber: {err}");
     }
     let _subscriber_guard = tracing::dispatcher::set_default(&dispatcher);
 

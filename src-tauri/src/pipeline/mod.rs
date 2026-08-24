@@ -189,7 +189,7 @@ impl PipelineWorker {
                                 }
                             }
                             Err(e) => {
-                                let msg = format!("ingest error {}: {}", path, e);
+                                let msg = format!("ingest error {}: {:#}", path, e);
                                 eprintln!("[pipeline] {}", msg);
                                 write_error_log(vault_root.as_deref(), &msg);
                             }
