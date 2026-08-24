@@ -507,12 +507,28 @@ impl VaultMcpServer {
             })?;
 
         let hops = max_hops.unwrap_or(2).clamp(1, 5);
+        let dir = direction.as_deref();
+        if let Some(d) = dir {
+            if !matches!(d, "callees" | "callers" | "both") {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!("invalid direction '{d}': expected callees, callers, or both"),
+                    None,
+                ));
+            }
+        }
         let neighbors =
-            tauri_app_lib::graph::get_neighbors(&conn, root_chunk_id, &entity_id, hops, direction.as_deref())
+            tauri_app_lib::graph::get_neighbors(&conn, root_chunk_id, &entity_id, hops, dir)
                 .map_err(|e| rmcp::ErrorData::internal_error(format!("traversal failed: {e}"), None))?;
 
+        // Hard cap BEFORE enrichment: hub symbols at high depth can return
+        // thousands of rows; don't run per-row lookups on all of them while
+        // holding the DB lock.
+        const MAX_NEIGHBORS: usize = 200;
+        let total = neighbors.len();
+        let capped: Vec<_> = neighbors.into_iter().take(MAX_NEIGHBORS).collect();
+
         // Enrich rows with doc path + symbol for agent consumption.
-        let mut enriched = Vec::with_capacity(neighbors.len());
+        let mut enriched = Vec::with_capacity(capped.len());
         {
             let mut stmt = conn
                 .prepare(
@@ -521,7 +537,7 @@ impl VaultMcpServer {
                      WHERE c.id = ?1",
                 )
                 .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare: {e}"), None))?;
-            for n in &neighbors {
+            for n in &capped {
                 let detail = stmt
                     .query_row(rusqlite::params![n.chunk_id], |r| {
                         Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
@@ -538,10 +554,6 @@ impl VaultMcpServer {
         }
 
         self.log_access("graph_neighbors", Some(&entity_id));
-        // Hard cap: hub symbols at high depth can serialize thousands of rows.
-        const MAX_NEIGHBORS: usize = 200;
-        let total = enriched.len();
-        enriched.truncate(MAX_NEIGHBORS);
         serde_json::to_string(&serde_json::json!({
             "root_chunk_id": root_chunk_id,
             "direction": direction.as_deref().unwrap_or("both"),
