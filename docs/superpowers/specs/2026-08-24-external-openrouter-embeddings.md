@@ -30,7 +30,7 @@ Recovered implementation (from stash), plus hardening:
 
 ## Explicit non-goals
 
-- **No change to defaults.** Missing/unset `embed_profile` still means local Ollama (`nomic-embed-text` @ localhost:11434). Local remains fully supported.
+- **No change to defaults.** Missing/unset `embed_profile` still means local Ollama (`nomic-embed-code` @ localhost:11434, per `EmbedProfile::default()`). Local remains fully supported.
 - No config-file migration or UI changes in this PR.
 - Do NOT write the API key or full endpoint into any config file — ever. Env vars only.
 
