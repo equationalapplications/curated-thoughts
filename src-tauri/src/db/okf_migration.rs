@@ -77,9 +77,8 @@ fn okf_migration_complete(conn: &Connection) -> Result<bool> {
 }
 
 fn migrate_approved_wiki_pages(conn: &Connection, vault_root: &Path, now: i64) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT id, path FROM wiki_pages WHERE status = 'approved' ORDER BY id",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, path FROM wiki_pages WHERE status = 'approved' ORDER BY id")?;
     let rows: Vec<(i64, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

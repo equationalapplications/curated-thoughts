@@ -135,8 +135,10 @@ mod tests {
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash1").unwrap();
         mark_document_indexed(&conn, doc_id).unwrap();
 
-        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
-        let ref_id = insert_chunk(&conn, doc_id, &ref_chunk("init_db"), 1, "tier_fact", "").unwrap();
+        let def_id =
+            insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
+        let ref_id =
+            insert_chunk(&conn, doc_id, &ref_chunk("init_db"), 1, "tier_fact", "").unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
 
@@ -161,9 +163,17 @@ mod tests {
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash2").unwrap();
         mark_document_indexed(&conn, doc_id).unwrap();
 
-        let def_id = insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
-        let ref_id =
-            insert_chunk(&conn, doc_id, &import_ref_chunk("init_db"), 1, "tier_fact", "").unwrap();
+        let def_id =
+            insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
+        let ref_id = insert_chunk(
+            &conn,
+            doc_id,
+            &import_ref_chunk("init_db"),
+            1,
+            "tier_fact",
+            "",
+        )
+        .unwrap();
 
         run_linker(&conn, "tier_fact", 0).unwrap();
 

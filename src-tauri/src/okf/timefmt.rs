@@ -5,7 +5,11 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
 pub fn iso_from_ms(ms: i64) -> String {
     Utc.timestamp_millis_opt(ms)
         .single()
-        .unwrap_or_else(|| Utc.timestamp_millis_opt(0).single().expect("epoch is valid"))
+        .unwrap_or_else(|| {
+            Utc.timestamp_millis_opt(0)
+                .single()
+                .expect("epoch is valid")
+        })
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
@@ -36,10 +40,7 @@ mod tests {
     #[test]
     fn round_trips_fixture_timestamp() {
         assert_eq!(iso_from_ms(1782907200000), "2026-07-01T12:00:00.000Z");
-        assert_eq!(
-            ms_from_iso("2026-07-01T12:00:00.000Z"),
-            Some(1782907200000)
-        );
+        assert_eq!(ms_from_iso("2026-07-01T12:00:00.000Z"), Some(1782907200000));
     }
 
     #[test]

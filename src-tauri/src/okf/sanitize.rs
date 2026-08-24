@@ -66,10 +66,7 @@ pub fn sanitize_for_filename(value: &str) -> String {
     }
 
     let windows_reserved = is_windows_reserved_name(&base_name);
-    let needs_suffix = base_name != value
-        || over_max
-        || had_trailing_dot_space
-        || windows_reserved;
+    let needs_suffix = base_name != value || over_max || had_trailing_dot_space || windows_reserved;
 
     if !needs_suffix {
         return base_name;

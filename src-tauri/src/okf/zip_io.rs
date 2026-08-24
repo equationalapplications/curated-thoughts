@@ -25,9 +25,7 @@ fn read_bundle_dir(root: &Path) -> Result<Vec<OkfFile>> {
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(root) {
         let entry = entry?;
-        if !entry.file_type().is_file()
-            || entry.path().extension().is_none_or(|e| e != "md")
-        {
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "md") {
             continue;
         }
         let rel = entry
@@ -72,7 +70,10 @@ fn read_bundle_zip(path: &Path) -> Result<Vec<OkfFile>> {
         if total > MAX_TOTAL_BYTES {
             bail!("bundle rejected: decompressed size exceeds {MAX_TOTAL_BYTES} bytes");
         }
-        files.push(OkfFile { path: name, content });
+        files.push(OkfFile {
+            path: name,
+            content,
+        });
     }
     Ok(files)
 }
