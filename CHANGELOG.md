@@ -1,3 +1,9 @@
+## [1.24.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.24.1...v1.24.2) (2026-08-24)
+
+### Bug Fixes
+
+* **embedder:** replace redaction-placeholder default Ollama base URL with localhost ([02f1806](https://github.com/equationalapplications/curated-thoughts/commit/02f1806ed79c254d4d37542bc8a38ecc8b7b5d0d))
+
 ## [1.24.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.24.0...v1.24.1) (2026-08-23)
 
 ### Bug Fixes
