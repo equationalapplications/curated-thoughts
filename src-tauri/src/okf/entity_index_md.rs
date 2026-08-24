@@ -53,17 +53,12 @@ pub fn parse_entity_index_md(content: &str) -> (String, Vec<OkfIndexSection>) {
         summary_start += 1;
     }
     if summary_start < summary_lines.len()
-        && summary_lines[summary_start]
-            .trim()
-            .starts_with("# ")
-            && !summary_lines[summary_start].trim().starts_with("## ")
+        && summary_lines[summary_start].trim().starts_with("# ")
+        && !summary_lines[summary_start].trim().starts_with("## ")
     {
         summary_start += 1;
     }
-    let summary = summary_lines[summary_start..]
-        .join("\n")
-        .trim()
-        .to_string();
+    let summary = summary_lines[summary_start..].join("\n").trim().to_string();
 
     let mut sections = Vec::new();
     let Some(first_section_idx) = first_section_idx else {

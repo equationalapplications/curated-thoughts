@@ -30,8 +30,8 @@ pub struct TimelineFilter {
     pub until_ms: Option<i64>,
     pub before_ms: Option<i64>, // cursor: return strictly older than this
     pub before_id: Option<String>, // tie-breaker: when an event shares `before_ms`'s
-                                   // timestamp, skip those whose id is >= this so the
-                                   // (created_at_ms, id) cursor is lexically exclusive.
+    // timestamp, skip those whose id is >= this so the
+    // (created_at_ms, id) cursor is lexically exclusive.
     pub limit: Option<u32>,
 }
 
@@ -228,16 +228,10 @@ mod tests {
         let wiki_event = events.iter().find(|e| e.id == "wiki_1").unwrap();
         assert_eq!(wiki_event.created_at_ms, wiki_event_ts * 1000);
 
-        let agent_event = events
-            .iter()
-            .find(|e| e.id.starts_with("agent_"))
-            .unwrap();
+        let agent_event = events.iter().find(|e| e.id.starts_with("agent_")).unwrap();
         assert_eq!(agent_event.created_at_ms, agent_log_ts * 1000);
 
-        let ingest_event = events
-            .iter()
-            .find(|e| e.id.starts_with("ingest_"))
-            .unwrap();
+        let ingest_event = events.iter().find(|e| e.id.starts_with("ingest_")).unwrap();
         assert_eq!(ingest_event.created_at_ms, doc_ingest_ts * 1000);
 
         // Check reverse chronological order (newest first)
@@ -285,10 +279,7 @@ mod tests {
         assert_eq!(approved.kind, "approved");
         assert_eq!(approved.raw_type, "approved");
 
-        let synthesized = events
-            .iter()
-            .find(|e| e.id == "wiki_synthesized")
-            .unwrap();
+        let synthesized = events.iter().find(|e| e.id == "wiki_synthesized").unwrap();
         assert_eq!(synthesized.kind, "synthesized");
         assert_eq!(synthesized.raw_type, "synthesized");
 
@@ -477,7 +468,14 @@ mod tests {
         all.sort();
         assert_eq!(
             all,
-            vec!["wiki_a", "wiki_b", "wiki_c", "wiki_d", "wiki_e", "wiki_newer"]
+            vec![
+                "wiki_a",
+                "wiki_b",
+                "wiki_c",
+                "wiki_d",
+                "wiki_e",
+                "wiki_newer"
+            ]
         );
 
         Ok(())

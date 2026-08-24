@@ -92,7 +92,10 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
                WHERE event_type = 'observation' AND summary LIKE 'Rejected proposal%';",
         )?;
         // Bump schema_version to 8 so this migration runs only once
-        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (8)", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (8)",
+            [],
+        )?;
     }
 
     // 90-day pruning of curated_agent_log (local-only audit trail)
@@ -104,7 +107,7 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     // Ensure index on curated_agent_log.created_at for pruning performance
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_curated_agent_log_created_at
-         ON curated_agent_log(created_at);"
+         ON curated_agent_log(created_at);",
     )?;
 
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
@@ -241,7 +244,8 @@ mod tests {
             defined_symbol: Some("mystruct".into()),
             strategy: crate::chunker::ChunkStrategyTag::AstSymbolRust,
         };
-        let id = crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
+        let id =
+            crate::db::queries::insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         let (def_sym, eid): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT defined_symbol, entity_id FROM chunks WHERE id = ?1",
@@ -424,11 +428,8 @@ mod tests {
         .unwrap();
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
             .unwrap();
-        conn.execute_batch(&format!(
-            "BEGIN;\n{}\nCOMMIT;",
-            okf_ddl::migration_v7_sql()
-        ))
-        .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO schema_version (version) VALUES (8)",
             [],

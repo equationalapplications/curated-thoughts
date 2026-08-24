@@ -52,10 +52,7 @@ pub fn build_root_index_md(
     sections: &[OkfIndexSection],
     profile: Option<&str>,
 ) -> String {
-    let mut lines = vec![
-        "---".to_string(),
-        format!("okf_version: {}", okf_version),
-    ];
+    let mut lines = vec!["---".to_string(), format!("okf_version: {}", okf_version)];
     if let Some(profile) = profile {
         lines.push(format!("profile: {}", serialize_scalar_string(profile)));
     }
@@ -69,11 +66,7 @@ pub fn parse_root_index_md(content: &str) -> (Option<String>, Option<String>) {
     let okf_version = frontmatter
         .get_str("okf_version")
         .map(str::to_string)
-        .or_else(|| {
-            frontmatter
-                .get_number("okf_version")
-                .map(|n| n.to_string())
-        });
+        .or_else(|| frontmatter.get_number("okf_version").map(|n| n.to_string()));
     let profile = frontmatter.get_str("profile").map(str::to_string);
     (okf_version, profile)
 }

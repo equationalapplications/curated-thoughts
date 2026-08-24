@@ -45,7 +45,19 @@ pub(super) fn split_oversized_block_spans(
     let mut out = Vec::new();
     let mut start = 0usize;
     while start < block.len() {
+        if !block.is_char_boundary(start) {
+            // Previous piece may have ended mid-code-point if its end was
+            // clamped; advance to the next boundary.
+            while start < block.len() && !block.is_char_boundary(start) {
+                start += 1;
+            }
+            continue;
+        }
         let mut end = (start + max_c).min(block.len());
+        // Clamp to a char boundary (multi-byte code points can straddle max_c).
+        while end < block.len() && !block.is_char_boundary(end) {
+            end += 1;
+        }
         if end < block.len() {
             let slice = &block[start..end];
             if let Some(rel) = slice.rfind('\n') {
@@ -169,6 +181,18 @@ mod integration_tests {
             .map(|c| c.text)
             .collect();
         assert_eq!(a, chunk_text(text));
+    }
+
+    #[test]
+    fn split_oversized_block_handles_multibyte_chars() {
+        // Regression: an em-dash (3 bytes) straddling the max_c boundary used
+        // to panic with "byte index is not a char boundary" (found ingesting
+        // clanker-ai docs). Slices must land on char boundaries and reassemble.
+        let block = "word — ".repeat(300); // em-dashes everywhere, > any small cap
+        let pieces = split_oversized_block_spans(&block, 0, 100, 0);
+        assert!(pieces.len() > 1);
+        let joined: String = pieces.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert_eq!(joined.replace(' ', ""), block.trim().replace(' ', ""));
     }
 
     #[test]

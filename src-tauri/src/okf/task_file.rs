@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 
 use crate::okf::concept::parse_concept;
 use crate::okf::fact_file::{
-    flow_mapping_from_json, flow_to_json_string, json_array_to_flow_sequence,
-    latest_verified_at, latest_verified_by, parse_generated_by, parse_stale_after_ms,
-    serialize_actor_string, serialize_pairs_with_flow,
+    flow_mapping_from_json, flow_to_json_string, json_array_to_flow_sequence, latest_verified_at,
+    latest_verified_by, parse_generated_by, parse_stale_after_ms, serialize_actor_string,
+    serialize_pairs_with_flow,
 };
 use crate::okf::related_section::{append_related_section, split_related_section};
 use crate::okf::timefmt::{iso_from_ms, ms_from_iso};
@@ -32,11 +32,7 @@ fn opt_ms(value: Option<i64>) -> V {
     }
 }
 
-pub fn build_task_file(
-    task: &WikiTask,
-    related: &[(String, String)],
-    profile: &str,
-) -> String {
+pub fn build_task_file(task: &WikiTask, related: &[(String, String)], profile: &str) -> String {
     // Wire shape is profile-specific. Field ordering matters because the
     // golden-v1 fixture is byte-for-byte; we preserve the v0.1 ordering
     // (`status` lives between `entity_id` and `priority`) on profile-1.
@@ -103,7 +99,10 @@ pub fn build_task_file(
         if let Some(window) = &task.okf_usage_window {
             pairs.push((
                 "usage_window",
-                V::String(flow_mapping_from_json(window, "usage_window").unwrap_or_else(|| window.clone())),
+                V::String(
+                    flow_mapping_from_json(window, "usage_window")
+                        .unwrap_or_else(|| window.clone()),
+                ),
             ));
         }
     }
@@ -144,10 +143,7 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
         _ => false,
     };
     let (execution_status, lifecycle_status) = if is_profile_v2 {
-        (
-            exec_v.unwrap().to_string(),
-            status_v.unwrap().to_string(),
-        )
+        (exec_v.unwrap().to_string(), status_v.unwrap().to_string())
     } else {
         (
             status_v.unwrap_or("pending").to_string(),
@@ -156,7 +152,10 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
     };
 
     let task = WikiTask {
-        id: fm.get_str("id").context("task file missing id")?.to_string(),
+        id: fm
+            .get_str("id")
+            .context("task file missing id")?
+            .to_string(),
         entity_id: fm
             .get_str("entity_id")
             .context("task file missing entity_id")?
@@ -232,20 +231,39 @@ mod tests {
             stale_after: Some(crate::okf::timefmt::ms_from_utc_date("2027-01-01").unwrap()),
             generated_by: Some("human:alice".into()),
             okf_sources: Some(r#"[{"resource":"documents/notes.md"}]"#.into()),
-            okf_verified: Some(r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into()),
+            okf_verified: Some(
+                r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into(),
+            ),
             okf_usage_window: Some(r#"{"from":"2026-07-01","to":"2026-12-31"}"#.into()),
-            last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
+            last_verified_at: Some(
+                crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap(),
+            ),
             last_verified_by: Some("process:nightly".into()),
         };
         let md = build_task_file(&task, &[], "llm-wiki/2");
         // v0.2 rename rule (upstream §2.3):
-        assert!(md.contains("status: stable"), "missing lifecycle status: {md}");
-        assert!(md.contains("execution_status: pending"), "missing execution status: {md}");
-        assert!(md.contains("stale_after: 2027-01-01"), "missing stale_after: {md}");
-        assert!(md.contains("generated: { by: \"human:alice\""), "missing generated flow mapping: {md}");
+        assert!(
+            md.contains("status: stable"),
+            "missing lifecycle status: {md}"
+        );
+        assert!(
+            md.contains("execution_status: pending"),
+            "missing execution status: {md}"
+        );
+        assert!(
+            md.contains("stale_after: 2027-01-01"),
+            "missing stale_after: {md}"
+        );
+        assert!(
+            md.contains("generated: { by: \"human:alice\""),
+            "missing generated flow mapping: {md}"
+        );
         assert!(md.contains("verified:"), "missing verified key: {md}");
         assert!(md.contains("sources:"), "missing sources key: {md}");
-        assert!(md.contains("usage_window: { from: \"2026-07-01\", to: \"2026-12-31\" }"), "missing usage_window: {md}");
+        assert!(
+            md.contains("usage_window: { from: \"2026-07-01\", to: \"2026-12-31\" }"),
+            "missing usage_window: {md}"
+        );
         // Round-trip: parse what we just emitted
         let parsed = parse_task_file(&md).unwrap();
         assert_eq!(parsed.task.lifecycle_status, "stable");
@@ -269,20 +287,45 @@ mod tests {
             stale_after: Some(crate::okf::timefmt::ms_from_utc_date("2027-01-01").unwrap()),
             generated_by: Some("human:alice".into()),
             okf_sources: Some(r#"[{"resource":"documents/notes.md"}]"#.into()),
-            okf_verified: Some(r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into()),
+            okf_verified: Some(
+                r#"[{"by":"process:nightly","at":"2026-07-02T00:00:00.000Z"}]"#.into(),
+            ),
             okf_usage_window: Some(r#"{"from":"2026-07-01","to":"2026-12-31"}"#.into()),
-            last_verified_at: Some(crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap()),
+            last_verified_at: Some(
+                crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap(),
+            ),
             last_verified_by: Some("process:nightly".into()),
         };
         let md = build_task_file(&task, &[], "llm-wiki/1");
         // profile-1: `status` carries execution, no `execution_status`, no v0.2 keys.
-        assert!(md.contains("status: in_progress"), "missing execution status under status: {md}");
-        assert!(!md.contains("execution_status:"), "v0.1 must not emit execution_status: {md}");
-        assert!(!md.contains("status: draft"), "v0.1 must not emit lifecycle_status under status: {md}");
-        assert!(!md.contains("stale_after:"), "v0.1 must not emit stale_after: {md}");
-        assert!(!md.contains("generated:"), "v0.1 must not emit generated: {md}");
-        assert!(!md.contains("verified:"), "v0.1 must not emit verified: {md}");
+        assert!(
+            md.contains("status: in_progress"),
+            "missing execution status under status: {md}"
+        );
+        assert!(
+            !md.contains("execution_status:"),
+            "v0.1 must not emit execution_status: {md}"
+        );
+        assert!(
+            !md.contains("status: draft"),
+            "v0.1 must not emit lifecycle_status under status: {md}"
+        );
+        assert!(
+            !md.contains("stale_after:"),
+            "v0.1 must not emit stale_after: {md}"
+        );
+        assert!(
+            !md.contains("generated:"),
+            "v0.1 must not emit generated: {md}"
+        );
+        assert!(
+            !md.contains("verified:"),
+            "v0.1 must not emit verified: {md}"
+        );
         assert!(!md.contains("sources:"), "v0.1 must not emit sources: {md}");
-        assert!(!md.contains("usage_window:"), "v0.1 must not emit usage_window: {md}");
+        assert!(
+            !md.contains("usage_window:"),
+            "v0.1 must not emit usage_window: {md}"
+        );
     }
 }

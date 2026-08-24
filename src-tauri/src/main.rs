@@ -8,7 +8,8 @@ where
     Args: IntoIterator,
     Args::Item: AsRef<std::ffi::OsStr>,
 {
-    args.into_iter().any(|a| a.as_ref() == std::ffi::OsStr::new("--mcp"))
+    args.into_iter()
+        .any(|a| a.as_ref() == std::ffi::OsStr::new("--mcp"))
 }
 
 fn main() {
@@ -83,6 +84,8 @@ mod dispatch_tests {
 
     #[test]
     fn no_false_positive_without_flag() {
-        assert!(!has_mcp_flag(&[std::ffi::OsString::from("curated-thoughts")]));
+        assert!(!has_mcp_flag(&[std::ffi::OsString::from(
+            "curated-thoughts"
+        )]));
     }
 }

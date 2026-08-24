@@ -1,9 +1,7 @@
 //! Legacy Review desk shims over `curated_proposals` (integer rowid ↔ proposal id).
 
 use crate::db::commit::{resolve_proposal, CommitResult, ResolveOptions};
-use crate::db::proposals::{
-    get_proposal_detail, ItemDecision, ItemDecisionKind, ProposalDetail,
-};
+use crate::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind, ProposalDetail};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -39,7 +37,8 @@ pub fn list_pending_review_pages(conn: &Connection) -> Result<Vec<ShimReviewPage
     let mut out = Vec::new();
     for row in rows {
         let (rowid, proposal_id, kind, entity_id, proposed_name, reasoning, model) = row?;
-        let target_name = resolve_shim_target_name(conn, &kind, entity_id.as_deref(), proposed_name.as_deref())?;
+        let target_name =
+            resolve_shim_target_name(conn, &kind, entity_id.as_deref(), proposed_name.as_deref())?;
         let source_paths = source_paths_json(conn, &proposal_id)?;
         out.push(ShimReviewPage {
             id: rowid,
@@ -126,11 +125,19 @@ pub fn format_proposal_preview(detail: &ProposalDetail) -> String {
                 md.push_str("\n\n");
             }
             "fact_add" => {
-                let body = item.payload.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                let body = item
+                    .payload
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 md.push_str(&format!("- **Add fact:** {body}\n"));
             }
             "fact_update" => {
-                let body = item.payload.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                let body = item
+                    .payload
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let tid = item.target_id.as_deref().unwrap_or("?");
                 md.push_str(&format!("- **Update fact** `{tid}`: {body}\n"));
             }
@@ -170,10 +177,9 @@ pub fn format_proposal_preview(detail: &ProposalDetail) -> String {
 }
 
 pub fn approve_proposal_shim(conn: &mut Connection, rowid: i64) -> Result<CommitResult> {
-    let proposal_id = proposal_id_for_rowid(conn, rowid)?
-        .context("proposal not found for review id")?;
-    let detail = get_proposal_detail(conn, &proposal_id)?
-        .context("proposal detail missing")?;
+    let proposal_id =
+        proposal_id_for_rowid(conn, rowid)?.context("proposal not found for review id")?;
+    let detail = get_proposal_detail(conn, &proposal_id)?.context("proposal detail missing")?;
     let decisions: Vec<ItemDecision> = detail
         .items
         .iter()
@@ -199,10 +205,9 @@ pub fn reject_proposal_shim(
     rowid: i64,
     reject_reason: Option<&str>,
 ) -> Result<CommitResult> {
-    let proposal_id = proposal_id_for_rowid(conn, rowid)?
-        .context("proposal not found for review id")?;
-    let detail = get_proposal_detail(conn, &proposal_id)?
-        .context("proposal detail missing")?;
+    let proposal_id =
+        proposal_id_for_rowid(conn, rowid)?.context("proposal not found for review id")?;
+    let detail = get_proposal_detail(conn, &proposal_id)?.context("proposal detail missing")?;
     let decisions: Vec<ItemDecision> = detail
         .items
         .iter()
@@ -224,10 +229,9 @@ pub fn reject_proposal_shim(
 }
 
 pub fn proposed_content_for_rowid(conn: &Connection, rowid: i64) -> Result<String> {
-    let proposal_id = proposal_id_for_rowid(conn, rowid)?
-        .context("proposal not found for review id")?;
-    let detail = get_proposal_detail(conn, &proposal_id)?
-        .context("proposal detail missing")?;
+    let proposal_id =
+        proposal_id_for_rowid(conn, rowid)?.context("proposal not found for review id")?;
+    let detail = get_proposal_detail(conn, &proposal_id)?.context("proposal detail missing")?;
     Ok(format_proposal_preview(&detail))
 }
 
@@ -360,7 +364,8 @@ mod tests {
     fn list_proposals_matches_store() {
         let conn = open_in_memory().unwrap();
         seed_proposal(&conn, "prop-list", "Listed");
-        let summaries = crate::db::proposals::list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        let summaries =
+            crate::db::proposals::list_proposals(&conn, &ProposalFilter::default()).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].target_name, "Listed");
     }

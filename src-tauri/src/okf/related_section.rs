@@ -25,11 +25,7 @@ pub fn append_related_section(body: &str, links: &[(&str, &str)]) -> String {
     };
     let mut lines = vec!["## Related".to_string(), String::new()];
     for (edge_type, path) in links {
-        lines.push(format!(
-            "- [{}]({})",
-            escape_link_label(edge_type),
-            path
-        ));
+        lines.push(format!("- [{}]({})", escape_link_label(edge_type), path));
     }
     format!("{}{}\n", prefix, lines.join("\n"))
 }
@@ -118,10 +114,7 @@ pub(crate) fn parse_inline_links(text: &str) -> Vec<OkfMarkdownLink> {
         if i < chars.len() && chars[i] == ')' {
             i += 1;
         }
-        if path.starts_with("http:")
-            || path.starts_with("https:")
-            || path.starts_with("mailto:")
-        {
+        if path.starts_with("http:") || path.starts_with("https:") || path.starts_with("mailto:") {
             continue;
         }
         let text = label

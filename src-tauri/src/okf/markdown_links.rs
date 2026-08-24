@@ -34,16 +34,10 @@ pub fn extract_markdown_links(body: &str) -> Vec<OkfMarkdownLink> {
         if i < chars.len() && chars[i] == ')' {
             i += 1;
         }
-        if path.starts_with("http:")
-            || path.starts_with("https:")
-            || path.starts_with("mailto:")
-        {
+        if path.starts_with("http:") || path.starts_with("https:") || path.starts_with("mailto:") {
             continue;
         }
-        links.push(OkfMarkdownLink {
-            text: label,
-            path,
-        });
+        links.push(OkfMarkdownLink { text: label, path });
     }
     links
 }

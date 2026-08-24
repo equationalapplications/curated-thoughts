@@ -10,8 +10,8 @@ use crate::okf::log_md::build_log_md;
 use crate::okf::sanitize::{sanitize_concept_id, sanitize_for_filename};
 use crate::okf::task_file::build_task_file;
 use crate::okf::types::{
-    OkfFile, OkfIndexEntry, OkfIndexSection, OkfLogEntry, WikiFact, WikiTask,
-    LLM_WIKI_PROFILE_V2, OKF_VERSION_V2,
+    OkfFile, OkfIndexEntry, OkfIndexSection, OkfLogEntry, WikiFact, WikiTask, LLM_WIKI_PROFILE_V2,
+    OKF_VERSION_V2,
 };
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,10 @@ pub fn write_bundle_with_profile(
             }
             concepts.insert(
                 fact.id.as_str(),
-                (ConceptKind::Fact, format!("{}.md", sanitize_concept_id(&fact.id))),
+                (
+                    ConceptKind::Fact,
+                    format!("{}.md", sanitize_concept_id(&fact.id)),
+                ),
             );
         }
         for task in &entity.tasks {
@@ -81,7 +84,10 @@ pub fn write_bundle_with_profile(
             }
             concepts.insert(
                 task.id.as_str(),
-                (ConceptKind::Task, format!("{}.md", sanitize_concept_id(&task.id))),
+                (
+                    ConceptKind::Task,
+                    format!("{}.md", sanitize_concept_id(&task.id)),
+                ),
             );
         }
 
@@ -108,11 +114,7 @@ pub fn write_bundle_with_profile(
             let file_name = &concepts[fact.id.as_str()].1;
             files.push(OkfFile {
                 path: format!("{base}/facts/{file_name}"),
-                content: build_fact_file(
-                    fact,
-                    &related_for(&fact.id, &ConceptKind::Fact),
-                    profile,
-                ),
+                content: build_fact_file(fact, &related_for(&fact.id, &ConceptKind::Fact), profile),
             });
             fact_entries.push(OkfIndexEntry {
                 title: fact.title.clone(),
@@ -126,11 +128,7 @@ pub fn write_bundle_with_profile(
             let file_name = &concepts[task.id.as_str()].1;
             files.push(OkfFile {
                 path: format!("{base}/tasks/{file_name}"),
-                content: build_task_file(
-                    task,
-                    &related_for(&task.id, &ConceptKind::Task),
-                    profile,
-                ),
+                content: build_task_file(task, &related_for(&task.id, &ConceptKind::Task), profile),
             });
             task_entries.push(OkfIndexEntry {
                 title: task.description.clone(),

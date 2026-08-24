@@ -110,7 +110,13 @@ fn seed_wiki_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
             id, entity_id, title, body, tags, confidence, source_type,
             created_at, updated_at, embedding_blob
          ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', 1, 1, ?5)",
-        ("seed-a", "tier_fact", "MCP seed A", "seed body A", blob.clone()),
+        (
+            "seed-a",
+            "tier_fact",
+            "MCP seed A",
+            "seed body A",
+            blob.clone(),
+        ),
     )?;
     conn.execute(
         "INSERT INTO llm_wiki_entries (

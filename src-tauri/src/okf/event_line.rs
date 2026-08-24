@@ -82,7 +82,10 @@ mod tests {
         .unwrap();
         assert_eq!(linked.event_type, "observation");
         assert_eq!(linked.summary, "Linked to alpha");
-        assert_eq!(linked.related_path.as_deref(), Some("./facts/fact_alpha.md"));
+        assert_eq!(
+            linked.related_path.as_deref(),
+            Some("./facts/fact_alpha.md")
+        );
         assert_eq!(linked.event_id.as_deref(), Some("evt_golden_1"));
 
         let plain = parse_event_text("(decision) Chose path B <!-- id: evt_golden_2 -->").unwrap();
