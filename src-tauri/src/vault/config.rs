@@ -169,15 +169,15 @@ mod tests {
 
     #[test]
     fn legacy_embed_profile_variant_does_not_poison_config() {
-        // Written by an older schema (`external` embed variant). The whole file
-        // used to fail deserialization, resetting the vault path and re-triggering
+        // Written by an unknown/future schema variant. The whole file used to
+        // fail deserialization, resetting the vault path and re-triggering
         // onboarding. Now only the embed profile is dropped.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.json");
         std::fs::write(
             &path,
             r#"{
-  "embed_profile": { "type": "external", "base_url": "https://example.test/v1", "model": "text-embedding-3-small" },
+  "embed_profile": { "type": "holographic", "model": "xz-9000" },
   "vault_path": "/home/tester/vault"
 }"#,
         )
@@ -189,6 +189,30 @@ mod tests {
         );
         // The invalid embed_profile is discarded; default profile applies.
         assert_eq!(cfg.get_embed_profile().unwrap(), EmbedProfile::default());
+    }
+
+    #[test]
+    fn external_embed_profile_round_trips() {
+        // `external` is a first-class supported variant (OpenRouter etc.); it
+        // must survive config read/write instead of being dropped as legacy.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "embed_profile": { "type": "external", "base_url": "https://openrouter.ai/api/v1", "model": "openai/text-embedding-3-small", "api_key": null },
+  "vault_path": "/home/tester/vault"
+}"#,
+        )
+        .unwrap();
+        let cfg = VaultConfig::new(path);
+        match cfg.get_embed_profile().unwrap() {
+            EmbedProfile::External { profile } => {
+                assert_eq!(profile.base_url, "https://openrouter.ai/api/v1");
+                assert_eq!(profile.model, "openai/text-embedding-3-small");
+            }
+            other => panic!("expected external profile, got {other:?}"),
+        }
     }
 
     #[test]
