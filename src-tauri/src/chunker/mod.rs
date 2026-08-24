@@ -187,12 +187,14 @@ mod integration_tests {
     fn split_oversized_block_handles_multibyte_chars() {
         // Regression: an em-dash (3 bytes) straddling the max_c boundary used
         // to panic with "byte index is not a char boundary" (found ingesting
-        // clanker-ai docs). Slices must land on char boundaries and reassemble.
-        let block = "word — ".repeat(300); // em-dashes everywhere, > any small cap
+        // clanker-ai docs). Separator-free input forces every cap to land
+        // inside a multi-byte char; slices must land on char boundaries and
+        // reassemble EXACTLY.
+        let block = "—".repeat(300); // 900 bytes of 3-byte chars, no whitespace
         let pieces = split_oversized_block_spans(&block, 0, 100, 0);
         assert!(pieces.len() > 1);
         let joined: String = pieces.iter().map(|(t, _, _)| t.as_str()).collect();
-        assert_eq!(joined.replace(' ', ""), block.trim().replace(' ', ""));
+        assert_eq!(joined, block);
     }
 
     #[test]
