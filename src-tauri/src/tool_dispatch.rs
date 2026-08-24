@@ -309,7 +309,7 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, 
 
 /// Best-effort audit log for agent tool access. A failed log write must never fail
 /// the tool call — tool availability wins over audit completeness.
-fn log_agent_access(conn: &Connection, client: &str, tool: &str, entity_id: Option<&str>) {
+pub fn log_agent_access(conn: &Connection, client: &str, tool: &str, entity_id: Option<&str>) {
     let _ = conn.execute(
         "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
          VALUES (?1, ?2, 'read', ?3, NULL)",
