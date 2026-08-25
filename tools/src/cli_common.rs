@@ -23,7 +23,7 @@ pub fn resolve() -> Result<Brain> {
 }
 
 pub fn open_ro(brain: &Brain) -> Result<rusqlite::Connection> {
-    Ok(retrieval::open_brain_readonly(&brain.paths.db_path)?)
+    retrieval::open_brain_readonly(&brain.paths.db_path)
 }
 
 pub fn open_rw(brain: &Brain) -> Result<rusqlite::Connection> {
@@ -735,7 +735,7 @@ fn collect_files(
     errors: &mut Vec<String>,
 ) {
     let walker = walkdir::WalkDir::new(root).follow_links(false);
-    let mut it = walker.into_iter().filter_entry(|e| {
+    let it = walker.into_iter().filter_entry(|e| {
         // Skip excluded dirs by name at any depth.
         if e.file_type().is_dir() {
             if let Some(name) = e.path().file_name() {
@@ -744,7 +744,7 @@ fn collect_files(
         }
         true
     });
-    while let Some(entry) = it.next() {
+    for entry in it {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
