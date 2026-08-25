@@ -2152,12 +2152,15 @@ mod tests {
         assert_eq!(result.committed.len(), 0);
 
         // The resolution event for prop-dup must surface the duplicate count
-        // so reviewers can see *why* every item was rejected.
+        // so reviewers can see *why* every item was rejected. Filter by
+        // event_type rather than relying on `ORDER BY created_at DESC LIMIT 1`,
+        // because back-to-back resolve_proposal calls can produce identical
+        // millisecond timestamps and SQLite's order is then unspecified —
+        // returning whichever row the storage layer chose first.
         let (event_type, event_summary): (String, String) = conn
             .query_row(
                 "SELECT event_type, summary FROM llm_wiki_events
-                 WHERE related_entry_id IS NULL
-                 ORDER BY created_at DESC LIMIT 1",
+                 WHERE event_type = 'rejected'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
