@@ -439,6 +439,15 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<EntityTask>> {
 }
 
 fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
+    // TODO(pr-followup): `ORDER BY created_at DESC` has no secondary
+    // tiebreaker (e.g. `, id DESC`). When two events for the same entity
+    // share a millisecond timestamp, SQLite returns rows in rowid/insertion
+    // order — call sites that rely on strict time-descending order may see
+    // unpredictable results on busy entities. Lower risk than the
+    // unfiltered `LIMIT 1` pattern fixed in commit 4c6ecf4 (this query
+    // is scoped by entity_id and returns a list, not a single row), but
+    // worth a sweep across the codebase. See
+    // procedures/curated-thoughts-improvement-backlog.md.
     let mut stmt = conn.prepare(
         "SELECT id, event_type, summary, related_entry_id, created_at
          FROM llm_wiki_events

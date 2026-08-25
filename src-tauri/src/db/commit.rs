@@ -498,6 +498,12 @@ fn commit_fact_add(
     // Phase-1 dedupe: exact match on normalized body, scoped to the target
     // entity. No fuzzy/similarity matching.
     let normalized = normalize_fact_body(&body);
+    // TODO(pr-followup): loading every non-deleted body for the entity into
+    // memory is O(N) per fact_add and unbounded as the entity grows. Consider
+    // a precomputed index or `SELECT body WHERE normalized_body = ?1` if
+    // entities routinely accumulate hundreds of facts. Flagged by
+    // aws-cloud-agent-pr-review on PR #84 as a theoretical perf concern;
+    // not blocking this PR. Filed in procedures/curated-thoughts-improvement-backlog.md.
     let existing_bodies: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT body FROM llm_wiki_entries
