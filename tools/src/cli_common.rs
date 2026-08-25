@@ -1184,6 +1184,16 @@ where
         match result {
             Ok(()) => {
                 if let Some(log) = error_log {
+                    // TODO(pr-followup): errors_log_len/tail reads the shared
+                    // error log without coordinating with concurrent writers.
+                    // If the librarian pipeline is writing errors.log at the
+                    // same moment this check runs (e.g. during a parallel
+                    // librarian --force + watcher ingest), the > log_before
+                    // check can misattribute an unrelated writer's entry to
+                    // the doc currently being synthesized. Flagged by
+                    // aws-cloud-agent-pr-review on PR #84 as a minor
+                    // concurrency concern; not blocking this PR. Filed in
+                    // procedures/curated-thoughts-improvement-backlog.md.
                     if errors_log_len(error_log) > log_before {
                         status = "error";
                         let detail = errors_log_tail(log, log_before).unwrap_or_default();
