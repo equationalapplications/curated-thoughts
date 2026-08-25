@@ -349,9 +349,9 @@ fn run_query(
     query: &str,
     k: usize,
     ast_only: bool,
-) -> Result<std::result::Result<Vec<ScoredChunk>, ()>> {
+) -> Result<Option<(rusqlite::Connection, Vec<ScoredChunk>)>> {
     if query.trim().is_empty() {
-        return Ok(Err(()));
+        return Ok(None);
     }
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
@@ -366,9 +366,9 @@ fn run_query(
         ast_only,
     )?);
     Ok(if chunks.is_empty() {
-        Err(())
+        None
     } else {
-        Ok(chunks)
+        Some((conn, chunks))
     })
 }
 
@@ -383,43 +383,44 @@ pub fn code_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
 
 /// `ct recall`: chunk results plus the wiki ranking leg.
 pub fn recall_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
-    match run_query(query, k, false)? {
-        Err(()) => Ok(EXIT_NO_RESULTS),
-        Ok(chunks) => {
-            let brain = resolve()?;
-            let conn = open_ro(&brain)?;
-            let wiki = rank_wiki_entries(&conn, query, 5)?;
-            if json_mode {
-                print_json(&json!({
-                    "results": chunks,
-                    "wiki": wiki,
-                }));
-            } else {
-                for c in &chunks {
-                    println!(
-                        "{:.4} {}: {}",
-                        c.score,
-                        c.doc_path,
-                        first_line(&c.chunk_text)
-                    );
-                }
-                if !wiki.is_empty() {
-                    println!("--- wiki ---");
-                    for w in &wiki {
-                        let title = w["title"].as_str().unwrap_or("");
-                        println!("wiki: {title}");
-                    }
-                }
+    // None means no chunk results (exit 2). The connection is returned so the
+    // wiki ranking leg reuses it instead of reopening the database.
+    let Some((conn, chunks)) = run_query(query, k, false)? else {
+        return Ok(EXIT_NO_RESULTS);
+    };
+    let wiki = rank_wiki_entries(&conn, query, 5)?;
+    if json_mode {
+        print_json(&json!({
+            "results": chunks,
+            "wiki": wiki,
+        }));
+    } else {
+        for c in &chunks {
+            println!(
+                "{:.4} {}: {}",
+                c.score,
+                c.doc_path,
+                first_line(&c.chunk_text)
+            );
+        }
+        if !wiki.is_empty() {
+            println!("--- wiki ---");
+            for w in &wiki {
+                let title = w["title"].as_str().unwrap_or("");
+                println!("wiki: {title}");
             }
-            Ok(0)
         }
     }
+    Ok(0)
 }
 
-fn cmd_output(chunks: std::result::Result<Vec<ScoredChunk>, ()>, json_mode: bool) -> Result<i32> {
-    let chunks = match chunks {
-        Ok(c) => c,
-        Err(()) => return Ok(EXIT_NO_RESULTS),
+fn cmd_output(
+    chunks: Option<(rusqlite::Connection, Vec<ScoredChunk>)>,
+    json_mode: bool,
+) -> Result<i32> {
+    let (_, chunks) = match chunks {
+        Some(c) => c,
+        None => return Ok(EXIT_NO_RESULTS),
     };
     if json_mode {
         print_json(&json!({ "results": chunks }));
@@ -967,8 +968,10 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
     Ok(())
 }
 
-/// Approve every pending proposal via [`approve_one_on`]. Prints
-/// `approved: N` (N=0 on an empty pending set — still exit 0).
+/// Approve every pending proposal via [`approve_one_on`]. Continues past
+/// individual failures so one bad proposal doesn't block the rest. Prints
+/// `approved: N` (N=0 on an empty pending set — still exit 0), or
+/// `approved: N, failed: M` before returning Err when any failed.
 pub fn approve_all() -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
@@ -978,10 +981,25 @@ pub fn approve_all() -> Result<()> {
         let rows = stmt.query_map([], |r| r.get(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
-    let n = ids.len();
+    let mut approved = 0usize;
+    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
     for pid in &ids {
-        approve_one_on(&mut db.0, pid)?;
+        match approve_one_on(&mut db.0, pid) {
+            Ok(()) => approved += 1,
+            Err(e) => failures.push((pid.clone(), e)),
+        }
     }
-    println!("approved: {n}");
-    Ok(())
+    if failures.is_empty() {
+        println!("approved: {approved}");
+        return Ok(());
+    }
+    println!("approved: {approved}, failed: {}", failures.len());
+    for (pid, e) in &failures {
+        eprintln!("failed {pid}: {e:#}");
+    }
+    bail!(
+        "{} of {} proposal(s) failed to approve",
+        failures.len(),
+        ids.len()
+    )
 }

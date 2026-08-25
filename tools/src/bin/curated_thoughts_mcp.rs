@@ -364,8 +364,7 @@ impl VaultMcpServer {
 
         if let Some(ref sym) = symbol {
             sql.push_str(" AND c.symbol_name LIKE '%' || ?1 || '%'");
-            // `params` stays empty here: the shared helper receives the raw
-            // parameter slice below, so we pass the symbol directly.
+            // The shared helper takes the symbol as its sole parameter.
             let rows = fetch_ranked_chunks(&conn, &sql, &[sym], &query_embedding, limit)
                 .map_err(rmcp_internal)?;
             let results: Vec<serde_json::Value> = code_rows_to_json(rows);

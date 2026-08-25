@@ -43,15 +43,15 @@ pub fn seed_vault(brain_path: &std::path::Path) -> i64 {
         defined_symbol: None,
         strategy: ChunkStrategyTag::Prose,
     };
-    let _prose_id = insert_chunk(&db.0, doc_id, &prose_chunk, 1, "ent_fixture", "chash2").unwrap();
+    let prose_id = insert_chunk(&db.0, doc_id, &prose_chunk, 1, "ent_fixture", "chash2").unwrap();
 
     let profile = retrieval::load_embed_profile(&paths.config_path).unwrap();
-    for (idx, text) in [ast_chunk.text.clone(), prose_chunk.text.clone()]
-        .into_iter()
-        .enumerate()
-    {
-        let v = embed_one(&profile, text.clone()).unwrap();
-        insert_embedding(&db.0, chunk_id + idx as i64, &v).unwrap();
+    for (rowid, text) in [
+        (chunk_id, ast_chunk.text.clone()),
+        (prose_id, prose_chunk.text.clone()),
+    ] {
+        let v = embed_one(&profile, text).unwrap();
+        insert_embedding(&db.0, rowid, &v).unwrap();
     }
     mark_document_indexed(&db.0, doc_id).unwrap();
     chunk_id

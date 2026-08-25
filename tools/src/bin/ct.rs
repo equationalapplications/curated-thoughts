@@ -124,8 +124,13 @@ fn main() {
     let cmd = match Ct::try_parse() {
         Ok(ct) => ct.cmd,
         Err(e) => {
-            // Parse errors and --help both go through here; clap exits 2 on
-            // usage errors by default, but our contract wants 1.
+            // --help is a successful invocation: print help, exit 0.
+            if e.kind() == clap::error::ErrorKind::DisplayHelp {
+                let _ = e.print();
+                std::process::exit(0);
+            }
+            // Parse errors go through here; clap exits 2 on usage errors by
+            // default, but our contract wants 1.
             let _ = e.print();
             std::process::exit(1);
         }
@@ -160,7 +165,7 @@ fn run(cmd: Cmd) -> Result<i32> {
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
-            ProposalsCmd::Show { id, .. } => proposals_show(&id),
+            ProposalsCmd::Show { id, json } => proposals_show(&id, json),
         },
         Cmd::Approve {
             all,
@@ -169,10 +174,12 @@ fn run(cmd: Cmd) -> Result<i32> {
         } => approve_cmd(all, yes, proposal_id),
         Cmd::Ingest { yes } => {
             if !yes {
-                let brain = cli_common::resolve()?;
+                // Path-only resolution so a fresh brain (no brain.db yet)
+                // can still print the refusal with the planned db path.
+                let db_path = tauri_app_lib::retrieval::resolve_brain_paths().db_path;
                 eprintln!(
                     "refusing: `ct ingest` would ingest the configured vault into {} (a write). Pass --yes to proceed.",
-                    brain.paths.db_path.display()
+                    db_path.display()
                 );
                 return Ok(1);
             }
@@ -210,15 +217,31 @@ fn proposals_list(json_mode: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// `ct proposals show <id>` — full ProposalDetail JSON verbatim.
+/// `ct proposals show <id>` — full proposal detail. `--json` prints the
+/// ProposalDetail JSON verbatim; default renders a compact text summary.
 /// Unknown id exits 2 per the no-results contract.
-fn proposals_show(id: &str) -> Result<i32> {
+fn proposals_show(id: &str, json_mode: bool) -> Result<i32> {
     let brain = cli_common::resolve()?;
     let conn = cli_common::open_ro(&brain)?;
     match cli_common::show_proposal(&conn, id)? {
         None => Ok(cli_common::EXIT_NO_RESULTS),
         Some(detail) => {
-            print_json(&detail);
+            if json_mode {
+                print_json(&detail);
+            } else {
+                println!("{}\t{}", detail.id, detail.created_at);
+                for p in &detail.source_doc_paths {
+                    println!("source: {p}");
+                }
+                println!("{} item(s)", detail.items.len());
+                for item in &detail.items {
+                    println!(
+                        "  {}\t{}",
+                        item.id,
+                        serde_json::to_string(&item.payload).unwrap_or_else(|_| "<payload>".into())
+                    );
+                }
+            }
             Ok(0)
         }
     }
