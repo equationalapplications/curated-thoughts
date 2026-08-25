@@ -1,7 +1,7 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
-    MIGRATION_V1, MIGRATION_V10, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5,
-    MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4,
+    MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -81,6 +81,9 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     }
     if version < 10 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))?;
+    }
+    if version < 11 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11))?;
     }
     if version < 7 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
@@ -173,7 +176,191 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 10);
+        assert_eq!(max_version, 11);
+    }
+
+    /// Fresh-DB path: `open_in_memory` applies every migration, so the
+    /// watermark columns and the dirty-doc partial index must exist.
+    #[test]
+    fn migration_v11_fresh_db_adds_watermark_columns_and_dirty_index() {
+        let conn = open_in_memory().unwrap();
+        for column in &["synth_hash", "synth_model", "synth_at"] {
+            let has_column: bool = conn
+                .prepare("PRAGMA table_info(documents)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|name| name == *column);
+            assert!(
+                has_column,
+                "documents.{column} must exist on a fresh database"
+            );
+        }
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='index' AND name='idx_documents_dirty'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1, "idx_documents_dirty must exist");
+    }
+
+    /// Upgraded-DB path: simulate a pre-V11 database (schema_version = 10,
+    /// no watermark columns), run the production `migrate` gate, and assert
+    /// the columns appear.
+    #[test]
+    fn migration_v11_upgrades_v10_database() {
+        // Pre-seed a V10 database: V1..V6 + OKF V7 DDL + data migration to 8 + V9 + V10.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5
+        ))
+        .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))
+            .unwrap();
+
+        let pre_has_synth_hash: bool = conn
+            .prepare("PRAGMA table_info(documents)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|name| name == "synth_hash");
+        assert!(
+            !pre_has_synth_hash,
+            "test precondition: no synth_hash before migrate()"
+        );
+
+        migrate(&conn, None).expect("migrate must succeed upgrading a V10 DB");
+
+        let post_has_synth_hash: bool = conn
+            .prepare("PRAGMA table_info(documents)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|name| name == "synth_hash");
+        assert!(post_has_synth_hash, "synth_hash must exist after migrate()");
+        let post_version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(post_version >= 11, "schema_version must reach >= 11");
+    }
+
+    /// Backfill correctness: a doc whose latest ingest run succeeded gets
+    /// synth_hash = hash and synth_model = 'pre-watermark'; a doc with no
+    /// ingest history (or whose latest run failed) stays NULL (dirty).
+    #[test]
+    fn migration_v11_backfills_only_docs_with_indexed_latest_run() {
+        // Build a V10-state database by hand so we control ingest history.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5
+        ))
+        .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))
+            .unwrap();
+
+        let insert_doc = |path: &str, hash: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO documents (path, hash, tier, status) VALUES (?1, ?2, 'user_doc', 'indexed')",
+                [path, hash],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        // Indexed-latest doc (older error, then indexed).
+        let indexed_id = insert_doc("/v/a.md", "hash-a");
+        conn.execute(
+            "INSERT INTO ingest_runs (doc_id, run_at, outcome) VALUES (?1, 100, 'error')",
+            [indexed_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ingest_runs (doc_id, run_at, outcome) VALUES (?1, 200, 'indexed')",
+            [indexed_id],
+        )
+        .unwrap();
+        // Error-latest doc.
+        let errored_id = insert_doc("/v/b.md", "hash-b");
+        conn.execute(
+            "INSERT INTO ingest_runs (doc_id, run_at, outcome) VALUES (?1, 100, 'indexed')",
+            [errored_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ingest_runs (doc_id, run_at, outcome) VALUES (?1, 300, 'error')",
+            [errored_id],
+        )
+        .unwrap();
+        // No-history doc.
+        let _no_history_id = insert_doc("/v/c.md", "hash-c");
+
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11))
+            .unwrap();
+
+        let (a_hash, a_model): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT synth_hash, synth_model FROM documents WHERE id = ?1",
+                [indexed_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            a_hash.as_deref(),
+            Some("hash-a"),
+            "indexed-latest doc must be backfilled with its hash"
+        );
+        assert_eq!(a_model.as_deref(), Some("pre-watermark"));
+
+        for id in [errored_id] {
+            let (h, m): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT synth_hash, synth_model FROM documents WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(
+                h.is_none(),
+                "doc {id} without an indexed latest run must stay dirty"
+            );
+            assert!(m.is_none());
+        }
+        let dirty_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE synth_hash IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            dirty_count, 2,
+            "exactly the error-latest and no-history docs stay dirty"
+        );
     }
 
     #[test]
