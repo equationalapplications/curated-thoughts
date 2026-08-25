@@ -158,3 +158,32 @@ CREATE INDEX IF NOT EXISTS idx_ingest_runs_doc_time
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (10);
 ";
+
+pub const MIGRATION_V11: &str = "
+-- Synthesis watermark columns: track which document hash was last
+-- summarized by which model, so unchanged docs can be skipped.
+ALTER TABLE documents ADD COLUMN synth_hash TEXT;
+ALTER TABLE documents ADD COLUMN synth_model TEXT;
+ALTER TABLE documents ADD COLUMN synth_at INTEGER;
+
+CREATE INDEX idx_documents_dirty
+    ON documents(status) WHERE synth_hash IS NULL;
+
+-- Best-effort backfill: a doc whose most recent ingest attempt succeeded
+-- predates watermarking entirely, so its current hash must have been what
+-- was last synthesized. Mark it clean without pretending any model ran.
+UPDATE documents
+   SET synth_hash = hash,
+       synth_model = 'pre-watermark'
+ WHERE EXISTS (
+     SELECT 1 FROM ingest_runs ir
+      WHERE ir.doc_id = documents.id
+        AND ir.outcome = 'indexed'
+        AND ir.run_at = (
+            SELECT MAX(ir2.run_at) FROM ingest_runs ir2
+             WHERE ir2.doc_id = documents.id
+         )
+ );
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (11);
+";

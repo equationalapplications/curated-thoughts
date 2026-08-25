@@ -1,3 +1,18 @@
+## [1.29.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.28.1...v1.29.0) (2026-08-25)
+
+### Features
+
+* **tools:** add ct dispatcher with status subcommand, --json and exit-code contract ([5f5c1ad](https://github.com/equationalapplications/curated-thoughts/commit/5f5c1ada0bbc21a4abc1278e53bbffb4570948ed))
+* **tools:** add tools lib shell with cli_common path resolution ([ab7498a](https://github.com/equationalapplications/curated-thoughts/commit/ab7498a8605b7b00814a7660edd1936f9266db75))
+* **tools:** ct graph traversal and ct wiki get/list ([0589491](https://github.com/equationalapplications/curated-thoughts/commit/0589491bf2da009a201026c613dd5cae3b0521e9))
+* **tools:** ct proposals list/show for headless proposal inspection ([78da780](https://github.com/equationalapplications/curated-thoughts/commit/78da7808374df7d3a4e09ebdf300f24547986347))
+* **tools:** ct search/recall/code over shared query helpers ([02e4643](https://github.com/equationalapplications/curated-thoughts/commit/02e4643713080db07843071f735ffece2593fa0b))
+
+### Bug Fixes
+
+* **tools:** address CodeRabbit review round on ct CLI ([a39a860](https://github.com/equationalapplications/curated-thoughts/commit/a39a860ed2958c0c039927132230e5c6e2ff4e4b))
+* **tools:** clippy clean under -D warnings (needless Ok/?, while-let, unused mut) ([b3c2a47](https://github.com/equationalapplications/curated-thoughts/commit/b3c2a47ee5d55022a3bf4a43bcb66afc35ab7531))
+
 ## [1.28.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.28.0...v1.28.1) (2026-08-25)
 
 ### Bug Fixes
