@@ -32,7 +32,7 @@ pub fn print_json<T: Serialize>(v: &T) {
 }
 
 /// Path-prefix guard. Returns `true` when `canonical_path` is inside
-/// `vault_root`. Mirrors `src-tauri/src/lib.rs:294-296`.
+/// `vault_root`. Mirrors `src-tauri/src/lib.rs:805` (`if !canonical.starts_with(&documents_root)`).
 pub fn vault_contains(canonical_path: &Path, vault_root: &Path) -> bool {
     canonical_path.starts_with(vault_root)
 }
