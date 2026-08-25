@@ -15,6 +15,11 @@ rmcp = { version = "3.1", features = ["macros", "transport-io", "schemars"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 schemars = { version = "1", features = ["derive"] }
 walkdir = "2"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+temp-env = "0.3"
 
 [[bin]]
 name = "embed_scifact"
@@ -55,3 +60,7 @@ path = "src/bin/ingest_vault_once.rs"
 [[bin]]
 name = "semantic_search_profile"
 path = "src/bin/semantic_search_profile.rs"
+
+[[bin]]
+name = "ct"
+path = "src/bin/ct.rs"
