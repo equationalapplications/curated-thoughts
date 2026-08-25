@@ -916,7 +916,12 @@ pub fn librarian_run_on(
         let mut stmt = conn.prepare(
             "SELECT id, path FROM documents
              WHERE status = 'indexed'
-               AND (synth_hash IS NULL OR synth_hash != hash OR synth_model != ?1)
+               AND (
+                   synth_hash IS NULL
+                   OR synth_hash != hash
+                   OR synth_model IS NULL
+                   OR synth_model != ?1
+               )
              ORDER BY path",
         )?;
         let rows = stmt.query_map([model], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1051,7 +1056,12 @@ mod tests {
             .prepare(
                 "SELECT id, path FROM documents
                  WHERE status = 'indexed'
-                   AND (synth_hash IS NULL OR synth_hash != hash OR synth_model != ?1)
+                   AND (
+                       synth_hash IS NULL
+                       OR synth_hash != hash
+                       OR synth_model IS NULL
+                       OR synth_model != ?1
+                   )
                  ORDER BY path",
             )
             .unwrap();
@@ -1085,12 +1095,24 @@ mod tests {
             [d.to_string()],
         )
         .unwrap();
+        // Watermarked-but-model-NULL doc: hash matches but synth_model IS NULL.
+        // SQL three-valued logic makes `synth_model != ?1` evaluate to UNKNOWN
+        // here, so the older `(synth_hash != hash OR synth_model != ?1)` form
+        // misses it. The fix adds `OR synth_model IS NULL` so this case is
+        // treated as dirty. Reproduces the regression CodeRabbit flagged on
+        // PR #84 (round 2).
+        let e = seed_doc(&mut conn, "/v/e.md", "hash-e", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = hash, synth_model = NULL, synth_at = 1 WHERE id = ?1",
+            [e.to_string()],
+        )
+        .unwrap();
         // Non-indexed doc must never be selected.
-        seed_doc(&mut conn, "/v/e.md", "hash-e", "pending");
+        seed_doc(&mut conn, "/v/f.md", "hash-f", "pending");
 
         assert_eq!(
             dirty_paths(&mut conn, "m"),
-            vec!["/v/a.md", "/v/b.md", "/v/d.md"]
+            vec!["/v/a.md", "/v/b.md", "/v/d.md", "/v/e.md"]
         );
     }
 }
