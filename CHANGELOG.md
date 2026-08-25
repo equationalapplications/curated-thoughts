@@ -1,3 +1,9 @@
+## [1.28.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.28.0...v1.28.1) (2026-08-25)
+
+### Bug Fixes
+
+* **mcp:** read llm_wiki_entries.updated_at as integer in recall_context ([3bd6298](https://github.com/equationalapplications/curated-thoughts/commit/3bd62980a20932384f49e33c38fb58d6f7e96617)), closes [#78](https://github.com/equationalapplications/curated-thoughts/issues/78)
+
 ## [1.28.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.27.2...v1.28.0) (2026-08-25)
 
 ### Features
