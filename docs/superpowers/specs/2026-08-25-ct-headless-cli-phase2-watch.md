@@ -25,7 +25,7 @@ ct watch [--foreground] [--once] [--json]
   --json         Emit structured event lines to stdout.
 ```
 
-Process model: **foreground daemon.** Matches `ct` philosophy (small, scriptable, explicit). Users wrap with `while true; do ct watch; done` or a systemd user unit if they want auto-restart. Single instance per vault — enforced by an exclusive advisory lock on `{brain_dir}/.ct-watch.lock`.
+Process model: **foreground daemon.** Matches `ct` philosophy (small, scriptable, explicit). Users wrap with `while true; do ct watch; done` or a systemd user unit if they want auto-restart. Single instance per vault — enforced by an exclusive advisory lock on `{brain_dir}/.curated_thoughts.lock` (chosen over `.ct-watch.lock` for filesystem-clarity; both crates use the same path so desktop and headless see each other).
 
 ### 2. Single-instance lock via `fs4::FileExt::lock_exclusive`
 
