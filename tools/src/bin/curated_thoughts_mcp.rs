@@ -7,9 +7,16 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use curated_thoughts_tools::cli_common::{
+    fetch_ranked_chunks, rank_wiki_entries as shared_rank_wiki_entries, resolve_symbol,
+    RECALL_CHUNKS_AST_FILTER, RECALL_CHUNKS_SQL_BASE,
+};
 use tauri_app_lib::embedder::{embed_batch, EmbedProfile};
 use tauri_app_lib::retrieval;
-use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
+
+fn rmcp_internal(e: anyhow::Error) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(e.to_string(), None)
+}
 
 #[derive(Clone)]
 struct VaultMcpServer {
@@ -103,109 +110,33 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
 
-/// Coerce a stored `updated_at` cell into an integer epoch ranking key.
-///
-/// The live schema declares `updated_at INTEGER`, but desktop-app writes and
-/// older sidecars may have produced TEXT-form values; NULL is also tolerated.
-/// Any value that cannot be coerced ranks as 0 — acceptable for a sort key.
-fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
-    match value {
-        Some(rusqlite::types::Value::Integer(i)) => i,
-        Some(rusqlite::types::Value::Text(s)) => s.parse::<i64>().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-/// Wisdom layer: llm_wiki_entries is the librarian's synthesis destination. It
-/// has no embeddings populated yet, so rank entries by title/body keyword
-/// overlap with the query terms (BM25-lite); when the table is empty this leg
-/// returns [] without error. Candidates are aggregated across all query terms,
-/// ranked by term overlap then confidence/updated_at, and truncated to
-/// limit_wiki only at the end.
+/// Thin wrapper over the shared helper, mapping anyhow errors back to rmcp.
 fn rank_wiki_entries(
     conn: &Connection,
     query: &str,
     limit_wiki: usize,
 ) -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
-    // Keep terms of any length >= 2; short technical terms ("sql", "rag")
-    // are often the most meaningful.
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .filter(|t| t.len() >= 2)
-        .map(|t| t.to_lowercase())
-        .collect();
-    if terms.is_empty() {
-        return Ok(Vec::new());
-    }
+    shared_rank_wiki_entries(conn, query, limit_wiki).map_err(rmcp_internal)
+}
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, entity_id, title, body, source_ref, confidence,
-                    updated_at
-             FROM llm_wiki_entries
-             WHERE deleted_at IS NULL
-               AND (title LIKE '%' || ?1 || '%'
-                    OR body LIKE '%' || ?1 || '%')",
-        )
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare wiki query: {e}"), None))?;
-    // id -> (overlap_count, json_value, confidence_rank, updated_at)
-    use std::collections::HashMap;
-    let mut candidates: HashMap<String, (usize, serde_json::Value, String, i64)> = HashMap::new();
-    for term in &terms {
-        let rows = stmt
-            .query_map(rusqlite::params![term], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,                         // id (TEXT PK)
-                    row.get::<_, Option<String>>(1)?,                 // entity_id
-                    row.get::<_, Option<String>>(2)?,                 // title
-                    row.get::<_, Option<String>>(3)?,                 // body
-                    row.get::<_, Option<String>>(4)?,                 // source_ref
-                    row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
-                    row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
-                ))
+/// Map ranked chunk rows to the sidecar's curated_search_code JSON shape.
+fn code_rows_to_json(
+    rows: Vec<curated_thoughts_tools::cli_common::RankedChunkRow>,
+) -> Vec<serde_json::Value> {
+    rows.into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "text": r.text,
+                "doc_path": r.doc_path,
+                "start_line": r.start_line,
+                "end_line": r.end_line,
+                "symbol": r.symbol_name,
+                "strategy": r.language,
+                "score": r.score
             })
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("execute wiki query: {e}"), None)
-            })?;
-        for row in rows {
-            // A single malformed row must never abort the whole tool call:
-            // log it and skip.
-            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
-                Ok(row) => row,
-                Err(e) => {
-                    eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
-                    continue;
-                }
-            };
-            let updated_at = coerce_updated_at(updated_at_raw);
-            let entry = candidates.entry(id.clone()).or_insert_with(|| {
-                let v = serde_json::json!({
-                    "id": id,
-                    "entity_id": entity_id,
-                    "title": title,
-                    "text": text,
-                    "source_ref": source_ref,
-                    "confidence": confidence,
-                });
-                // Higher confidence string sorts later; rank key is
-                // inverted for descending sort convenience.
-                (0, v, confidence.clone().unwrap_or_default(), updated_at)
-            });
-            entry.0 += 1; // one overlap point per matching term
-        }
-    }
-    let mut ranked: Vec<_> = candidates.into_iter().collect();
-    ranked.sort_by(|a, b| {
-        b.1 .0
-            .cmp(&a.1 .0) // term overlap desc
-            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
-            .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
-    });
-    Ok(ranked
-        .into_iter()
-        .take(limit_wiki)
-        .map(|(_, (_, v, _, _))| v)
-        .collect())
+        })
+        .collect()
 }
 
 #[tool_router(server_handler)]
@@ -281,76 +212,32 @@ impl VaultMcpServer {
             })?;
 
         // Helper to fetch and rank chunks by similarity
-        let fetch_ranked_chunks = |conn: &Connection,
-                                   sql: &str,
-                                   params: &[&dyn rusqlite::ToSql],
-                                   query_emb: &[f32],
-                                   limit: usize|
-         -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
-            let mut stmt = conn.prepare(sql).map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("prepare chunk query: {e}"), None)
-            })?;
-            let rows = stmt
-                .query_map(params, |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,            // id
-                        row.get::<_, String>(1)?,         // text
-                        row.get::<_, Vec<u8>>(2)?,        // embedding bytes
-                        row.get::<_, String>(3)?,         // doc_path
-                        row.get::<_, Option<u32>>(4)?,    // start_line
-                        row.get::<_, Option<u32>>(5)?,    // end_line
-                        row.get::<_, Option<String>>(6)?, // symbol (optional)
-                    ))
+        let fetch_ranked = |conn: &Connection, sql: &str, limit: usize| {
+            fetch_ranked_chunks(conn, sql, &[], &query_embedding, limit)
+                .map_err(rmcp_internal)
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "id": r.id,
+                                "text": r.text,
+                                "doc_path": r.doc_path,
+                                "start_line": r.start_line,
+                                "end_line": r.end_line,
+                                "symbol": r.symbol_name,
+                                "score": r.score
+                            })
+                        })
+                        .collect::<Vec<serde_json::Value>>()
                 })
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("execute chunk query: {e}"), None)
-                })?;
-
-            let mut chunks_with_scores: Vec<(f32, serde_json::Value)> = Vec::new();
-            for row in rows {
-                let (id, text, emb_bytes, doc_path, start_line, end_line, symbol) =
-                    row.map_err(|e| {
-                        rmcp::ErrorData::internal_error(format!("read chunk row: {e}"), None)
-                    })?;
-                let chunk_emb = bytes_to_f32(&emb_bytes);
-                if chunk_emb.len() != query_emb.len() {
-                    continue; // skip chunks with mismatched embedding dimensions
-                }
-                let score = cosine_similarity(&query_emb, &chunk_emb);
-                let chunk_json = serde_json::json!({
-                    "id": id,
-                    "text": text,
-                    "doc_path": doc_path,
-                    "start_line": start_line,
-                    "end_line": end_line,
-                    "symbol": symbol,
-                    "score": score
-                });
-                chunks_with_scores.push((score, chunk_json));
-            }
-
-            // Sort descending by score, take top limit
-            chunks_with_scores
-                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            Ok(chunks_with_scores
-                .into_iter()
-                .take(limit)
-                .map(|(_, v)| v)
-                .collect())
         };
 
         let wiki_entries = rank_wiki_entries(&conn, &query, limit_wiki)?;
 
         // Code chunks: real chunker strategies (ast_*). Vectors live in the
         // separate embeddings table.
-        let code_sql = "
-            SELECT c.id, c.chunk_text, e.vector, d.path, c.start_line, c.end_line, c.symbol_name
-            FROM chunks c
-            JOIN documents d ON c.doc_id = d.id
-            JOIN embeddings e ON e.chunk_id = c.id
-            WHERE d.status = 'indexed' AND c.strategy LIKE 'ast%'
-        ";
-        let code_chunks = fetch_ranked_chunks(&conn, code_sql, &[], &query_embedding, limit_code)?;
+        let code_sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+        let code_chunks = fetch_ranked(&conn, &code_sql, limit_code)?;
 
         // Build response
         let response = serde_json::json!({
@@ -473,74 +360,28 @@ impl VaultMcpServer {
                 rmcp::ErrorData::internal_error("no embedding returned for query", None)
             })?;
 
-        let mut sql = "
-            SELECT c.id, c.chunk_text, e.vector, d.path, c.start_line, c.end_line,
-                   c.symbol_name, c.strategy
-            FROM chunks c
-            JOIN documents d ON c.doc_id = d.id
-            JOIN embeddings e ON e.chunk_id = c.id
-            WHERE d.status = 'indexed' AND c.strategy LIKE 'ast%'
-        "
-        .to_string();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
 
         if let Some(ref sym) = symbol {
             sql.push_str(" AND c.symbol_name LIKE '%' || ?1 || '%'");
-            params.push(Box::new(sym.clone()));
-        }
-
-        let mut stmt = conn.prepare(&sql).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("prepare code search query: {e}"), None)
-        })?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,            // id
-                    row.get::<_, String>(1)?,         // text
-                    row.get::<_, Vec<u8>>(2)?,        // embedding bytes
-                    row.get::<_, String>(3)?,         // doc_path
-                    row.get::<_, Option<u32>>(4)?,    // start_line
-                    row.get::<_, Option<u32>>(5)?,    // end_line
-                    row.get::<_, Option<String>>(6)?, // symbol
-                    row.get::<_, Option<String>>(7)?, // language
-                ))
-            })
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("execute code search query: {e}"), None)
-            })?;
-
-        let mut chunks_with_scores: Vec<(f32, serde_json::Value)> = Vec::new();
-        for row in rows {
-            let (id, text, emb_bytes, doc_path, start_line, end_line, symbol, language) = row
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("read code chunk row: {e}"), None)
-                })?;
-            let chunk_emb = bytes_to_f32(&emb_bytes);
-            if chunk_emb.len() != query_embedding.len() {
-                continue;
-            }
-            let score = cosine_similarity(&query_embedding, &chunk_emb);
-            let chunk_json = serde_json::json!({
-                "id": id,
-                "text": text,
-                "doc_path": doc_path,
-                "start_line": start_line,
-                "end_line": end_line,
-                "symbol": symbol,
-                "strategy": language,
-                "score": score
+            // `params` stays empty here: the shared helper receives the raw
+            // parameter slice below, so we pass the symbol directly.
+            let rows = fetch_ranked_chunks(&conn, &sql, &[sym], &query_embedding, limit)
+                .map_err(rmcp_internal)?;
+            let results: Vec<serde_json::Value> = code_rows_to_json(rows);
+            let response = serde_json::json!({
+                "code_chunks": results,
+                "query": query,
+                "symbol_filter": symbol
             });
-            chunks_with_scores.push((score, chunk_json));
+            self.log_access("curated_search_code", None);
+            return serde_json::to_string(&response)
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None));
         }
 
-        // Sort by score descending, take top limit
-        chunks_with_scores
-            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let results: Vec<serde_json::Value> = chunks_with_scores
-            .into_iter()
-            .take(limit)
-            .map(|(_, v)| v)
-            .collect();
+        let rows = fetch_ranked_chunks(&conn, &sql, &[], &query_embedding, limit)
+            .map_err(rmcp_internal)?;
+        let results: Vec<serde_json::Value> = code_rows_to_json(rows);
 
         let response = serde_json::json!({
             "code_chunks": results,
@@ -575,18 +416,15 @@ impl VaultMcpServer {
         let root_chunk_id: i64 = if let Some(id) = chunk_id {
             id
         } else if let Some(ref sym) = symbol {
-            let normalized = sym.trim().to_lowercase();
-            conn.query_row(
-                "SELECT c.id FROM chunks c
-                 WHERE c.defined_symbol = ?1 OR (c.defined_symbol IS NULL AND c.symbol_name = ?1)
-                 ORDER BY CASE WHEN c.defined_symbol IS NOT NULL THEN 0 ELSE 1 END, c.id
-                 LIMIT 1",
-                rusqlite::params![normalized],
-                |r| r.get(0),
-            )
-            .map_err(|_| {
-                rmcp::ErrorData::internal_error(format!("no chunk found with symbol '{sym}'"), None)
-            })?
+            match resolve_symbol(&conn, sym).map_err(rmcp_internal)? {
+                Some((id, _)) => id,
+                None => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        format!("no chunk found with symbol '{sym}'"),
+                        None,
+                    ))
+                }
+            }
         } else {
             return Err(rmcp::ErrorData::invalid_params(
                 "provide either chunk_id or symbol",

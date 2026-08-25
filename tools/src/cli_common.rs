@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::OpenFlags;
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use tauri_app_lib::embedder::{embed_one, EmbedProfile};
 use tauri_app_lib::retrieval::{self, BrainPaths};
+use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
 
 pub struct Brain {
     pub paths: BrainPaths,
@@ -35,4 +37,266 @@ pub const EXIT_NO_RESULTS: i32 = 2;
 
 pub fn print_json<T: Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).expect("serialize"));
+}
+
+// ---------------------------------------------------------------------------
+// Shared query helpers (extracted from tools/src/bin/curated_thoughts_mcp.rs;
+// SQL kept verbatim so sidecar behavior is unchanged).
+// ---------------------------------------------------------------------------
+
+/// One cosine-ranked code chunk from the chunks-JOIN-embeddings recall leg.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoredChunk {
+    pub doc_path: String,
+    pub chunk_text: String,
+    pub score: f32,
+    pub symbol_name: Option<String>,
+    pub entity_id: String,
+}
+
+/// Both recall legs for a coding-task query.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallLegs {
+    pub wiki: Vec<serde_json::Value>,
+    pub chunks: Vec<ScoredChunk>,
+}
+
+/// Full ranked row as consumed by the MCP sidecar's JSON responses (which
+/// expose id/lines/strategy fields beyond what `ScoredChunk` carries).
+#[derive(Debug, Clone)]
+pub struct RankedChunkRow {
+    pub id: i64,
+    pub text: String,
+    pub doc_path: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    pub symbol_name: Option<String>,
+    /// Second strategy-ish column (`c.strategy` in curated_search_code).
+    pub language: Option<String>,
+    pub entity_id: String,
+    pub score: f32,
+}
+
+/// Coerce a stored `updated_at` cell into an integer epoch ranking key.
+///
+/// The live schema declares `updated_at INTEGER`, but desktop-app writes and
+/// older sidecars may have produced TEXT-form values; NULL is also tolerated.
+/// Any value that cannot be coerced ranks as 0 — acceptable for a sort key.
+pub fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
+    match value {
+        Some(rusqlite::types::Value::Integer(i)) => i,
+        Some(rusqlite::types::Value::Text(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Wisdom layer: llm_wiki_entries is the librarian's synthesis destination. It
+/// has no embeddings populated yet, so rank entries by title/body keyword
+/// overlap with the query terms (BM25-lite); when the table is empty this leg
+/// returns [] without error. Candidates are aggregated across all query terms,
+/// ranked by term overlap then confidence/updated_at, and truncated to
+/// limit_wiki only at the end.
+pub fn rank_wiki_entries(
+    conn: &Connection,
+    query: &str,
+    limit_wiki: usize,
+) -> Result<Vec<serde_json::Value>> {
+    // Keep terms of any length >= 2; short technical terms ("sql", "rag")
+    // are often the most meaningful.
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, title, body, source_ref, confidence,
+                updated_at
+         FROM llm_wiki_entries
+         WHERE deleted_at IS NULL
+           AND (title LIKE '%' || ?1 || '%'
+                OR body LIKE '%' || ?1 || '%')",
+    )?;
+    // id -> (overlap_count, json_value, confidence_rank, updated_at)
+    use std::collections::HashMap;
+    let mut candidates: HashMap<String, (usize, serde_json::Value, String, i64)> = HashMap::new();
+    for term in &terms {
+        let rows = stmt.query_map(rusqlite::params![term], |row| {
+            Ok((
+                row.get::<_, String>(0)?,                         // id (TEXT PK)
+                row.get::<_, Option<String>>(1)?,                 // entity_id
+                row.get::<_, Option<String>>(2)?,                 // title
+                row.get::<_, Option<String>>(3)?,                 // body
+                row.get::<_, Option<String>>(4)?,                 // source_ref
+                row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
+                row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
+            ))
+        })?;
+        for row in rows {
+            // A single malformed row must never abort the whole tool call:
+            // log it and skip.
+            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
+                Ok(row) => row,
+                Err(e) => {
+                    eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
+                    continue;
+                }
+            };
+            let updated_at = coerce_updated_at(updated_at_raw);
+            let entry = candidates.entry(id.clone()).or_insert_with(|| {
+                let v = serde_json::json!({
+                    "id": id,
+                    "entity_id": entity_id,
+                    "title": title,
+                    "text": text,
+                    "source_ref": source_ref,
+                    "confidence": confidence,
+                });
+                // Higher confidence string sorts later; rank key is
+                // inverted for descending sort convenience.
+                (0, v, confidence.clone().unwrap_or_default(), updated_at)
+            });
+            entry.0 += 1; // one overlap point per matching term
+        }
+    }
+    let mut ranked: Vec<_> = candidates.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1 .0
+            .cmp(&a.1 .0) // term overlap desc
+            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+            .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
+    });
+    Ok(ranked
+        .into_iter()
+        .take(limit_wiki)
+        .map(|(_, (_, v, _, _))| v)
+        .collect())
+}
+
+/// Fetch and rank chunk rows by cosine similarity against `query_emb`.
+/// Chunks with mismatched embedding dimensions are skipped; results are
+/// sorted by score descending and truncated to `limit`.
+pub fn fetch_ranked_chunks(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+    query_emb: &[f32],
+    limit: usize,
+) -> Result<Vec<RankedChunkRow>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, i64>(0)?,            // id
+            row.get::<_, String>(1)?,         // text
+            row.get::<_, Vec<u8>>(2)?,        // embedding bytes
+            row.get::<_, String>(3)?,         // doc_path
+            row.get::<_, Option<u32>>(4)?,    // start_line
+            row.get::<_, Option<u32>>(5)?,    // end_line
+            row.get::<_, Option<String>>(6)?, // symbol (optional)
+            row.get::<_, Option<String>>(7)?, // strategy/language (optional)
+            row.get::<_, Option<String>>(8)?, // entity_id (optional)
+        ))
+    })?;
+
+    let mut scored: Vec<RankedChunkRow> = Vec::new();
+    for row in rows {
+        let (id, text, emb_bytes, doc_path, start_line, end_line, symbol, language, entity_id) =
+            row?;
+        let chunk_emb = bytes_to_f32(&emb_bytes);
+        if chunk_emb.len() != query_emb.len() {
+            continue; // skip chunks with mismatched embedding dimensions
+        }
+        let score = cosine_similarity(query_emb, &chunk_emb);
+        scored.push(RankedChunkRow {
+            id,
+            text,
+            doc_path,
+            start_line,
+            end_line,
+            symbol_name: symbol,
+            language,
+            entity_id: entity_id.unwrap_or_default(),
+            score,
+        });
+    }
+
+    // Sort descending by score, take top limit
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+/// Recall-leg SQL over real chunker strategies (ast_*). Vectors live in the
+/// separate embeddings table. With the AST predicate appended this matches the
+/// MCP sidecar's `curated_recall_context` / `curated_search_code` leg exactly.
+pub const RECALL_CHUNKS_SQL_BASE: &str = "
+    SELECT c.id, c.chunk_text, e.vector, d.path, c.start_line, c.end_line,
+           c.symbol_name, c.strategy, c.entity_id
+    FROM chunks c
+    JOIN documents d ON c.doc_id = d.id
+    JOIN embeddings e ON e.chunk_id = c.id
+    WHERE d.status = 'indexed'
+";
+pub const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
+
+/// Embed the query and run the chunks-JOIN-embeddings cosine leg.
+///
+/// `ast_only=true` reproduces the recall leg's `strategy LIKE 'ast%'` filter
+/// (also used by `ct code`); `ast_only=false` returns every indexed chunk.
+pub fn recall_chunks(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    query: &str,
+    limit: usize,
+    ast_only: bool,
+) -> Result<Vec<ScoredChunk>> {
+    let query_embedding = embed_one(profile, query.to_string()).context("failed to embed query")?;
+    let mut sql = RECALL_CHUNKS_SQL_BASE.to_string();
+    if ast_only {
+        sql.push_str(RECALL_CHUNKS_AST_FILTER);
+    }
+    let rows = fetch_ranked_chunks(conn, &sql, &[], &query_embedding, limit)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ScoredChunk {
+            doc_path: r.doc_path,
+            chunk_text: r.text,
+            score: r.score,
+            symbol_name: r.symbol_name,
+            entity_id: r.entity_id,
+        })
+        .collect())
+}
+
+/// Resolve a user-supplied symbol name to its definition chunk.
+///
+/// The name is normalized (trim + lowercase, matching how the linker stores
+/// `defined_symbol`) and resolution prefers rows where `defined_symbol IS NOT
+/// NULL`, falling back to `symbol_name`; lowest chunk id breaks ties. Returns
+/// `(chunk_id, entity_id)` or `None` when nothing matches.
+pub fn resolve_symbol(conn: &Connection, symbol: &str) -> Result<Option<(i64, String)>> {
+    use rusqlite::OptionalExtension;
+    let normalized = symbol.trim().to_lowercase();
+    conn.query_row(
+        "SELECT c.id, c.entity_id FROM chunks c
+         WHERE c.defined_symbol = ?1 OR (c.defined_symbol IS NULL AND c.symbol_name = ?1)
+         ORDER BY CASE WHEN c.defined_symbol IS NOT NULL THEN 0 ELSE 1 END, c.id
+         LIMIT 1",
+        rusqlite::params![normalized],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            ))
+        },
+    )
+    .optional()
+    .context("resolve symbol query")
 }
