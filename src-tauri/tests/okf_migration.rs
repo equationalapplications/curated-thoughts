@@ -195,5 +195,5 @@ fn test_app_open_runs_v7_schema() {
     let max_version: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(max_version, 10);
+    assert_eq!(max_version, 11);
 }
