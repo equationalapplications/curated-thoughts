@@ -1,3 +1,20 @@
+## [1.30.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.29.0...v1.30.0) (2026-08-25)
+
+### Features
+
+* **db:** add MIGRATION_V11 synthesis watermark columns with backfill ([eaa5495](https://github.com/equationalapplications/curated-thoughts/commit/eaa5495e3774473565d292a68c50992778829584))
+* **db:** dedupe fact_add proposals by normalized exact body match ([1ce2e63](https://github.com/equationalapplications/curated-thoughts/commit/1ce2e63e4d55e7b9e43ca461c4927359babab5d1))
+* **librarian:** hash-gated synthesis watermark, dirty-doc selection, --force ([b4f14b2](https://github.com/equationalapplications/curated-thoughts/commit/b4f14b207450304e07d3fad6c745438ae4680cf7))
+* **librarian:** merge observability branch + hand-resolve merge conflicts (phase 1 intergration) ([d91f7a5](https://github.com/equationalapplications/curated-thoughts/commit/d91f7a5c90f3fc36e689a12eb966bbc821a0a330))
+* **librarian:** stderr per-doc progress, error surfacing, configurable timeout_secs, run summary ([104fd4e](https://github.com/equationalapplications/curated-thoughts/commit/104fd4e4410a5f8c0f69a465e6bf406f378d5ac8))
+
+### Bug Fixes
+
+* **ci:** repair tests + CodeRabbit findings on phase-1 watermark ([f8a02cc](https://github.com/equationalapplications/curated-thoughts/commit/f8a02cc2cdf272d2ff429decc44f05dff2f52919))
+* **db:** anchor duplicate-count test by event_type to avoid timestamp tie ([4c6ecf4](https://github.com/equationalapplications/curated-thoughts/commit/4c6ecf45e6e223120c8800caad90a5573a275336)), closes [#84](https://github.com/equationalapplications/curated-thoughts/issues/84)
+* **db:** treat NULL synth_model as dirty in watermark gate ([6e00531](https://github.com/equationalapplications/curated-thoughts/commit/6e00531a0289ba10d2587289dca82cbbf32e4740)), closes [#84](https://github.com/equationalapplications/curated-thoughts/issues/84)
+* **librarian:** revert drive-by cargo fmt artifact in embedder/mod.rs ([a1620c8](https://github.com/equationalapplications/curated-thoughts/commit/a1620c8c3205cee1f3443599f01db79194c6e003))
+
 ## [1.29.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.28.1...v1.29.0) (2026-08-25)
 
 ### Features
