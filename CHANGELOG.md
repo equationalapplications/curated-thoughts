@@ -1,3 +1,9 @@
+## [1.27.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.27.1...v1.27.2) (2026-08-25)
+
+### Bug Fixes
+
+* **librarian:** raise LLM completer timeout and cap reasoning effort ([ddbf8c5](https://github.com/equationalapplications/curated-thoughts/commit/ddbf8c53cf45da806485197f910e446d8841b931))
+
 ## [1.27.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.27.0...v1.27.1) (2026-08-24)
 
 ### Bug Fixes
