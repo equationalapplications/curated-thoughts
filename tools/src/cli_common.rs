@@ -397,6 +397,190 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
+// ---------------------------------------------------------------------------
+// Task 5: ct graph traversal + ct wiki get/list
+// ---------------------------------------------------------------------------
+
+/// Hard neighbor cap shared with the MCP sidecar's graph tool.
+pub const GRAPH_MAX_NEIGHBORS: usize = 200;
+
+/// Traversal direction for `ct graph` (validated at the clap parse level via
+/// `value_enum`, mapping onto the graph module's callees/callers/both CTEs).
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum GraphDir {
+    Callees,
+    Callers,
+    Both,
+}
+
+/// Serialize one graph traversal as
+/// `{"root": {chunk_id, entity_id}, "neighbors": [{chunk_id, depth, rel_type,
+/// entity_id}], "truncated": bool}`, joining `chunks.entity_id` for each
+/// NeighborRow.chunk_id.
+pub fn graph_json(
+    conn: &Connection,
+    root_chunk_id: i64,
+    root_entity_id: &str,
+    neighbors: &[tauri_app_lib::graph::NeighborRow],
+) -> serde_json::Value {
+    let entity_of = |chunk_id: i64| -> String {
+        conn.query_row(
+            "SELECT COALESCE(entity_id, '') FROM chunks WHERE id = ?1",
+            rusqlite::params![chunk_id],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+    };
+    let truncated = neighbors.len() > GRAPH_MAX_NEIGHBORS;
+    let listed: Vec<serde_json::Value> = neighbors
+        .iter()
+        .take(GRAPH_MAX_NEIGHBORS)
+        .map(|n| {
+            json!({
+                "chunk_id": n.chunk_id,
+                "depth": n.depth,
+                "rel_type": n.rel_type,
+                "entity_id": entity_of(n.chunk_id),
+            })
+        })
+        .collect();
+    json!({
+        "root": { "chunk_id": root_chunk_id, "entity_id": root_entity_id },
+        "neighbors": listed,
+        "truncated": truncated,
+    })
+}
+
+/// `ct graph`: resolve the symbol, run the traversal, render JSON or text.
+pub fn graph_cmd(symbol: &str, dir: GraphDir, hops: u32, json_mode: bool) -> Result<i32> {
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    let (root_chunk_id, root_entity_id) = match resolve_symbol(&conn, symbol)? {
+        Some(pair) => pair,
+        None => {
+            eprintln!("symbol not found: {symbol}");
+            return Ok(EXIT_NO_RESULTS);
+        }
+    };
+    let neighbors = match dir {
+        GraphDir::Callees => {
+            tauri_app_lib::graph::get_callees(&conn, root_chunk_id, &root_entity_id, hops)?
+        }
+        GraphDir::Callers => {
+            tauri_app_lib::graph::get_callers(&conn, root_chunk_id, &root_entity_id, hops)?
+        }
+        GraphDir::Both => {
+            tauri_app_lib::graph::get_both(&conn, root_chunk_id, &root_entity_id, hops)?
+        }
+    };
+    if json_mode {
+        print_json(&graph_json(
+            &conn,
+            root_chunk_id,
+            &root_entity_id,
+            &neighbors,
+        ));
+    } else {
+        println!("root: {} ({root_entity_id})", symbol.trim().to_lowercase());
+        for n in neighbors.iter().take(GRAPH_MAX_NEIGHBORS) {
+            println!(
+                "{:>2} {:<8} {} {}",
+                n.depth,
+                n.rel_type,
+                n.chunk_id,
+                entity_lookup(&conn, n.chunk_id)
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn entity_lookup(conn: &Connection, chunk_id: i64) -> String {
+    conn.query_row(
+        "SELECT COALESCE(entity_id, '') FROM chunks WHERE id = ?1",
+        rusqlite::params![chunk_id],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_default()
+}
+
+/// One wiki row as a JSON object (`ct wiki list --json`, eval-C2 gap).
+pub fn wiki_rows(conn: &Connection) -> Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, title, body, confidence, updated_at
+         FROM llm_wiki_entries
+         WHERE deleted_at IS NULL
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(json!({
+            "id": row.get::<_, String>(0)?,
+            "entity_id": row.get::<_, Option<String>>(1)?,
+            "title": row.get::<_, Option<String>>(2)?,
+            "body": row.get::<_, Option<String>>(3)?,
+            "confidence": row.get::<_, Option<String>>(4)?,
+            "updated_at": row.get::<_, Option<rusqlite::types::Value>>(5)
+                .ok()
+                .and_then(|v| v)
+                .map(|v| coerce_updated_at(Some(v))),
+        }))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn wiki_text_line(w: &serde_json::Value) -> String {
+    format!(
+        "{}  {}",
+        w["id"].as_str().unwrap_or(""),
+        w["title"].as_str().unwrap_or("")
+    )
+}
+
+/// `ct wiki list`: all non-deleted entries.
+pub fn wiki_list_cmd(json_mode: bool) -> Result<i32> {
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    let rows = wiki_rows(&conn)?;
+    if rows.is_empty() {
+        eprintln!("no wiki entries");
+        return Ok(EXIT_NO_RESULTS);
+    }
+    if json_mode {
+        print_json(&rows);
+    } else {
+        for w in &rows {
+            println!("{}", wiki_text_line(w));
+        }
+    }
+    Ok(0)
+}
+
+/// `ct wiki get <entity_id>`: full row(s), body included.
+pub fn wiki_get_cmd(entity_id: &str, json_mode: bool) -> Result<i32> {
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    let rows: Vec<serde_json::Value> = wiki_rows(&conn)?
+        .into_iter()
+        .filter(|w| w["entity_id"] == *entity_id)
+        .collect();
+    if rows.is_empty() {
+        eprintln!("wiki entry not found: {entity_id}");
+        return Ok(EXIT_NO_RESULTS);
+    }
+    if json_mode {
+        print_json(&rows);
+    } else {
+        for w in &rows {
+            println!("{}", serde_json::to_string_pretty(w).expect("serialize"));
+        }
+    }
+    Ok(0)
+}
+
 /// Resolve a user-supplied symbol name to its definition chunk.
 ///
 /// The name is normalized (trim + lowercase, matching how the linker stores

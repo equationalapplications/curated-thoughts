@@ -44,8 +44,8 @@ enum Cmd {
     /// Knowledge-graph lookups around a symbol.
     Graph {
         symbol: String,
-        #[arg(long, default_value = "both")]
-        dir: String,
+        #[arg(long, value_enum, default_value = "both")]
+        dir: cli_common::GraphDir,
         #[arg(long, default_value_t = 1)]
         hops: u32,
         #[arg(long)]
@@ -79,6 +79,12 @@ enum Cmd {
 #[derive(Subcommand)]
 enum WikiCmd {
     List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print full wiki row(s) for an entity id (body included).
+    Get {
+        entity_id: String,
         #[arg(long)]
         json: bool,
     },
@@ -130,6 +136,16 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Search { query, k, json } => cli_common::search_cmd(&query, k, json),
         Cmd::Recall { query, k, json } => cli_common::recall_cmd(&query, k, json),
         Cmd::Code { query, k, json } => cli_common::code_cmd(&query, k, json),
+        Cmd::Graph {
+            symbol,
+            dir,
+            hops,
+            json,
+        } => cli_common::graph_cmd(&symbol, dir, hops, json),
+        Cmd::Wiki { cmd } => match cmd {
+            WikiCmd::List { json } => cli_common::wiki_list_cmd(json),
+            WikiCmd::Get { entity_id, json } => cli_common::wiki_get_cmd(&entity_id, json),
+        },
         other => {
             bail!("subcommand not implemented yet: {}", describe(&other));
         }
