@@ -63,10 +63,10 @@ Delete events skip step 4 (file doesn't exist on disk). They use the path string
 
 | New file | Contents | Approx LOC |
 |---|---|---|
-| `tools/src/paths.rs` | `BrainPaths`, `resolve_brain_paths()`, `print_json<T>()` | ~80 |
+| `tools/src/paths.rs` | `pub use tauri_app_lib::retrieval::BrainPaths;` + `resolve_brain_paths()` (re-export), `print_json<T>()`, `vault_contains(&Path, &Path) -> bool` | ~90 |
 | `tools/src/queries.rs` | `status_cmd`, `search_cmd`, `recall_cmd`, `code_cmd`, `graph_cmd`, `wiki_list_cmd`, `wiki_get_cmd` | ~700 |
 | `tools/src/cmds.rs` | `ingest_run`, `librarian_run`, `librarian_run_on`, `approve_one`, `approve_all`, **new:** `watch_run`, `enqueue_vault_event` | ~600 |
-| `tools/src/write.rs` | DB write path helpers, error wrappers, dedup helper | ~150 |
+| `tools/src/write.rs` | `open_ro(&Brain) -> Result<Connection>`, `open_rw(&Brain) -> Result<Connection>` (delegate to `cli_common::open_ro/open_rw`; `&Brain` signature preserved to match existing call sites — `cli_common::resolve()` returns `Brain`, integration tests read `brain.paths.db_path`) | ~100 |
 
 `tools/src/cli_common.rs` becomes a thin re-export shim (`pub use {paths, queries, cmds, write};`) so the existing `use curated_thoughts_tools::cli_common::X` paths in `tools/src/bin/*` keep compiling. The re-exports can be removed in a follow-up PR once all consumers migrate.
 
@@ -143,7 +143,7 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 
 ## Cross-cutting requirements
 
-- **Path resolution identical to sidecar.** `paths::resolve_brain_paths()` is a direct move of the existing function — same env var precedence (`CURATED_BRAIN_DIR`, `CURATED_BRAIN_DB`, `CURATED_BRAIN_CONFIG`).
+- **Path resolution identical to sidecar.** `paths::resolve_brain_paths()` re-exports the canonical `tauri_app_lib::retrieval::resolve_brain_paths` — same env var precedence (`CURATED_BRAIN_DIR`, `CURATED_BRAIN_DB`, `CURATED_BRAIN_CONFIG`). **`BrainPaths` itself is re-exported, not redefined locally**, so its type identity (`Eq`/`PartialEq`/`Serialize`) is shared across crates and test fixtures.
 - **Single source of truth for `enqueue_vault_event`.** Both the desktop's `lib.rs:798` callback and `ct watch`'s callback call the same `cmds::enqueue_vault_event` function. No copy-paste divergence.
 - **Exit codes:** 0 ok / clean shutdown, 1 config error, 2 lock conflict, 3 DB/schema error, 4 notify init failure.
 - **`--json` output on `ct watch`** — structured `{kind, path, ts_ms}` event lines on stdout. Matches the existing `--json` contract from phase 1 commands.
