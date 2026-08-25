@@ -1,3 +1,9 @@
+## [1.28.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.27.2...v1.28.0) (2026-08-25)
+
+### Features
+
+* **tools:** add approve_pending_proposals one-off bin ([f90c84f](https://github.com/equationalapplications/curated-thoughts/commit/f90c84f460970557abd039a9afda2c83caafe8ba))
+
 ## [1.27.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.27.1...v1.27.2) (2026-08-25)
 
 ### Bug Fixes
