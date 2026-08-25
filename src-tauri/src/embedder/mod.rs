@@ -259,7 +259,10 @@ mod tests {
         };
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["type"], "external");
-        assert_eq!(json["base_url"], "https://openrouter.ai/api/v1");
+        assert_eq!(
+            json["base_url"],
+            "https://openrouter.ai/api/v1"
+        );
         assert_eq!(json["model"], "openai/text-embedding-3-small");
         let back: EmbedProfile = serde_json::from_value(json).unwrap();
         assert_eq!(back, p);
