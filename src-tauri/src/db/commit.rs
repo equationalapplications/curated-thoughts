@@ -64,6 +64,7 @@ struct CommitContext {
     facts_updated: usize,
     facts_archived: usize,
     tasks_added: usize,
+    facts_duplicated: usize,
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
@@ -486,13 +487,32 @@ fn commit_fact_add(
     ctx: &mut CommitContext,
     item: &LoadedItem,
     payload: &serde_json::Value,
-) -> Result<()> {
+) -> Result<FactAddOutcome> {
     let body = parse_string_field(payload, "body")?;
     let confidence = payload
         .get("confidence")
         .and_then(|v| v.as_str())
         .unwrap_or("inferred");
     let tags = parse_tags(payload);
+
+    // Phase-1 dedupe: exact match on normalized body, scoped to the target
+    // entity. No fuzzy/similarity matching.
+    let normalized = normalize_fact_body(&body);
+    let existing_bodies: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT body FROM llm_wiki_entries
+             WHERE entity_id = ?1 AND deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![ctx.entity_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if existing_bodies
+        .iter()
+        .any(|existing| normalize_fact_body(existing) == normalized)
+    {
+        return Ok(FactAddOutcome::Duplicate);
+    }
+
     let fact_id = generate_llm_id("fact_");
     let title = fact_title_from_body(&body);
     let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
@@ -555,7 +575,7 @@ fn commit_fact_add(
         record_id: fact_id,
     });
     ctx.facts_added += 1;
-    Ok(())
+    Ok(FactAddOutcome::Applied)
 }
 
 fn commit_fact_update(
@@ -780,6 +800,18 @@ enum ItemCommitOutcome {
     Rejected,
 }
 
+enum FactAddOutcome {
+    Applied,
+    /// Normalized body exactly matches an existing fact on the same entity.
+    Duplicate,
+}
+
+/// Normalize a fact body for exact-match dedupe: trim edges and collapse
+/// internal whitespace runs to single spaces.
+fn normalize_fact_body(body: &str) -> String {
+    body.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn commit_task_add(
     conn: &Connection,
     ctx: &mut CommitContext,
@@ -916,6 +948,12 @@ fn write_resolution_event(
     if ctx.tasks_added > 0 {
         parts.push(format!("{} task(s) added", ctx.tasks_added));
     }
+    if ctx.facts_duplicated > 0 {
+        parts.push(format!(
+            "{} duplicate fact(s) skipped",
+            ctx.facts_duplicated
+        ));
+    }
 
     let summary = if proposal_status == "rejected" {
         format!(
@@ -1014,6 +1052,7 @@ pub fn resolve_proposal(
         facts_updated: 0,
         facts_archived: 0,
         tasks_added: 0,
+        facts_duplicated: 0,
     };
 
     if let Some(eid) = entity_id.as_deref() {
@@ -1055,8 +1094,15 @@ pub fn resolve_proposal(
         let payload = effective_payload(item, decision);
         let item_outcome: Result<ItemCommitOutcome> =
             match item.item_type.as_str() {
-                "fact_add" => commit_fact_add(&tx, &mut ctx, item, &payload)
-                    .map(|_| ItemCommitOutcome::Applied),
+                "fact_add" => {
+                    commit_fact_add(&tx, &mut ctx, item, &payload).map(|outcome| match outcome {
+                        FactAddOutcome::Applied => ItemCommitOutcome::Applied,
+                        FactAddOutcome::Duplicate => {
+                            ctx.facts_duplicated += 1;
+                            ItemCommitOutcome::Rejected
+                        }
+                    })
+                }
                 "fact_update" => commit_fact_update(&tx, &mut ctx, item, &payload)
                     .map(|_| ItemCommitOutcome::Applied),
                 "fact_archive" => {
@@ -1848,5 +1894,192 @@ mod tests {
             hash,
             "commit must populate content_hash from the chunk row"
         );
+    }
+
+    fn resolve_fact(conn: &mut Connection, prop_id: &str, item_id: &str) -> CommitResult {
+        resolve_proposal(
+            conn,
+            prop_id,
+            &[ItemDecision {
+                item_id: item_id.into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fact_add_identical_body_dedupes() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        insert_test_proposal(
+            &conn,
+            "prop-f1",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("fact-1", chunk_id, "Rust is a systems language.")],
+            doc_id,
+        );
+
+        // Separate trigger doc so the second proposal is not auto-superseded.
+        let doc2 = seed_document(&conn, "/vault/documents/b.pdf");
+        let chunk2 = seed_chunk(&conn, doc2);
+        insert_test_proposal(
+            &conn,
+            "prop-f2",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("fact-dup", chunk2, "Rust is a systems language.")],
+            doc2,
+        );
+
+        resolve_fact(&mut conn, "prop-f1", "fact-1");
+        let result = resolve_fact(&mut conn, "prop-f2", "fact-dup");
+
+        assert!(result.committed.is_empty(), "duplicate must not commit");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "exactly one stored fact");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM curated_proposal_items WHERE id = 'fact-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "rejected", "duplicate item recorded as skipped");
+    }
+
+    #[test]
+    fn fact_add_whitespace_varied_duplicate_dedupes() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        insert_test_proposal(
+            &conn,
+            "prop-f1",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item(
+                "fact-1",
+                chunk_id,
+                "Rust is  a  systems\tlanguage.",
+            )],
+            doc_id,
+        );
+
+        // Separate trigger doc so the second proposal is not auto-superseded.
+        let doc2 = seed_document(&conn, "/vault/documents/b.pdf");
+        let chunk2 = seed_chunk(&conn, doc2);
+        insert_test_proposal(
+            &conn,
+            "prop-f2",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item(
+                "fact-ws",
+                chunk2,
+                "  Rust   is a systems\nlanguage.  ",
+            )],
+            doc2,
+        );
+
+        resolve_fact(&mut conn, "prop-f1", "fact-1");
+        let result = resolve_fact(&mut conn, "prop-f2", "fact-ws");
+
+        assert!(result.committed.is_empty());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn fact_add_different_body_still_commits() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        insert_test_proposal(
+            &conn,
+            "prop-f1",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("fact-1", chunk_id, "Rust is a systems language.")],
+            doc_id,
+        );
+
+        // Separate trigger doc so the second proposal is not auto-superseded.
+        let doc2 = seed_document(&conn, "/vault/documents/b.pdf");
+        let chunk2 = seed_chunk(&conn, doc2);
+        insert_test_proposal(
+            &conn,
+            "prop-f2",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item(
+                "fact-new",
+                chunk2,
+                "Rust has no garbage collector.",
+            )],
+            doc2,
+        );
+
+        resolve_fact(&mut conn, "prop-f1", "fact-1");
+        let result = resolve_fact(&mut conn, "prop-f2", "fact-new");
+
+        assert_eq!(result.committed.len(), 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn fact_add_dedupe_scoped_per_entity() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_entity(&conn, "ent-2", "Other", "Summary", 100);
+
+        insert_test_proposal(
+            &conn,
+            "prop-f1",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("fact-1", chunk_id, "Rust is a systems language.")],
+            doc_id,
+        );
+        // Same normalized body, different entity — must NOT be treated as duplicate.
+        insert_test_proposal(
+            &conn,
+            "prop-f2",
+            ProposalKind::UpdateEntity,
+            Some("ent-2"),
+            vec![fact_item("fact-x", chunk_id, "Rust is a systems language.")],
+            doc_id,
+        );
+
+        resolve_fact(&mut conn, "prop-f1", "fact-1");
+        let result = resolve_fact(&mut conn, "prop-f2", "fact-x");
+
+        assert_eq!(result.committed.len(), 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }
