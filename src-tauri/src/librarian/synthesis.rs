@@ -10,7 +10,7 @@ use crate::librarian::{assemble_librarian_context, build_structural_context, Chu
 use crate::search::{bytes_to_f32, cosine_similarity};
 use anyhow::{Context, Result};
 use rand::RngCore;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -131,14 +131,19 @@ struct HttpLlmCompleter {
     endpoint_url: String,
     api_key: Option<String>,
     model_name: String,
+    /// Per-request timeout in seconds (`generation.timeout_secs`, default 600).
+    timeout_secs: u64,
 }
+
+/// Historical default; overridable via `generation.timeout_secs` in brain config.
+const DEFAULT_LLM_TIMEOUT_SECS: u64 = 600;
 
 impl LlmCompleter for HttpLlmCompleter {
     fn complete(&self, system: &str, user: &str) -> Result<String> {
         let client = reqwest::blocking::Client::builder()
             // Reasoning models on OpenRouter can take minutes per synthesis call;
             // reqwest's default 30s would drop long documents.
-            .timeout(std::time::Duration::from_secs(600))
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
         let mut body = serde_json::json!({
@@ -196,6 +201,10 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
     let brain_dir_str = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir_str);
     let llm_config = read_config(brain_path);
+    let timeout_secs = llm_config
+        .generation
+        .timeout_secs
+        .unwrap_or(DEFAULT_LLM_TIMEOUT_SECS);
     let completer: Box<dyn LlmCompleter> = match &llm_config.generation.provider {
         GenerationProviderKind::Unconfigured => return Ok(None),
         GenerationProviderKind::Sidecar => {
@@ -206,6 +215,7 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
                 endpoint_url: format!("{base}/v1/chat/completions"),
                 api_key: None,
                 model_name: choose_sidecar_model_name(&llm_config, model),
+                timeout_secs,
             })
         }
         GenerationProviderKind::External => {
@@ -224,6 +234,7 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
                     .model_name
                     .clone()
                     .unwrap_or_else(|| model.to_string()),
+                timeout_secs,
             })
         }
     };
@@ -872,6 +883,7 @@ pub fn run_synthesis(
     mode: SynthesisMode,
     auto_approve: bool,
     vault_root: Option<&Path>,
+    force: bool,
 ) -> Result<()> {
     let completer = build_llm_completer(model)?.context("LLM provider not configured")?;
     run_synthesis_with_completer(
@@ -884,7 +896,21 @@ pub fn run_synthesis(
         auto_approve,
         vault_root,
         completer.as_ref(),
+        force,
     )
+}
+
+/// Mark a document as synthesized: watermark its current content hash and
+/// the active model that produced the proposal. One atomic UPDATE, issued
+/// only after proposals were successfully inserted — a synthesis failure
+/// (LLM error, validation failure) leaves the watermark unset so the doc is
+/// retried on the next run.
+fn write_synth_watermark(conn: &Connection, doc_id: i64, model: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE documents SET synth_hash = hash, synth_model = ?2, synth_at = unixepoch() WHERE id = ?1",
+        rusqlite::params![doc_id, model],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn run_synthesis_with_completer(
@@ -897,7 +923,24 @@ pub(crate) fn run_synthesis_with_completer(
     auto_approve: bool,
     vault_root: Option<&Path>,
     completer: &dyn LlmCompleter,
+    force: bool,
 ) -> Result<()> {
+    if !force {
+        // Watermark gate: skip docs whose content hash and active model
+        // match the last successful synthesis. No LLM call is made.
+        let row: Option<(String, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT hash, synth_hash, synth_model FROM documents WHERE id = ?1",
+                [trigger_doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((hash, synth_hash, synth_model)) = row {
+            if super::is_doc_clean(synth_hash.as_deref(), synth_model.as_deref(), &hash, model) {
+                return Ok(());
+            }
+        }
+    }
     let chunk_ids: Vec<i64> = source_chunks.iter().map(|c| c.id).collect();
     let mean_embedding = mean_chunk_embedding(conn, &chunk_ids)?;
     let candidates =
@@ -937,6 +980,7 @@ pub(crate) fn run_synthesis_with_completer(
         };
 
     if validated.is_empty() {
+        write_synth_watermark(conn, trigger_doc_id, model)?;
         return Ok(());
     }
 
@@ -963,6 +1007,8 @@ pub(crate) fn run_synthesis_with_completer(
         }
     }
 
+    write_synth_watermark(conn, trigger_doc_id, model)?;
+
     Ok(())
 }
 
@@ -973,6 +1019,7 @@ mod tests {
     use crate::db::connection::open_in_memory;
     use crate::db::proposals::{list_proposals, ProposalFilter};
     use crate::db::queries::{insert_chunk, upsert_document};
+    use std::sync::atomic::Ordering;
 
     struct MockCompleter {
         responses: Vec<String>,
@@ -1224,6 +1271,7 @@ mod tests {
             false,
             Some(tmp.path()),
             &mock,
+            false,
         );
         assert!(result.is_ok());
         let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
@@ -1284,6 +1332,7 @@ mod tests {
             false,
             None,
             &mock,
+            false,
         )
         .unwrap();
 
@@ -1364,6 +1413,7 @@ mod tests {
             true,
             None,
             &mock,
+            false,
         )
         .unwrap();
 
@@ -1378,5 +1428,247 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fact_count, 1);
+    }
+
+    fn set_watermark(conn: &Connection, doc_id: i64, synth_hash: &str, synth_model: &str) {
+        conn.execute(
+            "UPDATE documents SET synth_hash = ?2, synth_model = ?3, synth_at = 100 WHERE id = ?1",
+            params![doc_id, synth_hash, synth_model],
+        )
+        .unwrap();
+    }
+
+    fn watermark_of(conn: &Connection, doc_id: i64) -> (Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT synth_hash, synth_model FROM documents WHERE id = ?1",
+            [doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn clean_doc_skipped_with_zero_completer_calls() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "content about Alpha project",
+        );
+        set_watermark(&conn, doc_id, "hash", "test-model");
+
+        let mock = MockCompleter::new(vec![]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "content about Alpha project".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            "test-model",
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mock.call.load(Ordering::SeqCst),
+            0,
+            "clean doc must not hit the LLM"
+        );
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn changed_doc_resynthesized_and_watermark_written() {
+        let mut conn = open_in_memory().unwrap();
+        // Stale watermark: content changed since last synthesis.
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Alpha project details here",
+        );
+        set_watermark(&conn, doc_id, "old-hash", "test-model");
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Doc adds a fact.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "target_id": null,
+                    "body": "Alpha uses Rust.",
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C1"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            "test-model",
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(mock.call.load(Ordering::SeqCst), 1);
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert_eq!(queue.len(), 1);
+        let (synth_hash, synth_model) = watermark_of(&conn, doc_id);
+        assert_eq!(synth_hash.as_deref(), Some("hash"));
+        assert_eq!(synth_model.as_deref(), Some("test-model"));
+        let synth_at: Option<i64> = conn
+            .query_row(
+                "SELECT synth_at FROM documents WHERE id = ?1",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(synth_at.is_some(), "synth_at must be stamped on success");
+    }
+
+    #[test]
+    fn failed_synthesis_leaves_watermark_unset() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "content about Alpha project",
+        );
+
+        let mock = MockCompleter::new(vec!["not json".into(); 6]);
+        let tmp = tempfile::tempdir().unwrap();
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "content about Alpha project".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            "test-model",
+            SynthesisMode::Synthesize,
+            false,
+            Some(tmp.path()),
+            &mock,
+            false,
+        )
+        .unwrap();
+
+        let (synth_hash, _) = watermark_of(&conn, doc_id);
+        assert!(
+            synth_hash.is_none(),
+            "failed synthesis must not stamp a watermark (doc retried next run)"
+        );
+    }
+
+    #[test]
+    fn force_overrides_watermark_gate() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Alpha project details here",
+        );
+        set_watermark(&conn, doc_id, "hash", "test-model"); // clean
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Doc adds a fact.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "target_id": null,
+                    "body": "Alpha uses Rust.",
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C1"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            "test-model",
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            mock.call.load(Ordering::SeqCst) >= 1,
+            "--force must bypass the watermark gate"
+        );
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert_eq!(queue.len(), 1);
     }
 }

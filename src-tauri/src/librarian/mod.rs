@@ -184,7 +184,27 @@ fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
     ("summarize".to_string(), false)
 }
 
-pub fn generate_summary(conn: &mut Connection, source_path: &str, model: &str) -> Result<()> {
+/// Watermark gate: a document is "clean" when its last successful synthesis
+/// ran over the current content hash with the current active model. Such a
+/// doc is skipped by synthesis (unless `--force`). Deliberately ignores
+/// `ingest_runs` — the Task 1 backfill marks pre-watermark indexed docs as
+/// clean via `synth_model = 'pre-watermark'`, which never matches an active
+/// model name, so those stay dirty until re-synthesized.
+pub fn is_doc_clean(
+    synth_hash: Option<&str>,
+    synth_model: Option<&str>,
+    doc_hash: &str,
+    active_model: &str,
+) -> bool {
+    synth_hash == Some(doc_hash) && synth_model == Some(active_model)
+}
+
+pub fn generate_summary(
+    conn: &mut Connection,
+    source_path: &str,
+    model: &str,
+    force: bool,
+) -> Result<()> {
     let (mode, auto_approve) = get_folder_mode(conn, source_path);
 
     if mode == "index" {
@@ -275,6 +295,7 @@ pub fn generate_summary(conn: &mut Connection, source_path: &str, model: &str) -
         synthesis_mode,
         auto_approve,
         vault_root,
+        force,
     )
 }
 
@@ -286,7 +307,12 @@ mod tests {
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
         let mut conn = open_in_memory().unwrap();
-        let result = generate_summary(&mut conn, "/vault/documents/nonexistent.md", "llama3.2:1b");
+        let result = generate_summary(
+            &mut conn,
+            "/vault/documents/nonexistent.md",
+            "llama3.2:1b",
+            false,
+        );
         assert!(result.is_ok());
     }
 
@@ -297,7 +323,7 @@ mod tests {
             "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('/vault/documents', 'index', 0)",
             [],
         ).unwrap();
-        let result = generate_summary(&mut conn, "/vault/documents/note.md", "llama3.2:1b");
+        let result = generate_summary(&mut conn, "/vault/documents/note.md", "llama3.2:1b", false);
         assert!(result.is_ok());
     }
 
@@ -307,6 +333,26 @@ mod tests {
         let (mode, auto) = get_folder_mode(&conn, "/vault/documents/note.md");
         assert_eq!(mode, "summarize");
         assert!(!auto);
+    }
+
+    #[test]
+    fn test_is_doc_clean() {
+        // Clean: watermark matches both content hash and active model.
+        assert!(is_doc_clean(Some("h1"), Some("m1"), "h1", "m1"));
+        // Content changed since last synthesis.
+        assert!(!is_doc_clean(Some("old"), Some("m1"), "h1", "m1"));
+        // Model changed since last synthesis.
+        assert!(!is_doc_clean(Some("h1"), Some("old-model"), "h1", "m1"));
+        // Never synthesized.
+        assert!(!is_doc_clean(None, None, "h1", "m1"));
+        // Task 1 backfill marks pre-watermark docs clean via
+        // synth_model='pre-watermark', which never equals an active model.
+        assert!(!is_doc_clean(
+            Some("h1"),
+            Some("pre-watermark"),
+            "h1",
+            "llama3.2:3b"
+        ));
     }
 
     #[test]

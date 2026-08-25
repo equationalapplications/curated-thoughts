@@ -100,7 +100,7 @@ fn index_mode_skips_librarian_without_calling_ollama() {
     ).unwrap();
 
     // Should return Ok without calling Ollama (mode=index returns early)
-    let result = generate_summary(&mut conn, source_path, "test-model");
+    let result = generate_summary(&mut conn, source_path, "test-model", false);
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);
 
     // No proposal should have been created
@@ -178,6 +178,7 @@ fn auto_approve_commits_proposal_via_resolve_path() {
                 model_name: Some("test-model".to_string()),
                 external_url: Some(server.url()),
                 api_key: None,
+                timeout_secs: None,
             },
             embedding: Default::default(),
         },
@@ -185,7 +186,7 @@ fn auto_approve_commits_proposal_via_resolve_path() {
     .unwrap();
 
     let mut conn = db_conn;
-    let result = generate_summary(&mut conn, &source_str, "test-model");
+    let result = generate_summary(&mut conn, &source_str, "test-model", false);
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);
 
     // Proposal auto-approved — no pending queue
