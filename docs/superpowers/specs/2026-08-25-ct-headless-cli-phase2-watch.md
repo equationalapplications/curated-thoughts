@@ -70,10 +70,16 @@ Delete events skip step 4 (file doesn't exist on disk). They use the path string
 
 `tools/src/cli_common.rs` becomes a thin re-export shim (`pub use {paths, queries, cmds, write};`) so the existing `use curated_thoughts_tools::cli_common::X` paths in `tools/src/bin/*` keep compiling. The re-exports can be removed in a follow-up PR once all consumers migrate.
 
-### 6. Watcher code relocation
+### 6. Watcher code location
 
-- New `tools/src/watcher.rs`: `VaultEvent`, `WatcherHandle`, `spawn_vault_watcher`, `VaultLock`. Body moved verbatim from `src-tauri/src/watcher/fs_watcher.rs`. The two existing `#[test]`s move with it so coverage is unchanged.
-- `src-tauri/src/watcher/mod.rs` becomes `pub use curated_thoughts_tools::watcher::*;` — single line. The `fs_watcher.rs` file is deleted.
+**Direction (corrected from original draft):** the watcher code stays in `src-tauri/src/watcher/fs_watcher.rs`. `tools/src/watcher.rs` becomes a thin re-export of `tauri_app_lib::watcher::*` so the `ct` binary can call the watcher without duplication.
+
+**Why not the original "move it to tools" plan:** `tools/Cargo.toml` already declares `tauri_app_lib = { path = "../src-tauri", package = "curated-thoughts" }` (tools depends on src-tauri). If we also moved the watcher to `tools/` and tried to make src-tauri re-export `curated_thoughts_tools::watcher::*`, we'd need a path dep in the opposite direction, which Cargo rejects as a cyclic package dependency. The implementer who first hit this BLOCKED correctly (the cycle is real and unrecoverable without a workspace migration, which is out of scope for this PR). Therefore:
+
+- `src-tauri/src/watcher/fs_watcher.rs` **keeps the canonical watcher** (`VaultEvent`, `WatcherHandle`, `spawn_vault_watcher`). The two existing `#[test]`s stay. The file gets extended in-place with the new `VaultLock` (since src-tauri is where desktop-mode locking lives).
+- `src-tauri/src/watcher/mod.rs` keeps its current shape (`pub mod fs_watcher; pub use fs_watcher::*;`). **No change.**
+- `tools/src/watcher.rs` becomes `pub use tauri_app_lib::watcher::*;` — a thin re-export. No logic lives here.
+- `tools/src/lock.rs` becomes a small standalone `VaultLock` (uses `fs4::FileExt::lock_exclusive`) used by `ct watch` when no desktop is running. ~30 LOC + 2 unit tests. This duplicates the equivalent ~30 LOC in `src-tauri/src/watcher/fs_watcher.rs`; the duplication is forced by the cargo dep direction. **Phase-3 workspace migration can collapse this**; explicitly out of scope here.
 - `src-tauri/src/lib.rs:798` swaps its `pipeline_tx.try_send(...)` body for `cmds::enqueue_vault_event(&conn, event.kind(), &path)`. The heal tick for Delete events stays because the desktop's heal scheduler is app-state cleanup that doesn't apply to the headless case.
 
 ### 7. Contract for `spawn_vault_watcher`
@@ -119,7 +125,8 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 
 | File | Action |
 |---|---|
-| `tools/src/watcher.rs` | NEW |
+| `tools/src/watcher.rs` | NEW (thin re-export) | `pub use tauri_app_lib::watcher::*;` — no logic, no tests. |
+| `tools/src/lock.rs` | NEW | `VaultLock` (uses `fs4::FileExt::lock_exclusive`) — thin standalone wrapper, ~30 LOC + 2 unit tests. Duplicates ~30 LOC in `src-tauri/src/watcher/fs_watcher.rs`; forced by cargo dep direction. |
 | `tools/src/paths.rs` | NEW (split) |
 | `tools/src/queries.rs` | NEW (split) |
 | `tools/src/cmds.rs` | NEW (split) |
@@ -127,8 +134,8 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 | `tools/src/cli_common.rs` | Becomes thin re-export shim |
 | `tools/src/bin/ct.rs` | Add `Watch` subcommand; import path update |
 | `tools/Cargo.toml` | Add `fs4 = "0.7"` (verify latest stable at impl time) |
-| `src-tauri/src/watcher/mod.rs` | Becomes `pub use curated_thoughts_tools::watcher::*;` |
-| `src-tauri/src/watcher/fs_watcher.rs` | DELETED |
+| `src-tauri/src/watcher/mod.rs` | **No change** — keeps `pub mod fs_watcher; pub use fs_watcher::*;` |
+| `src-tauri/src/watcher/fs_watcher.rs` | Extends in place with `VaultLock` + 2 unit tests (`vault_lock_blocks_second_acquire`, `vault_lock_released_on_drop`). Existing watcher code unchanged. |
 | `src-tauri/src/lib.rs:741-824` | `reconcile_vault` (line 786) + watcher callback (line 798) both swap to `enqueue_vault_event`; lock acquisition at `switch_vault`; `WatcherHandle::stop()` releases lock first |
 | `src-tauri/Cargo.toml` | Add `fs4 = "0.7"` |
 | `docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md` | THIS SPEC |
@@ -153,11 +160,12 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 
 ## Test plan
 
-1. **Unit tests in `tools/src/watcher.rs`** (moved from `fs_watcher.rs`): `test_watcher_detects_new_file`, `test_watcher_detects_deleted_file`, plus two new tests:
-   - `test_watcher_delivers_absolute_paths` — asserts every event path is `is_absolute()`.
-   - `test_lock_blocks_second_instance` — acquires lock in main thread, spawns `ct watch` as subprocess, asserts exit code 2 and stderr message.
+1. **Unit tests in `src-tauri/src/watcher/fs_watcher.rs`** (unchanged location): `test_watcher_detects_new_file`, `test_watcher_detects_deleted_file`, plus two new tests for `VaultLock`:
+   - `vault_lock_blocks_second_acquire` — acquire lock in main test thread, attempt second acquire, assert conflict error.
+   - `vault_lock_released_on_drop` — acquire, drop, second acquire succeeds.
+2. **Unit tests in `tools/src/lock.rs`**: same two as above (`vault_lock_blocks_second_acquire`, `vault_lock_released_on_drop`) — `ct watch` exercises the duplicate type, and coverage parity ensures both paths work.
 
-2. **Unit tests in `tools/src/cmds.rs`**: `enqueue_vault_event` covered for:
+3. **Unit tests in `tools/src/cmds.rs`**: `enqueue_vault_event` covered for:
    - Add on new path → row created with `status='pending'`, hash matches.
    - Modify on existing indexed row with different hash → status flips to `'pending'`.
    - Modify on existing indexed row with same hash → no-op.
@@ -165,9 +173,9 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
    - Delete on missing row → no error.
    - Path outside vault root → no DB write (logged warning).
 
-3. **Integration test:** temp-dir vault fixture → `ct ingest` (seeded) → `ct watch --once --json` (60s) → modify a file → assert event delivered to stdout JSON; assert DB row has `status='pending'` and matching hash.
+4. **Integration test:** temp-dir vault fixture → `ct ingest` (seeded) → `ct watch --once --json` (60s) → modify a file → assert event delivered to stdout JSON; assert DB row has `status='pending'` and matching hash.
 
-4. **Manual smoke against live vault:**
+5. **Manual smoke against live vault:**
    - Stop desktop app.
    - Run `ct ingest` (initial drain — should pick up the 3 missing memory files).
    - Run `ct watch --foreground` in one terminal.
@@ -176,7 +184,7 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
    - `ct status --json` shows the row `status='pending'` (or `='indexed'` if a consumer also ran).
    - Ctrl-C: clean shutdown, lock released.
 
-5. **Full suite green:** `cargo test --lib (tools)` ≥ 7 passing, `cargo build (tools)` clean, `cargo check --tests --features test-utils (src-tauri)` clean. Conventional commits `feat(tools): add ct watch + split cli_common` + `refactor(tools): split cli_common into paths/queries/cmds/write` + `fix(tauri): replace in-process pipeline with DB-backed enqueue` + `chore(deps): add fs4 cross-platform file lock`.
+6. **Full suite green:** `cargo test --lib (tools)` ≥ 7 passing, `cargo build (tools)` clean, `cargo check --tests --features test-utils (src-tauri)` clean. Conventional commits `feat(tools): add ct watch + split cli_common` + `refactor(tools): split cli_common into paths/queries/cmds/write` + `fix(tauri): replace in-process pipeline with DB-backed enqueue` + `chore(deps): add fs4 cross-platform file lock`.
 
 ## Risks
 
@@ -185,7 +193,7 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 - **Watcher deliverer path contracts change in a future `notify` upgrade.** Mitigation: `test_watcher_delivers_absolute_paths` test catches the regression.
 - **macOS FSEvents coalescing semantics differ from Linux inotify.** Mitigation: not a correctness issue (coalescing is desirable); just behavioral. Documented in non-goals.
 - **Two simultaneous watchers** — explicitly unsupported, but the lock makes the failure mode clean. Documented in `ct watch` startup banner.
-- **Vault-switch lock release.** `lib.rs:827-845` swaps out a `WatcherHandle` when `switch_vault` reconfigures. The lock release must happen *before* the old handle drops or the new `switch_vault` call will deadlock on its own lock acquisition. Mitigation: `WatcherHandle::stop()` releases the lock as its first action (before joining the watcher thread). Spec'd as a contract on `WatcherHandle::stop()` — implementation detail of `tools/src/watcher.rs`.
+- **Cyclic-package dependency between `tools` and `src-tauri`** — disallows moving the watcher or VaultLock to `tools/` as a primary home. Mitigation: phase-2 keeps the watcher in `src-tauri/` and uses a thin re-export from `tools/`; `VaultLock` is duplicated ~30 LOC between the two crates (workspace migration in phase-3 can collapse this).
 - **The desktop's `reconcile_vault` (`lib.rs:741-789`) still uses `pipeline_tx.try_send`.** Mitigation: also swap to `enqueue_vault_event` in this same PR (small additional change at `lib.rs:786`). This is intentional scope inclusion — leaving it on the in-memory channel while the watcher moves to DB-backed enqueue would create two divergent paths to the same DB. One source of truth for vault→DB writes.
 
 ## Sequencing
