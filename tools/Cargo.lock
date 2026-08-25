@@ -1116,6 +1116,8 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "temp-env",
+ "tempfile",
  "tokio",
  "walkdir",
 ]
@@ -6552,6 +6554,15 @@ dependencies = [
  "thiserror 2.0.18",
  "windows",
  "windows-version",
+]
+
+[[package]]
+name = "temp-env"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
+dependencies = [
+ "parking_lot",
 ]
 
 [[package]]
