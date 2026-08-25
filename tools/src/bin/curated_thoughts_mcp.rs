@@ -103,9 +103,113 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>
         .map_err(|_| rmcp::ErrorData::internal_error("database mutex poisoned", None))
 }
 
+/// Coerce a stored `updated_at` cell into an integer epoch ranking key.
+///
+/// The live schema declares `updated_at INTEGER`, but desktop-app writes and
+/// older sidecars may have produced TEXT-form values; NULL is also tolerated.
+/// Any value that cannot be coerced ranks as 0 — acceptable for a sort key.
+fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
+    match value {
+        Some(rusqlite::types::Value::Integer(i)) => i,
+        Some(rusqlite::types::Value::Text(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Wisdom layer: llm_wiki_entries is the librarian's synthesis destination. It
+/// has no embeddings populated yet, so rank entries by title/body keyword
+/// overlap with the query terms (BM25-lite); when the table is empty this leg
+/// returns [] without error. Candidates are aggregated across all query terms,
+/// ranked by term overlap then confidence/updated_at, and truncated to
+/// limit_wiki only at the end.
+fn rank_wiki_entries(
+    conn: &Connection,
+    query: &str,
+    limit_wiki: usize,
+) -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
+    // Keep terms of any length >= 2; short technical terms ("sql", "rag")
+    // are often the most meaningful.
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_id, title, body, source_ref, confidence,
+                    updated_at
+             FROM llm_wiki_entries
+             WHERE deleted_at IS NULL
+               AND (title LIKE '%' || ?1 || '%'
+                    OR body LIKE '%' || ?1 || '%')",
+        )
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("prepare wiki query: {e}"), None))?;
+    // id -> (overlap_count, json_value, confidence_rank, updated_at)
+    use std::collections::HashMap;
+    let mut candidates: HashMap<String, (usize, serde_json::Value, String, i64)> = HashMap::new();
+    for term in &terms {
+        let rows = stmt
+            .query_map(rusqlite::params![term], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,                         // id (TEXT PK)
+                    row.get::<_, Option<String>>(1)?,                 // entity_id
+                    row.get::<_, Option<String>>(2)?,                 // title
+                    row.get::<_, Option<String>>(3)?,                 // body
+                    row.get::<_, Option<String>>(4)?,                 // source_ref
+                    row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
+                    row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
+                ))
+            })
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("execute wiki query: {e}"), None)
+            })?;
+        for row in rows {
+            // A single malformed row must never abort the whole tool call:
+            // log it and skip.
+            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
+                Ok(row) => row,
+                Err(e) => {
+                    eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
+                    continue;
+                }
+            };
+            let updated_at = coerce_updated_at(updated_at_raw);
+            let entry = candidates.entry(id.clone()).or_insert_with(|| {
+                let v = serde_json::json!({
+                    "id": id,
+                    "entity_id": entity_id,
+                    "title": title,
+                    "text": text,
+                    "source_ref": source_ref,
+                    "confidence": confidence,
+                });
+                // Higher confidence string sorts later; rank key is
+                // inverted for descending sort convenience.
+                (0, v, confidence.clone().unwrap_or_default(), updated_at)
+            });
+            entry.0 += 1; // one overlap point per matching term
+        }
+    }
+    let mut ranked: Vec<_> = candidates.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1 .0
+            .cmp(&a.1 .0) // term overlap desc
+            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+            .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
+    });
+    Ok(ranked
+        .into_iter()
+        .take(limit_wiki)
+        .map(|(_, (_, v, _, _))| v)
+        .collect())
+}
+
 #[tool_router(server_handler)]
 impl VaultMcpServer {
-
     /// Best-effort agent-access logging via the dedicated read-write connection.
     fn log_access(&self, tool: &str, entity_id: Option<&str>) {
         if let Ok(guard) = self.log_conn.lock() {
@@ -235,100 +339,7 @@ impl VaultMcpServer {
                 .collect())
         };
 
-        // Wisdom layer: llm_wiki_entries is the librarian's synthesis
-        // destination. It has no embeddings populated yet, so rank entries by
-        // title/body keyword overlap with the query terms (BM25-lite); when
-        // the table is empty this leg returns [] without error. Candidates
-        // are aggregated across all query terms, ranked by term overlap then
-        // confidence/updated_at, and truncated to limit_wiki only at the end.
-        let wiki_entries: Vec<serde_json::Value> = {
-            // Keep terms of any length >= 2; short technical terms ("sql",
-            // "rag") are often the most meaningful.
-            let terms: Vec<String> = query
-                .split_whitespace()
-                .filter(|t| t.len() >= 2)
-                .map(|t| t.to_lowercase())
-                .collect();
-            if terms.is_empty() {
-                Vec::new()
-            } else {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT id, entity_id, title, body, source_ref, confidence,
-                                updated_at
-                         FROM llm_wiki_entries
-                         WHERE deleted_at IS NULL
-                           AND (title LIKE '%' || ?1 || '%'
-                                OR body LIKE '%' || ?1 || '%')",
-                    )
-                    .map_err(|e| {
-                        rmcp::ErrorData::internal_error(format!("prepare wiki query: {e}"), None)
-                    })?;
-                // id -> (overlap_count, json_value, confidence_rank, updated_at)
-                use std::collections::HashMap;
-                let mut candidates: HashMap<String, (usize, serde_json::Value, String, String)> =
-                    HashMap::new();
-                for term in &terms {
-                    let rows = stmt
-                        .query_map(rusqlite::params![term], |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,          // id (TEXT PK)
-                                row.get::<_, Option<String>>(1)?,  // entity_id
-                                row.get::<_, Option<String>>(2)?,  // title
-                                row.get::<_, Option<String>>(3)?,  // body
-                                row.get::<_, Option<String>>(4)?,  // source_ref
-                                row.get::<_, Option<String>>(5)?,  // confidence (TEXT)
-                                row.get::<_, Option<String>>(6)?,  // updated_at
-                            ))
-                        })
-                        .map_err(|e| {
-                            rmcp::ErrorData::internal_error(
-                                format!("execute wiki query: {e}"),
-                                None,
-                            )
-                        })?;
-                    for row in rows {
-                        let (id, entity_id, title, text, source_ref, confidence, updated_at) =
-                            row.map_err(|e| {
-                                rmcp::ErrorData::internal_error(
-                                    format!("read wiki row: {e}"),
-                                    None,
-                                )
-                            })?;
-                        let entry = candidates.entry(id.clone()).or_insert_with(|| {
-                            let v = serde_json::json!({
-                                "id": id,
-                                "entity_id": entity_id,
-                                "title": title,
-                                "text": text,
-                                "source_ref": source_ref,
-                                "confidence": confidence,
-                            });
-                            // Higher confidence string sorts later; rank key is
-                            // inverted for descending sort convenience.
-                            (
-                                0,
-                                v,
-                                confidence.clone().unwrap_or_default(),
-                                updated_at.clone().unwrap_or_default(),
-                            )
-                        });
-                        entry.0 += 1; // one overlap point per matching term
-                    }
-                }
-                let mut ranked: Vec<_> = candidates.into_iter().collect();
-                ranked.sort_by(|a, b| {
-                    b.1 .0.cmp(&a.1 .0) // term overlap desc
-                        .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
-                        .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc
-                });
-                ranked
-                    .into_iter()
-                    .take(limit_wiki)
-                    .map(|(_, (_, v, _, _))| v)
-                    .collect()
-            }
-        };
+        let wiki_entries = rank_wiki_entries(&conn, &query, limit_wiki)?;
 
         // Code chunks: real chunker strategies (ast_*). Vectors live in the
         // separate embeddings table.
@@ -574,10 +585,7 @@ impl VaultMcpServer {
                 |r| r.get(0),
             )
             .map_err(|_| {
-                rmcp::ErrorData::internal_error(
-                    format!("no chunk found with symbol '{sym}'"),
-                    None,
-                )
+                rmcp::ErrorData::internal_error(format!("no chunk found with symbol '{sym}'"), None)
             })?
         } else {
             return Err(rmcp::ErrorData::invalid_params(
@@ -609,7 +617,9 @@ impl VaultMcpServer {
         }
         let neighbors =
             tauri_app_lib::graph::get_neighbors(&conn, root_chunk_id, &entity_id, hops, dir)
-                .map_err(|e| rmcp::ErrorData::internal_error(format!("traversal failed: {e}"), None))?;
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("traversal failed: {e}"), None)
+                })?;
 
         // Hard cap BEFORE enrichment: hub symbols at high depth can return
         // thousands of rows; don't run per-row lookups on all of them while
@@ -774,9 +784,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("curated-thoughts-mcp: agent-log db unavailable ({e}); logging disabled");
         retrieval::open_brain_readonly(&p.db_path).expect("readonly fallback")
     });
-// Tolerate brief write contention from the desktop app / librarian instead of
-// dropping audit rows (best-effort: failures still never fail a tool call).
-let _ = log_conn.busy_timeout(std::time::Duration::from_millis(5000));
+    // Tolerate brief write contention from the desktop app / librarian instead of
+    // dropping audit rows (best-effort: failures still never fail a tool call).
+    let _ = log_conn.busy_timeout(std::time::Duration::from_millis(5000));
 
     fn configured_database_url() -> Option<String> {
         let db_url = std::env::var("DATABASE_URL").ok()?;
@@ -813,4 +823,71 @@ let _ = log_conn.busy_timeout(std::time::Duration::from_millis(5000));
         .await
         .map_err(|e| anyhow::anyhow!("MCP server task ended with error: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fixture table matching llm_wiki_entries' live shape but WITHOUT the
+    /// NOT NULL constraint on updated_at, so we can exercise the defensive
+    /// read path against mixed/legacy stored types (INTEGER, TEXT-form, NULL).
+    fn open_fixture_db() -> Connection {
+        let conn = tauri_app_lib::db::connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "DROP TABLE llm_wiki_entries;
+             CREATE TABLE llm_wiki_entries (
+               id TEXT PRIMARY KEY,
+               entity_id TEXT NOT NULL,
+               title TEXT NOT NULL,
+               body TEXT NOT NULL,
+               source_ref TEXT,
+               confidence TEXT,
+               updated_at,
+               deleted_at INTEGER
+             );",
+        )
+        .expect("recreate permissive fixture table");
+        conn
+    }
+
+    fn insert_entry(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        updated_at_sql: &str,
+        confidence: &str,
+    ) {
+        conn.execute(
+            &format!(
+                "INSERT INTO llm_wiki_entries
+                     (id, entity_id, title, body, confidence, updated_at)
+                 VALUES ('{id}', 'ent-{id}', '{title}', 'farmhouse annual report body',
+                         '{confidence}', {updated_at_sql})"
+            ),
+            [],
+        )
+        .expect("insert fixture row");
+    }
+
+    #[test]
+    fn recall_wiki_tolerates_mixed_updated_at_types() {
+        let conn = open_fixture_db();
+        insert_entry(&conn, "newest", "Farmhouse Notes", "1756000000", "inferred"); // INTEGER epoch
+                                                                                    // TEXT-form value from an older writer: unparseable -> coerces to 0,
+                                                                                    // but its higher confidence keeps the expected order deterministic.
+        insert_entry(&conn, "middle", "Farmhouse Ledger", "'[PHONE]'", "verified");
+        insert_entry(&conn, "unknown", "Farmhouse Chores", "NULL", "inferred"); // NULL
+
+        let ranked = rank_wiki_entries(&conn, "farmhouse", 5).expect("ranking must not fail");
+        assert_eq!(
+            ranked.len(),
+            3,
+            "all rows must be returned despite mixed types"
+        );
+        let ids: Vec<&str> = ranked.iter().map(|v| v["id"].as_str().unwrap()).collect();
+        // Ordered desc by NUMERIC updated_at (not lexicographic); ties broken
+        // by confidence ('certain' first), NULL ranks as 0.
+        assert_eq!(ids, vec!["middle", "newest", "unknown"]);
+    }
 }
