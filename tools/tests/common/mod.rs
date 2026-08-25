@@ -57,6 +57,46 @@ pub fn seed_vault(brain_path: &std::path::Path) -> i64 {
     chunk_id
 }
 
+/// Open the (existing) brain.db schema at `dir` by going through the real
+/// AppDb migration path, so seeded rows always match production DDL.
+pub fn init_brain_db(brain_dir: &std::path::Path) {
+    fs::write(brain_dir.join("config.json"), b"{}\n").unwrap();
+    let paths = retrieval::resolve_brain_paths();
+    let _db = AppDb::open(&paths.db_path).expect("writable brain db open");
+}
+
+/// Insert a pending `new_entity` proposal with `item_count` items directly via
+/// SQL matching the real DDL (`src-tauri/src/db/okf_ddl.rs`). Requires
+/// `init_brain_db` to have run first.
+pub fn insert_pending_proposal(
+    brain_dir: &std::path::Path,
+    id: &str,
+    item_count: usize,
+    created_at: i64,
+) {
+    let conn = rusqlite::Connection::open(brain_dir.join("brain.db")).expect("open brain.db rw");
+    conn.execute(
+        "INSERT INTO curated_proposals (
+            id, kind, entity_id, proposed_name, proposed_type, reasoning, model, status, created_at
+         ) VALUES (?1, 'new_entity', NULL, ?2, NULL, NULL, 'fixture-model', 'pending', ?3)",
+        rusqlite::params![id, format!("Entity {id}"), created_at],
+    )
+    .unwrap();
+    for i in 0..item_count {
+        conn.execute(
+            "INSERT INTO curated_proposal_items (
+                id, proposal_id, item_type, target_id, payload, evidence, status
+             ) VALUES (?1, ?2, 'fact_add', NULL, ?3, '[]', 'pending')",
+            rusqlite::params![
+                format!("{id}-item-{i}"),
+                id,
+                format!(r#"{{"value":"{i}"}}"#)
+            ],
+        )
+        .unwrap();
+    }
+}
+
 /// Run `f` with a freshly seeded temp brain as CURATED_BRAIN_DIR and stub
 /// embeddings enabled. `run_ct` must be used inside `f`.
 pub fn with_seeded_brain<F: FnOnce()>(f: F) {
