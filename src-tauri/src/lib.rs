@@ -25,7 +25,7 @@ mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
 pub mod vault;
-mod watcher;
+pub mod watcher;
 pub mod wiki_graph;
 
 use crate::inference::{
