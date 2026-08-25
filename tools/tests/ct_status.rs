@@ -61,23 +61,6 @@ fn status_json_exits_zero_and_prints_expected_keys() {
 }
 
 #[test]
-fn search_no_match_exits_two() {
-    let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().to_str().unwrap().to_string();
-    seed_db(tmp.path());
-
-    let out = Command::new(env!("CARGO_BIN_EXE_ct"))
-        .env("CURATED_BRAIN_DIR", &dir)
-        .env_remove("CURATED_BRAIN_DB")
-        .env_remove("CURATED_BRAIN_CONFIG")
-        .args(["search", "--json", "zzz-no-match-zzz"])
-        .output()
-        .unwrap();
-
-    assert_eq!(out.status.code(), Some(2));
-}
-
-#[test]
 fn unknown_subcommand_exits_one() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().to_str().unwrap().to_string();

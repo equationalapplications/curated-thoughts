@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use curated_thoughts_tools::cli_common::{self, print_json, Brain, EXIT_NO_RESULTS};
+use curated_thoughts_tools::cli_common::{self, print_json};
 use serde_json::json;
 
 /// `ct` — headless CLI for Curated Thoughts brains.
@@ -25,15 +25,19 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Recall context for a prompt.
+    /// Recall context for a prompt (chunks + wiki entries).
     Recall {
         query: String,
+        #[arg(long, default_value_t = 5)]
+        k: usize,
         #[arg(long)]
         json: bool,
     },
-    /// Search code chunks.
+    /// Search code chunks (ast strategies only).
     Code {
         query: String,
+        #[arg(long, default_value_t = 5)]
+        k: usize,
         #[arg(long)]
         json: bool,
     },
@@ -123,7 +127,9 @@ fn main() {
 fn run(cmd: Cmd) -> Result<i32> {
     match cmd {
         Cmd::Status { json } => status(json),
-        Cmd::Search { query, k, json } => search(&query, k, json),
+        Cmd::Search { query, k, json } => cli_common::search_cmd(&query, k, json),
+        Cmd::Recall { query, k, json } => cli_common::recall_cmd(&query, k, json),
+        Cmd::Code { query, k, json } => cli_common::code_cmd(&query, k, json),
         other => {
             bail!("subcommand not implemented yet: {}", describe(&other));
         }
@@ -202,38 +208,6 @@ fn status(json_mode: bool) -> Result<i32> {
                 .map(|(id, _, o)| format!("#{id} ({o})"))
                 .unwrap_or_else(|| "never".into())
         );
-    }
-    Ok(0)
-}
-
-/// Placeholder search used by the exit-code contract until Task 4 wires the
-/// real semantic search: substring scan over chunk_text.
-fn search(query: &str, k: usize, json_mode: bool) -> Result<i32> {
-    let Brain { paths } = cli_common::resolve()?;
-    let conn = cli_common::open_ro(&Brain { paths })?;
-    let mut stmt = conn.prepare(
-        "SELECT c.id, d.path, c.chunk_text FROM chunks c \
-         JOIN documents d ON d.id = c.doc_id \
-         WHERE c.chunk_text LIKE '%' || ?1 || '%' LIMIT ?2",
-    )?;
-    let rows: Vec<(i64, String, String)> = stmt
-        .query_map(rusqlite::params![query, k as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<std::result::Result<_, _>>()?;
-    if rows.is_empty() {
-        return Ok(EXIT_NO_RESULTS);
-    }
-    if json_mode {
-        let hits: Vec<_> = rows
-            .into_iter()
-            .map(|(id, path, text)| json!({"chunk_id": id, "path": path, "text": text}))
-            .collect();
-        print_json(&serde_json::Value::Array(hits));
-    } else {
-        for (id, path, text) in rows {
-            println!("[{id}] {path}: {}", text.lines().next().unwrap_or(""));
-        }
     }
     Ok(0)
 }

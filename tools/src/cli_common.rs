@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use serde_json::json;
 use tauri_app_lib::embedder::{embed_one, EmbedProfile};
 use tauri_app_lib::retrieval::{self, BrainPaths};
 use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
@@ -273,6 +274,127 @@ pub fn recall_chunks(
             entity_id: r.entity_id,
         })
         .collect())
+}
+
+/// Best-effort canonicalization for dedup keys; falls back to the input.
+fn canonicalize_best_effort(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Result-level dedup on (canonicalized doc_path, chunk_text). Ingest already
+/// enforces unique (doc_id, content_hash); this catches repo/symlink
+/// duplicates that surface as distinct documents with identical content.
+pub fn dedup_chunks(chunks: Vec<ScoredChunk>) -> Vec<ScoredChunk> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    chunks
+        .into_iter()
+        .filter(|c| seen.insert((canonicalize_best_effort(&c.doc_path), c.chunk_text.clone())))
+        .collect()
+}
+
+/// Clamp k the same way the retrieval facade does (`limit.clamp(1, 50)`).
+pub fn clamp_limit(k: usize) -> usize {
+    k.clamp(1, 50)
+}
+
+/// Shared plumbing for search/code/recall: resolve brain, load the embed
+/// profile, embed + rank via recall_chunks, dedupe, and render.
+fn run_query(
+    query: &str,
+    k: usize,
+    ast_only: bool,
+) -> Result<std::result::Result<Vec<ScoredChunk>, ()>> {
+    if query.trim().is_empty() {
+        return Ok(Err(()));
+    }
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    let config_path = brain.paths.config_path.clone();
+    let profile = retrieval::load_embed_profile(&config_path)
+        .context("loading embed profile from vault config.json — point CURATED_BRAIN_DIR at the folder containing config.json and brain.db")?;
+    let chunks = dedup_chunks(recall_chunks(
+        &conn,
+        &profile,
+        query,
+        clamp_limit(k),
+        ast_only,
+    )?);
+    Ok(if chunks.is_empty() {
+        Err(())
+    } else {
+        Ok(chunks)
+    })
+}
+
+pub fn search_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
+    cmd_output(run_query(query, k, false)?, json_mode)
+}
+
+/// `ct code`: semantic search restricted to ast% strategy chunks.
+pub fn code_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
+    cmd_output(run_query(query, k, true)?, json_mode)
+}
+
+/// `ct recall`: chunk results plus the wiki ranking leg.
+pub fn recall_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
+    match run_query(query, k, false)? {
+        Err(()) => Ok(EXIT_NO_RESULTS),
+        Ok(chunks) => {
+            let brain = resolve()?;
+            let conn = open_ro(&brain)?;
+            let wiki = rank_wiki_entries(&conn, query, 5)?;
+            if json_mode {
+                print_json(&json!({
+                    "results": chunks,
+                    "wiki": wiki,
+                }));
+            } else {
+                for c in &chunks {
+                    println!(
+                        "{:.4} {}: {}",
+                        c.score,
+                        c.doc_path,
+                        first_line(&c.chunk_text)
+                    );
+                }
+                if !wiki.is_empty() {
+                    println!("--- wiki ---");
+                    for w in &wiki {
+                        let title = w["title"].as_str().unwrap_or("");
+                        println!("wiki: {title}");
+                    }
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn cmd_output(chunks: std::result::Result<Vec<ScoredChunk>, ()>, json_mode: bool) -> Result<i32> {
+    let chunks = match chunks {
+        Ok(c) => c,
+        Err(()) => return Ok(EXIT_NO_RESULTS),
+    };
+    if json_mode {
+        print_json(&json!({ "results": chunks }));
+    } else {
+        for c in &chunks {
+            println!(
+                "{:.4} {}: {}",
+                c.score,
+                c.doc_path,
+                first_line(&c.chunk_text)
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
 }
 
 /// Resolve a user-supplied symbol name to its definition chunk.
