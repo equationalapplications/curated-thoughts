@@ -23,6 +23,10 @@ pub struct GenerationConfig {
     pub model_name: Option<String>,
     pub external_url: Option<String>,
     pub api_key: Option<String>,
+    /// Per-request LLM timeout in seconds (librarian synthesis HTTP client).
+    /// `None` preserves the historical 600s default.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -137,6 +141,7 @@ mod tests {
                 model_name: None,
                 external_url: None,
                 api_key: None,
+                timeout_secs: None,
             },
             embedding: EmbeddingConfig::default(),
         };
@@ -167,6 +172,21 @@ mod tests {
             loaded.generation.provider,
             GenerationProviderKind::Unconfigured
         );
+    }
+
+    #[test]
+    fn timeout_secs_defaults_to_none_when_key_absent() {
+        let json =
+            r#"{"generation": {"provider": "external"}, "embedding": {"provider": "fastembed"}}"#;
+        let config: LlmConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.generation.timeout_secs, None);
+    }
+
+    #[test]
+    fn timeout_secs_parsed_when_present() {
+        let json = r#"{"generation": {"provider": "external", "timeout_secs": 90}, "embedding": {"provider": "fastembed"}}"#;
+        let config: LlmConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.generation.timeout_secs, Some(90));
     }
 
     #[test]

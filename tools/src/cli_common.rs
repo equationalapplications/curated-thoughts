@@ -878,7 +878,7 @@ pub fn ingest_run() -> Result<()> {
 /// Full run_librarian_once flow over already-ingested documents with the
 /// given fallback model (bin default: "llama3.2:3b"; config overrides it in
 /// sidecar mode). Extracted from `run_librarian_once.rs`.
-pub fn librarian_run(model: &str) -> Result<()> {
+pub fn librarian_run(model: &str, force: bool) -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
     if !paths.db_path.is_file() {
         anyhow::bail!(
@@ -890,39 +890,65 @@ pub fn librarian_run(model: &str) -> Result<()> {
     // root from the resolved config path, not from db_path's parent.
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
         .with_context(|| format!("open brain database {}", paths.db_path.display()))?;
-    let conn = &db.0;
+    // Resolve errors.log's parent directory the same way write_synthesis_error does
+    // (vault root derived from the config path), not from db_path's parent, so
+    // surface-detection stays correct under non-default brain-dir layouts.
+    let error_log_dir = paths.config_path.parent();
+    librarian_run_on(&mut db.0, error_log_dir, model, force)
+}
 
-    let docs: Vec<(i64, String)> = {
+/// Dirty-doc selection + run loop over an open connection (testable core of
+/// [`librarian_run`]). Without `force`, only dirty documents are selected:
+/// indexed docs whose watermark doesn't match the current content hash and
+/// active model (`synth_hash IS NULL OR synth_hash != hash OR synth_model !=
+/// ?model`). `--force` selects every document and bypasses the watermark gate.
+pub fn librarian_run_on(
+    conn: &mut rusqlite::Connection,
+    error_log_dir: Option<&std::path::Path>,
+    model: &str,
+    force: bool,
+) -> Result<()> {
+    let docs: Vec<(i64, String)> = if force {
         let mut stmt = conn.prepare("SELECT id, path FROM documents ORDER BY path")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, path FROM documents
+             WHERE status = 'indexed'
+               AND (synth_hash IS NULL OR synth_hash != hash OR synth_model != ?1)
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([model], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
 
+    let scope = if force { "all" } else { "dirty" };
     println!(
-        "running librarian over {} document(s) with fallback model {model}",
+        "running librarian over {} {scope} document(s) with fallback model {model}",
         docs.len()
     );
 
-    let mut ok = 0usize;
-    let mut failed = 0usize;
-    for (i, (_id, path)) in docs.iter().enumerate() {
-        match tauri_app_lib::librarian::generate_summary(&mut db.0, path, model) {
-            Ok(()) => {
-                ok += 1;
-                println!("[{}/{}] ok: {}", i + 1, docs.len(), path);
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("[{}/{}] FAILED: {}: {e}", i + 1, docs.len(), path);
-            }
-        }
-    }
-    println!("done: {ok} ok, {failed} failed");
+    // Synthesis failures are recorded to <brain>/errors.log by
+    // write_synthesis_error (called from generate_summary, which still
+    // returns Ok). Surface them by watching that file grow across each
+    // call. The log directory must be resolved the same way the writer
+    // resolves its target (vault root), not from db_path's parent.
+    let error_log = error_log_dir.map(|dir| dir.join("errors.log"));
+    let paths: Vec<String> = docs.into_iter().map(|(_, p)| p).collect();
+
+    run_librarian_docs(
+        &paths,
+        |path| {
+            tauri_app_lib::librarian::generate_summary(conn, path, model, force)
+                .map_err(|e| format!("{e:#}"))
+        },
+        &mut std::io::stderr(),
+        error_log.as_deref(),
+    );
     Ok(())
 }
 
-/// Approve one pending proposal through the real resolve_proposal commit
-/// path, printing the summary of what was accepted (id, item count, source
 /// doc, commit result). Extracted from `approve_pending_proposals.rs`.
 pub fn approve_one(proposal_id: &str) -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
@@ -1003,3 +1029,331 @@ pub fn approve_all() -> Result<()> {
         ids.len()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri_app_lib::db::connection::open_in_memory;
+    use tauri_app_lib::db::queries::upsert_document;
+
+    fn seed_doc(conn: &Connection, path: &str, hash: &str, status: &str) -> i64 {
+        let id = upsert_document(conn, path, hash).unwrap();
+        conn.execute(
+            "UPDATE documents SET status = ?2 WHERE id = ?1",
+            rusqlite::params![id, status],
+        )
+        .unwrap();
+        id
+    }
+
+    fn dirty_paths(conn: &mut Connection, model: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path FROM documents
+                 WHERE status = 'indexed'
+                   AND (synth_hash IS NULL OR synth_hash != hash OR synth_model != ?1)
+                 ORDER BY path",
+            )
+            .unwrap();
+        let rows = stmt.query_map([model], |r| r.get::<_, String>(1)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn dirty_select_returns_only_changed_and_new_docs() {
+        let mut conn = open_in_memory().unwrap();
+        // New doc: never synthesized (synth_hash NULL).
+        let a = seed_doc(&mut conn, "/v/a.md", "hash-a", "indexed");
+        // Changed doc: stale watermark hash.
+        let b = seed_doc(&mut conn, "/v/b.md", "hash-b", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = 'stale', synth_model = 'm' WHERE id = ?1",
+            [b.to_string()],
+        )
+        .unwrap();
+        // Clean doc: watermark matches hash + model.
+        let c = seed_doc(&mut conn, "/v/c.md", "hash-c", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = hash, synth_model = 'm', synth_at = 1 WHERE id = ?1",
+            [c.to_string()],
+        )
+        .unwrap();
+        // Model-switched doc: same hash but different synth_model.
+        let d = seed_doc(&mut conn, "/v/d.md", "hash-d", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = hash, synth_model = 'other-model' WHERE id = ?1",
+            [d.to_string()],
+        )
+        .unwrap();
+        // Non-indexed doc must never be selected.
+        seed_doc(&mut conn, "/v/e.md", "hash-e", "pending");
+
+        assert_eq!(
+            dirty_paths(&mut conn, "m"),
+            vec!["/v/a.md", "/v/b.md", "/v/d.md"]
+        );
+    }
+}
+
+/// End-of-run totals for [`run_librarian_docs`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LibrarianRunSummary {
+    pub attempted: usize,
+    pub ok: usize,
+    pub error: usize,
+    /// Reserved for the phase-1 watermark gate (`skipped-dirty` assertion);
+    /// always 0 until dirty-doc selection lands.
+    pub skipped_by_watermark: usize,
+    pub elapsed_secs: u64,
+}
+
+pub(crate) fn format_progress(
+    n: usize,
+    total: usize,
+    path: &str,
+    status: &str,
+    elapsed_secs: u64,
+) -> String {
+    format!("[{n}/{total}] {path} {status} ({elapsed_secs}s)")
+}
+
+pub(crate) fn format_run_summary(summary: &LibrarianRunSummary) -> String {
+    format!(
+        "librarian run summary: attempted={} ok={} error={} \
+         skipped_by_watermark={} elapsed={}s",
+        summary.attempted,
+        summary.ok,
+        summary.error,
+        summary.skipped_by_watermark,
+        summary.elapsed_secs
+    )
+}
+
+fn errors_log_len(path: Option<&Path>) -> u64 {
+    path.and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// First line of whatever was appended to the errors log at `from` offset.
+fn errors_log_tail(path: &Path, from: u64) -> Option<String> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(std::io::SeekFrom::Start(from)).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let line = text.lines().next()?.trim().to_string();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+/// Per-doc librarian loop with stderr observability. One `[n/total] <path>
+/// ok|error (<elapsed>s)` line per doc plus a final run-summary line, all
+/// written (flushed) to `err`. Synthesis failures are surfaced whether they
+/// come back as `Err` or were swallowed into `error_log` by
+/// `write_synthesis_error` (detected via log growth during the call).
+pub(crate) fn run_librarian_docs<F>(
+    docs: &[String],
+    mut synthesize: F,
+    err: &mut dyn std::io::Write,
+    error_log: Option<&Path>,
+) -> LibrarianRunSummary
+where
+    F: FnMut(&str) -> std::result::Result<(), String>,
+{
+    let start = std::time::Instant::now();
+    let total = docs.len();
+    let mut summary = LibrarianRunSummary {
+        attempted: total,
+        ..Default::default()
+    };
+
+    for (i, path) in docs.iter().enumerate() {
+        let log_before = errors_log_len(error_log);
+        let doc_start = std::time::Instant::now();
+        let result = synthesize(path);
+        let elapsed = doc_start.elapsed().as_secs();
+
+        let mut status = "ok";
+        match result {
+            Ok(()) => {
+                if let Some(log) = error_log {
+                    if errors_log_len(error_log) > log_before {
+                        status = "error";
+                        let detail = errors_log_tail(log, log_before).unwrap_or_default();
+                        let _ = writeln!(
+                            err,
+                            "error: synthesis failed for {path} — recorded in {}: {detail}",
+                            log.display()
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                status = "error";
+                let _ = writeln!(err, "error: synthesis failed for {path}: {e}");
+            }
+        }
+        if status == "ok" {
+            summary.ok += 1;
+        } else {
+            summary.error += 1;
+        }
+
+        let _ = writeln!(
+            err,
+            "{}",
+            format_progress(i + 1, total, path, status, elapsed)
+        );
+        let _ = err.flush();
+    }
+
+    summary.elapsed_secs = start.elapsed().as_secs();
+    let _ = writeln!(err, "{}", format_run_summary(&summary));
+    let _ = err.flush();
+    summary
+}
+
+
+        mod observability_tests {
+
+        use super::*;
+        use std::io::Cursor;
+
+        fn lines(out: &str) -> Vec<&str> {
+            out.lines().collect()
+        }
+
+        #[test]
+        fn progress_line_format_matches_spec() {
+            assert_eq!(
+                format_progress(3, 10, "docs/a.md", "ok", 12),
+                "[3/10] docs/a.md ok (12s)"
+            );
+            assert_eq!(
+                format_progress(4, 10, "docs/b.md", "error", 1),
+                "[4/10] docs/b.md error (1s)"
+            );
+        }
+
+        #[test]
+        fn summary_format_includes_reserved_watermark_field() {
+            let s = LibrarianRunSummary {
+                attempted: 5,
+                ok: 4,
+                error: 1,
+                skipped_by_watermark: 0,
+                elapsed_secs: 42,
+            };
+            assert_eq!(
+                format_run_summary(&s),
+                "librarian run summary: attempted=5 ok=4 error=1 skipped_by_watermark=0 elapsed=42s"
+            );
+        }
+
+        #[test]
+        fn per_doc_lines_and_counts_all_ok() {
+            let docs = vec!["a.md".to_string(), "b.md".to_string()];
+            let mut out = Cursor::new(Vec::new());
+            let summary = run_librarian_docs(&docs, |_p| Ok(()), &mut out, None);
+            let text = String::from_utf8(out.into_inner()).unwrap();
+            let ls = lines(&text);
+            assert_eq!(ls[0], "[1/2] a.md ok (0s)");
+            assert_eq!(ls[1], "[2/2] b.md ok (0s)");
+            assert_eq!(
+                ls[2],
+                "librarian run summary: attempted=2 ok=2 error=0 skipped_by_watermark=0 elapsed=0s"
+            );
+            assert_eq!(
+                summary,
+                LibrarianRunSummary {
+                    attempted: 2,
+                    ok: 2,
+                    error: 0,
+                    skipped_by_watermark: 0,
+                    elapsed_secs: 0
+                }
+            );
+        }
+
+        #[test]
+        fn err_result_counted_and_surfaced() {
+            let docs = vec!["ok.md".to_string(), "bad.md".to_string()];
+            let mut out = Cursor::new(Vec::new());
+            let summary = run_librarian_docs(
+                &docs,
+                |p| {
+                    if p == "bad.md" {
+                        Err("LLM unreachable".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut out,
+                None,
+            );
+            let text = String::from_utf8(out.into_inner()).unwrap();
+            assert!(text.contains("error: synthesis failed for bad.md: LLM unreachable"));
+            assert!(text.contains("[2/2] bad.md error ("));
+            assert_eq!(summary.ok, 1);
+            assert_eq!(summary.error, 1);
+            assert_eq!(summary.attempted, 2);
+        }
+
+        #[test]
+        fn swallowed_synthesis_error_via_log_growth_is_surfaced() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let log = dir.path().join("errors.log");
+            std::fs::write(&log, "pre-existing\n").unwrap();
+
+            let docs = vec!["swallow.md".to_string(), "fine.md".to_string()];
+            let log_path = log.clone();
+            let mut out = Cursor::new(Vec::new());
+            let summary = run_librarian_docs(
+                &docs,
+                move |p| {
+                    if p == "swallow.md" {
+                        // Mirrors write_synthesis_error: append + return Ok.
+                        use std::io::Write as _;
+                        let mut f = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&log_path)
+                            .unwrap();
+                        writeln!(
+                            f,
+                            "[1756123456] synthesis JSON failure for swallow.md: boom"
+                        )
+                        .unwrap();
+                    }
+                    Ok(())
+                },
+                &mut out,
+                Some(&log),
+            );
+            let text = String::from_utf8(out.into_inner()).unwrap();
+            assert!(text.contains("recorded in"));
+            assert!(text.contains("errors.log"));
+            assert!(text.contains("synthesis JSON failure for swallow.md"));
+            assert!(text.contains("[1/2] swallow.md error ("));
+            assert!(text.contains("[2/2] fine.md ok ("));
+            assert_eq!(summary.error, 1);
+            assert_eq!(summary.ok, 1);
+        }
+
+        #[test]
+        fn empty_run_still_prints_summary() {
+            let mut out = Cursor::new(Vec::new());
+            let summary = run_librarian_docs(&[], |_p| Ok(()), &mut out, None);
+            let text = String::from_utf8(out.into_inner()).unwrap();
+            assert_eq!(
+                text.trim(),
+                "librarian run summary: attempted=0 ok=0 error=0 skipped_by_watermark=0 elapsed=0s"
+            );
+            assert_eq!(summary.attempted, 0);
+        }
+    }
+
