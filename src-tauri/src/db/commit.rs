@@ -956,10 +956,19 @@ fn write_resolution_event(
     }
 
     let summary = if proposal_status == "rejected" {
-        format!(
-            "Rejected proposal for *{}* from *{}*",
-            ctx.entity_name, source_label
-        )
+        if parts.is_empty() {
+            format!(
+                "Rejected proposal for *{}* from *{}*",
+                ctx.entity_name, source_label
+            )
+        } else {
+            format!(
+                "Rejected proposal for *{}* from *{}*: {}",
+                ctx.entity_name,
+                source_label,
+                parts.join(", ")
+            )
+        }
     } else if parts.is_empty() {
         format!(
             "Approved proposal for *{}* from *{}*",
@@ -2081,5 +2090,82 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn fact_add_all_duplicates_includes_count_in_rejected_event() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        // Seed an existing fact so the second proposal's items dedupe.
+        insert_test_proposal(
+            &conn,
+            "prop-original",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("fact-original", chunk_id, "Rust is a systems language.")],
+            doc_id,
+        );
+        resolve_fact(&mut conn, "prop-original", "fact-original");
+
+        // New proposal with ONLY duplicate fact_add items (different trigger doc
+        // so it isn't auto-superseded).
+        let doc2 = seed_document(&conn, "/vault/documents/b.pdf");
+        let chunk2 = seed_chunk(&conn, doc2);
+        insert_test_proposal(
+            &conn,
+            "prop-dup",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![
+                fact_item("fact-d1", chunk2, "Rust is a systems language."),
+                fact_item("fact-d2", chunk2, "Rust is a systems language."),
+            ],
+            doc2,
+        );
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-dup",
+            &[
+                ItemDecision {
+                    item_id: "fact-d1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                },
+                ItemDecision {
+                    item_id: "fact-d2".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                },
+            ],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.proposal_status, "rejected");
+        assert_eq!(result.committed.len(), 0);
+
+        // The resolution event for prop-dup must surface the duplicate count
+        // so reviewers can see *why* every item was rejected.
+        let (event_type, event_summary): (String, String) = conn
+            .query_row(
+                "SELECT event_type, summary FROM llm_wiki_events
+                 WHERE related_entry_id IS NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(event_type, "rejected");
+        assert!(
+            event_summary.contains("2 duplicate fact(s) skipped"),
+            "rejected event summary must include duplicate count, got: {event_summary}"
+        );
     }
 }

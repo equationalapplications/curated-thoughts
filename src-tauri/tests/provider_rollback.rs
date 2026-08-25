@@ -23,6 +23,7 @@ fn update_provider_rejects_external_in_strict_mode() {
         model_name: Some("gpt-3.5-turbo".to_string()),
         external_url: Some("https://api.openai.com/v1".to_string()),
         api_key: Some("sk-test".to_string()),
+        timeout_secs: None,
     };
 
     let err = update_provider_with_brain_path(brain_path, config, &state, None).unwrap_err();
@@ -44,6 +45,7 @@ fn update_provider_rolls_back_to_unconfigured_on_init_failure() {
         model_name: None,
         external_url: None,
         api_key: None,
+        timeout_secs: None,
     };
 
     let err = update_provider_with_brain_path(brain_path, config, &state, None).unwrap_err();
@@ -75,6 +77,7 @@ fn update_provider_rolls_back_to_unconfigured_when_config_write_fails() {
         model_name: Some("gpt-3.5-turbo".to_string()),
         external_url: Some("https://api.openai.com/v1".to_string()),
         api_key: Some("sk-test".to_string()),
+        timeout_secs: None,
     };
 
     let original_perms = std::fs::metadata(brain_path)
@@ -114,6 +117,7 @@ fn update_provider_preserves_state_when_config_and_rollback_fail() {
         model_name: Some("gpt-3.5-turbo".to_string()),
         external_url: Some("https://api.openai.com/v1".to_string()),
         api_key: Some("sk-test".to_string()),
+        timeout_secs: None,
     };
 
     let original_perms = std::fs::metadata(brain_path)
