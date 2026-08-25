@@ -135,15 +135,24 @@ struct HttpLlmCompleter {
 
 impl LlmCompleter for HttpLlmCompleter {
     fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let client = reqwest::blocking::Client::new();
-        let mut req = client.post(&self.endpoint_url).json(&serde_json::json!({
+        let client = reqwest::blocking::Client::builder()
+            // Reasoning models on OpenRouter can take minutes per synthesis call;
+            // reqwest's default 30s would drop long documents.
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let mut body = serde_json::json!({
             "model": self.model_name,
             "messages": [
                 { "role": "system", "content": system },
                 { "role": "user", "content": user }
             ],
             "stream": false,
-        }));
+            // Cap reasoning effort so bulk librarian runs stay fast; the
+            // synthesis prompt needs little deliberation.
+            "reasoning": { "effort": "low" },
+        });
+        let mut req = client.post(&self.endpoint_url).json(&body);
         if let Some(key) = &self.api_key {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
