@@ -182,6 +182,7 @@ impl PipelineWorker {
                                     &mut conn,
                                     &path,
                                     crate::setup::recommended_model(),
+                                    false,
                                 ) {
                                     let msg = format!("librarian error {}: {}", path, e);
                                     eprintln!("[pipeline] {}", msg);

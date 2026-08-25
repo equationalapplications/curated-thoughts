@@ -117,6 +117,9 @@ enum LibrarianCmd {
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
+        /// Re-run every document, bypassing the synthesis watermark gate.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -187,7 +190,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             Ok(0)
         }
         Cmd::Librarian { cmd } => match cmd {
-            LibrarianCmd::Run { yes } => librarian_run_cmd(yes),
+            LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
     }
 }
@@ -350,7 +353,7 @@ fn approve_cmd(all: bool, yes: bool, proposal_id: Option<String>) -> Result<i32>
 }
 
 /// `ct librarian run` — requires --yes; prints the planned action otherwise.
-fn librarian_run_cmd(yes: bool) -> Result<i32> {
+fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {
     if !yes {
         let brain = cli_common::resolve()?;
         let conn = cli_common::open_ro(&brain)?;
@@ -361,6 +364,6 @@ fn librarian_run_cmd(yes: bool) -> Result<i32> {
         );
         return Ok(1);
     }
-    cli_common::librarian_run("llama3.2:3b")?;
+    cli_common::librarian_run("llama3.2:3b", force)?;
     Ok(0)
 }

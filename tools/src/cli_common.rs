@@ -878,7 +878,7 @@ pub fn ingest_run() -> Result<()> {
 /// Full run_librarian_once flow over already-ingested documents with the
 /// given fallback model (bin default: "llama3.2:3b"; config overrides it in
 /// sidecar mode). Extracted from `run_librarian_once.rs`.
-pub fn librarian_run(model: &str) -> Result<()> {
+pub fn librarian_run(model: &str, force: bool) -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
     if !paths.db_path.is_file() {
         anyhow::bail!(
@@ -890,23 +890,40 @@ pub fn librarian_run(model: &str) -> Result<()> {
     // root from the resolved config path, not from db_path's parent.
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
         .with_context(|| format!("open brain database {}", paths.db_path.display()))?;
-    let conn = &db.0;
+    librarian_run_on(&mut db.0, model, force)
+}
 
-    let docs: Vec<(i64, String)> = {
+/// Dirty-doc selection + run loop over an open connection (testable core of
+/// [`librarian_run`]). Without `force`, only dirty documents are selected:
+/// indexed docs whose watermark doesn't match the current content hash and
+/// active model (`synth_hash IS NULL OR synth_hash != hash OR synth_model !=
+/// ?model`). `--force` selects every document and bypasses the watermark gate.
+pub fn librarian_run_on(conn: &mut rusqlite::Connection, model: &str, force: bool) -> Result<()> {
+    let docs: Vec<(i64, String)> = if force {
         let mut stmt = conn.prepare("SELECT id, path FROM documents ORDER BY path")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, path FROM documents
+             WHERE status = 'indexed'
+               AND (synth_hash IS NULL OR synth_hash != hash OR synth_model != ?1)
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([model], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
 
+    let scope = if force { "all" } else { "dirty" };
     println!(
-        "running librarian over {} document(s) with fallback model {model}",
+        "running librarian over {} {scope} document(s) with fallback model {model}",
         docs.len()
     );
 
     let mut ok = 0usize;
     let mut failed = 0usize;
     for (i, (_id, path)) in docs.iter().enumerate() {
-        match tauri_app_lib::librarian::generate_summary(&mut db.0, path, model) {
+        match tauri_app_lib::librarian::generate_summary(conn, path, model, force) {
             Ok(()) => {
                 ok += 1;
                 println!("[{}/{}] ok: {}", i + 1, docs.len(), path);
@@ -1002,4 +1019,69 @@ pub fn approve_all() -> Result<()> {
         failures.len(),
         ids.len()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri_app_lib::db::connection::open_in_memory;
+    use tauri_app_lib::db::queries::upsert_document;
+
+    fn seed_doc(conn: &Connection, path: &str, hash: &str, status: &str) -> i64 {
+        let id = upsert_document(conn, path, hash).unwrap();
+        conn.execute(
+            "UPDATE documents SET status = ?2 WHERE id = ?1",
+            rusqlite::params![id, status],
+        )
+        .unwrap();
+        id
+    }
+
+    fn dirty_paths(conn: &mut Connection, model: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path FROM documents
+                 WHERE status = 'indexed'
+                   AND (synth_hash IS NULL OR synth_hash != hash OR synth_model != ?1)
+                 ORDER BY path",
+            )
+            .unwrap();
+        let rows = stmt.query_map([model], |r| r.get::<_, String>(1)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn dirty_select_returns_only_changed_and_new_docs() {
+        let mut conn = open_in_memory().unwrap();
+        // New doc: never synthesized (synth_hash NULL).
+        let a = seed_doc(&mut conn, "/v/a.md", "hash-a", "indexed");
+        // Changed doc: stale watermark hash.
+        let b = seed_doc(&mut conn, "/v/b.md", "hash-b", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = 'stale', synth_model = 'm' WHERE id = ?1",
+            [b.to_string()],
+        )
+        .unwrap();
+        // Clean doc: watermark matches hash + model.
+        let c = seed_doc(&mut conn, "/v/c.md", "hash-c", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = hash, synth_model = 'm', synth_at = 1 WHERE id = ?1",
+            [c.to_string()],
+        )
+        .unwrap();
+        // Model-switched doc: same hash but different synth_model.
+        let d = seed_doc(&mut conn, "/v/d.md", "hash-d", "indexed");
+        conn.execute(
+            "UPDATE documents SET synth_hash = hash, synth_model = 'other-model' WHERE id = ?1",
+            [d.to_string()],
+        )
+        .unwrap();
+        // Non-indexed doc must never be selected.
+        seed_doc(&mut conn, "/v/e.md", "hash-e", "pending");
+
+        assert_eq!(
+            dirty_paths(&mut conn, "m"),
+            vec!["/v/a.md", "/v/b.md", "/v/d.md"]
+        );
+    }
 }
