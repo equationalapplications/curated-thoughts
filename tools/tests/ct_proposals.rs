@@ -98,6 +98,22 @@ fn proposals_show_json_contains_items() {
 }
 
 #[test]
+fn proposals_show_text_mode_renders_summary() {
+    with_seeded_proposals(|dir| {
+        let out = run_ct(dir, &["proposals", "show", "prop-a"]);
+        assert!(
+            out.status.success(),
+            "ct proposals show failed: {} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.starts_with("prop-a\t"), "id line first: {text}");
+        assert!(text.contains("2 item(s)"), "item count line: {text}");
+    });
+}
+
+#[test]
 fn proposals_show_unknown_id_exits_two() {
     with_seeded_proposals(|dir| {
         let out = run_ct(dir, &["proposals", "show", "no-such-id", "--json"]);
