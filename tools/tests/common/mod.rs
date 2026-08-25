@@ -90,7 +90,7 @@ pub fn insert_pending_proposal(
             rusqlite::params![
                 format!("{id}-item-{i}"),
                 id,
-                format!(r#"{{"value":"{i}"}}"#)
+                format!(r#"{{"body":"fact {i}","tags":[],"confidence":"inferred"}}"#)
             ],
         )
         .unwrap();

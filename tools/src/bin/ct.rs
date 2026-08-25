@@ -65,10 +65,17 @@ enum Cmd {
     Approve {
         #[arg(long)]
         all: bool,
+        /// Confirm the bulk write (`--all` with pending items refuses without it).
+        #[arg(long)]
+        yes: bool,
         proposal_id: Option<String>,
     },
-    /// Ingest the vault into the brain database (write).
-    Ingest,
+    /// Ingest the vault into the brain database (write; requires --yes).
+    Ingest {
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Librarian operations.
     Librarian {
         #[command(subcommand)]
@@ -105,7 +112,12 @@ enum ProposalsCmd {
 
 #[derive(Subcommand)]
 enum LibrarianCmd {
-    Run,
+    /// Run the Active Librarian over indexed documents (write; requires --yes).
+    Run {
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() {
@@ -150,24 +162,26 @@ fn run(cmd: Cmd) -> Result<i32> {
             ProposalsCmd::List { json } => proposals_list(json),
             ProposalsCmd::Show { id, .. } => proposals_show(&id),
         },
-        other => {
-            bail!("subcommand not implemented yet: {}", describe(&other));
+        Cmd::Approve {
+            all,
+            yes,
+            proposal_id,
+        } => approve_cmd(all, yes, proposal_id),
+        Cmd::Ingest { yes } => {
+            if !yes {
+                let brain = cli_common::resolve()?;
+                eprintln!(
+                    "refusing: `ct ingest` would ingest the configured vault into {} (a write). Pass --yes to proceed.",
+                    brain.paths.db_path.display()
+                );
+                return Ok(1);
+            }
+            cli_common::ingest_run()?;
+            Ok(0)
         }
-    }
-}
-
-fn describe(cmd: &Cmd) -> &'static str {
-    match cmd {
-        Cmd::Status { .. } => "status",
-        Cmd::Search { .. } => "search",
-        Cmd::Recall { .. } => "recall",
-        Cmd::Code { .. } => "code",
-        Cmd::Graph { .. } => "graph",
-        Cmd::Wiki { .. } => "wiki",
-        Cmd::Proposals { .. } => "proposals",
-        Cmd::Approve { .. } => "approve",
-        Cmd::Ingest => "ingest",
-        Cmd::Librarian { .. } => "librarian",
+        Cmd::Librarian { cmd } => match cmd {
+            LibrarianCmd::Run { yes } => librarian_run_cmd(yes),
+        },
     }
 }
 
@@ -268,5 +282,62 @@ fn status(json_mode: bool) -> Result<i32> {
                 .unwrap_or_else(|| "never".into())
         );
     }
+    Ok(0)
+}
+
+/// `ct approve` — write command with the SDD confirmation rules:
+/// - `<id>`: approve that proposal (exit 0), or exit 1 if not pending/unknown.
+/// - `--all`: empty pending set exits 0 printing `approved: 0`; with pending
+///   items, refuses (exit 1, listing what would be accepted) unless `--yes`.
+fn approve_cmd(all: bool, yes: bool, proposal_id: Option<String>) -> Result<i32> {
+    if all {
+        let brain = cli_common::resolve()?;
+        let conn = cli_common::open_ro(&brain)?;
+        let pending = cli_common::list_pending_proposals(&conn)?;
+        if pending.is_empty() {
+            println!("approved: 0");
+            return Ok(0);
+        }
+        if !yes {
+            eprintln!(
+                "refusing: --all would approve {} pending proposal(s); pass --yes to proceed:",
+                pending.len()
+            );
+            for p in &pending {
+                eprintln!(
+                    "  {}\t{} items\t{}",
+                    p.id,
+                    p.item_count,
+                    p.source_doc_path.as_deref().unwrap_or("-")
+                );
+            }
+            return Ok(1);
+        }
+        drop(conn);
+        cli_common::approve_all()?;
+        return Ok(0);
+    }
+    match proposal_id {
+        Some(id) => {
+            cli_common::approve_one(&id)?;
+            Ok(0)
+        }
+        None => bail!("specify a proposal id or --all"),
+    }
+}
+
+/// `ct librarian run` — requires --yes; prints the planned action otherwise.
+fn librarian_run_cmd(yes: bool) -> Result<i32> {
+    if !yes {
+        let brain = cli_common::resolve()?;
+        let conn = cli_common::open_ro(&brain)?;
+        let docs: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+        eprintln!(
+            "refusing: `ct librarian run` would run the Active Librarian over {docs} indexed document(s) in {} (a write). Pass --yes to proceed.",
+            brain.paths.db_path.display()
+        );
+        return Ok(1);
+    }
+    cli_common::librarian_run("llama3.2:3b")?;
     Ok(0)
 }
