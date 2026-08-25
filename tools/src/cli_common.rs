@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use serde_json::json;
+use tauri_app_lib::db::proposals::{self, ProposalDetail};
 use tauri_app_lib::embedder::{embed_one, EmbedProfile};
 use tauri_app_lib::retrieval::{self, BrainPaths};
 use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
@@ -38,6 +39,48 @@ pub const EXIT_NO_RESULTS: i32 = 2;
 
 pub fn print_json<T: Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).expect("serialize"));
+}
+
+/// One row of `ct proposals list` output.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingProposal {
+    pub id: String,
+    pub source_doc_path: Option<String>,
+    pub created_at: i64,
+    pub item_count: usize,
+}
+
+/// Pending proposals, oldest first. item_count comes from the same
+/// `get_proposal_detail` call the GUI renders (N+1 is fine at pending
+/// volumes); source_doc_path is the first source doc, when any.
+pub fn list_pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at
+         FROM curated_proposals
+         WHERE status = 'pending'
+         ORDER BY created_at",
+    )?;
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, created_at) in rows {
+        let detail = proposals::get_proposal_detail(conn, &id)?
+            .with_context(|| format!("pending proposal {id} vanished mid-list"))?;
+        out.push(PendingProposal {
+            id,
+            source_doc_path: detail.source_doc_paths.first().cloned(),
+            created_at,
+            item_count: detail.items.len(),
+        });
+    }
+    Ok(out)
+}
+
+/// Full proposal JSON for `ct proposals show` — delegates entirely to
+/// `get_proposal_detail`; `None` means unknown id.
+pub fn show_proposal(conn: &Connection, id: &str) -> Result<Option<ProposalDetail>> {
+    proposals::get_proposal_detail(conn, id)
 }
 
 // ---------------------------------------------------------------------------

@@ -130,6 +130,10 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Search { query, k, json } => cli_common::search_cmd(&query, k, json),
         Cmd::Recall { query, k, json } => cli_common::recall_cmd(&query, k, json),
         Cmd::Code { query, k, json } => cli_common::code_cmd(&query, k, json),
+        Cmd::Proposals { cmd } => match cmd {
+            ProposalsCmd::List { json } => proposals_list(json),
+            ProposalsCmd::Show { id, .. } => proposals_show(&id),
+        },
         other => {
             bail!("subcommand not implemented yet: {}", describe(&other));
         }
@@ -148,6 +152,45 @@ fn describe(cmd: &Cmd) -> &'static str {
         Cmd::Approve { .. } => "approve",
         Cmd::Ingest => "ingest",
         Cmd::Librarian { .. } => "librarian",
+    }
+}
+
+/// `ct proposals list` — pending proposals, oldest first. Empty list is the
+/// no-results case (exit 2), matching search/recall.
+fn proposals_list(json_mode: bool) -> Result<i32> {
+    let brain = cli_common::resolve()?;
+    let conn = cli_common::open_ro(&brain)?;
+    let proposals = cli_common::list_pending_proposals(&conn)?;
+    if proposals.is_empty() {
+        return Ok(cli_common::EXIT_NO_RESULTS);
+    }
+    if json_mode {
+        print_json(&proposals);
+    } else {
+        for p in &proposals {
+            println!(
+                "{}\t{}\t{} items\t{}",
+                p.id,
+                p.created_at,
+                p.item_count,
+                p.source_doc_path.as_deref().unwrap_or("-")
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// `ct proposals show <id>` — full ProposalDetail JSON verbatim.
+/// Unknown id exits 2 per the no-results contract.
+fn proposals_show(id: &str) -> Result<i32> {
+    let brain = cli_common::resolve()?;
+    let conn = cli_common::open_ro(&brain)?;
+    match cli_common::show_proposal(&conn, id)? {
+        None => Ok(cli_common::EXIT_NO_RESULTS),
+        Some(detail) => {
+            print_json(&detail);
+            Ok(0)
+        }
     }
 }
 
