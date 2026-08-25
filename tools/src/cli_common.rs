@@ -1101,8 +1101,10 @@ pub struct LibrarianRunSummary {
     pub attempted: usize,
     pub ok: usize,
     pub error: usize,
-    /// Reserved for the phase-1 watermark gate (`skipped-dirty` assertion);
-    /// always 0 until dirty-doc selection lands.
+    /// Phase-1 synthesis-watermark gate counter. Dirty-doc selection has
+    /// landed, but skipped docs are filtered out of the run loop *before* this
+    /// counter is incremented — so this stays 0 in practice today. The field
+    /// is reserved for a future phase that counts (rather than drops) them.
     pub skipped_by_watermark: usize,
     pub elapsed_secs: u64,
 }
@@ -1219,6 +1221,7 @@ where
 }
 
 
+        #[cfg(test)]
         mod observability_tests {
 
         use super::*;
