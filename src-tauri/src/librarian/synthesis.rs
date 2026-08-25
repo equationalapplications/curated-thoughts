@@ -131,14 +131,19 @@ struct HttpLlmCompleter {
     endpoint_url: String,
     api_key: Option<String>,
     model_name: String,
+    /// Per-request timeout in seconds (`generation.timeout_secs`, default 600).
+    timeout_secs: u64,
 }
+
+/// Historical default; overridable via `generation.timeout_secs` in brain config.
+const DEFAULT_LLM_TIMEOUT_SECS: u64 = 600;
 
 impl LlmCompleter for HttpLlmCompleter {
     fn complete(&self, system: &str, user: &str) -> Result<String> {
         let client = reqwest::blocking::Client::builder()
             // Reasoning models on OpenRouter can take minutes per synthesis call;
             // reqwest's default 30s would drop long documents.
-            .timeout(std::time::Duration::from_secs(600))
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
         let mut body = serde_json::json!({
@@ -196,6 +201,10 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
     let brain_dir_str = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir_str);
     let llm_config = read_config(brain_path);
+    let timeout_secs = llm_config
+        .generation
+        .timeout_secs
+        .unwrap_or(DEFAULT_LLM_TIMEOUT_SECS);
     let completer: Box<dyn LlmCompleter> = match &llm_config.generation.provider {
         GenerationProviderKind::Unconfigured => return Ok(None),
         GenerationProviderKind::Sidecar => {
@@ -206,6 +215,7 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
                 endpoint_url: format!("{base}/v1/chat/completions"),
                 api_key: None,
                 model_name: choose_sidecar_model_name(&llm_config, model),
+                timeout_secs,
             })
         }
         GenerationProviderKind::External => {
@@ -224,6 +234,7 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
                     .model_name
                     .clone()
                     .unwrap_or_else(|| model.to_string()),
+                timeout_secs,
             })
         }
     };
