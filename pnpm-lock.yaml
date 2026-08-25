@@ -26,11 +26,11 @@ importers:
         specifier: ^0.54.0
         version: 0.54.0(@floating-ui/dom@1.8.0)(@types/hast@3.0.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(y-prosemirror@1.3.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30))(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       '@equationalapplications/core-llm-wiki':
-        specifier: ^5.5.1
-        version: 5.5.1
+        specifier: ^6.0.1
+        version: 6.0.1
       '@equationalapplications/react-llm-wiki':
-        specifier: ^5.5.1
-        version: 5.5.1(react@19.2.8)
+        specifier: ^6.0.1
+        version: 6.0.1(react@19.2.8)
       '@mantine/core':
         specifier: ^9.5.1
         version: 9.5.1(@mantine/hooks@9.5.1(react@19.2.8))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -268,16 +268,16 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@5.5.1':
-    resolution: {integrity: sha512-PX2X2UZ/Bh3jpHENGaKQ9tt88LcClZXNWUNy8W9V04vQg9S2XQf0RqV2y5nJgSec9/OJtyxu7twKATqzVvP65g==}
+  '@equationalapplications/core-llm-wiki@6.0.1':
+    resolution: {integrity: sha512-rgZ8ooV/DnnHtTorep872NMA9r0LV7eLWuMbC0BHorpgDY4zqY3DS/ru6xlRgwPmOrxRM0AZGql9TXmQsIS8Mg==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/core-okf@5.5.1':
-    resolution: {integrity: sha512-DWYUZvv3D3CtyzGTQhlbFDzQHhCVWxul4RsZq5Togg5JRjGNUPpMyDCdjmLJIeIjnQuTCZofheSAJarYP2H3og==}
+  '@equationalapplications/core-okf@6.0.1':
+    resolution: {integrity: sha512-5UehyWTM9z85pN8M4VTgM4UAvKARigQF/iQX+TX+nlvSu99mO5SGBrtON0huLxK8D9yynCU5iDQcxzGnAUBMVQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@5.5.1':
-    resolution: {integrity: sha512-MtG9PtVOLWBtvsDWJLhMN30pck5QxKWzFAgF01yKSSAUQ87bMEjH4Od1J2e0beGxKT1ba1QZfD+udhuN/ReXaA==}
+  '@equationalapplications/react-llm-wiki@6.0.1':
+    resolution: {integrity: sha512-edkop3QjbiROxtZ+rFt6I4dXKbW/0Nv+CDS+hd2y/a9gLWyRGfmDfCqquKpEgzm0eB3VyfIBHJNxRMZQWP2nlQ==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
@@ -3559,16 +3559,16 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@5.5.1':
+  '@equationalapplications/core-llm-wiki@6.0.1':
     dependencies:
-      '@equationalapplications/core-okf': 5.5.1
+      '@equationalapplications/core-okf': 6.0.1
       minisearch: 7.2.0
 
-  '@equationalapplications/core-okf@5.5.1': {}
+  '@equationalapplications/core-okf@6.0.1': {}
 
-  '@equationalapplications/react-llm-wiki@5.5.1(react@19.2.8)':
+  '@equationalapplications/react-llm-wiki@6.0.1(react@19.2.8)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 5.5.1
+      '@equationalapplications/core-llm-wiki': 6.0.1
       react: 19.2.8
 
   '@eslint-community/eslint-utils@4.10.1(eslint@9.39.4)':
