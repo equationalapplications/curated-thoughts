@@ -39,7 +39,7 @@ Process model: **foreground daemon.** Matches `ct` philosophy (small, scriptable
 
 **No new table. No schema migration.** Reuses the V1 `documents.status` field and the V11 `idx_documents_dirty` partial index.
 
-- `ct watch` callback → `cmds::enqueue_vault_event(conn, event_kind, path)`.
+- `ct watch` callback → `tauri_app_lib::db::queue::enqueue_vault_event(&mut conn, event_kind, path)` (called via a thin wrapper at `tools/src/cmds.rs::enqueue_vault_event` for ergonomics — see §11 amendment).
 - For Add/Modify: `INSERT ... ON CONFLICT(path) DO UPDATE` upserts a `pending` row with fresh content hash. Idempotent: re-firing the same event for a doc that's already `indexed` with the same hash is a no-op.
 - For Delete: `DELETE FROM documents WHERE path = ?1`. `chunks` cascade-delete via the FK in `schema.rs:18`.
 - Consumer side is unchanged: `ct ingest`, `ct librarian run`, and the desktop's pipeline worker all already select `WHERE status='pending'`. `ct watch` is just another writer.
@@ -65,7 +65,7 @@ Delete events skip step 4 (file doesn't exist on disk). They use the path string
 |---|---|---|
 | `tools/src/paths.rs` | `pub use tauri_app_lib::retrieval::BrainPaths;` + `resolve_brain_paths()` (re-export), `print_json<T>()`, `vault_contains(&Path, &Path) -> bool` | ~90 |
 | `tools/src/queries.rs` | `status_cmd`, `search_cmd`, `recall_cmd`, `code_cmd`, `graph_cmd`, `wiki_list_cmd`, `wiki_get_cmd` | ~700 |
-| `tools/src/cmds.rs` | `ingest_run`, `librarian_run`, `librarian_run_on`, `approve_one`, `approve_all`, **new:** `watch_run`, `enqueue_vault_event` | ~600 |
+| `tools/src/cmds.rs` | `ingest_run`, `librarian_run`, `librarian_run_on`, `approve_one`, `approve_all`, `watch_run`; **new thin wrapper:** `enqueue_vault_event` (delegates to `tauri_app_lib::db::queue::enqueue_vault_event`) | ~600 |
 | `tools/src/write.rs` | `open_ro(&Brain) -> Result<Connection>`, `open_rw(&Brain) -> Result<Connection>` (delegate to `cli_common::open_ro/open_rw`; `&Brain` signature preserved to match existing call sites — `cli_common::resolve()` returns `Brain`, integration tests read `brain.paths.db_path`) | ~100 |
 
 `tools/src/cli_common.rs` becomes a thin re-export shim (`pub use {paths, queries, cmds, write};`) so the existing `use curated_thoughts_tools::cli_common::X` paths in `tools/src/bin/*` keep compiling. The re-exports can be removed in a follow-up PR once all consumers migrate.
@@ -80,7 +80,7 @@ Delete events skip step 4 (file doesn't exist on disk). They use the path string
 - `src-tauri/src/watcher/mod.rs` keeps its current shape (`pub mod fs_watcher; pub use fs_watcher::*;`). **No change.**
 - `tools/src/watcher.rs` becomes `pub use tauri_app_lib::watcher::*;` — a thin re-export. No logic lives here.
 - `tools/src/lock.rs` becomes a small standalone `VaultLock` (uses `fs4::FileExt::lock_exclusive`) used by `ct watch` when no desktop is running. ~30 LOC + 2 unit tests. This duplicates the equivalent ~30 LOC in `src-tauri/src/watcher/fs_watcher.rs`; the duplication is forced by the cargo dep direction. **Phase-3 workspace migration can collapse this**; explicitly out of scope here.
-- `src-tauri/src/lib.rs:798` swaps its `pipeline_tx.try_send(...)` body for `cmds::enqueue_vault_event(&conn, event.kind(), &path)`. The heal tick for Delete events stays because the desktop's heal scheduler is app-state cleanup that doesn't apply to the headless case.
+- `src-tauri/src/lib.rs:798` swaps its `pipeline_tx.try_send(...)` body for `tauri_app_lib::db::queue::enqueue_vault_event(&mut conn, event.kind(), &path)` (no wrapper — direct call from src-tauri, same package, no cycle). The heal tick for Delete events stays because the desktop's heal scheduler is app-state cleanup that doesn't apply to the headless case. **Connection lifecycle (mutex trap, §11):** the desktop's watcher callback must NOT hold the `DbState` mutex (`Mutex<AppDb>` at `src-tauri/src/lib.rs:66`) during the `enqueue_vault_event` call — sha256 hashing on a large PDF can take ~150ms, freezing the React UI. Instead, open a fresh ephemeral `rusqlite::Connection::open(&brain_paths.db_path)` per event and pass that to `enqueue_vault_event`. WAL mode (`src-tauri/src/db/connection.rs:130`) permits concurrent writer + reader.
 
 ### 7. Contract for `spawn_vault_watcher`
 
@@ -102,20 +102,20 @@ The two call sites inject different dispatch:
 let handle = spawn_vault_watcher(vault_root, move |event| {
     let _ = app.emit("vault-event", &event);
     if matches!(event, VaultEvent::Deleted(_)) { let _ = heal_tx.send(()); }
-    let conn = open_brain_rw(&brain_paths).ok()?;
+    let mut conn = open_brain_rw(&brain_paths).ok()?; // see §11: ephemeral conn, not db_state mutex
     let path = match &event {
         VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
     };
-    let _ = enqueue_vault_event(&conn, event.kind(), Path::new(path));
+    let _ = tauri_app_lib::db::queue::enqueue_vault_event(&mut conn, event.kind(), Path::new(path));
 });
 
 // tools/src/bin/ct.rs — headless mode (DB enqueue only)
 let handle = spawn_vault_watcher(vault_root, move |event| {
-    let conn = open_brain_rw(&brain_paths).ok()?;
+    let mut conn = open_brain_rw(&brain_paths).ok()?; // see §11: ephemeral conn, not db_state mutex
     let path = match &event {
         VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
     };
-    let _ = enqueue_vault_event(&conn, event.kind(), Path::new(path));
+    let _ = tauri_app_lib::db::queue::enqueue_vault_event(&mut conn, event.kind(), Path::new(path));
 });
 ```
 
@@ -129,13 +129,15 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 | `tools/src/lock.rs` | NEW | `VaultLock` (uses `fs4::FileExt::lock_exclusive`) — thin standalone wrapper, ~30 LOC + 2 unit tests. Duplicates ~30 LOC in `src-tauri/src/watcher/fs_watcher.rs`; forced by cargo dep direction. |
 | `tools/src/paths.rs` | NEW (split) |
 | `tools/src/queries.rs` | NEW (split) |
-| `tools/src/cmds.rs` | NEW (split) |
+| `tools/src/cmds.rs` | NEW (split) — contains `watch_run` and a thin `enqueue_vault_event` wrapper delegating to `tauri_app_lib::db::queue::enqueue_vault_event`. Full logic lives in src-tauri (see §11). |
 | `tools/src/write.rs` | NEW (split) |
 | `tools/src/cli_common.rs` | Becomes thin re-export shim |
 | `tools/src/bin/ct.rs` | Add `Watch` subcommand; import path update |
 | `tools/Cargo.toml` | Add `fs4 = "0.7"` (verify latest stable at impl time) |
 | `src-tauri/src/watcher/mod.rs` | **No change** — keeps `pub mod fs_watcher; pub use fs_watcher::*;` |
 | `src-tauri/src/watcher/fs_watcher.rs` | Extends in place with `VaultLock` + 2 unit tests (`vault_lock_blocks_second_acquire`, `vault_lock_released_on_drop`). Existing watcher code unchanged. |
+| `src-tauri/src/db/queue.rs` | NEW (amended §11) — `enqueue_vault_event` + 4-stage path hardening + sha256 + 6 unit tests. Shared queue logic lives here because both crates need to call it and the cargo dep direction (`tools → src-tauri`) prevents tools from being the canonical home. |
+| `src-tauri/src/db/mod.rs` | Adds `pub mod queue;` re-export |
 | `src-tauri/src/lib.rs:741-824` | `reconcile_vault` (line 786) + watcher callback (line 798) both swap to `enqueue_vault_event`; lock acquisition at `switch_vault`; `WatcherHandle::stop()` releases lock first |
 | `src-tauri/Cargo.toml` | Add `fs4 = "0.7"` |
 | `docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md` | THIS SPEC |
@@ -144,7 +146,7 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 ## Cross-cutting requirements
 
 - **Path resolution identical to sidecar.** `paths::resolve_brain_paths()` re-exports the canonical `tauri_app_lib::retrieval::resolve_brain_paths` — same env var precedence (`CURATED_BRAIN_DIR`, `CURATED_BRAIN_DB`, `CURATED_BRAIN_CONFIG`). **`BrainPaths` itself is re-exported, not redefined locally**, so its type identity (`Eq`/`PartialEq`/`Serialize`) is shared across crates and test fixtures.
-- **Single source of truth for `enqueue_vault_event`.** Both the desktop's `lib.rs:798` callback and `ct watch`'s callback call the same `cmds::enqueue_vault_event` function. No copy-paste divergence.
+- **Single source of truth for `enqueue_vault_event`.** Both the desktop's `lib.rs:798` callback and `ct watch`'s callback call the same `tauri_app_lib::db::queue::enqueue_vault_event` function (the desktop directly; `ct watch` via a thin wrapper at `tools/src/cmds.rs::enqueue_vault_event`). No copy-paste divergence.
 - **Exit codes:** 0 ok / clean shutdown, 1 config error, 2 lock conflict, 3 DB/schema error, 4 notify init failure.
 - **`--json` output on `ct watch`** — structured `{kind, path, ts_ms}` event lines on stdout. Matches the existing `--json` contract from phase 1 commands.
 - **Log noise:** `ct watch` writes one stderr line per event in TTY mode; downgrades to startup-banner-only + final summary in non-TTY mode (cron-friendly).
@@ -165,7 +167,7 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
    - `vault_lock_released_on_drop` — acquire, drop, second acquire succeeds.
 2. **Unit tests in `tools/src/lock.rs`**: same two as above (`vault_lock_blocks_second_acquire`, `vault_lock_released_on_drop`) — `ct watch` exercises the duplicate type, and coverage parity ensures both paths work.
 
-3. **Unit tests in `tools/src/cmds.rs`**: `enqueue_vault_event` covered for:
+3. **Unit tests in `src-tauri/src/db/queue.rs`** (relocated from `tools/src/cmds.rs` per §11 amendment): `enqueue_vault_event` covered for:
    - Add on new path → row created with `status='pending'`, hash matches.
    - Modify on existing indexed row with different hash → status flips to `'pending'`.
    - Modify on existing indexed row with same hash → no-op.
@@ -193,8 +195,22 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 - **Watcher deliverer path contracts change in a future `notify` upgrade.** Mitigation: `test_watcher_delivers_absolute_paths` test catches the regression.
 - **macOS FSEvents coalescing semantics differ from Linux inotify.** Mitigation: not a correctness issue (coalescing is desirable); just behavioral. Documented in non-goals.
 - **Two simultaneous watchers** — explicitly unsupported, but the lock makes the failure mode clean. Documented in `ct watch` startup banner.
-- **Cyclic-package dependency between `tools` and `src-tauri`** — disallows moving the watcher or VaultLock to `tools/` as a primary home. Mitigation: phase-2 keeps the watcher in `src-tauri/` and uses a thin re-export from `tools/`; `VaultLock` is duplicated ~30 LOC between the two crates (workspace migration in phase-3 can collapse this).
+- **Cyclic-package dependency between `tools` and `src-tauri`** — disallows moving the watcher or VaultLock to `tools/` as a primary home. Mitigation: phase-2 keeps the watcher in `src-tauri/` and uses a thin re-export from `tools/`; `VaultLock` is duplicated ~30 LOC between the two crates (workspace migration in phase-3 can collapse this). The DB-write half of this dependency concern (`enqueue_vault_event` was originally planned for `tools/src/cmds.rs`) is **resolved by amendment (§11)**: the shared logic moved to `src-tauri/src/db/queue.rs` where both crates can reach it.
 - **The desktop's `reconcile_vault` (`lib.rs:741-789`) still uses `pipeline_tx.try_send`.** Mitigation: also swap to `enqueue_vault_event` in this same PR (small additional change at `lib.rs:786`). This is intentional scope inclusion — leaving it on the in-memory channel while the watcher moves to DB-backed enqueue would create two divergent paths to the same DB. One source of truth for vault→DB writes.
+
+## §11 Amendment — `enqueue_vault_event` canonical home (2026-08-25)
+
+**Context.** Task 7 implementation BLOCKED on a cargo package cycle: `tools/Cargo.toml` depends on `src-tauri/Cargo.toml` (via `tauri_app_lib = { path = "../src-tauri", package = "curated-thoughts" }`), so `src-tauri/src/lib.rs` cannot `use curated_thoughts_tools::*`. Task 5 placed `enqueue_vault_event` in `tools/src/cmds.rs`; Task 7's brief assumed src-tauri could call it directly, which is impossible without creating a cycle.
+
+**Resolution.** Move `enqueue_vault_event` (and its 4-stage path hardening + sha256 helper) to `src-tauri/src/db/queue.rs`. `tools/src/cmds.rs` keeps a one-line delegating wrapper so call sites in tools don't change. Both crates reach the same code:
+- Desktop (`src-tauri/src/lib.rs`) → direct: `tauri_app_lib::db::queue::enqueue_vault_event(...)`
+- Headless (`tools/src/cmds.rs::watch_run`) → via wrapper: `tools::cmds::enqueue_vault_event(...)` → `tauri_app_lib::db::queue::enqueue_vault_event(...)`
+
+**Why not move the whole DB helpers (Brain, open_rw, BrainPaths) into src-tauri instead?** Brain and BrainPaths are CLI lifecycle concepts (ephemeral connections per `ct` invocation). Forcing them into src-tauri would couple the desktop crate to CLI plumbing. The split — queue logic in src-tauri, lifecycle helpers in tools — mirrors the natural boundary between "what to do" (queue logic, shared) and "how to connect" (per-crate lifecycle, different).
+
+**Connection lifecycle (mutex trap).** The desktop's `DbState(Mutex<AppDb>)` is a long-lived lock shared with the React UI (DB state). If the watcher callback locks it and calls `enqueue_vault_event`, which reads file bytes and computes `sha256` (~150ms for a large PDF), the UI freezes for 150ms. Mitigation: **do not use `db_state.0.lock()` in the watcher callback**. Open a fresh `rusqlite::Connection::open(&brain_paths.db_path)` per event and pass that to `enqueue_vault_event`. SQLite WAL mode (`src-tauri/src/db/connection.rs:130`) permits concurrent readers + writers, so the UI's connection through `DbState` keeps reading while the watcher writes via the ephemeral connection. `ct watch` already uses ephemeral connections (`tools::write::open_rw`), so it needs no change.
+
+**Tests.** The 6 `enqueue_vault_event` unit tests move from `tools/src/cmds.rs::tests` to `src-tauri/src/db/queue.rs::tests`. Test fixture: `tauri_app_lib::db::connection::open_in_memory()` (already exists at `src-tauri/src/db/connection.rs:163`), which avoids duplicating the inline CREATE TABLE DDL from the tools tests. WAL mode is not relevant to in-memory DBs; tests still cover the 4-stage normalization + sha256 + upsert contract.
 
 ## Sequencing
 
