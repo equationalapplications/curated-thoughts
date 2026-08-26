@@ -52,9 +52,19 @@ fn ct_watch_e2e_emits_event_and_flips_db_row_to_pending() {
         ],
         || {
             // Seed config.json so ct ingest discovers the temp vault.
+            // JSON-serialize the vault path so Windows backslashes
+            // (and any other JSON-significant chars in the temp
+            // directory name — e.g. quotes, backslashes, control
+            // chars) round-trip correctly. Direct interpolation
+            // produced a malformed config on Windows hosts
+            // (CodeRabbit review on PR #96).
+            let config_json = serde_json::json!({
+                "vault_path": vault_path.to_string_lossy().as_ref()
+            })
+            .to_string();
             std::fs::write(
                 brain_path.join("config.json"),
-                format!(r#"{{"vault_path":"{vault_str}"}}"#),
+                config_json,
             )
             .unwrap();
 

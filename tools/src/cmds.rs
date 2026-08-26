@@ -896,6 +896,25 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
 
     drop(lock); // explicit unlock before handle drops
     handle.stop();
+    if opts.json_mode {
+        // Shutdown-event "path" carries the same human-readable
+        // summary as the start-event so downstream consumers can
+        // confirm the watcher instance identity (spec §6:
+        // "{kind, path, ts_ms}" wire format).
+        println!(
+            "{}",
+            format_event(
+                "shutdown",
+                &format!(
+                    "brain={} vault={} pid={}",
+                    brain.brain_dir.display(),
+                    vault_root,
+                    std::process::id()
+                ),
+                now_ms()
+            )
+        );
+    }
     Ok(())
 }
 
@@ -908,9 +927,24 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
 /// synchronous (clap dispatch is sync). This shim keeps the dependency
 /// surface tiny — just `tokio::signal` — instead of pulling in `ctrlc` or a
 /// dedicated `signal-hook` runtime.
+///
+/// **Failure-mode contract (CodeRabbit review on PR #96):** if the
+/// signal-thread spawn fails, the runtime fails to build, or `ctrl_c()`
+/// itself returns an error, the `fatal` flag is set to `Some(msg)` so the
+/// caller surfaces the failure as an exit-1 (`Other`) instead of hanging
+/// forever. The previous implementation swallowed those errors via
+/// `eprintln!` + `return;` and then polled `term` indefinitely — meaning
+/// any signal-stack init failure made `ct watch` a non-responding
+/// foreground daemon.
 fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
     let term = Arc::new(AtomicBool::new(false));
     let term_signal = term.clone();
+    // Fatal flag: written from the signal thread on startup failure, read
+    // from the main thread's poll loop. `None` means "still starting or
+    // SIGINT not yet fired"; `Some(msg)` means "fatal — surface to user".
+    let fatal: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let fatal_signal = fatal.clone();
     std::thread::Builder::new()
         .name("ct-watch-sigint".into())
         .spawn(move || {
@@ -923,13 +957,16 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    eprintln!("[watch] failed to start signal runtime: {}", e);
+                    *fatal_signal.lock().unwrap() = Some(format!(
+                        "failed to start signal runtime: {e}"
+                    ));
                     return;
                 }
             };
             rt.block_on(async {
                 if let Err(e) = tokio::signal::ctrl_c().await {
-                    eprintln!("[watch] ctrl_c failed: {}", e);
+                    *fatal_signal.lock().unwrap() =
+                        Some(format!("ctrl_c failed: {e}"));
                     return;
                 }
                 term_signal.store(true, Ordering::SeqCst);
@@ -941,6 +978,11 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
     // until Ctrl-C fires). Same poll cadence as the once-mode loop.
     while !term.load(Ordering::SeqCst) {
         std::thread::sleep(WATCH_SIGNAL_POLL);
+        if let Some(msg) = fatal.lock().unwrap().clone() {
+            // Surface as `WatchError::Other` so main() exits 1 with the
+            // signal-thread diagnostic instead of hanging forever.
+            return Err(anyhow::anyhow!(msg));
+        }
     }
     Ok(term)
 }
@@ -1297,20 +1339,40 @@ mod tests {
     /// Lock conflict: another process holds the vault lock → exit 2 (existing
     /// behavior, regression-guarded here as part of the exit-code spec
     /// coverage).
+    ///
+    /// **Test isolation (CodeRabbit review on PR #96):** the previous
+    /// version of this test only set `CURATED_VAULT_ROOT` and let
+    /// `resolve_brain_paths()` fall back to `$HOME/.brain`, then
+    /// acquired the lock on that real directory. That meant every
+    /// run of `cargo test` would briefly create a `.curated_thoughts.lock`
+    /// in the developer's actual brain dir — corrupting any concurrent
+    /// watcher / making it crash on lock conflict. We now set both
+    /// `CURATED_VAULT_ROOT` and `CURATED_BRAIN_DIR` to the same temp
+    /// dir so all locks and DB lookups happen inside a throwaway
+    /// directory. The `temp_env::with_var` calls serialize the env
+    /// mutation (no `temp_env::with_vars` race).
     #[test]
     fn watch_run_lock_conflict_returns_exit_2() {
         let tmp = TempDir::new().unwrap();
         let path_str = tmp.path().to_str().unwrap().to_string();
+        // Two sequential `with_var` closures so we never have two
+        // env mutations in flight concurrently (the spec at
+        // https://docs.rs/temp-env warns that nested `with_var`s are
+        // racy on thread-pool executors).
         temp_env::with_var("CURATED_VAULT_ROOT", Some(&path_str), || {
-            // Hold the lock for the brain_dir (this is the path
-            // `VaultLock::acquire` in `watch_run` actually uses).
-            let _held = crate::lock::VaultLock::acquire(&crate::paths::resolve_brain_paths().brain_dir)
+            temp_env::with_var("CURATED_BRAIN_DIR", Some(&path_str), || {
+                // Hold the lock for the brain_dir (this is the path
+                // `VaultLock::acquire` in `watch_run` actually uses).
+                let _held = crate::lock::VaultLock::acquire(
+                    &crate::paths::resolve_brain_paths().brain_dir,
+                )
                 .expect("first lock acquire should succeed in test");
-            let r = watch_run(watch_run_short_opts());
-            assert!(
-                matches!(r, Ok(2)),
-                "vault lock conflict must surface as Ok(2), got {r:?}"
-            );
+                let r = watch_run(watch_run_short_opts());
+                assert!(
+                    matches!(r, Ok(2)),
+                    "vault lock conflict must surface as Ok(2), got {r:?}"
+                );
+            });
         });
     }
 
@@ -1319,6 +1381,15 @@ mod tests {
     /// platforms where recursive watching requires a directory (and on
     /// Linux inotify it also rejects non-existent paths; we use the
     /// non-directory path because it is portable).
+    ///
+    /// **Test isolation (CodeRabbit review on PR #96):** this test
+    /// previously only set `CURATED_VAULT_ROOT` and let
+    /// `resolve_brain_paths()` use the developer's real `$HOME/.brain`
+    /// dir for the brain DB probe. We now also set `CURATED_BRAIN_DIR`
+    /// to the same temp dir so the probe doesn't touch the real brain.
+    /// `open_rw` will create a throwaway `brain.db` file in the temp
+    /// dir; the watcher init failure happens later, at the `notify`
+    /// backend level.
     #[test]
     fn watch_run_non_directory_vault_root_returns_exit_4() {
         let tmp = TempDir::new().unwrap();
@@ -1326,11 +1397,13 @@ mod tests {
         std::fs::write(&file_path, "x").unwrap();
         let file_str = file_path.to_str().unwrap().to_string();
         temp_env::with_var("CURATED_VAULT_ROOT", Some(&file_str), || {
-            let r = watch_run(watch_run_short_opts());
-            assert!(
-                matches!(r, Ok(4)),
-                "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
-            );
+            temp_env::with_var("CURATED_BRAIN_DIR", Some(tmp.path().to_str().unwrap()), || {
+                let r = watch_run(watch_run_short_opts());
+                assert!(
+                    matches!(r, Ok(4)),
+                    "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
+                );
+            });
         });
     }
 }

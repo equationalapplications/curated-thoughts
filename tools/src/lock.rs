@@ -61,6 +61,15 @@ impl VaultLock {
 
     /// Platform-native `try_lock_exclusive` with a single, descriptive
     /// error message on contention.
+    ///
+    /// **API note:** in `fs4` 0.7, `FileExt::try_lock_exclusive` returns
+    /// `std::io::Result<()>` (contention surfaces as
+    /// `Err(AlreadyLocked)` / `Err(WouldBlock)`, NOT `Ok(false)`). The
+    /// previous `map_err`-only path was therefore correct in behavior;
+    /// the CodeRabbit review on PR #96 mistook it for a
+    /// `Result<bool, _>` API (that's POSIX `flock(LOCK_EX | LOCK_NB)`,
+    /// not `fs4`). We keep the simple `?`-propagation and only document
+    /// the actual semantics here.
     fn try_lock_exclusive(file: &fs::File) -> Result<()> {
         file.try_lock_exclusive()
             .map_err(|e| anyhow!("vault is already locked by another watcher instance: {e}"))

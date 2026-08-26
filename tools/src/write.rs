@@ -51,12 +51,24 @@ pub fn open_ro(brain: &Brain) -> Result<Connection> {
 
 /// Open a read-write connection, creating the database file if it does not
 /// exist. Mirrors the pragmas `cli_common::open_rw` historically applied.
+///
+/// **Busy-timeout pragma (CodeRabbit review on PR #96):** every
+/// writer connection that participates in the watcher's per-event
+/// reopen must set `PRAGMA busy_timeout = 5000`. Otherwise SQLite's
+/// default is 0 — meaning a transient lock from the desktop's WAL
+/// checkpoint (or another concurrent ingest) instantly fails with
+/// `SQLITE_BUSY`, leaving the event silently dropped. 5s is the
+/// value used by `tauri_app_lib::db::AppDb`; matching it keeps the
+/// watcher's contention behavior consistent with the desktop.
 pub fn open_rw(brain: &Brain) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         &brain.paths.db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .with_context(|| format!("open rw {}", brain.paths.db_path.display()))?;
+    // 5s busy timeout — see doc above.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("set busy_timeout on rw connection")?;
     Ok(conn)
 }
 

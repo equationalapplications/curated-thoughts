@@ -28,7 +28,17 @@ pub fn enqueue_vault_event(
     event_kind: notify::EventKind,
     raw_path: &Path,
 ) -> Result<()> {
-    let vault_root = std::env::var_os("CURATED_VAULT_ROOT").map(PathBuf::from);
+    // Canonicalize the vault root the same way as the event path so that
+    // symlinked / non-canonical vault roots (e.g. macOS /var → /private/var)
+    // can't bypass the containment check. Without this, an event for
+    // `/var/vault/note.md` would fail `starts_with("/var/vault")` against a
+    // canonicalized `/private/var/vault/note.md` and be silently dropped.
+    let vault_root = std::env::var_os("CURATED_VAULT_ROOT")
+        .map(|s| {
+            let p = PathBuf::from(s);
+            std::path::absolute(&p).map(|abs| std::fs::canonicalize(&abs).unwrap_or(abs))
+        })
+        .transpose()?;
 
     let abs = std::path::absolute(raw_path)?;
     let canonical = std::fs::canonicalize(&abs).unwrap_or(abs.clone());
@@ -328,5 +338,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0, "out-of-vault event must not insert a row");
+    }
+
+    /// Positive counterpart to `enqueue_out_of_vault_path_is_rejected`: a
+    /// path inside the vault must be ingested when `CURATED_VAULT_ROOT` is
+    /// set. Without this, a regression that simply skips every event would
+    /// pass the negative test alone.
+    #[test]
+    fn enqueue_in_vault_path_is_accepted() {
+        let vault = tempfile::TempDir::new().unwrap();
+        let note = vault.path().join("note.md");
+        std::fs::write(&note, b"inside").unwrap();
+        let mut conn = open_seeded_conn();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::Any),
+                &note,
+            )
+            .unwrap();
+        });
+
+        let canonical = std::fs::canonicalize(&note).unwrap();
+        let path_str = canonical.to_string_lossy().into_owned();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                rusqlite::params![&path_str],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "in-vault event must insert a row");
+        let _ = vault.path();
     }
 }

@@ -83,7 +83,10 @@ enum Cmd {
     },
     /// Run the headless vault watcher (foreground daemon).
     Watch {
-        /// Run in bounded watchdog mode (exit on timeout or no events for the watch interval).
+        /// Run in bounded watchdog mode (exit after --once-timeout; default
+        /// 60s). The runtime exits on timeout alone — there is no idle
+        /// early-exit; without events the watcher idles for the full
+        /// timeout window. CodeRabbit review on PR #96.
         #[arg(long)]
         once: bool,
         /// Emit structured JSON event lines to stdout (one per event). Use
@@ -247,12 +250,38 @@ fn run(cmd: Cmd) -> Result<i32> {
             foreground: _,
         } => {
             use curated_thoughts_tools::cli_common::WatchOpts;
-            cli_common::watch_run(WatchOpts {
+            let opts = WatchOpts {
                 once,
                 json_mode: json,
                 background: false,
                 once_timeout,
-            })
+            };
+            // For `--json` mode, the spec §6 wire format covers
+            // `{kind, path, ts_ms}` events. The success path
+            // (shutdown) is emitted from inside `watch_run`; here we
+            // mirror the failure path so consumers always see the
+            // watcher exit cleanly. Without this, a `ct watch
+            // --json` that fails (e.g. lock conflict) only logs to
+            // stderr and a piped consumer would block forever waiting
+            // for the (never-emitted) shutdown event.
+            match cli_common::watch_run(opts) {
+                Ok(code) => Ok(code),
+                Err(e) => {
+                    if json {
+                        // Emit a structured error line so log
+                        // scrapers see the failure reason.
+                        println!(
+                            "{}",
+                            cli_common::format_event(
+                                "error",
+                                &format!("{e}"),
+                                cli_common::now_ms()
+                            )
+                        );
+                    }
+                    Err(e)
+                }
+            }
         }
     }
 }

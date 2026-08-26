@@ -749,10 +749,13 @@ fn start_file_watcher_inner(
         // If the connection open fails (e.g. fresh install with no brain.db
         // yet), log and skip the reconcile pass — but DO continue to spawn the
         // watcher below, which will catch new events as they arrive.
-        let brain_db_path = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".brain")
-            .join("brain.db");
+        //
+        // Use the shared `retrieval::resolve_brain_paths()` so desktop and
+        // `ct watch` agree on the brain path (see CodeRabbit review on
+        // PR #96 — previously this constructed the path inline via
+        // `dirs::home_dir().join(".brain")` which silently diverged from
+        // the canonical resolver when `CURATED_BRAIN_DIR` was set).
+        let brain_db_path = retrieval::resolve_brain_paths().db_path;
         // Open a fresh WAL-mode connection for the reconcile pass (spec §11
         // mutex trap — keeps the UI's long-lived `DbState` connection free
         // to read while we hash and upsert).
@@ -762,7 +765,24 @@ fn start_file_watcher_inner(
         // still runs and catches new events as they arrive.
         let mut conn_opt: Option<rusqlite::Connection> =
             match rusqlite::Connection::open(&brain_db_path) {
-                Ok(c) => Some(c),
+                Ok(c) => {
+                    // Busy-timeout pragma (CodeRabbit review on PR #96):
+                    // the reconcile writer participates in WAL mode,
+                    // but `ct watch`'s per-event connection also opens
+                    // RW against the same DB. Without a timeout,
+                    // contention with a checkpoint or another writer
+                    // fails instantly with SQLITE_BUSY. 5s matches
+                    // `tauri_app_lib::db::AppDb`'s default.
+                    if let Err(e) =
+                        c.busy_timeout(std::time::Duration::from_secs(5))
+                    {
+                        eprintln!(
+                            "[reconcile] failed to set busy_timeout: {e}"
+                        );
+                        // Non-fatal: continue without the pragma.
+                    }
+                    Some(c)
+                }
                 Err(e) => {
                     eprintln!(
                         "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
@@ -772,17 +792,28 @@ fn start_file_watcher_inner(
             };
 
         // Purge documents rows whose backing file no longer exists on disk.
+        // Each per-row query failure is logged and skipped — we do NOT
+        // abort the reconcile pass on a single bad row, otherwise a
+        // single corrupt DB row would silently disable vault reconcile
+        // (CodeRabbit review on PR #96).
         if let Some(conn) = conn_opt.as_mut() {
-            let db_paths: Vec<String> = {
-                let mut stmt = conn
-                    .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
-                    .map_err(|e| e.to_string())?;
-                let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-                let mut v = Vec::new();
-                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                    v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+            let db_paths: Vec<String> = match conn
+                .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    let mut v = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        v.push(row.get::<_, String>(0)?);
+                    }
+                    Ok::<_, rusqlite::Error>(v)
+                }) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[reconcile] skipping path purge — SELECT path FROM documents failed: {e}"
+                    );
+                    Vec::new()
                 }
-                v
             };
             for path in db_paths {
                 if !std::path::Path::new(&path).exists() {
@@ -831,6 +862,25 @@ fn start_file_watcher_inner(
         // `conn_opt` drops here, releasing the WAL writer slot.
     }
 
+    // Acquire the vault lock BEFORE swapping the heal scheduler so a
+    // headless `ct watch` cannot race in during the gap. Held for the
+    // lifetime of the watcher; released when the returned `WatcherHandle`
+    // is dropped (via `stop()` in `WatcherHandle::stop`, before the watcher
+    // thread joins — see spec §7).
+    //
+    // The lock file lives at `{brain_dir}/.curated_thoughts.lock` per spec §2.
+    // BOTH the desktop (here) and `ct watch` (tools/cmds.rs:636) MUST acquire
+    // on the SAME path or they won't see each other. Resolved via the
+    // canonical `retrieval::resolve_brain_paths()` so desktop and CLI agree
+    // on the brain dir (CodeRabbit review on PR #96 — previously this
+    // constructed the path inline via `dirs::home_dir().join(".brain")`
+    // which silently diverged when `CURATED_BRAIN_DIR` was set).
+    let brain_paths = retrieval::resolve_brain_paths();
+    let brain_dir = brain_paths.brain_dir.clone();
+    let brain_db_path = brain_paths.db_path.clone();
+    let vault_lock = VaultLock::acquire(&brain_dir)
+        .map_err(|e| format!("failed to acquire vault lock for {brain_dir:?}: {e}"))?;
+
     let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
     let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
     *scheduler_guard = Some((heal_tx.clone(), heal_thread));
@@ -840,22 +890,6 @@ fn start_file_watcher_inner(
     // Brain DB path for the per-event ephemeral WAL-mode connection.
     // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
     // during the (potentially slow) sha256 hash freezes the UI.
-    let brain_db_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".brain")
-        .join("brain.db");
-    // Acquire the vault lock so a headless `ct watch` cannot also touch this
-    // vault concurrently. Held for the lifetime of the watcher; released when
-    // the returned `WatcherHandle` is dropped (via `stop()` in
-    // `WatcherHandle::stop`, before the watcher thread joins — see spec §7).
-    //
-    // The lock file lives at `{brain_dir}/.curated_thoughts.lock` per spec §2.
-    // BOTH the desktop (here) and `ct watch` (tools/cmds.rs:636) MUST acquire
-    // on the SAME path or they won't see each other. `brain_dir` matches
-    // switch_vault's pattern (line 999) so the two code paths agree.
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
-    let vault_lock = VaultLock::acquire(&brain_dir)
-        .map_err(|e| format!("failed to acquire vault lock for {brain_dir:?}: {e}"))?;
     let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
@@ -880,6 +914,15 @@ fn start_file_watcher_inner(
                 return;
             }
         };
+        // Busy-timeout pragma (CodeRabbit review on PR #96):
+        // without this, transient contention with a WAL checkpoint
+        // or another writer instantly fails with SQLITE_BUSY. 5s
+        // matches `tauri_app_lib::db::AppDb`'s default and the
+        // `ct watch` side (`tools/src/write.rs::open_rw`).
+        if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+            eprintln!("[watch] failed to set busy_timeout: {e}");
+            // Non-fatal: continue.
+        }
         let event_kind = match &event {
             VaultEvent::Added(_) => {
                 update_wiki_status_from_app(&app, |flags| {
