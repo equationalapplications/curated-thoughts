@@ -49,7 +49,7 @@ tree-sitter-typescript = { version = "0.23.2", default-features = false }
 tree-sitter-javascript = { version = "0.25.0", default-features = false }
 tree-sitter-python = { version = "0.25.0", default-features = false }
 tree-sitter-go = { version = "0.25.0", default-features = false }
-rmcp = { version = "1.6", features = ["macros", "transport-io", "schemars"], optional = true }
+rmcp = { version = "3.1", features = ["macros", "transport-io", "schemars"], optional = true }
 schemars = { version = "1", features = ["derive"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
@@ -69,7 +69,7 @@ tempfile = "3"
 mockito = "1"
 temp-env = "0.3"
 anyhow = "1"
-rmcp = { version = "1.6", features = ["client", "transport-child-process"] }
+rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
 uuid = { version = "1", features = ["v4"] }
 
 [features]
