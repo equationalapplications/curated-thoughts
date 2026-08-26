@@ -53,6 +53,7 @@ pub struct PendingProposal {
 /// Pending proposals, oldest first. item_count comes from the same
 /// `get_proposal_detail` call the GUI renders (N+1 is fine at pending
 /// volumes); source_doc_path is the first source doc, when any.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn list_pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>> {
     let mut stmt = conn.prepare(
         "SELECT id, created_at
@@ -79,6 +80,7 @@ pub fn list_pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>>
 
 /// Full proposal JSON for `ct proposals show` — delegates entirely to
 /// `get_proposal_detail`; `None` means unknown id.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn show_proposal(conn: &Connection, id: &str) -> Result<Option<ProposalDetail>> {
     proposals::get_proposal_detail(conn, id)
 }
@@ -126,6 +128,7 @@ pub struct RankedChunkRow {
 /// The live schema declares `updated_at INTEGER`, but desktop-app writes and
 /// older sidecars may have produced TEXT-form values; NULL is also tolerated.
 /// Any value that cannot be coerced ranks as 0 — acceptable for a sort key.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
     match value {
         Some(rusqlite::types::Value::Integer(i)) => i,
@@ -140,6 +143,7 @@ pub fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
 /// returns [] without error. Candidates are aggregated across all query terms,
 /// ranked by term overlap then confidence/updated_at, and truncated to
 /// limit_wiki only at the end.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn rank_wiki_entries(
     conn: &Connection,
     query: &str,
@@ -223,6 +227,7 @@ pub fn rank_wiki_entries(
 /// Fetch and rank chunk rows by cosine similarity against `query_emb`.
 /// Chunks with mismatched embedding dimensions are skipped; results are
 /// sorted by score descending and truncated to `limit`.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn fetch_ranked_chunks(
     conn: &Connection,
     sql: &str,
@@ -294,6 +299,7 @@ pub const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
 ///
 /// `ast_only=true` reproduces the recall leg's `strategy LIKE 'ast%'` filter
 /// (also used by `ct code`); `ast_only=false` returns every indexed chunk.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn recall_chunks(
     conn: &Connection,
     profile: &EmbedProfile,
@@ -329,6 +335,7 @@ fn canonicalize_best_effort(path: &str) -> String {
 /// Result-level dedup on (canonicalized doc_path, chunk_text). Ingest already
 /// enforces unique (doc_id, content_hash); this catches repo/symlink
 /// duplicates that surface as distinct documents with identical content.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn dedup_chunks(chunks: Vec<ScoredChunk>) -> Vec<ScoredChunk> {
     use std::collections::HashSet;
     let mut seen = HashSet::new();
@@ -339,6 +346,7 @@ pub fn dedup_chunks(chunks: Vec<ScoredChunk>) -> Vec<ScoredChunk> {
 }
 
 /// Clamp k the same way the retrieval facade does (`limit.clamp(1, 50)`).
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn clamp_limit(k: usize) -> usize {
     k.clamp(1, 50)
 }
@@ -372,16 +380,19 @@ fn run_query(
     })
 }
 
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn search_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
     cmd_output(run_query(query, k, false)?, json_mode)
 }
 
 /// `ct code`: semantic search restricted to ast% strategy chunks.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn code_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
     cmd_output(run_query(query, k, true)?, json_mode)
 }
 
 /// `ct recall`: chunk results plus the wiki ranking leg.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn recall_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
     // None means no chunk results (exit 2). The connection is returned so the
     // wiki ranking leg reuses it instead of reopening the database.
@@ -496,6 +507,7 @@ pub fn graph_json(
 }
 
 /// `ct graph`: resolve the symbol, run the traversal, render JSON or text.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn graph_cmd(symbol: &str, dir: GraphDir, hops: u32, json_mode: bool) -> Result<i32> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
@@ -549,6 +561,7 @@ fn entity_lookup(conn: &Connection, chunk_id: i64) -> String {
 }
 
 /// One wiki row as a JSON object (`ct wiki list --json`, eval-C2 gap).
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn wiki_rows(conn: &Connection) -> Result<Vec<serde_json::Value>> {
     let mut stmt = conn.prepare(
         "SELECT id, entity_id, title, body, confidence, updated_at
@@ -585,6 +598,7 @@ fn wiki_text_line(w: &serde_json::Value) -> String {
 }
 
 /// `ct wiki list`: all non-deleted entries.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn wiki_list_cmd(json_mode: bool) -> Result<i32> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
@@ -604,6 +618,7 @@ pub fn wiki_list_cmd(json_mode: bool) -> Result<i32> {
 }
 
 /// `ct wiki get <entity_id>`: full row(s), body included.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn wiki_get_cmd(entity_id: &str, json_mode: bool) -> Result<i32> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
@@ -631,6 +646,7 @@ pub fn wiki_get_cmd(entity_id: &str, json_mode: bool) -> Result<i32> {
 /// `defined_symbol`) and resolution prefers rows where `defined_symbol IS NOT
 /// NULL`, falling back to `symbol_name`; lowest chunk id breaks ties. Returns
 /// `(chunk_id, entity_id)` or `None` when nothing matches.
+// TODO(phase2-Task-5): duplicate; delete when cmds.rs lands
 pub fn resolve_symbol(conn: &Connection, symbol: &str) -> Result<Option<(i64, String)>> {
     use rusqlite::OptionalExtension;
     let normalized = symbol.trim().to_lowercase();
