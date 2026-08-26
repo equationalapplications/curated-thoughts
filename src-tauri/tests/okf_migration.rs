@@ -195,5 +195,10 @@ fn test_app_open_runs_v7_schema() {
     let max_version: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(max_version, 11);
+    // Bumped from 11 to 12 by MIGRATION_V12 (see
+    // docs/superpowers/specs/2026-08-26-fix-run-wiki-heal-source-ref-contract.md
+    // §4 / §6 — V12 idempotently multiplies seconds-valued
+    // `llm_wiki_entries.deleted_at` by 1000 to lock the timestamp-unit
+    // contract for the heal writers).
+    assert_eq!(max_version, 12);
 }

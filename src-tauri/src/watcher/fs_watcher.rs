@@ -135,7 +135,12 @@ impl VaultLock {
             .write(true)
             .read(true)
             .open(&lock_path)
-            .map_err(|e| anyhow!("failed to open vault lock file {}: {e}", lock_path.display()))?;
+            .map_err(|e| {
+                anyhow!(
+                    "failed to open vault lock file {}: {e}",
+                    lock_path.display()
+                )
+            })?;
         // `fs4::FileExt::try_lock_exclusive` returns `Result<()>`. Contention
         // surfaces as `Err(AlreadyLocked)` / `Err(WouldBlock)` — see
         // `fs4-0.7.0/src/{unix,windows}.rs` for the platform impl. The
@@ -234,9 +239,7 @@ mod tests {
         .unwrap();
         fs::write(tmp.path().join("note.md"), "hello").unwrap();
 
-        let event = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("no event");
+        let event = rx.recv_timeout(Duration::from_secs(5)).expect("no event");
         let path_str = match event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
         };
