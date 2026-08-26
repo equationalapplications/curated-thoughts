@@ -1,7 +1,7 @@
 # Spec: `ct watch` — headless vault watcher (phase 2)
 
 **Repo:** curated-thoughts · **Type:** feature · **Priority:** P2
-**Status:** awaiting Kurt's spec approval
+**Status:** Implemented
 **Supersedes / builds on:** `2026-08-24-ct-headless-cli-phase1.md` (merged as PR #83 / PR #84)
 **Context:** the Phase 1 CLI ships read-side commands + `ct ingest` / `ct librarian run` / `ct approve`. Phase 2 adds a foreground watcher daemon so files modified while no desktop app is running still get indexed, and splits the 1394-line `tools/src/cli_common.rs` into focused modules. Three files in the live vault (`people/tessera/INDEX.md`, `memories/memory-architecture.md`, `memories/farmhouse-arts.md`) are currently unindexed for exactly this reason — they are the smoke test for this PR.
 
