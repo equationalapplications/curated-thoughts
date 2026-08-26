@@ -1,7 +1,7 @@
 //! CRUD for `curated_entities` — OKF entity surface for Brain mode (Phase 4).
 
 use anyhow::{bail, Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -161,7 +161,7 @@ fn now_secs() -> i64 {
 
 fn generate_entity_id() -> String {
     let mut bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     format!("ent_{}", hex::encode(bytes))
 }
 
