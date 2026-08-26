@@ -29,7 +29,8 @@ use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
 
 // Items that stay in cli_common (write-side concerns, Brain, EXIT_NO_RESULTS).
 // We import them here so the command fns can refer to them by short name.
-use crate::cli_common::{open_ro, print_json, resolve, EXIT_NO_RESULTS};
+use crate::paths::print_json;
+use crate::write::{open_ro, resolve, EXIT_NO_RESULTS};
 
 // ---------------------------------------------------------------------------
 // Shared types / constants re-homed from cli_common.
@@ -83,6 +84,51 @@ pub const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
 
 /// Hard neighbor cap shared with the MCP sidecar's graph tool.
 pub const GRAPH_MAX_NEIGHBORS: usize = 200;
+
+/// One row of `ct proposals list` output.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingProposal {
+    pub id: String,
+    pub source_doc_path: Option<String>,
+    pub created_at: i64,
+    pub item_count: usize,
+}
+
+/// Pending proposals, oldest first. item_count comes from the same
+/// `get_proposal_detail` call the GUI renders (N+1 is fine at pending
+/// volumes); source_doc_path is the first source doc, when any.
+pub fn list_pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at
+         FROM curated_proposals
+         WHERE status = 'pending'
+         ORDER BY created_at",
+    )?;
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, created_at) in rows {
+        let detail = tauri_app_lib::db::proposals::get_proposal_detail(conn, &id)?
+            .with_context(|| format!("pending proposal {id} vanished mid-list"))?;
+        out.push(PendingProposal {
+            id,
+            source_doc_path: detail.source_doc_paths.first().cloned(),
+            created_at,
+            item_count: detail.items.len(),
+        });
+    }
+    Ok(out)
+}
+
+/// Full proposal JSON for `ct proposals show` — delegates entirely to
+/// `get_proposal_detail`; `None` means unknown id.
+pub fn show_proposal(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<tauri_app_lib::db::proposals::ProposalDetail>> {
+    tauri_app_lib::db::proposals::get_proposal_detail(conn, id)
+}
 
 /// Traversal direction for `ct graph` (validated at the clap parse level via
 /// `value_enum`, mapping onto the graph module's callees/callers/both CTEs.
@@ -704,7 +750,7 @@ mod tests {
     // Suppress dead-code lints for items that exist for completeness but are
     // not exercised by these unit tests (they are exercised by integration
     // tests against a seeded brain).
-    use crate::cli_common::Brain;
+    use crate::write::Brain;
     use crate::paths::BrainPaths;
     #[allow(dead_code)]
     fn _suppress_unused_for_helper_types(_b: Brain, _bp: BrainPaths) {}

@@ -11,12 +11,18 @@ serde_json = "1"
 flate2 = "1"
 fs4 = "0.7"
 anyhow = "1"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
 rmcp = { version = "3.1", features = ["macros", "transport-io", "schemars"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 schemars = { version = "1", features = ["derive"] }
 walkdir = "2"
 clap = { version = "4", features = ["derive"] }
+# notify v6 + sha2: direct deps so `cmds.rs` can use them without relying on
+# transitive resolution through `tauri_app_lib`. Both versions match the
+# pins in `src-tauri/Cargo.toml` to keep the workspace on a single
+# notification backend and a single SHA-2 implementation.
+notify = "6"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
