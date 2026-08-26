@@ -3402,7 +3402,7 @@ mod maintenance_command_tests {
             "old-inferred",
             "librarian_inferred",
             "documents/old.md",
-            Some(old.as_secs() as i64),
+            Some(old.as_millis() as i64),
         );
         insert_wiki_entry(
             &conn,
@@ -3416,7 +3416,7 @@ mod maintenance_command_tests {
             "old-immutable",
             "immutable_document",
             "documents/immutable.md",
-            Some(old.as_secs() as i64),
+            Some(old.as_millis() as i64),
         );
 
         let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
