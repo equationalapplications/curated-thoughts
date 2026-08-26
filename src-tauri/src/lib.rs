@@ -617,8 +617,11 @@ fn backup_vault_db(
         ));
     }
 
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
-    let src = brain_dir.join("brain.db");
+    // Same fix as `switch_vault` (CodeRabbit review on PR #96): the
+    // backup source path was hardcoded to `~/.brain/brain.db`. With
+    // `CURATED_BRAIN_DIR` set, the backup silently captured the wrong
+    // database. Route through the canonical resolver.
+    let src = retrieval::resolve_brain_paths().db_path;
     if !src.exists() {
         return Err("no database to back up".to_string());
     }
@@ -1045,8 +1048,14 @@ async fn switch_vault(
     status_state: State<'_, WikiStatusState>,
     outbox_state: State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
-    let db_path = brain_dir.join("brain.db");
+    // CodeRabbit review on PR #96: the inner `start_file_watcher_inner`
+    // was already migrated to `retrieval::resolve_brain_paths()` for the
+    // watcher brain dir / brain db path, but the outer `switch_vault`
+    // scope was still using the hardcoded `~/.brain/brain.db`. With
+    // `CURATED_BRAIN_DIR` set, the outbox worker + sidecar recovery +
+    // db-path-cleanup were silently operating on the WRONG brain.db.
+    // Route through the canonical resolver so the two paths agree.
+    let db_path = retrieval::resolve_brain_paths().db_path;
 
     let new_root = validated_new_vault_root(&new_path)?;
 
@@ -2481,10 +2490,14 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
+    // Same fix as `switch_vault` (CodeRabbit review on PR #96): the
+    // entrypoint was hardcoded to `~/.brain/`. With `CURATED_BRAIN_DIR`
+    // set, the app would bootstrap a directory the user never asked
+    // for. Route through the canonical resolver.
+    let brain_dir = retrieval::resolve_brain_paths().brain_dir;
     std::fs::create_dir_all(&brain_dir).ok();
 
-    let db_path = brain_dir.join("brain.db");
+    let db_path = retrieval::resolve_brain_paths().db_path;
 
     let config = VaultConfig::new(VaultConfig::default_config_path());
     if config.get_vault_path().ok().flatten().is_none() {

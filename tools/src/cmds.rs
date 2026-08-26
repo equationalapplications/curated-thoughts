@@ -890,8 +890,13 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
     } else {
         // Foreground: block until SIGINT. We use tokio::signal::ctrl_c() via
         // a tiny dedicated thread + atomic flag — see `wait_for_sigint`.
-        let term = wait_for_sigint()?;
-        let _ = term; // sigint already observed
+        // CodeRabbit review on PR #96 (review pass 2): the previous
+        // `let term = wait_for_sigint()?; let _ = term;` was dead — the
+        // Arc<AtomicBool> returned has no other readers once the
+        // signal-thread has set and exited. We just call for its
+        // side-effect (block until SIGINT) and let the value drop on
+        // the next line.
+        wait_for_sigint()?;
     }
 
     drop(lock); // explicit unlock before handle drops

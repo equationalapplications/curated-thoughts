@@ -154,6 +154,12 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 - **Single source of truth for `enqueue_vault_event`.** Both the desktop's `lib.rs:798` callback and `ct watch`'s callback call the same `tauri_app_lib::db::queue::enqueue_vault_event` function (the desktop directly; `ct watch` via a thin wrapper at `tools/src/cmds.rs::enqueue_vault_event`). No copy-paste divergence.
 - **Exit codes:** 0 ok / clean shutdown, 1 config error, 2 lock conflict, 3 DB/schema error, 4 notify init failure.
 - **`--json` output on `ct watch`** — structured `{kind, path, ts_ms}` event lines on stdout. Matches the existing `--json` contract from phase 1 commands.
+  - **Valid `kind` values** (closed enum, see also `--help`):
+    - `start` — first line of every run; `path` carries `brain=<dir> vault=<dir> pid=<n>`.
+    - `added` / `modified` / `removed` — vault filesystem events.
+    - `error` — failure path (both `WatchError::Other` exit-1 and classified exit 2/3/4); emitted from `bin/ct.rs` so piped consumers see the reason before shutdown.
+    - `shutdown` — final line of every clean run; `path` carries the same `brain/vault/pid` summary as `start` so log scrapers can pair them.
+  - Consumers SHOULD treat `error` followed by no `shutdown` as a partial failure (process killed mid-run) and SHOULD treat `error` followed by `shutdown` as a clean classified exit.
 - **Log noise:** `ct watch` writes one stderr line per event in TTY mode; downgrades to startup-banner-only + final summary in non-TTY mode (cron-friendly).
 
 ## Non-goals (this phase)
