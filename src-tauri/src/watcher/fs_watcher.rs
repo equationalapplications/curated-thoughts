@@ -1,7 +1,9 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use fs4::FileExt;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -21,12 +23,26 @@ pub enum VaultEvent {
 pub struct WatcherHandle {
     cancel: Arc<AtomicBool>,
     join: thread::JoinHandle<()>,
+    /// Optional vault lock held by this watcher. Released on `stop()` (before
+    /// joining the watcher thread) so a subsequent watcher acquire cannot
+    /// race against an exiting thread. See spec §7 deadlock prevention.
+    lock: Option<VaultLock>,
 }
 
 impl WatcherHandle {
-    pub fn stop(self) {
+    pub fn stop(mut self) {
+        // Drop the vault lock FIRST so a new watcher can acquire it before the
+        // watcher thread is joined (avoids a deadlock window during vault switch).
+        drop(self.lock.take());
         self.cancel.store(true, Ordering::SeqCst);
         let _ = self.join.join();
+    }
+
+    /// Attach a [`VaultLock`] to this handle. The lock is released when
+    /// [`stop`](Self::stop) is called (or when the handle is dropped).
+    pub fn with_lock(mut self, lock: VaultLock) -> Self {
+        self.lock = Some(lock);
+        self
     }
 }
 
@@ -66,7 +82,92 @@ where
         }
     });
 
-    Ok(WatcherHandle { cancel, join })
+    Ok(WatcherHandle {
+        cancel,
+        join,
+        lock: None,
+    })
+}
+
+/// Cross-platform exclusive lock for a vault directory.
+///
+/// Used by desktop-mode vault reconciliation to ensure only one watcher
+/// holds the vault open at a time. The lock is implemented via
+/// `fs4::FileExt::try_lock_exclusive`, which works on Linux (flock), macOS
+/// (fcntl), and Windows (LockFileEx). Holding the lock keeps the file
+/// alive via `_file`; releasing it happens implicitly when the struct
+/// drops and `fs::File` closes.
+///
+/// On Windows, the file must be opened without the
+/// `FILE_SHARE_READ`/`FILE_SHARE_WRITE` masks for the exclusive lock to
+/// fail when another holder exists — `fs4` handles this via its platform
+/// implementation, so callers do not need to set flags themselves.
+///
+/// **API note:** in `fs4` 0.7, `FileExt::try_lock_exclusive` returns
+/// `std::io::Result<()>` (it surfaces contention via
+/// `Err(io::ErrorKind::AlreadyLocked)` / `Err(io::ErrorKind::WouldBlock)`
+/// rather than `Ok(false)`). The previous `map_err`-only path was
+/// therefore correct in behavior; the CodeRabbit review on PR #96
+/// mistook the API for one returning `Result<bool, _>` (that's POSIX
+/// `flock(LOCK_EX | LOCK_NB)`, not `fs4`). We keep the simple `?`-map
+/// and only document the actual semantics.
+#[derive(Debug)]
+pub struct VaultLock {
+    /// Keep the lock file handle alive for the lifetime of the guard;
+    /// closing the file releases the OS-level lock.
+    _file: fs::File,
+    /// Stored for diagnostics and for the `path()` accessor.
+    _path: PathBuf,
+}
+
+impl VaultLock {
+    /// Acquire the exclusive vault lock for `vault`.
+    ///
+    /// On success returns a guard whose drop releases the lock.
+    /// On contention returns `Err` with a message identifying the
+    /// existing holder (when the platform exposes one).
+    pub fn acquire(vault: &Path) -> Result<Self> {
+        let lock_path = vault.join(".curated_thoughts.lock");
+        // Create the lock file if missing; we open for read+write so
+        // both `try_lock_exclusive` and the held handle are valid.
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&lock_path)
+            .map_err(|e| anyhow!("failed to open vault lock file {}: {e}", lock_path.display()))?;
+        // `fs4::FileExt::try_lock_exclusive` returns `Result<()>`. Contention
+        // surfaces as `Err(AlreadyLocked)` / `Err(WouldBlock)` — see
+        // `fs4-0.7.0/src/{unix,windows}.rs` for the platform impl. The
+        // `?`-propagation below is sufficient; no `Ok(false)` case
+        // exists in this version of `fs4`.
+        Self::try_lock_exclusive(&file)?;
+        Ok(Self {
+            _file: file,
+            _path: lock_path,
+        })
+    }
+
+    /// Platform-native `try_lock_exclusive` with a single, descriptive
+    /// error message on contention.
+    fn try_lock_exclusive(file: &fs::File) -> Result<()> {
+        file.try_lock_exclusive()
+            .map_err(|e| anyhow!("vault is already locked by another watcher instance: {e}"))
+    }
+
+    /// Return the on-disk path of the lock file (for diagnostics).
+    pub fn path(&self) -> &Path {
+        &self._path
+    }
+}
+
+impl Drop for VaultLock {
+    fn drop(&mut self) {
+        // Release the OS lock explicitly; fs::File's Drop will close
+        // the handle. Unlock failure here is non-fatal (the file is
+        // being closed anyway), so we swallow the error.
+        let _ = self._file.unlock();
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +222,62 @@ mod tests {
         }
         assert!(found, "no Deleted event received within timeout");
         handle.stop();
+    }
+
+    #[test]
+    fn test_watcher_delivers_absolute_paths() {
+        let tmp = TempDir::new().unwrap();
+        let (tx, rx) = mpsc::channel::<VaultEvent>();
+        let handle = spawn_vault_watcher(tmp.path().to_path_buf(), move |e| {
+            tx.send(e).ok();
+        })
+        .unwrap();
+        fs::write(tmp.path().join("note.md"), "hello").unwrap();
+
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no event");
+        let path_str = match event {
+            VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
+        };
+        let path = Path::new(&path_str);
+        assert!(
+            path.is_absolute(),
+            "watcher delivered non-absolute path: {}",
+            path_str
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn vault_lock_blocks_second_acquire() {
+        let tmp = TempDir::new().unwrap();
+        let _first = VaultLock::acquire(tmp.path()).expect("first acquire succeeds");
+        let second = VaultLock::acquire(tmp.path());
+        assert!(
+            second.is_err(),
+            "second acquire on same vault must fail, got {:?}",
+            second
+        );
+        let msg = format!("{}", second.err().unwrap());
+        assert!(
+            msg.contains("locked") || msg.contains("lock"),
+            "error message should mention lock contention, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn vault_lock_released_on_drop() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let _first = VaultLock::acquire(tmp.path()).expect("first acquire succeeds");
+        }
+        // First guard is dropped here; second acquire must now succeed.
+        let second = VaultLock::acquire(tmp.path());
+        assert!(
+            second.is_ok(),
+            "second acquire after drop must succeed, got {:?}",
+            second
+        );
     }
 }

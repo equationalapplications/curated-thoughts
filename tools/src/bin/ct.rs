@@ -81,6 +81,57 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LibrarianCmd,
     },
+    /// Run the headless vault watcher (foreground daemon).
+    Watch {
+        /// Run in bounded watchdog mode (exit after --once-timeout; default
+        /// 60s). The runtime exits on timeout alone — there is no idle
+        /// early-exit; without events the watcher idles for the full
+        /// timeout window. CodeRabbit review on PR #96.
+        #[arg(long)]
+        once: bool,
+        /// Emit structured JSON event lines to stdout (one per event). Use
+        /// 2>/dev/null or `--stderr` redirection only for human-readable
+        /// mode. Schema: {"kind": "<start|added|modified|removed|error|shutdown>",
+        /// "path": "<absolute>", "ts_ms": <i64 unix millis>}.
+        #[arg(long)]
+        json: bool,
+        /// Maximum time to wait in --once mode (default 60s). Format: e.g. "60s", "5m", "500ms".
+        #[arg(long, value_parser = parse_secs)]
+        once_timeout: Option<std::time::Duration>,
+        /// Run as a foreground daemon (the only mode in v1; flag exists for spec parity + future systemd use).
+        // TODO(phase3): `foreground` is a no-op in v1 — daemon is always foreground.
+        // Future: --background spawns a detached systemd-style service.
+        #[arg(long)]
+        foreground: bool,
+    },
+}
+
+/// Parse a human-friendly duration string ("60s", "5m", "500ms", "2h") into a
+/// `std::time::Duration`. Used by the `watch --once-timeout` flag so we don't
+/// pull in the `humantime` crate just for one flag.
+fn parse_secs(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    if let Some(num) = s.strip_suffix("ms") {
+        num.parse::<u64>()
+            .map(std::time::Duration::from_millis)
+            .map_err(|e| format!("invalid ms: {e}"))
+    } else if let Some(num) = s.strip_suffix('s') {
+        num.parse::<u64>()
+            .map(std::time::Duration::from_secs)
+            .map_err(|e| format!("invalid s: {e}"))
+    } else if let Some(num) = s.strip_suffix('m') {
+        num.parse::<u64>()
+            .map(|n| std::time::Duration::from_secs(n * 60))
+            .map_err(|e| format!("invalid m: {e}"))
+    } else if let Some(num) = s.strip_suffix('h') {
+        num.parse::<u64>()
+            .map(|n| std::time::Duration::from_secs(n * 3600))
+            .map_err(|e| format!("invalid h: {e}"))
+    } else {
+        Err(format!(
+            "unrecognized duration format: {s:?} (use 60s, 5m, 500ms, 2h)"
+        ))
+    }
 }
 
 #[derive(Subcommand)]
@@ -192,6 +243,65 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Watch {
+            once,
+            json,
+            once_timeout,
+            foreground: _,
+        } => {
+            use curated_thoughts_tools::cli_common::WatchOpts;
+            let opts = WatchOpts {
+                once,
+                json_mode: json,
+                background: false,
+                once_timeout,
+            };
+            // For `--json` mode, the spec §6 wire format covers
+            // `{kind, path, ts_ms}` events. The shutdown event is emitted
+            // from inside `watch_run` (line ~780) on EVERY outcome —
+            // clean, classified, and unclassified. Here we just emit
+            // an `error` line so consumers see the reason first; the
+            // shutdown follows immediately. CodeRabbit review on PR #96
+            // (pass 3): the previous comment promised a "paired" event
+            // but the shutdown never fired for classified exits.
+            match cli_common::watch_run(opts) {
+                Ok(0) => Ok(0),
+                Ok(code) => {
+                    if json {
+                        // Classified exit (lock conflict → 2,
+                        // DB → 3, notify-init → 4). The shutdown event
+                        // for this run has already been emitted by
+                        // `watch_run`'s wrapper (line ~780), so we
+                        // only need the error line here. Consumers see
+                        // error → shutdown in stdout.
+                        println!(
+                            "{}",
+                            cli_common::format_event(
+                                "error",
+                                &format!("classified exit code {code}"),
+                                cli_common::now_ms()
+                            )
+                        );
+                    }
+                    Ok(code)
+                }
+                Err(e) => {
+                    if json {
+                        // Emit a structured error line so log
+                        // scrapers see the failure reason.
+                        println!(
+                            "{}",
+                            cli_common::format_event(
+                                "error",
+                                &format!("{e}"),
+                                cli_common::now_ms()
+                            )
+                        );
+                    }
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
