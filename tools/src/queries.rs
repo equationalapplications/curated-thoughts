@@ -12,16 +12,12 @@
 //! `Task 5`; until then both modules' items coexist at different paths
 //! (`crate::cli_common::*` vs `crate::queries::*`).
 //!
-//! Internal cross-references are wired to the post-Task-3 modules:
-//! - `crate::paths::print_json`        (was `crate::cli_common::print_json`)
-//! - `crate::paths::BrainPaths`        (re-export of the canonical type)
-//! - `crate::write::open_ro`           (was `crate::cli_common::open_ro`)
-//!
-//! `Brain`, `resolve()`, `EXIT_NO_RESULTS`, and the embed-side `BrainPaths`
-//! re-exported via `crate::paths` all stay sourced from `cli_common` /
-//! `tauri_app_lib::retrieval` (the canonical definitions). `cli_common::Brain`
-//! continues to be the struct callers pass into `crate::write::open_ro` /
-//! `open_rw`, so we re-import it here for ergonomic call sites.
+//! Items still owned by `cli_common` (write-side `Brain`, `resolve()`,
+//! `EXIT_NO_RESULTS`, `print_json`) are imported here so the command fns can
+//! refer to them by short name. `Task 5` will re-home these alongside
+//! `write.rs` (for `Brain` + `resolve()`) and `queries.rs` (for the
+//! `EXIT_NO_RESULTS` constant). Until then the import path is correct as
+//! `crate::cli_common::{...}` and the duplicates coexist.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
