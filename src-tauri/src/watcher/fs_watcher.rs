@@ -93,7 +93,7 @@ where
 ///
 /// Used by desktop-mode vault reconciliation to ensure only one watcher
 /// holds the vault open at a time. The lock is implemented via
-/// `fs4::FileExt::lock_exclusive`, which works on Linux (flock), macOS
+/// `fs4::FileExt::try_lock_exclusive`, which works on Linux (flock), macOS
 /// (fcntl), and Windows (LockFileEx). Holding the lock keeps the file
 /// alive via `_file`; releasing it happens implicitly when the struct
 /// drops and `fs::File` closes.
@@ -102,6 +102,15 @@ where
 /// `FILE_SHARE_READ`/`FILE_SHARE_WRITE` masks for the exclusive lock to
 /// fail when another holder exists — `fs4` handles this via its platform
 /// implementation, so callers do not need to set flags themselves.
+///
+/// **API note:** in `fs4` 0.7, `FileExt::try_lock_exclusive` returns
+/// `std::io::Result<()>` (it surfaces contention via
+/// `Err(io::ErrorKind::AlreadyLocked)` / `Err(io::ErrorKind::WouldBlock)`
+/// rather than `Ok(false)`). The previous `map_err`-only path was
+/// therefore correct in behavior; the CodeRabbit review on PR #96
+/// mistook the API for one returning `Result<bool, _>` (that's POSIX
+/// `flock(LOCK_EX | LOCK_NB)`, not `fs4`). We keep the simple `?`-map
+/// and only document the actual semantics.
 #[derive(Debug)]
 pub struct VaultLock {
     /// Keep the lock file handle alive for the lifetime of the guard;
@@ -127,6 +136,11 @@ impl VaultLock {
             .read(true)
             .open(&lock_path)
             .map_err(|e| anyhow!("failed to open vault lock file {}: {e}", lock_path.display()))?;
+        // `fs4::FileExt::try_lock_exclusive` returns `Result<()>`. Contention
+        // surfaces as `Err(AlreadyLocked)` / `Err(WouldBlock)` — see
+        // `fs4-0.7.0/src/{unix,windows}.rs` for the platform impl. The
+        // `?`-propagation below is sufficient; no `Ok(false)` case
+        // exists in this version of `fs4`.
         Self::try_lock_exclusive(&file)?;
         Ok(Self {
             _file: file,

@@ -37,12 +37,16 @@
 // paths); the desktop side was already hot-fixed in 6258cfd. This
 // PR fixes the name-resolution bug on the `tools` side so future
 // callers cannot re-introduce the same drift.
+//
+// **Deprecation (CodeRabbit review on PR #96):** the `CtVaultLock`
+// alias that used to live here has been removed. No callers in the
+// workspace used it (a tree-wide `rg "CtVaultLock"` is part of the
+// pre-commit hook), so the API surface loses nothing. The intended
+// future cleanup is to collapse the ~30 LOC of duplicated lock code
+// between `tools/src/lock.rs` and `src-tauri/src/watcher/fs_watcher.rs`
+// into a single canonical definition (probably via a workspace crate
+// shared by both) — tracked separately; it can't happen in this PR
+// because of the cargo dependency direction
+// (`tools -> src-tauri`, so `src-tauri` cannot import from `tools`).
 pub use tauri_app_lib::watcher::*;
 pub use crate::lock::VaultLock;
-
-// Deprecated alias kept for any callers that may have written
-// `curated_thoughts_tools::watcher::CtVaultLock`. None exist in the
-// current codebase, but keeping the symbol avoids a needless API
-// churn if one is added in a downstream PR before this lands.
-#[deprecated(note = "use `curated_thoughts_tools::watcher::VaultLock` instead")]
-pub use crate::lock::VaultLock as CtVaultLock;

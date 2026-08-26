@@ -128,8 +128,8 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 
 ## Files touched
 
-| File | Action |
-|---|---|
+| File | Action | Details |
+|---|---|---|
 | `tools/src/watcher.rs` | NEW (thin re-export) | `pub use tauri_app_lib::watcher::*;` — no logic, no tests. |
 | `tools/src/lock.rs` | NEW | `VaultLock` (uses `fs4::FileExt::lock_exclusive`) — thin standalone wrapper, ~30 LOC + 2 unit tests. Duplicates ~30 LOC in `src-tauri/src/watcher/fs_watcher.rs`; forced by cargo dep direction. |
 | `tools/src/paths.rs` | NEW (split) |
