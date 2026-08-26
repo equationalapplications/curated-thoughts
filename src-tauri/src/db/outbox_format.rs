@@ -8,7 +8,7 @@
 //! package writes `llm_wiki_outbox`. Worker config alignment is tracked for Task 7.
 
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use rusqlite::{params, Connection};
 
 pub const LLM_WIKI_OUTBOX_TABLE: &str = "llm_wiki_outbox";
@@ -43,7 +43,7 @@ pub struct OutboxPushParams {
 /// Generate an outbox row id matching `generateId("out_")` in core-llm-wiki (24 hex chars).
 pub fn generate_outbox_id() -> String {
     let mut bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     format!("out_{}", hex::encode(bytes))
 }
 

@@ -9,7 +9,7 @@ use crate::inference::config::{read_config, GenerationProviderKind, LlmConfig};
 use crate::librarian::{assemble_librarian_context, build_structural_context, ChunkRow};
 use crate::search::{bytes_to_f32, cosine_similarity};
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -172,7 +172,7 @@ impl LlmCompleter for HttpLlmCompleter {
 
 fn generate_id(prefix: &str) -> String {
     let mut bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     format!("{prefix}{}", hex::encode(bytes))
 }
 

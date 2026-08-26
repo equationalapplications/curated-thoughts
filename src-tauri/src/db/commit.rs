@@ -3,7 +3,7 @@
 use crate::db::outbox_format::{self, OutboxOperation, OutboxPushParams};
 use crate::db::proposals::{ItemDecision, ItemDecisionKind, ProposalKind, StoredEvidenceChunk};
 use anyhow::{bail, Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +69,7 @@ struct CommitContext {
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
     let mut bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     format!("{prefix}{}", hex::encode(bytes))
 }
 
