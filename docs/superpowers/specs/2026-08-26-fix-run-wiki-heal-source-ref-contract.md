@@ -100,11 +100,18 @@ of the same root issue (text-vs-int). We're now closing it upstream.
 /// can't be parsed isn't demonstrably stale — it's a legacy path or a future
 /// producer we don't know about yet. Logging is the right response, not
 /// deletion. (This is the contract that all five new tests lock in.)
-pub(crate) fn source_ref_is_still_grounded(
+pub fn source_ref_is_still_grounded(
     conn: &Connection,
     source_ref: &str,
 ) -> bool
 ```
+
+> **Visibility note (corrected after implementer review):** The spec originally
+> said `pub(crate)`, but Cargo's `tests/` directory treats each integration
+> test file as a separate external binary that only sees `pub` items. `pub`
+> does not expand the API surface meaningfully — both `ms_now` and
+> `source_ref_is_still_grounded` are internal helpers. The `pub` is the
+> minimum visibility that makes U1–U15 compile.
 
 Logic:
 1. If `source_ref` doesn't start with `{`, treat as legacy vault-relative path;
@@ -149,7 +156,7 @@ current code does this already, good).
 ### 3. New helper: `ms_now() -> i64` colocated with `now_timestamps()`
 
 ```rust
-pub(crate) fn ms_now() -> i64 {
+pub fn ms_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -303,8 +310,9 @@ unambiguously. (This is the same heuristic the migration uses.)
 The `timestamp_units.rs` test file lives at the crate top level so it can
 exercise both `src-tauri/src/db/*` and `src-tauri/src/lib.rs` (heal functions
 live in the latter). Cargo's `tests/` directory treats each file as a separate
-integration-test binary, so we get full `pub(crate)` access via the existing
-`pub(crate)` visibility on the helpers — no API surface changes needed.
+integration-test binary, so the test crate is an external consumer of the
+library — `pub(crate)` is not visible from there, and the helpers therefore
+must be `pub`. This does not expand the public API meaningfully.
 
 ## Test plan (executed by subagent before handoff)
 
