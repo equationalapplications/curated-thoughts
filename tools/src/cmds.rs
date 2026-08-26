@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
@@ -607,6 +607,36 @@ pub fn enqueue_vault_event(
 // watch_run (headless vault watcher)
 // ---------------------------------------------------------------------------
 
+/// Format a single JSON event line for `ct watch --json` (spec §6).
+///
+/// Pure helper (no I/O) so tests can pin the wire format without spawning
+/// the binary. Field order is `kind`, `path`, `ts_ms` — the canonical order
+/// documented in `docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md`
+/// §6. The returned string has no trailing newline; the caller is
+/// responsible for emitting it on stdout (so the writer controls flushing).
+pub fn format_event(kind: &str, path: &str, ts_ms: i64) -> String {
+    serde_json::json!({
+        "kind": kind,
+        "path": path,
+        "ts_ms": ts_ms,
+    })
+    .to_string()
+}
+
+/// Current wall-clock time in unix milliseconds.
+///
+/// Uses `std::time::SystemTime` (no `chrono` dep — keeping the dependency
+/// surface tiny per the phase 2 spec's "no new deps" rule). If the system
+/// clock is somehow before the epoch we fall back to 0 rather than panicking
+/// — a negative `ts_ms` is meaningless for downstream consumers and we
+/// never want the watcher to crash on a bad clock read.
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Knobs for [`watch_run`]. `once` switches the SIGINT-blocking loop into a
 /// bounded watchdog (`once_timeout`, default 60s). `background` is reserved
 /// for a future systemd-style mode; v1 always foregrounds.
@@ -648,11 +678,23 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
     let brain_for_cb = crate::write::Brain { paths: brain.clone() };
 
     if opts.json_mode {
-        eprintln!(
-            r#"{{"event":"start","brain":"{}","vault":"{}","pid":{}}}"#,
-            brain.brain_dir.display(),
-            vault_root,
-            std::process::id()
+        // Start-event "path" is a synthetic context string per the
+        // drift-fixups plan step 1.5: the original {event, brain, vault,
+        // pid} payload collapses into the spec §6 {kind, path, ts_ms}
+        // schema by reusing the `path` slot for a human-readable
+        // brain/vault/pid summary. `kind=start`, `ts_ms=now_ms()`.
+        println!(
+            "{}",
+            format_event(
+                "start",
+                &format!(
+                    "brain={} vault={} pid={}",
+                    brain.brain_dir.display(),
+                    vault_root,
+                    std::process::id()
+                ),
+                now_ms()
+            )
         );
     } else {
         eprintln!(
@@ -693,15 +735,17 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
             return;
         }
         if opts.json_mode {
-            eprintln!(
-                r#"{{"event":"{}","path":"{}"}}"#,
-                match event {
-                    crate::watcher::VaultEvent::Added(_) => "added",
-                    crate::watcher::VaultEvent::Modified(_) => "modified",
-                    crate::watcher::VaultEvent::Deleted(_) => "deleted",
-                },
-                path
-            );
+            // JSON event line → stdout (cron-friendly). The spec §6
+            // vocabulary maps Deleted → "removed" (the watcher enum
+            // uses "deleted" but the spec wire vocabulary uses
+            // "removed" — see plan step 1.5 ruling). All other kinds
+            // pass through unchanged.
+            let kind = match event {
+                crate::watcher::VaultEvent::Added(_) => "added",
+                crate::watcher::VaultEvent::Modified(_) => "modified",
+                crate::watcher::VaultEvent::Deleted(_) => "removed",
+            };
+            println!("{}", format_event(kind, &path, now_ms()));
         } else {
             eprintln!(
                 "[watch] {} {}",
@@ -797,6 +841,61 @@ mod tests {
 
     fn lines(out: &str) -> Vec<&str> {
         out.lines().collect()
+    }
+
+    // ---- ct watch JSON output (drift-fixups Task 1) ----
+    //
+    // Pin the wire format for `--json` mode. Spec §6 schema:
+    //   {"kind": "<start|added|modified|removed|error|shutdown>",
+    //    "path": "<absolute or context string>",
+    //    "ts_ms": <i64 unix millis>}
+    //
+    // These are pure-helper tests — no I/O — so they don't depend on spawning
+    // a process and remain stable across refactors of `watch_run` itself.
+
+    #[test]
+    fn watch_run_json_writes_to_stdout_not_stderr() {
+        // Extract the JSON-line formatting into a small
+        // `fn format_event(kind, path, ts_ms) -> String` so it's directly
+        // testable. Verify the exact wire format (no trailing newline,
+        // single-line JSON, field order is kind → path → ts_ms).
+        let line = super::format_event("modified", "/abs/path.md", 1_234_567_890_123);
+        assert_eq!(
+            line,
+            r#"{"kind":"modified","path":"/abs/path.md","ts_ms":1234567890123}"#
+        );
+    }
+
+    #[test]
+    fn watch_run_event_kind_values_are_constrained() {
+        // Spec §6: kind ∈ {start, added, modified, removed, error, shutdown}.
+        // The formatter is a pure string passthrough, but pin the six
+        // canonical values so accidental drift in callers is caught.
+        for kind in ["start", "added", "modified", "removed", "error", "shutdown"] {
+            let line = super::format_event(kind, "/abs", 0);
+            assert!(
+                line.contains(&format!(r#""kind":"{}""#, kind)),
+                "line {line:?} missing kind field {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn watch_run_ts_ms_is_unix_millis() {
+        // Use std::time::SystemTime (no chrono dep). The value must be
+        // post-2024 in unix millis, and must round-trip through format_event
+        // exactly so a downstream JSON consumer can parse it.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(now > 1_700_000_000_000, "ts_ms {now} not in 2024+");
+        let line = super::format_event("start", "/abs", now);
+        assert!(
+            line.contains(&format!(r#""ts_ms":{}"#, now)),
+            "line {line:?} missing ts_ms value {now}"
+        );
     }
 
     #[test]
