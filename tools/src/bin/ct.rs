@@ -259,13 +259,38 @@ fn run(cmd: Cmd) -> Result<i32> {
             // For `--json` mode, the spec §6 wire format covers
             // `{kind, path, ts_ms}` events. The success path
             // (shutdown) is emitted from inside `watch_run`; here we
-            // mirror the failure path so consumers always see the
-            // watcher exit cleanly. Without this, a `ct watch
-            // --json` that fails (e.g. lock conflict) only logs to
+            // mirror BOTH failure paths so consumers always see the
+            // watcher exit cleanly. Without this, a `ct watch --json`
+            // that fails (e.g. lock conflict → exit 2) only logs to
             // stderr and a piped consumer would block forever waiting
-            // for the (never-emitted) shutdown event.
+            // for the (never-emitted) error event.
+            //
+            // CodeRabbit review on PR #96 (review pass 2): the original
+            // dispatch only emitted for `Err(WatchError::Other)` (exit 1).
+            // Classified failures (exit 2/3/4) flow through the `Ok(code)`
+            // arm and never produced a `kind="error"` line. We now emit
+            // for both `Err(_)` AND `Ok(non_zero)` (the `Ok(non_zero)`
+            // case is `watch_run`'s own translation of
+            // LockConflict / Db / NotifyInit into stable exit codes).
             match cli_common::watch_run(opts) {
-                Ok(code) => Ok(code),
+                Ok(0) => Ok(0),
+                Ok(code) => {
+                    if json {
+                        // Classified exit (lock conflict → 2,
+                        // DB → 3, notify-init → 4). Emit a paired
+                        // error line so downstream consumers see
+                        // the reason before the shutdown.
+                        println!(
+                            "{}",
+                            cli_common::format_event(
+                                "error",
+                                &format!("classified exit code {code}"),
+                                cli_common::now_ms()
+                            )
+                        );
+                    }
+                    Ok(code)
+                }
                 Err(e) => {
                     if json {
                         // Emit a structured error line so log

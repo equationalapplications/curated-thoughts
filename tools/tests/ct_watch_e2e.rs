@@ -81,8 +81,13 @@ fn ct_watch_e2e_emits_event_and_flips_db_row_to_pending() {
             );
 
             // Step 2: launch `ct watch --once --json` with a generous
-            // timeout so the test isn't flaky on slow CI. The watcher
-            // exits as soon as it receives one event.
+            // timeout so the test isn't flaky on slow CI. Per spec §11.4
+            // there is NO event-driven early-exit — --once is a fixed
+            // timeout window (here 10s) that exits when the window
+            // elapses, regardless of events. CodeRabbit review on PR #96
+            // (review pass 2): the previous comment claimed the watcher
+            // "exits as soon as it receives one event" which was false;
+            // this comment now describes the actual behavior.
             let watch = StdCommand::new(env!("CARGO_BIN_EXE_ct"))
                 .args(["watch", "--once", "--json", "--once-timeout", "10s"])
                 .stdout(Stdio::piped())
