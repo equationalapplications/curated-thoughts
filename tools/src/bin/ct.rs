@@ -257,29 +257,23 @@ fn run(cmd: Cmd) -> Result<i32> {
                 once_timeout,
             };
             // For `--json` mode, the spec §6 wire format covers
-            // `{kind, path, ts_ms}` events. The success path
-            // (shutdown) is emitted from inside `watch_run`; here we
-            // mirror BOTH failure paths so consumers always see the
-            // watcher exit cleanly. Without this, a `ct watch --json`
-            // that fails (e.g. lock conflict → exit 2) only logs to
-            // stderr and a piped consumer would block forever waiting
-            // for the (never-emitted) error event.
-            //
-            // CodeRabbit review on PR #96 (review pass 2): the original
-            // dispatch only emitted for `Err(WatchError::Other)` (exit 1).
-            // Classified failures (exit 2/3/4) flow through the `Ok(code)`
-            // arm and never produced a `kind="error"` line. We now emit
-            // for both `Err(_)` AND `Ok(non_zero)` (the `Ok(non_zero)`
-            // case is `watch_run`'s own translation of
-            // LockConflict / Db / NotifyInit into stable exit codes).
+            // `{kind, path, ts_ms}` events. The shutdown event is emitted
+            // from inside `watch_run` (line ~780) on EVERY outcome —
+            // clean, classified, and unclassified. Here we just emit
+            // an `error` line so consumers see the reason first; the
+            // shutdown follows immediately. CodeRabbit review on PR #96
+            // (pass 3): the previous comment promised a "paired" event
+            // but the shutdown never fired for classified exits.
             match cli_common::watch_run(opts) {
                 Ok(0) => Ok(0),
                 Ok(code) => {
                     if json {
                         // Classified exit (lock conflict → 2,
-                        // DB → 3, notify-init → 4). Emit a paired
-                        // error line so downstream consumers see
-                        // the reason before the shutdown.
+                        // DB → 3, notify-init → 4). The shutdown event
+                        // for this run has already been emitted by
+                        // `watch_run`'s wrapper (line ~780), so we
+                        // only need the error line here. Consumers see
+                        // error → shutdown in stdout.
                         println!(
                             "{}",
                             cli_common::format_event(

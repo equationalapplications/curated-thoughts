@@ -155,11 +155,16 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 - **Exit codes:** 0 ok / clean shutdown, 1 config error, 2 lock conflict, 3 DB/schema error, 4 notify init failure.
 - **`--json` output on `ct watch`** — structured `{kind, path, ts_ms}` event lines on stdout. Matches the existing `--json` contract from phase 1 commands.
   - **Valid `kind` values** (closed enum, see also `--help`):
-    - `start` — first line of every run; `path` carries `brain=<dir> vault=<dir> pid=<n>`.
-    - `added` / `modified` / `removed` — vault filesystem events.
-    - `error` — failure path (both `WatchError::Other` exit-1 and classified exit 2/3/4); emitted from `bin/ct.rs` so piped consumers see the reason before shutdown.
-    - `shutdown` — final line of every clean run; `path` carries the same `brain/vault/pid` summary as `start` so log scrapers can pair them.
-  - Consumers SHOULD treat `error` followed by no `shutdown` as a partial failure (process killed mid-run) and SHOULD treat `error` followed by `shutdown` as a clean classified exit.
+    - `start` — emitted AFTER the pre-start validation succeeds (lock acquired, vault root exists and is a directory, brain DB probe OK); `path` carries `brain=<dir> vault=<dir> pid=<n>`. Pre-start classified failures (lock conflict, missing/non-directory vault root) do NOT emit `start`.
+    - `added` / `modified` / `removed` — vault filesystem events (the spec wire vocabulary maps the watcher enum's `Deleted` → `removed`).
+    - `error` — failure path (both `WatchError::Other` exit-1 and classified exit 2/3/4); emitted from `bin/ct.rs` so piped consumers see the reason.
+    - `shutdown` — emitted by the `watch_run` wrapper on EVERY outcome (clean + classified + unclassified); `path` carries the same `brain/vault/pid` summary so log scrapers can pair it with `start` (or with `error` for pre-start failures).
+  - Consumers SHOULD treat these sequences as canonical:
+    - `start` then `added`/`modified`/`removed`* then `shutdown` (exit 0): clean run.
+    - `start` then `error` then `shutdown` (exit 2/3/4): mid-run classified failure (signal-thread fatal, DB error, or notify-init failure after start).
+    - `error` then `shutdown` (exit 2/3/4), no preceding `start`: pre-start classified failure (lock conflict, missing vault root, non-directory vault root).
+    - `start` then `error` then `shutdown` (exit 1): unclassified error (config error, internal panic).
+    - `start` only, no `shutdown`: process was killed mid-run (SIGKILL or external `kill -9`).
 - **Log noise:** `ct watch` writes one stderr line per event in TTY mode; downgrades to startup-banner-only + final summary in non-TTY mode (cron-friendly).
 
 ## Non-goals (this phase)

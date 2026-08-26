@@ -729,16 +729,64 @@ impl From<anyhow::Error> for WatchError {
 ///   refused).
 /// - `Err(_)` for any other failure (config error, signal-thread
 ///   failure, etc.) — `main()` turns that into exit 1.
+///
+/// **JSON event contract (spec §6 — CodeRabbit review on PR #96 pass 3,
+/// comment #12):** when `opts.json_mode` is true, this function emits
+/// a `shutdown` event on EVERY outcome — clean (exit 0), classified
+/// (exit 2/3/4), and unclassified (Err(_)). The pre-start classified
+/// failures (lock conflict → 2, missing vault root → 4, non-directory
+/// vault root → 4) emit `error` + `shutdown` with `path` carrying the
+/// same brain/vault/pid summary as the start event would have (so
+/// downstream consumers can pair them). This means a `start` event
+/// never appears for pre-start failures — see the spec §6 consumer
+/// contract for the trio (start → error → shutdown OR just error →
+/// shutdown).
 pub fn watch_run(opts: WatchOpts) -> Result<i32> {
-    match run(opts) {
-        Ok(()) => Ok(0),
+    // Resolve brain/vault/pid identity up-front so the shutdown event
+    // can carry the same summary as the start event. We do this even
+    // when CURATED_VAULT_ROOT is unset so the failure-mode shutdown is
+    // still meaningful (we render "vault=<unset>" in that case).
+    // Capture `opts.json_mode` locally because `opts` is moved into
+    // `run(opts)` below.
+    let json_mode = opts.json_mode;
+    let brain = crate::paths::resolve_brain_paths();
+    let vault_root = std::env::var("CURATED_VAULT_ROOT")
+        .unwrap_or_else(|_| "<unset>".to_string());
+    let pid = std::process::id();
+
+    let summary = format!(
+        "brain={} vault={} pid={}",
+        brain.brain_dir.display(),
+        vault_root,
+        pid,
+    );
+
+    let result = run(opts);
+    let (exit_code, final_err) = match result {
+        Ok(()) => (0i32, None),
         Err(e @ WatchError::LockConflict(_))
         | Err(e @ WatchError::Db(_))
         | Err(e @ WatchError::NotifyInit(_)) => {
             eprintln!("{}", e);
-            Ok(e.exit_code())
+            (e.exit_code(), None)
         }
-        Err(WatchError::Other(e)) => Err(e),
+        Err(WatchError::Other(e)) => (1, Some(e)),
+    };
+
+    if json_mode {
+        // Emit shutdown on every outcome — see the docstring above.
+        // For unclassified errors the "path" carries the same
+        // brain/vault/pid summary; consumers match the error+shutdown
+        // pair to identify the run.
+        println!(
+            "{}",
+            format_event("shutdown", &summary, now_ms())
+        );
+    }
+
+    match final_err {
+        Some(e) => Err(e),
+        None => Ok(exit_code),
     }
 }
 
@@ -899,27 +947,23 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
         wait_for_sigint()?;
     }
 
-    drop(lock); // explicit unlock before handle drops
-    handle.stop();
-    if opts.json_mode {
-        // Shutdown-event "path" carries the same human-readable
-        // summary as the start-event so downstream consumers can
-        // confirm the watcher instance identity (spec §6:
-        // "{kind, path, ts_ms}" wire format).
-        println!(
-            "{}",
-            format_event(
-                "shutdown",
-                &format!(
-                    "brain={} vault={} pid={}",
-                    brain.brain_dir.display(),
-                    vault_root,
-                    std::process::id()
-                ),
-                now_ms()
-            )
-        );
+    // IMPORTANT ordering: stop the watcher BEFORE releasing the lock.
+    // CodeRabbit review on PR #96 (pass 3 comment #13): the previous
+    // `drop(lock); handle.stop();` sequence released the lock first,
+    // letting a second process acquire it while the watcher thread was
+    // still alive and enqueueing events. Rust drops bindings in REVERSE
+    // declaration order (handle is declared at line 826, lock at 793),
+    // so the natural scope-end drop would also drop the lock first —
+    // wrapping the join in an inner scope fixes that.
+    {
+        handle.stop();
+        drop(lock);
     }
+    // NOTE: the `shutdown` JSON event is emitted by the public
+    // `watch_run` wrapper (line ~780), NOT here — emitting in both
+    // places would double-fire. The wrapper runs once per `ct watch`
+    // invocation, regardless of the outcome (clean / classified /
+    // unclassified). CodeRabbit review on PR #96 pass 3, comment #12.
     Ok(())
 }
 
