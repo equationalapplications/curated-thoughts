@@ -1130,7 +1130,7 @@ dependencies = [
  "notify",
  "pdf-extract",
  "portpicker",
- "rand 0.8.6",
+ "rand 0.10.2",
  "reqwest 0.13.3",
  "rmcp",
  "rusqlite",
