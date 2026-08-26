@@ -1,4 +1,12 @@
 // `embeddings` BLOB table (V2). Vector ANN (e.g. sqlite-vec) is a future perf path; see `search` module docs.
+
+/// Boundary that separates `llm_wiki_entries.deleted_at` values written in
+/// milliseconds (`>=` this) from the historical seconds-valued rows (`<`
+/// this). Twelve zeros, not eleven: 1_000_000_000_000 ms = 2001-09-09,
+/// 100_000_000_000 (11 zeros) = 1973-03-03 in seconds. The off-by-one-zero
+/// variant was the bug caught in spec review for the V12 migration; both
+/// constants are pinned by U1/U2.
+pub const SEC_VS_MS_THRESHOLD: i64 = 1_000_000_000_000;
 pub const MIGRATION_V1: &str = "
 PRAGMA foreign_keys = ON;
 
@@ -186,4 +194,27 @@ UPDATE documents
  );
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (11);
+";
+
+/// Heal-writer timestamp-unit migration. Two writers in `lib.rs` were writing
+/// `deleted_at = unixepoch()` (seconds) while every other `llm_wiki_entries`
+/// writer used milliseconds (`commit.rs:733`, `facts.rs:232`, etc.). This
+/// migration multiplies any seconds-valued `deleted_at` by 1000 so the column
+/// is uniformly milliseconds after the heal writers are fixed.
+///
+/// Boundary: `deleted_at < SEC_VS_MS_THRESHOLD` (1_000_000_000_000 = 2001-09-09
+/// in ms). Every real-world row, present or future, is well past that in ms
+/// or well below it in seconds, so the heuristic is safe. Idempotent: a
+/// second run finds zero rows to update because the first run already pushed
+/// all candidates above the threshold.
+pub const MIGRATION_V12: &str = "
+-- Promote seconds-valued soft-deletes to milliseconds so the timestamp-unit
+-- audit (curated-thoughts-runwikiheal-bug-2026-08-26 §C) sees a single
+-- convention across the column.
+UPDATE llm_wiki_entries
+   SET deleted_at = deleted_at * 1000
+ WHERE deleted_at IS NOT NULL
+   AND deleted_at < 1000000000000;
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (12);
 ";
