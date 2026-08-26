@@ -865,28 +865,50 @@ fn start_file_watcher_inner(
         // `conn_opt` drops here, releasing the WAL writer slot.
     }
 
-    // Acquire the vault lock BEFORE swapping the heal scheduler so a
-    // headless `ct watch` cannot race in during the gap. Held for the
-    // lifetime of the watcher; released when the returned `WatcherHandle`
-    // is dropped (via `stop()` in `WatcherHandle::stop`, before the watcher
-    // thread joins — see spec §7).
+    // Acquire the vault lock. This function is called from TWO outer
+    // entrypoints:
+    //   1. `start_file_watcher` (Tauri command) — no upstream lock.
+    //   2. `switch_vault` — acquires the lock at its own line ~1077
+    //      BEFORE the teardown block (CodeRabbit review on PR #96
+    //      pass 3, comment #11). That outer acquire is the FAIL-FAST
+    //      gate that protects the watcher from being torn down while a
+    //      headless `ct watch` holds the lock.
     //
-    // The lock file lives at `{brain_dir}/.curated_thoughts.lock` per spec §2.
-    // BOTH the desktop (here) and `ct watch` (tools/cmds.rs:636) MUST acquire
-    // on the SAME path or they won't see each other. Resolved via the
-    // canonical `retrieval::resolve_brain_paths()` so desktop and CLI agree
-    // on the brain dir (CodeRabbit review on PR #96 — previously this
-    // constructed the path inline via `dirs::home_dir().join(".brain")`
-    // which silently diverged when `CURATED_BRAIN_DIR` was set).
-    let brain_paths = retrieval::resolve_brain_paths();
-    let brain_dir = brain_paths.brain_dir.clone();
-    let brain_db_path = brain_paths.db_path.clone();
-    let vault_lock = VaultLock::acquire(&brain_dir)
-        .map_err(|e| format!("failed to acquire vault lock for {brain_dir:?}: {e}"))?;
+    // The double-acquire here is intentional and harmless: `flock` is
+    // per-file-descriptor on Linux (and per-handle on Windows), so the
+    // same process acquiring the same lock file from two `OpenOptions`
+    // handles produces two independent locks. Both release on drop. The
+    // `WatcherHandle` returned below stores THIS lock (the inner one),
+    // so its drop releases the inner lock; the outer lock in `switch_vault`
+    // drops when that function returns.
+    //
+    // ...[truncated]
 
     let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
     let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
     *scheduler_guard = Some((heal_tx.clone(), heal_thread));
+
+    // Resolve the brain DB path for the per-event ephemeral WAL-mode
+    // connection (line 910 below). The vault lock was already acquired
+    // at the top of this function — see the double-acquire rationale in
+    // the block comment above. (CodeRabbit review on PR #96 pass 3.)
+    let brain_paths = retrieval::resolve_brain_paths();
+    let brain_db_path = brain_paths.db_path.clone();
+
+    // Acquire the vault lock for the WatcherHandle. The outer lock in
+    // `switch_vault` is the FAIL-FAST gate that prevents tearing down
+    // the old watcher when a headless `ct watch` holds the lock (see
+    // CodeRabbit review on PR #96 pass 3, comment #11). This inner
+    // lock is owned by the returned `WatcherHandle` and released when
+    // `WatcherHandle::stop` runs. Same-process double-flock is harmless
+    // (flock is per-fd); see the detailed rationale in the block comment
+    // above the `start_file_watcher_inner` function.
+    let vault_lock = VaultLock::acquire(&brain_paths.brain_dir).map_err(|e| {
+        format!(
+            "failed to acquire vault lock for {:?}: {e}",
+            brain_paths.brain_dir
+        )
+    })?;
 
     let app = app.clone();
     let vault_for_watcher = target_canonical.clone();
@@ -1064,6 +1086,22 @@ async fn switch_vault(
             return Ok(());
         }
     }
+
+    // Acquire the vault lock BEFORE tearing anything down. If a headless
+    // `ct watch` is currently holding the lock, we want to fail FAST
+    // with the old watcher + pipeline + outbox still running — the previous
+    // ordering (teardown, then lock acquire at line 884 inside
+    // `start_file_watcher_inner`) silently disabled desktop file watching
+    // on lock-conflict and required an app restart to recover.
+    // CodeRabbit review on PR #96 (review pass 3, comment #11).
+    let brain_dir_for_lock = retrieval::resolve_brain_paths().brain_dir;
+    let _vault_lock = VaultLock::acquire(&brain_dir_for_lock).map_err(|e| {
+        format!(
+            "failed to acquire vault lock for {brain_dir_for_lock:?}: {e} \
+             — a headless `ct watch` may be holding this vault; \
+             stop it and retry"
+        )
+    })?;
 
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
