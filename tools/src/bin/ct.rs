@@ -86,12 +86,20 @@ enum Cmd {
         /// Run in bounded watchdog mode (exit on timeout or no events for the watch interval).
         #[arg(long)]
         once: bool,
-        /// Emit structured JSON event lines to stderr.
+        /// Emit structured JSON event lines to stdout (one per event). Use
+        /// 2>/dev/null or `--stderr` redirection only for human-readable
+        /// mode. Schema: {"kind": "<start|added|modified|removed|error|shutdown>",
+        /// "path": "<absolute>", "ts_ms": <i64 unix millis>}.
         #[arg(long)]
         json: bool,
         /// Maximum time to wait in --once mode (default 60s). Format: e.g. "60s", "5m", "500ms".
         #[arg(long, value_parser = parse_secs)]
         once_timeout: Option<std::time::Duration>,
+        /// Run as a foreground daemon (the only mode in v1; flag exists for spec parity + future systemd use).
+        // TODO(phase3): `foreground` is a no-op in v1 — daemon is always foreground.
+        // Future: --background spawns a detached systemd-style service.
+        #[arg(long)]
+        foreground: bool,
     },
 }
 
@@ -236,6 +244,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             once,
             json,
             once_timeout,
+            foreground: _,
         } => {
             use curated_thoughts_tools::cli_common::WatchOpts;
             cli_common::watch_run(WatchOpts {
