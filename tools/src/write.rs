@@ -2,16 +2,47 @@
 //!
 //! Low-level DB connection helpers for the `ct` headless CLI.
 //!
-//! `Brain` is the existing struct returned by `cli_common::resolve()`; the
-//! wrappers here take `&Brain` so callers and integration tests can switch
-//! `cli_common::open_ro` → `crate::write::open_ro` without churning call
-//! sites. The actual open logic stays in `tauri_app_lib::retrieval` (for
-//! read-only) and the read-write flag set already used by `cli_common`
-//! (for read-write).
+//! `Brain` is the struct that wraps a `BrainPaths` and is passed to
+//! `open_ro` / `open_rw`. It used to live in `cli_common::resolve`;
+//! phase 2 of the headless CLI split relocates it here so write-side
+//! helpers and read-side helpers share a single home.
 
-use crate::cli_common::Brain;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
+
+use crate::paths::BrainPaths;
+
+/// Brain layout: the resolved `BrainPaths` for the current process. Cheap
+/// to clone (just three `PathBuf`s); passing by `&Brain` lets `open_ro`
+/// and `open_rw` share the same layout contract.
+#[derive(Debug, Clone)]
+pub struct Brain {
+    pub paths: BrainPaths,
+}
+
+/// Resolve `BrainPaths` from env. Errors when no `brain.db` exists at the
+/// resolved path — `ct` subcommands that follow should fail fast rather
+/// than try to open a non-existent database. Extracted from
+/// `cli_common::resolve` in phase 2 task 5.
+pub fn resolve() -> Result<Brain> {
+    use anyhow::{bail, Context};
+    let paths = crate::paths::resolve_brain_paths();
+    if !paths.db_path.exists() {
+        bail!(
+            "brain.db not found at {} — run ingest first",
+            paths.db_path.display()
+        );
+    }
+    // open_rw historically also exercised the file (it used
+    // SQLITE_OPEN_READ_WRITE which is a stat-only call). Mirror that to
+    // surface any I/O error early.
+    let _ = std::fs::metadata(&paths.db_path)
+        .with_context(|| format!("stat {}", paths.db_path.display()))?;
+    Ok(Brain { paths })
+}
+
+/// Exit code contract for the `ct` CLI: 0 ok, 1 error, 2 no results.
+pub const EXIT_NO_RESULTS: i32 = 2;
 
 /// Open a read-only connection to the brain database.
 pub fn open_ro(brain: &Brain) -> Result<Connection> {
@@ -19,7 +50,7 @@ pub fn open_ro(brain: &Brain) -> Result<Connection> {
 }
 
 /// Open a read-write connection, creating the database file if it does not
-/// exist. Mirrors the pragmas `cli_common::open_rw` has historically applied.
+/// exist. Mirrors the pragmas `cli_common::open_rw` historically applied.
 pub fn open_rw(brain: &Brain) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         &brain.paths.db_path,
