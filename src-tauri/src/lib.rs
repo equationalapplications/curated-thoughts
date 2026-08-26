@@ -567,6 +567,250 @@ fn get_binary_path() -> Result<String, String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+// ── OKF Write Commands ────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn vault_write_note(
+    _conn: State<DbState>,
+    vault_root_state: State<VaultConfigState>,
+    path: String,
+    frontmatter: okf::OkfFrontmatter,
+    body: String,
+) -> Result<okf::WriteNoteResult, String> {
+    use okf::{validate_frontmatter, sha256_hash, WriteNoteError};
+
+    // Get vault root
+    let vault_root = vault_root_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Vault not configured".to_string())?;
+
+    let vault_root = std::path::Path::new(&vault_root);
+
+    // Validate path is under vault root
+    let full_path = vault_root.join(&path);
+    let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_path = full_path.canonicalize().ok();
+    if let Some(ref cp) = canonical_path {
+        if !cp.starts_with(&canonical_vault) {
+            return Err(WriteNoteError::PathOutsideVault.to_string());
+        }
+    }
+
+    // Validate frontmatter
+    validate_frontmatter(&frontmatter)
+        .map_err(|e| WriteNoteError::InvalidFrontmatter(e))?;
+
+    // Check for stale update if file exists
+    if canonical_path.as_ref().map_or(false, |p| p.exists()) {
+        let file_mtime = std::fs::metadata(&full_path)
+            .map_err(|e| WriteNoteError::WriteError(e.to_string()))?
+            .modified()
+            .map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+
+        let updated_at = frontmatter
+            .updated_at
+            .as_ref()
+            .ok_or_else(|| WriteNoteError::InvalidFrontmatter("updated_at required for edits".to_string()))?;
+
+        let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .map_err(|e| WriteNoteError::InvalidFrontmatter(format!("Invalid updated_at: {}", e)))?;
+
+        if updated_dt.timestamp_millis()
+            < file_mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        {
+            return Err(
+                WriteNoteError::StaleUpdate {
+                    updated_at: updated_at.clone(),
+                }
+                .to_string(),
+            );
+        }
+    }
+
+    // Build the document
+    let fm_yaml = okf::render_frontmatter(&frontmatter);
+    let document = format!("{}\n{}", fm_yaml, body);
+
+    // Write atomically (temp file + rename)
+    use std::time::SystemTime;
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| format!("Failed to get timestamp: {}", e))?
+        .as_nanos();
+    let temp_path = full_path.with_extension(format!("{}.tmp", timestamp));
+
+    // Ensure parent directory exists
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+    }
+
+    std::fs::write(&temp_path, &document).map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+    std::fs::rename(&temp_path, &full_path).map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+
+    // Compute and return SHA256
+    let sha256 = sha256_hash(&document);
+
+    Ok(okf::WriteNoteResult {
+        success: true,
+        path: full_path.to_string_lossy().into_owned(),
+        sha256,
+    })
+}
+
+#[tauri::command]
+fn vault_upsert_index_entry(
+    vault_root_state: State<VaultConfigState>,
+    index_path: String,
+    entry_name: String,
+    entry_path: String,
+    entry_type: String,
+    metadata: Option<serde_json::Value>,
+) -> Result<okf::UpsertResult, String> {
+    use okf::UpsertError;
+
+    // Get vault root
+    let vault_root = vault_root_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Vault not configured".to_string())?;
+
+    let vault_root = std::path::Path::new(&vault_root);
+
+    // Validate paths are under vault root
+    let full_index_path = vault_root.join(&index_path);
+    let full_entry_path = vault_root.join(&entry_path);
+
+    let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_index = full_index_path.canonicalize().ok();
+    let canonical_entry = full_entry_path.canonicalize().ok();
+
+    if let Some(ref ci) = canonical_index {
+        if !ci.starts_with(&canonical_vault) {
+            return Err(UpsertError::PathOutsideVault.to_string());
+        }
+    }
+    if let Some(ref ce) = canonical_entry {
+        if !ce.starts_with(&canonical_vault) {
+            return Err(UpsertError::PathOutsideVault.to_string());
+        }
+    }
+
+    // Check index file exists
+    if canonical_index.as_ref().map_or(false, |p| !p.exists()) {
+        return Err(UpsertError::IndexNotFound(index_path).to_string());
+    }
+
+    // Read existing index content
+    let mut content = std::fs::read_to_string(&full_index_path)
+        .map_err(|e| format!("Read error: {}", e))?;
+
+    // Check if entry already exists
+    let entry_regex = regex::Regex::new(&format!(r"^##\s+{}", regex::escape(&entry_name)))
+        .map_err(|e| format!("Regex error: {}", e))?;
+
+    let (appended, line_number) = if entry_regex.is_match(&content) {
+        // Update existing entry
+        let lines: Vec<&str> = content.lines().collect();
+        let mut new_content = String::new();
+        let mut entry_start = None;
+
+        for (i, line) in lines.iter().enumerate() {
+            if entry_regex.is_match(line) {
+                entry_start = Some(i);
+                // Replace entry
+                new_content.push_str(&build_index_entry(
+                    &entry_name,
+                    &entry_path,
+                    &entry_type,
+                    &metadata,
+                ));
+                new_content.push('\n');
+                // Skip until next entry or end
+            } else if entry_start.is_some() && line.starts_with("## ") {
+                // Next entry found, stop replacing
+                entry_start = None;
+                new_content.push_str(line);
+                new_content.push('\n');
+            } else if entry_start.is_none() {
+                new_content.push_str(line);
+                new_content.push('\n');
+            }
+        }
+
+        // Write atomically
+        use std::time::SystemTime;
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| format!("Failed to get timestamp: {}", e))?
+            .as_nanos();
+        let temp_path = full_index_path.with_extension(format!("{}.tmp", timestamp));
+        std::fs::write(&temp_path, &new_content).map_err(|e| e.to_string())?;
+        std::fs::rename(&temp_path, &full_index_path).map_err(|e| e.to_string())?;
+
+        (false, entry_start.unwrap_or(0))
+    } else {
+        // Entry doesn't exist, append
+        let new_entry = build_index_entry(&entry_name, &entry_path, &entry_type, &metadata);
+        let final_content = if content.ends_with('\n') {
+            format!("{}\n{}", content, new_entry)
+        } else {
+            format!("{}\n\n{}", content, new_entry)
+        };
+
+        use std::time::SystemTime;
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| format!("Failed to get timestamp: {}", e))?
+            .as_nanos();
+        let temp_path = full_index_path.with_extension(format!("{}.tmp", timestamp));
+        std::fs::write(&temp_path, &final_content).map_err(|e| e.to_string())?;
+        std::fs::rename(&temp_path, &full_index_path).map_err(|e| e.to_string())?;
+
+        (true, content.lines().count() + 2)
+    };
+
+    Ok(okf::UpsertResult {
+        success: true,
+        index_path: full_index_path.to_string_lossy().into_owned(),
+        entry_id: entry_name.clone(),
+        appended,
+        line_number: Some(line_number),
+    })
+}
+
+fn build_index_entry(name: &str, path: &str, entry_type: &str, metadata: &Option<serde_json::Value>) -> String {
+    let mut entry = format!("## {}\n", name);
+    entry.push_str(&format!("[[{}]]\n", path));
+    entry.push_str(&format!("- Type: {}\n", entry_type));
+
+    if let Some(meta) = metadata {
+        if let Some(date) = meta.get("date") {
+            entry.push_str(&format!("- Date: {}\n", date));
+        }
+        if let Some(status) = meta.get("status") {
+            entry.push_str(&format!("- Status: {}\n", status));
+        }
+        // Add any other fields dynamically
+        for (key, value) in meta.as_object().unwrap_or(&serde_json::Map::new()) {
+            if key != "date" && key != "status" {
+                entry.push_str(&format!("- {}: {}\n", key, value));
+            }
+        }
+    }
+
+    entry
+}
+
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
 /// Returns the temp stub path; callers must call [`cleanup_temp_stub_db`] after the stub
 /// connection is dropped (otherwise `-wal` / `-shm` sidecars and the file may remain, especially on Windows).
