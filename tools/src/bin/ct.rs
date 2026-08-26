@@ -81,6 +81,46 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LibrarianCmd,
     },
+    /// Run the headless vault watcher (foreground daemon).
+    Watch {
+        /// Run in bounded watchdog mode (exit on timeout or no events for the watch interval).
+        #[arg(long)]
+        once: bool,
+        /// Emit structured JSON event lines to stderr.
+        #[arg(long)]
+        json: bool,
+        /// Maximum time to wait in --once mode (default 60s). Format: e.g. "60s", "5m", "500ms".
+        #[arg(long, value_parser = parse_secs)]
+        once_timeout: Option<std::time::Duration>,
+    },
+}
+
+/// Parse a human-friendly duration string ("60s", "5m", "500ms", "2h") into a
+/// `std::time::Duration`. Used by the `watch --once-timeout` flag so we don't
+/// pull in the `humantime` crate just for one flag.
+fn parse_secs(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    if let Some(num) = s.strip_suffix("ms") {
+        num.parse::<u64>()
+            .map(std::time::Duration::from_millis)
+            .map_err(|e| format!("invalid ms: {e}"))
+    } else if let Some(num) = s.strip_suffix('s') {
+        num.parse::<u64>()
+            .map(std::time::Duration::from_secs)
+            .map_err(|e| format!("invalid s: {e}"))
+    } else if let Some(num) = s.strip_suffix('m') {
+        num.parse::<u64>()
+            .map(|n| std::time::Duration::from_secs(n * 60))
+            .map_err(|e| format!("invalid m: {e}"))
+    } else if let Some(num) = s.strip_suffix('h') {
+        num.parse::<u64>()
+            .map(|n| std::time::Duration::from_secs(n * 3600))
+            .map_err(|e| format!("invalid h: {e}"))
+    } else {
+        Err(format!(
+            "unrecognized duration format: {s:?} (use 60s, 5m, 500ms, 2h)"
+        ))
+    }
 }
 
 #[derive(Subcommand)]
@@ -192,6 +232,19 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Watch {
+            once,
+            json,
+            once_timeout,
+        } => {
+            use curated_thoughts_tools::cli_common::WatchOpts;
+            cli_common::watch_run(WatchOpts {
+                once,
+                json_mode: json,
+                background: false,
+                once_timeout,
+            })
+        }
     }
 }
 
