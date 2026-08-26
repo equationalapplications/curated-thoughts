@@ -29,6 +29,7 @@ use std::path::Path;
 ///
 /// Adopted from @equationalapplications/okf, profile: llm-wiki/1
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct OkfFrontmatter {
     pub okf_version: String,
@@ -43,6 +44,7 @@ pub struct OkfFrontmatter {
 
 /// Entity types for OKF documents
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
     Fact,
@@ -320,16 +322,18 @@ pub fn vault_upsert_index_entry(
     let entry_block = build_index_entry_block(entry_id, metadata);
 
     // Find and replace existing entry, or append
-    let new_content = upsert_entry_in_index(&content, entry_id, &entry_block);
+    let (appended, line_number) = upsert_entry_in_index(&content, entry_id, &entry_block);
 
     // Write back
-    std::fs::write(&full_path, new_content)
+    std::fs::write(&full_path, &upsert_entry_in_index(&content, entry_id, &entry_block))
         .map_err(|e| UpsertError::InvalidMetadata(format!("failed to write: {}", e)))?;
 
     Ok(UpsertResult {
         success: true,
         index_path: index_path.to_string(),
         entry_id: entry_id.to_string(),
+        appended,
+        line_number: Some(line_number),
     })
 }
 

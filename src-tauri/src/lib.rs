@@ -665,8 +665,8 @@ async fn vault_write_note(
 }
 
 #[tauri::command]
-fn vault_upsert_index_entry(
-    vault_root_state: State<VaultConfigState>,
+fn vault_upsert_index_entry<'a>(
+    vault_root_state: State<'a, VaultConfigState>,
     index_path: String,
     entry_name: String,
     entry_path: String,

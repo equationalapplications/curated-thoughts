@@ -104,6 +104,42 @@ impl VaultMcpServer {
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
+
+    #[tool(
+        name = "vault_write_note",
+        description = "Write or update a markdown note with OKF v0.1 frontmatter. Path safety: must be under vault root. Stale update detection: if updated_at is provided and file mtime > updated_at, returns error. Atomic write via temp file + rename."
+    )]
+    async fn vault_write_note(
+        &self,
+        args: Parameters<tool_dispatch::VaultWriteNoteParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "vault_write_note", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "vault_upsert_index_entry",
+        description = "Atomically upsert an entry into a markdown index file. Validates entry_name (alphanumeric, hyphen, underscore only). Finds existing entry by regex '^## {entry_name}'. If found, replaces entire entry content. If not found, appends. Writes via temp file + rename for atomicity."
+    )]
+    async fn vault_upsert_index_entry(
+        &self,
+        args: Parameters<tool_dispatch::VaultUpsertIndexEntryParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "vault_upsert_index_entry", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
 }
 
 /// Blocking entrypoint for `--mcp` mode. Calls into a tokio runtime internally.
