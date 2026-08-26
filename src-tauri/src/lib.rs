@@ -848,8 +848,14 @@ fn start_file_watcher_inner(
     // vault concurrently. Held for the lifetime of the watcher; released when
     // the returned `WatcherHandle` is dropped (via `stop()` in
     // `WatcherHandle::stop`, before the watcher thread joins — see spec §7).
-    let vault_lock = VaultLock::acquire(&vault_for_watcher)
-        .map_err(|e| format!("failed to acquire vault lock for {vault_for_watcher:?}: {e}"))?;
+    //
+    // The lock file lives at `{brain_dir}/.curated_thoughts.lock` per spec §2.
+    // BOTH the desktop (here) and `ct watch` (tools/cmds.rs:636) MUST acquire
+    // on the SAME path or they won't see each other. `brain_dir` matches
+    // switch_vault's pattern (line 999) so the two code paths agree.
+    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
+    let vault_lock = VaultLock::acquire(&brain_dir)
+        .map_err(|e| format!("failed to acquire vault lock for {brain_dir:?}: {e}"))?;
     let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
