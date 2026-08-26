@@ -322,10 +322,10 @@ pub fn vault_upsert_index_entry(
     let entry_block = build_index_entry_block(entry_id, metadata);
 
     // Find and replace existing entry, or append
-    let (appended, line_number) = upsert_entry_in_index(&content, entry_id, &entry_block);
+    let (new_content, appended, line_number) = upsert_entry_in_index(&content, entry_id, &entry_block);
 
     // Write back
-    std::fs::write(&full_path, &upsert_entry_in_index(&content, entry_id, &entry_block))
+    std::fs::write(&full_path, new_content)
         .map_err(|e| UpsertError::InvalidMetadata(format!("failed to write: {}", e)))?;
 
     Ok(UpsertResult {
@@ -356,27 +356,33 @@ fn build_index_entry_block(entry_id: &str, metadata: &serde_json::Value) -> Stri
 }
 
 /// Upsert an entry block into index content
-fn upsert_entry_in_index(content: &str, entry_id: &str, entry_block: &str) -> String {
+/// Returns (new_content, appended, line_number)
+fn upsert_entry_in_index(content: &str, entry_id: &str, entry_block: &str) -> (String, bool, usize) {
     // Pattern: ## entry-id ([metadata](#entry_id))
     let entry_header = format!("## {} ([metadata](#{entry_id}))", entry_id);
 
     // Find existing entry
     if let Some(start) = content.find(&entry_header) {
+        // Calculate line number
+        let line_number = content[..start].lines().count() + 1;
+        
         // Find the end (next ## or EOF)
         let after_start = &content[start + entry_header.len()..];
         if let Some(end_offset) = after_start.find("\n## ") {
             let end = start + entry_header.len() + end_offset;
             let before = &content[..start];
             let after = &content[end..];
-            return format!("{}{}{}", before, entry_block, after);
+            return (format!("{}{}{}", before, entry_block, after), false, line_number);
         } else {
             // Entry is at the end
-            return format!("{}{}", &content[..start], entry_block);
+            return (format!("{}{}", &content[..start], entry_block), false, line_number);
         }
     }
 
     // Entry doesn't exist, append
-    format!("{}\n{}", content.trim(), entry_block)
+    let new_content = format!("{}\n{}", content.trim(), entry_block);
+    let line_number = content.lines().count() + 1;
+    (new_content, true, line_number)
 }
 
 #[cfg(test)]

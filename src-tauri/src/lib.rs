@@ -570,7 +570,7 @@ fn get_binary_path() -> Result<String, String> {
 // ── OKF Write Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn vault_write_note(
+fn vault_write_note(
     _conn: State<DbState>,
     vault_root_state: State<VaultConfigState>,
     path: String,
@@ -602,22 +602,22 @@ async fn vault_write_note(
 
     // Validate frontmatter
     validate_frontmatter(&frontmatter)
-        .map_err(|e| WriteNoteError::InvalidFrontmatter(e))?;
+        .map_err(|e| e.to_string())?;
 
     // Check for stale update if file exists
     if canonical_path.as_ref().map_or(false, |p| p.exists()) {
         let file_mtime = std::fs::metadata(&full_path)
-            .map_err(|e| WriteNoteError::WriteError(e.to_string()))?
+            .map_err(|e| e.to_string())?
             .modified()
-            .map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+            .map_err(|e| e.to_string())?;
 
         let updated_at = frontmatter
             .updated_at
             .as_ref()
-            .ok_or_else(|| WriteNoteError::InvalidFrontmatter("updated_at required for edits".to_string()))?;
+            .ok_or_else(|| "updated_at required for edits".to_string())?;
 
         let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
-            .map_err(|e| WriteNoteError::InvalidFrontmatter(format!("Invalid updated_at: {}", e)))?;
+            .map_err(|e| format!("Invalid updated_at: {}", e))?;
 
         if updated_dt.timestamp_millis()
             < file_mtime
@@ -648,11 +648,11 @@ async fn vault_write_note(
 
     // Ensure parent directory exists
     if let Some(parent) = full_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    std::fs::write(&temp_path, &document).map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
-    std::fs::rename(&temp_path, &full_path).map_err(|e| WriteNoteError::WriteError(e.to_string()))?;
+    std::fs::write(&temp_path, &document).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp_path, &full_path).map_err(|e| e.to_string())?;
 
     // Compute and return SHA256
     let sha256 = sha256_hash(&document);
