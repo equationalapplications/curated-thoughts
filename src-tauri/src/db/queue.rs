@@ -45,7 +45,10 @@ pub fn enqueue_vault_event(
 
     if let Some(vr) = &vault_root {
         if !canonical.starts_with(vr) {
-            eprintln!("[watch] skipping out-of-vault path: {}", canonical.display());
+            eprintln!(
+                "[watch] skipping out-of-vault path: {}",
+                canonical.display()
+            );
             return Ok(());
         }
     }
@@ -61,8 +64,8 @@ pub fn enqueue_vault_event(
     }
 
     // Add / Modify: hash, upsert.
-    let bytes = std::fs::read(&canonical)
-        .with_context(|| format!("read {}", canonical.display()))?;
+    let bytes =
+        std::fs::read(&canonical).with_context(|| format!("read {}", canonical.display()))?;
     let hash = sha256_hex(&bytes);
 
     conn.execute(
@@ -82,10 +85,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
-    h.finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -264,7 +264,11 @@ mod tests {
         let path_str = canonical.to_string_lossy().into_owned();
         upsert_document(&conn, &path_str, "h").unwrap();
         let count_before: i64 = conn
-            .query_row("SELECT COUNT(*) FROM documents WHERE path = ?1", rusqlite::params![&path_str], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                rusqlite::params![&path_str],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count_before, 1);
 
@@ -276,7 +280,11 @@ mod tests {
         .unwrap();
 
         let count_after: i64 = conn
-            .query_row("SELECT COUNT(*) FROM documents WHERE path = ?1", rusqlite::params![&path_str], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                rusqlite::params![&path_str],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count_after, 0, "Remove event must delete the documents row");
         let _ = vault.path();

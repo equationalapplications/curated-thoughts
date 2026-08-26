@@ -361,7 +361,12 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
         .get_vault_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault configured".to_string())?;
-    let vault_root = std::path::PathBuf::from(&vault);
+    // The vault path is read here so the function fails fast when no vault
+    // is configured (matches pre-fix behavior). The actual existence checks
+    // are now driven by `source_ref_is_still_grounded`, which checks the
+    // `documents.path` and `chunks.id` tables — the vault_root is not
+    // consulted on disk any more.
+    let _vault_root = std::path::PathBuf::from(&vault);
 
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
@@ -371,7 +376,9 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
             .prepare(
                 "SELECT e.rowid, e.source_ref, e.entity_id
                  FROM llm_wiki_entries e
-                 WHERE e.deleted_at IS NULL AND e.source_ref IS NOT NULL",
+                 WHERE e.deleted_at IS NULL
+                   AND e.source_ref IS NOT NULL
+                   AND e.source_type = 'librarian_inferred'",
             )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
@@ -389,16 +396,16 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
     let mut healed_by_entity: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (rowid, source_ref, entity_id) in entries {
-        let safe = crate::vault::safe_vault_path(
-            &vault_root,
-            &source_ref,
-            &["."],
-            crate::vault::PathMode::MustExist,
-        );
-        if safe.is_err() {
+        // Bug A + B fix: use the shared consumer helper
+        // (`source_ref_is_still_grounded`) instead of `safe_vault_path`.
+        // The legacy producer wrote a vault-relative path; the post-c30f141
+        // producer writes a JSON blob. The helper handles both and treats
+        // empty / unparseable values as still-grounded (defensive — see
+        // its docs).
+        if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
             conn.execute(
-                "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
-                [rowid],
+                "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
+                rusqlite::params![crate::db::commit::ms_now(), rowid],
             )
             .map_err(|e| e.to_string())?;
             *healed_by_entity.entry(entity_id).or_insert(0) += 1;
@@ -407,10 +414,7 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
 
     // Write healed events for entities that had entries repaired
     if !healed_by_entity.is_empty() {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let (_, now_ms) = crate::db::commit::now_timestamps();
         for (entity_id, n) in healed_by_entity {
             conn.execute(
                 "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
@@ -776,20 +780,16 @@ fn start_file_watcher_inner(
                     // contention with a checkpoint or another writer
                     // fails instantly with SQLITE_BUSY. 5s matches
                     // `tauri_app_lib::db::AppDb`'s default.
-                    if let Err(e) =
-                        c.busy_timeout(std::time::Duration::from_secs(5))
-                    {
-                        eprintln!(
-                            "[reconcile] failed to set busy_timeout: {e}"
-                        );
+                    if let Err(e) = c.busy_timeout(std::time::Duration::from_secs(5)) {
+                        eprintln!("[reconcile] failed to set busy_timeout: {e}");
                         // Non-fatal: continue without the pragma.
                     }
                     Some(c)
                 }
                 Err(e) => {
                     eprintln!(
-                        "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
-                    );
+                    "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
+                );
                     None
                 }
             };
@@ -1378,8 +1378,13 @@ fn queue_full_reindex(
 
 fn heal_lost_librarian_inferred(
     conn: &rusqlite::Connection,
-    vault_root: &Path,
+    _vault_root: &Path,
 ) -> Result<usize, String> {
+    // Source-ref consumer is now the shared helper
+    // (`source_ref_is_still_grounded`) which handles both legacy path and
+    // JSON shapes, so the on-disk `vault_root` no longer participates in
+    // the existence check. Kept in the signature so existing call sites
+    // continue to compile unchanged.
     let entries: Vec<(i64, String)> = {
         let mut stmt = conn
             .prepare(
@@ -1402,17 +1407,11 @@ fn heal_lost_librarian_inferred(
 
     let mut updated = 0;
     for (rowid, source_ref) in entries {
-        let safe = crate::vault::safe_vault_path(
-            vault_root,
-            &source_ref,
-            &["."],
-            crate::vault::PathMode::MustExist,
-        );
-        if safe.is_err() {
+        if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
             updated += conn
                 .execute(
-                    "UPDATE llm_wiki_entries SET deleted_at = unixepoch() WHERE rowid = ?1",
-                    [rowid],
+                    "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
+                    rusqlite::params![crate::db::commit::ms_now(), rowid],
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -3359,10 +3358,12 @@ mod workspace_id_tests {
 
 #[cfg(test)]
 mod maintenance_command_tests {
-    use super::{heal_lost_librarian_inferred, prune_old_librarian_inferred};
+    use super::{
+        heal_invalid_sources, heal_lost_librarian_inferred, prune_old_librarian_inferred, DbState,
+        VaultConfigState,
+    };
     use crate::db::connection::open_in_memory;
     use rusqlite::{params, Connection};
-    use std::fs;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn insert_wiki_entry(
@@ -3445,102 +3446,349 @@ mod maintenance_command_tests {
         );
     }
 
+    // ── Spec section 6: heal_unit_contracts (E1-E5) ──────────────────────────
+    // The original `heal_soft_deletes_missing_librarian_inferred_entries_only`
+    // test (Bug A pre-fix) is replaced here. Its three-row setup (existing,
+    // missing, immutable) is preserved across E1 + E2 + E3, with the new
+    // contract: every assertion must reflect the JSON `source_ref` shape and
+    // the `librarian_inferred` filter, not the legacy path check.
+
+    /// E1 — JSON source_ref with at least one live chunk → preserved (no
+    /// soft-delete). Refactor of the existing test's "existing inferred
+    /// row stays alive" assertion under the new JSON contract.
     #[test]
-    fn heal_soft_deletes_missing_librarian_inferred_entries_only() {
+    fn e1_heal_lost_librarian_inferred_preserves_json_source_refs_with_alive_chunk() {
         let conn = open_in_memory().unwrap();
 
+        // Seed a document + chunk so `source_ref_is_still_grounded` finds
+        // at least one live chunk_id.
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line,
+                                 symbol_name, strategy, content_hash)
+             VALUES (?1, 'chunk text', 0, 1, 3, NULL, 'prose', 'h_alive')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id = conn.last_insert_rowid();
+
+        let live_json = format!(
+            r#"{{"proposal_id":"prop_alive","evidence":[{{"chunk_id"{chunk_id},"content_hash":"h_alive","quote":"q","start_line":1,"end_line":3,"source_kind":"prose"}}]}}"#,
+            chunk_id = chunk_id,
+        );
+        insert_wiki_entry(&conn, "json-live", "librarian_inferred", &live_json, None);
+
         let tmp = tempfile::TempDir::new().unwrap();
-        let vault_root = tmp.path();
-        fs::create_dir_all(vault_root.join("documents")).unwrap();
-        fs::write(vault_root.join("documents/existing.md"), b"x").unwrap();
-
-        insert_wiki_entry(
-            &conn,
-            "existing-inferred",
-            "librarian_inferred",
-            "documents/existing.md",
-            None,
-        );
-        insert_wiki_entry(
-            &conn,
-            "missing-inferred",
-            "librarian_inferred",
-            "documents/missing.md",
-            None,
-        );
-        insert_wiki_entry(
-            &conn,
-            "missing-immutable",
-            "immutable_document",
-            "documents/missing.md",
-            None,
+        let updated = heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            updated, 0,
+            "JSON-shaped source_ref with a live chunk must be preserved"
         );
 
-        let updated = heal_lost_librarian_inferred(&conn, vault_root).unwrap();
+        let deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'json-live'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            deleted_at.is_none(),
+            "live JSON source_ref must NOT have deleted_at set"
+        );
+    }
+
+    /// E2 — JSON source_ref whose chunk is gone from `chunks` → soft-delete.
+    /// Refactor of the existing test's "missing inferred row gets deleted"
+    /// assertion under the new JSON contract.
+    #[test]
+    fn e2_heal_lost_librarian_inferred_soft_deletes_json_source_refs_with_all_dead_chunks() {
+        let conn = open_in_memory().unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/gone.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line,
+                                 symbol_name, strategy, content_hash)
+             VALUES (?1, 'gone text', 0, 1, 3, NULL, 'prose', 'h_gone')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id = conn.last_insert_rowid();
+
+        let dead_json = format!(
+            r#"{{"proposal_id":"prop_dead","evidence":[{{"chunk_id":{chunk_id},"content_hash":"h_gone","quote":"q","start_line":1,"end_line":3,"source_kind":"prose"}}]}}"#
+        );
+        insert_wiki_entry(&conn, "json-dead", "librarian_inferred", &dead_json, None);
+
+        // Kill the chunk — simulate vault-pruning.
+        conn.execute("DELETE FROM chunks WHERE id = ?1", [chunk_id])
+            .unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let updated = heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
         assert_eq!(
             updated, 1,
-            "only the missing inferred row should be soft-deleted"
+            "JSON source_ref whose chunk is gone must be soft-deleted"
         );
 
-        let statuses: Vec<(String, Option<i64>, String)> = conn
-            .prepare("SELECT source_type, deleted_at, source_ref FROM llm_wiki_entries ORDER BY source_type, source_ref")
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect();
-
-        let inferred_existing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "librarian_inferred"
-                && source_ref == "documents/existing.md"
-                && deleted_at.is_none()
-        });
-        let inferred_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "librarian_inferred"
-                && source_ref == "documents/missing.md"
-                && deleted_at.is_some()
-        });
-        let immutable_missing = statuses.iter().find(|(t, deleted_at, source_ref)| {
-            t == "immutable_document"
-                && source_ref == "documents/missing.md"
-                && deleted_at.is_none()
-        });
-
-        assert!(
-            inferred_existing.is_some(),
-            "existing inferred rows should be preserved without deleted_at"
-        );
-        assert!(
-            inferred_missing.is_some(),
-            "missing inferred rows should be marked deleted"
-        );
-        assert!(
-            immutable_missing.is_some(),
-            "immutable_document rows should not be soft-deleted by heal"
-        );
-
-        let missing_deleted_at: Option<i64> = conn
+        let deleted_at: Option<i64> = conn
             .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE source_type = 'librarian_inferred' AND source_ref = 'documents/missing.md'",
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'json-dead'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert!(
-            missing_deleted_at.is_some(),
-            "missing inferred entries should be marked deleted"
+            deleted_at.is_some(),
+            "dead JSON source_ref must be marked deleted"
         );
+    }
 
-        let existing_deleted_at: Option<i64> = conn
+    /// E3 — `heal_invalid_sources` is scoped to `librarian_inferred`. The
+    /// watcher fires this on every `VaultEvent::Deleted`; without the
+    /// source_type filter it would wipe `user_stated` rows (whose source_ref
+    /// is the `MANUAL_SOURCE_REF` JSON sentinel — which `safe_vault_path`
+    /// would also reject) and `immutable_document` rows.
+    #[test]
+    fn e3_heal_invalid_sources_is_scoped_to_librarian_inferred() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        std::fs::create_dir_all(vault_root.join("documents")).unwrap();
+
+        // Build a DbState backed by a file DB and seed three rows: one
+        // librarian_inferred (must be soft-deleted), one user_stated
+        // (must NOT be touched), one immutable_document (must NOT be
+        // touched). The heal function takes &DbState directly so we seed
+        // against the AppDb's connection rather than an in-memory one.
+        let db_path = tmp.path().join("test.db");
+        let db = crate::db::AppDb::open(&db_path).expect("open test db");
+        let manual = r#"{"proposal_id":null,"evidence":[]}"#;
+        // Three rows: one librarian_inferred (must be touched), one
+        // user_stated with the MANUAL sentinel (must NOT be touched), one
+        // immutable_document with a missing path (must NOT be touched).
+        db.0.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                 created_at, updated_at, deleted_at)
+             VALUES (?1, 'tier_fact', 'Title lost-inferred', 'body', '[]',
+                     'inferred', 'librarian_inferred', 'documents/gone.md', 1, 1, NULL)",
+            rusqlite::params!["lost-inferred"],
+        )
+        .expect("insert librarian_inferred");
+        db.0.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                 created_at, updated_at, deleted_at)
+             VALUES (?1, 'tier_fact', 'Title user-stated', 'body', '[]',
+                     'confirmed', 'user_stated', ?2, 1, 1, NULL)",
+            rusqlite::params!["user-stated", manual],
+        )
+        .expect("insert user_stated");
+        db.0.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                 created_at, updated_at, deleted_at)
+             VALUES (?1, 'tier_fact', 'Title immutable', 'body', '[]',
+                     'inferred', 'immutable_document', 'documents/gone.md', 1, 1, NULL)",
+            rusqlite::params!["immutable"],
+        )
+        .expect("insert immutable_document");
+
+        let cfg = crate::vault::VaultConfig::new(tmp.path().join("config.json"));
+        cfg.set_vault_path(&vault_root.to_string_lossy())
+            .expect("set vault");
+        let db_state = DbState(std::sync::Mutex::new(db));
+        let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
+
+        heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
+
+        let deleted_at_lost: Option<i64> = db_state
+            .0
+            .lock()
+            .unwrap()
+            .0
             .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE source_type = 'librarian_inferred' AND source_ref = 'documents/existing.md'",
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'lost-inferred'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert!(
-            existing_deleted_at.is_none(),
-            "existing source_ref should not be marked deleted"
+            deleted_at_lost.is_some(),
+            "lost-inferred (librarian_inferred) must be soft-deleted by heal_invalid_sources"
+        );
+        for id in ["user-stated", "immutable"] {
+            let deleted_at: Option<i64> = db_state
+                .0
+                .lock()
+                .unwrap()
+                .0
+                .query_row(
+                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                deleted_at.is_none(),
+                "{id} (non-librarian_inferred) must NOT be touched by heal_invalid_sources"
+            );
+        }
+    }
+
+    /// E4 — Both heal writers write `deleted_at` in milliseconds (post-fix).
+    /// Direct regression test for Bug C: assert the value is at least
+    /// `SEC_VS_MS_THRESHOLD` (any ms timestamp after 2001-09-09), so a
+    /// regressed seconds-valued writer (≈1.7e9) would fail loudly.
+    #[test]
+    fn e4_heal_writers_set_deleted_at_in_milliseconds() {
+        use crate::db::schema::SEC_VS_MS_THRESHOLD;
+
+        // (a) heal_lost_librarian_inferred
+        let conn = open_in_memory().unwrap();
+        insert_wiki_entry(
+            &conn,
+            "target-lost",
+            "librarian_inferred",
+            "documents/missing.md",
+            None,
+        );
+        let tmp = tempfile::TempDir::new().unwrap();
+        heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+        let deleted_at_lost: i64 = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-lost'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            deleted_at_lost >= SEC_VS_MS_THRESHOLD,
+            "heal_lost_librarian_inferred wrote seconds (deleted_at={deleted_at_lost})"
+        );
+
+        // (b) heal_invalid_sources
+        let db_path = tmp.path().join("e4.db");
+        let db = crate::db::AppDb::open(&db_path).expect("open test db");
+        db.0.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                 created_at, updated_at, deleted_at)
+             VALUES ('target-invalid', 'tier_fact', 'Title target-invalid', 'body',
+                     '[]', 'inferred', 'librarian_inferred', 'documents/missing.md',
+                     1, 1, NULL)",
+            [],
+        )
+        .expect("insert target-invalid");
+        let cfg = crate::vault::VaultConfig::new(tmp.path().join("e4-config.json"));
+        cfg.set_vault_path(&tmp.path().to_string_lossy())
+            .expect("set vault");
+        let db_state = DbState(std::sync::Mutex::new(db));
+        let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
+        heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
+        let deleted_at_invalid: Option<i64> = db_state
+            .0
+            .lock()
+            .unwrap()
+            .0
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-invalid'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query target-invalid");
+        assert!(
+            deleted_at_invalid.is_some_and(|v| v >= SEC_VS_MS_THRESHOLD),
+            "heal_invalid_sources wrote seconds or NULL (deleted_at={deleted_at_invalid:?})"
+        );
+    }
+
+    /// E5 — MIGRATION_V12 mix-and-idempotency: a row whose `deleted_at` is
+    /// in seconds (the only known bad unit) gets multiplied; an already-ms
+    /// row is left alone; a second run is a no-op.
+    #[test]
+    fn e5_v12_promotes_seconds_leaves_ms_alone_and_is_idempotent() {
+        use crate::db::schema::SEC_VS_MS_THRESHOLD;
+
+        let conn = open_in_memory().unwrap();
+        insert_wiki_entry(
+            &conn,
+            "secs",
+            "librarian_inferred",
+            "documents/gone.md",
+            Some(1_700_000_000),
+        );
+        insert_wiki_entry(
+            &conn,
+            "ms",
+            "user_stated",
+            r#"{"proposal_id":null,"evidence":[]}"#,
+            Some(SEC_VS_MS_THRESHOLD + 60_000),
+        );
+
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nCOMMIT;",
+            crate::db::schema::MIGRATION_V12
+        ))
+        .unwrap();
+        let secs_after: i64 = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'secs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let ms_after: i64 = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'ms'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(secs_after, 1_700_000_000 * 1000, "seconds row promoted");
+        assert_eq!(ms_after, SEC_VS_MS_THRESHOLD + 60_000, "ms row untouched");
+
+        // Idempotency: re-run and re-check.
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nCOMMIT;",
+            crate::db::schema::MIGRATION_V12
+        ))
+        .unwrap();
+        let secs_after2: i64 = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'secs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let ms_after2: i64 = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'ms'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            secs_after2,
+            1_700_000_000 * 1000,
+            "second run is no-op for secs"
+        );
+        assert_eq!(
+            ms_after2,
+            SEC_VS_MS_THRESHOLD + 60_000,
+            "second run is no-op for ms"
         );
     }
 }

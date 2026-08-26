@@ -80,6 +80,143 @@ pub(crate) fn now_timestamps() -> (i64, i64) {
     (dur.as_secs() as i64, dur.as_millis() as i64)
 }
 
+/// Millisecond-precision "now" used by the two `llm_wiki_entries.deleted_at`
+/// heal writers (`lib.rs:400` and `lib.rs:1414`) so they match the convention
+/// every other writer in the schema uses for this column. Returns `0` if the
+/// system clock is somehow before the Unix epoch (would only happen on a
+/// pathological test harness).
+pub fn ms_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Returns true iff `source_ref` represents a chunk/fact that still exists in
+/// the vault. `source_ref` can be either a vault-relative path (legacy
+/// producer contract) or the JSON `{"proposal_id":..., "evidence":[...]}`
+/// shape produced by `evidence_json_with_hashes` since commit c30f141.
+///
+/// Empty / null / parse-error → returns `true` (no-op). The heal policy is
+/// "soft-delete if the reference is *demonstrably* stale", and a row that
+/// can't be parsed isn't demonstrably stale — it's a legacy path or a future
+/// producer we don't know about yet. Logging is the right response, not
+/// deletion. Same defensive policy applies to DB lookup errors — a failing
+/// lookup is *not* the same thing as a demonstrably-stale reference, and
+/// silently soft-deleting on a broken DB would amplify outages. (This is the
+/// contract that the six D-tests in commit.rs lock in.)
+pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool {
+    let trimmed = source_ref.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Legacy contract: a plain vault-relative path. Existence-check against
+    // `documents.path = ?1` with `status='indexed'`. The legacy producer never
+    // started its value with `{`, so the leading-byte test is sufficient.
+    //
+    // Defensive error handling: if the lookup itself errors (DB I/O,
+    // corrupted schema, lock contention), we treat the reference as
+    // *still-grounded* — same policy as the parse-error branch below. A DB
+    // failure is not the same thing as a demonstrably-stale reference; the
+    // heal policy is "soft-delete iff the reference is *demonstrably*
+    // stale", and silently soft-deleting on a broken DB would amplify
+    // outages. `unwrap_or(None)` previously collapsed the two cases
+    // (NoRows vs Err) and could over-delete during DB faults. The operator
+    // sees a warning either way.
+    if !trimmed.starts_with('{') {
+        match conn.query_row(
+            "SELECT 1 FROM documents WHERE path = ?1 AND status = 'indexed' LIMIT 1",
+            [trimmed],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(_) => return true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return false,
+            Err(err) => {
+                warn_source_ref_db_error(trimmed, "documents.path", &err);
+                return true;
+            }
+        }
+    }
+    // New contract: JSON shape. Defensive parse — see comment above.
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(err) => {
+            warn_source_ref_parse_error(trimmed, &err);
+            return true;
+        }
+    };
+    let evidence = match value.get("evidence").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return true,
+    };
+    // Collect chunk_ids; if the entry has no evidence (e.g. MANUAL_SOURCE_REF
+    // for user_stated facts) it's not librarian-grounded and we leave it alone.
+    let chunk_ids: Vec<i64> = evidence
+        .iter()
+        .filter_map(|entry| entry.get("chunk_id").and_then(|v| v.as_i64()))
+        .collect();
+    if chunk_ids.is_empty() {
+        return true;
+    }
+    // Any surviving chunk keeps the fact partially grounded; the soft-delete
+    // policy only fires when *every* underlying chunk is gone. Same
+    // defensive-on-error rule as the legacy branch above.
+    for chunk_id in &chunk_ids {
+        match conn.query_row(
+            "SELECT 1 FROM chunks WHERE id = ?1 LIMIT 1",
+            [chunk_id],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(_) => return true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(err) => {
+                warn_source_ref_db_error(&format!("chunk_id={chunk_id}"), "chunks.id", &err);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(feature = "mcp-server")]
+fn warn_source_ref_parse_error(source_ref: &str, err: &serde_json::Error) {
+    tracing::warn!(
+        target: "ct::heal",
+        source_ref = %source_ref,
+        error = %err,
+        "source_ref is JSON-looking but unparseable; treating as still-grounded (defensive)"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_source_ref_parse_error(source_ref: &str, err: &serde_json::Error) {
+    eprintln!(
+        "[ct::heal WARN] source_ref is JSON-looking but unparseable; treating as still-grounded: source_ref={source_ref:?} error={err}"
+    );
+}
+
+/// Logs a heal-path DB lookup failure so operators can see when the
+/// grounding check ran into an error (vs. a definitive NoRows). Same
+/// defensive "still-grounded" policy as the parse-error branch — we
+/// refuse to soft-delete when the lookup itself didn't succeed.
+#[cfg(feature = "mcp-server")]
+fn warn_source_ref_db_error(source_ref: &str, lookup: &str, err: &rusqlite::Error) {
+    tracing::warn!(
+        target: "ct::heal",
+        source_ref = %source_ref,
+        lookup = %lookup,
+        error = %err,
+        "source_ref DB lookup failed; treating as still-grounded (defensive)"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_source_ref_db_error(source_ref: &str, lookup: &str, err: &rusqlite::Error) {
+    eprintln!(
+        "[ct::heal WARN] source_ref DB lookup failed; treating as still-grounded: source_ref={source_ref:?} lookup={lookup:?} error={err}"
+    );
+}
+
 fn effective_payload(item: &LoadedItem, decision: &ItemDecision) -> serde_json::Value {
     decision
         .edited_payload
@@ -2111,7 +2248,11 @@ mod tests {
             "prop-original",
             ProposalKind::UpdateEntity,
             Some("ent-1"),
-            vec![fact_item("fact-original", chunk_id, "Rust is a systems language.")],
+            vec![fact_item(
+                "fact-original",
+                chunk_id,
+                "Rust is a systems language.",
+            )],
             doc_id,
         );
         resolve_fact(&mut conn, "prop-original", "fact-original");
@@ -2175,6 +2316,177 @@ mod tests {
         assert!(
             event_summary.contains("2 duplicate fact(s) skipped"),
             "rejected event summary must include duplicate count, got: {event_summary}"
+        );
+    }
+}
+
+/// D-tests for the `source_ref_is_still_grounded` consumer contract. Lives
+/// in commit.rs so it shares `super::*` with the helper under test and the
+/// in-memory connection. The five tests pin every branch of the helper:
+/// legacy-path lookup, JSON parse, evidence-empty short-circuit, chunk-id
+/// presence, and the parse-error "still-grounded" defensive policy that
+/// Bug A's spec review called out.
+#[cfg(test)]
+mod source_ref_grounded_tests {
+    use super::*;
+    use crate::db::connection::open_in_memory;
+
+    fn insert_doc_indexed(conn: &Connection, path: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES (?1, 'h', 'user_doc', 'indexed')",
+            [path],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_chunk_for_doc(conn: &Connection, doc_id: i64, hash: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line,
+                                 symbol_name, strategy, content_hash)
+             VALUES (?1, 'ct', 0, 1, 3, NULL, 'prose', ?2)",
+            rusqlite::params![doc_id, hash],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// D1 — Legacy path lookup: a `documents.path` match with
+    /// `status='indexed'` is "still grounded". A non-indexed status or a
+    /// missing path returns false.
+    #[test]
+    fn legacy_path_indexed_returns_true_missing_returns_false() {
+        let conn = open_in_memory().unwrap();
+        insert_doc_indexed(&conn, "documents/gone.md");
+        // Flip the status to 'pending' so the legacy existence check fails.
+        conn.execute(
+            "UPDATE documents SET status = 'pending' WHERE path = ?1",
+            ["documents/gone.md"],
+        )
+        .unwrap();
+        assert!(
+            !source_ref_is_still_grounded(&conn, "documents/gone.md"),
+            "non-indexed status must report not-grounded"
+        );
+
+        // Set it back to indexed and re-check.
+        conn.execute(
+            "UPDATE documents SET status = 'indexed' WHERE path = ?1",
+            ["documents/gone.md"],
+        )
+        .unwrap();
+        assert!(
+            source_ref_is_still_grounded(&conn, "documents/gone.md"),
+            "indexed legacy path must report still-grounded"
+        );
+
+        // And a path that doesn't exist at all.
+        assert!(
+            !source_ref_is_still_grounded(&conn, "documents/missing.md"),
+            "unknown legacy path must report not-grounded"
+        );
+    }
+
+    /// D2 — JSON-shape happy path: at least one referenced chunk exists →
+    /// still-grounded.
+    #[test]
+    fn json_with_live_chunk_returns_true() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = insert_doc_indexed(&conn, "documents/notes.md");
+        let chunk_id = insert_chunk_for_doc(&conn, doc_id, "h_alive");
+        let src = format!(
+            r#"{{"proposal_id":"p1","evidence":[{{"chunk_id":{chunk_id},"content_hash":"h_alive","quote":"q","start_line":1,"end_line":3}}]}}"#
+        );
+        assert!(source_ref_is_still_grounded(&conn, &src));
+    }
+
+    /// D3 — JSON-shape with all dead chunks → not-grounded. Pins the
+    /// "partial evidence keeps the entry" rule's negative: every chunk_id
+    /// gone means we soft-delete.
+    #[test]
+    fn json_with_all_dead_chunks_returns_false() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = insert_doc_indexed(&conn, "documents/x.md");
+        let chunk_id = insert_chunk_for_doc(&conn, doc_id, "h_dead");
+        conn.execute("DELETE FROM chunks WHERE id = ?1", [chunk_id])
+            .unwrap();
+        let src = format!(
+            r#"{{"proposal_id":"p1","evidence":[{{"chunk_id":{chunk_id},"content_hash":"h_dead","quote":"q","start_line":1,"end_line":3}}]}}"#
+        );
+        assert!(
+            !source_ref_is_still_grounded(&conn, &src),
+            "JSON with all-dead chunks must report not-grounded"
+        );
+    }
+
+    /// D4 — Empty evidence array → still-grounded. The MANUAL_SOURCE_REF
+    /// sentinel has `evidence:[]`; those rows are user_stated and the heal
+    /// must never delete them based on the source_ref shape.
+    #[test]
+    fn json_with_empty_evidence_returns_true() {
+        let conn = open_in_memory().unwrap();
+        assert!(source_ref_is_still_grounded(
+            &conn,
+            r#"{"proposal_id":null,"evidence":[]}"#
+        ));
+    }
+
+    /// D5 — Parse-error defensive branch. JSON-looking-but-malformed input
+    /// returns `true` (no soft-delete) rather than false. This is the
+    /// Bug A spec-review contract: a row that can't be parsed isn't
+    /// *demonstrably* stale — it's a legacy path or a future producer we
+    /// don't know about yet. Logging is the right response, not deletion.
+    #[test]
+    fn malformed_json_returns_true_defensive() {
+        let conn = open_in_memory().unwrap();
+        assert!(
+            source_ref_is_still_grounded(&conn, "{not valid json"),
+            "malformed JSON must defensively return true (no soft-delete)"
+        );
+        // A JSON-shaped value without an `evidence` key also returns true
+        // (not a JSON parse failure, but no librarian evidence either).
+        assert!(source_ref_is_still_grounded(
+            &conn,
+            r#"{"proposal_id":"p1"}"#
+        ));
+        // Empty string and whitespace-only strings also return true.
+        assert!(source_ref_is_still_grounded(&conn, ""));
+        assert!(source_ref_is_still_grounded(&conn, "   \t  "));
+    }
+
+    /// D6 — Defensive DB-error branch. A failing lookup (broken
+    /// connection, corrupted schema, lock contention) must NOT be
+    /// interpreted as "demonstrably stale" — same policy as the
+    /// parse-error branch above. The previous `unwrap_or(None)`
+    /// collapsed `Err(...)` into `None` and could over-delete on DB
+    /// faults, which is the opposite of what the spec wants. We pin
+    /// both call sites here: legacy-path lookup against `documents`
+    /// and chunk lookup against `chunks`.
+    ///
+    /// We provoke the DB error by dropping the underlying table so
+    /// the SELECT raises `SqliteFailure` (vs. `NoRows` — that's the
+    /// distinction the new match arm is making).
+    #[test]
+    fn dropped_table_db_error_returns_true_defensive() {
+        // Legacy-path branch: documents lookup against a vanished table.
+        let conn = open_in_memory().unwrap();
+        conn.execute("DROP TABLE documents", [])
+            .expect("drop documents");
+        assert!(
+            source_ref_is_still_grounded(&conn, "documents/anything.md"),
+            "legacy-path DB error must defensively return true (no soft-delete)"
+        );
+
+        // JSON branch: chunks lookup against a vanished table. Use a
+        // shape with a real chunk_id so the code reaches the chunks
+        // SELECT before failing on the missing table.
+        let conn = open_in_memory().unwrap();
+        conn.execute("DROP TABLE chunks", []).expect("drop chunks");
+        let src = r#"{"proposal_id":"p1","evidence":[{"chunk_id":1,"content_hash":"h","quote":"q","start_line":1,"end_line":3}]}"#;
+        assert!(
+            source_ref_is_still_grounded(&conn, src),
+            "JSON-path DB error must defensively return true (no soft-delete)"
         );
     }
 }

@@ -1,7 +1,7 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
-    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4,
-    MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V2, MIGRATION_V3,
+    MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -87,6 +87,13 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     }
     if version < 7 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))?;
+    }
+    // V12 must run AFTER the OKF V7 DDL because it touches
+    // `llm_wiki_entries.deleted_at`, which V7 creates. The V7/V8 gates
+    // above were intentionally ordered to land before any data-migration
+    // SQL; V12 follows the same convention.
+    if version < 12 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))?;
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
@@ -176,7 +183,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 11);
+        assert_eq!(max_version, 12);
     }
 
     /// Fresh-DB path: `open_in_memory` applies every migration, so the
@@ -206,6 +213,114 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index_count, 1, "idx_documents_dirty must exist");
+    }
+
+    /// V12 idempotent unit-contract: every seconds-valued `deleted_at` row is
+    /// promoted to ms on the first run, and a second run on the same data is
+    /// a no-op. Pin the boundary against the 11-zeros off-by-one bug from
+    /// spec review: rows that already pass `SEC_VS_MS_THRESHOLD` (i.e. were
+    /// written in ms by the post-fix heal writers, or by `commit.rs:733` /
+    /// `facts.rs:232`) must NOT be multiplied.
+    #[test]
+    fn migration_v12_promotes_seconds_and_is_idempotent() {
+        use crate::db::schema::SEC_VS_MS_THRESHOLD;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        // Build the schema to V11 so we have an `llm_wiki_entries` table to
+        // mutate before V12 fires.
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3
+        ))
+        .unwrap();
+        conn.execute_batch(MIGRATION_V4).unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11))
+            .unwrap();
+
+        // Seed three rows: one in seconds (the bug), one already in ms
+        // (anything from `commit.rs:733` or `facts.rs:232`), one null.
+        let insert = |deleted_at: Option<i64>| -> i64 {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     created_at, updated_at, deleted_at)
+                 VALUES ('f' || hex(randomblob(6)), 'e', 't', 'b', '[]', 'inferred',
+                         'librarian_inferred', 1, 1, ?1)",
+                rusqlite::params![deleted_at],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let secs_id = insert(Some(1_750_000_000)); // seconds — must be promoted
+        let ms_id = insert(Some(SEC_VS_MS_THRESHOLD + 1)); // already ms — must NOT change
+        let null_id = insert(None); // untouched
+
+        // Pre-V12: confirm the seeded values.
+        assert_eq!(
+            conn.query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = ?1",
+                [secs_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1_750_000_000,
+            "seeded seconds-valued row must read back as seconds pre-V12"
+        );
+
+        // Fire V12.
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
+            .unwrap();
+
+        let read = |id: i64| -> Option<i64> {
+            conn.query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            read(secs_id),
+            Some(1_750_000_000 * 1000),
+            "seconds-valued row must be promoted to milliseconds"
+        );
+        assert_eq!(
+            read(ms_id),
+            Some(SEC_VS_MS_THRESHOLD + 1),
+            "already-ms row above threshold must NOT be multiplied"
+        );
+        assert_eq!(read(null_id), None, "NULL row must stay NULL");
+
+        // Idempotency: re-running V12 must change nothing.
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
+            .unwrap();
+        assert_eq!(read(secs_id), Some(1_750_000_000 * 1000));
+        assert_eq!(read(ms_id), Some(SEC_VS_MS_THRESHOLD + 1));
+        assert_eq!(read(null_id), None);
+
+        // Pin the post-condition: zero rows below the threshold (the live-DB
+        // smoke gate).
+        let below: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries
+                  WHERE deleted_at IS NOT NULL
+                    AND deleted_at < ?1",
+                [SEC_VS_MS_THRESHOLD],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(below, 0, "no row may remain below SEC_VS_MS_THRESHOLD");
     }
 
     /// Upgraded-DB path: simulate a pre-V11 database (schema_version = 10,
