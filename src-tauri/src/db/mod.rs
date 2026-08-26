@@ -14,6 +14,7 @@ pub mod okf_migration;
 pub mod outbox_format;
 pub mod proposals;
 pub mod queries;
+pub mod queue;
 pub mod review_shim;
 pub mod schema;
 pub mod schema_guard;
