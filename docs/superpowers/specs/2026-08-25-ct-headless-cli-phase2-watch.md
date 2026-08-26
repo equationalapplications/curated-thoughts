@@ -18,11 +18,16 @@ A separate housekeeping need: `tools/src/cli_common.rs` is 1394 lines mixing fou
 ### 1. `ct watch` — new foreground daemon subcommand
 
 ```
-ct watch [--foreground] [--once] [--json]
-  --foreground   Run in current terminal until SIGINT/SIGTERM (default behavior).
-  --once         Watch for a fixed 60s window then exit (cron smoke test). Duration
-                 is not configurable in v1; see Non-goals.
-  --json         Emit structured event lines to stdout.
+ct watch [--foreground] [--once] [--once-timeout <DURATION>] [--json]
+  --foreground                  Run in current terminal until SIGINT/SIGTERM (default behavior).
+  --once                        Watch for a fixed window then exit (cron smoke test).
+                                Defaults to 60s when --once-timeout is not set.
+  --once-timeout <DURATION>     Override the --once timeout (e.g. "5s", "500ms", "2m").
+                                Accepts the same format as `humantime`/clap's value parser.
+                                Configurable per session-18 ruling (was fixed 60s in earlier
+                                drafts; relaxed because smoke-test workflows want shorter
+                                windows and real vaults want longer ones).
+  --json                        Emit structured event lines to stdout.
 ```
 
 Process model: **foreground daemon.** Matches `ct` philosophy (small, scriptable, explicit). Users wrap with `while true; do ct watch; done` or a systemd user unit if they want auto-restart. Single instance per vault — enforced by an exclusive advisory lock on `{brain_dir}/.curated_thoughts.lock` (chosen over `.ct-watch.lock` for filesystem-clarity; both crates use the same path so desktop and headless see each other).
@@ -211,6 +216,29 @@ let handle = spawn_vault_watcher(vault_root, move |event| {
 **Connection lifecycle (mutex trap).** The desktop's `DbState(Mutex<AppDb>)` is a long-lived lock shared with the React UI (DB state). If the watcher callback locks it and calls `enqueue_vault_event`, which reads file bytes and computes `sha256` (~150ms for a large PDF), the UI freezes for 150ms. Mitigation: **do not use `db_state.0.lock()` in the watcher callback**. Open a fresh `rusqlite::Connection::open(&brain_paths.db_path)` per event and pass that to `enqueue_vault_event`. SQLite WAL mode (`src-tauri/src/db/connection.rs:130`) permits concurrent readers + writers, so the UI's connection through `DbState` keeps reading while the watcher writes via the ephemeral connection. `ct watch` already uses ephemeral connections (`tools::write::open_rw`), so it needs no change.
 
 **Tests.** The 6 `enqueue_vault_event` unit tests move from `tools/src/cmds.rs::tests` to `src-tauri/src/db/queue.rs::tests`. Test fixture: `tauri_app_lib::db::connection::open_in_memory()` (already exists at `src-tauri/src/db/connection.rs:163`), which avoids duplicating the inline CREATE TABLE DDL from the tools tests. WAL mode is not relevant to in-memory DBs; tests still cover the 4-stage normalization + sha256 + upsert contract.
+
+## §11.1 Amendment — Post-fixup state (2026-08-25 follow-up PR, drift-fixups)
+
+**Context.** PR #96 shipped the §11 amendment (single canonical home for `enqueue_vault_event`) but accumulated 7 spec/plan drift items + 1 missing e2e test during the 8-review cycle. This amendment records the post-fixup state so the spec reflects what the code actually does. No behavioral change beyond §5 exit-code mapping + `--once-timeout` configurability (both spec-required by §5/§6; documented here for traceability).
+
+**Resolved drift items:**
+
+- **`--once-timeout <DURATION>` is configurable** (per session-18 ruling, surfaced during PR #96 review of Task 1 implementation; commit `5ce3268`). Earlier drafts of this spec said "fixed 60s window, not configurable in v1". Rationale: smoke-test workflows want shorter windows (`--once-timeout 1s`), real-vault cron jobs want longer ones (`--once-timeout 5m`). The 60s default is preserved when `--once-timeout` is not provided.
+- **Exit codes 3/4 are now distinct** (per spec §5). Previously all non-lock-conflict failures bubbled to `main()` and became exit 1. After this amendment: DB/schema errors at startup → exit 3, notify-deck init failures → exit 4. Implemented via a `WatchError` enum (`tools/src/cmds.rs`) with explicit `Display` impl so each bucket renders a distinct stderr message. Lock-conflict stays exit 2 (already correct in PR #96), config-error stays exit 1 (unchanged). Coverage: 4 integration tests in `tools/tests/ct_watch_exit_codes.rs` (process-level exit-code assertions) + 3 unit tests in `tools/src/cmds.rs::tests` (return-code-from-`watch_run` shape).
+- **`--foreground` flag is plumbed end-to-end** (per spec §1 CLI usage table, drift item 4). Flag is a no-op in v1 — the daemon is always foreground by design — but the clap variant field + dispatch-arm `foreground: _` are wired so a future phase-3 PR can implement `--background` (systemd-style detached mode) without an interface break. Test: `tools/tests/ct_watch_help.rs::ct_watch_help_lists_all_flags` snapshots `--help` output and asserts `--foreground` is present (regression guard).
+- **`tools/tests/ct_watch_e2e.rs` integration test added** (per spec §11 test plan item 4, drift item 7). Temp-dir vault + `ct ingest --yes` + `ct watch --once --json --once-timeout 10s` + file modification + assert (a) JSON event on stdout, (b) DB row flipped to `status='pending'`, (c) recomputed SHA-256 matches the stored hash. Uses the `env!("CARGO_BIN_EXE_ct")` + `temp_env::with_var` + `tempfile::TempDir` pattern matching the existing `tools/tests/` integration suite. 500ms watcher-startup delay tuned for inotify setup; comment in the test documents the upgrade path if CI becomes flaky.
+
+**Items NOT in this amendment (deliberately):**
+
+- Cosmetic spec line-refs (`lib.rs:798`, `lib.rs:805-807`, `lib.rs:741-789`) — these drifted 60–100 LOC during PR #96 review. Bumping them is a separate "spec cleanup" pass once the line numbers stabilize.
+- `tools/src/queries.rs` header docstring (still describes pre-split state) and `tools/src/cmds.rs:1041` unused `tempfile::TempDir` import — tracked but cosmetic.
+- Removal of `pipeline_tx`/`PipelineJob`/`PipelineHolder` dead code from src-tauri — `#[cfg(feature = "test-utils")]` gate keeps it contained. Separate cleanup PR.
+- The `queries.rs` doc update + the dead-import removal were **not** rolled into this amendment because they don't affect runtime behavior; touching them here would expand scope beyond "fix drift items 1–7".
+
+**Plan/operational handoff:**
+- Drift-fixups plan: `docs/superpowers/plans/2026-08-25-ct-watch-drift-fixups.md`
+- Operational handoff: `~/Documents/equational-wiki/operations/ct-watch-phase2-followup-handoff.md`
+- Lessons extracted: `~/Documents/equational-wiki/operations/ct-phase-2-lessons.md`
 
 ## Sequencing
 
