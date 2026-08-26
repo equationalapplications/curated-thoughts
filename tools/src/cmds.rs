@@ -649,6 +649,73 @@ pub struct WatchOpts {
     pub once_timeout: Option<Duration>,
 }
 
+/// Distinct failure modes for `watch_run`. Each variant maps to a
+/// distinct exit code per spec §5 ("0 ok / 1 config / 2 lock / 3
+/// DB-schema / 4 notify init"). Anything that does not match a
+/// specific bucket becomes [`WatchError::Other`], which bubbles to
+/// `main()` and exits 1 (preserves the historic "default everything
+/// else to exit 1" behavior for unclassified faults).
+#[derive(Debug)]
+pub enum WatchError {
+    /// Vault lock could not be acquired — another watcher holds it.
+    /// → exit 2.
+    LockConflict(anyhow::Error),
+    /// Brain DB open / schema / migration failure.
+    /// → exit 3.
+    Db(anyhow::Error),
+    /// `notify` watcher could not be initialized (non-directory vault
+    /// root, or `spawn_vault_watcher` returned an error).
+    /// → exit 4.
+    NotifyInit(anyhow::Error),
+    /// Any other failure. Bubbles to main() → exit 1.
+    Other(anyhow::Error),
+}
+
+impl WatchError {
+    /// Stable exit code per the spec §5 contract.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            WatchError::LockConflict(_) => 2,
+            WatchError::Db(_) => 3,
+            WatchError::NotifyInit(_) => 4,
+            WatchError::Other(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for WatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WatchError::LockConflict(e) => write!(f, "vault lock conflict: {e}"),
+            WatchError::Db(e) => write!(f, "brain.db error: {e}"),
+            WatchError::NotifyInit(e) => write!(f, "notify init failure: {e}"),
+            WatchError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for WatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WatchError::LockConflict(e)
+            | WatchError::Db(e)
+            | WatchError::NotifyInit(e)
+            | WatchError::Other(e) => Some(e.as_ref()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for WatchError {
+    /// Any unclassified error becomes `Other`. Specific buckets are
+    /// populated via the explicit constructor paths inside `run()` —
+    /// do NOT rely on this From for `WatchError::Db` etc., because we
+    /// want the call-site to be explicit about *why* an error belongs
+    /// in a particular exit-code bucket (the spec distinguishes them).
+    fn from(e: anyhow::Error) -> Self {
+        WatchError::Other(e)
+    }
+}
+
 /// Run the headless vault watcher.
 ///
 /// Returns:
@@ -656,26 +723,77 @@ pub struct WatchOpts {
 ///   timeout elapsed in `--once` mode).
 /// - `Ok(2)` when the vault lock could not be acquired (another watcher
 ///   already holds it).
+/// - `Ok(3)` when the brain DB cannot be opened / its schema is bad.
+/// - `Ok(4)` when the `notify` watcher cannot be initialized (vault
+///   root missing or non-directory, or inotify/readdir/kqueue backend
+///   refused).
+/// - `Err(_)` for any other failure (config error, signal-thread
+///   failure, etc.) — `main()` turns that into exit 1.
 pub fn watch_run(opts: WatchOpts) -> Result<i32> {
+    match run(opts) {
+        Ok(()) => Ok(0),
+        Err(e @ WatchError::LockConflict(_))
+        | Err(e @ WatchError::Db(_))
+        | Err(e @ WatchError::NotifyInit(_)) => {
+            eprintln!("{}", e);
+            Ok(e.exit_code())
+        }
+        Err(WatchError::Other(e)) => Err(e),
+    }
+}
+
+/// Internal worker for [`watch_run`]. Returns `Result<(), WatchError>`
+/// so the public entry point can translate the variant into a stable
+/// exit code per spec §5.
+fn run(opts: WatchOpts) -> Result<(), WatchError> {
     use crate::lock::VaultLock;
 
     let brain = crate::paths::resolve_brain_paths();
     let vault_root = std::env::var("CURATED_VAULT_ROOT")
-        .map_err(|_| anyhow::anyhow!("CURATED_VAULT_ROOT must be set (or pass --vault)"))?;
+        .map_err(|e| WatchError::Other(anyhow::Error::new(e).context(
+            "CURATED_VAULT_ROOT must be set (or pass --vault)",
+        )))?;
+
+    let vault_path = PathBuf::from(&vault_root);
+    if !vault_path.exists() {
+        return Err(WatchError::NotifyInit(anyhow::anyhow!(
+            "configured vault path does not exist: {}",
+            vault_path.display()
+        )));
+    }
+    if !vault_path.is_dir() {
+        // notify backends differ on whether they refuse a non-directory
+        // upfront (Windows/macOS do; Linux inotify happens to allow it
+        // for single files but can't recursively enumerate). Treat a
+        // non-directory vault root as a notify-init failure so callers
+        // see a deterministic exit-4 regardless of platform.
+        return Err(WatchError::NotifyInit(anyhow::anyhow!(
+            "vault root must be a directory (got non-directory): {}",
+            vault_path.display()
+        )));
+    }
+
+    // Probe the brain DB up-front so a corrupt or unreadable file surfaces
+    // as exit 3 instead of being swallowed inside the per-event callback.
+    // The watcher loop will reopen on every event regardless; this is
+    // purely a fail-fast gate. Execute a trivial `SELECT 1` against the
+    // freshly opened connection so corruption in the file header (SQLite
+    // accepts an open-with-create against garbage bytes without complaint;
+    // it only surfaces the error when you try to read) is caught here.
+    let brain_for_cb = crate::write::Brain { paths: brain.clone() };
+    {
+        let probe = crate::write::open_rw(&brain_for_cb)
+            .map_err(|e| WatchError::Db(e.context("open brain.db for watcher startup")))?;
+        probe
+            .execute_batch("SELECT 1;")
+            .map_err(|e| WatchError::Db(anyhow::Error::new(e)
+                .context("brain.db schema probe failed at watcher startup")))?;
+    }
 
     let lock = match VaultLock::acquire(&brain.brain_dir) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("{}", e);
-            return Ok(2); // exit code 2: lock conflict
-        }
+        Err(e) => return Err(WatchError::LockConflict(e)),
     };
-
-    let vault_path = PathBuf::from(&vault_root);
-    // `open_rw` takes `&Brain` (paths.db_path, etc.); wrap the resolved
-    // BrainPaths in a Brain for the callback closure. Brain lives in
-    // write.rs (relocated from cli_common in phase 2 task 5 step 7).
-    let brain_for_cb = crate::write::Brain { paths: brain.clone() };
 
     if opts.json_mode {
         // Start-event "path" is a synthetic context string per the
@@ -757,7 +875,8 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
                 path
             );
         }
-    })?;
+    })
+    .map_err(|e| WatchError::NotifyInit(e.context("spawn vault watcher")))?;
 
     if opts.once {
         let timeout = opts.once_timeout.unwrap_or(DEFAULT_ONCE_TIMEOUT);
@@ -777,7 +896,7 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
 
     drop(lock); // explicit unlock before handle drops
     handle.stop();
-    Ok(0)
+    Ok(())
 }
 
 /// Spawn a background thread that waits for SIGINT (Ctrl-C) via
@@ -1130,6 +1249,89 @@ mod tests {
             dirty_paths(&mut conn, "m"),
             vec!["/v/c.md", "/v/d.md", "/v/e.md"]
         );
+    }
+
+    // ---- ct watch exit codes (drift-fixups Task 2) ----
+    //
+    // Spec §5 exit-code contract:
+    //   0 ok / clean shutdown
+    //   1 config error
+    //   2 lock conflict
+    //   3 DB/schema error
+    //   4 notify init failure
+    //
+    // `watch_run` is a single function; unit tests here cover the four
+    // non-zero paths by setting CURATED_VAULT_ROOT / CURATED_BRAIN_DIR
+    // per test. All tests use `--once` so the watcher exits after the
+    // short `once_timeout` rather than blocking on SIGINT.
+
+    fn watch_run_short_opts() -> WatchOpts {
+        WatchOpts {
+            once: true,
+            json_mode: false,
+            background: false,
+            once_timeout: Some(Duration::from_millis(200)),
+        }
+    }
+
+    /// Regression guard: missing CURATED_VAULT_ROOT stays exit 1 (config).
+    /// Asserted via the outer `Result::Err` contract — main() turns that
+    /// into exit 1 — because the spec classifies missing env var as a
+    /// config error rather than a runtime fault.
+    #[test]
+    fn watch_run_missing_vault_root_returns_err_for_main_to_exit_1() {
+        temp_env::with_var("CURATED_VAULT_ROOT", None::<&str>, || {
+            let r = watch_run(watch_run_short_opts());
+            assert!(
+                r.is_err(),
+                "missing CURATED_VAULT_ROOT must surface as Err so main() emits exit 1, got {r:?}"
+            );
+            let msg = format!("{}", r.err().unwrap());
+            assert!(
+                msg.contains("CURATED_VAULT_ROOT"),
+                "error must mention the missing var, got: {msg}"
+            );
+        });
+    }
+
+    /// Lock conflict: another process holds the vault lock → exit 2 (existing
+    /// behavior, regression-guarded here as part of the exit-code spec
+    /// coverage).
+    #[test]
+    fn watch_run_lock_conflict_returns_exit_2() {
+        let tmp = TempDir::new().unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(&path_str), || {
+            // Hold the lock for the brain_dir (this is the path
+            // `VaultLock::acquire` in `watch_run` actually uses).
+            let _held = crate::lock::VaultLock::acquire(&crate::paths::resolve_brain_paths().brain_dir)
+                .expect("first lock acquire should succeed in test");
+            let r = watch_run(watch_run_short_opts());
+            assert!(
+                matches!(r, Ok(2)),
+                "vault lock conflict must surface as Ok(2), got {r:?}"
+            );
+        });
+    }
+
+    /// Notify init failure: vault root exists but is a regular file (not a
+    /// directory) → exit 4. Triggers `spawn_vault_watcher` failure on
+    /// platforms where recursive watching requires a directory (and on
+    /// Linux inotify it also rejects non-existent paths; we use the
+    /// non-directory path because it is portable).
+    #[test]
+    fn watch_run_non_directory_vault_root_returns_exit_4() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("not_a_dir.txt");
+        std::fs::write(&file_path, "x").unwrap();
+        let file_str = file_path.to_str().unwrap().to_string();
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(&file_str), || {
+            let r = watch_run(watch_run_short_opts());
+            assert!(
+                matches!(r, Ok(4)),
+                "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
+            );
+        });
     }
 }
 
