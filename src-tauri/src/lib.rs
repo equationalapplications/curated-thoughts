@@ -34,6 +34,7 @@ use crate::inference::{
 };
 use chunker::should_ingest_extension;
 use cloud_bridge::pairing::PairingTokenStore;
+use db::queue::enqueue_vault_event;
 use db::AppDb;
 use outbox::{
     postgres::{spawn_postgres_worker, OutboxWorkerHandle},
@@ -61,7 +62,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
-use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
+use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
@@ -682,7 +683,7 @@ fn canonical_vault_from_config(vault_state: &VaultConfigState) -> Result<PathBuf
 fn start_file_watcher_inner(
     app: &AppHandle,
     pipeline: State<'_, PipelineHolder>,
-    db_state: State<'_, DbState>,
+    _db_state: State<'_, DbState>,
     vault_state: State<'_, VaultConfigState>,
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
@@ -716,14 +717,12 @@ fn start_file_watcher_inner(
         let _ = handle.join();
     }
 
-    let (pipeline_tx, status_rx) = {
+    let status_rx = {
         let mut guard = pipeline.0.lock().unwrap();
         let tuple = guard
             .as_mut()
             .ok_or_else(|| "pipeline not running".to_string())?;
-        let tx = tuple.0.clone();
-        let status_rx = tuple.3.take();
-        (tx, status_rx)
+        tuple.3.take()
     };
 
     if let Some(status_rx) = status_rx {
@@ -742,51 +741,94 @@ fn start_file_watcher_inner(
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
     {
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
+        // Open a fresh WAL-mode connection for the reconcile pass instead of
+        // holding `db_state.0.lock()` across the (potentially slow) sha256
+        // hashing. This keeps the UI's long-lived connection free to read
+        // while the reconcile writes. See spec §11 mutex trap.
+        //
+        // If the connection open fails (e.g. fresh install with no brain.db
+        // yet), log and skip the reconcile pass — but DO continue to spawn the
+        // watcher below, which will catch new events as they arrive.
+        let brain_db_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".brain")
+            .join("brain.db");
+        // Open a fresh WAL-mode connection for the reconcile pass (spec §11
+        // mutex trap — keeps the UI's long-lived `DbState` connection free
+        // to read while we hash and upsert).
+        //
+        // If the open fails (e.g. fresh install with no `brain.db` yet), log
+        // and skip the reconcile — but DO continue so the watcher spawn below
+        // still runs and catches new events as they arrive.
+        let mut conn_opt: Option<rusqlite::Connection> =
+            match rusqlite::Connection::open(&brain_db_path) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!(
+                        "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
+                    );
+                    None
+                }
+            };
 
-        let db_paths: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
-                .map_err(|e| e.to_string())?;
-            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            let mut v = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+        // Purge documents rows whose backing file no longer exists on disk.
+        if let Some(conn) = conn_opt.as_mut() {
+            let db_paths: Vec<String> = {
+                let mut stmt = conn
+                    .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
+                    .map_err(|e| e.to_string())?;
+                let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+                let mut v = Vec::new();
+                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                    v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+                }
+                v
+            };
+            for path in db_paths {
+                if !std::path::Path::new(&path).exists() {
+                    eprintln!("[reconcile] purging deleted file from index: {}", path);
+                    if let Err(e) = enqueue_vault_event(
+                        conn,
+                        notify::EventKind::Remove(notify::event::RemoveKind::Any),
+                        std::path::Path::new(&path),
+                    ) {
+                        eprintln!("[reconcile] enqueue_vault_event (Remove) failed: {e}");
+                    }
+                }
             }
-            v
-        };
-        for path in db_paths {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[reconcile] purging deleted file from index: {}", path);
-                let _ = pipeline_tx.try_send(PipelineJob::Delete(path));
-            }
-        }
 
-        if raw_docs.exists() {
-            for entry in walkdir::WalkDir::new(&raw_docs)
-                .min_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let ext = entry
-                    .path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if should_ingest_extension(ext) {
-                    let normalized = std::fs::canonicalize(entry.path())
-                        .unwrap_or_else(|_| entry.path().to_path_buf())
-                        .to_string_lossy()
-                        .into_owned();
-                    update_wiki_status(app, &status_state, |flags| {
-                        flags.ingesting = true;
-                    });
-                    let _ = pipeline_tx.try_send(PipelineJob::ingest_counted(normalized));
+            if raw_docs.exists() {
+                for entry in walkdir::WalkDir::new(&raw_docs)
+                    .min_depth(1)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                {
+                    let ext = entry
+                        .path()
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    if should_ingest_extension(ext) {
+                        let normalized = std::fs::canonicalize(entry.path())
+                            .unwrap_or_else(|_| entry.path().to_path_buf())
+                            .to_string_lossy()
+                            .into_owned();
+                        update_wiki_status(app, &status_state, |flags| {
+                            flags.ingesting = true;
+                        });
+                        if let Err(e) = enqueue_vault_event(
+                            conn,
+                            notify::EventKind::Create(notify::event::CreateKind::Any),
+                            std::path::Path::new(&normalized),
+                        ) {
+                            eprintln!("[reconcile] enqueue_vault_event (Create) failed: {e}");
+                        }
+                    }
                 }
             }
         }
+        // `conn_opt` drops here, releasing the WAL writer slot.
     }
 
     let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
@@ -795,6 +837,19 @@ fn start_file_watcher_inner(
 
     let app = app.clone();
     let vault_for_watcher = target_canonical.clone();
+    // Brain DB path for the per-event ephemeral WAL-mode connection.
+    // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
+    // during the (potentially slow) sha256 hash freezes the UI.
+    let brain_db_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".brain")
+        .join("brain.db");
+    // Acquire the vault lock so a headless `ct watch` cannot also touch this
+    // vault concurrently. Held for the lifetime of the watcher; released when
+    // the returned `WatcherHandle` is dropped (via `stop()` in
+    // `WatcherHandle::stop`, before the watcher thread joins — see spec §7).
+    let vault_lock = VaultLock::acquire(&vault_for_watcher)
+        .map_err(|e| format!("failed to acquire vault lock for {vault_for_watcher:?}: {e}"))?;
     let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
@@ -806,23 +861,50 @@ fn start_file_watcher_inner(
             return;
         }
         let normalized = canonical.to_string_lossy().into_owned();
-        let job = match &event {
-            VaultEvent::Added(_) | VaultEvent::Modified(_) => {
+        // Open a fresh WAL-mode connection per event. WAL mode allows
+        // concurrent reader + writer, so the UI's long-lived connection in
+        // `DbState` keeps reading while we hash and upsert here.
+        let conn_result = rusqlite::Connection::open(&brain_db_path);
+        let mut conn = match conn_result {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[watch] failed to open brain.db at {brain_db_path:?}: {e}; event dropped: {normalized}"
+                );
+                return;
+            }
+        };
+        let event_kind = match &event {
+            VaultEvent::Added(_) => {
                 update_wiki_status_from_app(&app, |flags| {
                     flags.ingesting = true;
                 });
-                Some(PipelineJob::ingest_counted(normalized.clone()))
+                Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
+            }
+            VaultEvent::Modified(_) => {
+                update_wiki_status_from_app(&app, |flags| {
+                    flags.ingesting = true;
+                });
+                Ok(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             }
             VaultEvent::Deleted(_) => {
                 let _ = heal_tx.send(());
-                Some(PipelineJob::Delete(normalized.clone()))
+                Ok(notify::EventKind::Remove(notify::event::RemoveKind::Any))
             }
         };
-        if let Some(j) = job {
-            let _ = pipeline_tx.try_send(j);
+        let event_kind = match event_kind {
+            Ok(k) => k,
+            Err(()) => return,
+        };
+        if let Err(e) =
+            enqueue_vault_event(&mut conn, event_kind, std::path::Path::new(&normalized))
+        {
+            eprintln!("[watch] enqueue_vault_event failed for {normalized}: {e}");
         }
+        // conn drops here, releasing the WAL writer slot.
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .with_lock(vault_lock);
 
     let mut watcher_guard = watcher_started.0.lock().unwrap();
     let still_canonical = match canonical_vault_from_config(&vault_state) {

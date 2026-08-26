@@ -23,12 +23,26 @@ pub enum VaultEvent {
 pub struct WatcherHandle {
     cancel: Arc<AtomicBool>,
     join: thread::JoinHandle<()>,
+    /// Optional vault lock held by this watcher. Released on `stop()` (before
+    /// joining the watcher thread) so a subsequent watcher acquire cannot
+    /// race against an exiting thread. See spec §7 deadlock prevention.
+    lock: Option<VaultLock>,
 }
 
 impl WatcherHandle {
-    pub fn stop(self) {
+    pub fn stop(mut self) {
+        // Drop the vault lock FIRST so a new watcher can acquire it before the
+        // watcher thread is joined (avoids a deadlock window during vault switch).
+        drop(self.lock.take());
         self.cancel.store(true, Ordering::SeqCst);
         let _ = self.join.join();
+    }
+
+    /// Attach a [`VaultLock`] to this handle. The lock is released when
+    /// [`stop`](Self::stop) is called (or when the handle is dropped).
+    pub fn with_lock(mut self, lock: VaultLock) -> Self {
+        self.lock = Some(lock);
+        self
     }
 }
 
@@ -68,7 +82,11 @@ where
         }
     });
 
-    Ok(WatcherHandle { cancel, join })
+    Ok(WatcherHandle {
+        cancel,
+        join,
+        lock: None,
+    })
 }
 
 /// Cross-platform exclusive lock for a vault directory.
