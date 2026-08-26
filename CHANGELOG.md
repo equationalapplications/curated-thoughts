@@ -1,3 +1,23 @@
+## [1.31.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.30.0...v1.31.0) (2026-08-26)
+
+### Features
+
+* **tools:** add --foreground flag to ct watch ([d4b8069](https://github.com/equationalapplications/curated-thoughts/commit/d4b8069b58874241b6d9284a4b09c9fc9cd6abbb)), closes [#96](https://github.com/equationalapplications/curated-thoughts/issues/96)
+* **tools:** add ct watch subcommand ([5ce3268](https://github.com/equationalapplications/curated-thoughts/commit/5ce32689e5b64f9aca69b0d040fe3fece1bffe1e))
+* **watch:** add VaultLock to src-tauri watcher and duplicate in tools (phase 2 v2) ([7c35b11](https://github.com/equationalapplications/curated-thoughts/commit/7c35b117bfd29a89f8d09e7d128e2c83f531701e))
+
+### Bug Fixes
+
+* **tauri:** acquire VaultLock on brain_dir, not vault path ([6258cfd](https://github.com/equationalapplications/curated-thoughts/commit/6258cfd2b98e3dc2b0a42107fe44cc9bfed717e8))
+* **tauri:** swap in-process pipeline for DB-backed enqueue_vault_event ([2ed0acf](https://github.com/equationalapplications/curated-thoughts/commit/2ed0acfb4b29a3993d3b05cc23e9a2bfaacf346b))
+* **tools:** add watcher absolute-paths test + fix VaultLock name shadowing ([8f49511](https://github.com/equationalapplications/curated-thoughts/commit/8f495115362c99049a1a5966bd90f705ca7d4857))
+* **tools:** address CodeRabbit review on PR [#96](https://github.com/equationalapplications/curated-thoughts/issues/96) ([c1c54cb](https://github.com/equationalapplications/curated-thoughts/commit/c1c54cbe717e2845c8fef59eac334fbebb4ea773))
+* **tools:** address CodeRabbit review pass 2 on PR [#96](https://github.com/equationalapplications/curated-thoughts/issues/96) ([a1c33b3](https://github.com/equationalapplications/curated-thoughts/commit/a1c33b3d235fb7a0b511c5746cf15453a598abd4))
+* **tools:** address CodeRabbit review pass 3 on PR [#96](https://github.com/equationalapplications/curated-thoughts/issues/96) ([5c22235](https://github.com/equationalapplications/curated-thoughts/commit/5c22235a2fcd37bf1aafa60f132219c166be1f93)), closes [#12](https://github.com/equationalapplications/curated-thoughts/issues/12)
+* **tools:** correct paths.rs vault_contains doc-comment line ref + trailing newlines ([e93c283](https://github.com/equationalapplications/curated-thoughts/commit/e93c2836b2dbc1d0bf99be64fba9624702aa5d5f))
+* **tools:** ct watch JSON to stdout, kind field, add ts_ms ([fca4e77](https://github.com/equationalapplications/curated-thoughts/commit/fca4e779b2b305b02c34a5ee346410fea6f0ab60)), closes [#96](https://github.com/equationalapplications/curated-thoughts/issues/96)
+* **tools:** map DB errors to exit 3, notify init errors to exit 4 ([9b5eb7b](https://github.com/equationalapplications/curated-thoughts/commit/9b5eb7bb8be692bb2d3b815800dcc73f113627b8)), closes [#96](https://github.com/equationalapplications/curated-thoughts/issues/96)
+
 ## [1.30.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.29.0...v1.30.0) (2026-08-25)
 
 ### Features
