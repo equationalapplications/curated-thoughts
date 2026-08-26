@@ -25,7 +25,7 @@ mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
 pub mod vault;
-mod watcher;
+pub mod watcher;
 pub mod wiki_graph;
 
 use crate::inference::{
@@ -34,6 +34,7 @@ use crate::inference::{
 };
 use chunker::should_ingest_extension;
 use cloud_bridge::pairing::PairingTokenStore;
+use db::queue::enqueue_vault_event;
 use db::AppDb;
 use outbox::{
     postgres::{spawn_postgres_worker, OutboxWorkerHandle},
@@ -61,7 +62,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
-use watcher::{spawn_vault_watcher, VaultEvent, WatcherHandle};
+use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
@@ -616,8 +617,11 @@ fn backup_vault_db(
         ));
     }
 
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
-    let src = brain_dir.join("brain.db");
+    // Same fix as `switch_vault` (CodeRabbit review on PR #96): the
+    // backup source path was hardcoded to `~/.brain/brain.db`. With
+    // `CURATED_BRAIN_DIR` set, the backup silently captured the wrong
+    // database. Route through the canonical resolver.
+    let src = retrieval::resolve_brain_paths().db_path;
     if !src.exists() {
         return Err("no database to back up".to_string());
     }
@@ -682,7 +686,7 @@ fn canonical_vault_from_config(vault_state: &VaultConfigState) -> Result<PathBuf
 fn start_file_watcher_inner(
     app: &AppHandle,
     pipeline: State<'_, PipelineHolder>,
-    db_state: State<'_, DbState>,
+    _db_state: State<'_, DbState>,
     vault_state: State<'_, VaultConfigState>,
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
@@ -716,14 +720,12 @@ fn start_file_watcher_inner(
         let _ = handle.join();
     }
 
-    let (pipeline_tx, status_rx) = {
+    let status_rx = {
         let mut guard = pipeline.0.lock().unwrap();
         let tuple = guard
             .as_mut()
             .ok_or_else(|| "pipeline not running".to_string())?;
-        let tx = tuple.0.clone();
-        let status_rx = tuple.3.take();
-        (tx, status_rx)
+        tuple.3.take()
     };
 
     if let Some(status_rx) = status_rx {
@@ -742,59 +744,177 @@ fn start_file_watcher_inner(
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
     {
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
+        // Open a fresh WAL-mode connection for the reconcile pass instead of
+        // holding `db_state.0.lock()` across the (potentially slow) sha256
+        // hashing. This keeps the UI's long-lived connection free to read
+        // while the reconcile writes. See spec §11 mutex trap.
+        //
+        // If the connection open fails (e.g. fresh install with no brain.db
+        // yet), log and skip the reconcile pass — but DO continue to spawn the
+        // watcher below, which will catch new events as they arrive.
+        //
+        // Use the shared `retrieval::resolve_brain_paths()` so desktop and
+        // `ct watch` agree on the brain path (see CodeRabbit review on
+        // PR #96 — previously this constructed the path inline via
+        // `dirs::home_dir().join(".brain")` which silently diverged from
+        // the canonical resolver when `CURATED_BRAIN_DIR` was set).
+        let brain_db_path = retrieval::resolve_brain_paths().db_path;
+        // Open a fresh WAL-mode connection for the reconcile pass (spec §11
+        // mutex trap — keeps the UI's long-lived `DbState` connection free
+        // to read while we hash and upsert).
+        //
+        // If the open fails (e.g. fresh install with no `brain.db` yet), log
+        // and skip the reconcile — but DO continue so the watcher spawn below
+        // still runs and catches new events as they arrive.
+        let mut conn_opt: Option<rusqlite::Connection> =
+            match rusqlite::Connection::open(&brain_db_path) {
+                Ok(c) => {
+                    // Busy-timeout pragma (CodeRabbit review on PR #96):
+                    // the reconcile writer participates in WAL mode,
+                    // but `ct watch`'s per-event connection also opens
+                    // RW against the same DB. Without a timeout,
+                    // contention with a checkpoint or another writer
+                    // fails instantly with SQLITE_BUSY. 5s matches
+                    // `tauri_app_lib::db::AppDb`'s default.
+                    if let Err(e) =
+                        c.busy_timeout(std::time::Duration::from_secs(5))
+                    {
+                        eprintln!(
+                            "[reconcile] failed to set busy_timeout: {e}"
+                        );
+                        // Non-fatal: continue without the pragma.
+                    }
+                    Some(c)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
+                    );
+                    None
+                }
+            };
 
-        let db_paths: Vec<String> = {
-            let mut stmt = conn
+        // Purge documents rows whose backing file no longer exists on disk.
+        // Each per-row query failure is logged and skipped — we do NOT
+        // abort the reconcile pass on a single bad row, otherwise a
+        // single corrupt DB row would silently disable vault reconcile
+        // (CodeRabbit review on PR #96).
+        if let Some(conn) = conn_opt.as_mut() {
+            let db_paths: Vec<String> = match conn
                 .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
-                .map_err(|e| e.to_string())?;
-            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            let mut v = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                v.push(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    let mut v = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        v.push(row.get::<_, String>(0)?);
+                    }
+                    Ok::<_, rusqlite::Error>(v)
+                }) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[reconcile] skipping path purge — SELECT path FROM documents failed: {e}"
+                    );
+                    Vec::new()
+                }
+            };
+            for path in db_paths {
+                if !std::path::Path::new(&path).exists() {
+                    eprintln!("[reconcile] purging deleted file from index: {}", path);
+                    if let Err(e) = enqueue_vault_event(
+                        conn,
+                        notify::EventKind::Remove(notify::event::RemoveKind::Any),
+                        std::path::Path::new(&path),
+                    ) {
+                        eprintln!("[reconcile] enqueue_vault_event (Remove) failed: {e}");
+                    }
+                }
             }
-            v
-        };
-        for path in db_paths {
-            if !std::path::Path::new(&path).exists() {
-                eprintln!("[reconcile] purging deleted file from index: {}", path);
-                let _ = pipeline_tx.try_send(PipelineJob::Delete(path));
-            }
-        }
 
-        if raw_docs.exists() {
-            for entry in walkdir::WalkDir::new(&raw_docs)
-                .min_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let ext = entry
-                    .path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if should_ingest_extension(ext) {
-                    let normalized = std::fs::canonicalize(entry.path())
-                        .unwrap_or_else(|_| entry.path().to_path_buf())
-                        .to_string_lossy()
-                        .into_owned();
-                    update_wiki_status(app, &status_state, |flags| {
-                        flags.ingesting = true;
-                    });
-                    let _ = pipeline_tx.try_send(PipelineJob::ingest_counted(normalized));
+            if raw_docs.exists() {
+                for entry in walkdir::WalkDir::new(&raw_docs)
+                    .min_depth(1)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                {
+                    let ext = entry
+                        .path()
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    if should_ingest_extension(ext) {
+                        let normalized = std::fs::canonicalize(entry.path())
+                            .unwrap_or_else(|_| entry.path().to_path_buf())
+                            .to_string_lossy()
+                            .into_owned();
+                        update_wiki_status(app, &status_state, |flags| {
+                            flags.ingesting = true;
+                        });
+                        if let Err(e) = enqueue_vault_event(
+                            conn,
+                            notify::EventKind::Create(notify::event::CreateKind::Any),
+                            std::path::Path::new(&normalized),
+                        ) {
+                            eprintln!("[reconcile] enqueue_vault_event (Create) failed: {e}");
+                        }
+                    }
                 }
             }
         }
+        // `conn_opt` drops here, releasing the WAL writer slot.
     }
+
+    // Acquire the vault lock. This function is called from TWO outer
+    // entrypoints:
+    //   1. `start_file_watcher` (Tauri command) — no upstream lock.
+    //   2. `switch_vault` — acquires the lock at its own line ~1077
+    //      BEFORE the teardown block (CodeRabbit review on PR #96
+    //      pass 3, comment #11). That outer acquire is the FAIL-FAST
+    //      gate that protects the watcher from being torn down while a
+    //      headless `ct watch` holds the lock.
+    //
+    // The double-acquire here is intentional and harmless: `flock` is
+    // per-file-descriptor on Linux (and per-handle on Windows), so the
+    // same process acquiring the same lock file from two `OpenOptions`
+    // handles produces two independent locks. Both release on drop. The
+    // `WatcherHandle` returned below stores THIS lock (the inner one),
+    // so its drop releases the inner lock; the outer lock in `switch_vault`
+    // drops when that function returns.
+    //
+    // ...[truncated]
 
     let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
     let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
     *scheduler_guard = Some((heal_tx.clone(), heal_thread));
 
+    // Resolve the brain DB path for the per-event ephemeral WAL-mode
+    // connection (line 910 below). The vault lock was already acquired
+    // at the top of this function — see the double-acquire rationale in
+    // the block comment above. (CodeRabbit review on PR #96 pass 3.)
+    let brain_paths = retrieval::resolve_brain_paths();
+    let brain_db_path = brain_paths.db_path.clone();
+
+    // Acquire the vault lock for the WatcherHandle. The outer lock in
+    // `switch_vault` is the FAIL-FAST gate that prevents tearing down
+    // the old watcher when a headless `ct watch` holds the lock (see
+    // CodeRabbit review on PR #96 pass 3, comment #11). This inner
+    // lock is owned by the returned `WatcherHandle` and released when
+    // `WatcherHandle::stop` runs. Same-process double-flock is harmless
+    // (flock is per-fd); see the detailed rationale in the block comment
+    // above the `start_file_watcher_inner` function.
+    let vault_lock = VaultLock::acquire(&brain_paths.brain_dir).map_err(|e| {
+        format!(
+            "failed to acquire vault lock for {:?}: {e}",
+            brain_paths.brain_dir
+        )
+    })?;
+
     let app = app.clone();
     let vault_for_watcher = target_canonical.clone();
+    // Brain DB path for the per-event ephemeral WAL-mode connection.
+    // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
+    // during the (potentially slow) sha256 hash freezes the UI.
     let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
         let _ = app.emit("vault-event", &event);
         let path_str = match &event {
@@ -806,23 +926,59 @@ fn start_file_watcher_inner(
             return;
         }
         let normalized = canonical.to_string_lossy().into_owned();
-        let job = match &event {
-            VaultEvent::Added(_) | VaultEvent::Modified(_) => {
+        // Open a fresh WAL-mode connection per event. WAL mode allows
+        // concurrent reader + writer, so the UI's long-lived connection in
+        // `DbState` keeps reading while we hash and upsert here.
+        let conn_result = rusqlite::Connection::open(&brain_db_path);
+        let mut conn = match conn_result {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[watch] failed to open brain.db at {brain_db_path:?}: {e}; event dropped: {normalized}"
+                );
+                return;
+            }
+        };
+        // Busy-timeout pragma (CodeRabbit review on PR #96):
+        // without this, transient contention with a WAL checkpoint
+        // or another writer instantly fails with SQLITE_BUSY. 5s
+        // matches `tauri_app_lib::db::AppDb`'s default and the
+        // `ct watch` side (`tools/src/write.rs::open_rw`).
+        if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+            eprintln!("[watch] failed to set busy_timeout: {e}");
+            // Non-fatal: continue.
+        }
+        let event_kind = match &event {
+            VaultEvent::Added(_) => {
                 update_wiki_status_from_app(&app, |flags| {
                     flags.ingesting = true;
                 });
-                Some(PipelineJob::ingest_counted(normalized.clone()))
+                Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
+            }
+            VaultEvent::Modified(_) => {
+                update_wiki_status_from_app(&app, |flags| {
+                    flags.ingesting = true;
+                });
+                Ok(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             }
             VaultEvent::Deleted(_) => {
                 let _ = heal_tx.send(());
-                Some(PipelineJob::Delete(normalized.clone()))
+                Ok(notify::EventKind::Remove(notify::event::RemoveKind::Any))
             }
         };
-        if let Some(j) = job {
-            let _ = pipeline_tx.try_send(j);
+        let event_kind = match event_kind {
+            Ok(k) => k,
+            Err(()) => return,
+        };
+        if let Err(e) =
+            enqueue_vault_event(&mut conn, event_kind, std::path::Path::new(&normalized))
+        {
+            eprintln!("[watch] enqueue_vault_event failed for {normalized}: {e}");
         }
+        // conn drops here, releasing the WAL writer slot.
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .with_lock(vault_lock);
 
     let mut watcher_guard = watcher_started.0.lock().unwrap();
     let still_canonical = match canonical_vault_from_config(&vault_state) {
@@ -914,8 +1070,14 @@ async fn switch_vault(
     status_state: State<'_, WikiStatusState>,
     outbox_state: State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
-    let db_path = brain_dir.join("brain.db");
+    // CodeRabbit review on PR #96: the inner `start_file_watcher_inner`
+    // was already migrated to `retrieval::resolve_brain_paths()` for the
+    // watcher brain dir / brain db path, but the outer `switch_vault`
+    // scope was still using the hardcoded `~/.brain/brain.db`. With
+    // `CURATED_BRAIN_DIR` set, the outbox worker + sidecar recovery +
+    // db-path-cleanup were silently operating on the WRONG brain.db.
+    // Route through the canonical resolver so the two paths agree.
+    let db_path = retrieval::resolve_brain_paths().db_path;
 
     let new_root = validated_new_vault_root(&new_path)?;
 
@@ -924,6 +1086,22 @@ async fn switch_vault(
             return Ok(());
         }
     }
+
+    // Acquire the vault lock BEFORE tearing anything down. If a headless
+    // `ct watch` is currently holding the lock, we want to fail FAST
+    // with the old watcher + pipeline + outbox still running — the previous
+    // ordering (teardown, then lock acquire at line 884 inside
+    // `start_file_watcher_inner`) silently disabled desktop file watching
+    // on lock-conflict and required an app restart to recover.
+    // CodeRabbit review on PR #96 (review pass 3, comment #11).
+    let brain_dir_for_lock = retrieval::resolve_brain_paths().brain_dir;
+    let _vault_lock = VaultLock::acquire(&brain_dir_for_lock).map_err(|e| {
+        format!(
+            "failed to acquire vault lock for {brain_dir_for_lock:?}: {e} \
+             — a headless `ct watch` may be holding this vault; \
+             stop it and retry"
+        )
+    })?;
 
     for subdir in &["documents", "wiki"] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
@@ -2350,10 +2528,14 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let brain_dir = dirs::home_dir().unwrap_or_default().join(".brain");
+    // Same fix as `switch_vault` (CodeRabbit review on PR #96): the
+    // entrypoint was hardcoded to `~/.brain/`. With `CURATED_BRAIN_DIR`
+    // set, the app would bootstrap a directory the user never asked
+    // for. Route through the canonical resolver.
+    let brain_dir = retrieval::resolve_brain_paths().brain_dir;
     std::fs::create_dir_all(&brain_dir).ok();
 
-    let db_path = brain_dir.join("brain.db");
+    let db_path = retrieval::resolve_brain_paths().db_path;
 
     let config = VaultConfig::new(VaultConfig::default_config_path());
     if config.get_vault_path().ok().flatten().is_none() {
