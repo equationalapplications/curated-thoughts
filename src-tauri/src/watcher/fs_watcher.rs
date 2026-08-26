@@ -211,6 +211,31 @@ mod tests {
     }
 
     #[test]
+    fn test_watcher_delivers_absolute_paths() {
+        let tmp = TempDir::new().unwrap();
+        let (tx, rx) = mpsc::channel::<VaultEvent>();
+        let handle = spawn_vault_watcher(tmp.path().to_path_buf(), move |e| {
+            tx.send(e).ok();
+        })
+        .unwrap();
+        fs::write(tmp.path().join("note.md"), "hello").unwrap();
+
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no event");
+        let path_str = match event {
+            VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
+        };
+        let path = Path::new(&path_str);
+        assert!(
+            path.is_absolute(),
+            "watcher delivered non-absolute path: {}",
+            path_str
+        );
+        handle.stop();
+    }
+
+    #[test]
     fn vault_lock_blocks_second_acquire() {
         let tmp = TempDir::new().unwrap();
         let _first = VaultLock::acquire(tmp.path()).expect("first acquire succeeds");
