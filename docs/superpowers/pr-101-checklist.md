@@ -38,9 +38,9 @@
 
 ## T3 — Hygiene (blocking for merge)
 
-- [ ] `git rm -r --cached tools/.fastembed_cache` (16 files, 87 MB) + gitignore `tools/.fastembed_cache/`
+- [x] Drop 87 MB `tools/.fastembed_cache` blobs — DONE Aug 27 2026 (Kurt approved): history rewritten via `git filter-repo --invert-paths --path tools/.fastembed_cache --refs feature/mcp-write-path-okf-frontmatter` (backup bundle: `~/hermes-backups/pr-101-pre-rewrite-20260827-081046.bundle`); `tools/.fastembed_cache/` added to `.gitignore`. NOTE: `pr-99` branch still carries its own copy (incl. a 90 MB `model.onnx`) — separate cleanup, separate decision.
 - [ ] Delete `MCP_TOOL_REGISTRATION_SUMMARY.md`, `MCP_WRITE_INTEGRATION_TESTS.md`, `test_mcp_registration.sh`
-- [ ] Ask Kurt: history purge (`git filter-repo`) vs tip-only removal
+- [x] ~~Ask Kurt: history purge (`git filter-repo`) vs tip-only removal~~ — RULED Aug 27: full filter-repo, approved
 - [ ] `docs/mcp-write-tools-okf-frontmatter.md` reviewed against v2 contracts (token staleness, error strings, block format)
 
 ## T4 — Merge
