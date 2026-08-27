@@ -114,20 +114,23 @@ fn index_mode_skips_librarian_without_calling_ollama() {
 fn auto_approve_commits_proposal_via_resolve_path() {
     let app = TestApp::new();
     let vault = app.tmp.path().join("vault");
-    std::fs::create_dir_all(vault.join("documents")).unwrap();
+    // v2 layout: source tier is immutable-source-files/ (documents/ is v1 and
+    // set_vault_path migrates it away).
+    std::fs::create_dir_all(vault.join("immutable-source-files")).unwrap();
     app.invoke::<()>("set_vault_path", json!({ "path": vault }));
 
-    let source_path = vault.join("documents").join("auto.md");
+    let source_path = vault.join("immutable-source-files").join("auto.md");
     let source_str = source_path.to_string_lossy().to_string();
     std::fs::write(&source_path, "Auto-approve test content.").unwrap();
     seed_chunks(&app, &source_str);
 
     let db_conn = app.open_db();
-    db_conn.execute(
-        "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'synthesize', 1)",
-        [&vault.join("documents").to_string_lossy().to_string()],
-    )
-    .unwrap();
+    db_conn
+        .execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'synthesize', 1)",
+            [&vault.join("immutable-source-files").to_string_lossy().to_string()],
+        )
+        .unwrap();
 
     db_conn
         .execute(
