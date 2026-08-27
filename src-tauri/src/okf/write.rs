@@ -22,7 +22,7 @@ use std::path::Path;
 use chrono::SecondsFormat;
 use serde_json::Value;
 
-use crate::vault::{safe_vault_path, PathMode, SafePathError};
+use crate::vault::{safe_vault_path, PathMode, SafePathError, WRITABLE_SUBDIRS, READABLE_SUBDIRS};
 
 use super::{
     parse_frontmatter, render_frontmatter, sha256_hash, validate_frontmatter, OkfFrontmatter,
@@ -98,7 +98,7 @@ fn enforce_staleness(
 ///
 /// * `vault_root` — absolute path to the vault root.
 /// * `path` — vault-relative path (e.g. `wiki/my-note.md`). Validated with
-///   `safe_vault_path(_, _, &["."], PathMode::MayCreate)`. Missing parent
+///   `safe_vault_path(_, _, WRITABLE_SUBDIRS, PathMode::MayCreate)`. Missing parent
 ///   directories are created, then the resolution is repeated so every
 ///   containment/symlink decision stays inside `safe_vault_path`.
 /// * `frontmatter` — OKF frontmatter; validated; `updated_at` defaults to
@@ -115,7 +115,7 @@ pub fn write_note(
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
 
-    let target = match safe_vault_path(vault_root, path, &["."], PathMode::MayCreate) {
+    let target = match safe_vault_path(vault_root, path, WRITABLE_SUBDIRS, PathMode::MayCreate) {
         Ok(target) => target,
         Err(SafePathError::NotFound(ref msg)) if msg.contains("parent directory not found") => {
             // Parent dirs don't exist yet. Path shape was already vetted
@@ -134,7 +134,7 @@ pub fn write_note(
             std::fs::create_dir_all(vault_root.join(rel_parent)).map_err(|e| {
                 WriteNoteError::WriteError(format!("write_error:create_dir_all: {}", e))
             })?;
-            safe_vault_path(vault_root, path, &["."], PathMode::MayCreate)
+            safe_vault_path(vault_root, path, WRITABLE_SUBDIRS, PathMode::MayCreate)
                 .map_err(map_safe_err_note)?
         }
         Err(e) => return Err(map_safe_err_note(e)),
@@ -329,7 +329,7 @@ pub fn upsert_index_entry(
         )));
     }
 
-    let canonical_index = match safe_vault_path(vault_root, index_path, &["."], PathMode::MustExist)
+    let canonical_index = match safe_vault_path(vault_root, index_path, READABLE_SUBDIRS, PathMode::MustExist)
     {
         Ok(p) => p,
         Err(SafePathError::NotFound(_)) => {
@@ -337,7 +337,7 @@ pub fn upsert_index_entry(
         }
         Err(e) => return Err(map_safe_err_upsert(e)),
     };
-    let canonical_entry_target = safe_vault_path(vault_root, entry_path, &["."], PathMode::MustExist)
+    let canonical_entry_target = safe_vault_path(vault_root, entry_path, READABLE_SUBDIRS, PathMode::MustExist)
         .map_err(map_safe_err_upsert)?;
 
     let content = std::fs::read_to_string(&canonical_index)

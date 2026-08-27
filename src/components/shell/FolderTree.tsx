@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { VaultFile } from "../../lib/tauri";
 import { deleteVaultFile } from "../../lib/tauri";
+import { getVaultLayout } from "../../lib/tauri";
 
 interface Props {
   files: VaultFile[];
@@ -58,8 +59,38 @@ function FileRow({
 }
 
 export function FolderTree({ files, selectedPath, onSelect }: Props) {
+  const [layout, setLayout] = useState<{
+    immutableDir: string;
+    wikiDir: string;
+    labels: {
+      immutableDir: string;
+      wikiDir: string;
+    };
+  } | null>(null);
+
+  // Load folder layout configuration on mount
+  useEffect(() => {
+    getVaultLayout()
+      .then(setLayout)
+      .catch((err) => {
+        console.error("Failed to load vault layout:", err);
+        // Fallback to hardcoded labels if fetch fails
+        setLayout({
+          immutableDir: "immutable-source-files",
+          wikiDir: "wiki",
+          labels: {
+            immutableDir: "Source Files",
+            wikiDir: "Wiki Pages",
+          },
+        });
+      });
+  }, []);
+
   const docs = files.filter((f) => f.tier === "user_doc");
   const wiki = files.filter((f) => f.tier === "wiki");
+
+  const immutableLabel = layout?.labels.immutableDir ?? "Source Files";
+  const wikiLabel = layout?.labels.wikiDir ?? "Wiki Pages";
 
   if (files.length === 0) {
     return <p className="placeholder">Drop documents into your vault folder to get started</p>;
@@ -69,7 +100,7 @@ export function FolderTree({ files, selectedPath, onSelect }: Props) {
     <div className="folder-tree">
       {docs.length > 0 && (
         <section className="tree-section">
-          <h4 className="tree-section-label">Documents</h4>
+          <h4 className="tree-section-label">{immutableLabel}</h4>
           {docs.map((f) => (
             <FileRow
               key={f.path}
@@ -83,7 +114,7 @@ export function FolderTree({ files, selectedPath, onSelect }: Props) {
       )}
       {wiki.length > 0 && (
         <section className="tree-section">
-          <h4 className="tree-section-label">Wiki</h4>
+          <h4 className="tree-section-label">{wikiLabel}</h4>
           {wiki.map((f) => (
             <FileRow
               key={f.path}

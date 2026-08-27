@@ -1,14 +1,33 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::embedder::EmbedProfile;
+use crate::vault::safe_path::IMMUTABLE_DIR;
+
+/// Migration errors for vault folder structure changes
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum MigrationError {
+    #[error("Both 'documents' and 'immutable-source-files' folders exist. Manual intervention required: move files from '{old}' to '{new}', then restart.")]
+    BothFoldersExist { old: PathBuf, new: PathBuf },
+    #[error("IO error during migration: {0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for MigrationError {
+    fn from(e: std::io::Error) -> Self {
+        MigrationError::Io(e.to_string())
+    }
+}
 
 #[derive(Deserialize, Serialize, Default)]
 struct ConfigFile {
     vault_path: Option<String>,
     #[serde(default)]
     embed_profile: Option<EmbedProfile>,
+    #[serde(default)]
+    migrated_to_v2: bool,
 }
 
 impl ConfigFile {
@@ -102,6 +121,38 @@ impl VaultConfig {
         let mut cfg = self.read()?;
         cfg.embed_profile = Some(profile);
         self.write(&cfg)
+    }
+
+    pub fn has_migrated_to_v2(&self) -> Result<bool> {
+        Ok(self.read()?.migrated_to_v2)
+    }
+
+    pub fn set_migrated_to_v2(&self) -> Result<()> {
+        let mut cfg = self.read()?;
+        cfg.migrated_to_v2 = true;
+        self.write(&cfg)
+    }
+}
+
+/// Migrate vault folder structure from v1 (documents/) to v2 (immutable-source-files/)
+pub fn migrate_vault(vault_root: &Path) -> Result<(), MigrationError> {
+    let old = vault_root.join("documents");
+    let new = vault_root.join(IMMUTABLE_DIR);
+
+    match (old.exists(), new.exists()) {
+        (true, false) => {
+            // Normal migration: rename documents to immutable-source-files
+            fs::rename(&old, &new)?;
+            Ok(())
+        }
+        (false, _) => {
+            // Idempotent: nothing to migrate (either already migrated or fresh vault)
+            Ok(())
+        }
+        (true, true) => {
+            // Both folders exist - user needs to resolve manually
+            Err(MigrationError::BothFoldersExist { old, new })
+        }
     }
 }
 
@@ -238,5 +289,67 @@ mod tests {
         };
         cfg.set_embed_profile(p.clone()).unwrap();
         assert_eq!(cfg.get_embed_profile().unwrap(), p);
+    }
+
+    #[test]
+    fn migration_success_when_old_exists_new_does_not() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let old_dir = vault.join("documents");
+        let new_dir = vault.join(IMMUTABLE_DIR);
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("test.txt"), b"test").unwrap();
+
+        assert!(old_dir.exists());
+        assert!(!new_dir.exists());
+
+        migrate_vault(&vault).unwrap();
+
+        assert!(!old_dir.exists());
+        assert!(new_dir.exists());
+        assert!(new_dir.join("test.txt").exists());
+    }
+
+    #[test]
+    fn migration_idempotent_when_old_does_not_exist() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+
+        // Fresh vault with neither folder
+        migrate_vault(&vault).unwrap();
+
+        // Already migrated vault
+        fs::create_dir_all(vault.join(IMMUTABLE_DIR)).unwrap();
+        migrate_vault(&vault).unwrap();
+    }
+
+    #[test]
+    fn migration_fails_when_both_folders_exist() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let old_dir = vault.join("documents");
+        let new_dir = vault.join(IMMUTABLE_DIR);
+        
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("old.txt"), b"old").unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("new.txt"), b"new").unwrap();
+
+        let result = migrate_vault(&vault);
+        assert!(result.is_err());
+        match result {
+            Err(MigrationError::BothFoldersExist { old, new }) => {
+                assert_eq!(old, old_dir);
+                assert_eq!(new, new_dir);
+            }
+            _ => panic!("Expected BothFoldersExist error"),
+        }
+
+        // Both folders should still exist
+        assert!(old_dir.exists());
+        assert!(new_dir.exists());
+        assert!(old_dir.join("old.txt").exists());
+        assert!(new_dir.join("new.txt").exists());
     }
 }

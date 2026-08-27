@@ -1,7 +1,7 @@
 # Vault Folder Structure Refactoring
 
 **Date:** 2026-08-27
-**Status:** SPEC (rev 2 — incorporates review round 1)
+**Status:** ✅ IMPLEMENTED (rev 2 — see [PR #115](https://github.com/equationalapplications/curated-thoughts/pull/115))
 **Author:** Kurt VanDusen
 **Related Specs:**
 - `2026-05-05-second-brain-app-design.md` — original design with documents/ immutability

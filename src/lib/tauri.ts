@@ -13,6 +13,15 @@ export const getVaultPath = (): Promise<string | null> =>
 export const setVaultPath = (path: string): Promise<void> =>
   invoke("set_vault_path", { path });
 
+export const getVaultLayout = (): Promise<{
+  immutableDir: string;
+  wikiDir: string;
+  labels: {
+    immutableDir: string;
+    wikiDir: string;
+  };
+}> => invoke("get_vault_layout");
+
 export const checkOllama = (): Promise<OllamaStatus> =>
   invoke("check_ollama");
 

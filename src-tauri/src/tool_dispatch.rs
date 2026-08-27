@@ -47,7 +47,7 @@ fn normalize_path_lexically(path: &Path) -> PathBuf {
 }
 
 fn safe_vault_relative_path(vault: &Path, user_path: &str) -> Option<PathBuf> {
-    crate::vault::safe_vault_path(vault, user_path, &["."], crate::vault::PathMode::MayCreate).ok()
+    crate::vault::safe_vault_path(vault, user_path, crate::vault::READABLE_SUBDIRS, crate::vault::PathMode::MayCreate).ok()
 }
 
 /// Returns every path spelling worth trying against `documents.path` for a vault-relative or
