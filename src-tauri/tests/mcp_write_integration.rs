@@ -52,7 +52,7 @@ fn parse_frontmatter_from_file(path: &Path) -> OkfFrontmatter {
         + start_idx
         + 1;
 
-    let frontmatter_yaml = lines[start_idx + 1..end_idx].join("\\n");
+    let frontmatter_yaml = lines[start_idx + 1..end_idx].join("\n");
     tauri_app_lib::okf::parse_frontmatter(&frontmatter_yaml).expect("failed to parse frontmatter")
 }
 
@@ -64,11 +64,14 @@ fn parse_frontmatter_from_file(path: &Path) -> OkfFrontmatter {
 fn e1_write_new_note_and_verify_frontmatter() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create vault directory structure first
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_write_note
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     let note_path = "wiki/test-fact.md";
     let frontmatter = create_test_frontmatter("Test Fact");
@@ -129,11 +132,14 @@ fn e1_write_new_note_and_verify_frontmatter() {
 fn e1_update_existing_note_and_verify_sha256() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create vault directory structure first
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_write_note
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     let note_path = "wiki/test-updated.md";
     let body = "Initial body";
@@ -141,8 +147,7 @@ fn e1_update_existing_note_and_verify_sha256() {
 
     // Create initial note
     let initial_fm = create_test_frontmatter("Initial Title");
-    app.invoke::<()>(
-        "vault_write_note",
+    app.invoke::<serde_json::Value>("vault_write_note",
         json!({
             "path": note_path,
             "frontmatter": initial_fm,
@@ -212,11 +217,14 @@ fn e1_update_existing_note_and_verify_sha256() {
 fn e2_upsert_new_entry_appends_with_correct_flags() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create wiki directory
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_upsert_index_entry
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     // Create an INDEX.md with existing entry
     let index_path = vault_root.join("wiki/INDEX.md");
@@ -230,10 +238,10 @@ fn e2_upsert_new_entry_appends_with_correct_flags() {
     let result: serde_json::Value = app.invoke(
         "vault_upsert_index_entry",
         json!({
-            "index_path": "wiki/INDEX.md",
-            "entry_name": "new-entry",
-            "entry_path": "wiki/new.md",
-            "entry_type": "memory",
+            "indexPath": "wiki/INDEX.md",
+            "entryName": "new-entry",
+            "entryPath": "wiki/new.md",
+            "entryType": "memory",
             "metadata": json!({"date": "2024-01-01", "status": "active"})
         }),
     );
@@ -261,11 +269,14 @@ fn e2_upsert_new_entry_appends_with_correct_flags() {
 fn e2_upsert_existing_entry_replaces_with_correct_flags() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create wiki directory
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_upsert_index_entry
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     // Create an INDEX.md with existing entry
     let index_path = vault_root.join("wiki/INDEX.md");
@@ -279,10 +290,10 @@ fn e2_upsert_existing_entry_replaces_with_correct_flags() {
     let result: serde_json::Value = app.invoke(
         "vault_upsert_index_entry",
         json!({
-            "index_path": "wiki/INDEX.md",
-            "entry_name": "entry-to-update",
-            "entry_path": "wiki/new-path.md",
-            "entry_type": "concept",
+            "indexPath": "wiki/INDEX.md",
+            "entryName": "entry-to-update",
+            "entryPath": "wiki/new-path.md",
+            "entryType": "concept",
             "metadata": json!({"date": "2024-01-02", "status": "inactive"})
         }),
     );
@@ -326,11 +337,14 @@ fn e2_upsert_existing_entry_replaces_with_correct_flags() {
 fn e2_multiple_upserts_maintain_single_instance() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create wiki directory
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_upsert_index_entry
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     // Create an INDEX.md
     let index_path = vault_root.join("wiki/INDEX.md");
@@ -342,13 +356,12 @@ fn e2_multiple_upserts_maintain_single_instance() {
 
     // Upsert the same entry multiple times with different paths
     for i in 0..3 {
-        app.invoke::<()>(
-            "vault_upsert_index_entry",
+        app.invoke::<serde_json::Value>("vault_upsert_index_entry",
             json!({
-                "index_path": "wiki/INDEX.md",
-                "entry_name": "multi-update",
-                "entry_path": format!("wiki/note-{}.md", i),
-                "entry_type": "memory",
+                "indexPath": "wiki/INDEX.md",
+                "entryName": "multi-update",
+                "entryPath": format!("wiki/note-{}.md", i),
+                "entryType": "memory",
                 "metadata": json!({"iteration": i})
             }),
         );
@@ -376,6 +389,12 @@ fn e2_multiple_upserts_maintain_single_instance() {
 fn e3_write_path_outside_vault_fails() {
     let app = TestApp::new();
 
+    let vault_root = app.tmp.path().join("vault");
+    std::fs::create_dir_all(&vault_root).expect("failed to create vault directory");
+
+    // Set vault path - so the path traversal check runs
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
+
     let frontmatter = create_test_frontmatter("Escaping Path");
 
     let result: Result<serde_json::Value, _> = app.invoke_result(
@@ -401,11 +420,14 @@ fn e3_write_path_outside_vault_fails() {
 fn e3_write_with_invalid_entity_type_fails() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create vault directory structure first
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_write_note
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     // Create invalid frontmatter with wrong entity_type as JSON
     let invalid_frontmatter = json!({
@@ -439,11 +461,14 @@ fn e3_write_with_invalid_entity_type_fails() {
 fn e3_write_with_malformed_timestamp_fails() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create vault directory structure first
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_write_note
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     // Create invalid frontmatter with malformed timestamp
     let invalid_frontmatter = json!({
@@ -477,18 +502,20 @@ fn e3_write_with_malformed_timestamp_fails() {
 fn e3_stale_update_fails_when_updated_at_older_than_mtime() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create vault directory structure first
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
 
+    // Set vault path - REQUIRED before vault_write_note
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
+
     let note_path = "wiki/stale-update.md";
 
     // Create initial note
     let initial_fm = create_test_frontmatter("Stale Test");
-    app.invoke::<()>(
-        "vault_write_note",
+    app.invoke::<serde_json::Value>("vault_write_note",
         json!({
             "path": note_path,
             "frontmatter": initial_fm,
@@ -527,19 +554,22 @@ fn e3_stale_update_fails_when_updated_at_older_than_mtime() {
 fn e3_upsert_nonexistent_index_fails() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create wiki directory but no INDEX.md
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
 
+    // Set vault path - REQUIRED before vault_upsert_index_entry
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
+
     let result: Result<serde_json::Value, _> = app.invoke_result(
         "vault_upsert_index_entry",
         json!({
-            "index_path": "wiki/INDEX.md",
-            "entry_name": "new-entry",
-            "entry_path": "wiki/new.md",
-            "entry_type": "memory",
+            "indexPath": "wiki/INDEX.md",
+            "entryName": "new-entry",
+            "entryPath": "wiki/new.md",
+            "entryType": "memory",
             "metadata": json!({"date": "2024-01-01"})
         }),
     );
@@ -558,11 +588,14 @@ fn e3_upsert_nonexistent_index_fails() {
 fn e3_upsert_with_invalid_entry_name_special_chars_fails() {
     let app = TestApp::new();
 
-    let vault_root = app.tmp.path();
+    let vault_root = app.tmp.path().join("vault");
 
     // Create wiki directory and INDEX.md
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).expect("failed to create wiki directory");
+
+    // Set vault path - REQUIRED before vault_upsert_index_entry
+    app.invoke::<()>("set_vault_path", json!({ "path": vault_root }));
 
     let index_path = vault_root.join("wiki/INDEX.md");
     std::fs::write(
@@ -575,10 +608,10 @@ fn e3_upsert_with_invalid_entry_name_special_chars_fails() {
     let result: Result<serde_json::Value, _> = app.invoke_result(
         "vault_upsert_index_entry",
         json!({
-            "index_path": "wiki/INDEX.md",
-            "entry_name": "invalid entry!", // contains space and exclamation
-            "entry_path": "wiki/new.md",
-            "entry_type": "memory",
+            "indexPath": "wiki/INDEX.md",
+            "entryName": "invalid entry!", // contains space and exclamation
+            "entryPath": "wiki/new.md",
+            "entryType": "memory",
             "metadata": json!({"date": "2024-01-01"})
         }),
     );
