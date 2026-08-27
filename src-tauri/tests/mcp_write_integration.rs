@@ -8,6 +8,7 @@
 mod helpers;
 
 use helpers::TestApp;
+use chrono::Utc;
 use tauri_app_lib::okf::{EntityType, OkfFrontmatter};
 use serde_json::json;
 use std::path::Path;
@@ -158,8 +159,10 @@ fn e1_update_existing_note_and_verify_sha256() {
     // Wait a moment to ensure mtime advances
     thread::sleep(Duration::from_millis(10));
 
-    // Update the note
-    let updated_at = "2024-01-01T00:00:01Z".to_string();
+    // Update the note - use a future timestamp to avoid stale detection
+    let now = chrono::Utc::now();
+    let future_time = now + chrono::Duration::seconds(1);
+    let updated_at = future_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let updated_fm = OkfFrontmatter {
         title: "Updated Title".to_string(),
         updated_at: Some(updated_at.clone()),
