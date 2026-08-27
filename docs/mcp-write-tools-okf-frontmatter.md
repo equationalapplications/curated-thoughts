@@ -247,7 +247,7 @@ profile: "llm-wiki/1"
 title: Implement write path
 entity_type: task
 tags: ["mcp", "okf", "priority-high"]
-created_at: "2026-08-26T10:00:00Z
+created_at: "2026-08-26T10:00:00Z"
 updated_at: "2026-08-26T10:00:00Z"
 ---
 
