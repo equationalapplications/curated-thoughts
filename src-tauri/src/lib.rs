@@ -538,7 +538,11 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
         .set_vault_path(&path)
         .map_err(|e| e.to_string())?;
     let root = std::path::Path::new(&path);
-    for subdir in &["documents", "wiki"] {
+    // v2 layout: migrate a v1 vault (documents/ → immutable-source-files/)
+    // BEFORE creating subdirs, otherwise both folders would exist and the
+    // startup migration would block with BothFoldersExist.
+    crate::vault::config::migrate_vault(root).map_err(|e| e.to_string())?;
+    for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
@@ -594,9 +598,14 @@ fn vault_write_note(
     let vault_root = vault_root_from_state(&vault_root_state)?;
     // The request frontmatter's `updated_at` is the If-Match token; on success
     // the core stamps a fresh token so the next edit must observe the new one.
-    okf::write::write_note(&vault_root, &path, &frontmatter, &body,
-        frontmatter.updated_at.as_deref())
-        .map_err(|e| e.to_string())
+    okf::write::write_note(
+        &vault_root,
+        &path,
+        &frontmatter,
+        &body,
+        frontmatter.updated_at.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1156,7 +1165,11 @@ async fn switch_vault(
         )
     })?;
 
-    for subdir in &["documents", "wiki"] {
+    // v2 layout: migrate a v1 vault (documents/ → immutable-source-files/)
+    // BEFORE creating subdirs, otherwise both folders would exist and the
+    // startup migration would block with BothFoldersExist.
+    crate::vault::config::migrate_vault(new_root.as_path()).map_err(|e| e.to_string())?;
+    for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(new_root.join(".brain").join("converted"))
@@ -2146,7 +2159,10 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
 
     let mut files = Vec::new();
 
-    for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
+    // Scan ONLY the immutable source tier. wiki/ is archive-only post-V7
+    // (and now post-v2) and must never appear in list_vault_files — the
+    // folder tree renders wiki/ from get_vault_layout instead.
+    for subdir in &[crate::vault::IMMUTABLE_DIR] {
         let dir = root.join(subdir);
         if !dir.exists() {
             continue;
@@ -2716,7 +2732,7 @@ pub fn run() {
                 // we re-take the lock inside the spawn_blocking
                 // closure (Option B from the brief) instead of
                 // trying to move the lock across threads.
-                
+
                 // Vault migration: migrate documents/ -> immutable-source-files/
                 if vault_migration_needed {
                     if let Some(vault_path) = vault_path_for_migration {
@@ -3391,7 +3407,12 @@ mod drop_destination_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR)).unwrap();
-        fs::write(root.join(crate::vault::safe_path::IMMUTABLE_DIR).join("dup.md"), b"x").unwrap();
+        fs::write(
+            root.join(crate::vault::safe_path::IMMUTABLE_DIR)
+                .join("dup.md"),
+            b"x",
+        )
+        .unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
     }
@@ -3401,7 +3422,11 @@ mod drop_destination_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR)).unwrap();
-        fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR).join("dup.md")).unwrap();
+        fs::create_dir_all(
+            root.join(crate::vault::safe_path::IMMUTABLE_DIR)
+                .join("dup.md"),
+        )
+        .unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
     }
