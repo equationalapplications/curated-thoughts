@@ -29,6 +29,17 @@ pub enum SafePathError {
     Io(#[from] std::io::Error),
 }
 
+/// Directory name for immutable source files (read-only, no user writes allowed)
+pub const IMMUTABLE_DIR: &str = "immutable-source-files";
+/// Directory name for wiki content (readable and writable)
+pub const WIKI_DIR: &str = "wiki";
+/// Subdirectories allowed for read operations
+pub const READABLE_SUBDIRS: &[&str] = &[IMMUTABLE_DIR, WIKI_DIR];
+/// Subdirectories allowed for write operations (excludes immutable-source-files)
+pub const WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR];
+/// Subdirectories allowed for proposed content operations
+pub const PROPOSED_SUBDIRS: &[&str] = &[WIKI_DIR, ".brain/proposed"];
+
 #[derive(Debug, Clone, Copy)]
 pub enum PathMode {
     /// The target must already exist and resolve (via `canonicalize`) to a regular file
@@ -169,7 +180,14 @@ pub fn safe_vault_path(
     if user_path.as_bytes().contains(&0) {
         return Err(SafePathError::InvalidName);
     }
-    let candidate = Path::new(user_path);
+    // In MayCreate mode, reject backslashes entirely (invalid filename character on Unix, path separator on Windows)
+    // This must be checked before normalization to ensure we catch backslash attempts
+    if matches!(mode, PathMode::MayCreate) && user_path.contains('\\') {
+        return Err(SafePathError::InvalidName);
+    }
+    // Normalize backslashes to forward slashes for traversal detection (MustExist mode only)
+    let normalized_path = user_path.replace('\\', "/");
+    let candidate = Path::new(&normalized_path);
     if candidate.is_absolute() {
         return Err(SafePathError::Absolute);
     }
@@ -673,5 +691,97 @@ mod tests {
         let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o711);
         assert_eq!(fs::read_to_string(&dst).unwrap(), "x");
+    }
+
+    // === Containment Regression Tests ===
+    // These tests verify that the invariants are NOT simplified to string matching.
+
+    #[test]
+    fn write_to_immutable_dir_returns_outside() {
+        let (_g, root) = vault();
+        fs::create_dir_all(root.join(IMMUTABLE_DIR)).unwrap();
+        let err = safe_vault_path(
+            &root,
+            "immutable-source-files/test.md",
+            WRITABLE_SUBDIRS,
+            PathMode::MayCreate,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SafePathError::Outside), "got {err:?}");
+    }
+
+    #[test]
+    fn write_to_wiki_succeeds() {
+        let (_g, root) = vault();
+        let result = safe_vault_path(
+            &root,
+            "wiki/test.md",
+            WRITABLE_SUBDIRS,
+            PathMode::MayCreate,
+        );
+        assert!(result.is_ok(), "write to wiki/ should succeed");
+    }
+
+    #[test]
+    fn read_from_both_folders_succeeds() {
+        let (_g, root) = vault();
+        fs::create_dir_all(root.join(IMMUTABLE_DIR)).unwrap();
+
+        // Read from wiki
+        let wiki_result = safe_vault_path(&root, "wiki/test.md", READABLE_SUBDIRS, PathMode::MayCreate);
+        assert!(wiki_result.is_ok(), "read from wiki/ should succeed");
+
+        // Read from immutable-source-files
+        let immutable_result = safe_vault_path(
+            &root,
+            "immutable-source-files/test.md",
+            READABLE_SUBDIRS,
+            PathMode::MayCreate,
+        );
+        assert!(immutable_result.is_ok(), "read from immutable-source-files/ should succeed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn traversal_rejects_backslash_dotdot_path() {
+        let (_g, root) = vault();
+        fs::create_dir_all(root.join(IMMUTABLE_DIR)).unwrap();
+        // On Unix, backslashes are valid filename characters, so this tests path traversal via ".."
+        let err = safe_vault_path(
+            &root,
+            "wiki\\..\\immutable-source-files\\x.md",
+            READABLE_SUBDIRS,
+            PathMode::MustExist,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SafePathError::Traversal), "got {err:?}");
+    }
+
+    #[test]
+    fn traversal_rejects_dotdot_in_path() {
+        let (_g, root) = vault();
+        fs::create_dir_all(root.join(IMMUTABLE_DIR)).unwrap();
+        let err = safe_vault_path(
+            &root,
+            "immutable-source-files/sub/../x.md",
+            READABLE_SUBDIRS,
+            PathMode::MustExist,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SafePathError::Traversal), "got {err:?}");
+    }
+
+    #[test]
+    fn may_create_rejects_backslash_in_final_component() {
+        let (_g, root) = vault();
+        // MayCreate mode should reject paths with backslash in final component
+        let err = safe_vault_path(
+            &root,
+            "wiki/test\\file.md",
+            WRITABLE_SUBDIRS,
+            PathMode::MayCreate,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SafePathError::InvalidName), "got {err:?}");
     }
 }

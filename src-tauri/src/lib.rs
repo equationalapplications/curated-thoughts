@@ -797,7 +797,7 @@ fn start_file_watcher_inner(
         });
     }
 
-    let raw_docs = target_canonical.join("documents");
+    let raw_docs = target_canonical.join(crate::vault::safe_path::IMMUTABLE_DIR);
     let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
     {
@@ -1575,7 +1575,7 @@ async fn run_wiki_forget(
         let safe = crate::vault::safe_vault_path(
             &vault_root,
             &normalized_rel,
-            &["documents", "wiki"],
+            crate::vault::WRITABLE_SUBDIRS,
             crate::vault::PathMode::MayCreate,
         )
         .map_err(|e| e.to_string())?;
@@ -1887,7 +1887,7 @@ fn get_related_chunks(
     let safe = crate::vault::safe_vault_path(
         &vault_root,
         &normalized_rel,
-        &["documents", "wiki"],
+        crate::vault::READABLE_SUBDIRS,
         crate::vault::PathMode::MayCreate,
     )
     .map_err(|e| e.to_string())?;
@@ -1964,7 +1964,7 @@ fn get_structural_neighbors(
     let safe = crate::vault::safe_vault_path(
         &vault_root,
         &normalized_rel,
-        &["."],
+        crate::vault::READABLE_SUBDIRS,
         crate::vault::PathMode::MustExist,
     )
     .map_err(|e| e.to_string())?;
@@ -2087,7 +2087,7 @@ fn get_chunk_ids_for_wiki_entry(
     let safe = match crate::vault::safe_vault_path(
         &vault_root,
         &normalized_rel,
-        &["."],
+        crate::vault::READABLE_SUBDIRS,
         crate::vault::PathMode::MustExist,
     ) {
         Ok(p) => p,
@@ -2146,7 +2146,7 @@ fn list_vault_files(state: State<VaultConfigState>) -> Result<Vec<VaultFile>, St
 
     let mut files = Vec::new();
 
-    for subdir in &["documents"] {
+    for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         let dir = root.join(subdir);
         if !dir.exists() {
             continue;
@@ -2201,7 +2201,7 @@ fn read_document(path: String, state: State<VaultConfigState>) -> Result<String,
     let safe = crate::vault::safe_vault_path(
         &root,
         &normalized_path,
-        &["documents", "wiki"],
+        crate::vault::READABLE_SUBDIRS,
         crate::vault::PathMode::MustExist,
     )
     .map_err(|e| e.to_string())?;
@@ -2239,6 +2239,26 @@ fn get_folder_rules(db_state: State<DbState>) -> Result<Vec<FolderRule>, String>
         });
     }
     Ok(rules)
+}
+
+#[derive(serde::Serialize)]
+pub struct VaultFolder {
+    pub name: String,
+    pub label: String,
+}
+
+#[tauri::command]
+fn get_vault_layout() -> Vec<VaultFolder> {
+    vec![
+        VaultFolder {
+            name: crate::vault::safe_path::IMMUTABLE_DIR.to_string(),
+            label: "Source Files".to_string(),
+        },
+        VaultFolder {
+            name: crate::vault::safe_path::WIKI_DIR.to_string(),
+            label: "Wiki Pages".to_string(),
+        },
+    ]
 }
 
 #[tauri::command]
@@ -2304,7 +2324,7 @@ fn save_wiki_page(
     let safe = crate::vault::safe_vault_path(
         &vault_root,
         &normalized_path,
-        &["wiki"],
+        crate::vault::WRITABLE_SUBDIRS,
         crate::vault::PathMode::MayCreate,
     )
     .map_err(|e| e.to_string())?;
@@ -2332,7 +2352,7 @@ fn delete_vault_file(path: String, state: State<VaultConfigState>) -> Result<(),
     let safe = crate::vault::safe_vault_path(
         &vault_root,
         &normalized_path,
-        &["documents"],
+        crate::vault::READABLE_SUBDIRS,
         crate::vault::PathMode::MustExist,
     )
     .map_err(|e| e.to_string())?;
@@ -2360,14 +2380,15 @@ fn unique_drop_destination(
     vault_root: &std::path::Path,
     original_file_name: &str,
 ) -> Result<std::path::PathBuf, String> {
+    use crate::vault::safe_path::IMMUTABLE_DIR;
     const MAX_TRIES: u32 = 10_000;
     for n in 0..MAX_TRIES {
         let candidate_name = drop_destination_filename(original_file_name, n);
-        let rel = format!("documents/{candidate_name}");
+        let rel = format!("{IMMUTABLE_DIR}/{candidate_name}");
         match crate::vault::safe_vault_path(
             vault_root,
             &rel,
-            &["documents"],
+            &[IMMUTABLE_DIR],
             crate::vault::PathMode::MustExist,
         ) {
             Ok(_) => continue,
@@ -2375,7 +2396,7 @@ fn unique_drop_destination(
                 return crate::vault::safe_vault_path(
                     vault_root,
                     &rel,
-                    &["documents"],
+                    &[IMMUTABLE_DIR],
                     crate::vault::PathMode::MayCreate,
                 )
                 .map_err(|e| e.to_string());
@@ -2393,7 +2414,7 @@ fn unique_drop_destination(
         }
     }
     Err(format!(
-        "could not find a free filename under documents/ for {original_file_name}"
+        "could not find a free filename under {IMMUTABLE_DIR}/ for {original_file_name}"
     ))
 }
 
@@ -2401,6 +2422,7 @@ fn copy_os_drop_paths_to_vault(
     app: &AppHandle,
     paths: &[std::path::PathBuf],
 ) -> Result<Vec<String>, String> {
+    use crate::vault::safe_path::IMMUTABLE_DIR;
     let vault_path = app
         .state::<VaultConfigState>()
         .0
@@ -2410,7 +2432,7 @@ fn copy_os_drop_paths_to_vault(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no vault configured".to_string())?;
     let vault_root = std::path::PathBuf::from(&vault_path);
-    std::fs::create_dir_all(vault_root.join("documents")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(vault_root.join(IMMUTABLE_DIR)).map_err(|e| e.to_string())?;
 
     let mut copied_paths = Vec::new();
 
@@ -2558,6 +2580,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
+            get_vault_layout,
             get_indexing_status,
             list_vault_files,
             read_document,
@@ -2592,10 +2615,13 @@ pub fn run() {
     let db_path = retrieval::resolve_brain_paths().db_path;
 
     let config = VaultConfig::new(VaultConfig::default_config_path());
+    let vault_path_for_migration = config.get_vault_path().ok().flatten();
+    let vault_migration_needed = !config.has_migrated_to_v2().unwrap_or(false);
+
     if config.get_vault_path().ok().flatten().is_none() {
         let default_vault = VaultConfig::default_vault_path();
         let mut all_dirs_created = true;
-        for subdir in &["documents", "wiki"] {
+        for subdir in &[crate::vault::safe_path::IMMUTABLE_DIR, "wiki"] {
             if let Err(e) = std::fs::create_dir_all(default_vault.join(subdir)) {
                 eprintln!("warning: failed to create default vault subdirectory {subdir}: {e}");
                 all_dirs_created = false;
@@ -2618,7 +2644,7 @@ pub fn run() {
             eprintln!("error: failed to create default vault directory structure; falling back to temporary directory");
             let fallback_vault = std::env::temp_dir().join("Curated-Thoughts-recovery");
             let mut fallback_dirs_created = true;
-            for subdir in &["documents", "wiki"] {
+            for subdir in &[crate::vault::safe_path::IMMUTABLE_DIR, "wiki"] {
                 if let Err(e) = std::fs::create_dir_all(fallback_vault.join(subdir)) {
                     eprintln!("error: failed to create fallback vault subdir {subdir}: {e}");
                     fallback_dirs_created = false;
@@ -2690,6 +2716,49 @@ pub fn run() {
                 // we re-take the lock inside the spawn_blocking
                 // closure (Option B from the brief) instead of
                 // trying to move the lock across threads.
+                
+                // Vault migration: migrate documents/ -> immutable-source-files/
+                if vault_migration_needed {
+                    if let Some(vault_path) = vault_path_for_migration {
+                        let vault_root = PathBuf::from(&vault_path);
+                        let config_for_migration = VaultConfig::new(VaultConfig::default_config_path());
+                        match crate::vault::config::migrate_vault(&vault_root) {
+                            Ok(()) => {
+                                if let Err(e) = config_for_migration.set_migrated_to_v2() {
+                                    eprintln!("warning: failed to persist migration flag: {e}");
+                                }
+                                let _ = app.emit(
+                                    "vault-migration-success",
+                                    serde_json::json!({
+                                        "message": "Documents folder renamed to 'immutable-source-files' to match app conventions. Your files are unchanged.",
+                                    }),
+                                );
+                            }
+                            Err(crate::vault::config::MigrationError::BothFoldersExist { old, new }) => {
+                                // Blocking error: emit blocking dialog event
+                                let _ = app.emit(
+                                    "vault-migration-blocked",
+                                    serde_json::json!({
+                                        "message": format!(
+                                            "Migration blocked: both '{}' and '{}' exist. Move your files from '{}' into '{}' manually, then restart the app. (Files left in '{}' are not visible to the app.)",
+                                            old.display(), new.display(), old.display(), new.display(), old.display()
+                                        ),
+                                    }),
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("warning: vault migration failed: {e}");
+                                let _ = app.emit(
+                                    "vault-migration-error",
+                                    serde_json::json!({
+                                        "message": format!("Migration failed: {e}"),
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+                
                 if needs_migration {
                     let app_handle = app.app_handle().clone();
                     tauri::async_runtime::spawn_blocking(move || {
@@ -2874,6 +2943,7 @@ pub fn run() {
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
+            get_vault_layout,
             save_wiki_page,
             delete_vault_file,
             run_wiki_heal,
@@ -3311,7 +3381,7 @@ mod drop_destination_tests {
     fn unique_drop_uses_original_when_unused() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
-        fs::create_dir_all(root.join("documents")).unwrap();
+        fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR)).unwrap();
         let p = unique_drop_destination(root, "fresh.txt").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("fresh.txt"));
     }
@@ -3320,8 +3390,8 @@ mod drop_destination_tests {
     fn unique_drop_avoids_overwriting_existing_basename() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
-        fs::create_dir_all(root.join("documents")).unwrap();
-        fs::write(root.join("documents").join("dup.md"), b"x").unwrap();
+        fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR)).unwrap();
+        fs::write(root.join(crate::vault::safe_path::IMMUTABLE_DIR).join("dup.md"), b"x").unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
     }
@@ -3330,8 +3400,8 @@ mod drop_destination_tests {
     fn unique_drop_skips_directory_with_same_basename() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
-        fs::create_dir_all(root.join("documents")).unwrap();
-        fs::create_dir_all(root.join("documents").join("dup.md")).unwrap();
+        fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR)).unwrap();
+        fs::create_dir_all(root.join(crate::vault::safe_path::IMMUTABLE_DIR).join("dup.md")).unwrap();
         let p = unique_drop_destination(root, "dup.md").unwrap();
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("dup (1).md"));
     }
