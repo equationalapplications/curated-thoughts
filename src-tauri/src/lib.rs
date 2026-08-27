@@ -737,7 +737,7 @@ fn vault_upsert_index_entry<'a>(
         .map_err(|e| format!("Read error: {}", e))?;
 
     // Check if entry already exists
-    let entry_regex = regex::Regex::new(&format!(r"^##\s+{}", regex::escape(&entry_name)))
+    let entry_regex = regex::Regex::new(&format!(r"^##\s*{}", regex::escape(&entry_name)))
         .map_err(|e| format!("Regex error: {}", e))?;
 
     let (appended, line_number) = if entry_regex.is_match(&content) {
