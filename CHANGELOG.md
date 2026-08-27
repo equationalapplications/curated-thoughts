@@ -1,3 +1,14 @@
+## [1.32.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.31.0...v1.32.0) (2026-08-27)
+
+### Features
+
+* MCP write path + OKF frontmatter (v2 stabilization) ([#102](https://github.com/equationalapplications/curated-thoughts/issues/102)) ([4c0cbe0](https://github.com/equationalapplications/curated-thoughts/commit/4c0cbe09b056afc24f7a1cdad1b79817d8b592f7)), closes [#101](https://github.com/equationalapplications/curated-thoughts/issues/101) [#101](https://github.com/equationalapplications/curated-thoughts/issues/101)
+
+### Bug Fixes
+
+* **test:** update prune test to use millisecond timestamps ([#100](https://github.com/equationalapplications/curated-thoughts/issues/100)) ([3769c8e](https://github.com/equationalapplications/curated-thoughts/commit/3769c8e663364a7eaaf2d358e25a97dbe95bbf7f))
+* **wiki:** source_ref consumer + timestamp unit contract (SPEC ONLY) ([#99](https://github.com/equationalapplications/curated-thoughts/issues/99)) ([bb5315b](https://github.com/equationalapplications/curated-thoughts/commit/bb5315beee8abd7cd789944b1433f0ce5dbc40f4)), closes [#7](https://github.com/equationalapplications/curated-thoughts/issues/7)
+
 ## [1.31.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.30.0...v1.31.0) (2026-08-26)
 
 ### Features
