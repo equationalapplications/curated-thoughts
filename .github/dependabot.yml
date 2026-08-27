@@ -5,6 +5,9 @@ updates:
     schedule:
       interval: "weekly"
     cooldown:
+      # Note: 14-day cooldown applies to direct Dependabot updates only.
+      # Transitive dependencies updated via lockfile regeneration may still
+      # include packages published <14 days ago. This is a known limitation.
       default-days: 14
     groups:
       minor-and-patch:
