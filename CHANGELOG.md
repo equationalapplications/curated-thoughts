@@ -1,3 +1,9 @@
+## [1.32.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.32.0...v1.32.1) (2026-08-27)
+
+### Bug Fixes
+
+* **security:** supply-chain hardening — exact pins + 14-day age gate ([#103](https://github.com/equationalapplications/curated-thoughts/issues/103)) ([03a84d2](https://github.com/equationalapplications/curated-thoughts/commit/03a84d206694f4261d470d4044b7ea6b511331e1))
+
 ## [1.32.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.31.0...v1.32.0) (2026-08-27)
 
 ### Features
