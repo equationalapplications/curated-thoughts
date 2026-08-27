@@ -8,7 +8,7 @@
 mod helpers;
 
 use helpers::TestApp;
-use curated_thoughts::okf::{EntityType, OkfFrontmatter};
+use tauri_app_lib::okf::{EntityType, OkfFrontmatter};
 use serde_json::json;
 use std::path::Path;
 use std::thread;
@@ -43,17 +43,17 @@ fn parse_frontmatter_from_file(path: &Path) -> OkfFrontmatter {
     // Find frontmatter boundaries
     let start_idx = lines
         .iter()
-        .position(|l| l == "---")
+        .position(|l| *l == "---")
         .expect("no frontmatter start");
     let end_idx = lines[start_idx + 1..]
         .iter()
-        .position(|l| l == "---")
+        .position(|l| *l == "---")
         .expect("no frontmatter end")
         + start_idx
         + 1;
 
-    let frontmatter_yaml = lines[start_idx + 1..end_idx].join("\n");
-    okf::parse_frontmatter(&frontmatter_yaml).expect("failed to parse frontmatter")
+    let frontmatter_yaml = lines[start_idx + 1..end_idx].join("\\n");
+    tauri_app_lib::okf::parse_frontmatter(&frontmatter_yaml).expect("failed to parse frontmatter")
 }
 
 // ============================================================================
@@ -294,7 +294,7 @@ fn e2_upsert_existing_entry_replaces_with_correct_flags() {
     );
 
     // Read file and verify entry was replaced
-    let content = std::fs::read_to_string(&full_index_path).expect("failed to read INDEX.md");
+    let content = std::fs::read_to_string(&index_path).expect("failed to read INDEX.md");
 
     // Verify the old path is gone and new path is present
     assert!(
@@ -355,7 +355,7 @@ fn e2_multiple_upserts_maintain_single_instance() {
     }
 
     // Read file and verify only one instance exists
-    let content = std::fs::read_to_string(&full_index_path).expect("failed to read INDEX.md");
+    let content = std::fs::read_to_string(&index_path).expect("failed to read INDEX.md");
     let entry_count = content.matches("## multi-update").count();
     assert_eq!(
         entry_count, 1,

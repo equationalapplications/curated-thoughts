@@ -78,7 +78,9 @@ impl TestApp {
             },
         );
         match result {
-            Ok(body) => Ok(body),
+            Ok(body) => {
+                serde_json::to_value(body).map_err(|e| e.to_string())
+            },
             Err(e) => Err(e.to_string()),
         }
     }
