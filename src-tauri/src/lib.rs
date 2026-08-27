@@ -595,18 +595,32 @@ fn vault_write_note(
     let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
     
     // C1: Check path safety even if file doesn't exist yet
-    // Walk up the path components; the first canonicalizable ancestor
-    // that equals or is under the vault root proves containment.
+    // Canonicalize both paths and verify full_path is under vault_root
+    let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
+    
+    // Try to canonicalize full_path - it may not exist yet
+    let canonical_full = full_path.canonicalize();
+    
     let mut path_under_vault = false;
-    for ancestor in full_path.ancestors() {
-        match ancestor.canonicalize() {
-            Ok(canon_ancestor) if canon_ancestor == canonical_vault || canon_ancestor.starts_with(&canonical_vault) => {
-                path_under_vault = true;
-                break;
+    if let Ok(canon_full) = canonical_full {
+        // File exists, check if it's under vault_root
+        path_under_vault = canon_full == canonical_vault || canon_full.starts_with(&format!("{}/", canonical_vault));
+    } else {
+        // File doesn't exist, find the first existing ancestor and check if it's under vault_root
+        for ancestor in full_path.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(canon_ancestor) => {
+                    // Check if this ancestor is under vault_root (vault_root should be an ancestor of this path)
+                    path_under_vault = canon_ancestor == canonical_vault 
+                        || canon_ancestor.starts_with(&format!("{}/", canonical_vault));
+                    // Stop at the first canonicalizable ancestor
+                    break;
+                }
+                Err(_) => continue,
             }
-            Ok(_) | Err(_) => continue,
         }
     }
+    
     if !path_under_vault {
         return Err("Path is outside vault root".to_string());
     }
@@ -708,11 +722,25 @@ fn vault_upsert_index_entry<'a>(
 
     let vault_root = std::path::Path::new(&vault_root);
 
+    // Validate entry_name contains only safe characters (alphanumeric, hyphens, underscores)
+    if !entry_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!(
+            "Invalid entry name '{}': only alphanumeric, hyphens, and underscores are allowed",
+            entry_name
+        ));
+    }
+
     // Validate paths are under vault root
     let full_index_path = vault_root.join(&index_path);
     let full_entry_path = vault_root.join(&entry_path);
 
     let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
+
+    // Check index file exists BEFORE canonicalize (non-existent files return Err)
+    if !full_index_path.exists() {
+        return Err(UpsertError::IndexNotFound(index_path).to_string());
+    }
+
     let canonical_index = full_index_path.canonicalize().ok();
     let canonical_entry = full_entry_path.canonicalize().ok();
 
@@ -725,11 +753,6 @@ fn vault_upsert_index_entry<'a>(
         if !ce.starts_with(&canonical_vault) {
             return Err(UpsertError::PathOutsideVault.to_string());
         }
-    }
-
-    // Check index file exists
-    if canonical_index.as_ref().map_or(false, |p| !p.exists()) {
-        return Err(UpsertError::IndexNotFound(index_path).to_string());
     }
 
     // Read existing index content
@@ -749,7 +772,10 @@ fn vault_upsert_index_entry<'a>(
         for (i, line) in lines.iter().enumerate() {
             if entry_regex.is_match(line) {
                 entry_start = Some(i);
-                // Replace entry
+                // Skip the old entry header and body
+                // The new entry will be written when we exit the old entry block
+            } else if entry_start.is_some() && line.starts_with("## ") {
+                // End of old entry found - write replacement and then this new header
                 new_content.push_str(&build_index_entry(
                     &entry_name,
                     &entry_path,
@@ -757,9 +783,7 @@ fn vault_upsert_index_entry<'a>(
                     &metadata,
                 ));
                 new_content.push('\n');
-                // Skip until next entry or end
-            } else if entry_start.is_some() && line.starts_with("## ") {
-                // Next entry found, stop replacing
+                // Now write the next entry header
                 entry_start = None;
                 new_content.push_str(line);
                 new_content.push('\n');
@@ -767,6 +791,17 @@ fn vault_upsert_index_entry<'a>(
                 new_content.push_str(line);
                 new_content.push('\n');
             }
+        }
+
+        // Handle case where replaced entry was at end of file
+        if entry_start.is_some() {
+            new_content.push_str(&build_index_entry(
+                &entry_name,
+                &entry_path,
+                &entry_type,
+                &metadata,
+            ));
+            new_content.push('\n');
         }
 
         // Write atomically
