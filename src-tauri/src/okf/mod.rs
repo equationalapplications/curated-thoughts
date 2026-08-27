@@ -135,8 +135,8 @@ pub fn validate_frontmatter(fm: &OkfFrontmatter) -> Result<(), String> {
             return Err(format!("too many tags: {} (max 20)", tags.len()));
         }
         for tag in tags {
-            if tag.len() > 100 {
-                return Err(format!("tag exceeds 100 characters: {}", tag));
+            if tag.len() > 50 {
+                return Err(format!("tag exceeds 50 characters: {}", tag));
             }
         }
     }
@@ -520,7 +520,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("exceeds 10 characters"));
+            .contains("exceeds 50 characters"));
     }
 
     #[test]
@@ -671,6 +671,9 @@ updated_at: "2024-01-02T00:00:00Z""#;
     fn test_vault_upsert_index_entry_new() {
         let temp_dir = tempfile::tempdir().unwrap();
         let vault_root = temp_dir.path();
+        
+        // Create wiki directory
+        std::fs::create_dir_all(vault_root.join("wiki")).unwrap();
 
         let metadata = serde_json::json!({
             "title": "Test Entry",
@@ -695,6 +698,9 @@ updated_at: "2024-01-02T00:00:00Z""#;
     fn test_vault_upsert_index_entry_update() {
         let temp_dir = tempfile::tempdir().unwrap();
         let vault_root = temp_dir.path();
+        
+        // Create wiki directory
+        std::fs::create_dir_all(vault_root.join("wiki")).unwrap();
 
         let metadata1 = serde_json::json!({
             "title": "Old Title",
