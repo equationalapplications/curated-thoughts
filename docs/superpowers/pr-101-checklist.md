@@ -22,7 +22,7 @@
 
 - [ ] Create `src-tauri/src/okf/write.rs` with:
   - `write_note(vault_root, path, fm, body)` — uses `crate::vault::safe_vault_path(&["."], PathMode::MayCreate)`; stale contract = exact-match `updated_at` token from EXISTING file frontmatter (no mtime); atomic temp+rename in same dir
-  - `upsert_index_entry(vault_root, index_path, entry_name, entry_path, entry_type, metadata)` — line-scan whole-line header match (NO regex, NO `(?m)`), pinned block format, replace-through-next-`## `-or-EOF, atomic write
+  - `upsert_index_entry(vault_root, index_path, entry_name, entry_path, entry_type, metadata)` — line-scan whole-line header match (NO regex, NO `(?m)`), pinned block format, replace through the next `##` header or EOF, atomic write
 - [ ] `tool_dispatch.rs::dispatch_vault_write_note` / `dispatch_vault_upsert_index_entry` → thin calls into `okf::write` (DELETE ~100-line inline upsert copy)
 - [ ] `lib.rs` Tauri commands → thin wrappers (vault root from `VaultConfigState`) — DELETE inline logic (~lib.rs:573-860)
 - [ ] DELETE old-shape fns from `okf/mod.rs` (`vault_write_note`, `vault_upsert_index_entry(vault_root, index_path, entry_id, metadata)`)

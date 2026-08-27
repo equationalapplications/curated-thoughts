@@ -147,7 +147,7 @@ Any valid JSON object. Common fields:
 {
   "success": true,
   "index_path": "string",   // Index file path
-  "entry_id": "string",     // Entry identifier
+  "entry_id": "string",     // Echoes the entry_name you provided
   "appended": boolean,      // true if new entry, false if updated
   "line_number": number     // Line number where entry starts
 }
