@@ -1,0 +1,3 @@
+minimumReleaseAge: 20160          # 14 days in minutes
+minimumReleaseAgeExclude:
+  - '@equationalapplications/*'   # first-party: published and consumed same-day
