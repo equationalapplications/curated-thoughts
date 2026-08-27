@@ -593,44 +593,66 @@ fn vault_write_note(
     // Validate path is under vault root
     let full_path = vault_root.join(&path);
     let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
-    let canonical_path = full_path.canonicalize().ok();
-    if let Some(ref cp) = canonical_path {
-        if !cp.starts_with(&canonical_vault) {
-            return Err(WriteNoteError::PathOutsideVault.to_string());
+    
+    // C1: Check path safety even if file doesn't exist yet
+    // Walk up the path components; the first canonicalizable ancestor
+    // that equals or is under the vault root proves containment.
+    let mut path_under_vault = false;
+    for ancestor in full_path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(canon_ancestor) if canon_ancestor == canonical_vault || canon_ancestor.starts_with(&canonical_vault) => {
+                path_under_vault = true;
+                break;
+            }
+            Ok(_) | Err(_) => continue,
         }
+    }
+    if !path_under_vault {
+        return Err("Path is outside vault root".to_string());
     }
 
     // Validate frontmatter
     validate_frontmatter(&frontmatter)
         .map_err(|e| e.to_string())?;
 
-    // Check for stale update if file exists
-    if canonical_path.as_ref().map_or(false, |p| p.exists()) {
-        let file_mtime = std::fs::metadata(&full_path)
-            .map_err(|e| e.to_string())?
+    // C2: Check for stale update if file exists
+    // Use metadata directly - it returns error if file doesn't exist (eliminates race)
+    if let Ok(metadata) = std::fs::metadata(&full_path) {
+        let file_mtime = metadata
             .modified()
             .map_err(|e| e.to_string())?;
 
-        let updated_at = frontmatter
-            .updated_at
-            .as_ref()
-            .ok_or_else(|| "updated_at required for edits".to_string())?;
+        if let Some(ref updated_at) = frontmatter.updated_at {
+            let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
+                .map_err(|e| format!("Invalid updated_at: {}", e))?;
 
-        let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
-            .map_err(|e| format!("Invalid updated_at: {}", e))?;
+            if updated_dt.timestamp_millis()
+                < file_mtime
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64
+            {
+                return Err(format!(
+                    "Stale update: file was modified since updated_at={}",
+                    updated_at
+                ));
+            }
+        } else {
+            return Err("updated_at required for edits".to_string());
+        }
+    }
 
-        if updated_dt.timestamp_millis()
-            < file_mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        {
-            return Err(
-                WriteNoteError::StaleUpdate {
-                    updated_at: updated_at.clone(),
-                }
-                .to_string(),
-            );
+    // C3: For new files, validate updated_at is not older than created_at if provided
+    if !full_path.exists() {
+        if let Some(ref updated_at) = frontmatter.updated_at {
+            let created_dt = chrono::DateTime::parse_from_rfc3339(&frontmatter.created_at)
+                .map_err(|e| format!("Invalid created_at: {}", e))?;
+            let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
+                .map_err(|e| format!("Invalid updated_at: {}", e))?;
+
+            if updated_dt < created_dt {
+                return Err("updated_at cannot be older than created_at".to_string());
+            }
         }
     }
 
