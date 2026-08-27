@@ -35,6 +35,8 @@ dirs = "6"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 sha2 = "0.11"
 hex = "0.4"
+regex = "1"
+serde_yaml = "0.9"
 portpicker = "0.1"
 fastembed = "4"
 flate2 = "1"

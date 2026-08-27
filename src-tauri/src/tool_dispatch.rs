@@ -237,6 +237,44 @@ pub fn dispatch_wiki_traverse_graph(
     )
 }
 
+pub fn dispatch_vault_write_note(
+    vault_dir: &Path,
+    path: &str,
+    frontmatter: &crate::okf::OkfFrontmatter,
+    body: &str,
+) -> Result<crate::okf::WriteNoteResult> {
+    // Thin adapter (spec v2): all logic lives in the `okf::write` core.
+    // The MCP surface carries no separate If-Match parameter — the supplied
+    // frontmatter's `updated_at` IS the If-Match token.
+    crate::okf::write::write_note(
+        vault_dir,
+        path,
+        frontmatter,
+        body,
+        frontmatter.updated_at.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+pub fn dispatch_vault_upsert_index_entry(
+    vault_dir: &Path,
+    index_path: &str,
+    entry_name: &str,
+    entry_path: &str,
+    entry_type: &str,
+    metadata: &Option<Value>,
+) -> Result<crate::okf::UpsertResult> {
+    crate::okf::write::upsert_index_entry(
+        vault_dir,
+        index_path,
+        entry_name,
+        entry_path,
+        entry_type,
+        metadata.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
 #[derive(Clone)]
 pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
@@ -295,6 +333,29 @@ pub struct WikiTraverseGraphParams {
     pub direction: Option<String>,
     #[serde(default, rename = "edgeTypes", alias = "edge_types")]
     pub edge_types: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct VaultWriteNoteParams {
+    pub path: String,
+    pub frontmatter: crate::okf::OkfFrontmatter,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct VaultUpsertIndexEntryParams {
+    #[serde(rename = "indexPath", alias = "index_path")]
+    pub index_path: String,
+    #[serde(rename = "entryName", alias = "entry_name")]
+    pub entry_name: String,
+    #[serde(rename = "entryPath", alias = "entry_path")]
+    pub entry_path: String,
+    #[serde(rename = "entryType", alias = "entry_type")]
+    pub entry_type: String,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> {
@@ -396,6 +457,37 @@ pub async fn dispatch_tool_call(
                     p.max_depth,
                     p.direction,
                     p.edge_types,
+                )
+            })
+            .await??;
+            Ok(serde_json::to_value(result)?)
+        }
+        "vault_write_note" => {
+            let p: VaultWriteNoteParams = serde_json::from_value(params)?;
+            let vault_dir = ctx.vault_dir
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
+                .clone();
+            let result = tokio::task::spawn_blocking(move || {
+                dispatch_vault_write_note(&vault_dir, &p.path, &p.frontmatter, &p.body)
+            })
+            .await??;
+            Ok(serde_json::to_value(result)?)
+        }
+        "vault_upsert_index_entry" => {
+            let p: VaultUpsertIndexEntryParams = serde_json::from_value(params)?;
+            let vault_dir = ctx.vault_dir
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
+                .clone();
+            let result = tokio::task::spawn_blocking(move || {
+                dispatch_vault_upsert_index_entry(
+                    &vault_dir,
+                    &p.index_path,
+                    &p.entry_name,
+                    &p.entry_path,
+                    &p.entry_type,
+                    &p.metadata,
                 )
             })
             .await??;

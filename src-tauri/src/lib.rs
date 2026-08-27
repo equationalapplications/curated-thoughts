@@ -567,6 +567,59 @@ fn get_binary_path() -> Result<String, String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+// ── OKF Write Commands ────────────────────────────────────────────────────────
+// Thin Tauri adapters (spec v2): all write logic lives in `okf::write`.
+
+fn vault_root_from_state(
+    vault_root_state: &VaultConfigState,
+) -> Result<std::path::PathBuf, String> {
+    vault_root_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "Vault not configured".to_string())
+}
+
+#[tauri::command]
+fn vault_write_note(
+    _conn: State<DbState>,
+    vault_root_state: State<VaultConfigState>,
+    path: String,
+    frontmatter: okf::OkfFrontmatter,
+    body: String,
+) -> Result<okf::WriteNoteResult, String> {
+    let vault_root = vault_root_from_state(&vault_root_state)?;
+    // The request frontmatter's `updated_at` is the If-Match token; on success
+    // the core stamps a fresh token so the next edit must observe the new one.
+    okf::write::write_note(&vault_root, &path, &frontmatter, &body,
+        frontmatter.updated_at.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn vault_upsert_index_entry(
+    vault_root_state: State<VaultConfigState>,
+    index_path: String,
+    entry_name: String,
+    entry_path: String,
+    entry_type: String,
+    metadata: Option<serde_json::Value>,
+) -> Result<okf::UpsertResult, String> {
+    let vault_root = vault_root_from_state(&vault_root_state)?;
+    okf::write::upsert_index_entry(
+        &vault_root,
+        &index_path,
+        &entry_name,
+        &entry_path,
+        &entry_type,
+        metadata.as_ref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
 /// Returns the temp stub path; callers must call [`cleanup_temp_stub_db`] after the stub
 /// connection is dropped (otherwise `-wal` / `-shm` sidecars and the file may remain, especially on Windows).
@@ -2518,6 +2571,8 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             commands::chunks::resolve_chunk_overlay,
             commands::chunks::fetch_chunk_content,
             needs_chunk_hash_migration,
+            vault_write_note,
+            vault_upsert_index_entry,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -2846,6 +2901,8 @@ pub fn run() {
             commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
             needs_chunk_hash_migration,
+            vault_write_note,
+            vault_upsert_index_entry,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
@@ -3402,7 +3459,7 @@ mod maintenance_command_tests {
             "old-inferred",
             "librarian_inferred",
             "documents/old.md",
-            Some(old.as_millis() as i64),
+            Some(old.as_secs() as i64),
         );
         insert_wiki_entry(
             &conn,
@@ -3416,7 +3473,7 @@ mod maintenance_command_tests {
             "old-immutable",
             "immutable_document",
             "documents/immutable.md",
-            Some(old.as_millis() as i64),
+            Some(old.as_secs() as i64),
         );
 
         let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
