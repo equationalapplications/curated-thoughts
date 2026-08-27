@@ -2784,6 +2784,8 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             commands::chunks::resolve_chunk_overlay,
             commands::chunks::fetch_chunk_content,
             needs_chunk_hash_migration,
+            vault_write_note,
+            vault_upsert_index_entry,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
