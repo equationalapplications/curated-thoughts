@@ -1,7 +1,7 @@
 # Supply-Chain Version Policy: exact pins + 14-day release-age gate
 
 **Date:** 2026-08-27
-**Status:** ON HOLD — awaiting external architect review (Kurt, 2026-08-27)
+**Status:** IN PROGRESS — Task 1 complete (exact-pinning), Task 2 pending (14-day gate)
 **Author:** Hermes Agent (Tessera) at Kurt's direction
 **External guidance:** Senior architect (multi-national audit firm), relayed by Kurt:
 > "We've encountered two such attacks and our current guidance is one of two options.
