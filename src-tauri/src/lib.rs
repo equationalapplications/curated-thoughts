@@ -568,6 +568,20 @@ fn get_binary_path() -> Result<String, String> {
 }
 
 // ── OKF Write Commands ────────────────────────────────────────────────────────
+// Thin Tauri adapters (spec v2): all write logic lives in `okf::write`.
+
+fn vault_root_from_state(
+    vault_root_state: &VaultConfigState,
+) -> Result<std::path::PathBuf, String> {
+    vault_root_state
+        .0
+        .lock()
+        .unwrap()
+        .get_vault_path()
+        .map_err(|e| e.to_string())?
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "Vault not configured".to_string())
+}
 
 #[tauri::command]
 fn vault_write_note(
@@ -577,295 +591,33 @@ fn vault_write_note(
     frontmatter: okf::OkfFrontmatter,
     body: String,
 ) -> Result<okf::WriteNoteResult, String> {
-    use okf::{validate_frontmatter, sha256_hash, WriteNoteError};
-
-    // Get vault root
-    let vault_root = vault_root_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Vault not configured".to_string())?;
-
-    let vault_root = std::path::Path::new(&vault_root);
-
-    // Validate path is under vault root
-    let full_path = vault_root.join(&path);
-    let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
-    
-    // C1: Check path safety even if file doesn't exist yet
-    // Canonicalize both paths and verify full_path is under vault_root
-    let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
-    
-    // Try to canonicalize full_path - it may not exist yet
-    let canonical_full = full_path.canonicalize();
-    
-    let mut path_under_vault = false;
-    if let Ok(canon_full) = canonical_full {
-        // File exists, check if it's under vault_root
-        path_under_vault = canon_full == canonical_vault || canon_full.starts_with(&format!("{}/", canonical_vault));
-    } else {
-        // File doesn't exist, find the first existing ancestor and check if it's under vault_root
-        for ancestor in full_path.ancestors() {
-            match ancestor.canonicalize() {
-                Ok(canon_ancestor) => {
-                    // Check if this ancestor is under vault_root (vault_root should be an ancestor of this path)
-                    path_under_vault = canon_ancestor == canonical_vault 
-                        || canon_ancestor.starts_with(&format!("{}/", canonical_vault));
-                    // Stop at the first canonicalizable ancestor
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-    }
-    
-    if !path_under_vault {
-        return Err("Path is outside vault root".to_string());
-    }
-
-    // Validate frontmatter
-    validate_frontmatter(&frontmatter)
-        .map_err(|e| e.to_string())?;
-
-    // C2: Check for stale update if file exists
-    // Use metadata directly - it returns error if file doesn't exist (eliminates race)
-    if let Ok(metadata) = std::fs::metadata(&full_path) {
-        let file_mtime = metadata
-            .modified()
-            .map_err(|e| e.to_string())?;
-
-        if let Some(ref updated_at) = frontmatter.updated_at {
-            let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
-                .map_err(|e| format!("Invalid updated_at: {}", e))?;
-
-            if updated_dt.timestamp_millis()
-                < file_mtime
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64
-            {
-                return Err(format!(
-                    "Stale update: file was modified since updated_at={}",
-                    updated_at
-                ));
-            }
-        } else {
-            return Err("updated_at required for edits".to_string());
-        }
-    }
-
-    // C3: For new files, validate updated_at is not older than created_at if provided
-    if !full_path.exists() {
-        if let Some(ref updated_at) = frontmatter.updated_at {
-            let created_dt = chrono::DateTime::parse_from_rfc3339(&frontmatter.created_at)
-                .map_err(|e| format!("Invalid created_at: {}", e))?;
-            let updated_dt = chrono::DateTime::parse_from_rfc3339(updated_at)
-                .map_err(|e| format!("Invalid updated_at: {}", e))?;
-
-            if updated_dt < created_dt {
-                return Err("updated_at cannot be older than created_at".to_string());
-            }
-        }
-    }
-
-    // Build the document
-    let fm_yaml = okf::render_frontmatter(&frontmatter);
-    let document = format!("{}\n{}", fm_yaml, body);
-
-    // Write atomically (temp file + rename)
-    use std::time::SystemTime;
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| format!("Failed to get timestamp: {}", e))?
-        .as_nanos();
-    let temp_path = full_path.with_extension(format!("{}.tmp", timestamp));
-
-    // Ensure parent directory exists
-    if let Some(parent) = full_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    std::fs::write(&temp_path, &document).map_err(|e| e.to_string())?;
-    std::fs::rename(&temp_path, &full_path).map_err(|e| e.to_string())?;
-
-    // Compute and return SHA256
-    let sha256 = sha256_hash(&document);
-
-    Ok(okf::WriteNoteResult {
-        success: true,
-        path: full_path.to_string_lossy().into_owned(),
-        sha256,
-    })
+    let vault_root = vault_root_from_state(&vault_root_state)?;
+    // The request frontmatter's `updated_at` is the If-Match token; on success
+    // the core stamps a fresh token so the next edit must observe the new one.
+    okf::write::write_note(&vault_root, &path, &frontmatter, &body,
+        frontmatter.updated_at.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn vault_upsert_index_entry<'a>(
-    vault_root_state: State<'a, VaultConfigState>,
+fn vault_upsert_index_entry(
+    vault_root_state: State<VaultConfigState>,
     index_path: String,
     entry_name: String,
     entry_path: String,
     entry_type: String,
     metadata: Option<serde_json::Value>,
 ) -> Result<okf::UpsertResult, String> {
-    use okf::UpsertError;
-
-    // Get vault root
-    let vault_root = vault_root_state
-        .0
-        .lock()
-        .unwrap()
-        .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Vault not configured".to_string())?;
-
-    let vault_root = std::path::Path::new(&vault_root);
-
-    // Validate entry_name contains only safe characters (alphanumeric, hyphens, underscores)
-    if !entry_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        return Err(format!(
-            "Invalid entry name '{}': only alphanumeric, hyphens, and underscores are allowed",
-            entry_name
-        ));
-    }
-
-    // Validate paths are under vault root
-    let full_index_path = vault_root.join(&index_path);
-    let full_entry_path = vault_root.join(&entry_path);
-
-    let canonical_vault = vault_root.canonicalize().map_err(|e| e.to_string())?;
-
-    // Check index file exists BEFORE canonicalize (non-existent files return Err)
-    if !full_index_path.exists() {
-        return Err(UpsertError::IndexNotFound(index_path).to_string());
-    }
-
-    let canonical_index = full_index_path.canonicalize().ok();
-    let canonical_entry = full_entry_path.canonicalize().ok();
-
-    if let Some(ref ci) = canonical_index {
-        if !ci.starts_with(&canonical_vault) {
-            return Err(UpsertError::PathOutsideVault.to_string());
-        }
-    }
-    if let Some(ref ce) = canonical_entry {
-        if !ce.starts_with(&canonical_vault) {
-            return Err(UpsertError::PathOutsideVault.to_string());
-        }
-    }
-
-    // Read existing index content
-    let mut content = std::fs::read_to_string(&full_index_path)
-        .map_err(|e| format!("Read error: {}", e))?;
-
-    // Check if entry already exists
-    let entry_regex = regex::Regex::new(&format!(r"^##\s*{}", regex::escape(&entry_name)))
-        .map_err(|e| format!("Regex error: {}", e))?;
-
-    let (appended, line_number) = if entry_regex.is_match(&content) {
-        // Update existing entry
-        let lines: Vec<&str> = content.lines().collect();
-        let mut new_content = String::new();
-        let mut entry_start = None;
-
-        for (i, line) in lines.iter().enumerate() {
-            if entry_regex.is_match(line) {
-                entry_start = Some(i);
-                // Skip the old entry header and body
-                // The new entry will be written when we exit the old entry block
-            } else if entry_start.is_some() && line.starts_with("## ") {
-                // End of old entry found - write replacement and then this new header
-                new_content.push_str(&build_index_entry(
-                    &entry_name,
-                    &entry_path,
-                    &entry_type,
-                    &metadata,
-                ));
-                new_content.push('\n');
-                // Now write the next entry header
-                entry_start = None;
-                new_content.push_str(line);
-                new_content.push('\n');
-            } else if entry_start.is_none() {
-                new_content.push_str(line);
-                new_content.push('\n');
-            }
-        }
-
-        // Handle case where replaced entry was at end of file
-        if entry_start.is_some() {
-            new_content.push_str(&build_index_entry(
-                &entry_name,
-                &entry_path,
-                &entry_type,
-                &metadata,
-            ));
-            new_content.push('\n');
-        }
-
-        // Write atomically
-        use std::time::SystemTime;
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| format!("Failed to get timestamp: {}", e))?
-            .as_nanos();
-        let temp_path = full_index_path.with_extension(format!("{}.tmp", timestamp));
-        std::fs::write(&temp_path, &new_content).map_err(|e| e.to_string())?;
-        std::fs::rename(&temp_path, &full_index_path).map_err(|e| e.to_string())?;
-
-        (false, entry_start.unwrap_or(0))
-    } else {
-        // Entry doesn't exist, append
-        let new_entry = build_index_entry(&entry_name, &entry_path, &entry_type, &metadata);
-        let final_content = if content.ends_with('\n') {
-            format!("{}\n{}", content, new_entry)
-        } else {
-            format!("{}\n\n{}", content, new_entry)
-        };
-
-        use std::time::SystemTime;
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| format!("Failed to get timestamp: {}", e))?
-            .as_nanos();
-        let temp_path = full_index_path.with_extension(format!("{}.tmp", timestamp));
-        std::fs::write(&temp_path, &final_content).map_err(|e| e.to_string())?;
-        std::fs::rename(&temp_path, &full_index_path).map_err(|e| e.to_string())?;
-
-        (true, content.lines().count() + 2)
-    };
-
-    Ok(okf::UpsertResult {
-        success: true,
-        index_path: full_index_path.to_string_lossy().into_owned(),
-        entry_id: entry_name.clone(),
-        appended,
-        line_number: Some(line_number),
-    })
-}
-
-fn build_index_entry(name: &str, path: &str, entry_type: &str, metadata: &Option<serde_json::Value>) -> String {
-    let mut entry = format!("## {}\n", name);
-    entry.push_str(&format!("[[{}]]\n", path));
-    entry.push_str(&format!("- Type: {}\n", entry_type));
-
-    if let Some(meta) = metadata {
-        if let Some(date) = meta.get("date") {
-            entry.push_str(&format!("- Date: {}\n", date));
-        }
-        if let Some(status) = meta.get("status") {
-            entry.push_str(&format!("- Status: {}\n", status));
-        }
-        // Add any other fields dynamically
-        for (key, value) in meta.as_object().unwrap_or(&serde_json::Map::new()) {
-            if key != "date" && key != "status" {
-                entry.push_str(&format!("- {}: {}\n", key, value));
-            }
-        }
-    }
-
-    entry
+    let vault_root = vault_root_from_state(&vault_root_state)?;
+    okf::write::upsert_index_entry(
+        &vault_root,
+        &index_path,
+        &entry_name,
+        &entry_path,
+        &entry_type,
+        metadata.as_ref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Swaps the live DB handle for a temporary empty DB so `brain.db` can be replaced on disk.
@@ -3149,6 +2901,8 @@ pub fn run() {
             commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
             needs_chunk_hash_migration,
+            vault_write_note,
+            vault_upsert_index_entry,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

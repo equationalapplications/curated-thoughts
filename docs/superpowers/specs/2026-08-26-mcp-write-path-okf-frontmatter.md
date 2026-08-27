@@ -246,6 +246,24 @@ of the above, pasted into the PR thread. Subagent claims are verified, not trust
 
 ---
 
+## Implementation Addendum (T1, 2026-08-27)
+
+Rulings where the T1 implementation refined this spec's letter — normative now:
+
+1. **Create also stamps a token.** v2 said `updated_at` is optional on create.
+   The core stamps one anyway (now, second precision), so EVERY stored doc has
+   an If-Match token and clients don't need to special-case first-edit. The
+   "optional on create" contract still holds (supplying one on create is
+   accepted); "must EXACTLY match on edit" is unchanged. Docs updated to match
+   (`docs/mcp-write-tools-okf-frontmatter.md`).
+2. **Token rotation is monotonic.** On edit the new token = max(now,
+   previous + 1 ms). Rotation can never repeat or go backwards even when two
+   writes land inside the same wall-clock second.
+3. **Upsert validates referenced entries exist** (`entry_path` via
+   `safe_vault_path(MustExist)`), so INDEX blocks can't point at ghosts.
+
+---
+
 ## Merge Checklist
 
 - [ ] T0 compile fixes land (E0277 ×2, unused import, unused mut) — see HANDOFF

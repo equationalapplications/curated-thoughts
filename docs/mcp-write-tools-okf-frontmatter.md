@@ -7,7 +7,7 @@ Curated Thoughts v0.1 adds two new MCP tools for writing vault content with stan
 These tools enable AI agents (via MCP) to write markdown files to your vault with structured metadata. They:
 
 - **Validate frontmatter** before writing (fail fast on invalid inputs)
-- **Prevent stale updates** with timestamp-based conflict detection
+- **Prevent lost updates** with If-Match content tokens (`updated_at` must exactly match the file's current token)
 - **Ensure path safety** by rejecting paths outside the vault
 - **Provide atomic writes** to avoid partial/corrupted files
 
@@ -44,7 +44,7 @@ Write a markdown note with OKF v0.1 frontmatter to your vault.
 - `title` must be non-empty (after trimming)
 - `entity_type` must be one of: `fact`, `task`, `event`, `concept`, `doc`
 - `created_at` and `updated_at` must parse as ISO 8601 (e.g., `"2026-08-26T12:34:56Z"`)
-- `tags` array: max 20 tags, max 100 characters per tag
+- `tags` array: max 20 tags, max 50 characters per tag
 - Unknown fields are rejected (strict schema)
 
 ### Return Value
@@ -52,7 +52,7 @@ Write a markdown note with OKF v0.1 frontmatter to your vault.
 ```json
 {
   "success": true,
-  "path": "string",      // Absolute path on disk
+  "path": "string",      // Vault-relative path (as provided)
   "sha256": "string"     // SHA-256 hash of written content
 }
 ```
@@ -63,7 +63,7 @@ Write a markdown note with OKF v0.1 frontmatter to your vault.
 |-------|-------------|
 | `path_outside_vault` | Path contains `..` or is outside vault root |
 | `invalid_frontmatter` | Frontmatter validation failed (details in message) |
-| `stale_update` | File was modified since `updated_at` timestamp |
+| `stale_update` | Provided `updated_at` does not exactly match the file's current token (shape: `stale_update:{current}`) |
 | `write_error` | File system write failed |
 
 ### Example: Write a new fact
@@ -96,7 +96,7 @@ Write a markdown note with OKF v0.1 frontmatter to your vault.
     "entity_type": "fact",
     "tags": ["rust", "async", "patterns"],
     "created_at": "2026-08-26T12:34:56Z",
-    "updated_at": "2026-08-26T12:45:00Z"  // Must be newer than file's current updated_at
+    "updated_at": "2026-08-26T12:45:00Z"  // Must EXACTLY MATCH the file's current updated_at (read it first)
   },
   "body": "## Key patterns\n\nUse `async fn` for readability, `Future` trait for control.\n\n## New section\n\nUse `tokio::spawn` for concurrent tasks."
 }
@@ -110,14 +110,21 @@ Add or update an entry in an INDEX.md file (e.g., for cataloging memories, tasks
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `index_path` | `string` | Yes | Vault-relative path to INDEX.md (e.g., `"people/tessera/INDEX.md"`) |
-| `entry_id` | `string` | Yes | Unique identifier (alphanumeric, hyphen, underscore only) |
-| `metadata` | `object` | Yes | JSON object with entry metadata |
+| `index_path` | `string` | Yes | Vault-relative path to an EXISTING INDEX.md (never auto-created), e.g. `"people/tessera/INDEX.md"` |
+| `entry_name` | `string` | Yes | Entry header name (whole-line matched); letters, digits, spaces, `_`, `-`, `.` |
+| `entry_path` | `string` | Yes | Vault-relative path of the note this entry links to (must exist) |
+| `entry_type` | `string` | Yes | Displayed on the `- Type:` line, e.g. `"memory"`, `"handoff"` |
+| `metadata` | `object` | No | Extra key/values rendered as `- Key: value` lines |
 
-### Entry ID Validation
+Wire note: MCP clients may use either `camelCase` (`indexPath`, `entryName`, `entryPath`, `entryType`) or `snake_case`.
 
-- Must match regex: `^[a-zA-Z0-9_-]+$`
-- Examples: `"my-entry"`, `"task-123"`, `"procedure_name"`
+### Entry Name Rules (spec v2)
+
+- Matched by WHOLE-LINE equality against `## {entry_name}` headers — no regex, no substring matching
+- Allowed characters: letters, digits, spaces, `_`, `-`, `.`
+- Must be non-empty after trimming
+- Prefix collisions are safe: updating `"alpha"` never touches a neighboring `"alphabet"` block
+- Examples: `"my-entry"`, `"task-123"`, `"procedure_name"`, `"Database schema migration"`
 
 ### Metadata Schema
 
@@ -151,19 +158,21 @@ Any valid JSON object. Common fields:
 | Error | Description |
 |-------|-------------|
 | `path_outside_vault` | Index path is outside vault root |
-| `index_not_found` | Index file doesn't exist (auto-creates with header) |
+| `index_not_found` | Index file doesn't exist (NEVER auto-created — create it first) |
 | `invalid_metadata` | Metadata is not a valid JSON object |
+| `invalid_entry_name` | Entry name empty or contains forbidden characters |
+| `path_outside_vault` | Entry path resolves outside the vault root |
 
 ### Example: Add new entry
 
 ```json
 {
   "index_path": "people/tessera/INDEX.md",
-  "entry_id": "handoff-2026-08-26",
+  "entry_name": "handoff-2026-08-26",
+  "entry_path": "people/tessera/migration-2026-08-26.md",
+  "entry_type": "handoff",
   "metadata": {
     "title": "Database schema migration",
-    "path": "people/tessera/migration-2026-08-26.md",
-    "type": "handoff",
     "created_at": "2026-08-26T12:34:56Z",
     "status": "pending"
   }
@@ -175,16 +184,30 @@ Any valid JSON object. Common fields:
 ```json
 {
   "index_path": "people/tessera/INDEX.md",
-  "entry_id": "handoff-2026-08-26",
+  "entry_name": "handoff-2026-08-26",
+  "entry_path": "people/tessera/migration-2026-08-26.md",
+  "entry_type": "handoff",
   "metadata": {
     "title": "Database schema migration",
-    "path": "people/tessera/migration-2026-08-26.md",
-    "type": "handoff",
     "created_at": "2026-08-26T12:34:56Z",
     "updated_at": "2026-08-26T14:30:00Z",
     "status": "completed"
   }
 }
+
+The upsert writes a pinned block:
+
+```markdown
+## handoff-2026-08-26
+[[people/tessera/migration-2026-08-26.md]]
+- Type: handoff
+- Title: Database schema migration
+- Created_at: 2026-08-26T12:34:56Z
+- Updated_at: 2026-08-26T14:30:00Z
+- Status: completed
+```
+
+Repeated calls with the same `entry_name` replace the existing block in place (idempotent — no duplicates).
 ```
 
 ## OKF Frontmatter Schema Reference
@@ -339,15 +362,17 @@ Guide for using the new MCP write tools.
 1. Agent completes work handoff
 2. Call `vault_write_note` with handoff details
 3. Call `vault_upsert_index_entry` to add to `people/{name}/INDEX.md`
-4. Use `updated_at` to track completion
+4. On edits, read the file first and echo back its exact `updated_at` token (If-Match)
 
 ### Workflow 5: Multi-agent collaboration
 
-1. Agent A writes a note with `updated_at: "2026-08-26T12:00:00Z"`
-2. Agent B attempts to edit with `updated_at: "2026-08-26T12:00:00Z"` (stale!)
-3. Tool returns `stale_update` error
-4. Agent B reads current file, merges changes, updates `updated_at`
+1. Agent A writes a note; the file now carries an `updated_at` token (A rotates it on every write)
+2. Agent B attempts an edit with an outdated token (A wrote since B last read)
+3. Tool returns `stale_update:{current}` — ordering does NOT matter; only exact match passes
+4. Agent B reads the current file, merges changes, and echoes back the CURRENT token verbatim
 5. Retry succeeds
+
+Wall-clock comparisons are never used — a older-looking timestamp that matches the stored token is accepted, and a newer one that doesn't is refused.
 
 ## Error Handling Guidance
 
@@ -383,27 +408,27 @@ Guide for using the new MCP write tools.
 
 ### Handling `stale_update`
 
-**Cause**: File was modified by another process since your `updated_at`.
+**Cause**: The provided `updated_at` does not exactly equal the file's current token — someone wrote after you last read.
 
 **Solution**:
-1. Read the current file to get the latest `updated_at`
+1. Read the current file and copy its exact `updated_at` token
 2. Merge your changes with the current content
-3. Update your `frontmatter.updated_at` to a newer timestamp
+3. Send that token back unchanged in `frontmatter.updated_at`
 4. Retry the write
 
 **Workflow**:
-```
+```text
 1. vault_write_note → stale_update error
 2. Read file (or use existing read tools)
 3. Merge changes
-4. vault_write_note with new updated_at → success
+4. vault_write_note with the CURRENT updated_at token → success
 ```
 
 ### Handling `index_not_found`
 
-**Cause**: Index file doesn't exist.
+**Cause**: The index file doesn't exist.
 
-**Solution**: The tool auto-creates INDEX.md with a header if missing. No action needed.
+**Solution**: Index files are never auto-created (spec v2). Create `INDEX.md` yourself — even empty — then retry the upsert.
 
 ## Migration Notes
 

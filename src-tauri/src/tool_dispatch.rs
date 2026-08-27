@@ -17,9 +17,6 @@ use crate::wiki_graph::{
     DEFAULT_ENTITY_IDS, DEFAULT_MAX_DEPTH,
 };
 
-// Import regex for index entry matching
-use regex;
-
 /// Typed error for unknown tool names so callers can classify without string matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownToolError(pub String);
@@ -246,8 +243,17 @@ pub fn dispatch_vault_write_note(
     frontmatter: &crate::okf::OkfFrontmatter,
     body: &str,
 ) -> Result<crate::okf::WriteNoteResult> {
-    crate::okf::vault_write_note(vault_dir, path, frontmatter, body)
-        .map_err(|e| anyhow::anyhow!("{}", e))
+    // Thin adapter (spec v2): all logic lives in the `okf::write` core.
+    // The MCP surface carries no separate If-Match parameter — the supplied
+    // frontmatter's `updated_at` IS the If-Match token.
+    crate::okf::write::write_note(
+        vault_dir,
+        path,
+        frontmatter,
+        body,
+        frontmatter.updated_at.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 pub fn dispatch_vault_upsert_index_entry(
@@ -258,147 +264,15 @@ pub fn dispatch_vault_upsert_index_entry(
     entry_type: &str,
     metadata: &Option<Value>,
 ) -> Result<crate::okf::UpsertResult> {
-    use crate::okf::UpsertError;
-
-    // Path safety
-    let canonical_vault = vault_dir
-        .canonicalize()
-        .map_err(|_| UpsertError::PathOutsideVault)?;
-    let full_index_path = vault_dir.join(index_path);
-    let canonical_index = full_index_path.canonicalize().ok();
-    let full_entry_path = vault_dir.join(entry_path);
-    let canonical_entry = full_entry_path.canonicalize().ok();
-
-    if let Some(ref ci) = canonical_index {
-        if !ci.starts_with(&canonical_vault) {
-            return Err(anyhow::anyhow!("Index path outside vault root"));
-        }
-    }
-    if let Some(ref ce) = canonical_entry {
-        if !ce.starts_with(&canonical_vault) {
-            return Err(anyhow::anyhow!("Entry path outside vault root"));
-        }
-    }
-
-    // Check index file exists
-    if canonical_index.as_ref().map_or(false, |p| !p.exists()) {
-        return Err(anyhow::anyhow!("Index file not found: {}", index_path));
-    }
-
-    // Read existing index content
-    let content = std::fs::read_to_string(&full_index_path)
-        .map_err(|e| anyhow::anyhow!("Read error: {}", e))?;
-
-    // Check if entry already exists
-    let entry_regex = regex::Regex::new(&format!(r"^##\s+{}", regex::escape(entry_name)))
-        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
-
-    let (appended, line_number) = if entry_regex.is_match(&content) {
-        // Update existing entry
-        let lines: Vec<&str> = content.lines().collect();
-        let mut new_content = String::new();
-        let mut entry_start = None;
-
-        for (i, line) in lines.iter().enumerate() {
-            if entry_regex.is_match(line) {
-                entry_start = Some(i);
-                // Replace entry
-                new_content.push_str(&build_index_entry_local(
-                    entry_name,
-                    entry_path,
-                    entry_type,
-                    metadata,
-                ));
-                new_content.push('\n');
-                // Skip until next entry or end
-            } else if entry_start.is_some() && line.starts_with("## ") {
-                // Next entry found, stop replacing
-                entry_start = None;
-                new_content.push_str(line);
-                new_content.push('\n');
-            } else if entry_start.is_none() {
-                new_content.push_str(line);
-                new_content.push('\n');
-            }
-        }
-
-        // Write atomically
-        use std::time::SystemTime;
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| anyhow::anyhow!("Failed to get timestamp: {}", e))?
-            .as_nanos();
-        let temp_path = full_index_path.with_extension(format!("{}.tmp", timestamp));
-        std::fs::write(&temp_path, &new_content)
-            .map_err(|e| anyhow::anyhow!("Write error: {}", e))?;
-        std::fs::rename(&temp_path, &full_index_path)
-            .map_err(|e| anyhow::anyhow!("Rename error: {}", e))?;
-
-        (false, entry_start.unwrap_or(0))
-    } else {
-        // Entry doesn't exist, append
-        let new_entry = build_index_entry_local(
-            entry_name,
-            entry_path,
-            entry_type,
-            metadata,
-        );
-        let final_content = if content.ends_with('\n') {
-            format!("{}\n{}", content, new_entry)
-        } else {
-            format!("{}\n\n{}", content, new_entry)
-        };
-
-        use std::time::SystemTime;
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| anyhow::anyhow!("Failed to get timestamp: {}", e))?
-            .as_nanos();
-        let temp_path = full_index_path.with_extension(format!("{}.tmp", timestamp));
-        std::fs::write(&temp_path, &final_content)
-            .map_err(|e| anyhow::anyhow!("Write error: {}", e))?;
-        std::fs::rename(&temp_path, &full_index_path)
-            .map_err(|e| anyhow::anyhow!("Rename error: {}", e))?;
-
-        (true, content.lines().count() + 2)
-    };
-
-    Ok(crate::okf::UpsertResult {
-        success: true,
-        index_path: full_index_path.to_string_lossy().into_owned(),
-        entry_id: entry_name.to_string(),
-        appended,
-        line_number: Some(line_number),
-    })
-}
-
-/// Local helper to build an index entry block
-fn build_index_entry_local(
-    name: &str,
-    path: &str,
-    entry_type: &str,
-    metadata: &Option<Value>,
-) -> String {
-    let mut entry = format!("## {}\n", name);
-    entry.push_str(&format!("[[{}]]\n", path));
-    entry.push_str(&format!("- Type: {}\n", entry_type));
-
-    if let Some(meta) = metadata {
-        if let Some(date) = meta.get("date") {
-            entry.push_str(&format!("- Date: {}\n", date));
-        }
-        if let Some(status) = meta.get("status") {
-            entry.push_str(&format!("- Status: {}\n", status));
-        }
-        // Add any other fields dynamically
-        for (key, value) in meta.as_object().unwrap_or(&serde_json::Map::new()) {
-            if key != "date" && key != "status" {
-                entry.push_str(&format!("- {}: {}\n", key, value));
-            }
-        }
-    }
-
-    entry
+    crate::okf::write::upsert_index_entry(
+        vault_dir,
+        index_path,
+        entry_name,
+        entry_path,
+        entry_type,
+        metadata.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 #[derive(Clone)]

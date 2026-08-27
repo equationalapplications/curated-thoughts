@@ -19,6 +19,7 @@ use tauri_app_lib::embedder::{embed_one, EmbedProfile};
 use tauri_app_lib::retrieval::{
     self, insert_chunk, insert_embedding, mark_document_indexed, upsert_document, AppDb,
 };
+use tauri_app_lib::okf::sha256_hash;
 use tauri_app_lib::search::SearchResult;
 use tauri_app_lib::wiki_graph::{
     f32_vec_to_blob, WikiOntologyResult, WikiSearchHit, WikiTraverseResult,
@@ -171,8 +172,8 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
 
     let tools = client.list_all_tools().await.expect("list_all_tools");
     let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
-    assert!(names.iter().any(|n| *n == "vault_semantic_search"));
-    assert!(names.iter().any(|n| *n == "vault_related_chunks"));
+    assert!(names.contains(&"vault_semantic_search"));
+    assert!(names.contains(&"vault_related_chunks"));
 
     let args = serde_json::json!({
         "query": "q",
@@ -258,7 +259,7 @@ async fn mcp_lists_wiki_tools_and_returns_json() {
     let tools = client.list_all_tools().await.expect("list_all_tools");
     let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
     for tool in ["wiki_search", "wiki_get_ontology", "wiki_traverse_graph"] {
-        assert!(names.iter().any(|n| *n == tool), "missing tool {tool}");
+        assert!(names.contains(&tool), "missing tool {tool}");
     }
 
     let search_args = serde_json::json!({ "query": "seed", "limit": 5 })
@@ -303,6 +304,119 @@ async fn mcp_lists_wiki_tools_and_returns_json() {
     let graph: WikiTraverseResult =
         serde_json::from_str(&first_text_hit(&traverse_res)).expect("traverse JSON");
     assert!(graph.nodes.iter().any(|n| n.id == "seed-b"));
+
+    client.cancel().await.expect("shutdown");
+}
+
+// ============================================================================
+// Write-path Tier 3 - real MCP surface (spawned `--mcp` binary over stdio).
+// Tiers 1-2 cover contracts/errors; this proves the SHIPPING surface wires
+// dispatch -> core -> disk end-to-end (spec v2 §Test Strategy).
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
+    if std::env::var("CURATED_MCP_INTEGRATION_TESTS").is_err() {
+        eprintln!("Skipping MCP integration test — set CURATED_MCP_INTEGRATION_TESTS=1 to run");
+        return;
+    }
+    let root = tempdir().expect("tempdir");
+    let brain = root.path().join("brain");
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(brain.join("wiki")).unwrap();
+    std::fs::create_dir_all(vault.join("wiki")).unwrap();
+
+    // The spawned server resolves its vault from <brain>/config.json.
+    let config = serde_json::json!({ "vault_path": vault.to_str().unwrap() });
+    std::fs::write(brain.join("config.json"), config.to_string()).unwrap();
+    // Seed a migrated brain.db so the server\'s read-only open succeeds
+    // (same setup the search/wiki tests rely on).
+    temp_env::with_vars(
+        [("CURATED_BRAIN_DIR", Some(brain.to_str().unwrap()))],
+        || {
+            let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+            let _db =
+                tauri_app_lib::retrieval::AppDb::open(&paths.db_path).expect("seed brain.db");
+        },
+    );
+    // Index files are never auto-created (spec v2) — pre-seed one.
+    std::fs::write(vault.join("wiki/INDEX.md"), "# INDEX\n").unwrap();
+
+    assert!(
+        mcp_exe().exists(),
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml",
+        mcp_exe()
+    );
+
+    let client = spawn_mcp(&brain).await.expect("mcp handshake");
+
+    let tools = client.list_all_tools().await.expect("list_all_tools");
+    let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(names.contains(&"vault_write_note"), "tools: {names:?}");
+    assert!(names.contains(&"vault_upsert_index_entry"), "tools: {names:?}");
+
+    // 1) vault_write_note over stdio
+    let write_args = serde_json::json!({
+        "path": "wiki/mcp-roundtrip.md",
+        "frontmatter": {
+            "okf_version": "0.1",
+            "profile": "llm-wiki/1",
+            "title": "MCP Roundtrip",
+            "entity_type": "fact",
+            "tags": ["tier3"],
+            "created_at": "2026-08-27T00:00:00Z"
+        },
+        "body": "written through the shipping MCP surface"
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("vault_write_note").with_arguments(write_args))
+        .await
+        .expect("call_tool vault_write_note");
+    let text = first_text_hit(&res);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).expect("vault_write_note returns JSON result");
+    assert_eq!(parsed["success"], true, "write result: {text}");
+    assert_eq!(parsed["path"], "wiki/mcp-roundtrip.md");
+
+    let written =
+        std::fs::read_to_string(vault.join("wiki/mcp-roundtrip.md")).expect("note on disk");
+    assert_eq!(parsed["sha256"], sha256_hash(&written), "sha256 matches disk bytes");
+    assert!(
+        written.contains("updated_at:"),
+        "create stamps an If-Match token: {written}"
+    );
+    assert!(written.ends_with("\n"), "document ends with exactly one newline");
+
+    // 2) vault_upsert_index_entry over stdio links the new note
+    let upsert_args = serde_json::json!({
+        "indexPath": "wiki/INDEX.md",
+        "entryName": "mcp-roundtrip",
+        "entryPath": "wiki/mcp-roundtrip.md",
+        "entryType": "fact",
+        "metadata": { "status": "live" }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("vault_upsert_index_entry").with_arguments(upsert_args))
+        .await
+        .expect("call_tool vault_upsert_index_entry");
+    let text = first_text_hit(&res);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).expect("upsert returns JSON result");
+    assert_eq!(parsed["appended"], true, "first insert appends: {text}");
+
+    let index = std::fs::read_to_string(vault.join("wiki/INDEX.md")).expect("index on disk");
+    assert!(
+        index.contains("## mcp-roundtrip\n[[wiki/mcp-roundtrip.md]]\n- Type: fact"),
+        "pinned block shape landed: {index}"
+    );
 
     client.cancel().await.expect("shutdown");
 }

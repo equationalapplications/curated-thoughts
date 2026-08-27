@@ -18,12 +18,12 @@ pub mod sanitize;
 pub mod task_file;
 pub mod timefmt;
 pub mod types;
+pub mod write;
 pub mod zip_io;
 
 // Write-path extensions for vault_write_note and vault_upsert_index_entry
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// OKF document frontmatter (v0.1)
 ///
@@ -95,8 +95,12 @@ pub enum UpsertError {
     IndexNotFound(String),
     #[error("Invalid metadata: {0}")]
     InvalidMetadata(String),
+    #[error("invalid_entry_name")]
+    InvalidEntryName,
     #[error("Path is outside vault root")]
     PathOutsideVault,
+    #[error("Write error: {0}")]
+    WriteError(String),
 }
 
 /// Result from vault_upsert_index_entry
@@ -181,209 +185,10 @@ pub fn parse_frontmatter(yaml: &str) -> Result<OkfFrontmatter, String> {
     serde_yaml::from_str(yaml).map_err(|e| format!("failed to parse frontmatter: {}", e))
 }
 
-/// Write a note with OKF frontmatter to the vault
-///
-/// # Arguments
-/// * `vault_root` - Path to the vault root directory
-/// * `path` - Relative path from vault root (e.g., "wiki/my-note.md")
-/// * `frontmatter` - OKF frontmatter
-/// * `body` - Markdown body content
-///
-/// # Returns
-/// Result with WriteNoteResult containing success flag, path, and SHA-256 hash
-pub fn vault_write_note(
-    vault_root: &Path,
-    path: &str,
-    frontmatter: &OkfFrontmatter,
-    body: &str,
-) -> Result<WriteNoteResult, WriteNoteError> {
-    // Path safety: ensure path is within vault_root
-    let full_path = vault_root.join(path);
-    let canonical_vault = vault_root.canonicalize().map_err(|e| {
-        WriteNoteError::WriteError(format!("failed to canonicalize vault root: {}", e))
-    })?;
-    let canonical_path = full_path.canonicalize().ok();
-    if let Some(ref cp) = canonical_path {
-        if !cp.starts_with(&canonical_vault) {
-            return Err(WriteNoteError::PathOutsideVault);
-        }
-    }
-
-    // Validate frontmatter
-    validate_frontmatter(frontmatter)
-        .map_err(WriteNoteError::InvalidFrontmatter)?;
-
-    // Check for stale update on existing files
-    if canonical_path.is_some() && canonical_path.as_ref().unwrap().exists() {
-        let existing = std::fs::read_to_string(&full_path).map_err(|e| {
-            WriteNoteError::WriteError(format!("failed to read existing file: {}", e))
-        })?;
-
-        // Extract existing updated_at
-        if let Some(existing_updated) = extract_updated_at(&existing) {
-            if let Some(ref provided_updated) = frontmatter.updated_at {
-                if existing_updated != *provided_updated {
-                    return Err(WriteNoteError::StaleUpdate {
-                        updated_at: existing_updated,
-                    });
-                }
-            }
-        }
-    }
-
-    // Ensure parent directory exists
-    if let Some(parent) = full_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            WriteNoteError::WriteError(format!("failed to create parent directory: {}", e))
-        })?;
-    }
-
-    // Render document
-    let fm_yaml = render_frontmatter(frontmatter);
-    let content = format!("{}\n{}", fm_yaml, body);
-
-    // Write file
-    std::fs::write(&full_path, &content)
-        .map_err(|e| WriteNoteError::WriteError(format!("failed to write file: {}", e)))?;
-
-    // Compute SHA-256
-    let sha256 = sha256_hash(&content);
-
-    Ok(WriteNoteResult {
-        success: true,
-        path: path.to_string(),
-        sha256,
-    })
-}
-
-/// Extract updated_at from frontmatter if present
-fn extract_updated_at(content: &str) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    for line in lines {
-        if line.starts_with("updated_at:") {
-            let rest = line["updated_at:".len()..].trim();
-            return Some(rest.to_string());
-        }
-    }
-    None
-}
-
-/// Upsert an entry into an INDEX.md file
-///
-/// # Arguments
-/// * `vault_root` - Path to the vault root directory
-/// * `index_path` - Relative path to INDEX.md (e.g., "wiki/INDEX.md")
-/// * `entry_id` - Unique identifier for the entry
-/// * `metadata` - JSON object with entry metadata
-///
-/// # Returns
-/// Result with UpsertResult containing success flag, index path, and entry ID
-pub fn vault_upsert_index_entry(
-    vault_root: &Path,
-    index_path: &str,
-    entry_id: &str,
-    metadata: &serde_json::Value,
-) -> Result<UpsertResult, UpsertError> {
-    // Path safety
-    let full_path = vault_root.join(index_path);
-    let canonical_vault = vault_root.canonicalize().map_err(|_| UpsertError::PathOutsideVault)?;
-    let canonical_path = full_path.canonicalize().ok();
-    if let Some(ref cp) = canonical_path {
-        if !cp.starts_with(&canonical_vault) {
-            return Err(UpsertError::PathOutsideVault);
-        }
-    }
-
-    // Validate metadata is an object
-    if !metadata.is_object() {
-        return Err(UpsertError::InvalidMetadata(
-            "metadata must be a JSON object".to_string(),
-        ));
-    }
-
-    // Validate entry_id format (alphanumeric, hyphen, underscore)
-    let id_regex = regex::Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
-    if !id_regex.is_match(entry_id) {
-        return Err(UpsertError::InvalidMetadata(format!(
-            "entry_id contains invalid characters: {}",
-            entry_id
-        )));
-    }
-
-    // Read existing index or create new
-    let content = if canonical_path.as_ref().map_or(false, |p| p.exists()) {
-        std::fs::read_to_string(&full_path)
-            .map_err(|e| UpsertError::IndexNotFound(format!("failed to read: {}", e)))?
-    } else {
-        String::from("# INDEX\n\nThis file is auto-generated by Curated Thoughts.\n\n")
-    };
-
-    // Build entry block
-    let entry_block = build_index_entry_block(entry_id, metadata);
-
-    // Find and replace existing entry, or append
-    let (new_content, appended, line_number) = upsert_entry_in_index(&content, entry_id, &entry_block);
-
-    // Write back
-    std::fs::write(&full_path, new_content)
-        .map_err(|e| UpsertError::InvalidMetadata(format!("failed to write: {}", e)))?;
-
-    Ok(UpsertResult {
-        success: true,
-        index_path: index_path.to_string(),
-        entry_id: entry_id.to_string(),
-        appended,
-        line_number: Some(line_number),
-    })
-}
-
-/// Build a markdown entry block from metadata
-fn build_index_entry_block(entry_id: &str, metadata: &serde_json::Value) -> String {
-    let mut lines = vec![format!("## {} ([metadata](#{}))", entry_id, entry_id)];
-    lines.push(String::from("<!--"));
-
-    // Serialize metadata as pretty JSON
-    if let Ok(json_str) = serde_json::to_string_pretty(metadata) {
-        for line in json_str.lines() {
-            lines.push(format!("  {}", line));
-        }
-    } else {
-        lines.push(String::from("  (metadata serialization failed)"));
-    }
-
-    lines.push(String::from("-->\n"));
-    lines.join("\n")
-}
-
-/// Upsert an entry block into index content
-/// Returns (new_content, appended, line_number)
-fn upsert_entry_in_index(content: &str, entry_id: &str, entry_block: &str) -> (String, bool, usize) {
-    // Pattern: ## entry-id ([metadata](#entry_id))
-    let entry_header = format!("## {} ([metadata](#{entry_id}))", entry_id);
-
-    // Find existing entry
-    if let Some(start) = content.find(&entry_header) {
-        // Calculate line number
-        let line_number = content[..start].lines().count() + 1;
-        
-        // Find the end (next ## or EOF)
-        let after_start = &content[start + entry_header.len()..];
-        if let Some(end_offset) = after_start.find("\n## ") {
-            let end = start + entry_header.len() + end_offset;
-            let before = &content[..start];
-            let after = &content[end..];
-            return (format!("{}{}{}", before, entry_block, after), false, line_number);
-        } else {
-            // Entry is at the end
-            return (format!("{}{}", &content[..start], entry_block), false, line_number);
-        }
-    }
-
-    // Entry doesn't exist, append
-    let new_content = format!("{}\n{}", content.trim(), entry_block);
-    let line_number = content.lines().count() + 1;
-    (new_content, true, line_number)
-}
+// The vault write path (note writes + index upserts) lives in `okf::write`
+// (spec v2): ONE core, `safe_vault_path`, If-Match token staleness, atomic
+// temp+rename, whole-line entry matching. Thin adapters live in `lib.rs`
+// (Tauri commands) and `tool_dispatch.rs` (MCP dispatch).
 
 #[cfg(test)]
 mod tests {
@@ -591,147 +396,5 @@ updated_at: "2024-01-02T00:00:00Z""#;
         assert_eq!(fm.tags, Some(vec!["tag1".to_string(), "tag2".to_string()]));
         assert_eq!(fm.created_at, "2024-01-01T00:00:00Z");
         assert_eq!(fm.updated_at, Some("2024-01-02T00:00:00Z".to_string()));
-    }
-
-    #[test]
-    fn test_vault_write_note_new_file() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let vault_root = temp_dir.path();
-
-        let fm = OkfFrontmatter {
-            okf_version: "0.1".to_string(),
-            profile: "llm-wiki/1".to_string(),
-            title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
-            tags: None,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,
-        };
-
-        let result = vault_write_note(vault_root, "wiki/test-note.md", &fm, "Test body").unwrap();
-        assert!(result.success);
-        assert_eq!(result.path, "wiki/test-note.md");
-        assert!(!result.sha256.is_empty());
-
-        let file_path = vault_root.join("wiki/test-note.md");
-        assert!(file_path.exists());
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("---\n"));
-        assert!(content.contains("okf_version: 0.1\n"));
-        assert!(content.contains("Test body"));
-    }
-
-    #[test]
-    fn test_vault_write_note_stale_update() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let vault_root = temp_dir.path();
-
-        // Write initial file
-        let fm1 = OkfFrontmatter {
-            okf_version: "0.1".to_string(),
-            profile: "llm-wiki/1".to_string(),
-            title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
-            tags: None,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
-        };
-
-        vault_write_note(vault_root, "wiki/test-note.md", &fm1, "Body 1").unwrap();
-
-        // Try to update with stale updated_at
-        let fm2 = OkfFrontmatter {
-            okf_version: "0.1".to_string(),
-            profile: "llm-wiki/1".to_string(),
-            title: "Test Note Updated".to_string(),
-            entity_type: EntityType::Fact,
-            tags: None,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: Some("2024-01-01T00:00:00Z".to_string()), // Same as before
-        };
-
-        // First, modify the file on disk
-        let file_path = vault_root.join("wiki/test-note.md");
-        let mut content = std::fs::read_to_string(&file_path).unwrap();
-        content = content.replace("updated_at: 2024-01-01T00:00:00Z", "updated_at: 2024-01-02T00:00:00Z");
-        std::fs::write(&file_path, content).unwrap();
-
-        // Now the update should fail
-        let result = vault_write_note(vault_root, "wiki/test-note.md", &fm2, "Body 2");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            WriteNoteError::StaleUpdate { updated_at } => {
-                assert_eq!(updated_at, "2024-01-02T00:00:00Z");
-            }
-            _ => panic!("Expected StaleUpdate error"),
-        }
-    }
-
-    #[test]
-    fn test_vault_upsert_index_entry_new() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let vault_root = temp_dir.path();
-        
-        // Create wiki directory
-        std::fs::create_dir_all(vault_root.join("wiki")).unwrap();
-
-        let metadata = serde_json::json!({
-            "title": "Test Entry",
-            "path": "wiki/test.md",
-            "created_at": "2024-01-01T00:00:00Z"
-        });
-
-        let result = vault_upsert_index_entry(vault_root, "wiki/INDEX.md", "test-entry", &metadata).unwrap();
-        assert!(result.success);
-        assert_eq!(result.index_path, "wiki/INDEX.md");
-        assert_eq!(result.entry_id, "test-entry");
-
-        let index_path = vault_root.join("wiki/INDEX.md");
-        assert!(index_path.exists());
-        let content = std::fs::read_to_string(&index_path).unwrap();
-        assert!(content.contains("## test-entry ([metadata](#test-entry))"));
-        assert!(content.contains("<!--"));
-        assert!(content.contains("\"title\": \"Test Entry\""));
-    }
-
-    #[test]
-    fn test_vault_upsert_index_entry_update() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let vault_root = temp_dir.path();
-        
-        // Create wiki directory
-        std::fs::create_dir_all(vault_root.join("wiki")).unwrap();
-
-        let metadata1 = serde_json::json!({
-            "title": "Old Title",
-            "path": "wiki/test.md"
-        });
-
-        vault_upsert_index_entry(vault_root, "wiki/INDEX.md", "test-entry", &metadata1).unwrap();
-
-        let metadata2 = serde_json::json!({
-            "title": "New Title",
-            "path": "wiki/test.md",
-            "updated_at": "2024-01-02T00:00:00Z"
-        });
-
-        vault_upsert_index_entry(vault_root, "wiki/INDEX.md", "test-entry", &metadata2).unwrap();
-
-        let index_path = vault_root.join("wiki/INDEX.md");
-        let content = std::fs::read_to_string(&index_path).unwrap();
-        assert!(content.contains("New Title"));
-        assert!(!content.contains("Old Title"));
-    }
-
-    #[test]
-    fn test_vault_upsert_index_entry_invalid_id() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let vault_root = temp_dir.path();
-
-        let metadata = serde_json::json!({"title": "Test"});
-
-        let result = vault_upsert_index_entry(vault_root, "wiki/INDEX.md", "invalid id!", &metadata);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid characters"));
     }
 }

@@ -107,7 +107,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "vault_write_note",
-        description = "Write or update a markdown note with OKF v0.1 frontmatter. Path safety: must be under vault root. Stale update detection: if updated_at is provided and file mtime > updated_at, returns error. Atomic write via temp file + rename."
+        description = "Write or update a markdown note with OKF v0.1 frontmatter. Path safety: must be under vault root. If-Match semantics: on edits, frontmatter.updated_at must EXACTLY match the file\'s current updated_at token (mtime is never consulted); mismatch returns stale_update:{current}. On create the tool stamps a fresh token for you. Atomic write via temp file + rename."
     )]
     async fn vault_write_note(
         &self,
@@ -125,7 +125,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "vault_upsert_index_entry",
-        description = "Atomically upsert an entry into a markdown index file. Validates entry_name (alphanumeric, hyphen, underscore only). Finds existing entry by regex '^## {entry_name}'. If found, replaces entire entry content. If not found, appends. Writes via temp file + rename for atomicity."
+        description = "Atomically upsert an entry into an EXISTING markdown index file (never auto-created; missing index returns index_not_found). Entry names: letters/digits/spaces/_/-/. only, matched by whole-line equality against '## {entry_name}' (no regex). Replaces the block through the next '## ' header or EOF; appends if absent. entry_path must exist in the vault. Atomic write via temp file + rename; repeated calls are idempotent."
     )]
     async fn vault_upsert_index_entry(
         &self,
