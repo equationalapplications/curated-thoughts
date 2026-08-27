@@ -61,4 +61,25 @@ impl TestApp {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn
     }
+
+    /// Invoke a Tauri command and return the result as serde_json::Value.
+    /// Returns Result for cases where the command may legitimately fail.
+    pub fn invoke_result(&self, cmd: &str, params: Value) -> Result<serde_json::Value, String> {
+        let result = tauri::test::get_ipc_response(
+            &self.webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.to_string(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(params),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        );
+        match result {
+            Ok(body) => Ok(body),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
