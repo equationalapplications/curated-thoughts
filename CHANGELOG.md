@@ -1,3 +1,13 @@
+## [1.33.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.32.1...v1.33.0) (2026-08-27)
+
+### Features
+
+* vault folder structure refactoring - enforce immutable source tier ([9e6e66b](https://github.com/equationalapplications/curated-thoughts/commit/9e6e66b4c98ca145c4a9c2f4962466b6e9960b6d)), closes [#115](https://github.com/equationalapplications/curated-thoughts/issues/115)
+
+### Bug Fixes
+
+* **vault:** complete v2 layout in vault-setting commands + update integration tests ([f41acc2](https://github.com/equationalapplications/curated-thoughts/commit/f41acc294b1e6270651e365eaf0412c3112b4157)), closes [#115](https://github.com/equationalapplications/curated-thoughts/issues/115)
+
 ## [1.32.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.32.0...v1.32.1) (2026-08-27)
 
 ### Bug Fixes
