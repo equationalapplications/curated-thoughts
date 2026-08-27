@@ -63,7 +63,7 @@ impl TestApp {
     }
 
     /// Invoke a Tauri command and return the result as serde_json::Value.
-    /// Returns Result for cases where the command may legitimately fail.
+    /// Returns Result for cases where the command may legitimately fail (error tests).
     pub fn invoke_result(&self, cmd: &str, params: Value) -> Result<serde_json::Value, String> {
         let result = tauri::test::get_ipc_response(
             &self.webview,
@@ -79,7 +79,7 @@ impl TestApp {
         );
         match result {
             Ok(body) => {
-                serde_json::to_value(body).map_err(|e| e.to_string())
+                body.deserialize::<serde_json::Value>().map_err(|e| e.to_string())
             },
             Err(e) => Err(e.to_string()),
         }
