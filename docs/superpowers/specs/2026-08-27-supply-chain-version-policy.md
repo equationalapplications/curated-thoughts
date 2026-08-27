@@ -43,7 +43,7 @@ minimumReleaseAgeExclude:
 
 | Scenario | Result |
 |---|---|
-| `pnpm add @mantine/core@9.5.2` (published 5 days ago) | **Blocked**: `ERR_PNPM_NO_MATURE_MATCHING_VERSION` |
+| `pnpm add @mantine/core@9.5.1` (published 5 days ago) | **Blocked**: `ERR_PNPM_NO_MATURE_MATCHING_VERSION` |
 | `pnpm add @equationalapplications/core-llm-wiki@6.0.1` (published 2 days ago) | **Allowed** via scope exclusion |
 | `pnpm install --frozen-lockfile` with lockfile pinning a young version | **Unaffected** — gate is not evaluated on frozen installs |
 
