@@ -122,10 +122,14 @@ flexible. Pin each to the exact version the lockfile resolves today (e.g.
   the one where we want deliberate motion.
 - **Slower security fixes**: the gate delays *all* new versions 14 days,
   including patched ones. Mitigations: security updates via Dependabot are
-  exempt from cooldown; a human can always bump explicitly (write the exact
-  version into `package.json` — the pin IS the override of the gate), and the
-  `minimumReleaseAgeExclude` list can admit a specific `pkg@version` for
-  emergency patching.
+  exempt from cooldown; a human can always bump explicitly. **Emergency
+  patching procedure for <14-day versions:** temporary exact pins in
+  `package.json` are NOT sufficient — the gate blocks young versions even
+  when pinned. To install a package published <14 days ago:
+  1. Add `pkg@version` to `minimumReleaseAgeExclude` in `pnpm-workspace.yaml`
+  2. Run `pnpm install` to resolve the young version
+  3. Remove the entry from `minimumReleaseAgeExclude`
+  4. Commit and push the changes
 - **Lockfile-regen edge**: `pnpm install --fix-lockfile` has a known bug
   (pnpm#10361) bypassing the gate; not in our CI paths, noted for awareness.
 
