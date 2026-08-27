@@ -1,8 +1,8 @@
-# PR #101 — MCP Write Path + OKF Frontmatter — Implementation Checklist (v2)
+# PR #101 → #102 — MCP Write Path + OKF Frontmatter — Implementation Checklist (v2)
 
-**Branch:** `feature/mcp-write-path-okf-frontmatter`
+**Branch:** `feat/mcp-write-path-okf-v2` (renamed from `feature/mcp-write-path-okf-frontmatter` Aug 27 after history rewrite; old branch deleted, PR #101 closed, superseded by **PR #102**)
 **Spec:** `docs/superpowers/specs/2026-08-26-mcp-write-path-okf-frontmatter.md` (v2 — REVISED 2026-08-27)
-**Status:** In progress — 14 commits on branch, HEAD `facfdcc` DOES NOT COMPILE
+**Status:** In progress — 17 commits on branch, HEAD `3ccdd24` (docs+hygiene; still does not compile — T0 pending)
 **Handoff:** `.superpowers/sdd/2026-08-27-pr-101-stabilization/HANDOFF.md`
 
 > v1 checklist items are superseded. The v1 file-list and verification commands

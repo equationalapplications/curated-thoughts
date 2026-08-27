@@ -3,7 +3,7 @@
 **Date:** 2026-08-26 (v1) / **Revised:** 2026-08-27 (v2)
 **Author:** Hermes Agent (Tessera)
 **Status:** Revised — supersedes v1 solution architecture and test strategy
-**Related:** `procedures/curated-thoughts-improvement-backlog.md`, PR #101 (`feature/mcp-write-path-okf-frontmatter`)
+**Related:** `procedures/curated-thoughts-improvement-backlog.md`, PR #101 (closed; branch history rewritten) → **PR #102**, branch `feat/mcp-write-path-okf-v2`
 
 ---
 
