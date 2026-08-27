@@ -1,461 +1,266 @@
-# Spec: MCP Write Path + OKF Frontmatter
+# Spec: MCP Write Path + OKF Frontmatter — Revision 2
 
-**Date:** 2026-08-26
+**Date:** 2026-08-26 (v1) / **Revised:** 2026-08-27 (v2)
 **Author:** Hermes Agent (Tessera)
-**Status:** Draft
-**Related:** `procedures/curated-thoughts-improvement-backlog.md` (MCP write path + OKF frontmatter items)
+**Status:** Revised — supersedes v1 solution architecture and test strategy
+**Related:** `procedures/curated-thoughts-improvement-backlog.md`, PR #101 (`feature/mcp-write-path-okf-frontmatter`)
 
 ---
 
-## Problem Statement
+## Why This Revision Exists (Post-Mortem Summary)
 
-### 1. No MCP write capabilities
-The Curated Thoughts MCP server (`curated-thoughts-mcp`) exposes **read-only** tools:
-- `vault_semantic_search`
-- `vault_related_chunks`
-- `wiki_search`
-- `wiki_traverse_graph`
-- `wiki_get_ontology`
-- `curated_entities` (read-only)
-- `create_entities`/`create_relations` (ct-memory-eval third-party server, slated for removal)
+PR #101 went through ~10 fix rounds and still cannot merge. Root causes found on
+2026-08-27 (all verified against HEAD `facfdcc`, CI run `33047267015`, and a local
+build — see `.superpowers/sdd/2026-08-27-pr-101-stabilization/HANDOFF.md`):
 
-Today, "add to long-term memory" means:
-- Dropping a markdown file into `~/Documents/equational-wiki/` via filesystem
-- This breaks the MCP contract for agents that only have tool access (no shell)
-- Tessera can do it, but subagents cannot
+| # | Failure mode | v1 spec gap that allowed it |
+|---|---|---|
+| 1 | **Three parallel implementations** of the write path with divergent semantics: (a) Tauri commands in `src-tauri/src/lib.rs:573-860`, (b) core fns in `src-tauri/src/okf/mod.rs`, (c) a third inline copy in `tool_dispatch.rs::dispatch_vault_upsert_index_entry`. Fixes landed in one copy and not the others. | v1 never designated a **single source of truth**. It sketched a Tauri command and separately an MCP tool, with no rule that they must delegate to one core. |
+| 2 | **The tested code path is not the shipping code path.** The integration tests (`mcp_write_integration.rs`) drive Tauri commands registered ONLY in `make_test_app` (lib.rs:2822). The production app handler (lib.rs:3067) does NOT register them, and the real MCP server routes `mcp_server.rs → tool_dispatch.rs` (implementation (c), which has zero test coverage). | v1's test strategy tested "the command" without pinning **which surface must be covered** (MCP dispatch is the actual consumer). |
+| 3 | **Stale-update semantics were unworkable.** v1 said reject when `updated_at ≤ file mtime`. But every write sets mtime = now, so the next legitimate edit is always rejected. Tests escaped by faking **future timestamps** (commit `facfdcc` admits this) — tests lying to make code pass. | v1 chose mtime as the concurrency token. mtime is metadata, not content; it cannot serve as a read-modify-write token. |
+| 4 | **Upsert regex bugs.** `Regex::new(r"^##\s*{name}")` used with `.is_match(&content)`: without `(?m)`, `^` only matches the haystack start, so mid-file entries NEVER match → always appends → duplicate entries (2 known failing tests). Also prefix matching collides (`multi-update` matches `## multi-update-2`). | v1 specified "entry lookup by regex `^## {entry_name}`" — an underspecified matcher. |
+| 5 | **Path safety re-implemented three times** (ancestor walks, string-prefix `starts_with(&format!("{}/", vault))` — which doesn't even compile, E0277) instead of using the existing hardened `crate::vault::safe_vault_path` (null-byte, absolute, `..`, drive-prefix, symlink checks; 36 existing call sites; `tests/path_traversal.rs`). | v1 said "reject `../`, absolute paths" without requiring the existing helper. Each re-implementation reopened the same security review rounds. |
+| 6 | **87 MB of model-cache blobs committed** (`tools/.fastembed_cache/`, 16 files — fastembed ONNX weights). `.gitignore` only covers `src-tauri/.fastembed_cache/`. Plus scaffolding junk at repo root (`MCP_TOOL_REGISTRATION_SUMMARY.md`, `MCP_WRITE_INTEGRATION_TESTS.md`, `test_mcp_registration.sh`). | v1 had no repo-hygiene/PR-content requirements. |
+| 7 | **Pushed without compiling.** HEAD `facfdcc` does not compile (`E0277` ×2 at lib.rs:607/615, unused import at 580, unused `mut` at 759), yet its commit message claims "8/11 passing". | v1 had no local CI-parity verification gate before push. |
 
-### 2. No standardized frontmatter
-Vault files use inconsistent or missing frontmatter. The chunker/embedder cannot:
-- Extract metadata uniformly (entity_type, tags, created_at)
-- Populate the wiki layer from agent-written notes
-- Support temporal queries or entity-scoped retrieval
-
-### 3. Wiki layer remains empty
-The `llm_wiki_entries` / `llm_wiki_edges` tables are permanently populated only by the desktop app's commit UI. Agent-written notes never contribute to the wiki graph because:
-- No MCP write surface
-- No frontmatter contract for the librarian to consume
-- This blocks the "software factory in a box" vision
+**Verdict: the spec needed structural revision**, not another patch round. v2 below
+preserves v1's problem statement, vision, and migration stance, and replaces the
+solution architecture, behavioral contracts, and test strategy.
 
 ---
 
-## Vision Alignment
+## Problem Statement (unchanged from v1)
 
-From `curated-thoughts-vision.md`:
-> North star: CT as a software factory in a box with expert layers, built-in agency, and chat.
+1. **No MCP write capabilities** — the MCP server exposes read-only tools; agents
+   with tool-only access cannot persist knowledge to the vault.
+2. **No standardized frontmatter** — the chunker/embedder cannot uniformly extract
+   metadata (entity_type, tags, created_at) from agent-written notes.
+3. **Wiki layer stays empty** — agent notes never contribute to the wiki graph.
 
-This PR serves that vision by:
-1. Giving agents first-class write access to the vault via MCP
-2. Establishing the OKF document contract as the lingua franca for all vault content
-3. Enabling the wiki layer to ingest and reason over agent-generated knowledge
+See v1 (git history) for the full narrative; vision alignment and goals are unchanged:
 
----
+- `vault_write_note` MCP tool: write markdown with OKF v0.1 frontmatter.
+- `vault_upsert_index_entry` MCP tool: auditable INDEX.md updates.
+- OKF frontmatter on all NEW vault files going forward.
 
-## Goals
-
-### Primary
-1. Add `vault_write_note` MCP tool that writes markdown files with OKF frontmatter
-2. Add `vault_upsert_index_entry` MCP tool for auditable INDEX updates
-3. Adopt OKF frontmatter on all new vault files going forward
-
-### Secondary
-1. Validate frontmatter schemas before write (fail fast on invalid inputs)
-2. Propagate OKF metadata to chunk-level symbols/tags (chunker enhancement)
-3. Document migration path for existing vault files (optional, not blocking)
+Non-goals (unchanged): no back-migration, no librarian synthesis, no ct-memory-eval
+removal, no chunker changes (Phase 4, separate PR).
 
 ---
 
-## Non-Goals
+## Revised Solution Architecture (v2 — NORMATIVE)
 
-1. **Back-migrating existing vault files** — too risky at scale; new files only
-2. **Wiki layer librarian synthesis** — that's a separate item in the backlog ("make the librarian synthesize into wiki entries")
-3. **OKF profile v0.1 → v1 migration** — we adopt the current normative profile (`llm-wiki/1`) from day one
-4. **Removing ct-memory-eval** — that's a cleanup after this PR validates the write path
+**One core implementation. Every surface is a thin adapter. No logic in adapters.**
 
----
+```
+src-tauri/src/okf/mod.rs        (types, validate, render, parse, sha256 — keep as-is)
+src-tauri/src/okf/write.rs      (NEW — the single write-path core)
+  pub fn write_note(vault_root, path, fm, body) -> Result<WriteNoteResult, WriteNoteError>
+  pub fn upsert_index_entry(vault_root, index_path, entry_name, entry_path,
+                            entry_type, metadata) -> Result<UpsertResult, UpsertError>
 
-## Proposed Solution
-
-### 1. `vault_write_note` MCP tool
-
-**Tool Name:** `vault_write_note`
-
-**Parameters:**
-```json
-{
-  "path": "string",           // Vault-relative path, e.g., "memories/my-fact.md"
-  "frontmatter": {            // OKF v0.1 frontmatter object
-    "title": "string",
-    "entity_type": "fact|task|event|concept|doc",
-    "tags": ["string"],
-    "created_at": "ISO 8601 string",
-    "updated_at": "ISO 8601 string"  // Required on edits
-  },
-  "body": "string"             // Markdown body, may contain [[WikiLink]] edges
-}
+Adapters (each ≤ ~15 lines of glue, zero decision logic):
+  src-tauri/src/tool_dispatch.rs   dispatch_vault_write_note / dispatch_vault_upsert_index_entry
+                                   → call okf::write core. DELETE the current 100-line
+                                     inline upsert copy in dispatch_vault_upsert_index_entry.
+  src-tauri/src/lib.rs             #[tauri::command] vault_write_note / vault_upsert_index_entry
+                                   → resolve vault root from VaultConfigState, call okf::write core.
+                                   DELETE the current ~290 lines of inline logic (573-860).
+                                   Register BOTH commands in the PRODUCTION handler
+                                   (lib.rs:3067 block) as well as make_test_app.
 ```
 
-**Behavior:**
-1. Validate `path` is under the configured vault root (reject `../`, absolute paths)
-2. Parse `frontmatter`:
-   - `title`: required, non-empty
-   - `entity_type`: required, enum of `fact|task|event|concept|doc`
-   - `tags`: optional, array of strings
-   - `created_at`: required on new files, ISO 8601
-   - `updated_at`: required on edits, ISO 8601
-3. If file exists and `frontmatter.updated_at` ≤ file's mtime → reject (stale update)
-4. Construct the full document:
-   ```yaml
-   ---
-   okf_version: 0.1
-   profile: llm-wiki/1
-   title: <title>
-   entity_type: <entity_type>
-   tags: [<tags>]
-   created_at: <created_at>
-   updated_at: <updated_at>
-   ---
-   <body>
+**Deletions required by this spec** (this is what "clean" means for merge):
+- `lib.rs` inline write/upsert bodies (replaced by wrappers over `okf::write`).
+- The third inline upsert implementation inside `tool_dispatch.rs`.
+- The v1 signatures in `okf/mod.rs` (`vault_upsert_index_entry(vault_root, index_path,
+  entry_id, metadata)` — wrong shape: no entry_path/entry_type, JSON-comment format,
+  auto-creates missing index files, non-atomic `fs::write`). Move corrected logic to
+  `okf/write.rs`; old fns removed.
+
+---
+
+## Behavioral Contracts (v2 — NORMATIVE)
+
+### A. Path safety (both tools)
+
+MUST use the existing hardened helper — no re-implementations, ever:
+
+```rust
+crate::vault::safe_vault_path(vault_root, user_path, &["."], crate::vault::PathMode::MayCreate)
+```
+
+- Rejects: absolute paths, `..` components, Windows drive prefixes, NUL bytes,
+  symlink escapes. Errors map to `path_outside_vault`.
+- Writes are allowed anywhere under the vault root (`&["."]`), matching existing
+  read-tool behavior.
+- For `upsert`: `index_path` additionally MUST resolve to an existing file, else
+  `index_not_found`. `entry_path` is syntax-validated only (may not exist yet).
+
+### B. `vault_write_note`
+
+**Parameters:** `path` (vault-relative), `frontmatter` (OKF v0.1 object), `body`.
+
+**Order of operations:**
+1. `safe_vault_path` → `path_outside_vault`.
+2. `validate_frontmatter` (okf/mod.rs, unchanged) → `invalid_frontmatter:{detail}`.
+   Includes: `updated_at >= created_at` when both present.
+3. **Stale-update contract v2 (replaces mtime check — mtime is NEVER consulted):**
+   - If target file exists AND its frontmatter contains `updated_at = X`:
+     the caller MUST supply `frontmatter.updated_at == X` (exact string match).
+     Any mismatch or absence → `stale_update:{X}` (error carries the current token
+     so the caller can re-read and retry).
+   - If target file exists but has no `updated_at` (legacy/bootstrap): accept the
+     write (no token to compare).
+   - New file: accept; `updated_at` optional on create.
+   
+   Rationale: this is a read-modify-write optimistic-lock token (If-Match/ETag
+   semantics). It is deterministic, portable, and testable without clock games.
+4. Render document: `---\n{frontmatter yaml}\n---\n{body}`.
+5. **Atomic write:** temp file in the SAME directory (unique suffix), then
+   `fs::rename`. No partial writes visible; no leftover `.tmp` on success or failure.
+6. Return `WriteNoteResult { success: true, path: <vault-relative>, sha256 }`
+   — `path` is vault-RELATIVE (portable; do not leak absolute layout), `sha256`
+   is over the full document bytes written.
+
+**Error strings (stable machine-readable prefix before `:`):**
+`path_outside_vault`, `invalid_frontmatter:{detail}`, `stale_update:{current}`,
+`write_error:{io detail}`.
+
+### C. `vault_upsert_index_entry`
+
+**Parameters:** `index_path`, `entry_name`, `entry_path`, `entry_type`, `metadata`
+(object, optional). Serde keeps both camelCase (primary) and snake_case (alias).
+
+1. `entry_name` MUST match `^[A-Za-z0-9_-]+$` → else `invalid_entry_name`.
+2. `safe_vault_path(index_path)` → `path_outside_vault`; file must exist →
+   `index_not_found:{path}`. (Ruling Q2: NEVER auto-create.)
+3. `safe_vault_path(entry_path)` syntax check only → `path_outside_vault`.
+4. **Entry block format (pinned; the JSON-comment format from v1 okf/mod.rs is dead):**
    ```
-5. Write to disk atomically (write to temp, then `rename()`)
-6. Return:
-   - `success: true`
-   - `path: string` (absolute path on disk)
-   - `sha256: string` (file hash after write)
+   ## {entry_name}
+   [[{entry_path}]]
+   - Type: {entry_type}
+   - {key}: {value}        ← each metadata key, insertion order
+   ```
+5. **Entry matching — line scan, whole-line equality, NO regex:**
+   an entry exists iff some line satisfies `line.trim() == format!("## {}", entry_name)`.
+   (Rationale: `^` without `(?m)` never matches mid-file — the shipped duplicate bug;
+   and prefix regex collides with `entry-name-2`.)
+6. **Replace:** overwrite from the header line through the line preceding the next
+   `## ` header (or EOF). All other content preserved byte-for-byte.
+   **Append:** exactly one blank line of separation at EOF.
+7. Atomic write (temp + rename), same rules as B.5.
+8. Return `UpsertResult { success, index_path: <vault-relative>, entry_id: entry_name,
+   appended, line_number }` — `appended: true` iff no prior entry existed;
+   `line_number` = 1-based line of the entry header in the NEW content (the old code
+   returned `unwrap_or(0)` post-loop — always wrong; this pins it).
 
-**Error Cases:**
-- Path outside vault → `path_outside_vault`
-- Invalid frontmatter → `invalid_frontmatter` (details)
-- Stale update (`updated_at` ≤ mtime) → `stale_update`
-- Write failure → `write_error` (reason)
+---
 
-**Rust Integration:**
-```rust
-#[tauri::command]
-async fn vault_write_note(
-    conn: Connection,
-    vault_root: PathBuf,
-    path: String,
-    frontmatter: OkfFrontmatter,
-    body: String,
-) -> Result<WriteNoteResult, String>
+## Resolved Open Questions (v1 → v2 rulings)
+
+| Q | v1 open question | v2 ruling |
+|---|---|---|
+| Q1 | `updated_at` required on new files? | **Optional on create; required-on-edit only as the match token** (must equal the file's current frontmatter `updated_at` when the file has one). |
+| Q2 | Auto-create missing INDEX.md? | **No — reject with `index_not_found`.** |
+| Q3 | Chunker adoption timing? | Separate PR (unchanged). |
+| Q4 | Back-migration? | Defer; new files only (unchanged). |
+
+---
+
+## Repository Hygiene Requirements (NEW in v2 — blocking for merge)
+
+1. `git rm -r --cached tools/.fastembed_cache` and add `tools/.fastembed_cache/`
+   to `.gitignore`. 87 MB of ONNX weights must not land on `main`.
+   - Preferred: purge from branch history before merge (`git filter-repo
+     --path tools/.fastembed_cache --invert-paths` + force-push; reviews re-run
+     automatically). Requires Kurt's sign-off because it rewrites SHAs.
+   - Fallback: remove from tip only; accept history bloat.
+2. Delete root scaffolding: `MCP_TOOL_REGISTRATION_SUMMARY.md`,
+   `MCP_WRITE_INTEGRATION_TESTS.md`, `test_mcp_registration.sh`.
+3. Single doc: `docs/mcp-write-tools-okf-frontmatter.md` is the only write-tools
+   doc (v1's referenced `docs/mcp-tools.md` never existed — do not create it).
+4. Update `procedures/curated-thoughts-improvement-backlog.md` (mark P1 write-path
+   items done) at merge time, not before.
+
+---
+
+## Test Strategy v2 (NORMATIVE — three tiers)
+
+### Tier 1 — Core unit tests (`okf/write.rs`, inline `#[cfg(test)]`)
+- D1 frontmatter validation (existing 17 okf tests stay green).
+- D2 path safety: traversal (`../`), absolute, embedded `..`, symlink escape →
+  all `path_outside_vault`.
+- D3 stale contract: token mismatch → `stale_update`; token match → ok;
+  bootstrap (no token in file) → ok; new file without `updated_at` → ok.
+  **No `thread::sleep`, no future timestamps — the contract is content-based.**
+- D4 append: format exactness, blank-line separation, `appended: true`.
+- D5 replace: no duplicates after repeated upserts; prefix-collision case
+  (`multi-update` vs `multi-update-2` are distinct entries); unrelated entries
+  and prose preserved byte-for-byte; `appended: false`; `line_number` correct.
+- D6 atomicity: no `.tmp` remnants after success and after induced failure.
+- D7 `index_not_found` + `invalid_entry_name` errors.
+
+### Tier 2 — Adapter tests (existing `mcp_write_integration.rs`, updated)
+The 11 Tauri-invoke tests remain, with assertion updates for v2 semantics:
+- Remove ALL future-timestamp hacks; drive the token contract instead.
+- `e2_*` now assert single-instance + `appended` flags (they will genuinely pass
+  once the core is fixed — currently they fail for the regex reason in §4).
+- `e3_*` traversal tests unchanged in spirit (now trivially satisfied by
+  `safe_vault_path` rejecting `..`).
+
+### Tier 3 — MCP-surface tests (NEW — the shipping path, currently zero coverage)
+At least one roundtrip THROUGH `tool_dispatch::dispatch_tool_call` with a
+`ToolDispatchContext` whose `vault_dir` points at a temp vault (write note →
+read back → verify frontmatter + sha; upsert → verify index). If cheap, extend
+`tests/mcp_integration.rs` (spawned-server harness, `CURATED_MCP_INTEGRATION_TESTS=1`)
+with a write-tool call instead — preferred, it is the true E2E.
+
+### Verification gate (MUST be green locally before ANY push)
+Exact CI parity — from repo root:
+```bash
+mkdir -p src-tauri/binaries && touch src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
+cargo check --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --all-targets
+CURATED_MCP_INTEGRATION_TESTS=1 cargo test --manifest-path src-tauri/Cargo.toml \
+  --features test-utils,mcp-server -- --test-threads=1
+cargo clippy --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --all-targets
+git status --short   # must be clean after committing
 ```
+**A commit whose message claims test status MUST show that status from a local run
+of the above, pasted into the PR thread. Subagent claims are verified, not trusted.**
 
 ---
 
-### 2. `vault_upsert_index_entry` MCP tool
+## Success Criteria (v2)
 
-**Tool Name:** `vault_upsert_index_entry`
-
-**Parameters:**
-```json
-{
-  "index_path": "string",      // e.g., "people/tessera/INDEX.md"
-  "entry_name": "string",      // The anchor name
-  "entry_path": "string",      // Target markdown path, e.g., "people/tessera/my-fact.md"
-  "entry_type": "string",      // e.g., "memory", "handoff", "procedure"
-  "metadata": {                // Optional structured metadata
-    "date": "ISO 8601",
-    "status": "string",
-    ...
-  }
-}
-```
-
-**Behavior:**
-1. Validate `index_path` and `entry_path` are under vault root
-2. Read `index_path` file
-3. Find existing entry by `entry_name` (regex: `^## \{entry_name\}`)
-4. If exists:
-   - Update the link target to `[[<entry_path>]]`
-   - Update metadata block (if provided)
-5. If doesn't exist:
-   - Append new entry at end:
-     ```markdown
-     ## {entry_name}
-     [[{entry_path}]]
-     - Type: {entry_type}
-     - Date: {date}
-     - Status: {status}
-     ```
-6. Write atomically (temp + rename)
-7. Return:
-   - `success: true`
-   - `appended: boolean` (true if new entry, false if updated)
-   - `line_number: number` (where entry was placed)
-
-**Error Cases:**
-- Path outside vault → `path_outside_vault`
-- Index file missing → `index_not_found` (create with user approval?)
-- Invalid metadata → `invalid_metadata`
-
-**Rust Integration:**
-```rust
-#[tauri::command]
-async fn vault_upsert_index_entry(
-    conn: Connection,
-    vault_root: PathBuf,
-    index_path: String,
-    entry_name: String,
-    entry_path: String,
-    entry_type: String,
-    metadata: Option<serde_json::Value>,
-) -> Result<UpsertResult, String>
-```
+1. Exactly ONE implementation of each write operation (`okf/write.rs`); adapters
+   contain no logic. Verified by `grep`: no `entry_regex`, no ancestor-walk, no
+   `canonicalize` loops outside `okf/write.rs` + `vault/safe_path.rs`.
+2. Production Tauri handler (lib.rs:3067 block) registers both commands.
+3. All three test tiers green locally via the verification gate; CI green on
+   rust-ubuntu AND rust-macos.
+4. `tools/.fastembed_cache` absent from the merge tip; junk root files gone.
+5. No `thread::sleep`/future-timestamp workarounds in any write-path test.
+6. Wiki layer untouched; read tools unchanged (unchanged from v1).
 
 ---
 
-### 3. OKF Frontmatter Schema
+## Merge Checklist
 
-**Adopted Profile:** `llm-wiki/1` (current normative from `@equationalapplications/okf`)
-
-**Required Fields:**
-```yaml
-okf_version: 0.1
-profile: llm-wiki/1
-title: <string>
-entity_type: fact|task|event|concept|doc
-created_at: <ISO 8601>
-updated_at: <ISO 8601>  # Required on edits
-```
-
-**Optional Fields:**
-```yaml
-tags: [<string>]
-```
-
-**Validation Rules:**
-1. `title` must be non-empty
-2. `entity_type` must be one of the 5 enums
-3. `created_at` / `updated_at` must parse as ISO 8601
-4. `tags` must be an array of strings (max length: 10 per tag, 20 tags total)
-5. Unknown fields are rejected (strict schema)
-
-**Rust Struct:**
-```rust
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct OkfFrontmatter {
-    pub okf_version: String,
-    pub profile: String,
-    pub title: String,
-    pub entity_type: EntityType,
-    pub tags: Option<Vec<String>>,
-    pub created_at: String,
-    pub updated_at: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EntityType {
-    Fact,
-    Task,
-    Event,
-    Concept,
-    Doc,
-}
-```
-
----
-
-### 4. Chunker Enhancement (Optional, Low-Priority)
-
-The chunker should extract OKF metadata into chunk-level symbols/tags:
-
-**Before:**
-```rust
-// chunks.symbol_name is only set for AST symbols
-// chunks.tags is only set for folder_rules
-```
-
-**After:**
-```rust
-// When ingesting an OKF file:
-// - chunk.symbol_name ← frontmatter.title (first chunk only)
-// - chunk.tags ← frontmatter.tags (all chunks from that file)
-// - chunk.strategy ← "okf_document" (new strategy)
-```
-
-**Rationale:**
-- Makes vault documents discoverable to semantic search by title/tags
-- Enables temporal queries on `created_at` (add `indexed_at` column to `chunks`)
-- Bridges the wiki layer gap (librarian can read OKF metadata)
-
-**Blocking:** This is a **separate PR**. This spec only writes the frontmatter; chunker adoption comes later.
-
----
-
-## Implementation Plan
-
-### Phase 1: Core Write Path (Blocking)
-1. Add `OkfFrontmatter` struct + validation in `src-tauri/src/okf/mod.rs` (new module)
-2. Add `vault_write_note` command in `src-tauri/src/lib.rs`
-3. Add `vault_upsert_index_entry` command in `src-tauri/src/lib.rs`
-4. Register both tools in MCP server (`tools/src/bin/curated_thoughts_mcp.rs`)
-5. Write unit tests:
-   - `test_okf_frontmatter_validation`
-   - `test_vault_write_note_new_file`
-   - `test_vault_write_note_stale_update`
-   - `test_vault_upsert_index_entry_new`
-   - `test_vault_upsert_index_entry_update`
-
-### Phase 2: MCP Tool Registration (Blocking)
-1. Add tool schemas to MCP tools/list response
-2. Implement tool handlers in `tools/src/bin/curated_thoughts_mcp.rs`
-3. Add integration tests that drive the MCP handlers via JSON-RPC
-
-### Phase 3: Documentation (Blocking)
-1. Update `docs/mcp-tools.md` with new tools
-2. Update `procedures/curated-thoughts-improvement-backlog.md` (mark P1 items done)
-3. Add migration note for existing vault files (new files only, no back-migration)
-
-### Phase 4: Chunker Adoption (Non-Blocking, Separate PR)
-1. Modify `src-tauri/src/chunker/mod.rs` to extract OKF metadata
-2. Add `indexed_at` column to `chunks` (MIGRATION_V13)
-3. Update ingest pipeline to populate metadata
-
----
-
-## Testing Strategy
-
-### Unit Tests (D1–D5)
-**D1 — OKF validation:**
-- Valid frontmatter → passes
-- Missing `title` → fails
-- Invalid `entity_type` → fails
-- Invalid ISO 8601 → fails
-- Unknown field → fails
-
-**D2 — `vault_write_note` new file:**
-- File doesn't exist → creates with correct frontmatter
-- File path outside vault → rejected
-- Stale update check not triggered (no file)
-
-**D3 — `vault_write_note` stale update:**
-- File exists with mtime = T
-- Frontmatter.updated_at = T - 1s → rejected
-- Frontmatter.updated_at = T + 1s → accepted
-
-**D4 — `vault_upsert_index_entry` new:**
-- Index file exists → appends entry at end
-- Entry link is `[[target_path]]`
-- Returns `appended: true`
-
-**D5 — `vault_upsert_index_entry` update:**
-- Entry exists → updates link + metadata
-- Returns `appended: false`
-
-### Integration Tests (E1–E3)
-**E1 — MCP roundtrip:**
-- Call `vault_write_note` via JSON-RPC
-- Read file back via filesystem → matches frontmatter + body
-- Verify SHA returned matches computed
-
-**E2 — Index update workflow:**
-- Write note → upsert index entry
-- Read index file → entry present with correct link
-- Update note → upsert same entry → link updated
-
-**E3 — Error propagation:**
-- Invalid frontmatter → MCP error with details
-- Path outside vault → MCP error `path_outside_vault`
-- Stale update → MCP error `stale_update`
-
----
-
-## Migration Plan
-
-### Database
-No DB migrations required in this PR. The chunker adoption (Phase 4) will add `indexed_at` in a future migration.
-
-### Vault Files
-**New files only.** Existing vault files are not back-migrated. This is intentional:
-- Existing files may have ad-hoc frontmatter or none
-- Mass migration risks breaking existing retrieval patterns
-- Agents naturally transition to new format over time
-
-**Optional future work:**
-- Add a `migrate_to_okf` CLI command that adds frontmatter to legacy files
-- Or, rely on the librarian to synthesize wiki entries and rewrite in OKF
-
-### Backwards Compatibility
-- Read tools (`vault_semantic_search`, `wiki_search`, etc.) are unchanged
-- Old vault files remain discoverable (chunker doesn't require frontmatter)
-- No breaking changes for existing workflows
-
----
-
-## Success Criteria
-
-1. ✅ `vault_write_note` tool accepts valid OKF frontmatter and writes files
-2. ✅ `vault_upsert_index_entry` tool updates INDEX.md files atomically
-3. ✅ MCP handlers return structured errors (path_outside_vault, invalid_frontmatter, stale_update)
-4. ✅ All D1–D5 unit tests pass
-5. ✅ All E1–E3 integration tests pass
-6. ✅ No regressions in existing MCP tools
-7. ✅ Wiki layer remains unchanged (this PR only adds write surface)
-
----
-
-## Open Questions
-
-1. **Should `updated_at` be required on NEW files?**
-   - Proposal: Yes, require it from day one (explicit timestamps better than implicit)
-   - Alternative: Optional on new, required on edits
-
-2. **Should `vault_upsert_index_entry` create missing index files?**
-   - Proposal: No, reject with `index_not_found` → let user decide whether to create
-   - Alternative: Auto-create with a template
-
-3. **Chunker adoption timing:**
-   - Proposal: Separate PR, after this validates the write path
-   - Alternative: Include in this PR (bloats scope)
-
-4. **Back-migration approach:**
-   - Proposal: Defer; new files only for now
-   - Alternative: Add a `migrate_to_okf` CLI command in this PR
-
----
-
-## Dependencies
-
-**Required:**
-- None (blocks on nothing, enables the wiki layer)
-
-**Optional (Future):**
-- Chunker adoption (Phase 4) → requires this PR's OKF struct
-- Wiki layer librarian synthesis → requires chunker metadata
-
----
-
-## Risks
-
-1. **Frontmatter validation is too strict**
-   - Mitigation: Start with enum validation, relax to allow custom values if requested
-
-2. **Stale update check is too aggressive**
-   - Mitigation: Add `force: boolean` flag to bypass (for migration scripts)
-
-3. **Index file corruption risk**
-   - Mitigation: Write atomically (temp + rename), validate before commit
-
-4. **MCP tool naming conflicts**
-   - Mitigation: Prefix with `vault_` for write tools, keep existing names for read tools
-
----
-
-## Post-Merge Steps
-
-1. Update `curated-thoughts-operations` skill with new tool usage patterns
-2. Add example calls to `docs/mcp-tools.md`
-3. Update backlog (mark P1 MCP write path items as done)
-4. Consider removing `ct-memory-eval` server once Tessera validates the native write path
-5. Begin chunker adoption PR (Phase 4)
-
----
+- [ ] T0 compile fixes land (E0277 ×2, unused import, unused mut) — see HANDOFF
+- [ ] Core consolidation to `okf/write.rs` per architecture section
+- [ ] Adapters thinned; production handler registers commands
+- [ ] Tier 1/2/3 tests updated & green (verification gate)
+- [ ] Hygiene: cache blobs, junk files, docs consolidation
+- [ ] Kurt rules on history-rewrite vs tip-only for the 87 MB blobs
+- [ ] CI green both platforms; CodeRabbit + aws-cloud-agent reviews addressed
+      (standing rules: never `@coderabbitai` re-request; evaluate both bots;
+      log to reviewer scorecard)
+- [ ] Backlog P1 items marked done AT MERGE
 
 ## References
 
-- `procedures/curated-thoughts-improvement-backlog.md` (P1 MCP write path items)
-- `curated-thoughts-vision.md` (north star)
-- `@equationalapplications/okf` (OKF spec)
-- `docs/superpowers/specs/2026-08-26-fix-run-wiki-heal-source-ref-contract.md` (recent PR pattern)
+- HANDOFF (next-session plan): `.superpowers/sdd/2026-08-27-pr-101-stabilization/HANDOFF.md`
+- v1 spec: git history of this file (commit `86c2b24`)
+- `procedures/software-development/pr-spec-driven/references/coderabbit-review-handling.md`

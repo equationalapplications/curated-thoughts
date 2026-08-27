@@ -1,170 +1,64 @@
-# PR #101 — MCP Write Path + OKF Frontmatter — Implementation Checklist
+# PR #101 — MCP Write Path + OKF Frontmatter — Implementation Checklist (v2)
 
 **Branch:** `feature/mcp-write-path-okf-frontmatter`
-**Spec:** `docs/superpowers/specs/2026-08-26-mcp-write-path-okf-frontmatter.md`
-**Status:** Ready to implement
+**Spec:** `docs/superpowers/specs/2026-08-26-mcp-write-path-okf-frontmatter.md` (v2 — REVISED 2026-08-27)
+**Status:** In progress — 14 commits on branch, HEAD `facfdcc` DOES NOT COMPILE
+**Handoff:** `.superpowers/sdd/2026-08-27-pr-101-stabilization/HANDOFF.md`
+
+> v1 checklist items are superseded. The v1 file-list and verification commands
+> were wrong (`docs/mcp-tools.md` never existed; MCP handlers live in
+> `src-tauri/src/mcp_server.rs`, NOT `tools/src/bin/curated_thoughts_mcp.rs`).
 
 ---
 
-## Phase 1: Core Write Path
+## T0 — Unbreak the build (FIRST, mechanical)
 
-### 1.1 Add OKF module
-- [ ] Create `src-tauri/src/okf/mod.rs`
-- [ ] Add `OkfFrontmatter` struct with serde derives
-- [ ] Add `EntityType` enum (fact|task|event|concept|doc)
-- [ ] Add `validate_frontmatter(frontmatter: &OkfFrontmatter) -> Result<(), String>`
-- [ ] Add unit tests D1 (OKF validation)
+- [ ] Fix E0277 ×2: `src-tauri/src/lib.rs:607` and `:615` — `format!("{}/", canonical_vault)` on a `PathBuf`. (These lines are DELETED wholesale by T1; if T0 is committed separately, use `canonical_vault.display()` or drop the string-prefix hack for `starts_with(&canonical_vault)`.)
+- [ ] Remove unused import `WriteNoteError` (lib.rs:580)
+- [ ] Remove unused `mut` (lib.rs:759)
+- [ ] `cargo check --features test-utils,mcp-server --all-targets` clean
 
-### 1.2 Add `vault_write_note` command
-- [ ] Add `vault_write_note` Tauri command in `src-tauri/src/lib.rs`
-- [ ] Implement path validation (reject `../`, absolute paths)
-- [ ] Implement stale update check (`updated_at` ≤ file mtime)
-- [ ] Implement atomic write (temp file + rename)
-- [ ] Return `WriteNoteResult` with path and SHA256
-- [ ] Add unit tests D2 (new file) and D3 (stale update)
+## T1 — Consolidate to ONE core (the architectural fix)
 
-### 1.3 Add `vault_upsert_index_entry` command
-- [ ] Add `vault_upsert_index_entry` Tauri command in `src-tauri/src/lib.rs`
-- [ ] Implement index file read
-- [ ] Implement entry lookup by regex (`^## {entry_name}`)
-- [ ] Implement append or update logic
-- [ ] Implement atomic write (temp file + rename)
-- [ ] Return `UpsertResult` with `appended: bool` and `line_number`
-- [ ] Add unit tests D4 (new entry) and D5 (update entry)
+- [ ] Create `src-tauri/src/okf/write.rs` with:
+  - `write_note(vault_root, path, fm, body)` — uses `crate::vault::safe_vault_path(&["."], PathMode::MayCreate)`; stale contract = exact-match `updated_at` token from EXISTING file frontmatter (no mtime); atomic temp+rename in same dir
+  - `upsert_index_entry(vault_root, index_path, entry_name, entry_path, entry_type, metadata)` — line-scan whole-line header match (NO regex, NO `(?m)`), pinned block format, replace-through-next-`## `-or-EOF, atomic write
+- [ ] `tool_dispatch.rs::dispatch_vault_write_note` / `dispatch_vault_upsert_index_entry` → thin calls into `okf::write` (DELETE ~100-line inline upsert copy)
+- [ ] `lib.rs` Tauri commands → thin wrappers (vault root from `VaultConfigState`) — DELETE inline logic (~lib.rs:573-860)
+- [ ] DELETE old-shape fns from `okf/mod.rs` (`vault_write_note`, `vault_upsert_index_entry(vault_root, index_path, entry_id, metadata)`)
+- [ ] Register both commands in PRODUCTION handler (lib.rs:~3067 block) — currently only in `make_test_app` (lib.rs:2822)
+- [ ] grep gate: no `entry_regex`, no ancestor-walk loops, no `canonicalize` outside `okf/write.rs` + `vault/safe_path.rs` in write-path code
 
-### 1.4 Add error types
-- [ ] Add `WriteNoteError` enum in `src-tauri/src/okf/mod.rs`:
-  - `PathOutsideVault`
-  - `InvalidFrontmatter`
-  - `StaleUpdate`
-  - `WriteError`
-- [ ] Add `UpsertError` enum:
-  - `IndexNotFound`
-  - `InvalidMetadata`
+## T2 — Tests (three tiers)
 
----
+- [ ] Tier 1: inline unit tests in `okf/write.rs` (D1-D7 per spec v2 §Test Strategy)
+- [ ] Tier 2: update `tests/mcp_write_integration.rs` — remove ALL future-timestamp hacks + `thread::sleep`; token-based stale tests; e2 duplicate/prefix-collision assertions
+- [ ] Tier 3: dispatch-level roundtrip via `ToolDispatchContext { vault_dir: tmp }` (or extend `tests/mcp_integration.rs` spawned-server harness — preferred)
+- [ ] Verification gate green (spec v2 command block) BEFORE push; paste output in PR thread
 
-## Phase 2: MCP Tool Registration
+## T3 — Hygiene (blocking for merge)
 
-### 2.1 Register Tauri commands
-- [ ] Register `vault_write_note` in `src-tauri/src/lib.rs` via `#[tauri::command]`
-- [ ] Register `vault_upsert_index_entry` in `src-tauri/src/lib.rs` via `#[tauri::command]`
+- [ ] `git rm -r --cached tools/.fastembed_cache` (16 files, 87 MB) + gitignore `tools/.fastembed_cache/`
+- [ ] Delete `MCP_TOOL_REGISTRATION_SUMMARY.md`, `MCP_WRITE_INTEGRATION_TESTS.md`, `test_mcp_registration.sh`
+- [ ] Ask Kurt: history purge (`git filter-repo`) vs tip-only removal
+- [ ] `docs/mcp-write-tools-okf-frontmatter.md` reviewed against v2 contracts (token staleness, error strings, block format)
 
-### 2.2 Add MCP tool handlers
-- [ ] Add `vault_write_note` handler in `tools/src/bin/curated_thoughts_mcp.rs`
-- [ ] Add `vault_upsert_index_entry` handler in `tools/src/bin/curated_thoughts_mcp.rs`
-- [ ] Add tool schemas to MCP `tools/list` response
+## T4 — Merge
 
-### 2.3 Add integration tests
-- [ ] Add E1 test (MCP roundtrip: write → read → verify SHA)
-- [ ] Add E2 test (index update workflow)
-- [ ] Add E3 test (error propagation)
+- [ ] CI green: rust-ubuntu AND rust-macos
+- [ ] CodeRabbit + aws-cloud-agent reviews addressed (never `@coderabbitai`; evaluate both; log to scorecard)
+- [ ] Mark backlog P1 write-path items done AT MERGE
+- [ ] Post-merge: update `curated-thoughts-operations` skill with tool usage patterns
 
 ---
 
-## Phase 3: Documentation
+## Resolved rulings (from spec v2 — do not re-litigate)
 
-### 3.1 Update docs
-- [ ] Update `docs/mcp-tools.md` with new tools
-- [ ] Add examples for both tools
-- [ ] Update `procedures/curated-thoughts-improvement-backlog.md`:
-  - Mark "Add a write tool to the Curated Thoughts MCP server" as done
-  - Mark "Adopt OKF frontmatter on all new vault files" as done
-
-### 3.2 Add migration note
-- [ ] Add note to README or docs: "New files only, no back-migration"
-- [ ] Document `okf_version: 0.1` and `profile: llm-wiki/1` contract
-
----
-
-## Phase 4: Chunker Adoption (Separate PR)
-
-### 4.1 Extract OKF metadata into chunks
-- [ ] Add `indexed_at` column to `chunks` table (MIGRATION_V13)
-- [ ] Modify chunker to parse OKF frontmatter
-- [ ] Populate `chunk.symbol_name` from `frontmatter.title` (first chunk)
-- [ ] Populate `chunk.tags` from `frontmatter.tags` (all chunks)
-- [ ] Add `chunk.strategy = "okf_document"` for OKF files
-- [ ] Add tests for metadata extraction
-
----
-
-## Verification Commands
-
-```bash
-# Run unit tests
-cargo test -p tauri-app-lib --lib --features test-utils okf
-cargo test -p tauri-app-lib --lib --features test-utils vault_write_note
-cargo test -p tauri-app-lib --lib --features test-utils vault_upsert_index_entry
-
-# Run integration tests
-cargo test -p curated_thoughts_mcp
-
-# Verify MCP tool registration
-./tools/target/debug/curated_thoughts_mcp --help | grep vault_write_note
-./tools/target/debug/curated_thoughts_mcp --help | grep vault_upsert_index_entry
-
-# Build binary
-cargo build --release --bin curated_thoughts_mcp
-```
-
----
-
-## Files to Change
-
-**New files:**
-- `src-tauri/src/okf/mod.rs` (OKF module)
-- `src-tauri/tests/okf_frontmatter.rs` (unit tests)
-- `src-tauri/tests/mcp_write_path.rs` (integration tests)
-
-**Modified files:**
-- `src-tauri/src/lib.rs` (add commands)
-- `tools/src/bin/curated_thoughts_mcp.rs` (register MCP handlers)
-- `docs/mcp-tools.md` (add tool docs)
-- `procedures/curated-thoughts-improvement-backlog.md` (mark items done)
-
----
-
-## Commit Strategy
-
-### Commit 1: OKF module + validation
-- `feat(okf): add OkfFrontmatter struct and validation`
-- Adds `src-tauri/src/okf/mod.rs`
-- Adds D1 tests
-
-### Commit 2: `vault_write_note` command
-- `feat(mcp): add vault_write_note Tauri command`
-- Adds D2 and D3 tests
-
-### Commit 3: `vault_upsert_index_entry` command
-- `feat(mcp): add vault_upsert_index_entry Tauri command`
-- Adds D4 and D5 tests
-
-### Commit 4: MCP tool registration
-- `feat(mcp): register write tools in curated_thoughts_mcp`
-- Registers handlers in `tools/src/bin/curated_thoughts_mcp.rs`
-- Adds E1, E2, E3 integration tests
-
-### Commit 5: Documentation
-- `docs(mcp): document vault_write_note and vault_upsert_index_entry`
-- Updates `docs/mcp-tools.md` and backlog
-
----
-
-## Blocking Decisions
-
-**Q1: Should `updated_at` be required on NEW files?**
-- [ ] Decide: Required (proposal) or Optional (alternative)
-- [ ] Update spec accordingly
-
-**Q2: Should `vault_upsert_index_entry` create missing index files?**
-- [ ] Decide: Reject with `index_not_found` (proposal) or Auto-create (alternative)
-- [ ] Update spec accordingly
-
----
-
-## Notes
-
-- This PR does NOT modify the wiki layer or chunker
-- Backwards compatible: read tools unchanged, old vault files unchanged
-- Phase 4 (chunker adoption) is a separate PR
+| Q | Ruling |
+|---|---|
+| updated_at on new files | Optional on create; on edit must EXACTLY MATCH file's current token |
+| Auto-create INDEX.md | NO — `index_not_found` |
+| Staleness mechanism | Content token (If-Match style); mtime NEVER consulted |
+| Entry matching | Whole-line `## {name}` scan; regex forbidden |
+| Result `path` field | Vault-relative, not absolute |
+| Path safety | `crate::vault::safe_vault_path` only — no re-implementations |
