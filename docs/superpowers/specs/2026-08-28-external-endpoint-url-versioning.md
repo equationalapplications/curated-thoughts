@@ -1,7 +1,7 @@
 # Version-aware external endpoint URL resolution (Z.AI GLM Coding Plan support)
 
 **Date:** 2026-08-28
-**Status:** DRAFT — awaiting review round 1
+**Status:** IMPLEMENTED — 2026-08-28, on this branch (`docs/external-endpoint-url-versioning`, commits 3a1d699 / f4208ab / 28bbe6a). Full-suite gate at head: 654 passed / 0 failed (`cargo test --features test-utils,mcp-server -- --test-threads=1`).
 **Author:** Tessera (Hermes Agent) at Kurt's direction
 **Trigger request:** Kurt, Aug 28 2026 — use `https://api.z.ai/api/coding/paas/v4` as the Curated Thoughts LLM provider endpoint
 
