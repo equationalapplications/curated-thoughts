@@ -1,3 +1,13 @@
+## [1.34.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.33.0...v1.34.0) (2026-08-28)
+
+### Features
+
+* agent deposit write path — immutable-source-files/agents/ + supersession ([9ed1653](https://github.com/equationalapplications/curated-thoughts/commit/9ed1653b9c4e759f78c48987d29ec2d07fa7a7dc)), closes [#117](https://github.com/equationalapplications/curated-thoughts/issues/117)
+
+### Bug Fixes
+
+* **deposit:** flat agents/ layout, correct dir creation, supersedes hardening ([333a364](https://github.com/equationalapplications/curated-thoughts/commit/333a3647753e01504ceecf6b81853c217def8146)), closes [#118](https://github.com/equationalapplications/curated-thoughts/issues/118)
+
 ## [1.33.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.32.1...v1.33.0) (2026-08-27)
 
 ### Features
