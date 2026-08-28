@@ -113,6 +113,32 @@ pub fn resolve_model_path(brain_dir: &Path, relative: &str) -> PathBuf {
     }
 }
 
+/// Resolve the chat-completions endpoint for a configured external base URL.
+///
+/// If the base already ends in a version segment (`/v<digits>`), treat it as
+/// the full path prefix and append only `/chat/completions`; otherwise fall
+/// back to the historical `/v1/chat/completions` layout.
+///
+/// Version detection is STRICTLY `/v<digits>`: qualified versions like
+/// `/v1.1` or `/v2_beta` deliberately do NOT match and take the legacy
+/// `/v1/chat/completions` fallback. No known OpenAI-compatible gateway uses
+/// minor/qualified version paths (industry standard is `/v1`, plus Z.AI's
+/// `/v4`); if one ever appears, extend the matcher here rather than
+/// special-casing call sites.
+pub fn resolve_chat_completions_url(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    let versioned = base
+        .rsplit_once("/v")
+        .filter(|(_, tail)| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()))
+        .is_some();
+    if versioned {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +223,45 @@ mod tests {
         let tmp = config_path(dir.path()).with_extension("json.tmp");
         assert!(!tmp.exists(), ".tmp file should be cleaned up by rename");
         assert!(config_path(dir.path()).exists(), "config.json must exist");
+    }
+
+    #[test]
+    fn resolve_chat_completions_url_behavior_contract() {
+        let cases: &[(&str, &str)] = &[
+            // Spec behavior contract table
+            ("https://api.z.ai/api/coding/paas/v4", "https://api.z.ai/api/coding/paas/v4/chat/completions"),
+            ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
+            ("https://openrouter.ai/api/v1/", "https://openrouter.ai/api/v1/chat/completions"),
+            ("http://localhost:11434", "http://localhost:11434/v1/chat/completions"),
+            ("http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"),
+            ("https://example.com/api/v2", "https://example.com/api/v2/chat/completions"),
+            ("https://example.com/v10", "https://example.com/v10/chat/completions"),
+            // Multi-digit versions
+            ("https://example.com/v99", "https://example.com/v99/chat/completions"),
+            // Single-digit boundary: /v9 versioned
+            ("https://example.com/v9", "https://example.com/v9/chat/completions"),
+            // Qualified versions deliberately do NOT match (review round 1)
+            ("https://example.com/v1.1", "https://example.com/v1.1/v1/chat/completions"),
+            ("https://example.com/v2_beta", "https://example.com/v2_beta/v1/chat/completions"),
+            // Empty tail and non-digit tail: NOT versioned
+            ("https://example.com/v", "https://example.com/v/v1/chat/completions"),
+            ("https://example.com/vX", "https://example.com/vX/v1/chat/completions"),
+            // Whitespace-padded versioned base (round 1) — pins .trim()
+            (" https://host/api/paas/v4/ ", "https://host/api/paas/v4/chat/completions"),
+            // Version segment that is NOT trailing — today's behavior preserved (Q3)
+            ("https://host/v1/models", "https://host/v1/models/v1/chat/completions"),
+            // Degenerate inputs fall through to the legacy layout
+            ("", "/v1/chat/completions"),
+            ("   ", "/v1/chat/completions"),
+            // Bare /v1 (degenerate relative base, round 1)
+            ("/v1", "/v1/chat/completions"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                &resolve_chat_completions_url(input),
+                expected,
+                "input: {input:?}"
+            );
+        }
     }
 }
