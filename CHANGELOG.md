@@ -1,3 +1,9 @@
+## [1.35.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.34.0...v1.35.0) (2026-08-28)
+
+### Features
+
+* **inference:** version-aware chat-completions URL resolver + table tests ([3a1d699](https://github.com/equationalapplications/curated-thoughts/commit/3a1d699865f827ea77928ade6f4846ed9f29badd))
+
 ## [1.34.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.33.0...v1.34.0) (2026-08-28)
 
 ### Features
