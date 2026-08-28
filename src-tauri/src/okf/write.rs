@@ -22,7 +22,7 @@ use std::path::Path;
 use chrono::SecondsFormat;
 use serde_json::Value;
 
-use crate::vault::{safe_vault_path, PathMode, SafePathError, WRITABLE_SUBDIRS, READABLE_SUBDIRS};
+use crate::vault::{safe_vault_path, PathMode, SafePathError, NOTE_WRITABLE_SUBDIRS, READABLE_SUBDIRS, AGENTS_DEPOSIT_DIR};
 
 use super::{
     parse_frontmatter, render_frontmatter, sha256_hash, validate_frontmatter, OkfFrontmatter,
@@ -97,8 +97,8 @@ fn enforce_staleness(
 /// Write a note with OKF frontmatter to the vault (single core, spec v2).
 ///
 /// * `vault_root` — absolute path to the vault root.
-/// * `path` — vault-relative path (e.g. `wiki/my-note.md`). Validated with
-///   `safe_vault_path(_, _, WRITABLE_SUBDIRS, PathMode::MayCreate)`. Missing parent
+/// * `path` — vault-relative path (e.g. `wiki/my-note.md` or `agents/sub/my-note.md`). Validated with
+///   `safe_vault_path(_, _, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate)`. Missing parent
 ///   directories are created, then the resolution is repeated so every
 ///   containment/symlink decision stays inside `safe_vault_path`.
 /// * `frontmatter` — OKF frontmatter; validated; `updated_at` defaults to
@@ -115,7 +115,32 @@ pub fn write_note(
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
 
-    let target = match safe_vault_path(vault_root, path, WRITABLE_SUBDIRS, PathMode::MayCreate) {
+    // Validate supersession: deposit-to-deposit only, target must exist
+    if let Some(ref supersedes_path) = frontmatter.supersedes {
+        if !supersedes_path.starts_with(AGENTS_DEPOSIT_DIR) {
+            return Err(WriteNoteError::InvalidFrontmatter(format!(
+                "supersedes must reference a deposit under {}: got {}",
+                AGENTS_DEPOSIT_DIR, supersedes_path
+            )));
+        }
+
+        let target_path = safe_vault_path(
+            vault_root,
+            supersedes_path,
+            READABLE_SUBDIRS,
+            PathMode::MustExist,
+        )
+        .map_err(map_safe_err_note)?;
+
+        if !target_path.is_file() {
+            return Err(WriteNoteError::InvalidFrontmatter(format!(
+                "supersedes_not_found:{}",
+                supersedes_path
+            )));
+        }
+    }
+
+    let target = match safe_vault_path(vault_root, path, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate) {
         Ok(target) => target,
         Err(SafePathError::NotFound(ref msg)) if msg.contains("parent directory not found") => {
             // Parent dirs don't exist yet. Path shape was already vetted
@@ -134,7 +159,7 @@ pub fn write_note(
             std::fs::create_dir_all(vault_root.join(rel_parent)).map_err(|e| {
                 WriteNoteError::WriteError(format!("write_error:create_dir_all: {}", e))
             })?;
-            safe_vault_path(vault_root, path, WRITABLE_SUBDIRS, PathMode::MayCreate)
+            safe_vault_path(vault_root, path, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate)
                 .map_err(map_safe_err_note)?
         }
         Err(e) => return Err(map_safe_err_note(e)),
@@ -399,6 +424,7 @@ mod tests {
             tags: Some(vec!["test".to_string()]),
             created_at: "2026-08-27T00:00:00Z".to_string(),
             updated_at: updated_at.map(str::to_string),
+            supersedes: None,
         }
     }
 
