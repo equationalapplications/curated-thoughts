@@ -92,12 +92,31 @@ One function, one derivation rule, used by every consumer:
 ```rust
 resolve_brain_paths() -> BrainPaths      // unchanged semantics: CURATED_BRAIN_CONFIG > CURATED_BRAIN_DB-parent > CURATED_BRAIN_DIR > ~/.brain
 BrainConfig::load(brain_dir) -> Result<BrainConfig>       // hard error only on malformed JSON
-BrainConfig::load_lenient() -> BrainConfig                // per-field leniency; malformed top-level JSON stays FATAL
+BrainConfig::load_lenient() -> LoadReport                 // per-field leniency; malformed top-level JSON stays FATAL
 ```
 
-(`load_lenient` is lenient about *fields*, never about the document: truncated
+`load_lenient` returns a **`LoadReport`**, not a bare `BrainConfig` — an opaque
+return would hide which fields were silently defaulted, and `--doctor` could not
+tell "generation block present" from "filled in by leniency":
+
+```rust
+pub struct LoadReport {
+    pub config: BrainConfig,
+    /// One entry per silently-defaulted field. (A structured enum may replace
+    /// the Vec in the plan; the contract is "every defaulting is observable".)
+    pub diagnostics: Vec<String>,
+    pub generation_missing: bool,
+    pub embedding_missing: bool,
+}
+```
+
+Consumers: `--doctor` renders the report (this is its primary data source);
+the pipeline worker logs `diagnostics` and continues with `.config`; desktop
+commands surface diagnostics through events/error strings.
+
+`load_lenient` is lenient about *fields*, never about the document: truncated
 or invalid top-level JSON is a hard error in every load mode, so the pipeline
-cannot continue on garbage defaults — CodeRabbit #1, PR #120.)
+cannot continue on garbage defaults — CodeRabbit #1, PR #120.
 
 - All seven consumers in the Problem table route through this accessor —
   including `privacy/mod.rs` (retiring its third reader/writer) and the
@@ -186,6 +205,9 @@ binding remains: copy snippet per instance.
   tools-crate sidecar, `read_config` call sites, `privacy/mod.rs`, frontend
   (`get_provider_config`). A consumer with no direct test needs an explicit
   exclusion reason in the plan.
+- Pipeline fatal-JSON test (CodeRabbit catch 2, PR #120): feed the pipeline
+  worker a truncated/invalid `config.json`; assert a **hard error** is returned
+  and the worker does NOT continue with a default profile.
 - Integration: entrypoint/pipeline/AppDb all observe `CURATED_BRAIN_DB`+
   `CURATED_BRAIN_CONFIG` split (fixture configs in temp dirs); round-trip of a
   real config.json from `~/.brain` and `~/.brain-equational-wiki` through
