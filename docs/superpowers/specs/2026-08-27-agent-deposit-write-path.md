@@ -28,13 +28,17 @@ Designate a **deposit subfolder** inside the immutable tier:
 <vault>/
 ├── immutable-source-files/
 │   └── agents/          ← NEW: the only agent-writable path in the source tier
-│       └── <agent>/…    ←   per-agent namespaces (hermes/, tessera/, …)
+│       └── mem.md …     ←   deposits live FLAT here (no per-agent subfolders)
 ├── wiki/                ← app-managed wiki (unchanged)
 └── .brain/              ← app state (unchanged)
 ```
 
-The v2 security model is preserved: agents still cannot touch user documents — only their
-own namespaced deposit folder. "Immutable" retains its operational meaning: **the librarian
+**Ruling (Kurt, Aug 28 2026):** no per-agent namespaces (`hermes/`, `tessera/`, …) —
+all deposits go directly under `agents/`. Provenance is carried by frontmatter
+(`title`, `tags`, `created_at`, `supersedes` chains), not by folder structure.
+
+The v2 security model is preserved: agents still cannot touch user documents — only the
+shared deposit folder. "Immutable" retains its operational meaning: **the librarian
 never rewrites sources**; deposits are append-only records the curator reads.
 
 ### Folder contract (amends v2 table)
@@ -154,7 +158,7 @@ Reconciliation contract (librarian/heal — ruling accepted Aug 27):
 | Risk | Mitigation |
 |------|------------|
 | Allowed-dir-not-exists silently drops the prefix (live-verified) | Phase 2 creation + Phase 1 bootstrap; regression test for the lazy path |
-| Deposit sprawl (unbounded append-only growth) | Per-agent namespaces; supersession chains; heal flags — pruning is a future, explicit decision |
+| Deposit sprawl (unbounded append-only growth) | Flat folder + supersession chains + heal flags — pruning is a future, explicit decision |
 | `supersedes` typo'd path | Target-must-exist validation |
 | Semantic drift: "immutable" now includes agent deposits | Accepted (Kurt): still immutable in the sense that the librarian never rewrites it; refine naming later |
 
