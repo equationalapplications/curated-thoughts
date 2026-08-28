@@ -179,6 +179,9 @@ pub fn render_frontmatter(fm: &OkfFrontmatter) -> String {
     if let Some(ref updated) = fm.updated_at {
         doc.push_str(&format!("updated_at: {}\n", updated));
     }
+    if let Some(ref supersedes) = fm.supersedes {
+        doc.push_str(&format!("supersedes: {}\n", supersedes));
+    }
     doc.push_str("---\n");
     doc
 }

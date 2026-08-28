@@ -22,7 +22,10 @@ use std::path::Path;
 use chrono::SecondsFormat;
 use serde_json::Value;
 
-use crate::vault::{safe_vault_path, PathMode, SafePathError, NOTE_WRITABLE_SUBDIRS, READABLE_SUBDIRS, AGENTS_DEPOSIT_DIR};
+use crate::vault::{
+    safe_vault_path, PathMode, SafePathError, AGENTS_DEPOSIT_DIR, NOTE_WRITABLE_SUBDIRS,
+    READABLE_SUBDIRS,
+};
 
 use super::{
     parse_frontmatter, render_frontmatter, sha256_hash, validate_frontmatter, OkfFrontmatter,
@@ -94,10 +97,41 @@ fn enforce_staleness(
     }
 }
 
+/// Components of the agent-deposit prefix (`immutable-source-files/agents`),
+/// pre-split for component-based comparisons (string `starts_with` would
+/// wrongly accept sibling prefixes like `immutable-source-files/agents-evil`).
+fn deposit_prefix_comps() -> Vec<&'static str> {
+    AGENTS_DEPOSIT_DIR.split('/').collect()
+}
+
+/// True iff `path` lies directly inside the deposit folder:
+/// `immutable-source-files/agents/<file>.md` — FLAT, no per-agent subfolders
+/// (ruling Kurt, Aug 28 2026; spec `2026-08-27-agent-deposit-write-path.md`).
+fn is_flat_deposit(path: &str) -> bool {
+    let prefix = deposit_prefix_comps();
+    let comps: Vec<&str> = Path::new(path)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    comps.len() == prefix.len() + 1 && comps[..prefix.len()] == prefix[..]
+}
+
+/// True iff `path` is inside the deposit folder at any depth (incl. subfolders).
+fn under_deposit(path: &str) -> bool {
+    let prefix = deposit_prefix_comps();
+    let comps: Vec<&str> = Path::new(path)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    comps.len() > prefix.len() && comps[..prefix.len()] == prefix[..]
+}
+
 /// Write a note with OKF frontmatter to the vault (single core, spec v2).
 ///
 /// * `vault_root` — absolute path to the vault root.
-/// * `path` — vault-relative path (e.g. `wiki/my-note.md` or `agents/sub/my-note.md`). Validated with
+/// * `path` — vault-relative path (e.g. `wiki/my-note.md` or
+///   `immutable-source-files/agents/my-note.md`). Agent deposits live FLAT
+///   under `agents/` (no subfolders). Validated with
 ///   `safe_vault_path(_, _, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate)`. Missing parent
 ///   directories are created, then the resolution is repeated so every
 ///   containment/symlink decision stays inside `safe_vault_path`.
@@ -115,29 +149,43 @@ pub fn write_note(
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
 
-    // Validate supersession: deposit-to-deposit only, target must exist
+    // Flat-layout contract (Kurt, Aug 28 2026): deposits live directly under
+    // `immutable-source-files/agents/` — no per-agent subfolders. Note this
+    // applies to ALL deposits, not just ones carrying `supersedes`.
+    if under_deposit(path) && !is_flat_deposit(path) {
+        return Err(WriteNoteError::PathOutsideVault);
+    }
+
+    // Validate supersession: deposit-to-deposit only, target must exist.
     if let Some(ref supersedes_path) = frontmatter.supersedes {
-        if !supersedes_path.starts_with(AGENTS_DEPOSIT_DIR) {
+        // Both ends must be deposits (component-based check; string
+        // `starts_with` would accept sibling prefixes like `agents-evil/`).
+        if !is_flat_deposit(supersedes_path) {
             return Err(WriteNoteError::InvalidFrontmatter(format!(
-                "supersedes must reference a deposit under {}: got {}",
+                "supersedes must reference a flat deposit under {}: got {}",
                 AGENTS_DEPOSIT_DIR, supersedes_path
             )));
         }
-
-        let target_path = safe_vault_path(
-            vault_root,
-            supersedes_path,
-            READABLE_SUBDIRS,
-            PathMode::MustExist,
-        )
-        .map_err(map_safe_err_note)?;
-
-        if !target_path.is_file() {
+        if !under_deposit(path) {
             return Err(WriteNoteError::InvalidFrontmatter(format!(
-                "supersedes_not_found:{}",
-                supersedes_path
+                "supersedes is deposit-only: note path must be a deposit under {}: got {}",
+                AGENTS_DEPOSIT_DIR, path
             )));
         }
+
+        // Resolve the target with the deposit-only allowlist. MustExist
+        // already guarantees is_file() (safe_vault_path rejects dirs and
+        // non-regular files), so the resolution error IS the not-found case.
+        safe_vault_path(
+            vault_root,
+            supersedes_path,
+            &[AGENTS_DEPOSIT_DIR],
+            PathMode::MustExist,
+        )
+        .map_err(|_| WriteNoteError::InvalidFrontmatter(format!(
+            "supersedes_not_found:{}",
+            supersedes_path
+        )))?;
     }
 
     let target = match safe_vault_path(vault_root, path, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate) {
@@ -549,5 +597,200 @@ mod tests {
         let content = "- ## fake\n\ntext ## fake\n## fake extra\n";
         assert_eq!(find_entry_header_line(content, "fake"), None);
         assert_eq!(find_entry_header_line("## fake\n", "fake"), Some(0));
+    }
+
+    // ---- Agent deposit write path (spec: 2026-08-27-agent-deposit-write-path.md) ----
+
+    /// Vault fixture with the deposit dir present (post-Phase-2 state).
+    fn deposit_vault() -> (TempDir, std::path::PathBuf) {
+        let (dir, root) = vault();
+        fs::create_dir_all(root.join("immutable-source-files/agents")).unwrap();
+        (dir, root)
+    }
+
+    /// AD1 — flat deposit write succeeds; file lands under agents/.
+    #[test]
+    fn ad1_flat_deposit_write_succeeds() {
+        let (_g, root) = deposit_vault();
+        let result = write_note(
+            &root,
+            "immutable-source-files/agents/mem.md",
+            &fm("Agent memory", None),
+            "deposited\n",
+            None,
+        )
+        .unwrap();
+        assert!(result.success);
+        assert!(root.join("immutable-source-files/agents/mem.md").is_file());
+    }
+
+    /// AD2 — subfolder deposits are rejected (flat layout is the contract).
+    #[test]
+    fn ad2_subfolder_deposit_rejected() {
+        let (_g, root) = deposit_vault();
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/hermes/mem.md",
+            &fm("T", None),
+            "x\n",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WriteNoteError::PathOutsideVault));
+        assert!(!root.join("immutable-source-files/agents/hermes").exists());
+    }
+
+    /// AD3 — write outside the deposit prefix is rejected (path safety).
+    #[test]
+    fn ad3_user_source_write_rejected() {
+        let (_g, root) = deposit_vault();
+        let err = write_note(
+            &root,
+            "immutable-source-files/secrets.md",
+            &fm("T", None),
+            "x\n",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WriteNoteError::PathOutsideVault));
+    }
+
+    /// AD4 — first deposit into a missing agents/ bootstraps parents (lazy path).
+    #[test]
+    fn ad4_lazy_bootstrap_missing_agents_dir() {
+        let (_g, root) = vault(); // no immutable-source-files/agents
+        write_note(
+            &root,
+            "immutable-source-files/agents/first.md",
+            &fm("First", None),
+            "x\n",
+            None,
+        )
+        .unwrap();
+        assert!(root.join("immutable-source-files/agents/first.md").is_file());
+    }
+
+    /// AD5 — supersedes happy path: target exists → write succeeds and the
+    /// supersedes value round-trips through render → parse.
+    #[test]
+    fn ad5_supersedes_valid_roundtrip() {
+        let (_g, root) = deposit_vault();
+        write_note(
+            &root,
+            "immutable-source-files/agents/v1.md",
+            &fm("V1", None),
+            "old\n",
+            None,
+        )
+        .unwrap();
+        let mut m = fm("V2", None);
+        m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
+        write_note(
+            &root,
+            "immutable-source-files/agents/v2.md",
+            &m,
+            "new\n",
+            None,
+        )
+        .unwrap();
+        let raw = fs::read_to_string(root.join("immutable-source-files/agents/v2.md")).unwrap();
+        assert!(raw.contains("supersedes: immutable-source-files/agents/v1.md"));
+        let parsed = extract_fm(&raw);
+        assert_eq!(
+            parsed.supersedes.as_deref(),
+            Some("immutable-source-files/agents/v1.md")
+        );
+    }
+
+    /// AD6 — supersedes pointing outside agents/ → InvalidFrontmatter.
+    #[test]
+    fn ad6_supersedes_outside_deposit_rejected() {
+        let (_g, root) = deposit_vault();
+        write_note(&root, "wiki/target.md", &fm("T", None), "x\n", None).unwrap();
+        let mut m = fm("Evil", None);
+        m.supersedes = Some("wiki/target.md".to_string());
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/e.md",
+            &m,
+            "x\n",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
+    }
+
+    /// AD7 — supersedes to a non-existent deposit → InvalidFrontmatter.
+    #[test]
+    fn ad7_supersedes_missing_target_rejected() {
+        let (_g, root) = deposit_vault();
+        let mut m = fm("T", None);
+        m.supersedes = Some("immutable-source-files/agents/ghost.md".to_string());
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/n.md",
+            &m,
+            "x\n",
+            None,
+        )
+        .unwrap_err();
+        match err {
+            WriteNoteError::InvalidFrontmatter(ref detail) => {
+                assert!(detail.contains("supersedes_not_found"));
+            }
+            other => panic!("expected InvalidFrontmatter, got {other:?}"),
+        }
+    }
+
+    /// AD8 — sibling-prefix attack: `agents-evil/` must NOT pass as a deposit
+    /// (string starts_with would accept it; component check must not).
+    #[test]
+    fn ad8_sibling_prefix_rejected() {
+        let (_g, root) = deposit_vault();
+        fs::create_dir_all(root.join("immutable-source-files/agents-evil")).unwrap();
+        fs::write(root.join("immutable-source-files/agents-evil/x.md"), "x\n").unwrap();
+        let mut m = fm("Evil", None);
+        m.supersedes = Some("immutable-source-files/agents-evil/x.md".to_string());
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/e.md",
+            &m,
+            "x\n",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
+    }
+
+    /// AD9 — supersedes is deposit-only: wiki notes cannot carry it.
+    #[test]
+    fn ad9_wiki_note_cannot_supersede() {
+        let (_g, root) = deposit_vault();
+        write_note(
+            &root,
+            "immutable-source-files/agents/v1.md",
+            &fm("V1", None),
+            "x\n",
+            None,
+        )
+        .unwrap();
+        let mut m = fm("W", None);
+        m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
+        let err = write_note(&root, "wiki/w.md", &m, "x\n", None).unwrap_err();
+        assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
+    }
+
+    /// Parse a rendered document's frontmatter block.
+    fn extract_fm(raw: &str) -> OkfFrontmatter {
+        let fenced: String = raw
+            .lines()
+            .skip(1) // opening ---
+            .take_while(|l| l != &"---")
+            .fold(String::new(), |mut acc, l| {
+                acc.push_str(l);
+                acc.push('\n');
+                acc
+            });
+        parse_frontmatter(&fenced).unwrap()
     }
 }
