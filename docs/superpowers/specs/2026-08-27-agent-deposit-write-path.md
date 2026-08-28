@@ -144,10 +144,11 @@ Reconciliation contract (librarian/heal — ruling accepted Aug 27):
 
 ## Acceptance Criteria
 
-- [ ] Test: write `immutable-source-files/agents/hermes/mem.md` via `vault_write_note` succeeds (MCP + Tauri surfaces)
+- [ ] Test: write `immutable-source-files/agents/mem.md` via `vault_write_note` succeeds (MCP + Tauri surfaces)
 - [ ] Test: write `immutable-source-files/secrets.md` (deposit prefix absent) → `SafePathError::Outside`
 - [ ] Test: traversal `immutable-source-files/agents/../../x.md` → `Traversal` (pinned, components-based)
 - [ ] Test: first deposit into a missing `agents/` dir bootstraps parents and succeeds
+- [ ] Test: write `immutable-source-files/agents/hermes/mem.md` (subfolder) → rejected (`Outside`; flat layout is the contract)
 - [ ] Vault-setup sites create `immutable-source-files/agents/` (set/switch/default bootstrap)
 - [ ] `supersedes` validates: deposit-to-deposit only, target must exist
 - [ ] `WRITABLE_SUBDIRS` unchanged (app-internal writers unaffected)
