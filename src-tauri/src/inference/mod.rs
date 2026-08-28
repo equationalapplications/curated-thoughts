@@ -3,7 +3,8 @@ pub mod sidecar;
 
 use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
 use crate::inference::config::{
-    read_config, resolve_model_path, write_config, GenerationConfig, GenerationProviderKind,
+    read_config, resolve_chat_completions_url, resolve_model_path, write_config, GenerationConfig,
+    GenerationProviderKind,
 };
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
 use crate::privacy::{self, allows_external_generation};
@@ -55,15 +56,13 @@ impl GenerationProvider {
                 api_key,
                 model_name,
             } => {
-                let base = base_url.trim_end_matches('/');
-                let base = base.strip_suffix("/v1").unwrap_or(base);
                 let model = if model_name.trim().is_empty() {
                     "default".to_string()
                 } else {
                     model_name.clone()
                 };
                 RouteInfo::Http {
-                    url: format!("{}/v1/chat/completions", base),
+                    url: resolve_chat_completions_url(base_url),
                     api_key: api_key.clone(),
                     model,
                 }
@@ -494,6 +493,19 @@ mod tests {
         assert_eq!(url, "http://localhost:11434/v1/chat/completions");
         assert_eq!(api_key.as_deref(), Some("key123"));
         assert_eq!(model, "gpt-4o");
+    }
+
+    #[test]
+    fn external_provider_versioned_base_appends_chat_completions_only() {
+        let p = GenerationProvider::External {
+            base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
+            api_key: Some("key123".to_string()),
+            model_name: "glm-5.3-flash".to_string(),
+        };
+        let RouteInfo::Http { url, .. } = p.route_info() else {
+            panic!()
+        };
+        assert_eq!(url, "https://api.z.ai/api/coding/paas/v4/chat/completions");
     }
 
     #[test]
