@@ -15,8 +15,10 @@ configured `external_url` (stripping an existing trailing `/v1` first):
 - `src-tauri/src/inference/mod.rs` — `route_info()` (~L58–66), used by the
   `generate_text` Tauri command
 - `src-tauri/src/librarian/synthesis.rs` — `build_llm_completer()` (~L221–238),
-  used by librarian synthesis; the Sidecar arm builds
-  `http://127.0.0.1:<port>/v1/chat/completions` and is out of scope here
+  used by librarian synthesis; its Sidecar arm builds from the
+  `OLLAMA_BASE_URL` env var (default `http://localhost:11434`) and is out of
+  scope here. (The `http://127.0.0.1:<port>` sidecar form belongs to
+  `route_info()`'s arm.) [round 1: attribution corrected]
 
 Z.AI's GLM Coding Plan endpoint is versioned under `/api/coding/paas/v4` and
 has **no `/v1` variant** (all `/v1` permutations return HTTP 404). Consequence:
@@ -60,8 +62,11 @@ Rejected alternatives (for the record):
 
 ## Non-goals
 
-- No changes to the Sidecar URL logic (`http://127.0.0.1:<port>/v1/...` is
-  llama-server's fixed contract).
+- No changes to Sidecar URL logic — `route_info()` builds
+  `http://127.0.0.1:<port>/v1/...` (llama-server's fixed contract) and
+  `build_llm_completer()` builds from `OLLAMA_BASE_URL` (default
+  `http://localhost:11434`); both keep their explicit `/v1/chat/completions`
+  strings. [round 1: both forms named explicitly]
 - No config schema/migration changes; `external_url` keeps its meaning
   ("base URL, version-segment-aware").
 - No GUI changes; the existing placeholder (`http://localhost:11434/v1`)
@@ -136,12 +141,17 @@ helper covering every row of the behavior contract above, plus edge cases:
 - qualified versions do NOT match (Kurt, review round 1): `/v1.1`,
   `/v2_beta` → legacy `/v1/chat/completions` append — deliberate fallback,
   documented in the function's doc-comment
+- versioned base with surrounding whitespace (`" https://host/api/paas/v4/ "`)
+  → `https://host/api/paas/v4/chat/completions` — pins the helper's new
+  `.trim()` behavior, which today's call sites lack [round 1: added]
 - path containing a version segment that is NOT trailing (e.g.
   `https://host/v1/models`): resolves to `https://host/v1/models/v1/chat/completions`
   — today's behavior, deliberately preserved (see Open questions Q3)
 - whitespace-only / empty string → falls through to
   `/v1/chat/completions` (matches today's behavior for degenerate input;
   callers already reject empty URLs before resolution)
+- bare `/v1` (degenerate relative base) → `/v1/chat/completions` [round 1:
+  added]
 
 **`inference/mod.rs` tests** — keep the existing three `route_info()` tests
 passing unchanged (they assert exactly the contract table's Ollama rows); add
