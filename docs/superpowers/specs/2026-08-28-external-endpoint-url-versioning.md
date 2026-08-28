@@ -81,6 +81,13 @@ truth for both call sites):
 /// If the base already ends in a version segment (`/v<digits>`), treat it as
 /// the full path prefix and append only `/chat/completions`; otherwise fall
 /// back to the historical `/v1/chat/completions` layout.
+///
+/// Version detection is STRICTLY `/v<digits>`: qualified versions like
+/// `/v1.1` or `/v2_beta` deliberately do NOT match and take the legacy
+/// `/v1/chat/completions` fallback. No known OpenAI-compatible gateway uses
+/// minor/qualified version paths (industry standard is `/v1`, plus Z.AI's
+/// `/v4`); if one ever appears, extend the matcher here rather than
+/// special-casing call sites.
 pub fn resolve_chat_completions_url(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     let base = base.strip_suffix("/v1").unwrap_or(base);
@@ -126,6 +133,9 @@ helper covering every row of the behavior contract above, plus edge cases:
 
 - multi-digit versions (`/v10`, `/v99`)
 - single-digit boundary: `/v9` versioned; `/v` or `/vX` NOT versioned
+- qualified versions do NOT match (Kurt, review round 1): `/v1.1`,
+  `/v2_beta` → legacy `/v1/chat/completions` append — deliberate fallback,
+  documented in the function's doc-comment
 - path containing a version segment that is NOT trailing (e.g.
   `https://host/v1/models`): resolves to `https://host/v1/models/v1/chat/completions`
   — today's behavior, deliberately preserved (see Open questions Q3)
