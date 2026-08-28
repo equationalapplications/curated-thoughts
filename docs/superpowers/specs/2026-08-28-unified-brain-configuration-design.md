@@ -178,12 +178,29 @@ binding remains: copy snippet per instance.
 - **Fallback UI:** plain numbered options in Discord (buttons truncate on mobile
   and rush Kurt; logged preference 2026-08-28).
 
-## Open questions
+## Resolved decisions (locked 2026-08-28, Kurt)
 
-1. Should `--onboard` also create/verify `brain.db` (schema migration) or leave
-   DB creation to first app/`ct` run? Leaning: verify-only, warn if missing.
-2. Should `ct` (tools crate) get `onboard`/`doctor` subcommands mirroring the
-   shipped binary? Leans no — ship on the bundled binary only, keep tools dev-only.
-3. Embedding "External" provider in headless onboarding: prompt for base_url +
-   model only, or also API key? Leans base_url+model, key via env (avoids keys in
-   shell history).
+1. **`--onboard` and `brain.db`: verify-only.** Warn if missing; the app or
+   ingestion engine owns schema creation/migrations. Duplicating migration logic
+   in a config tool is a recipe for drift.
+2. **`ct` (tools crate) does NOT get `onboard`/`doctor`.** Tools crate stays a
+   lightweight dev/headless indexing utility; the shipped bundled binary is the
+   canonical user entry point for configuration and diagnostics.
+3. **External embedding onboarding prompts base_url + model only; API key via
+   env.** Keeps keys out of shell history, logs, and plaintext `config.json`;
+   nudges users toward proper credential management (.env, keystores).
+
+## Durability & performance notes (Kurt, 2026-08-28)
+
+- **Atomic write durability.** The unified write path's tmp + rename must also
+  `sync_data()` (file contents) on the temp file's handle *before* the rename,
+  and prefer `sync_all()` when the directory entry itself must survive an
+  immediate hard power loss. Plain `std::fs::write` + `rename` alone does not
+  guarantee the data is on disk before the rename is visible.
+- **Resolution caching.** `resolve_brain_paths()` stays uncached and
+  re-evaluates env vars on every call — by design. It is called at process boot
+  and command boundaries (sidecar calls it once at startup; desktop calls it in
+  `run()` and behind `get_brain_dir`), not in per-tool-call hot loops, and env
+  reads + path joins are microseconds. If a hot loop ever needs it, cache at the
+  call site (explicit, testable) rather than baking a cache into the resolver
+  (which would freeze env state and break test isolation).
