@@ -77,6 +77,13 @@ pub struct BrainConfig {
   with hand-edited files).
 - JSON layout stays flat-compatible with today's file (same keys in the same
   places) — an existing `config.json` must parse unchanged.
+- **Unknown-key preservation on write (CodeRabbit #2, PR #120).** Serialization
+  must not drop unmodeled keys, including nested ones. The write path is a
+  **raw-document merge**: read existing JSON as a `serde_json::Value` tree,
+  overlay the modeled sections, write back — same strategy as today's
+  `inference::write_config`. A typed deserialize → serialize round-trip is
+  forbidden as the write path. Test: round-trip a config containing an unknown
+  top-level key and an unknown nested key; both must survive.
 
 ### 2. Single resolution + accessor (`config` module)
 
@@ -85,13 +92,22 @@ One function, one derivation rule, used by every consumer:
 ```rust
 resolve_brain_paths() -> BrainPaths      // unchanged semantics: CURATED_BRAIN_CONFIG > CURATED_BRAIN_DB-parent > CURATED_BRAIN_DIR > ~/.brain
 BrainConfig::load(brain_dir) -> Result<BrainConfig>       // hard error only on malformed JSON
-BrainConfig::load_lenient() -> BrainConfig                // never fails; bad fields → defaults + diagnostics
+BrainConfig::load_lenient() -> BrainConfig                // per-field leniency; malformed top-level JSON stays FATAL
 ```
 
-- All five consumers in the Problem table route through this accessor. The
-  desktop entrypoint's hardcoded `default_config_path()` call, `AppDb::open`'s
-  db-parent guess, and the pipeline's db-parent guess are replaced by
-  `resolve_brain_paths()`.
+(`load_lenient` is lenient about *fields*, never about the document: truncated
+or invalid top-level JSON is a hard error in every load mode, so the pipeline
+cannot continue on garbage defaults — CodeRabbit #1, PR #120.)
+
+- All seven consumers in the Problem table route through this accessor —
+  including `privacy/mod.rs` (retiring its third reader/writer) and the
+  frontend path (`get_provider_config` → unified load). The replacements:
+  desktop entrypoint hardcoded `default_config_path()` → `resolve_brain_paths()`;
+  `AppDb::open` db-parent guess → `resolve_brain_paths()`; pipeline db-parent
+  guess → `resolve_brain_paths()`; `privacy/mod.rs` hand-rolled reader/writer →
+  unified accessor + atomic write path; frontend commands → unified load via
+  shared command helpers. Each consumer gets a test (or an explicit exclusion
+  reason in the plan).
 - Backward compat: `VaultConfig` stays as a thin façade over the config module
   (same public methods) so existing call sites and tests compile; new code uses
   `BrainConfig` directly.
@@ -111,11 +127,27 @@ accessor. Multiple installs = multiple independent sidecars, each with its own
 config. Settings snippet (`AgentIntegrationPanel`) already embeds
 `CURATED_BRAIN_DIR` — unchanged.
 
+**Env-matrix contract (CodeRabbit #3, PR #120).** `resolve_brain_paths()`
+combines three env vars; every component must consume the *same resolved
+`BrainPaths`*, never re-derive. The binding matrix:
+
+| Env set | brain_dir | config_path | db_path |
+|---|---|---|---|
+| none | `~/.brain` | `{brain_dir}/config.json` | `{brain_dir}/brain.db` |
+| `DIR` only | `$DIR` | `{brain_dir}/config.json` | `{brain_dir}/brain.db` |
+| `DB` only | `~/.brain` | `{db parent}/config.json` | `$DB` |
+| `CONFIG` only | `~/.brain` | `$CONFIG` | `{brain_dir}/brain.db` |
+| `DB`+`CONFIG` | `~/.brain` | `$CONFIG` | `$DB` |
+| `DIR`+`DB`+`CONFIG` | `$DIR` | `$CONFIG` | `$DB` |
+
+Config-only and split launches are legal and must open the exact files the
+matrix names — the resolution-precedence tests in §6 enumerate this matrix.
+
 ### 4. Headless onboarding (`--onboard`)
 
 New subcommand routing in `main.rs` (before GUI/MCP dispatch):
 
-```
+```console
 curated-thoughts --onboard [--vault <path>] [--force]
 ```
 
@@ -146,11 +178,18 @@ binding remains: copy snippet per instance.
 ### 6. Tests
 
 - Unit: leniency matrix (legacy embed variants, missing blocks, malformed JSON
-  fatal, per-field drop-to-default), resolution-precedence tests (env matrix).
+  fatal, per-field drop-to-default), resolution-precedence tests (the full env
+  matrix in §3, all six rows).
+- Per-consumer coverage (CodeRabbit #4, PR #120): each of the seven Problem-table
+  consumers gets a test asserting it routes through the unified accessor —
+  entrypoint, `AppDb::open`, pipeline, shipped sidecar (`mcp_server.rs`),
+  tools-crate sidecar, `read_config` call sites, `privacy/mod.rs`, frontend
+  (`get_provider_config`). A consumer with no direct test needs an explicit
+  exclusion reason in the plan.
 - Integration: entrypoint/pipeline/AppDb all observe `CURATED_BRAIN_DB`+
   `CURATED_BRAIN_CONFIG` split (fixture configs in temp dirs); round-trip of a
   real config.json from `~/.brain` and `~/.brain-equational-wiki` through
-  `BrainConfig` without lossy field changes.
+  `BrainConfig` without lossy field changes; unknown-key round-trip (§1).
 - CLI: `--onboard` on a temp HOME (creates layout + config, snippet prints),
   `--doctor` on healthy/missing/malformed fixtures, exit codes.
 - CI: extend the existing sidecar smoke test (`scripts/smoke_test_mcp_sidecar.sh`)
