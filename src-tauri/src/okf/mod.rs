@@ -40,6 +40,9 @@ pub struct OkfFrontmatter {
     pub tags: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: Option<String>,
+    /// Vault-relative path of the deposit this one supersedes. Deposit-to-deposit only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
 }
 
 /// Entity types for OKF documents
@@ -176,6 +179,9 @@ pub fn render_frontmatter(fm: &OkfFrontmatter) -> String {
     if let Some(ref updated) = fm.updated_at {
         doc.push_str(&format!("updated_at: {}\n", updated));
     }
+    if let Some(ref supersedes) = fm.supersedes {
+        doc.push_str(&format!("supersedes: {}\n", supersedes));
+    }
     doc.push_str("---\n");
     doc
 }
@@ -210,6 +216,7 @@ mod tests {
             tags: Some(vec!["tag1".to_string(), "tag2".to_string()]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
+            supersedes: None,
         };
         assert!(validate_frontmatter(&fm).is_ok());
     }
@@ -224,6 +231,7 @@ mod tests {
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -243,6 +251,7 @@ mod tests {
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -261,7 +270,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,
+            updated_at: None,            supersedes: None,
+
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -280,7 +290,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: None,
             created_at: "not-a-date".to_string(),
-            updated_at: None,
+            updated_at: None,            supersedes: None,
+
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -300,6 +311,7 @@ mod tests {
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: Some("not-a-date".to_string()),
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -318,7 +330,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: Some(vec!["a".repeat(101)]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,
+            updated_at: None,            supersedes: None,
+
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -338,7 +351,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: Some(tags),
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,
+            updated_at: None,            supersedes: None,
+
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -367,6 +381,7 @@ mod tests {
             tags: Some(vec!["tag1".to_string(), "tag2".to_string()]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: Some("2024-01-02T00:00:00Z".to_string()),
+            supersedes: None,
         };
         let rendered = render_frontmatter(&fm);
         assert!(rendered.contains("---\n"));

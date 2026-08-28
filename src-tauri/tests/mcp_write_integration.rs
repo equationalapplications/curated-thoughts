@@ -22,6 +22,7 @@ fn create_test_frontmatter(title: &str) -> OkfFrontmatter {
         tags: Some(vec!["test".to_string(), "integration".to_string()]),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         updated_at: None,
+        supersedes: None,
     }
 }
 

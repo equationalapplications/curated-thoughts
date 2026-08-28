@@ -62,6 +62,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
+use crate::vault::safe_path::AGENTS_DEPOSIT_DIR;
 use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
@@ -545,6 +546,8 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
     }
+    std::fs::create_dir_all(root.join(AGENTS_DEPOSIT_DIR))
+        .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1172,6 +1175,8 @@ async fn switch_vault(
     for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
     }
+    std::fs::create_dir_all(new_root.join(AGENTS_DEPOSIT_DIR))
+        .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(new_root.join(".brain").join("converted"))
         .map_err(|e| e.to_string())?;
 
@@ -2643,6 +2648,10 @@ pub fn run() {
                 all_dirs_created = false;
             }
         }
+        if let Err(e) = std::fs::create_dir_all(default_vault.join(AGENTS_DEPOSIT_DIR)) {
+            eprintln!("warning: failed to create default vault immutable-source-files/agents: {e}");
+            all_dirs_created = false;
+        }
         if let Err(e) = std::fs::create_dir_all(default_vault.join(".brain").join("converted")) {
             eprintln!("warning: failed to create default vault .brain/converted: {e}");
             all_dirs_created = false;
@@ -2665,6 +2674,10 @@ pub fn run() {
                     eprintln!("error: failed to create fallback vault subdir {subdir}: {e}");
                     fallback_dirs_created = false;
                 }
+            }
+            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(AGENTS_DEPOSIT_DIR)) {
+                eprintln!("error: failed to create fallback vault subdir immutable-source-files/agents: {e}");
+                fallback_dirs_created = false;
             }
             if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted"))
             {

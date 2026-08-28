@@ -33,12 +33,16 @@ pub enum SafePathError {
 pub const IMMUTABLE_DIR: &str = "immutable-source-files";
 /// Directory name for wiki content (readable and writable)
 pub const WIKI_DIR: &str = "wiki";
+/// Nested agent-deposit prefix inside the immutable tier.
+pub const AGENTS_DEPOSIT_DIR: &str = "immutable-source-files/agents";
 /// Subdirectories allowed for read operations
 pub const READABLE_SUBDIRS: &[&str] = &[IMMUTABLE_DIR, WIKI_DIR];
 /// Subdirectories allowed for write operations (excludes immutable-source-files)
 pub const WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR];
 /// Subdirectories allowed for proposed content operations
 pub const PROPOSED_SUBDIRS: &[&str] = &[WIKI_DIR, ".brain/proposed"];
+/// Subdirectories allowed for note write operations (wiki + agents)
+pub const NOTE_WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR, AGENTS_DEPOSIT_DIR];
 
 #[derive(Debug, Clone, Copy)]
 pub enum PathMode {
