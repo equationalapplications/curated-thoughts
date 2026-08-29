@@ -10,6 +10,8 @@ use crate::librarian::synthesis::{run_synthesis, SynthesisMode};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+pub use synthesis::active_generation_model;
+
 pub struct ChunkRow {
     pub id: i64,
     pub entity_id: String,

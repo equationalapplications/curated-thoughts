@@ -199,6 +199,34 @@ fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> St
         .unwrap_or_else(|| fallback_model.to_string())
 }
 
+/// The generation model to record in watermarks and proposal provenance: the
+/// model actually configured for LLM calls, resolved from the brain config
+/// exactly as `build_llm_completer` resolves it. The caller's fallback
+/// (historically the local-Ollama RAM recommendation) applies only when the
+/// active config names no model — call sites that reach the LLM with an
+/// Unconfigured provider fail earlier with "LLM provider not configured", so
+/// the fallback here is a label of last resort, not the model that runs.
+pub fn active_generation_model(fallback_model: &str) -> String {
+    let brain_dir_str = crate::get_brain_dir_inner();
+    let llm_config = read_config(Path::new(&brain_dir_str));
+    active_generation_model_from(&llm_config, fallback_model)
+}
+
+/// Pure variant of [`active_generation_model`] for tests and callers that
+/// already hold a loaded [`LlmConfig`].
+pub fn active_generation_model_from(llm_config: &LlmConfig, fallback_model: &str) -> String {
+    match &llm_config.generation.provider {
+        GenerationProviderKind::Unconfigured => fallback_model.to_string(),
+        GenerationProviderKind::Sidecar => choose_sidecar_model_name(llm_config, fallback_model),
+        GenerationProviderKind::External => llm_config
+            .generation
+            .model_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| fallback_model.to_string()),
+    }
+}
+
 fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
     let brain_dir_str = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir_str);
@@ -886,16 +914,19 @@ pub fn run_synthesis(
     force: bool,
 ) -> Result<()> {
     let completer = build_llm_completer(model)?.context("LLM provider not configured")?;
+    // Record the CONFIGURED model (the one that will actually serve the call),
+    // not the caller's fallback recommendation.
+    let watermark_model = active_generation_model(model);
     run_synthesis_with_completer(
         conn,
         source_path,
         source_chunks,
         trigger_doc_id,
-        model,
         mode,
         auto_approve,
         vault_root,
         completer.as_ref(),
+        watermark_model.as_str(),
         force,
     )
 }
@@ -918,11 +949,13 @@ pub(crate) fn run_synthesis_with_completer(
     source_path: &str,
     source_chunks: &[ChunkRow],
     trigger_doc_id: i64,
-    model: &str,
     mode: SynthesisMode,
     auto_approve: bool,
     vault_root: Option<&Path>,
     completer: &dyn LlmCompleter,
+    // Model string recorded in watermarks and proposal provenance (the
+    // configured generation model; may differ from the `model` fallback arg).
+    watermark_model: &str,
     force: bool,
 ) -> Result<()> {
     if !force {
@@ -936,7 +969,12 @@ pub(crate) fn run_synthesis_with_completer(
             )
             .optional()?;
         if let Some((hash, synth_hash, synth_model)) = row {
-            if super::is_doc_clean(synth_hash.as_deref(), synth_model.as_deref(), &hash, model) {
+            if super::is_doc_clean(
+                synth_hash.as_deref(),
+                synth_model.as_deref(),
+                &hash,
+                watermark_model,
+            ) {
                 return Ok(());
             }
         }
@@ -969,18 +1007,24 @@ pub(crate) fn run_synthesis_with_completer(
         }
     };
 
-    let validated =
-        match parse_and_validate(&raw, mode, &candidates, &numbered, model, trigger_doc_id) {
-            Ok(v) => v,
-            Err(e) => {
-                let msg = format!("synthesis validation failure for {source_path}: {e:#}");
-                write_synthesis_error(vault_root, &msg);
-                return Ok(());
-            }
-        };
+    let validated = match parse_and_validate(
+        &raw,
+        mode,
+        &candidates,
+        &numbered,
+        watermark_model,
+        trigger_doc_id,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("synthesis validation failure for {source_path}: {e:#}");
+            write_synthesis_error(vault_root, &msg);
+            return Ok(());
+        }
+    };
 
     if validated.is_empty() {
-        write_synth_watermark(conn, trigger_doc_id, model)?;
+        write_synth_watermark(conn, trigger_doc_id, watermark_model)?;
         return Ok(());
     }
 
@@ -1007,7 +1051,7 @@ pub(crate) fn run_synthesis_with_completer(
         }
     }
 
-    write_synth_watermark(conn, trigger_doc_id, model)?;
+    write_synth_watermark(conn, trigger_doc_id, watermark_model)?;
 
     Ok(())
 }
@@ -1266,11 +1310,11 @@ mod tests {
             "/vault/documents/note.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             false,
             Some(tmp.path()),
             &mock,
+            "test-model",
             false,
         );
         assert!(result.is_ok());
@@ -1327,11 +1371,11 @@ mod tests {
             "/vault/documents/note.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             false,
             None,
             &mock,
+            "test-model",
             false,
         )
         .unwrap();
@@ -1408,11 +1452,11 @@ mod tests {
             "/vault/documents/auto.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             true,
             None,
             &mock,
+            "test-model",
             false,
         )
         .unwrap();
@@ -1474,11 +1518,11 @@ mod tests {
             "/vault/documents/note.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             false,
             None,
             &mock,
+            "test-model",
             false,
         )
         .unwrap();
@@ -1540,11 +1584,11 @@ mod tests {
             "/vault/documents/note.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             false,
             None,
             &mock,
+            "test-model",
             false,
         )
         .unwrap();
@@ -1592,11 +1636,11 @@ mod tests {
             "/vault/documents/note.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             false,
             Some(tmp.path()),
             &mock,
+            "test-model",
             false,
         )
         .unwrap();
@@ -1655,11 +1699,11 @@ mod tests {
             "/vault/documents/note.md",
             &chunks,
             doc_id,
-            "test-model",
             SynthesisMode::Synthesize,
             false,
             None,
             &mock,
+            "test-model",
             true,
         )
         .unwrap();
@@ -1670,5 +1714,116 @@ mod tests {
         );
         let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn test_active_generation_model_external() {
+        let mut cfg = LlmConfig::default();
+        cfg.generation.provider = GenerationProviderKind::External;
+        cfg.generation.model_name = Some("glm-5.3-flash".into());
+        assert_eq!(
+            active_generation_model_from(&cfg, "llama3.2:1b"),
+            "glm-5.3-flash"
+        );
+        // A whitespace-only model_name falls back like an absent one.
+        cfg.generation.model_name = Some("   ".into());
+        assert_eq!(
+            active_generation_model_from(&cfg, "llama3.2:1b"),
+            "llama3.2:1b"
+        );
+    }
+
+    #[test]
+    fn test_active_generation_model_sidecar() {
+        let mut cfg = LlmConfig::default();
+        cfg.generation.provider = GenerationProviderKind::Sidecar;
+        cfg.generation.model_name = Some("qwen3:4b-instruct".into());
+        assert_eq!(
+            active_generation_model_from(&cfg, "llama3.2:1b"),
+            "qwen3:4b-instruct"
+        );
+    }
+
+    #[test]
+    fn test_active_generation_model_unconfigured_keeps_fallback() {
+        let cfg = LlmConfig::default();
+        assert_eq!(
+            active_generation_model_from(&cfg, "llama3.2:3b"),
+            "llama3.2:3b"
+        );
+    }
+
+    #[test]
+    fn test_watermark_uses_active_model_not_fallback() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Watermark provenance body.",
+        );
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::wm".into(),
+            text: "Watermark provenance body.".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+        // Config names an EXTERNAL generation model; caller still passes the
+        // local fallback string. Watermark + provenance must record the
+        // configured model, and the gate must treat the doc as clean against
+        // it on the next pass (no LLM call).
+        let mut cfg = LlmConfig::default();
+        cfg.generation.provider = GenerationProviderKind::External;
+        cfg.generation.model_name = Some("glm-5.3-flash".into());
+        let watermark_model = active_generation_model_from(&cfg, "llama3.2:1b");
+
+        let mock = MockCompleter::new(vec![r#"{"proposals":[]}"#.to_string()]);
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            &watermark_model,
+            false,
+        )
+        .unwrap();
+
+        let row: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT synth_model, synth_hash FROM documents WHERE id = ?1",
+                [doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0.as_deref(), Some("glm-5.3-flash"));
+
+        // Second pass with the same fallback arg: the gate must see the doc
+        // as clean against the configured model and skip the LLM entirely.
+        mock.call.store(0, Ordering::SeqCst);
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            &watermark_model,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            mock.call.load(Ordering::SeqCst),
+            0,
+            "gate must be stable against the configured-model watermark"
+        );
     }
 }

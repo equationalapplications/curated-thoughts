@@ -181,7 +181,10 @@ impl PipelineWorker {
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &mut conn,
                                     &path,
-                                    crate::setup::recommended_model(),
+                                    crate::librarian::active_generation_model(
+                                        crate::setup::recommended_model(),
+                                    )
+                                    .as_str(),
                                     false,
                                 ) {
                                     let msg = format!("librarian error {}: {}", path, e);
