@@ -168,3 +168,35 @@ Reconciliation contract (librarian/heal — ruling accepted Aug 27):
 **None.** Decisions locked Aug 27 2026: deposit folder named `agents/` (nested under
 `immutable-source-files/`); supersession = newest wins + heal flags conflicts; retrieval
 contract as documented above.
+
+---
+
+## AMENDED (2026-08-29)
+
+**Directive (Kurt, Aug 29 2026):** deposits may now **nest at any depth** under
+`immutable-source-files/agents/`. This supersedes the Aug 28 "flat-only" ruling recorded
+above ("no per-agent subfolders"); agents may organize deposits into subfolders (any
+depth) beneath the deposit root. The change is generic vault behavior for Curated
+Thoughts — not specific to any one agent.
+
+Governing spec (approved by Kurt, Aug 29 2026), Phase B — deposit layout:
+`~/Documents/equational-wiki/immutable-source-files/agents/operations/tessera-memory-unification.md`
+(vault-local path; equational-wiki dogfood vault).
+
+**Unchanged:**
+
+- Supersession containment is exactly as before, widened only to depth: `supersedes`
+  must still reference a **deposit under `immutable-source-files/agents/`**
+  (deposit-to-deposit only) and the target **must exist**
+  (`invalid_frontmatter:supersedes_not_found:{path}` otherwise).
+- Component-based containment (`under_deposit`) still rejects sibling-prefix paths
+  such as `immutable-source-files/agents-evil/…`.
+- Everything else in this spec (Phase 1 mechanism, Phase 2 dir creation, Phase 3
+  supersession semantics, Phase 4 ingestion) is unchanged; `NOTE_WRITABLE_SUBDIRS`
+  already allows the whole `agents/` subtree, so `safe_path.rs` needs no change.
+
+**Implementation delta (`okf/write.rs`):** delete the `is_flat_deposit()` helper and its
+rejection block; the supersedes check uses `under_deposit()` instead of
+`is_flat_deposit()`; nested and deep-nested deposit writes now succeed (missing parents
+are bootstrapped by the existing `create_dir_all` retry).
+
