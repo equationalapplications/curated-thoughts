@@ -104,19 +104,9 @@ fn deposit_prefix_comps() -> Vec<&'static str> {
     AGENTS_DEPOSIT_DIR.split('/').collect()
 }
 
-/// True iff `path` lies directly inside the deposit folder:
-/// `immutable-source-files/agents/<file>.md` — FLAT, no per-agent subfolders
-/// (ruling Kurt, Aug 28 2026; spec `2026-08-27-agent-deposit-write-path.md`).
-fn is_flat_deposit(path: &str) -> bool {
-    let prefix = deposit_prefix_comps();
-    let comps: Vec<&str> = Path::new(path)
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-    comps.len() == prefix.len() + 1 && comps[..prefix.len()] == prefix[..]
-}
-
-/// True iff `path` is inside the deposit folder at any depth (incl. subfolders).
+/// True iff `path` is inside the deposit folder at any depth (incl. subfolders,
+/// allowed per Kurt's Aug 29 2026 directive; amended spec
+/// `2026-08-27-agent-deposit-write-path.md` §AMENDED 2026-08-29).
 fn under_deposit(path: &str) -> bool {
     let prefix = deposit_prefix_comps();
     let comps: Vec<&str> = Path::new(path)
@@ -130,11 +120,12 @@ fn under_deposit(path: &str) -> bool {
 ///
 /// * `vault_root` — absolute path to the vault root.
 /// * `path` — vault-relative path (e.g. `wiki/my-note.md` or
-///   `immutable-source-files/agents/my-note.md`). Agent deposits live FLAT
-///   under `agents/` (no subfolders). Validated with
-///   `safe_vault_path(_, _, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate)`. Missing parent
-///   directories are created, then the resolution is repeated so every
-///   containment/symlink decision stays inside `safe_vault_path`.
+///   `immutable-source-files/agents/my-note.md`). Agent deposits may nest at
+///   any depth under `agents/` (per-agent subfolders allowed; amended spec
+///   `2026-08-27-agent-deposit-write-path.md` §AMENDED 2026-08-29). Validated
+///   with `safe_vault_path(_, _, NOTE_WRITABLE_SUBDIRS, PathMode::MayCreate)`.
+///   Missing parent directories are created, then the resolution is repeated
+///   so every containment/symlink decision stays inside `safe_vault_path`.
 /// * `frontmatter` — OKF frontmatter; validated; `updated_at` defaults to
 ///   now (RFC 3339, UTC) when omitted.
 /// * `body` — markdown body; normalized to end with exactly one `\n`.
@@ -149,20 +140,13 @@ pub fn write_note(
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
 
-    // Flat-layout contract (Kurt, Aug 28 2026): deposits live directly under
-    // `immutable-source-files/agents/` — no per-agent subfolders. Note this
-    // applies to ALL deposits, not just ones carrying `supersedes`.
-    if under_deposit(path) && !is_flat_deposit(path) {
-        return Err(WriteNoteError::PathOutsideVault);
-    }
-
     // Validate supersession: deposit-to-deposit only, target must exist.
     if let Some(ref supersedes_path) = frontmatter.supersedes {
         // Both ends must be deposits (component-based check; string
         // `starts_with` would accept sibling prefixes like `agents-evil/`).
-        if !is_flat_deposit(supersedes_path) {
+        if !under_deposit(supersedes_path) {
             return Err(WriteNoteError::InvalidFrontmatter(format!(
-                "supersedes must reference a flat deposit under {}: got {}",
+                "supersedes must reference a deposit under {}: got {}",
                 AGENTS_DEPOSIT_DIR, supersedes_path
             )));
         }
@@ -624,20 +608,42 @@ mod tests {
         assert!(root.join("immutable-source-files/agents/mem.md").is_file());
     }
 
-    /// AD2 — subfolder deposits are rejected (flat layout is the contract).
+    /// AD2 — nested deposits succeed (amended spec §AMENDED 2026-08-29:
+    /// subfolders under `agents/` are allowed, any depth).
     #[test]
-    fn ad2_subfolder_deposit_rejected() {
+    fn ad2_nested_deposit_write_succeeds() {
         let (_g, root) = deposit_vault();
-        let err = write_note(
+        let result = write_note(
             &root,
-            "immutable-source-files/agents/hermes/mem.md",
-            &fm("T", None),
-            "x\n",
+            "immutable-source-files/agents/people/tessera/x.md",
+            &fm("Nested", None),
+            "deposited\n",
             None,
         )
-        .unwrap_err();
-        assert!(matches!(err, WriteNoteError::PathOutsideVault));
-        assert!(!root.join("immutable-source-files/agents/hermes").exists());
+        .unwrap();
+        assert!(result.success);
+        assert!(root
+            .join("immutable-source-files/agents/people/tessera/x.md")
+            .is_file());
+    }
+
+    /// E2 — deep-path deposit (4 levels under `agents/`) succeeds; missing
+    /// intermediate dirs are bootstrapped by the parent-create retry.
+    #[test]
+    fn e2_deep_nested_deposit_write_succeeds() {
+        let (_g, root) = deposit_vault();
+        let result = write_note(
+            &root,
+            "immutable-source-files/agents/products/curated-thoughts/specs/y.md",
+            &fm("Deep", None),
+            "deposited\n",
+            None,
+        )
+        .unwrap();
+        assert!(result.success);
+        assert!(root
+            .join("immutable-source-files/agents/products/curated-thoughts/specs/y.md")
+            .is_file());
     }
 
     /// AD3 — write outside the deposit prefix is rejected (path safety).
@@ -699,6 +705,40 @@ mod tests {
         assert_eq!(
             parsed.supersedes.as_deref(),
             Some("immutable-source-files/agents/v1.md")
+        );
+    }
+
+    /// AD5b — supersedes roundtrip with a NESTED target: both ends inside
+    /// `agents/` at depth, containment check passes (amended spec
+    /// §AMENDED 2026-08-29).
+    #[test]
+    fn ad5b_supersedes_nested_target_roundtrip() {
+        let (_g, root) = deposit_vault();
+        write_note(
+            &root,
+            "immutable-source-files/agents/people/tessera/v1.md",
+            &fm("V1", None),
+            "old\n",
+            None,
+        )
+        .unwrap();
+        let mut m = fm("V2", None);
+        m.supersedes = Some("immutable-source-files/agents/people/tessera/v1.md".to_string());
+        write_note(
+            &root,
+            "immutable-source-files/agents/people/tessera/v2.md",
+            &m,
+            "new\n",
+            None,
+        )
+        .unwrap();
+        let raw = fs::read_to_string(root.join("immutable-source-files/agents/people/tessera/v2.md"))
+            .unwrap();
+        assert!(raw.contains("supersedes: immutable-source-files/agents/people/tessera/v1.md"));
+        let parsed = extract_fm(&raw);
+        assert_eq!(
+            parsed.supersedes.as_deref(),
+            Some("immutable-source-files/agents/people/tessera/v1.md")
         );
     }
 
