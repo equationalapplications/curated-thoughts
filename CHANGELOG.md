@@ -1,3 +1,29 @@
+## [1.36.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.35.1...v1.36.0) (2026-08-30)
+
+### Features
+
+* **cli:** add --doctor subcommand for configuration diagnostics ([5a362be](https://github.com/equationalapplications/curated-thoughts/commit/5a362bea99762fd4612dc5acd223be27df9ab60b))
+* **cli:** add --onboard subcommand for headless setup ([270f70a](https://github.com/equationalapplications/curated-thoughts/commit/270f70aeca3fe05c0351d7b77ff5c77751d73ce4))
+* **config:** add unified BrainConfig schema and LoadReport ([0cc3033](https://github.com/equationalapplications/curated-thoughts/commit/0cc3033dfc13e7363f4f120d4683068a4a0d5967))
+* **config:** implement atomic raw-document merge write ([63b16df](https://github.com/equationalapplications/curated-thoughts/commit/63b16df68237b7f827b11f6f91755b8d48422041))
+* **config:** implement strict and lenient load paths ([baba398](https://github.com/equationalapplications/curated-thoughts/commit/baba3989c0760d60d9eeb6e10ff4a62c3ffd1f62))
+* **config:** re-export GenerationConfig and EmbeddingConfig for back-compat ([4a98b32](https://github.com/equationalapplications/curated-thoughts/commit/4a98b32a74916bff08e68aafcb8329c938adc81d))
+* **startup:** handle malformed config with recoverable banner ([27b3554](https://github.com/equationalapplications/curated-thoughts/commit/27b3554b438f1dc3e4bb35c613e2dae815f84fab))
+* **ui:** add brain dir source indicator to AgentIntegrationPanel ([77461da](https://github.com/equationalapplications/curated-thoughts/commit/77461da44d17478f26137831d3b784927ec286e6))
+
+### Bug Fixes
+
+* **config:** address final PR [#120](https://github.com/equationalapplications/curated-thoughts/issues/120) review threads (21, 22) ([5bee344](https://github.com/equationalapplications/curated-thoughts/commit/5bee3445f735a2a8e3ac4c974a70b725e799d4ed)), closes [#21](https://github.com/equationalapplications/curated-thoughts/issues/21) [#22](https://github.com/equationalapplications/curated-thoughts/issues/22)
+* **config:** address new PR [#120](https://github.com/equationalapplications/curated-thoughts/issues/120) review threads 14-15 ([92a3492](https://github.com/equationalapplications/curated-thoughts/commit/92a34924e6a781ebf0747f2346dd288bd3518916))
+* **config:** address post-merge review on unified config loader ([811b5a8](https://github.com/equationalapplications/curated-thoughts/commit/811b5a8a583fb3eeda9a6e504a42075f84ee6f2d))
+* **config:** address PR [#120](https://github.com/equationalapplications/curated-thoughts/issues/120) CodeRabbit review threads 1-4 ([745b520](https://github.com/equationalapplications/curated-thoughts/commit/745b5208813a97d3056cc264aa7876690ee99b62))
+* **config:** address PR [#120](https://github.com/equationalapplications/curated-thoughts/issues/120) review threads + honor supplied brain_dir ([151b2be](https://github.com/equationalapplications/curated-thoughts/commit/151b2bef60e3c957d2a237ef01f4016efd78d7db))
+* **config:** create brain dir before first config write ([e9f5334](https://github.com/equationalapplications/curated-thoughts/commit/e9f5334f2ec59f109ed43ea1422403721a9fb9c5))
+* **config:** preserve unknown keys and tighten test assertions ([4b3a21a](https://github.com/equationalapplications/curated-thoughts/commit/4b3a21a5b8b563f6e4ae88fd886059fbadf2eaf3))
+* resolve final review findings — panel save, --force, AppDb, doctor, startup ([2b08f84](https://github.com/equationalapplications/curated-thoughts/commit/2b08f84fec2c8c38f665f4ccbae9056fa0b5d336))
+* **test:** prevent ConnectionsPanel race by preserving test-setup mock for unrelated commands ([e032585](https://github.com/equationalapplications/curated-thoughts/commit/e0325852f6d18811443039c44a2e902274e03a6d))
+* **vault_config:** route setters through unified write (Problem class 4) ([41bc314](https://github.com/equationalapplications/curated-thoughts/commit/41bc314ec9a3152999e01e30e8ac7104dfcf705e))
+
 ## [1.35.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.35.0...v1.35.1) (2026-08-29)
 
 ### Bug Fixes
