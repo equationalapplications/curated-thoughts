@@ -104,7 +104,7 @@ fn load_lenient_fails_on_malformed_json() {
 
     let report = BrainConfig::load_lenient(&paths);
     // Malformed top-level JSON is still fatal
-    assert!(!report.diagnostics.is_empty() || report.config.vault_path.is_none());
+    assert!(report.diagnostics.iter().any(|d| d.contains("malformed")));
 }
 
 #[test]
@@ -127,4 +127,36 @@ fn load_lenient_tracks_missing_blocks() {
     assert!(report.embedding_missing);
     assert!(report.privacy_missing);
     assert!(!report.vault_path_missing);
+}
+
+#[test]
+fn load_lenient_preserves_unknown_keys() {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+
+    // Include an unknown top-level key
+    let json = r#"{"vault_path":"~/vault","unknown_field":"hello","another_unknown":42,"generation":{},"embedding":{},"privacy":{}}"#;
+    fs::write(&config_path, json).unwrap();
+
+    let paths = BrainPaths {
+        brain_dir: temp.path().to_path_buf(),
+        config_path,
+        db_path: temp.path().join("brain.db"),
+    };
+
+    let report = BrainConfig::load_lenient(&paths);
+    let preserved = report.config.preserved_keys;
+    assert!(
+        preserved.is_some(),
+        "unknown keys should be preserved in preserved_keys"
+    );
+    let preserved_obj = preserved.unwrap();
+    assert_eq!(
+        preserved_obj.get("unknown_field").and_then(|v| v.as_str()),
+        Some("hello")
+    );
+    assert_eq!(
+        preserved_obj.get("another_unknown").and_then(|v| v.as_i64()),
+        Some(42)
+    );
 }

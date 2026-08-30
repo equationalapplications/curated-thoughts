@@ -21,6 +21,9 @@ pub struct BrainConfig {
     pub embedding: EmbeddingConfig,
     /// Privacy mode and settings.
     pub privacy: PrivacyConfig,
+    /// Preserved raw JSON for unknown keys (round-trip vehicle).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_keys: Option<serde_json::Value>,
 }
 
 impl Default for BrainConfig {
@@ -32,6 +35,7 @@ impl Default for BrainConfig {
             generation: GenerationConfig::default(),
             embedding: EmbeddingConfig::default(),
             privacy: PrivacyConfig::default(),
+            preserved_keys: None,
         }
     }
 }
@@ -61,9 +65,38 @@ impl BrainConfig {
         let text = fs::read_to_string(&paths.config_path)?;
         let value: serde_json::Value = serde_json::from_str(&text)?;
 
-        // Strict: attempt direct deserialization. No fallback.
-        match serde_json::from_value::<BrainConfig>(value) {
-            Ok(cfg) => Ok(cfg),
+        let obj = match value.as_object() {
+            Some(o) => o.clone(),
+            None => bail!("config.json root must be a JSON object"),
+        };
+
+        // Preserve unknown keys for round-trip
+        let known_keys = [
+            "vault_path",
+            "embed_profile",
+            "migrated_to_v2",
+            "generation",
+            "embedding",
+            "privacy",
+        ];
+        let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
+            .iter()
+            .filter(|(k, _)| !known_keys.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let preserved_keys = if unknown_keys.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(unknown_keys))
+        };
+
+        // Re-serialize the known fields for strict deserialization
+        let known_value = serde_json::to_value(&obj)?;
+        match serde_json::from_value::<BrainConfig>(known_value) {
+            Ok(mut cfg) => {
+                cfg.preserved_keys = preserved_keys;
+                Ok(cfg)
+            }
             Err(e) => bail!("Config deserialize error: {}", e),
         }
     }
@@ -103,11 +136,31 @@ impl BrainConfig {
         };
 
         let obj = match value.as_object() {
-            Some(o) => o,
+            Some(o) => o.clone(),
             None => {
                 report.diagnostics.push("root is not a JSON object".to_string());
                 return report;
             }
+        };
+
+        // Preserve unknown keys for round-trip
+        let known_keys = [
+            "vault_path",
+            "embed_profile",
+            "migrated_to_v2",
+            "generation",
+            "embedding",
+            "privacy",
+        ];
+        let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
+            .iter()
+            .filter(|(k, _)| !known_keys.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        report.config.preserved_keys = if unknown_keys.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(unknown_keys))
         };
 
         // vault_path: hard error if present but not a string
