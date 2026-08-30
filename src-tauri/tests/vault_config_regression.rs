@@ -121,3 +121,41 @@ fn set_migrated_to_v2_preserves_generation_and_privacy() {
         "unknown nested key survived after set_migrated_to_v2"
     );
 }
+
+#[test]
+fn set_embed_profile_local_variant_preserves_all_blocks() {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    let json = r#"{"vault_path":"~/v","generation":{"model":"gpt4"},"privacy":{"mode":"strict"},"custom_key":"val"}"#;
+    fs::write(&config_path, json).unwrap();
+
+    let config = VaultConfig::new(config_path.clone());
+    config
+        .set_embed_profile(tauri_app_lib::embedder::EmbedProfile::Local {
+            model: "nomic".to_string(),
+        })
+        .expect("set_embed_profile succeeds");
+
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(written["generation"]["model"], "gpt4", "generation survived");
+    assert_eq!(written["privacy"]["mode"], "strict", "privacy survived");
+    assert_eq!(written["custom_key"], "val", "custom key survived");
+}
+
+#[test]
+fn set_migrated_to_v2_keeps_all_blocks_and_custom_keys() {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    let json =
+        r#"{"vault_path":"~/v","generation":{},"embedding":{},"privacy":{},"custom":"keep"}"#;
+    fs::write(&config_path, json).unwrap();
+
+    let config = VaultConfig::new(config_path.clone());
+    config.set_migrated_to_v2().expect("set_migrated_to_v2 succeeds");
+
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert!(written["migrated_to_v2"].as_bool().unwrap_or(false));
+    assert_eq!(written["custom"], "keep");
+}

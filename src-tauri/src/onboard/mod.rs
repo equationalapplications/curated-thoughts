@@ -155,10 +155,21 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
                     e
                 )
             })?;
-            // Replace the malformed file so BrainConfig::write can read it.
-            std::fs::write(&paths.config_path, "{}")?;
+
+            // If the existing config is parseable JSON, load it so unknown
+            // keys survive the --force overwrite.  Only when the file is
+            // malformed do we blank it (we cannot merge garbage).
+            let text = std::fs::read_to_string(&paths.config_path)?;
+            if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+                let report = BrainConfig::load_lenient(&paths);
+                report.config
+            } else {
+                std::fs::write(&paths.config_path, "{}")?;
+                BrainConfig::default()
+            }
+        } else {
+            BrainConfig::default()
         }
-        BrainConfig::default()
     } else if paths.config_path.exists() {
         let report = BrainConfig::load_lenient(&paths);
         report.config

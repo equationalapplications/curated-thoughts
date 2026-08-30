@@ -104,3 +104,91 @@ fn write_on_missing_file_creates_it() {
     let written: BrainConfig = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(written.vault_path, Some("~/vault".to_string()));
 }
+
+#[test]
+fn write_fails_and_preserves_file_on_malformed() {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    let original = "{ broken json }";
+    fs::write(&config_path, original).unwrap();
+
+    let paths = BrainPaths {
+        brain_dir: temp.path().to_path_buf(),
+        config_path: config_path.clone(),
+        db_path: temp.path().join("brain.db"),
+    };
+
+    let config = BrainConfig::default();
+    let result = config.write(&paths);
+    assert!(result.is_err(), "write should fail on malformed JSON");
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        original,
+        "original bytes preserved"
+    );
+}
+
+#[test]
+fn concurrent_writes_use_different_temp_files() {
+    use std::thread;
+    use std::sync::{Arc, Barrier};
+
+    let temp = TempDir::new().unwrap();
+    let brain_dir = temp.path().to_path_buf();
+    let db_path = brain_dir.join("brain.db");
+    let config_path = Arc::new(brain_dir.join("config.json"));
+    fs::write(
+        &*config_path,
+        r#"{"generation":{},"embedding":{},"privacy":{}}"#,
+    )
+    .unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+
+    let t1 = {
+        let path = Arc::clone(&config_path);
+        let b = Arc::clone(&barrier);
+        let brain_dir = brain_dir.clone();
+        let db_path = db_path.clone();
+        thread::spawn(move || {
+            let paths = BrainPaths {
+                brain_dir,
+                config_path: (*path).clone(),
+                db_path,
+            };
+            let mut config = BrainConfig::default();
+            config.vault_path = Some("vault1".to_string());
+            b.wait();
+            config.write(&paths).unwrap();
+        })
+    };
+
+    let t2 = {
+        let path = Arc::clone(&config_path);
+        let b = Arc::clone(&barrier);
+        let brain_dir = brain_dir.clone();
+        let db_path = db_path.clone();
+        thread::spawn(move || {
+            let paths = BrainPaths {
+                brain_dir,
+                config_path: (*path).clone(),
+                db_path,
+            };
+            let mut config = BrainConfig::default();
+            config.vault_path = Some("vault2".to_string());
+            b.wait();
+            config.write(&paths).unwrap();
+        })
+    };
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    // No .tmp files left
+    let entries: Vec<_> = fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "tmp"))
+        .collect();
+    assert!(entries.is_empty(), "no .tmp files from concurrent writes");
+}

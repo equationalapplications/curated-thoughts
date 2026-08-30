@@ -4,8 +4,7 @@ pub mod sidecar;
 use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
 #[allow(deprecated)]
 use crate::inference::config::{
-    read_config, resolve_model_path, write_config, EmbeddingConfig, GenerationConfig,
-    GenerationProviderKind,
+    resolve_model_path, EmbeddingConfig, GenerationConfig, GenerationProviderKind,
 };
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
 use crate::privacy::{self, allows_external_generation};
@@ -208,6 +207,11 @@ pub fn initialize_provider(
     initialize_provider_inner(brain_dir, config, Some(app))
 }
 
+/// Route a panel save through the unified loader + writer so we honor
+/// `CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG`, atomic temp files, and
+/// malformed-JSON safety.  Preserves any legacy plaintext `api_key` already
+/// on disk when the incoming value is None — matching the historical
+/// `write_config` raw-document-merge contract.
 #[allow(deprecated)]
 pub fn update_provider_with_brain_path(
     brain_path: &Path,
@@ -225,14 +229,20 @@ pub fn update_provider_with_brain_path(
 
     // Use the incoming config (including its api_key) for the immediate
     // provider init only — never for disk persistence.  Credentials on disk
-    // come from the environment (or pre-existing legacy entries preserved by
-    // write_config's raw-document merge).
+    // come from the environment (or pre-existing legacy entries preserved
+    // here from the unified loader).
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {
-            let mut fallback_config = read_config(brain_path);
-            fallback_config.generation = GenerationConfig::default();
-            let rollback_err = write_config(brain_path, &fallback_config).err();
+            // Roll back to a default config via the unified writer so the
+            // panel state is cleared even when provider init fails.
+            let paths = crate::retrieval::BrainPaths {
+                brain_dir: brain_path.to_path_buf(),
+                config_path: crate::retrieval::resolve_brain_paths().config_path,
+                db_path: brain_path.join("brain.db"),
+            };
+            let fallback = crate::config::BrainConfig::default();
+            let rollback_err = fallback.write(&paths).err();
             if let Some(rollback_err) = rollback_err {
                 return Err(format!(
                     "provider init failed: {e}; rollback failed: {rollback_err}"
@@ -244,19 +254,34 @@ pub fn update_provider_with_brain_path(
         }
     };
 
-    let mut llm_config = read_config(brain_path);
-    // Strip api_key before persisting. write_config's raw-document merge
-    // will restore any legacy plaintext key already on disk when the new
-    // value is null — so the panel cannot wipe a pre-existing credential,
-    // but it also cannot write a new one.
-    let mut config_for_disk = config;
-    config_for_disk.api_key = None;
-    llm_config.generation = config_for_disk;
+    // Load the current unified config (preserves any legacy plaintext api_key
+    // on disk), overlay the new generation block, and write via the unified
+    // writer.  `BrainConfig::write` honors `CURATED_BRAIN_DB` /
+    // `CURATED_BRAIN_CONFIG`, uses a unique temp filename, and treats
+    // malformed JSON as fatal.
+    let paths = crate::retrieval::BrainPaths {
+        brain_dir: brain_path.to_path_buf(),
+        config_path: crate::retrieval::resolve_brain_paths().config_path,
+        db_path: brain_path.join("brain.db"),
+    };
+    let mut cfg = crate::config::BrainConfig::load_lenient(&paths).config;
 
-    if let Err(e) = write_config(brain_path, &llm_config) {
-        let mut fallback = llm_config;
-        fallback.generation = GenerationConfig::default();
-        let rollback_err = write_config(brain_path, &fallback).err();
+    let mut config_for_disk = config;
+    // Strip api_key before persisting.  If the incoming value is empty,
+    // preserve any legacy plaintext key already on disk by NOT overwriting
+    // it — so the panel cannot wipe a pre-existing credential, but also
+    // cannot write a new one (the latter must come from env vars).
+    let incoming_key = config_for_disk.api_key.clone();
+    let preserved_key = match incoming_key.as_deref() {
+        Some(s) if !s.trim().is_empty() => incoming_key,
+        _ => cfg.generation.api_key.clone(),
+    };
+    config_for_disk.api_key = preserved_key;
+    cfg.generation = config_for_disk;
+
+    if let Err(e) = cfg.write(&paths) {
+        let fallback = crate::config::BrainConfig::default();
+        let rollback_err = fallback.write(&paths).err();
         if let Some(rollback_err) = rollback_err {
             return Err(format!(
                 "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"

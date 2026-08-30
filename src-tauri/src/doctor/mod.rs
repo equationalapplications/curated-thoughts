@@ -73,5 +73,24 @@ pub fn run_doctor() -> Result<u32> {
         }
     }
 
+    // Surface any legacy plaintext keys still living in config.json so the
+    // operator can migrate them to env vars and reduce disk exposure.
+    if report.config.generation.api_key.as_deref().map_or(false, |s| !s.is_empty()) {
+        println!("WARNING: generation.api_key found in config.json — migrate to GENERATION_API_KEY env var");
+    }
+    if let Some(profile) = &report.config.embed_profile {
+        let key_present = match profile {
+            crate::embedder::EmbedProfile::Cloud { api_key, .. } => !api_key.is_empty(),
+            crate::embedder::EmbedProfile::External { profile } => profile
+                .api_key
+                .as_deref()
+                .map_or(false, |s| !s.is_empty()),
+            crate::embedder::EmbedProfile::Local { .. } => false,
+        };
+        if key_present {
+            println!("WARNING: embed_profile.api_key found in config.json — migrate to EMBED_API_KEY env var");
+        }
+    }
+
     Ok(0) // Exit code 0
 }

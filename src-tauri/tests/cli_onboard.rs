@@ -176,3 +176,34 @@ fn onboard_is_idempotent_on_vault_dirs() {
         create_layout_and_onboard(cfg).expect("second onboard (idempotent)");
     });
 }
+
+#[test]
+fn onboard_preserves_existing_config_unknown_keys() {
+    let temp = TempDir::new().unwrap();
+    let vault = temp.path().join("new-vault");
+
+    let cfg = temp.path().join("config.json");
+    let pre_json = serde_json::json!({
+        "vault_path": "~/old",
+        "custom_field": "preserve_me",
+        "generation": {},
+        "embedding": {},
+        "privacy": {}
+    });
+    fs::write(&cfg, serde_json::to_string_pretty(&pre_json).unwrap()).unwrap();
+
+    with_temp_brain_dir(&temp, || {
+        create_layout_and_onboard(make_config(&vault)).expect("onboard merges unknown keys");
+    });
+
+    let text = fs::read_to_string(&cfg).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        parsed
+            .get("custom_field")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "preserve_me",
+        "unknown top-level key preserved"
+    );
+}

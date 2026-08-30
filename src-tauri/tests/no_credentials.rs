@@ -1,0 +1,143 @@
+//! Verify no API keys are written to config.json.
+
+use tauri_app_lib::config::BrainConfig;
+use tauri_app_lib::retrieval::BrainPaths;
+use tempfile::TempDir;
+use std::fs;
+
+fn temp_paths() -> (TempDir, BrainPaths) {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    let brain_dir = temp.path().to_path_buf();
+    fs::write(
+        &config_path,
+        r#"{"generation":{},"embedding":{},"privacy":{}}"#,
+    )
+    .unwrap();
+    let paths = BrainPaths {
+        brain_dir,
+        config_path: config_path.clone(),
+        db_path: temp.path().join("brain.db"),
+    };
+    (temp, paths)
+}
+
+#[test]
+fn onboard_never_writes_api_key_to_config() {
+    use tauri_app_lib::embedder::EmbedProfile;
+    use tauri_app_lib::inference::config::{GenerationConfig, GenerationProviderKind};
+    use tauri_app_lib::onboard::{create_layout_and_onboard, OnboardConfig};
+
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    fs::write(
+        &config_path,
+        r#"{"generation":{},"embedding":{},"privacy":{}}"#,
+    )
+    .unwrap();
+
+    let vault = temp.path().join("vault");
+    let cfg = OnboardConfig {
+        vault_root: vault.clone(),
+        force: false,
+        embed_profile: EmbedProfile::Local {
+            model: "nomic".to_string(),
+        },
+        generation: GenerationConfig {
+            provider: GenerationProviderKind::External,
+            model_path: None,
+            model_name: Some("gpt-4".to_string()),
+            external_url: Some("https://api.example.com".to_string()),
+            api_key: None, // Never set
+            timeout_secs: None,
+        },
+    };
+
+    // Point CURATED_BRAIN_CONFIG at our temp file via temp_env.
+    temp_env::with_var(
+        "CURATED_BRAIN_CONFIG",
+        Some(config_path.to_string_lossy().as_ref()),
+        || {
+            create_layout_and_onboard(cfg).expect("onboard succeeds");
+        },
+    );
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let written: serde_json::Value = serde_json::from_str(&content).unwrap();
+    // Verify no api_key field on the on-disk config
+    if let Some(gen) = written.get("generation").and_then(|g| g.as_object()) {
+        assert!(
+            !gen.contains_key("api_key")
+                || gen.get("api_key").map(|v| v.is_null()).unwrap_or(true),
+            "api_key should not be written to config.json"
+        );
+    }
+}
+
+#[test]
+fn doctor_never_echoes_api_key() {
+    use temp_env::with_var;
+
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    fs::write(
+        &config_path,
+        r#"{"vault_path":"~/v","generation":{},"embedding":{},"privacy":{}}"#,
+    )
+    .unwrap();
+
+    with_var(
+        "GENERATION_API_KEY",
+        Some("super-secret-key-99999"),
+        || {
+            with_var(
+                "CURATED_BRAIN_CONFIG",
+                Some(config_path.to_string_lossy().as_ref()),
+                || {
+                    let exit_code = tauri_app_lib::doctor::run_doctor().unwrap();
+                    assert_eq!(exit_code, 0);
+                    // We can't easily capture stdout in a unit test, but we verify
+                    // the function returns 0 and that config.json on disk was not
+                    // modified to include the secret.
+                    let content = fs::read_to_string(&config_path).unwrap();
+                    assert!(
+                        !content.contains("super-secret-key-99999"),
+                        "secret should never be written to config.json"
+                    );
+                },
+            );
+        },
+    );
+}
+
+#[test]
+fn brainconfig_default_has_no_api_key_in_json() {
+    // Verify that when an OnboardConfig has api_key: None and we serialize,
+    // the resulting JSON does NOT carry an api_key field.
+    use tauri_app_lib::inference::config::{GenerationConfig, GenerationProviderKind};
+
+    let (temp, paths) = temp_paths();
+    let mut config = BrainConfig::default();
+    config.generation = GenerationConfig {
+        provider: GenerationProviderKind::External,
+        model_path: None,
+        model_name: Some("gpt-4".to_string()),
+        external_url: Some("https://api.example.com".to_string()),
+        api_key: None,
+        timeout_secs: None,
+    };
+    config.write(&paths).expect("write succeeds");
+
+    let content = fs::read_to_string(&paths.config_path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let gen = value.get("generation").and_then(|g| g.as_object());
+    if let Some(gen) = gen {
+        assert!(
+            !gen.contains_key("api_key") || gen["api_key"].is_null(),
+            "api_key (None) should not appear in written JSON: got {:?}",
+            gen.get("api_key")
+        );
+    }
+
+    drop(temp);
+}

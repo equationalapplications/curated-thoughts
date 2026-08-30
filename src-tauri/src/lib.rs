@@ -2683,12 +2683,19 @@ pub fn run() {
     // Task 17: surface malformed config immediately so headless launches
     // (and CI logs) see the hint before the Tauri setup hook runs.
     // The in-app banner is emitted from the setup hook below; this early
-    // check is a stderr fallback that never blocks startup.
-    if let Ok(text) = std::fs::read_to_string(&config_path) {
-        if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+    // check is a stderr fallback that never blocks startup.  Reuses the
+    // unified lenient loader so the diagnostic wording stays in sync with
+    // the desktop banner — no second copy of the JSON parse gate.
+    if paths.config_path.exists() {
+        let early_report = crate::config::BrainConfig::load_lenient(&paths);
+        if early_report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("malformed"))
+        {
             eprintln!(
                 "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
-                config_path.display()
+                paths.config_path.display()
             );
         }
     }
@@ -2927,10 +2934,14 @@ pub fn run() {
 
                     let brain_dir_str = get_brain_dir_inner();
                     let brain_path = std::path::Path::new(&brain_dir_str);
+                    // Use the unified resolver so we honor `CURATED_BRAIN_DB`
+                    // / `CURATED_BRAIN_CONFIG` and stay in sync with every
+                    // other config-loading call site.
+                    let resolved_paths = crate::retrieval::resolve_brain_paths();
                     let report = crate::config::BrainConfig::load_lenient(
                         &crate::retrieval::BrainPaths {
                             brain_dir: brain_path.to_path_buf(),
-                            config_path: crate::inference::config::config_path(brain_path),
+                            config_path: resolved_paths.config_path.clone(),
                             db_path: brain_path.join("brain.db"),
                         },
                     );
@@ -2950,12 +2961,12 @@ pub fn run() {
                     if !malformed_diagnostics.is_empty() {
                         eprintln!(
                             "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
-                            crate::inference::config::config_path(brain_path).display()
+                            resolved_paths.config_path.display()
                         );
                         let _ = app_handle.emit(
                             "config-malformed",
                             serde_json::json!({
-                                "config_path": crate::inference::config::config_path(brain_path).to_string_lossy(),
+                                "config_path": resolved_paths.config_path.to_string_lossy(),
                                 "diagnostics": malformed_diagnostics,
                                 "remediation": "Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
                             }),

@@ -86,6 +86,17 @@ pub fn read_config(brain_dir: &Path) -> LlmConfig {
     }
 }
 
+/// DEPRECATED: use [`crate::config::BrainConfig::load_lenient`] +
+/// [`crate::config::BrainConfig::write`] instead.  This function does not
+/// honor `CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG` (it derives the path
+/// from the brain dir only), uses a fixed temp filename (race-prone), and
+/// silently swallows malformed JSON on disk.  It is retained for the
+/// historical test suite and any external callers; new code must use the
+/// unified loader.
+#[deprecated(
+    since = "0.1.0",
+    note = "use crate::config::BrainConfig::load_lenient + BrainConfig::write instead"
+)]
 pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
     let path = config_path(brain_dir);
     if let Some(parent) = path.parent() {
