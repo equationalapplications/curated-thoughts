@@ -176,9 +176,13 @@ impl BrainConfig {
         let raw_emb = obj.get("embedding").cloned();
         let raw_priv = obj.get("privacy").cloned();
 
-        // Re-serialize the known fields for strict deserialization
-        let known_value = serde_json::to_value(&obj)?;
-        match serde_json::from_value::<BrainConfig>(known_value) {
+        // Re-use the already-parsed `value` — `obj` is its inner map,
+        // re-serializing back to a Value just to deserialize again is wasted
+        // work. The pre-validation above guarantees the root is an object
+        // and vault_path is a valid string/null, so the strict deserialize
+        // here is the only thing that can fail (unknown enum variants,
+        // schema mismatches in typed blocks).
+        match serde_json::from_value::<BrainConfig>(value) {
             Ok(mut cfg) => {
                 cfg.preserved_keys = preserved_keys;
 
@@ -227,12 +231,13 @@ impl BrainConfig {
                     };
                 }
 
-                // Even when serde does not error on unknown variants (it silently
-                // defaults them), preserve the original raw block so write() can
-                // restore it verbatim instead of the defaulted struct.
-                cfg.raw_generation = raw_gen;
-                cfg.raw_embedding = raw_emb;
-                cfg.raw_privacy = raw_priv;
+                // On the typed-success path, the typed fields are authoritative.
+                // Only the lenient-fallback path (below) sets `raw_*`, so callers
+                // who mutate `cfg.generation` / `cfg.embedding` / `cfg.privacy`
+                // and call `write()` see their mutations land on disk. Unknown
+                // enum variants are no longer preserved verbatim here — that
+                // behavior was a public-API footgun because it silently dropped
+                // typed mutations. See PR #120 review finding.
 
                 Ok(cfg)
             }

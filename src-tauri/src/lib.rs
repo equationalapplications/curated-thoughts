@@ -2993,12 +2993,35 @@ pub fn run() {
                         Vec<String>,
                     ) = match report {
                         Ok(report) => {
-                            let diags: Vec<String> = report
+                            // Leniency diagnostics are noisy on their own; only
+                            // surface those that explicitly mention "malformed"
+                            // (matches the wording of `ConfigError::MalformedJson`).
+                            let mut diags: Vec<String> = report
                                 .diagnostics
                                 .iter()
                                 .filter(|d| d.contains("malformed"))
                                 .cloned()
                                 .collect();
+                            // Required-block absences are loud per spec §4 — the
+                            // banner must fire when `load_lenient` defaulted a
+                            // required block (missing key, OR unparseable nested
+                            // block whose serde error doesn't contain the literal
+                            // "malformed"). Without this trigger a user with e.g.
+                            // `{"generation": {"provider": "future_kind"}}` gets a
+                            // defaulted Unconfigured LLM and no signal to fix it.
+                            if report.generation_missing {
+                                diags.push(
+                                    "generation block missing or unparseable".to_string(),
+                                );
+                            }
+                            if report.embedding_missing {
+                                diags.push(
+                                    "embedding block missing or unparseable".to_string(),
+                                );
+                            }
+                            if report.privacy_missing {
+                                diags.push("privacy block missing or unparseable".to_string());
+                            }
                             (report.config, diags)
                         }
                         Err(e) => (

@@ -195,11 +195,21 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   // resolves. After rendering we explicitly ack the backend so the
   // payload is cleared — CodeRabbit #21, PR #120.
   useEffect(() => {
+    // The backend stashes the payload in `PendingConfigMalformed` AND emits
+    // the `config-malformed` event atomically. If the listener is registered
+    // before the IPC drain completes (or the backend emits a duplicate after
+    // mount), both `peekPendingConfigMalformed` and the live listener can
+    // deliver the same payload — without dedupe the banner renders twice.
+    // Key by config_path + diagnostics (the remediation string is constant).
+    let lastRenderedKey: string | null = null;
     const renderMalformed = (payload: {
       config_path: string;
       diagnostics: string[];
       remediation: string;
     }) => {
+      const key = `${payload.config_path}|${payload.diagnostics.join("|")}`;
+      if (key === lastRenderedKey) return;
+      lastRenderedKey = key;
       const { config_path, diagnostics, remediation } = payload;
       const message =
         `config.json at ${config_path} is malformed. ${remediation}\n\n` +

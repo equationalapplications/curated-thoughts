@@ -2,10 +2,9 @@ pub mod config;
 pub mod sidecar;
 
 use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
-#[allow(deprecated)]
 use crate::inference::config::{
-    read_config, resolve_chat_completions_url, resolve_model_path, write_config, EmbeddingConfig,
-    GenerationConfig, GenerationProviderKind,
+    resolve_chat_completions_url, resolve_model_path, EmbeddingConfig, GenerationConfig,
+    GenerationProviderKind,
 };
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
 use crate::privacy::{self, allows_external_generation};
