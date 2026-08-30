@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::embedder::EmbedProfile;
-use crate::inference::config::{GenerationConfig, EmbeddingConfig};
+pub use crate::inference::config::{GenerationConfig, EmbeddingConfig};
 use crate::privacy::PrivacyConfig;
 
 /// Unified configuration for a brain directory.
