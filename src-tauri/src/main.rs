@@ -59,6 +59,13 @@ fn run_cli_subcommand() -> Result<(), i32> {
                 }
             }
         }
+        Some("--doctor") => match tauri_app_lib::doctor::run_doctor() {
+            Ok(code) => Err(code as i32),
+            Err(e) => {
+                eprintln!("doctor error: {e}");
+                Err(1)
+            }
+        },
         _ => Ok(()), // not a CLI subcommand — fall through to GUI
     }
 }
