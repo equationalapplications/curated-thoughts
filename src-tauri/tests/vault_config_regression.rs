@@ -8,8 +8,8 @@
 //! Fix: setters now route through BrainConfig::load() + BrainConfig::write(),
 //! which uses raw-document merge so all blocks survive verbatim.
 
-use tauri_app_lib::vault::VaultConfig;
 use std::fs;
+use tauri_app_lib::vault::VaultConfig;
 use tempfile::TempDir;
 
 #[test]
@@ -28,7 +28,9 @@ fn set_vault_path_preserves_generation_and_privacy() {
     fs::write(&config_path, json).unwrap();
 
     let config = VaultConfig::new(config_path.clone());
-    config.set_vault_path("~/new").expect("set_vault_path succeeds");
+    config
+        .set_vault_path("~/new")
+        .expect("set_vault_path succeeds");
 
     // Read back and verify every section survived.
     let written = fs::read_to_string(&config_path).unwrap();
@@ -69,13 +71,18 @@ fn set_embed_profile_preserves_generation_and_privacy() {
         model: "embed-multilingual-v3.0".into(),
         api_key: "ck_new".into(),
     };
-    config.set_embed_profile(new_profile).expect("set_embed_profile succeeds");
+    config
+        .set_embed_profile(new_profile)
+        .expect("set_embed_profile succeeds");
 
     let written = fs::read_to_string(&config_path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&written).unwrap();
 
     assert!(
-        value["embed_profile"]["model"].as_str().unwrap().starts_with("embed"),
+        value["embed_profile"]["model"]
+            .as_str()
+            .unwrap()
+            .starts_with("embed"),
         "embed_profile was updated"
     );
     assert_eq!(
@@ -102,7 +109,9 @@ fn set_migrated_to_v2_preserves_generation_and_privacy() {
     fs::write(&config_path, json).unwrap();
 
     let config = VaultConfig::new(config_path.clone());
-    config.set_migrated_to_v2().expect("set_migrated_to_v2 succeeds");
+    config
+        .set_migrated_to_v2()
+        .expect("set_migrated_to_v2 succeeds");
 
     let written = fs::read_to_string(&config_path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&written).unwrap();
@@ -138,7 +147,10 @@ fn set_embed_profile_local_variant_preserves_all_blocks() {
 
     let written: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-    assert_eq!(written["generation"]["model"], "gpt4", "generation survived");
+    assert_eq!(
+        written["generation"]["model"], "gpt4",
+        "generation survived"
+    );
     assert_eq!(written["privacy"]["mode"], "strict", "privacy survived");
     assert_eq!(written["custom_key"], "val", "custom key survived");
 }
@@ -152,7 +164,9 @@ fn set_migrated_to_v2_keeps_all_blocks_and_custom_keys() {
     fs::write(&config_path, json).unwrap();
 
     let config = VaultConfig::new(config_path.clone());
-    config.set_migrated_to_v2().expect("set_migrated_to_v2 succeeds");
+    config
+        .set_migrated_to_v2()
+        .expect("set_migrated_to_v2 succeeds");
 
     let written: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();

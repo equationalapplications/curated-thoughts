@@ -717,12 +717,7 @@ mod tests {
     #[test]
     fn write_to_wiki_succeeds() {
         let (_g, root) = vault();
-        let result = safe_vault_path(
-            &root,
-            "wiki/test.md",
-            WRITABLE_SUBDIRS,
-            PathMode::MayCreate,
-        );
+        let result = safe_vault_path(&root, "wiki/test.md", WRITABLE_SUBDIRS, PathMode::MayCreate);
         assert!(result.is_ok(), "write to wiki/ should succeed");
     }
 
@@ -732,7 +727,8 @@ mod tests {
         fs::create_dir_all(root.join(IMMUTABLE_DIR)).unwrap();
 
         // Read from wiki
-        let wiki_result = safe_vault_path(&root, "wiki/test.md", READABLE_SUBDIRS, PathMode::MayCreate);
+        let wiki_result =
+            safe_vault_path(&root, "wiki/test.md", READABLE_SUBDIRS, PathMode::MayCreate);
         assert!(wiki_result.is_ok(), "read from wiki/ should succeed");
 
         // Read from immutable-source-files
@@ -742,7 +738,10 @@ mod tests {
             READABLE_SUBDIRS,
             PathMode::MayCreate,
         );
-        assert!(immutable_result.is_ok(), "read from immutable-source-files/ should succeed");
+        assert!(
+            immutable_result.is_ok(),
+            "read from immutable-source-files/ should succeed"
+        );
     }
 
     #[test]

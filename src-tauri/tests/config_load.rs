@@ -1,6 +1,6 @@
+use std::fs;
 use tauri_app_lib::config::{BrainConfig, ConfigError};
 use tauri_app_lib::retrieval::BrainPaths;
-use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -8,8 +8,7 @@ fn load_strict_succeeds_on_valid_json() {
     let temp = TempDir::new().unwrap();
     let config_path = temp.path().join("config.json");
 
-    let json =
-        r#"{"vault_path":"~/vault","migrated_to_v2":true,"generation":{},"embedding":{},"privacy":{}}"#;
+    let json = r#"{"vault_path":"~/vault","migrated_to_v2":true,"generation":{},"embedding":{},"privacy":{}}"#;
     fs::write(&config_path, json).unwrap();
 
     let paths = BrainPaths {
@@ -48,8 +47,7 @@ fn load_strict_fails_on_unparseable_vault_path() {
     let config_path = temp.path().join("config.json");
 
     // vault_path is present but not a string
-    let json =
-        r#"{"vault_path":123,"generation":{},"embedding":{},"privacy":{}}"#;
+    let json = r#"{"vault_path":123,"generation":{},"embedding":{},"privacy":{}}"#;
     fs::write(&config_path, json).unwrap();
 
     let paths = BrainPaths {
@@ -192,7 +190,9 @@ fn load_lenient_preserves_unknown_keys() {
         Some("hello")
     );
     assert_eq!(
-        preserved_obj.get("another_unknown").and_then(|v| v.as_i64()),
+        preserved_obj
+            .get("another_unknown")
+            .and_then(|v| v.as_i64()),
         Some(42)
     );
 }

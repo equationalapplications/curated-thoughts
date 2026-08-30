@@ -1,9 +1,9 @@
 //! Verify no API keys are written to config.json.
 
+use std::fs;
 use tauri_app_lib::config::BrainConfig;
 use tauri_app_lib::retrieval::BrainPaths;
 use tempfile::TempDir;
-use std::fs;
 
 fn temp_paths() -> (TempDir, BrainPaths) {
     let temp = TempDir::new().unwrap();
@@ -67,8 +67,7 @@ fn onboard_never_writes_api_key_to_config() {
     // Verify no api_key field on the on-disk config
     if let Some(gen) = written.get("generation").and_then(|g| g.as_object()) {
         assert!(
-            !gen.contains_key("api_key")
-                || gen.get("api_key").map(|v| v.is_null()).unwrap_or(true),
+            !gen.contains_key("api_key") || gen.get("api_key").map(|v| v.is_null()).unwrap_or(true),
             "api_key should not be written to config.json"
         );
     }
@@ -86,38 +85,34 @@ fn doctor_never_echoes_api_key() {
     )
     .unwrap();
 
-    with_var(
-        "GENERATION_API_KEY",
-        Some("super-secret-key-99999"),
-        || {
-            with_var(
-                "CURATED_BRAIN_CONFIG",
-                Some(config_path.to_string_lossy().as_ref()),
-                || {
-                    // Capture the full doctor report so the redaction contract
-                    // is actually asserted, not just the exit code.
-                    let mut out: Vec<u8> = Vec::new();
-                    let exit_code = tauri_app_lib::doctor::run_doctor_to(&mut out).unwrap();
-                    assert_eq!(exit_code, 0);
-                    let report = String::from_utf8(out).unwrap();
-                    assert!(
-                        !report.contains("super-secret-key-99999"),
-                        "secret should never be echoed by --doctor; got:\n{report}"
-                    );
-                    assert!(
-                        report.contains("NOTE: generation API key in environment"),
-                        "doctor should acknowledge the env key without echoing it; got:\n{report}"
-                    );
-                    // config.json on disk must not gain the secret either.
-                    let content = fs::read_to_string(&config_path).unwrap();
-                    assert!(
-                        !content.contains("super-secret-key-99999"),
-                        "secret should never be written to config.json"
-                    );
-                },
-            );
-        },
-    );
+    with_var("GENERATION_API_KEY", Some("super-secret-key-99999"), || {
+        with_var(
+            "CURATED_BRAIN_CONFIG",
+            Some(config_path.to_string_lossy().as_ref()),
+            || {
+                // Capture the full doctor report so the redaction contract
+                // is actually asserted, not just the exit code.
+                let mut out: Vec<u8> = Vec::new();
+                let exit_code = tauri_app_lib::doctor::run_doctor_to(&mut out).unwrap();
+                assert_eq!(exit_code, 0);
+                let report = String::from_utf8(out).unwrap();
+                assert!(
+                    !report.contains("super-secret-key-99999"),
+                    "secret should never be echoed by --doctor; got:\n{report}"
+                );
+                assert!(
+                    report.contains("NOTE: generation API key in environment"),
+                    "doctor should acknowledge the env key without echoing it; got:\n{report}"
+                );
+                // config.json on disk must not gain the secret either.
+                let content = fs::read_to_string(&config_path).unwrap();
+                assert!(
+                    !content.contains("super-secret-key-99999"),
+                    "secret should never be written to config.json"
+                );
+            },
+        );
+    });
 }
 
 #[test]

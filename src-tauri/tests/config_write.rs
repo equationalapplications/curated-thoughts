@@ -1,6 +1,6 @@
+use std::fs;
 use tauri_app_lib::config::BrainConfig;
 use tauri_app_lib::retrieval::BrainPaths;
-use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -27,8 +27,14 @@ fn write_preserves_unknown_keys() {
     let value: serde_json::Value = serde_json::from_str(&written).unwrap();
 
     assert_eq!(value["vault_path"], "~/new", "vault_path was updated");
-    assert_eq!(value["unknown_top"], "also_preserve", "unknown top-level key preserved");
-    assert_eq!(value["generation"]["unknown_field"], "preserve_me", "unknown nested key preserved");
+    assert_eq!(
+        value["unknown_top"], "also_preserve",
+        "unknown top-level key preserved"
+    );
+    assert_eq!(
+        value["generation"]["unknown_field"], "preserve_me",
+        "unknown nested key preserved"
+    );
 }
 
 #[test]
@@ -50,7 +56,10 @@ fn write_fails_on_malformed_existing_json() {
 
     // Verify file was not truncated
     let original = fs::read_to_string(&config_path).unwrap();
-    assert_eq!(original, "{ broken json }", "file bytes unchanged after failed write");
+    assert_eq!(
+        original, "{ broken json }",
+        "file bytes unchanged after failed write"
+    );
 }
 
 #[test]
@@ -58,7 +67,11 @@ fn write_uses_unique_temp_name() {
     let temp = TempDir::new().unwrap();
     let config_path = temp.path().join("config.json");
 
-    fs::write(&config_path, r#"{"generation":{"provider":"external"},"embedding":{},"privacy":{}}"#).unwrap();
+    fs::write(
+        &config_path,
+        r#"{"generation":{"provider":"external"},"embedding":{},"privacy":{}}"#,
+    )
+    .unwrap();
 
     let paths = BrainPaths {
         brain_dir: temp.path().to_path_buf(),
@@ -98,10 +111,13 @@ fn write_on_missing_file_creates_it() {
         ..Default::default()
     };
 
-    config.write(&paths).expect("write succeeds on missing file");
+    config
+        .write(&paths)
+        .expect("write succeeds on missing file");
     assert!(config_path.exists(), "file created");
 
-    let written: BrainConfig = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    let written: BrainConfig =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(written.vault_path, Some("~/vault".to_string()));
 }
 
@@ -130,8 +146,8 @@ fn write_fails_and_preserves_file_on_malformed() {
 
 #[test]
 fn concurrent_writes_use_different_temp_files() {
-    use std::thread;
     use std::sync::{Arc, Barrier};
+    use std::thread;
 
     let temp = TempDir::new().unwrap();
     let brain_dir = temp.path().to_path_buf();

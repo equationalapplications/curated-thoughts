@@ -8,9 +8,9 @@
 mod helpers;
 
 use helpers::TestApp;
-use tauri_app_lib::okf::{EntityType, OkfFrontmatter};
 use serde_json::json;
 use std::path::Path;
+use tauri_app_lib::okf::{EntityType, OkfFrontmatter};
 
 /// Helper: create valid OKF frontmatter for testing
 fn create_test_frontmatter(title: &str) -> OkfFrontmatter {
@@ -124,10 +124,7 @@ fn e1_write_new_note_and_verify_frontmatter() {
     );
 
     // Verify body is present
-    assert!(
-        file_content.contains(body),
-        "file should contain the body"
-    );
+    assert!(file_content.contains(body), "file should contain the body");
 }
 
 #[test]
@@ -149,7 +146,8 @@ fn e1_update_existing_note_and_verify_sha256() {
 
     // Create initial note
     let initial_fm = create_test_frontmatter("Initial Title");
-    app.invoke::<serde_json::Value>("vault_write_note",
+    app.invoke::<serde_json::Value>(
+        "vault_write_note",
         json!({
             "path": note_path,
             "frontmatter": initial_fm,
@@ -161,8 +159,8 @@ fn e1_update_existing_note_and_verify_sha256() {
     // future timestamps (spec v2: staleness is content tokens ONLY).
     let full_path = vault_root.join(note_path);
     let initial_content = std::fs::read_to_string(&full_path).expect("failed to read file");
-    let current_token = extract_updated_at_token(&initial_content)
-        .expect("create must stamp an updated_at token");
+    let current_token =
+        extract_updated_at_token(&initial_content).expect("create must stamp an updated_at token");
 
     let updated_fm = OkfFrontmatter {
         title: "Updated Title".to_string(),
@@ -199,9 +197,7 @@ fn e1_update_existing_note_and_verify_sha256() {
     // Verify frontmatter was updated AND the token rotated (never reused).
     let parsed_fm = parse_frontmatter_from_file(&full_path);
     assert_eq!(parsed_fm.title, "Updated Title");
-    let new_token = parsed_fm
-        .updated_at
-        .expect("edit must stamp a fresh token");
+    let new_token = parsed_fm.updated_at.expect("edit must stamp a fresh token");
     assert_ne!(
         new_token, current_token,
         "token must rotate on a successful edit"
@@ -265,7 +261,10 @@ fn e2_upsert_new_entry_appends_with_correct_flags() {
         content.contains("## existing-entry"),
         "existing entry should remain"
     );
-    assert!(content.contains("## new-entry"), "new entry should be added");
+    assert!(
+        content.contains("## new-entry"),
+        "new entry should be added"
+    );
 
     // Verify only one instance of the new entry exists
     let new_entry_count = content.matches("## new-entry").count();
@@ -325,7 +324,10 @@ fn e2_upsert_existing_entry_replaces_with_correct_flags() {
         !content.contains("old-path.md"),
         "old path should be replaced"
     );
-    assert!(content.contains("new-path.md"), "new path should be present");
+    assert!(
+        content.contains("new-path.md"),
+        "new path should be present"
+    );
 
     // Verify metadata was updated
     assert!(content.contains("Type: concept"), "type should be updated");
@@ -339,7 +341,10 @@ fn e2_upsert_existing_entry_replaces_with_correct_flags() {
     );
 
     // Verify other entry is unchanged
-    assert!(content.contains("## other-entry"), "other entry should remain");
+    assert!(
+        content.contains("## other-entry"),
+        "other entry should remain"
+    );
     assert!(
         content.contains("wiki/other.md"),
         "other entry path should remain"
@@ -368,13 +373,17 @@ fn e2_multiple_upserts_maintain_single_instance() {
     .expect("failed to create INDEX.md");
 
     for i in 0..3 {
-        std::fs::write(vault_root.join(format!("wiki/note-{}.md", i)), format!("note {}\n", i))
-            .expect("failed to create target note");
+        std::fs::write(
+            vault_root.join(format!("wiki/note-{}.md", i)),
+            format!("note {}\n", i),
+        )
+        .expect("failed to create target note");
     }
 
     // Upsert the same entry multiple times with different paths
     for i in 0..3 {
-        app.invoke::<serde_json::Value>("vault_upsert_index_entry",
+        app.invoke::<serde_json::Value>(
+            "vault_upsert_index_entry",
             json!({
                 "indexPath": "wiki/INDEX.md",
                 "entryName": "multi-update",
@@ -394,9 +403,18 @@ fn e2_multiple_upserts_maintain_single_instance() {
     );
 
     // Verify final state
-    assert!(content.contains("wiki/note-2.md"), "should have latest path");
-    assert!(!content.contains("wiki/note-0.md"), "should not have old path 0");
-    assert!(!content.contains("wiki/note-1.md"), "should not have old path 1");
+    assert!(
+        content.contains("wiki/note-2.md"),
+        "should have latest path"
+    );
+    assert!(
+        !content.contains("wiki/note-0.md"),
+        "should not have old path 0"
+    );
+    assert!(
+        !content.contains("wiki/note-1.md"),
+        "should not have old path 1"
+    );
 }
 
 // ============================================================================
@@ -533,7 +551,8 @@ fn e3_stale_update_fails_with_wrong_or_missing_token() {
 
     // Create initial note
     let initial_fm = create_test_frontmatter("Stale Test");
-    app.invoke::<serde_json::Value>("vault_write_note",
+    app.invoke::<serde_json::Value>(
+        "vault_write_note",
         json!({
             "path": note_path,
             "frontmatter": initial_fm,
@@ -593,7 +612,10 @@ fn e3_upsert_nonexistent_index_fails() {
         }),
     );
 
-    assert!(result.is_err(), "upsert into non-existent index should fail");
+    assert!(
+        result.is_err(),
+        "upsert into non-existent index should fail"
+    );
     let err = result.unwrap_err();
     let err_str = err.to_string();
     assert!(
@@ -701,7 +723,10 @@ fn e2_upsert_prefix_collision_does_not_clobber_neighbors() {
         }),
     );
 
-    assert_eq!(result["appended"], false, "exact header match updates in place");
+    assert_eq!(
+        result["appended"], false,
+        "exact header match updates in place"
+    );
 
     let content = std::fs::read_to_string(&index_path).unwrap();
     assert_eq!(

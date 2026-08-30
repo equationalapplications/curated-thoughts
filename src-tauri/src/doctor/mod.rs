@@ -109,7 +109,10 @@ pub fn run_doctor_to(out: &mut dyn Write) -> Result<u32> {
     // Check for legacy plaintext keys (warn without printing)
     if let Ok(gen_api_key) = std::env::var("GENERATION_API_KEY") {
         if !gen_api_key.is_empty() {
-            writeln!(out, "NOTE: generation API key in environment (good practice)")?;
+            writeln!(
+                out,
+                "NOTE: generation API key in environment (good practice)"
+            )?;
         }
     }
 
@@ -130,10 +133,9 @@ pub fn run_doctor_to(out: &mut dyn Write) -> Result<u32> {
     if let Some(profile) = &report.config.embed_profile {
         let key_present = match profile {
             crate::embedder::EmbedProfile::Cloud { api_key, .. } => !api_key.is_empty(),
-            crate::embedder::EmbedProfile::External { profile } => profile
-                .api_key
-                .as_deref()
-                .map_or(false, |s| !s.is_empty()),
+            crate::embedder::EmbedProfile::External { profile } => {
+                profile.api_key.as_deref().map_or(false, |s| !s.is_empty())
+            }
             crate::embedder::EmbedProfile::Local { .. } => false,
         };
         if key_present {

@@ -47,7 +47,13 @@ fn normalize_path_lexically(path: &Path) -> PathBuf {
 }
 
 fn safe_vault_relative_path(vault: &Path, user_path: &str) -> Option<PathBuf> {
-    crate::vault::safe_vault_path(vault, user_path, crate::vault::READABLE_SUBDIRS, crate::vault::PathMode::MayCreate).ok()
+    crate::vault::safe_vault_path(
+        vault,
+        user_path,
+        crate::vault::READABLE_SUBDIRS,
+        crate::vault::PathMode::MayCreate,
+    )
+    .ok()
 }
 
 /// Returns every path spelling worth trying against `documents.path` for a vault-relative or
@@ -464,7 +470,8 @@ pub async fn dispatch_tool_call(
         }
         "vault_write_note" => {
             let p: VaultWriteNoteParams = serde_json::from_value(params)?;
-            let vault_dir = ctx.vault_dir
+            let vault_dir = ctx
+                .vault_dir
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
                 .clone();
@@ -476,7 +483,8 @@ pub async fn dispatch_tool_call(
         }
         "vault_upsert_index_entry" => {
             let p: VaultUpsertIndexEntryParams = serde_json::from_value(params)?;
-            let vault_dir = ctx.vault_dir
+            let vault_dir = ctx
+                .vault_dir
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
                 .clone();

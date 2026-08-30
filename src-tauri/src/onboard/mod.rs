@@ -172,9 +172,7 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
         }
     } else if paths.config_path.exists() {
         let report = BrainConfig::load_lenient(&paths).map_err(|e| {
-            anyhow::anyhow!(
-                "config.json failed to load during onboarding merge: {e}"
-            )
+            anyhow::anyhow!("config.json failed to load during onboarding merge: {e}")
         })?;
         report.config
     } else {
@@ -185,13 +183,17 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
     cfg.embed_profile = Some(config.embed_profile);
     cfg.generation = config.generation;
 
-    cfg.write(&paths).map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
+    cfg.write(&paths)
+        .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
 
     // ── print agent-client snippet ─────────────────────────────────────────────
     println!("\nSetup complete.");
     println!("\nConfig written to {}", paths.config_path.display());
     println!("\nTo run your sidecar:");
-    println!("  export CURATED_BRAIN_CONFIG={}", paths.config_path.display());
+    println!(
+        "  export CURATED_BRAIN_CONFIG={}",
+        paths.config_path.display()
+    );
     println!("  curated-thoughts --mcp");
 
     Ok(())
@@ -223,12 +225,16 @@ mod tests {
     #[test]
     fn expand_tilde_replaces_home() {
         let home = dirs::home_dir().unwrap();
-        let expanded =
-            expand_tilde(&format!("~/test/{}", if cfg!(windows) { "foo" } else { "bar" }));
+        let expanded = expand_tilde(&format!(
+            "~/test/{}",
+            if cfg!(windows) { "foo" } else { "bar" }
+        ));
         assert!(expanded.starts_with(home.to_string_lossy().as_ref()));
-        assert!(
-            expanded.ends_with(if cfg!(windows) { "test\\foo" } else { "test/bar" })
-        );
+        assert!(expanded.ends_with(if cfg!(windows) {
+            "test\\foo"
+        } else {
+            "test/bar"
+        }));
     }
 
     #[test]

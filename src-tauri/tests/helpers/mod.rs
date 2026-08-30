@@ -78,9 +78,9 @@ impl TestApp {
             },
         );
         match result {
-            Ok(body) => {
-                body.deserialize::<serde_json::Value>().map_err(|e| e.to_string())
-            },
+            Ok(body) => body
+                .deserialize::<serde_json::Value>()
+                .map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         }
     }

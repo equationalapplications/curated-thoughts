@@ -1,9 +1,9 @@
 //! End-to-end config flows.
 
+use std::fs;
 use tauri_app_lib::config::BrainConfig;
 use tauri_app_lib::retrieval::{resolve_brain_paths, BrainPaths};
 use tempfile::TempDir;
-use std::fs;
 
 #[test]
 fn split_env_db_and_config() {

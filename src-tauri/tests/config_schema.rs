@@ -16,7 +16,10 @@ fn brain_config_serializes_and_deserializes_round_trip() {
     let loaded: BrainConfig = serde_json::from_str(&json).expect("deserialize");
 
     assert_eq!(loaded.vault_path, Some("~/my-vault".to_string()));
-    assert!(matches!(loaded.embed_profile, Some(EmbedProfile::Local { .. })));
+    assert!(matches!(
+        loaded.embed_profile,
+        Some(EmbedProfile::Local { .. })
+    ));
     assert!(loaded.migrated_to_v2);
 }
 

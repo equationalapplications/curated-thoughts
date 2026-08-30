@@ -101,12 +101,14 @@ mod tests {
                 .unwrap(),
         };
 
-        let result =
-            await_sidecar_ready_impl(&mut sidecar, // The timeout must exceed the impl's 500ms poll quantum: if the child has
-        // not exited before iteration 1's try_wait, iteration 2 runs at ~500ms
-        // and must land on the exit branch, not the timeout branch. (Was 200ms
-        // - racy under loaded CI runners; flaked on macos-14.)
-        std::time::Duration::from_secs(2), |_| {});
+        let result = await_sidecar_ready_impl(
+            &mut sidecar, // The timeout must exceed the impl's 500ms poll quantum: if the child has
+            // not exited before iteration 1's try_wait, iteration 2 runs at ~500ms
+            // and must land on the exit branch, not the timeout branch. (Was 200ms
+            // - racy under loaded CI runners; flaked on macos-14.)
+            std::time::Duration::from_secs(2),
+            |_| {},
+        );
 
         assert!(
             result.is_err(),

@@ -1,13 +1,13 @@
+use crate::embedder::EmbedProfile;
+pub use crate::inference::config::{EmbeddingConfig, GenerationConfig};
+use crate::privacy::PrivacyConfig;
+use crate::retrieval::BrainPaths;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::Write;
 use thiserror::Error;
 use uuid::Uuid;
-use crate::embedder::EmbedProfile;
-pub use crate::inference::config::{GenerationConfig, EmbeddingConfig};
-use crate::privacy::PrivacyConfig;
-use crate::retrieval::BrainPaths;
-use std::fs;
 
 /// Fatal errors from `BrainConfig::load_lenient`.
 ///
@@ -188,7 +188,14 @@ impl BrainConfig {
 
                 // Extract nested unknown keys from generation block
                 if let Some(gen_val) = obj.get("generation").and_then(|v| v.as_object()) {
-                    let known_gen_keys = ["provider", "model_path", "model_name", "external_url", "api_key", "timeout_secs"];
+                    let known_gen_keys = [
+                        "provider",
+                        "model_path",
+                        "model_name",
+                        "external_url",
+                        "api_key",
+                        "timeout_secs",
+                    ];
                     let unknown: serde_json::Map<String, serde_json::Value> = gen_val
                         .iter()
                         .filter(|(k, _)| !known_gen_keys.contains(&k.as_str()))
@@ -218,7 +225,12 @@ impl BrainConfig {
 
                 // Extract nested unknown keys from privacy block
                 if let Some(priv_val) = obj.get("privacy").and_then(|v| v.as_object()) {
-                    let known_priv_keys = ["mode", "chosen", "ephemeral_disclosure_acknowledged", "migration_disclosure_acknowledged"];
+                    let known_priv_keys = [
+                        "mode",
+                        "chosen",
+                        "ephemeral_disclosure_acknowledged",
+                        "migration_disclosure_acknowledged",
+                    ];
                     let unknown: serde_json::Map<String, serde_json::Value> = priv_val
                         .iter()
                         .filter(|(k, _)| !known_priv_keys.contains(&k.as_str()))
@@ -286,7 +298,9 @@ impl BrainConfig {
             // surfaces the real failure instead of silently re-onboarding.
             // Matches the contract documented on `ConfigError` above.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                report.diagnostics.push(format!("config.json not found: {}", e));
+                report
+                    .diagnostics
+                    .push(format!("config.json not found: {}", e));
                 report.generation_missing = true;
                 report.embedding_missing = true;
                 report.vault_path_missing = true;
@@ -296,8 +310,7 @@ impl BrainConfig {
             Err(e) => return Err(ConfigError::Io(e)),
         };
 
-        let value: serde_json::Value =
-            serde_json::from_str(&text).map_err(ConfigError::from)?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(ConfigError::from)?;
         let obj = value
             .as_object()
             .ok_or_else(|| ConfigError::NonObjectRoot {
@@ -327,7 +340,14 @@ impl BrainConfig {
 
         // Extract nested unknown keys from generation block
         if let Some(gen_val) = obj.get("generation").and_then(|v| v.as_object()) {
-            let known_gen_keys = ["provider", "model_path", "model_name", "external_url", "api_key", "timeout_secs"];
+            let known_gen_keys = [
+                "provider",
+                "model_path",
+                "model_name",
+                "external_url",
+                "api_key",
+                "timeout_secs",
+            ];
             let unknown: serde_json::Map<String, serde_json::Value> = gen_val
                 .iter()
                 .filter(|(k, _)| !known_gen_keys.contains(&k.as_str()))
@@ -357,7 +377,12 @@ impl BrainConfig {
 
         // Extract nested unknown keys from privacy block
         if let Some(priv_val) = obj.get("privacy").and_then(|v| v.as_object()) {
-            let known_priv_keys = ["mode", "chosen", "ephemeral_disclosure_acknowledged", "migration_disclosure_acknowledged"];
+            let known_priv_keys = [
+                "mode",
+                "chosen",
+                "ephemeral_disclosure_acknowledged",
+                "migration_disclosure_acknowledged",
+            ];
             let unknown: serde_json::Map<String, serde_json::Value> = priv_val
                 .iter()
                 .filter(|(k, _)| !known_priv_keys.contains(&k.as_str()))
@@ -533,9 +558,18 @@ impl BrainConfig {
         };
 
         // Insert modeled sections with preserved nested keys merged in.
-        obj.insert("vault_path".to_string(), serde_json::to_value(&self.vault_path)?);
-        obj.insert("embed_profile".to_string(), serde_json::to_value(&self.embed_profile)?);
-        obj.insert("migrated_to_v2".to_string(), serde_json::to_value(&self.migrated_to_v2)?);
+        obj.insert(
+            "vault_path".to_string(),
+            serde_json::to_value(&self.vault_path)?,
+        );
+        obj.insert(
+            "embed_profile".to_string(),
+            serde_json::to_value(&self.embed_profile)?,
+        );
+        obj.insert(
+            "migrated_to_v2".to_string(),
+            serde_json::to_value(&self.migrated_to_v2)?,
+        );
         obj.insert("generation".to_string(), gen_value);
         obj.insert("embedding".to_string(), emb_value);
         obj.insert("privacy".to_string(), priv_value);
@@ -553,7 +587,10 @@ impl BrainConfig {
         let nonce = Uuid::new_v4();
         let pid = std::process::id();
         let tmp_name = format!("config.json.{}.{}.tmp", pid, nonce);
-        let parent = paths.config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let parent = paths
+            .config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         // A fresh install has no brain dir yet — create it so the first write
         // (e.g. from --onboard) doesn't fail with ENOENT.
         fs::create_dir_all(parent)?;

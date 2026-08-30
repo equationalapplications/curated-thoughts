@@ -112,8 +112,8 @@ pub struct UpsertResult {
     pub success: bool,
     pub index_path: String,
     pub entry_id: String,
-    pub appended: bool,  // true if entry was new, false if updated
-    pub line_number: Option<usize>,  // Line number where entry starts (for auditing)
+    pub appended: bool,             // true if entry was new, false if updated
+    pub line_number: Option<usize>, // Line number where entry starts (for auditing)
 }
 
 /// Validate frontmatter semantics
@@ -270,8 +270,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,            supersedes: None,
-
+            updated_at: None,
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -290,8 +290,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: None,
             created_at: "not-a-date".to_string(),
-            updated_at: None,            supersedes: None,
-
+            updated_at: None,
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -330,8 +330,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: Some(vec!["a".repeat(101)]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,            supersedes: None,
-
+            updated_at: None,
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
@@ -351,8 +351,8 @@ mod tests {
             entity_type: EntityType::Fact,
             tags: Some(tags),
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: None,            supersedes: None,
-
+            updated_at: None,
+            supersedes: None,
         };
         let result = validate_frontmatter(&fm);
         assert!(result.is_err());
