@@ -2673,12 +2673,26 @@ pub fn run() {
     // entrypoint was hardcoded to `~/.brain/`. With `CURATED_BRAIN_DIR`
     // set, the app would bootstrap a directory the user never asked
     // for. Route through the canonical resolver.
-    let brain_dir = retrieval::resolve_brain_paths().brain_dir;
+    let paths = retrieval::resolve_brain_paths();
+    let brain_dir = paths.brain_dir.clone();
     std::fs::create_dir_all(&brain_dir).ok();
 
-    let db_path = retrieval::resolve_brain_paths().db_path;
+    let db_path = paths.db_path.clone();
+    let config_path = paths.config_path.clone();
 
-    let config_path = retrieval::resolve_brain_paths().config_path;
+    // Task 17: surface malformed config immediately so headless launches
+    // (and CI logs) see the hint before the Tauri setup hook runs.
+    // The in-app banner is emitted from the setup hook below; this early
+    // check is a stderr fallback that never blocks startup.
+    if let Ok(text) = std::fs::read_to_string(&config_path) {
+        if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+            eprintln!(
+                "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
+                config_path.display()
+            );
+        }
+    }
+
     let config = VaultConfig::new(config_path.clone());
     let vault_path_for_migration = config.get_vault_path().ok().flatten();
     let vault_migration_needed = !config.has_migrated_to_v2().unwrap_or(false);
@@ -2921,6 +2935,33 @@ pub fn run() {
                         },
                     );
                     let config = report.config;
+
+                    // Task 17: desktop startup surfaces malformed config with a
+                    // recoverable banner instead of crash-looping.  The same
+                    // load_lenient diagnostics drive the in-app banner and a
+                    // stderr hint for headless launches; we continue with the
+                    // defaulted config so the session can still run --doctor.
+                    let malformed_diagnostics: Vec<String> = report
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.contains("malformed"))
+                        .cloned()
+                        .collect();
+                    if !malformed_diagnostics.is_empty() {
+                        eprintln!(
+                            "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
+                            crate::inference::config::config_path(brain_path).display()
+                        );
+                        let _ = app_handle.emit(
+                            "config-malformed",
+                            serde_json::json!({
+                                "config_path": crate::inference::config::config_path(brain_path).to_string_lossy(),
+                                "diagnostics": malformed_diagnostics,
+                                "remediation": "Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
+                            }),
+                        );
+                    }
+
                     match initialize_provider(brain_path, &config.generation, &app_handle) {
                         Ok(provider) => {
                             let state = app_handle.state::<InferenceState>();

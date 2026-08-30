@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
 import { ActivityFeedPanel } from "./ActivityFeedPanel";
@@ -178,6 +179,28 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
     () => registerCommandContext({ navigate: nav.navigate }),
     [nav.navigate],
   );
+
+  // Task 17: surface malformed-config from the desktop startup hook as
+  // a recoverable banner via the shared error feed.  The backend emits
+  // `config-malformed` with diagnostics + a remediation hint; we wrap
+  // it as a background error so the existing ActivityFeed banner UI
+  // shows it without needing a new component.
+  useEffect(() => {
+    const promise = listen<{
+      config_path: string;
+      diagnostics: string[];
+      remediation: string;
+    }>("config-malformed", (event) => {
+      const { config_path, diagnostics, remediation } = event.payload;
+      const message =
+        `config.json at ${config_path} is malformed. ${remediation}\n\n` +
+        diagnostics.map((d) => `• ${d}`).join("\n");
+      reportBackgroundError(message);
+    });
+    return () => {
+      promise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     function handlePaletteShortcut(e: KeyboardEvent) {
