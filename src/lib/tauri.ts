@@ -44,6 +44,18 @@ export const getRecommendedModel = (): Promise<string> =>
   invoke("get_recommended_model");
 
 export const getBrainDir = (): Promise<string> => invoke("get_brain_dir");
+
+/** Returns the resolved brain dir plus the source that produced it
+ * (env override vs. home-dir default) so the AgentIntegrationPanel can
+ * display a status line. */
+export interface BrainDirInfo {
+  brain_dir: string;
+  source: "env" | "default";
+}
+
+export const getBrainDirInfo = (): Promise<BrainDirInfo> =>
+  invoke("get_brain_dir_info");
+
 export const getBinaryPath = (): Promise<string> => invoke("get_binary_path");
 
 export const resolveChunkOverlay = (

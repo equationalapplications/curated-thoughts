@@ -1,7 +1,9 @@
 pub mod chunker;
 pub mod cloud_bridge;
 pub mod commands;
+pub mod config;
 pub mod db;
+pub mod doctor;
 pub mod embedder;
 mod entities_api;
 pub mod graph;
@@ -16,7 +18,6 @@ mod okf_api;
 pub mod onboard;
 pub mod outbox;
 mod pipeline;
-pub mod config;
 pub mod privacy;
 mod proposals_api;
 pub mod recall_bench_fixture;
@@ -567,6 +568,37 @@ fn get_brain_dir_inner() -> String {
 #[tauri::command]
 fn get_brain_dir() -> String {
     get_brain_dir_inner()
+}
+
+/// Indicates how the resolved brain dir was chosen. The AgentIntegrationPanel
+/// surfaces this so the user can verify they're pointing at the instance
+/// they expect (env override vs. the home-dir default).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrainDirSource {
+    /// `CURATED_BRAIN_DIR` was set in the environment.
+    Env,
+    /// No env override; fell back to `$HOME/.brain`.
+    Default,
+}
+
+/// Bundles the resolved brain dir with its source so the frontend can
+/// display both in the AgentIntegrationPanel status line.
+#[derive(serde::Serialize)]
+struct BrainDirInfo {
+    brain_dir: String,
+    source: BrainDirSource,
+}
+
+#[tauri::command]
+fn get_brain_dir_info() -> BrainDirInfo {
+    let brain_dir = get_brain_dir_inner();
+    let source = if std::env::var_os("CURATED_BRAIN_DIR").is_some() {
+        BrainDirSource::Env
+    } else {
+        BrainDirSource::Default
+    };
+    BrainDirInfo { brain_dir, source }
 }
 
 #[tauri::command]
@@ -2622,6 +2654,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_impact_radius,
             get_binary_path,
             get_brain_dir,
+            get_brain_dir_info,
             commands::chunks::resolve_chunk_overlay,
             commands::chunks::fetch_chunk_content,
             needs_chunk_hash_migration,
@@ -3014,6 +3047,7 @@ pub fn run() {
             acknowledge_ephemeral_disclosure,
             get_binary_path,
             get_brain_dir,
+            get_brain_dir_info,
             commands::chunks::resolve_chunk_overlay,
             commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
