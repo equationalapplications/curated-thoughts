@@ -13,6 +13,7 @@ pub mod librarian;
 pub mod mcp_server;
 pub mod okf;
 mod okf_api;
+pub mod onboard;
 pub mod outbox;
 mod pipeline;
 pub mod config;

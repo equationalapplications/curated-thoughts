@@ -17,10 +17,49 @@ fn main() {
 
     if is_mcp {
         run_mcp();
+    } else if let Err(code) = run_cli_subcommand() {
+        std::process::exit(code);
     } else {
         #[cfg(not(debug_assertions))]
         hide_console_on_windows();
         tauri_app_lib::run();
+    }
+}
+
+/// Returns `Ok(())` when a CLI subcommand was dispatched (caller should skip GUI launch).
+/// Returns `Err(exit_code)` when the process should terminate with that exit code.
+fn run_cli_subcommand() -> Result<(), i32> {
+    let mut args = std::env::args_os().skip(1); // skip binary name
+    let Some(first) = args.next() else {
+        return Ok(()); // no subcommand
+    };
+
+    match first.to_str() {
+        Some("--onboard") => {
+            let mut vault_path: Option<String> = None;
+            let mut force = false;
+            let mut iter = args;
+            while let Some(arg) = iter.next() {
+                match arg.to_str() {
+                    Some("--force") => force = true,
+                    Some("--vault") => {
+                        vault_path = iter.next().and_then(|v| v.to_str().map(String::from));
+                    }
+                    _ => {}
+                }
+            }
+            match tauri_app_lib::onboard::run_onboard(tauri_app_lib::onboard::OnboardOptions {
+                vault_path,
+                force,
+            }) {
+                Ok(_) => Err(0),
+                Err(e) => {
+                    eprintln!("onboard error: {e}");
+                    Err(1)
+                }
+            }
+        }
+        _ => Ok(()), // not a CLI subcommand — fall through to GUI
     }
 }
 
