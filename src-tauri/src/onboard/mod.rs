@@ -158,10 +158,20 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
 
             // If the existing config is parseable JSON, load it so unknown
             // keys survive the --force overwrite.  Only when the file is
-            // malformed do we blank it (we cannot merge garbage).
+            // malformed do we blank it (we cannot merge garbage).  The
+            // parse-OK check above already rejected malformed JSON, so
+            // load_lenient here only needs to surface typed non-object-root
+            // / non-string-vault_path errors — which are equally fatal per
+            // §1 of the spec, but the file-level parse-OK check has already
+            // passed and the value extraction will succeed; if a future
+            // change makes these reachable, surface them clearly.
             let text = std::fs::read_to_string(&paths.config_path)?;
             if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
-                let report = BrainConfig::load_lenient(&paths);
+                let report = BrainConfig::load_lenient(&paths).map_err(|e| {
+                    anyhow::anyhow!(
+                        "config.json failed to load during --force overwrite: {e}"
+                    )
+                })?;
                 report.config
             } else {
                 std::fs::write(&paths.config_path, "{}")?;
@@ -171,7 +181,11 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
             BrainConfig::default()
         }
     } else if paths.config_path.exists() {
-        let report = BrainConfig::load_lenient(&paths);
+        let report = BrainConfig::load_lenient(&paths).map_err(|e| {
+            anyhow::anyhow!(
+                "config.json failed to load during onboarding merge: {e}"
+            )
+        })?;
         report.config
     } else {
         BrainConfig::default()

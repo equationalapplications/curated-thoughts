@@ -204,7 +204,7 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
         brain_dir: brain_path.to_path_buf(),
         config_path: crate::inference::config::config_path(brain_path),
         db_path: brain_path.join("brain.db"),
-    });
+    })?;
     let llm_config = LlmConfig {
         generation: report.config.generation,
         embedding: report.config.embedding,

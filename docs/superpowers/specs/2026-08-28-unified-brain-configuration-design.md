@@ -120,8 +120,18 @@ pub struct BrainConfig {
   MUST NOT fall back to `json!({})` and overwrite the file — as today's
   `inference::write_config` and `privacy::write_privacy_config` do. A write
   against an unparseable document returns an error and leaves the file
-  untouched. The single exception is `--onboard --force` (§4), which may replace
-  a malformed config only after backing it up to `config.json.bak`.
+  untouched.
+- **Valid non-object roots are fatal shape errors, too.** A document that parses
+  as valid JSON but whose root is an array, `null`, or a primitive (`42`,
+  `"string"`, `true`, `false`) cannot receive object-section overlays. Treating
+  it as `{}` would silently erase the user's file — exactly the class of failure
+  this refactor is meant to remove. The writer MUST classify these roots as
+  fatal shape errors and leave the file untouched, identical to parse failure.
+  `load_lenient` propagates the same condition as a typed `Err` (see §2). The
+  single exception is `--onboard --force` (§4), which may replace such a
+  document — malformed *or* non-object root — after backing the original up to
+  `config.json.bak`; the backup-before-replace rule applies identically in both
+  cases.
 
 ### 2. Single resolution + accessor (`config` module)
 
@@ -130,7 +140,7 @@ One function, one derivation rule, used by every consumer:
 ```rust
 resolve_brain_paths() -> BrainPaths      // unchanged semantics: CURATED_BRAIN_CONFIG > CURATED_BRAIN_DB-parent > CURATED_BRAIN_DIR > ~/.brain
 BrainConfig::load(paths: &BrainPaths) -> Result<BrainConfig>   // reads paths.config_path exactly — never re-derives
-BrainConfig::load_lenient(paths: &BrainPaths) -> LoadReport    // per-field leniency; malformed top-level JSON stays FATAL
+BrainConfig::load_lenient(paths: &BrainPaths) -> Result<LoadReport, ConfigError>    // per-field leniency on Ok; malformed top-level JSON or non-object root on Err
 ```
 
 (Signatures take the resolved `BrainPaths`, not `brain_dir`: joining
@@ -160,7 +170,21 @@ commands surface diagnostics through events/error strings.
 
 `load_lenient` is lenient about *fields*, never about the document: truncated
 or invalid top-level JSON is a hard error in every load mode, so the pipeline
-cannot continue on garbage defaults — CodeRabbit #1, PR #120.
+cannot continue on garbage defaults — CodeRabbit #1, PR #120. The return type
+is `Result<LoadReport, ConfigError>` so fatal cases propagate as typed errors
+rather than string-matched diagnostics (the previous `LoadReport` carried no
+error state, forcing callers to grep `diagnostics` for `"malformed"` —
+fragile and easy to miss). Fatal cases:
+- malformed top-level JSON (parse failure)
+- non-object root (`[]`, `null`, `42`, etc. — see §1)
+
+Callers MUST propagate the `Err` — pipeline hard-fails; `--doctor` returns
+exit code 2; desktop startup surfaces the §7 M2 banner and continues with
+defaults for the session. Callers MUST NOT fall back to defaults on `Err` —
+the previous "log a diagnostic and continue" path is the silent-failure class
+this refactor is removing. `Ok(LoadReport)` means the document parsed as a
+JSON object; per-field leniency information is then carried in
+`LoadReport.diagnostics` and `*_missing` flags — CodeRabbit #2, PR #120.
 
 - All seven consumers in the Problem table route through this accessor —
   including `privacy/mod.rs` (retiring its third reader/writer) and the
@@ -206,7 +230,9 @@ cannot continue on garbage defaults — CodeRabbit #1, PR #120.
   env-derived rule with no `CURATED_BRAIN_*` set they would silently read the
   developer's real `~/.brain/config.json`, or CI's `$HOME`.
   **Ruling:** migrate every test/tool fixture caller to `open_with_config` with
-  an explicit config path **in this PR**, rather than special-casing env
+  an explicit config path **in this PR** (the implementation PR; the
+  documentation-only PR that first opened this thread is long since folded in),
+  rather than special-casing env
   presence inside `open()`. Environment semantics stay out of the fallback logic
   and fixtures stay isolated. `open()` survives only for callers that genuinely
   mean "the ambient brain".
@@ -272,9 +298,18 @@ unified config atomically, and prints the agent-client snippet
 which modeled sections get overwritten, it never turns the writer into a
 truncating whole-document replace. Without `--force`, the existing config is
 merged/preserved and a warning printed. `--force` is also the
-**only** path allowed to replace a malformed document (§1), and it must copy the
-original to `config.json.bak` before writing — never discard an unparseable file
-the user may still want to hand-repair.
+**only** path allowed to replace a malformed or non-object-root document (§1),
+and it must copy the original to `config.json.bak` before writing — never
+discard an unparseable file the user may still want to hand-repair.
+
+**`--force` credential carve-out.** `--force` replaces modeled sections
+wholesale **except** an existing `generation.api_key` or `embedding.api_key`
+already present in the document. Section 7's back-compat rule 2 requires every
+write path (panel and `--onboard`, with or without `--force`) to carry an
+existing legacy plaintext key through untouched; `--force` is not an exemption.
+A user who wants to remove a stored key clears it explicitly via the panel
+("remove stored key" affordance) — `--force` must never silently re-delete a
+credential that was already on disk — CodeRabbit #4, PR #120.
 
 `--doctor` diagnoses the current binding (config path in use, parse status,
 generation/embedding block completeness, vault existence, db existence) —

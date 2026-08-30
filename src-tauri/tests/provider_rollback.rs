@@ -61,7 +61,8 @@ fn update_provider_rolls_back_to_unconfigured_on_init_failure() {
         brain_dir: brain_path.to_path_buf(),
         config_path: brain_path.join("config.json"),
         db_path: brain_path.join("brain.db"),
-    });
+    })
+    .unwrap();
     assert_eq!(
         report.config.generation.provider,
         GenerationProviderKind::Unconfigured

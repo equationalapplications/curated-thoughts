@@ -1,12 +1,47 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use thiserror::Error;
 use uuid::Uuid;
 use crate::embedder::EmbedProfile;
 pub use crate::inference::config::{GenerationConfig, EmbeddingConfig};
 use crate::privacy::PrivacyConfig;
 use crate::retrieval::BrainPaths;
 use std::fs;
+
+/// Fatal errors from `BrainConfig::load_lenient`.
+///
+/// Malformed top-level JSON, non-object roots, and present-but-non-string
+/// `vault_path` values are classified as hard errors because masking them once
+/// silently reset users' vault paths and forced re-onboarding (final-review M1,
+/// and the same failure class as today's `inference::write_config` silently
+/// replacing a malformed config with `{}`). Callers MUST propagate these as
+/// typed errors rather than matching on a `diagnostics: Vec<String>` string.
+/// The only IO condition returned as `Ok` is "file missing" — that is the
+/// normal post-onboarding state, not corruption.
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("config.json is malformed JSON: {0}")]
+    MalformedJson(#[from] serde_json::Error),
+    #[error("config.json root must be a JSON object (got {actual})")]
+    NonObjectRoot { actual: &'static str },
+    #[error("config.json vault_path is present but not a string")]
+    VaultPathNotString,
+    #[error("config.json could not be read: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Classifies a parsed-but-non-object JSON value for the error variant.
+fn root_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
 
 /// Unified configuration for a brain directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,13 +236,18 @@ impl BrainConfig {
 
                 Ok(cfg)
             }
-            Err(e) => {
-                // Strict load failed.  We pre-validated vault_path above, so any
-                // remaining error is from generation/embedding/privacy blocks
-                // (unknown enum variants or other schema mismatches).  Fall through
-                // to lenient loading to recover, and restore the original raw blocks
-                // verbatim so they survive the write cycle.
-                let mut report = BrainConfig::load_lenient(paths);
+            Err(_e) => {
+                // Strict load failed.  We pre-validated vault_path above and
+                // confirmed the root is an object, so any remaining strict
+                // error is from generation/embedding/privacy blocks (unknown
+                // enum variants or other schema mismatches).  Fall through to
+                // lenient loading to recover, and restore the original raw
+                // blocks verbatim so they survive the write cycle.  JSON
+                // itself already parsed successfully above, so a Result Err
+                // from load_lenient here would only be the non-object-root
+                // case (impossible by construction) or vault_path (already
+                // pre-validated) — propagate just in case.
+                let mut report = BrainConfig::load_lenient(paths)?;
                 report.config.raw_generation = raw_gen;
                 report.config.raw_embedding = raw_emb;
                 report.config.raw_privacy = raw_priv;
@@ -218,9 +258,11 @@ impl BrainConfig {
     }
 
     /// Load config from disk with per-field leniency.
-    /// Malformed top-level JSON is fatal and returned in the report.
-    /// Missing or unparseable fields (except vault_path) are dropped to defaults.
-    pub fn load_lenient(paths: &BrainPaths) -> LoadReport {
+    /// Malformed top-level JSON or a non-object root is fatal and returned as
+    /// `Err(ConfigError)`. Missing or unparseable fields (except `vault_path`)
+    /// are dropped to defaults; a missing file is `Ok` with all `*_missing`
+    /// flags set (callers decide whether missing config is a hard error).
+    pub fn load_lenient(paths: &BrainPaths) -> Result<LoadReport, ConfigError> {
         let mut report = LoadReport {
             config: BrainConfig::default(),
             diagnostics: vec![],
@@ -238,26 +280,18 @@ impl BrainConfig {
                 report.embedding_missing = true;
                 report.vault_path_missing = true;
                 report.privacy_missing = true;
-                return report;
+                return Ok(report);
             }
         };
 
-        let value: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                report.diagnostics
-                    .push(format!("malformed JSON: {}", e));
-                return report;
-            }
-        };
-
-        let obj = match value.as_object() {
-            Some(o) => o.clone(),
-            None => {
-                report.diagnostics.push("root is not a JSON object".to_string());
-                return report;
-            }
-        };
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(ConfigError::from)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| ConfigError::NonObjectRoot {
+                actual: root_kind(&value),
+            })?
+            .clone();
 
         // Preserve unknown keys for round-trip
         let known_keys = [
@@ -328,12 +362,7 @@ impl BrainConfig {
         if let Some(vp) = obj.get("vault_path") {
             match vp.as_str() {
                 Some(s) => report.config.vault_path = Some(s.to_string()),
-                None if !vp.is_null() => {
-                    report
-                        .diagnostics
-                        .push("vault_path present but not a string: hard error".to_string());
-                    return report;
-                }
+                None if !vp.is_null() => return Err(ConfigError::VaultPathNotString),
                 _ => report.vault_path_missing = true,
             }
         } else {
@@ -408,7 +437,7 @@ impl BrainConfig {
             report.privacy_missing = true;
         }
 
-        report
+        Ok(report)
     }
 
     /// Write config to disk using raw-document merge (preserves unknown keys).

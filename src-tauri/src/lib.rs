@@ -2687,14 +2687,12 @@ pub fn run() {
     // unified lenient loader so the diagnostic wording stays in sync with
     // the desktop banner — no second copy of the JSON parse gate.
     if paths.config_path.exists() {
-        let early_report = crate::config::BrainConfig::load_lenient(&paths);
-        if early_report
-            .diagnostics
-            .iter()
-            .any(|d| d.contains("malformed"))
-        {
+        // load_lenient now returns Result; a fatal Err (malformed JSON,
+        // non-object root, non-string vault_path) is the desktop §7 M2
+        // "show actionable banner, continue with defaults" path.
+        if let Err(e) = crate::config::BrainConfig::load_lenient(&paths) {
             eprintln!(
-                "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
+                "warning: config.json failed to load at {}: {e}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
                 paths.config_path.display()
             );
         }
@@ -2945,19 +2943,30 @@ pub fn run() {
                             db_path: brain_path.join("brain.db"),
                         },
                     );
-                    let config = report.config;
-
                     // Task 17: desktop startup surfaces malformed config with a
                     // recoverable banner instead of crash-looping.  The same
-                    // load_lenient diagnostics drive the in-app banner and a
-                    // stderr hint for headless launches; we continue with the
-                    // defaulted config so the session can still run --doctor.
-                    let malformed_diagnostics: Vec<String> = report
-                        .diagnostics
-                        .iter()
-                        .filter(|d| d.contains("malformed"))
-                        .cloned()
-                        .collect();
+                    // load_lenient call drives the in-app banner and a
+                    // stderr hint for headless launches; on Err we fall back
+                    // to a default config so the session can still run
+                    // --doctor (the §7 M2 degrade-visibly-not-crash-loop rule).
+                    let (config, malformed_diagnostics): (
+                        crate::config::BrainConfig,
+                        Vec<String>,
+                    ) = match report {
+                        Ok(report) => {
+                            let diags: Vec<String> = report
+                                .diagnostics
+                                .iter()
+                                .filter(|d| d.contains("malformed"))
+                                .cloned()
+                                .collect();
+                            (report.config, diags)
+                        }
+                        Err(e) => (
+                            crate::config::BrainConfig::default(),
+                            vec![format!("config.json failed to load: {e}")],
+                        ),
+                    };
                     if !malformed_diagnostics.is_empty() {
                         eprintln!(
                             "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",

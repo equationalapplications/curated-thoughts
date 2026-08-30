@@ -28,7 +28,7 @@ fn curated_brain_db_only_all_paths_agree() {
                     assert_eq!(paths.config_path, expected_config);
 
                     // Config loads from the right place
-                    let report = BrainConfig::load_lenient(&paths);
+                    let report = BrainConfig::load_lenient(&paths).unwrap();
                     assert_eq!(report.config.vault_path, Some("~/vault".to_string()));
 
                     // Sanity: the cfg_str we wrote exists at paths.config_path

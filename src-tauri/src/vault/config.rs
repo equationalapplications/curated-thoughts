@@ -100,7 +100,8 @@ impl VaultConfig {
 
     pub fn get_vault_path(&self) -> Result<Option<String>> {
         let paths = self.brain_paths();
-        let report = BrainConfig::load_lenient(&paths);
+        let report = BrainConfig::load_lenient(&paths)
+            .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?;
         Ok(report.config.vault_path)
     }
 
@@ -119,7 +120,8 @@ impl VaultConfig {
 
     pub fn get_embed_profile(&self) -> Result<EmbedProfile> {
         let paths = self.brain_paths();
-        let report = BrainConfig::load_lenient(&paths);
+        let report = BrainConfig::load_lenient(&paths)
+            .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?;
         Ok(report.config.embed_profile.unwrap_or_default())
     }
 
@@ -134,7 +136,8 @@ impl VaultConfig {
 
     pub fn has_migrated_to_v2(&self) -> Result<bool> {
         let paths = self.brain_paths();
-        let report = BrainConfig::load_lenient(&paths);
+        let report = BrainConfig::load_lenient(&paths)
+            .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?;
         Ok(report.config.migrated_to_v2)
     }
 

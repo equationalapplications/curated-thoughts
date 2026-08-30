@@ -80,7 +80,7 @@ fn load_lenient_drops_unparseable_embed_profile() {
         db_path: temp.path().join("brain.db"),
     };
 
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     assert_eq!(report.config.vault_path, Some("~/vault".to_string()));
     assert_eq!(report.config.embed_profile, None); // defaulted, not fatal
     assert!(report
@@ -102,9 +102,45 @@ fn load_lenient_fails_on_malformed_json() {
         db_path: temp.path().join("brain.db"),
     };
 
-    let report = BrainConfig::load_lenient(&paths);
-    // Malformed top-level JSON is still fatal
-    assert!(report.diagnostics.iter().any(|d| d.contains("malformed")));
+    // Malformed top-level JSON is propagated as a typed ConfigError.
+    let result = BrainConfig::load_lenient(&paths);
+    assert!(result.is_err(), "malformed JSON must be fatal");
+}
+
+#[test]
+fn load_lenient_fails_on_non_object_root() {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+
+    // Valid JSON but the root is an array — cannot receive object overlays.
+    fs::write(&config_path, "[1, 2, 3]").unwrap();
+
+    let paths = BrainPaths {
+        brain_dir: temp.path().to_path_buf(),
+        config_path,
+        db_path: temp.path().join("brain.db"),
+    };
+
+    let result = BrainConfig::load_lenient(&paths);
+    assert!(result.is_err(), "non-object root must be fatal");
+}
+
+#[test]
+fn load_lenient_fails_on_non_object_null_root() {
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+
+    // Valid JSON, root is null.
+    fs::write(&config_path, "null").unwrap();
+
+    let paths = BrainPaths {
+        brain_dir: temp.path().to_path_buf(),
+        config_path,
+        db_path: temp.path().join("brain.db"),
+    };
+
+    let result = BrainConfig::load_lenient(&paths);
+    assert!(result.is_err(), "null root must be fatal");
 }
 
 #[test]
@@ -122,7 +158,7 @@ fn load_lenient_tracks_missing_blocks() {
         db_path: temp.path().join("brain.db"),
     };
 
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     assert!(report.generation_missing);
     assert!(report.embedding_missing);
     assert!(report.privacy_missing);
@@ -144,7 +180,7 @@ fn load_lenient_preserves_unknown_keys() {
         db_path: temp.path().join("brain.db"),
     };
 
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     let preserved = report.config.preserved_keys;
     assert!(
         preserved.is_some(),

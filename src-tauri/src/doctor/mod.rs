@@ -14,26 +14,35 @@ use anyhow::Result;
 
 pub fn run_doctor() -> Result<u32> {
     let paths = resolve_brain_paths();
-    let report = crate::config::BrainConfig::load_lenient(&paths);
 
     println!("Config path: {}", paths.config_path.display());
     println!("Brain dir: {}", paths.brain_dir.display());
     println!("DB path: {}", paths.db_path.display());
     println!();
 
-    // Check if file exists
+    // Check if file exists. File-missing is reported by the path-exists check
+    // below (exit 1); a missing file causes `load_lenient` to return Ok with
+    // all *_missing flags set, which is the correct "needs onboarding" signal.
     if !paths.config_path.exists() {
         println!("ERROR: config.json not found");
         println!("Remediation: run `curated-thoughts --onboard`");
         return Ok(1); // Exit code 1
     }
 
-    // Check if malformed
-    if report.diagnostics.iter().any(|d| d.contains("malformed")) {
-        println!("ERROR: config.json is malformed JSON");
-        println!("Remediation: hand-repair the file, or run `curated-thoughts --onboard --force` (backs up to config.json.bak)");
-        return Ok(2); // Exit code 2
-    }
+    // Fatal load errors (malformed JSON, non-object root, non-string
+    // vault_path) are reported as exit code 2 with a typed error message.
+    // load_lenient's typed Result removed the previous string-match on
+    // "malformed" inside diagnostics.
+    let report = match crate::config::BrainConfig::load_lenient(&paths) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("ERROR: config.json could not be loaded: {}", e);
+            println!(
+                "Remediation: hand-repair the file, or run `curated-thoughts --onboard --force` (backs up to config.json.bak)"
+            );
+            return Ok(2); // Exit code 2
+        }
+    };
 
     // Check for required blocks
     if report.generation_missing || report.embedding_missing {

@@ -46,7 +46,7 @@ fn brain_config_write_preserves_unknown_keys() {
 #[test]
 fn load_lenient_returns_diagnostics() {
     let (_temp, paths) = temp_paths();
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     // Valid config should have no diagnostics (or no malformed-related ones)
     assert!(
         report.diagnostics.is_empty() || !report.diagnostics.iter().any(|d| d.contains("malformed")),
@@ -58,7 +58,7 @@ fn load_lenient_returns_diagnostics() {
 fn consumer_load_and_write_roundtrip() {
     let (_temp, paths) = temp_paths();
     // load_lenient (used by retrieval facade etc)
-    let loaded = BrainConfig::load_lenient(&paths);
+    let loaded = BrainConfig::load_lenient(&paths).unwrap();
     let mut cfg = loaded.config;
     cfg.generation.model_name = Some("updated-model".to_string());
     cfg.write(&paths).expect("write succeeds");

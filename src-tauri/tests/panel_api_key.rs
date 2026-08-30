@@ -127,7 +127,8 @@ fn update_provider_panel_save_does_not_overwrite_existing_api_key() {
         brain_dir: brain_path.to_path_buf(),
         config_path: config_path.clone(),
         db_path: brain_path.join("brain.db"),
-    });
+    })
+    .unwrap();
     // The disk api_key must remain the legacy one, not the new value.
     assert_eq!(
         report.config.generation.api_key.as_deref(),

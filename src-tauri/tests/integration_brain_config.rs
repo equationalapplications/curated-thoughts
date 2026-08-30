@@ -30,7 +30,7 @@ fn split_env_db_and_config() {
             assert_eq!(paths.config_path, config_path);
             assert_eq!(paths.db_path, db_path);
 
-            let report = BrainConfig::load_lenient(&paths);
+            let report = BrainConfig::load_lenient(&paths).unwrap();
             assert_eq!(report.config.vault_path, Some("~/vault".to_string()));
         },
     );

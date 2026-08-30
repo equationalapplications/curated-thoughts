@@ -25,7 +25,7 @@ fn leniency_drop_unknown_embed_variant() {
     let json = r#"{"vault_path":"~/v","embed_profile":"unknown_variant","generation":{},"embedding":{},"privacy":{}}"#;
     let (_temp, paths) = temp_paths(json);
 
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     assert_eq!(report.config.embed_profile, None);
     assert!(report.diagnostics.iter().any(|d| d.contains("embed_profile")));
 }
@@ -34,19 +34,21 @@ fn leniency_drop_unknown_embed_variant() {
 fn leniency_hard_fail_on_malformed_json() {
     let (_temp, paths) = temp_paths("{ invalid }");
 
-    let report = BrainConfig::load_lenient(&paths);
-    assert!(report.diagnostics.iter().any(|d| d.contains("malformed")));
+    // Malformed top-level JSON is propagated as a typed ConfigError.
+    let result = BrainConfig::load_lenient(&paths);
+    assert!(result.is_err(), "malformed JSON must be fatal");
 }
 
 #[test]
 fn leniency_hard_fail_on_unparseable_vault_path() {
-    // vault_path present but not a string
+    // vault_path present but not a string — propagated as a typed
+    // ConfigError (the previous contract returned Ok with a diagnostic,
+    // forcing callers to string-match; the typed contract is unambiguous).
     let json = r#"{"vault_path":123,"generation":{},"embedding":{},"privacy":{}}"#;
     let (_temp, paths) = temp_paths(json);
 
-    let report = BrainConfig::load_lenient(&paths);
-    // unparseable vault_path is a hard error (returns early with diagnostics)
-    assert!(!report.diagnostics.is_empty());
+    let result = BrainConfig::load_lenient(&paths);
+    assert!(result.is_err(), "non-string vault_path must be fatal");
 }
 
 #[test]
@@ -54,7 +56,7 @@ fn leniency_missing_blocks_marked() {
     let json = r#"{"vault_path":"~/v"}"#;
     let (_temp, paths) = temp_paths(json);
 
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     assert!(report.generation_missing);
     assert!(report.embedding_missing);
     assert!(report.privacy_missing);
@@ -66,6 +68,6 @@ fn leniency_missing_vault_path_marked() {
     let json = r#"{"generation":{},"embedding":{},"privacy":{}}"#;
     let (_temp, paths) = temp_paths(json);
 
-    let report = BrainConfig::load_lenient(&paths);
+    let report = BrainConfig::load_lenient(&paths).unwrap();
     assert!(report.vault_path_missing);
 }

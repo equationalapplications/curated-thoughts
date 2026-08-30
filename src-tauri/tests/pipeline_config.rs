@@ -15,7 +15,11 @@ use tempfile::TempDir;
 
 static PIPELINE_STUB_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Lenient load reports a `malformed` diagnostic on parse failure.
+/// Lenient load returns a typed ConfigError on parse failure.
+///
+/// load_lenient's contract changed (PR #120 follow-up): malformed JSON is
+/// propagated as `Err`, not as a diagnostic string inside `LoadReport`. The
+/// pipeline worker propagates that error and exits at startup.
 #[test]
 fn load_lenient_reports_malformed_on_broken_json() {
     let temp = TempDir::new().unwrap();
@@ -28,11 +32,11 @@ fn load_lenient_reports_malformed_on_broken_json() {
         db_path: temp.path().join("brain.db"),
     };
 
-    let report = BrainConfig::load_lenient(&paths);
+    let result = BrainConfig::load_lenient(&paths);
     assert!(
-        report.diagnostics.iter().any(|d| d.contains("malformed")),
-        "expected a 'malformed' diagnostic for broken JSON, got {:?}",
-        report.diagnostics
+        result.is_err(),
+        "expected Err for broken JSON, got {:?}",
+        result
     );
 }
 

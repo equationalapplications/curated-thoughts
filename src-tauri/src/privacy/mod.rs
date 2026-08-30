@@ -45,13 +45,16 @@ pub fn effective_mode(cfg: &PrivacyConfig) -> PrivacyMode {
 
 pub fn read_privacy_config(_brain_dir: &Path) -> Result<PrivacyConfig> {
     let paths = crate::retrieval::resolve_brain_paths();
-    let report = crate::config::BrainConfig::load_lenient(&paths);
+    let report = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?;
     Ok(report.config.privacy)
 }
 
 pub fn write_privacy_config(_brain_dir: &Path, privacy: &PrivacyConfig) -> Result<()> {
     let paths = crate::retrieval::resolve_brain_paths();
-    let mut config = crate::config::BrainConfig::load_lenient(&paths).config;
+    let mut config = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?
+        .config;
     config.privacy = privacy.clone();
     config.write(&paths)
 }

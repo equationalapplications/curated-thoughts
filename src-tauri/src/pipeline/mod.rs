@@ -142,17 +142,16 @@ impl PipelineWorker {
             config_path,
             db_path: self.db_path.clone(),
         };
-        let report = BrainConfig::load_lenient(&paths);
-        for diagnostic in &report.diagnostics {
-            eprintln!("[pipeline] config diagnostic: {}", diagnostic);
-        }
         // Hard fail on malformed top-level JSON: do NOT silently default the
         // embed profile, which would route every embedding through an
         // unconfigured LLM and look like an onboarding reset to the user.
-        if report.diagnostics.iter().any(|d| d.contains("malformed")) {
-            return Err(anyhow::anyhow!(
-                "malformed config.json; cannot proceed without explicit fix"
-            ));
+        // load_lenient now returns Result<LoadReport, ConfigError> so the
+        // fatal cases (malformed JSON, non-object root, non-string vault_path)
+        // propagate as typed errors instead of being string-matched out of
+        // a diagnostics Vec.
+        let report = BrainConfig::load_lenient(&paths)?;
+        for diagnostic in &report.diagnostics {
+            eprintln!("[pipeline] config diagnostic: {}", diagnostic);
         }
         let profile = report.config.embed_profile.unwrap_or_default();
         let mut conn = match Connection::open(&self.db_path) {

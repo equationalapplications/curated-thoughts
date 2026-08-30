@@ -264,7 +264,9 @@ pub fn update_provider_with_brain_path(
         config_path: crate::retrieval::resolve_brain_paths().config_path,
         db_path: brain_path.join("brain.db"),
     };
-    let mut cfg = crate::config::BrainConfig::load_lenient(&paths).config;
+    let mut cfg = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| format!("config.json failed to load: {e}"))?
+        .config;
 
     let mut config_for_disk = config;
     // Strip api_key before persisting.  If the incoming value is empty,
@@ -356,7 +358,8 @@ pub fn get_provider_config() -> Result<ProviderConfigResponse, String> {
     // see them at the top level; diagnostics and missing-block flags ride
     // alongside them.
     let paths = crate::retrieval::resolve_brain_paths();
-    let report = crate::config::BrainConfig::load_lenient(&paths);
+    let report = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| format!("config.json failed to load: {e}"))?;
     Ok(build_provider_config_response(&report))
 }
 
@@ -619,7 +622,7 @@ mod tests {
             db_path: temp.path().join("brain.db"),
         };
 
-        let report = BrainConfig::load_lenient(&paths);
+        let report = BrainConfig::load_lenient(&paths).unwrap();
         assert!(report.generation_missing, "gen block should be missing");
         assert!(report.embedding_missing, "emb block should be missing");
 
@@ -672,7 +675,7 @@ mod tests {
             db_path: temp.path().join("brain.db"),
         };
 
-        let report = BrainConfig::load_lenient(&paths);
+        let report = BrainConfig::load_lenient(&paths).unwrap();
         assert!(
             report.diagnostics.iter().any(|d| d.contains("not found")),
             "lenient load must report missing config.json, got {:?}",
