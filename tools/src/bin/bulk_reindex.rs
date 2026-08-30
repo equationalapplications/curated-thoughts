@@ -88,7 +88,8 @@ fn main() -> Result<()> {
     let profile =
         retrieval::load_embed_profile(&paths_b.config_path).context("read embed profile")?;
 
-    let db = AppDb::open(&paths_b.db_path).context("open brain database")?;
+    let db = AppDb::open_with_config(&paths_b.db_path, &paths_b.config_path)
+        .context("open brain database")?;
     let conn = &db.0;
     let config = VaultConfig::new(paths_b.config_path.clone());
     let vault_root = config

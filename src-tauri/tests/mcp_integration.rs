@@ -157,7 +157,7 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
         || {
             let paths = retrieval::resolve_brain_paths();
             let db_path = paths.db_path.clone();
-            let db = AppDb::open(&db_path).unwrap();
+            let db = AppDb::open_with_config(&db_path, &paths.config_path).unwrap();
             seed_fixture(&db.0).unwrap();
         },
     );
@@ -243,7 +243,7 @@ async fn mcp_lists_wiki_tools_and_returns_json() {
         ],
         || {
             let paths = retrieval::resolve_brain_paths();
-            let db = AppDb::open(&paths.db_path).unwrap();
+            let db = AppDb::open_with_config(&paths.db_path, &paths.config_path).unwrap();
             seed_fixture(&db.0).unwrap();
             seed_wiki_fixture(&db.0).unwrap();
         },
@@ -335,8 +335,11 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
         [("CURATED_BRAIN_DIR", Some(brain.to_str().unwrap()))],
         || {
             let paths = tauri_app_lib::retrieval::resolve_brain_paths();
-            let _db =
-                tauri_app_lib::retrieval::AppDb::open(&paths.db_path).expect("seed brain.db");
+            let _db = tauri_app_lib::retrieval::AppDb::open_with_config(
+                &paths.db_path,
+                &paths.config_path,
+            )
+            .expect("seed brain.db");
         },
     );
     // Index files are never auto-created (spec v2) — pre-seed one.

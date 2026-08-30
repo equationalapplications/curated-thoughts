@@ -646,7 +646,12 @@ fn release_global_db_lock(db_state: &DbState) -> Result<PathBuf, String> {
     ));
     remove_sqlite_sidecars(&stub_path);
     let _ = std::fs::remove_file(&stub_path);
-    let stub = AppDb::open(&stub_path).map_err(|e| e.to_string())?;
+    // The stub lives in temp_dir() with no real config — pass the default
+    // config path so open_with_config reads a (likely absent) config.json
+    // and falls through to a vault_root = None migration, which is safe
+    // for an empty stub DB.
+    let stub = AppDb::open_with_config(&stub_path, VaultConfig::default_config_path())
+        .map_err(|e| e.to_string())?;
     let mut guard = db_state.0.lock().unwrap();
     let prev = std::mem::replace(&mut *guard, stub);
     drop(guard);
@@ -1081,12 +1086,13 @@ fn recover_after_failed_switch_vault(
     status_state: State<'_, WikiStatusState>,
     _outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
+    let config_path = retrieval::resolve_brain_paths().config_path;
     let reopened = (|| -> Result<(), String> {
         let mut guard = db_state
             .0
             .lock()
             .map_err(|_| "db mutex poisoned".to_string())?;
-        *guard = AppDb::open(db_path).map_err(|e| e.to_string())?;
+        *guard = AppDb::open_with_config(db_path, &config_path).map_err(|e| e.to_string())?;
         Ok(())
     })();
     if let Err(e) = &reopened {
@@ -1144,6 +1150,7 @@ async fn switch_vault(
     // db-path-cleanup were silently operating on the WRONG brain.db.
     // Route through the canonical resolver so the two paths agree.
     let db_path = retrieval::resolve_brain_paths().db_path;
+    let config_path = retrieval::resolve_brain_paths().config_path;
 
     let new_root = validated_new_vault_root(&new_path)?;
 
@@ -1230,7 +1237,7 @@ async fn switch_vault(
 
         {
             let mut guard = db_state.0.lock().unwrap();
-            *guard = AppDb::open(&db_path).map_err(|e| e.to_string())?;
+            *guard = AppDb::open_with_config(&db_path, &config_path).map_err(|e| e.to_string())?;
         }
 
         {
@@ -2563,7 +2570,8 @@ fn run_ingest_with_app<R: tauri::Runtime>(
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
     let db_path = tmp_path.join("brain.db");
-    let db = db::AppDb::open(&db_path).expect("open test db");
+    let config_path = tmp_path.join("config.json");
+    let db = db::AppDb::open_with_config(&db_path, &config_path).expect("open test db");
     let config = vault::VaultConfig::new(tmp_path.join("config.json"));
     tauri::test::mock_builder()
         .manage(DbState(std::sync::Mutex::new(db)))
@@ -2636,7 +2644,8 @@ pub fn run() {
 
     let db_path = retrieval::resolve_brain_paths().db_path;
 
-    let config = VaultConfig::new(retrieval::resolve_brain_paths().config_path);
+    let config_path = retrieval::resolve_brain_paths().config_path;
+    let config = VaultConfig::new(config_path.clone());
     let vault_path_for_migration = config.get_vault_path().ok().flatten();
     let vault_migration_needed = !config.has_migrated_to_v2().unwrap_or(false);
 
@@ -2701,7 +2710,7 @@ pub fn run() {
         }
     }
 
-    let db = AppDb::open(&db_path).expect("failed to open database");
+    let db = AppDb::open_with_config(&db_path, &config_path).expect("failed to open database");
     // Phase 9: one-time content_hash migration gate. The V9 schema adds
     // the column; this returns true on the first start after the schema
     // ships. The actual data migration is dispatched in the setup
@@ -3341,7 +3350,7 @@ mod heal_invalid_sources_tests {
         config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
         let db_path = tmp.path().join("brain.db");
-        let db = AppDb::open(&db_path).unwrap();
+        let db = AppDb::open_with_config(&db_path, &tmp.path().join("config.json")).unwrap();
         let db_state = DbState(Mutex::new(db));
         let vault_state = VaultConfigState(Mutex::new(config));
 
@@ -3739,7 +3748,8 @@ mod maintenance_command_tests {
         // touched). The heal function takes &DbState directly so we seed
         // against the AppDb's connection rather than an in-memory one.
         let db_path = tmp.path().join("test.db");
-        let db = crate::db::AppDb::open(&db_path).expect("open test db");
+        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+            .expect("open test db");
         let manual = r#"{"proposal_id":null,"evidence":[]}"#;
         // Three rows: one librarian_inferred (must be touched), one
         // user_stated with the MANUAL sentinel (must NOT be touched), one
@@ -3847,7 +3857,8 @@ mod maintenance_command_tests {
 
         // (b) heal_invalid_sources
         let db_path = tmp.path().join("e4.db");
-        let db = crate::db::AppDb::open(&db_path).expect("open test db");
+        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("e4-config.json"))
+            .expect("open test db");
         db.0.execute(
             "INSERT INTO llm_wiki_entries
                 (id, entity_id, title, body, tags, confidence, source_type, source_ref,
@@ -3992,7 +4003,8 @@ mod ingest_document_command_tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("brain.db");
-        let db = db::AppDb::open(&db_path).expect("open test db");
+        let db = db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+            .expect("open test db");
         let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
         // Real markdown doc with enough words for chunk_autodetect to produce

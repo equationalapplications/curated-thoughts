@@ -32,7 +32,8 @@ fn make_chunk(name: &str) -> Chunk {
 fn seed_graph_brain(brain_path: &std::path::Path) -> (i64, i64) {
     fs::write(brain_path.join("config.json"), b"{}\n").unwrap();
     let paths = tauri_app_lib::retrieval::resolve_brain_paths();
-    let db = AppDb::open(&paths.db_path).expect("writable brain db open");
+    let db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
+        .expect("writable brain db open");
     let doc_id = upsert_document(&db.0, "/vault/graph_fixture.rs", "h_graph").unwrap();
     let caller_id =
         insert_chunk(&db.0, doc_id, &make_chunk("caller_fn"), 0, ENTITY_ID, "").unwrap();
