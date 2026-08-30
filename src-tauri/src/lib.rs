@@ -2879,7 +2879,14 @@ pub fn run() {
 
                     let brain_dir_str = get_brain_dir_inner();
                     let brain_path = std::path::Path::new(&brain_dir_str);
-                    let config = crate::inference::config::read_config(brain_path);
+                    let report = crate::config::BrainConfig::load_lenient(
+                        &crate::retrieval::BrainPaths {
+                            brain_dir: brain_path.to_path_buf(),
+                            config_path: crate::inference::config::config_path(brain_path),
+                            db_path: brain_path.join("brain.db"),
+                        },
+                    );
+                    let config = report.config;
                     match initialize_provider(brain_path, &config.generation, &app_handle) {
                         Ok(provider) => {
                             let state = app_handle.state::<InferenceState>();

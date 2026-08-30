@@ -1,3 +1,4 @@
+use crate::retrieval::BrainPaths;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -58,12 +59,31 @@ pub fn config_path(brain_dir: &Path) -> PathBuf {
     brain_dir.join("config.json")
 }
 
+/// DEPRECATED: use `BrainConfig::load` or `BrainConfig::load_lenient` instead.
+/// This function now delegates to the unified loader for compatibility, returning
+/// `LlmConfig::default()` if the strict loader fails. New code should use the
+/// `crate::config::BrainConfig` API directly.
+#[deprecated(
+    since = "0.1.0",
+    note = "use crate::config::BrainConfig::load or load_lenient instead"
+)]
 pub fn read_config(brain_dir: &Path) -> LlmConfig {
-    let path = config_path(brain_dir);
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return LlmConfig::default();
-    };
-    serde_json::from_str(&contents).unwrap_or_default()
+    // Derive config_path the old way for back-compat
+    let cfg_path = config_path(brain_dir);
+
+    // Use unified strict loader; fall back to defaults on any error to preserve
+    // historical behavior (the old implementation never surfaced errors).
+    match crate::config::BrainConfig::load(&BrainPaths {
+        brain_dir: brain_dir.to_path_buf(),
+        config_path: cfg_path,
+        db_path: brain_dir.join("brain.db"),
+    }) {
+        Ok(cfg) => LlmConfig {
+            generation: cfg.generation,
+            embedding: cfg.embedding,
+        },
+        Err(_) => LlmConfig::default(),
+    }
 }
 
 pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
@@ -116,6 +136,7 @@ pub fn resolve_model_path(brain_dir: &Path, relative: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

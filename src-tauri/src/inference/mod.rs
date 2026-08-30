@@ -2,6 +2,7 @@ pub mod config;
 pub mod sidecar;
 
 use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
+#[allow(deprecated)]
 use crate::inference::config::{
     read_config, resolve_model_path, write_config, GenerationConfig, GenerationProviderKind,
 };
@@ -206,6 +207,7 @@ pub fn initialize_provider(
     initialize_provider_inner(brain_dir, config, Some(app))
 }
 
+#[allow(deprecated)]
 pub fn update_provider_with_brain_path(
     brain_path: &Path,
     config: GenerationConfig,
@@ -275,6 +277,7 @@ pub fn update_provider(
 }
 
 #[tauri::command]
+#[allow(deprecated)]
 pub fn get_provider_config() -> Result<serde_json::Value, String> {
     let brain_dir = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir);

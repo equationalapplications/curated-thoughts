@@ -5,7 +5,7 @@ use crate::db::proposals::{
     get_proposal_detail, insert_proposal, ItemDecision, ItemDecisionKind, NewProposal,
     NewProposalItem, NewProposalSource, ProposalKind, ProposalSourceRole, StoredEvidenceChunk,
 };
-use crate::inference::config::{read_config, GenerationProviderKind, LlmConfig};
+use crate::inference::config::{GenerationProviderKind, LlmConfig};
 use crate::librarian::{assemble_librarian_context, build_structural_context, ChunkRow};
 use crate::search::{bytes_to_f32, cosine_similarity};
 use anyhow::{Context, Result};
@@ -200,7 +200,15 @@ fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> St
 fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
     let brain_dir_str = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir_str);
-    let llm_config = read_config(brain_path);
+    let report = crate::config::BrainConfig::load_lenient(&crate::retrieval::BrainPaths {
+        brain_dir: brain_path.to_path_buf(),
+        config_path: crate::inference::config::config_path(brain_path),
+        db_path: brain_path.join("brain.db"),
+    });
+    let llm_config = LlmConfig {
+        generation: report.config.generation,
+        embedding: report.config.embedding,
+    };
     let timeout_secs = llm_config
         .generation
         .timeout_secs
