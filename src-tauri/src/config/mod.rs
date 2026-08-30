@@ -548,8 +548,11 @@ impl BrainConfig {
         let nonce = Uuid::new_v4();
         let pid = std::process::id();
         let tmp_name = format!("config.json.{}.{}.tmp", pid, nonce);
-        let tmp_path = paths.config_path.parent().unwrap_or_else(|| std::path::Path::new("."))
-            .join(&tmp_name);
+        let parent = paths.config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        // A fresh install has no brain dir yet — create it so the first write
+        // (e.g. from --onboard) doesn't fail with ENOENT.
+        fs::create_dir_all(parent)?;
+        let tmp_path = parent.join(&tmp_name);
 
         let json = serde_json::to_string_pretty(&root)?;
 
