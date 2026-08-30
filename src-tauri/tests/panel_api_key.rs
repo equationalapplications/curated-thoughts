@@ -95,15 +95,17 @@ fn write_config_does_not_write_api_key_when_none_supplied_and_disk_empty() {
 fn update_provider_panel_save_does_not_overwrite_existing_api_key() {
     let tmp = TempDir::new().unwrap();
     let brain_path = tmp.path();
-    allow_external_generation(brain_path);
 
     let config_path = brain_path.join("config.json");
-    // Seed with a legacy plaintext key.
+    // Seed with a legacy plaintext key.  Seed BEFORE setting the privacy mode:
+    // both write the same `config.json`, so seeding second would clobber the
+    // privacy block and leave the brain in strict mode.
     std::fs::write(
         &config_path,
         r#"{"generation": {"provider": "external", "external_url": "http://x", "api_key": "legacy-secret"}, "embedding": {}, "privacy": {}}"#,
     )
     .unwrap();
+    allow_external_generation(brain_path);
 
     let state = InferenceState(Mutex::new(GenerationProvider::External {
         base_url: "http://x".to_string(),
@@ -142,14 +144,15 @@ fn update_provider_panel_save_does_not_overwrite_existing_api_key() {
 fn update_provider_panel_save_writes_no_api_key_when_disk_had_none() {
     let tmp = TempDir::new().unwrap();
     let brain_path = tmp.path();
-    allow_external_generation(brain_path);
 
     let config_path = brain_path.join("config.json");
+    // Seed before setting the privacy mode — see the note above.
     std::fs::write(
         &config_path,
         r#"{"generation": {"provider": "external", "external_url": "http://x"}, "embedding": {}, "privacy": {}}"#,
     )
     .unwrap();
+    allow_external_generation(brain_path);
 
     let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
     // Panel save with api_key = None (the realistic case once the field is dropped).

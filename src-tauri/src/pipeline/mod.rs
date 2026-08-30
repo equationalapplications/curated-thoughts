@@ -127,16 +127,15 @@ impl PipelineWorker {
         // captured at startup and malformed JSON is hard-failed (rather than
         // silently falling back to a default embed profile, which masks
         // misconfiguration and re-triggers onboarding — Problem class 2).
-        let config_path = self
-            .db_path
-            .parent()
-            .map(|p| p.join("config.json"))
-            .unwrap_or_else(|| PathBuf::from("config.json"));
         let brain_dir = self
             .db_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
+        // Honor the same env-var contract as the rest of the app: an explicit
+        // `CURATED_BRAIN_CONFIG` must win over `{parent(db)}/config.json`, or
+        // the pipeline reads a different config than everything else.
+        let config_path = crate::retrieval::brain_paths_for(&brain_dir).config_path;
         let paths = BrainPaths {
             brain_dir,
             config_path,
@@ -209,7 +208,10 @@ impl PipelineWorker {
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &mut conn,
                                     &path,
-                                    crate::setup::recommended_model(),
+                                    crate::librarian::active_generation_model(
+                                        crate::setup::recommended_model(),
+                                    )
+                                    .as_str(),
                                     false,
                                 ) {
                                     let msg = format!("librarian error {}: {}", path, e);

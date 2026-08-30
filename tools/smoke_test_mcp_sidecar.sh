@@ -45,8 +45,10 @@ else
     exit 1
 fi
 
-DOCTOR_OUT=$("$BIN" --doctor 2>&1) || true
-DOCTOR_RC=$?
+DOCTOR_RC=0
+# `|| DOCTOR_RC=$?` keeps the real exit status: with `|| true` the subsequent
+# `$?` would always be 0 and a failing --doctor would silently "pass".
+DOCTOR_OUT=$("$BIN" --doctor 2>&1) || DOCTOR_RC=$?
 if [ "$DOCTOR_RC" -eq 0 ]; then
     echo "PASS: --doctor exit 0"
 else

@@ -198,10 +198,10 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
     cfg.write(&paths).map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
 
     // ── print agent-client snippet ─────────────────────────────────────────────
-    let vault_str = config.vault_root.to_string_lossy();
     println!("\nSetup complete.");
+    println!("\nConfig written to {}", paths.config_path.display());
     println!("\nTo run your sidecar:");
-    println!("  export CURATED_BRAIN_DIR={vault_str}");
+    println!("  export CURATED_BRAIN_CONFIG={}", paths.config_path.display());
     println!("  curated-thoughts --mcp");
 
     Ok(())

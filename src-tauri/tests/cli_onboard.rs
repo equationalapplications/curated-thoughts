@@ -4,6 +4,7 @@
 //! so they work in any environment.
 
 use std::fs;
+use std::sync::Mutex;
 use tempfile::TempDir;
 use tauri_app_lib::embedder::EmbedProfile;
 use tauri_app_lib::inference::config::GenerationConfig;
@@ -20,24 +21,34 @@ fn make_config(vault: &std::path::Path) -> OnboardConfig {
     }
 }
 
+/// Serializes env-var mutation across tests in this binary.  The process
+/// environment is global, so two tests setting `CURATED_BRAIN_*` in parallel
+/// would see each other's values.  Mirrors the pattern in
+/// `src-tauri/src/privacy/mod.rs`.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// Set up a temp brain dir so tests are fully isolated from ~/.brain.
+///
+/// `temp_env::with_vars` restores whatever the vars held before (including
+/// "unset"), instead of unconditionally removing them.
 fn with_temp_brain_dir<F>(temp: &TempDir, f: F)
 where
     F: FnOnce(),
 {
+    // Recover from a poisoned lock: a panicking test still leaves the env
+    // restored by `with_vars`, so the guard carries no invariant to protect.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let brain_dir = temp.path();
-    std::env::set_var("CURATED_BRAIN_DIR", brain_dir);
     // Also set CURATED_BRAIN_CONFIG so we can find the file to verify it.
-    let cfg = brain_dir.join("config.json");
-    std::env::set_var("CURATED_BRAIN_CONFIG", &cfg);
-    // Unset so tests don't interfere with each other.
     // CURATED_BRAIN_DB is not set — defaults to brain_dir/brain.db.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    std::env::remove_var("CURATED_BRAIN_DIR");
-    std::env::remove_var("CURATED_BRAIN_CONFIG");
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
+    let cfg = brain_dir.join("config.json");
+    temp_env::with_vars(
+        [
+            ("CURATED_BRAIN_DIR", Some(brain_dir.as_os_str())),
+            ("CURATED_BRAIN_CONFIG", Some(cfg.as_os_str())),
+        ],
+        f,
+    );
 }
 
 #[test]

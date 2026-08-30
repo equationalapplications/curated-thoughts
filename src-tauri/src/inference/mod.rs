@@ -4,7 +4,8 @@ pub mod sidecar;
 use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
 #[allow(deprecated)]
 use crate::inference::config::{
-    resolve_model_path, EmbeddingConfig, GenerationConfig, GenerationProviderKind,
+    read_config, resolve_chat_completions_url, resolve_model_path, write_config, EmbeddingConfig,
+    GenerationConfig, GenerationProviderKind,
 };
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
 use crate::privacy::{self, allows_external_generation};
@@ -56,15 +57,13 @@ impl GenerationProvider {
                 api_key,
                 model_name,
             } => {
-                let base = base_url.trim_end_matches('/');
-                let base = base.strip_suffix("/v1").unwrap_or(base);
                 let model = if model_name.trim().is_empty() {
                     "default".to_string()
                 } else {
                     model_name.clone()
                 };
                 RouteInfo::Http {
-                    url: format!("{}/v1/chat/completions", base),
+                    url: resolve_chat_completions_url(base_url),
                     api_key: api_key.clone(),
                     model,
                 }
@@ -236,11 +235,7 @@ pub fn update_provider_with_brain_path(
         Err(e) => {
             // Roll back to a default config via the unified writer so the
             // panel state is cleared even when provider init fails.
-            let paths = crate::retrieval::BrainPaths {
-                brain_dir: brain_path.to_path_buf(),
-                config_path: crate::retrieval::resolve_brain_paths().config_path,
-                db_path: brain_path.join("brain.db"),
-            };
+            let paths = crate::retrieval::brain_paths_for(brain_path);
             let fallback = crate::config::BrainConfig::default();
             let rollback_err = fallback.write(&paths).err();
             if let Some(rollback_err) = rollback_err {
@@ -259,26 +254,17 @@ pub fn update_provider_with_brain_path(
     // writer.  `BrainConfig::write` honors `CURATED_BRAIN_DB` /
     // `CURATED_BRAIN_CONFIG`, uses a unique temp filename, and treats
     // malformed JSON as fatal.
-    let paths = crate::retrieval::BrainPaths {
-        brain_dir: brain_path.to_path_buf(),
-        config_path: crate::retrieval::resolve_brain_paths().config_path,
-        db_path: brain_path.join("brain.db"),
-    };
+    let paths = crate::retrieval::brain_paths_for(brain_path);
     let mut cfg = crate::config::BrainConfig::load_lenient(&paths)
         .map_err(|e| format!("config.json failed to load: {e}"))?
         .config;
 
     let mut config_for_disk = config;
-    // Strip api_key before persisting.  If the incoming value is empty,
-    // preserve any legacy plaintext key already on disk by NOT overwriting
-    // it — so the panel cannot wipe a pre-existing credential, but also
-    // cannot write a new one (the latter must come from env vars).
-    let incoming_key = config_for_disk.api_key.clone();
-    let preserved_key = match incoming_key.as_deref() {
-        Some(s) if !s.trim().is_empty() => incoming_key,
-        _ => cfg.generation.api_key.clone(),
-    };
-    config_for_disk.api_key = preserved_key;
+    // Strip the panel-supplied api_key before persisting: a new credential
+    // must come from the environment, never from the settings panel.  Any
+    // legacy plaintext key already on disk is carried through unchanged, so
+    // a panel save can neither wipe nor replace a pre-existing credential.
+    config_for_disk.api_key = cfg.generation.api_key.clone();
     cfg.generation = config_for_disk;
 
     if let Err(e) = cfg.write(&paths) {
@@ -575,6 +561,19 @@ mod tests {
         assert_eq!(url, "http://localhost:11434/v1/chat/completions");
         assert_eq!(api_key.as_deref(), Some("key123"));
         assert_eq!(model, "gpt-4o");
+    }
+
+    #[test]
+    fn external_provider_versioned_base_appends_chat_completions_only() {
+        let p = GenerationProvider::External {
+            base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
+            api_key: Some("key123".to_string()),
+            model_name: "glm-5.3-flash".to_string(),
+        };
+        let RouteInfo::Http { url, .. } = p.route_info() else {
+            panic!()
+        };
+        assert_eq!(url, "https://api.z.ai/api/coding/paas/v4/chat/completions");
     }
 
     #[test]

@@ -94,11 +94,21 @@ fn doctor_never_echoes_api_key() {
                 "CURATED_BRAIN_CONFIG",
                 Some(config_path.to_string_lossy().as_ref()),
                 || {
-                    let exit_code = tauri_app_lib::doctor::run_doctor().unwrap();
+                    // Capture the full doctor report so the redaction contract
+                    // is actually asserted, not just the exit code.
+                    let mut out: Vec<u8> = Vec::new();
+                    let exit_code = tauri_app_lib::doctor::run_doctor_to(&mut out).unwrap();
                     assert_eq!(exit_code, 0);
-                    // We can't easily capture stdout in a unit test, but we verify
-                    // the function returns 0 and that config.json on disk was not
-                    // modified to include the secret.
+                    let report = String::from_utf8(out).unwrap();
+                    assert!(
+                        !report.contains("super-secret-key-99999"),
+                        "secret should never be echoed by --doctor; got:\n{report}"
+                    );
+                    assert!(
+                        report.contains("NOTE: generation API key in environment"),
+                        "doctor should acknowledge the env key without echoing it; got:\n{report}"
+                    );
+                    // config.json on disk must not gain the secret either.
                     let content = fs::read_to_string(&config_path).unwrap();
                     assert!(
                         !content.contains("super-secret-key-99999"),
