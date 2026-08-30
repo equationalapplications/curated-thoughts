@@ -20,6 +20,10 @@ struct OllamaModel {
 }
 
 fn ram_gb() -> u64 {
+    // macOS reports byte-accurate RAM via sysctl. Linux has no hw.memsize
+    // sysctl MIB (the command fails there, which silently pinned everyone to
+    // the 8 GB bucket) — parse /proc/meminfo instead, then fall back to the
+    // historical 8 GB bucket.
     Command::new("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
@@ -27,7 +31,26 @@ fn ram_gb() -> u64 {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(|bytes| bytes / (1024 * 1024 * 1024))
+        .or_else(meminfo_ram_gb)
         .unwrap_or(8)
+}
+
+/// Total RAM in GB parsed from `/proc/meminfo` (Linux), if readable.
+fn meminfo_ram_gb() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo_ram_gb(&info)
+}
+
+fn parse_meminfo_ram_gb(info: &str) -> Option<u64> {
+    let kb: u64 = info
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    (kb > 0).then(|| kb / (1024 * 1024))
 }
 
 pub fn recommended_model() -> &'static str {
@@ -159,5 +182,22 @@ mod tests {
     #[test]
     fn test_parse_models_response_invalid_json_errors() {
         assert!(parse_models_response("not json").is_err());
+    }
+
+    #[test]
+    fn test_parse_meminfo_ram_gb() {
+        // 16 GB machine
+        assert_eq!(
+            parse_meminfo_ram_gb("MemTotal:       16384000 kB\n"),
+            Some(15)
+        );
+        // 8 GB machine
+        assert_eq!(
+            parse_meminfo_ram_gb("MemTotal:        8388608 kB\n"),
+            Some(8)
+        );
+        // Tiny / unparseable inputs
+        assert_eq!(parse_meminfo_ram_gb("MemTotal:       1024 kB\n"), Some(0));
+        assert_eq!(parse_meminfo_ram_gb("no memory line here\n"), None);
     }
 }

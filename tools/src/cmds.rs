@@ -194,7 +194,8 @@ pub fn ingest_run() -> Result<()> {
     let paths_b = retrieval::resolve_brain_paths();
     let profile =
         retrieval::load_embed_profile(&paths_b.config_path).context("read embed profile")?;
-    let db = AppDb::open(&paths_b.db_path).context("open brain database")?;
+    let db = AppDb::open_with_config(&paths_b.db_path, &paths_b.config_path)
+        .context("open brain database")?;
     let conn = &db.0;
 
     let config = VaultConfig::new(paths_b.config_path.clone());
@@ -288,7 +289,11 @@ pub fn librarian_run(model: &str, force: bool) -> Result<()> {
     // (vault root derived from the config path), not from db_path's parent, so
     // surface-detection stays correct under non-default brain-dir layouts.
     let error_log_dir = paths.config_path.parent();
-    librarian_run_on(&mut db.0, error_log_dir, model, force)
+    // CLI callers pass a bin-default fallback (e.g. "llama3.2:3b"); the
+    // watermark/provenance model must be what the brain config actually
+    // resolves to, or the dirty-doc gate never stabilizes against labels.
+    let active = tauri_app_lib::librarian::active_generation_model(model);
+    librarian_run_on(&mut db.0, error_log_dir, active.as_str(), force)
 }
 
 /// Dirty-doc selection + run loop over an open connection (testable core of

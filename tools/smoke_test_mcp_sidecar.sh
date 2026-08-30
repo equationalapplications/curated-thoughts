@@ -16,10 +16,51 @@ set -euo pipefail
 BIN="${1:?usage: smoke_test_mcp_sidecar.sh <binary>}"
 [ -x "$BIN" ] || { echo "FAIL: $BIN is not executable" >&2; exit 1; }
 
+# ── Onboard + Doctor smoke (exercises CLI subcommands before --mcp launch) ────
+# Stage into a per-invocation HOME so a real ~/.brain is never touched.
+SMOKE_HOME=$(mktemp -d)
+export HOME="$SMOKE_HOME"
+export CURATED_BRAIN_CONFIG="$SMOKE_HOME/.brain/config.json"
+
+# Canned input for the interactive --onboard prompts:
+# Embedding: option 1 (Local Ollama)
+# Generation: option 0 (Skip / unconfigured)
+# Vault path comes from --vault flag below so no stdin required for that.
+ONBOARD_INPUT=$'1\n0\n'
+if printf '%s' "$ONBOARD_INPUT" | "$BIN" --onboard --vault "$SMOKE_HOME/vault" --force >/dev/null 2>&1; then
+    if [ -f "$CURATED_BRAIN_CONFIG" ]; then
+        echo "PASS: --onboard wrote config.json"
+    else
+        echo "FAIL: --onboard did not write config.json" >&2
+        exit 1
+    fi
+    if [ -d "$SMOKE_HOME/vault/immutable-source-files" ] && [ -d "$SMOKE_HOME/vault/wiki" ]; then
+        echo "PASS: --onboard created vault layout"
+    else
+        echo "FAIL: --onboard did not create vault layout" >&2
+        exit 1
+    fi
+else
+    echo "FAIL: --onboard exited non-zero" >&2
+    exit 1
+fi
+
+DOCTOR_RC=0
+# `|| DOCTOR_RC=$?` keeps the real exit status: with `|| true` the subsequent
+# `$?` would always be 0 and a failing --doctor would silently "pass".
+DOCTOR_OUT=$("$BIN" --doctor 2>&1) || DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ]; then
+    echo "PASS: --doctor exit 0"
+else
+    echo "FAIL: --doctor exit $DOCTOR_RC (expected 0)" >&2
+    echo "$DOCTOR_OUT" >&2
+    exit 1
+fi
+
 REQ='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke-test","version":"0.0.1"}}}'
 
 RESP_FILE=$(mktemp)
-trap 'kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; rm -f "$RESP_FILE"' EXIT
+trap 'kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; rm -f "$RESP_FILE"; rm -rf "$SMOKE_HOME"' EXIT
 
 # Run the sidecar in the background; capture stdout to a file so post-handshake
 # output can never trigger SIGPIPE and so we control process lifetime without

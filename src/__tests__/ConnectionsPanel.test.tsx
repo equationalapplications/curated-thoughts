@@ -27,11 +27,18 @@ const CONNECTIONS = {
 
 describe("ConnectionsPanel", () => {
   beforeEach(() => {
-    vi.mocked(invoke).mockImplementation((cmd: string) =>
-      cmd === "get_entity_connections_cmd"
-        ? Promise.resolve(CONNECTIONS)
-        : Promise.resolve(null),
-    );
+    // Override only the connections query and fall through to the test-setup
+    // default for everything else. Critically, get_provider_config must keep
+    // returning a valid config so useProviderHealth resolves embedding to
+    // "ok" — otherwise the panel renders only the ProviderNotice, the
+    // backlinks never appear, and the click assertion below race-flakes on
+    // microtask ordering of the getEntityConnections vs getProviderConfig
+    // .then arms.
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_entity_connections_cmd") return Promise.resolve(CONNECTIONS);
+      return fallback!(cmd, args);
+    });
   });
 
   test("renders backlinks and edges grouped by type; backlink click selects entity", async () => {

@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "curated-thoughts"
-version = "1.35.0"
+version = "1.35.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1230,6 +1230,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "uuid",
  "walkdir",
  "windows-sys 0.61.2",
  "zip",
@@ -7727,6 +7728,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "rand 0.10.2",
  "serde_core",
  "wasm-bindgen",
 ]

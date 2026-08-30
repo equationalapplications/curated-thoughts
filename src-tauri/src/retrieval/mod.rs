@@ -62,6 +62,37 @@ pub fn resolve_brain_paths() -> BrainPaths {
     }
 }
 
+/// Resolve the brain layout for an explicitly supplied `brain_dir`.
+///
+/// Same env-var contract as [`resolve_brain_paths`] for `CURATED_BRAIN_DB` and
+/// `CURATED_BRAIN_CONFIG`, but the caller's `brain_dir` replaces
+/// `CURATED_BRAIN_DIR`, so callers that already hold a brain directory (tests
+/// with a temp dir, commands that take a path argument) are honored instead of
+/// silently falling back to the globally resolved `~/.brain`.
+pub fn brain_paths_for(brain_dir: &Path) -> BrainPaths {
+    let db_path = std::env::var_os("CURATED_BRAIN_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| brain_dir.join("brain.db"));
+
+    let config_path = if let Some(p) = std::env::var_os("CURATED_BRAIN_CONFIG") {
+        PathBuf::from(p)
+    } else if std::env::var_os("CURATED_BRAIN_DB").is_some() {
+        db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("config.json")
+    } else {
+        brain_dir.join("config.json")
+    };
+
+    BrainPaths {
+        brain_dir: brain_dir.to_path_buf(),
+        config_path,
+        db_path,
+    }
+}
+
 pub fn load_embed_profile(config_path: impl AsRef<Path>) -> Result<EmbedProfile> {
     VaultConfig::new(config_path.as_ref().to_path_buf()).get_embed_profile()
 }

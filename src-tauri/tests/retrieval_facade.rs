@@ -29,7 +29,8 @@ fn retrieval_facade_semantic_search_readonly_stub() {
             assert_eq!(paths.db_path, brain_path.join("brain.db"));
 
             {
-                let db = AppDb::open(&paths.db_path).expect("writable brain db open");
+                let db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
+                    .expect("writable brain db open");
                 let doc_id = upsert_document(&db.0, "/vault/x.md", "h_fixture").unwrap();
                 let chunk = Chunk {
                     text: "fixture chunk for search".into(),

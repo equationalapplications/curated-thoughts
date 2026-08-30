@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
 import { ActivityFeedPanel } from "./ActivityFeedPanel";
@@ -15,7 +16,7 @@ import {
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { SetupWizard } from "../setup/SetupWizard";
-import { startFileWatcher, needsChunkHashMigration } from "../../lib/tauri";
+import { startFileWatcher, needsChunkHashMigration, peekPendingConfigMalformed, ackPendingConfigMalformed } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
@@ -178,6 +179,68 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
     () => registerCommandContext({ navigate: nav.navigate }),
     [nav.navigate],
   );
+
+  // Task 17: surface malformed-config from the desktop startup hook as
+  // a recoverable banner via the shared error feed.  The backend emits
+  // `config-malformed` with diagnostics + a remediation hint; we wrap
+  // it as a background error so the existing ActivityFeed banner UI
+  // shows it without needing a new component.
+  //
+  // The setup thread can fire the event before this listener registers
+  // (Tauri does not buffer events), so we also drain any payload stashed
+  // by the backend via `peekPendingConfigMalformed` on mount — PR #120.
+  //
+  // The drain uses a non-destructive peek so a non-null payload is
+  // always rendered, even if cleanup runs before the IPC `.then`
+  // resolves. After rendering we explicitly ack the backend so the
+  // payload is cleared — CodeRabbit #21, PR #120.
+  useEffect(() => {
+    // The backend stashes the payload in `PendingConfigMalformed` AND emits
+    // the `config-malformed` event atomically. If the listener is registered
+    // before the IPC drain completes (or the backend emits a duplicate after
+    // mount), both `peekPendingConfigMalformed` and the live listener can
+    // deliver the same payload — without dedupe the banner renders twice.
+    // Key by config_path + diagnostics (the remediation string is constant).
+    let lastRenderedKey: string | null = null;
+    const renderMalformed = (payload: {
+      config_path: string;
+      diagnostics: string[];
+      remediation: string;
+    }) => {
+      const key = `${payload.config_path}|${payload.diagnostics.join("|")}`;
+      if (key === lastRenderedKey) return;
+      lastRenderedKey = key;
+      const { config_path, diagnostics, remediation } = payload;
+      const message =
+        `config.json at ${config_path} is malformed. ${remediation}\n\n` +
+        diagnostics.map((d) => `• ${d}`).join("\n");
+      reportBackgroundError(message);
+    };
+    peekPendingConfigMalformed()
+      .then((payload) => {
+        if (payload === null) return;
+        // Render regardless of mount state — a non-null payload must not
+        // be dropped just because cleanup ran first. The live listener
+        // below will still receive the same payload if we are still
+        // mounted, but the user would miss the banner otherwise.
+        renderMalformed(payload);
+        return ackPendingConfigMalformed();
+      })
+      .catch((err: unknown) => {
+        // Drain is best-effort — fall back to the live listener below.
+        console.warn("[config-malformed] drain failed:", err);
+      });
+    const promise = listen<{
+      config_path: string;
+      diagnostics: string[];
+      remediation: string;
+    }>("config-malformed", (event) => {
+      renderMalformed(event.payload);
+    });
+    return () => {
+      promise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     function handlePaletteShortcut(e: KeyboardEvent) {

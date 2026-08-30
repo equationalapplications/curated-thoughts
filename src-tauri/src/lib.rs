@@ -1,7 +1,9 @@
 pub mod chunker;
 pub mod cloud_bridge;
 pub mod commands;
+pub mod config;
 pub mod db;
+pub mod doctor;
 pub mod embedder;
 mod entities_api;
 pub mod graph;
@@ -13,6 +15,7 @@ pub mod librarian;
 pub mod mcp_server;
 pub mod okf;
 mod okf_api;
+pub mod onboard;
 pub mod outbox;
 mod pipeline;
 pub mod privacy;
@@ -84,6 +87,20 @@ struct WikiStatusState(Mutex<WikiStatusFlags>);
 struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
 struct CloudBridgeState(Mutex<Option<cloud_bridge::CloudBridgeHandle>>);
 struct CloudBridgeLifecycle(tokio::sync::Mutex<()>);
+
+/// Latest `config-malformed` payload surfaced by the setup hook. The setup
+/// thread can emit before the frontend listener registers (Tauri does not
+/// buffer events), so we also stash the payload here and let `AppShell`
+/// drain it on mount via `peek_pending_config_malformed` — CodeRabbit #19,
+/// PR #120.
+#[derive(serde::Serialize, Clone)]
+struct ConfigMalformedPayload {
+    config_path: String,
+    diagnostics: Vec<String>,
+    remediation: String,
+}
+
+struct PendingConfigMalformed(Mutex<Option<ConfigMalformedPayload>>);
 
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
@@ -567,6 +584,37 @@ fn get_brain_dir() -> String {
     get_brain_dir_inner()
 }
 
+/// Indicates how the resolved brain dir was chosen. The AgentIntegrationPanel
+/// surfaces this so the user can verify they're pointing at the instance
+/// they expect (env override vs. the home-dir default).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrainDirSource {
+    /// `CURATED_BRAIN_DIR` was set in the environment.
+    Env,
+    /// No env override; fell back to `$HOME/.brain`.
+    Default,
+}
+
+/// Bundles the resolved brain dir with its source so the frontend can
+/// display both in the AgentIntegrationPanel status line.
+#[derive(serde::Serialize)]
+struct BrainDirInfo {
+    brain_dir: String,
+    source: BrainDirSource,
+}
+
+#[tauri::command]
+fn get_brain_dir_info() -> BrainDirInfo {
+    let brain_dir = get_brain_dir_inner();
+    let source = if std::env::var_os("CURATED_BRAIN_DIR").is_some() {
+        BrainDirSource::Env
+    } else {
+        BrainDirSource::Default
+    };
+    BrainDirInfo { brain_dir, source }
+}
+
 #[tauri::command]
 fn get_binary_path() -> Result<String, String> {
     std::env::current_exe()
@@ -645,7 +693,12 @@ fn release_global_db_lock(db_state: &DbState) -> Result<PathBuf, String> {
     ));
     remove_sqlite_sidecars(&stub_path);
     let _ = std::fs::remove_file(&stub_path);
-    let stub = AppDb::open(&stub_path).map_err(|e| e.to_string())?;
+    // The stub lives in temp_dir() with no real config — pass the default
+    // config path so open_with_config reads a (likely absent) config.json
+    // and falls through to a vault_root = None migration, which is safe
+    // for an empty stub DB.
+    let stub = AppDb::open_with_config(&stub_path, VaultConfig::default_config_path())
+        .map_err(|e| e.to_string())?;
     let mut guard = db_state.0.lock().unwrap();
     let prev = std::mem::replace(&mut *guard, stub);
     drop(guard);
@@ -1080,12 +1133,13 @@ fn recover_after_failed_switch_vault(
     status_state: State<'_, WikiStatusState>,
     _outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
+    let config_path = retrieval::resolve_brain_paths().config_path;
     let reopened = (|| -> Result<(), String> {
         let mut guard = db_state
             .0
             .lock()
             .map_err(|_| "db mutex poisoned".to_string())?;
-        *guard = AppDb::open(db_path).map_err(|e| e.to_string())?;
+        *guard = AppDb::open_with_config(db_path, &config_path).map_err(|e| e.to_string())?;
         Ok(())
     })();
     if let Err(e) = &reopened {
@@ -1143,6 +1197,7 @@ async fn switch_vault(
     // db-path-cleanup were silently operating on the WRONG brain.db.
     // Route through the canonical resolver so the two paths agree.
     let db_path = retrieval::resolve_brain_paths().db_path;
+    let config_path = retrieval::resolve_brain_paths().config_path;
 
     let new_root = validated_new_vault_root(&new_path)?;
 
@@ -1229,7 +1284,7 @@ async fn switch_vault(
 
         {
             let mut guard = db_state.0.lock().unwrap();
-            *guard = AppDb::open(&db_path).map_err(|e| e.to_string())?;
+            *guard = AppDb::open_with_config(&db_path, &config_path).map_err(|e| e.to_string())?;
         }
 
         {
@@ -2517,6 +2572,31 @@ fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bo
 /// `ingest_document_cmd` so the event-emission sequence can be exercised in a
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
 /// argument is not supported by `MockRuntime`'s `CommandArg` extractor).
+
+/// Non-destructive read of the most recent `config-malformed` payload
+/// stashed by the setup hook. The setup thread can emit the event before
+/// the frontend listener registers (Tauri does not buffer events emitted
+/// before the corresponding `listen()` resolves), so `AppShell` peeks on
+/// mount to recover any payload that was missed — CodeRabbit #19, PR #120.
+/// Returns `None` if the setup hook never produced a malformed-config
+/// report. Pairs with `ack_pending_config_malformed`, which the caller
+/// MUST invoke after successfully rendering the payload — CodeRabbit #21,
+/// PR #120. The earlier destructive `take_` variant dropped the payload
+/// whenever cleanup ran before the IPC `.then` resolved.
+#[tauri::command]
+fn peek_pending_config_malformed(
+    state: tauri::State<'_, PendingConfigMalformed>,
+) -> Option<ConfigMalformedPayload> {
+    state.0.lock().unwrap().clone()
+}
+
+/// Clears the stashed `config-malformed` payload after the caller has
+/// successfully rendered it — pairs with `peek_pending_config_malformed`.
+/// No-op if no payload is pending. Safe to call multiple times.
+#[tauri::command]
+fn ack_pending_config_malformed(state: tauri::State<'_, PendingConfigMalformed>) {
+    let _ = state.0.lock().unwrap().take();
+}
 fn run_ingest_with_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     db: &Mutex<AppDb>,
@@ -2562,7 +2642,8 @@ fn run_ingest_with_app<R: tauri::Runtime>(
 #[cfg(feature = "test-utils")]
 pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
     let db_path = tmp_path.join("brain.db");
-    let db = db::AppDb::open(&db_path).expect("open test db");
+    let config_path = tmp_path.join("config.json");
+    let db = db::AppDb::open_with_config(&db_path, &config_path).expect("open test db");
     let config = vault::VaultConfig::new(tmp_path.join("config.json"));
     tauri::test::mock_builder()
         .manage(DbState(std::sync::Mutex::new(db)))
@@ -2612,6 +2693,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             get_impact_radius,
             get_binary_path,
             get_brain_dir,
+            get_brain_dir_info,
             commands::chunks::resolve_chunk_overlay,
             commands::chunks::fetch_chunk_content,
             needs_chunk_hash_migration,
@@ -2630,12 +2712,32 @@ pub fn run() {
     // entrypoint was hardcoded to `~/.brain/`. With `CURATED_BRAIN_DIR`
     // set, the app would bootstrap a directory the user never asked
     // for. Route through the canonical resolver.
-    let brain_dir = retrieval::resolve_brain_paths().brain_dir;
+    let paths = retrieval::resolve_brain_paths();
+    let brain_dir = paths.brain_dir.clone();
     std::fs::create_dir_all(&brain_dir).ok();
 
-    let db_path = retrieval::resolve_brain_paths().db_path;
+    let db_path = paths.db_path.clone();
+    let config_path = paths.config_path.clone();
 
-    let config = VaultConfig::new(VaultConfig::default_config_path());
+    // Task 17: surface malformed config immediately so headless launches
+    // (and CI logs) see the hint before the Tauri setup hook runs.
+    // The in-app banner is emitted from the setup hook below; this early
+    // check is a stderr fallback that never blocks startup.  Reuses the
+    // unified lenient loader so the diagnostic wording stays in sync with
+    // the desktop banner — no second copy of the JSON parse gate.
+    if paths.config_path.exists() {
+        // load_lenient now returns Result; a fatal Err (malformed JSON,
+        // non-object root, non-string vault_path) is the desktop §7 M2
+        // "show actionable banner, continue with defaults" path.
+        if let Err(e) = crate::config::BrainConfig::load_lenient(&paths) {
+            eprintln!(
+                "warning: config.json failed to load at {}: {e}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
+                paths.config_path.display()
+            );
+        }
+    }
+
+    let config = VaultConfig::new(config_path.clone());
     let vault_path_for_migration = config.get_vault_path().ok().flatten();
     let vault_migration_needed = !config.has_migrated_to_v2().unwrap_or(false);
 
@@ -2700,7 +2802,7 @@ pub fn run() {
         }
     }
 
-    let db = AppDb::open(&db_path).expect("failed to open database");
+    let db = AppDb::open_with_config(&db_path, &config_path).expect("failed to open database");
     // Phase 9: one-time content_hash migration gate. The V9 schema adds
     // the column; this returns true on the first start after the schema
     // ships. The actual data migration is dispatched in the setup
@@ -2750,7 +2852,7 @@ pub fn run() {
                 if vault_migration_needed {
                     if let Some(vault_path) = vault_path_for_migration {
                         let vault_root = PathBuf::from(&vault_path);
-                        let config_for_migration = VaultConfig::new(VaultConfig::default_config_path());
+                        let config_for_migration = VaultConfig::new(retrieval::resolve_brain_paths().config_path);
                         match crate::vault::config::migrate_vault(&vault_root) {
                             Ok(()) => {
                                 if let Err(e) = config_for_migration.set_migrated_to_v2() {
@@ -2869,7 +2971,85 @@ pub fn run() {
 
                     let brain_dir_str = get_brain_dir_inner();
                     let brain_path = std::path::Path::new(&brain_dir_str);
-                    let config = crate::inference::config::read_config(brain_path);
+                    // Use the unified resolver so we honor `CURATED_BRAIN_DB`
+                    // / `CURATED_BRAIN_CONFIG` and stay in sync with every
+                    // other config-loading call site.
+                    let resolved_paths = crate::retrieval::resolve_brain_paths();
+                    let report = crate::config::BrainConfig::load_lenient(
+                        &crate::retrieval::BrainPaths {
+                            brain_dir: brain_path.to_path_buf(),
+                            config_path: resolved_paths.config_path.clone(),
+                            db_path: brain_path.join("brain.db"),
+                        },
+                    );
+                    // Task 17: desktop startup surfaces malformed config with a
+                    // recoverable banner instead of crash-looping.  The same
+                    // load_lenient call drives the in-app banner and a
+                    // stderr hint for headless launches; on Err we fall back
+                    // to a default config so the session can still run
+                    // --doctor (the §7 M2 degrade-visibly-not-crash-loop rule).
+                    let (config, malformed_diagnostics): (
+                        crate::config::BrainConfig,
+                        Vec<String>,
+                    ) = match report {
+                        Ok(report) => {
+                            // Leniency diagnostics are noisy on their own; only
+                            // surface those that explicitly mention "malformed"
+                            // (matches the wording of `ConfigError::MalformedJson`).
+                            let mut diags: Vec<String> = report
+                                .diagnostics
+                                .iter()
+                                .filter(|d| d.contains("malformed"))
+                                .cloned()
+                                .collect();
+                            // Required-block absences are loud per spec §4 — the
+                            // banner must fire when `load_lenient` defaulted a
+                            // required block (missing key, OR unparseable nested
+                            // block whose serde error doesn't contain the literal
+                            // "malformed"). Without this trigger a user with e.g.
+                            // `{"generation": {"provider": "future_kind"}}` gets a
+                            // defaulted Unconfigured LLM and no signal to fix it.
+                            if report.generation_missing {
+                                diags.push(
+                                    "generation block missing or unparseable".to_string(),
+                                );
+                            }
+                            if report.embedding_missing {
+                                diags.push(
+                                    "embedding block missing or unparseable".to_string(),
+                                );
+                            }
+                            if report.privacy_missing {
+                                diags.push("privacy block missing or unparseable".to_string());
+                            }
+                            (report.config, diags)
+                        }
+                        Err(e) => (
+                            crate::config::BrainConfig::default(),
+                            vec![format!("config.json failed to load: {e}")],
+                        ),
+                    };
+                    if !malformed_diagnostics.is_empty() {
+                        eprintln!(
+                            "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
+                            resolved_paths.config_path.display()
+                        );
+                        // Stash the payload so `AppShell` can recover it on
+                        // mount via `peek_pending_config_malformed`. Tauri
+                        // does not buffer events emitted before the frontend
+                        // listener registers, and this background thread can
+                        // finish before the React app boots — CodeRabbit #19,
+                        // PR #120.
+                        let payload = ConfigMalformedPayload {
+                            config_path: resolved_paths.config_path.to_string_lossy().to_string(),
+                            diagnostics: malformed_diagnostics,
+                            remediation: "Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.".to_string(),
+                        };
+                        *app_handle.state::<PendingConfigMalformed>().0.lock().unwrap() =
+                            Some(payload.clone());
+                        let _ = app_handle.emit("config-malformed", payload);
+                    }
+
                     match initialize_provider(brain_path, &config.generation, &app_handle) {
                         Ok(provider) => {
                             let state = app_handle.state::<InferenceState>();
@@ -2914,6 +3094,7 @@ pub fn run() {
         .manage(InferenceState(Mutex::new(GenerationProvider::Unconfigured)))
         .manage(WatcherStarted(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
+        .manage(PendingConfigMalformed(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -2996,10 +3177,13 @@ pub fn run() {
             acknowledge_ephemeral_disclosure,
             get_binary_path,
             get_brain_dir,
+            get_brain_dir_info,
             commands::chunks::resolve_chunk_overlay,
             commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
             needs_chunk_hash_migration,
+            peek_pending_config_malformed,
+            ack_pending_config_malformed,
             vault_write_note,
             vault_upsert_index_entry,
         ])
@@ -3340,7 +3524,7 @@ mod heal_invalid_sources_tests {
         config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
         let db_path = tmp.path().join("brain.db");
-        let db = AppDb::open(&db_path).unwrap();
+        let db = AppDb::open_with_config(&db_path, &tmp.path().join("config.json")).unwrap();
         let db_state = DbState(Mutex::new(db));
         let vault_state = VaultConfigState(Mutex::new(config));
 
@@ -3738,7 +3922,8 @@ mod maintenance_command_tests {
         // touched). The heal function takes &DbState directly so we seed
         // against the AppDb's connection rather than an in-memory one.
         let db_path = tmp.path().join("test.db");
-        let db = crate::db::AppDb::open(&db_path).expect("open test db");
+        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+            .expect("open test db");
         let manual = r#"{"proposal_id":null,"evidence":[]}"#;
         // Three rows: one librarian_inferred (must be touched), one
         // user_stated with the MANUAL sentinel (must NOT be touched), one
@@ -3846,7 +4031,8 @@ mod maintenance_command_tests {
 
         // (b) heal_invalid_sources
         let db_path = tmp.path().join("e4.db");
-        let db = crate::db::AppDb::open(&db_path).expect("open test db");
+        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("e4-config.json"))
+            .expect("open test db");
         db.0.execute(
             "INSERT INTO llm_wiki_entries
                 (id, entity_id, title, body, tags, confidence, source_type, source_ref,
@@ -3991,7 +4177,8 @@ mod ingest_document_command_tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("brain.db");
-        let db = db::AppDb::open(&db_path).expect("open test db");
+        let db = db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+            .expect("open test db");
         let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
         // Real markdown doc with enough words for chunk_autodetect to produce

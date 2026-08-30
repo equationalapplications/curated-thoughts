@@ -1,4 +1,5 @@
 pub mod config;
+pub mod layout;
 pub mod safe_path;
 pub use config::VaultConfig;
 pub use safe_path::{

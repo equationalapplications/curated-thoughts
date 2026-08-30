@@ -1,3 +1,4 @@
+use crate::retrieval::BrainPaths;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ impl Default for GenerationProviderKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GenerationConfig {
+    #[serde(default)]
     pub provider: GenerationProviderKind,
     pub model_path: Option<String>,
     pub model_name: Option<String>,
@@ -39,6 +41,7 @@ pub enum EmbeddingProviderKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EmbeddingConfig {
+    #[serde(default)]
     pub provider: EmbeddingProviderKind,
     pub external_url: Option<String>,
 }
@@ -56,14 +59,44 @@ pub fn config_path(brain_dir: &Path) -> PathBuf {
     brain_dir.join("config.json")
 }
 
+/// DEPRECATED: use `BrainConfig::load` or `BrainConfig::load_lenient` instead.
+/// This function now delegates to the unified loader for compatibility, returning
+/// `LlmConfig::default()` if the strict loader fails. New code should use the
+/// `crate::config::BrainConfig` API directly.
+#[deprecated(
+    since = "0.1.0",
+    note = "use crate::config::BrainConfig::load or load_lenient instead"
+)]
 pub fn read_config(brain_dir: &Path) -> LlmConfig {
-    let path = config_path(brain_dir);
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return LlmConfig::default();
-    };
-    serde_json::from_str(&contents).unwrap_or_default()
+    // Derive config_path the old way for back-compat
+    let cfg_path = config_path(brain_dir);
+
+    // Use unified strict loader; fall back to defaults on any error to preserve
+    // historical behavior (the old implementation never surfaced errors).
+    match crate::config::BrainConfig::load(&BrainPaths {
+        brain_dir: brain_dir.to_path_buf(),
+        config_path: cfg_path,
+        db_path: brain_dir.join("brain.db"),
+    }) {
+        Ok(cfg) => LlmConfig {
+            generation: cfg.generation,
+            embedding: cfg.embedding,
+        },
+        Err(_) => LlmConfig::default(),
+    }
 }
 
+/// DEPRECATED: use [`crate::config::BrainConfig::load_lenient`] +
+/// [`crate::config::BrainConfig::write`] instead.  This function does not
+/// honor `CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG` (it derives the path
+/// from the brain dir only), uses a fixed temp filename (race-prone), and
+/// silently swallows malformed JSON on disk.  It is retained for the
+/// historical test suite and any external callers; new code must use the
+/// unified loader.
+#[deprecated(
+    since = "0.1.0",
+    note = "use crate::config::BrainConfig::load_lenient + BrainConfig::write instead"
+)]
 pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
     let path = config_path(brain_dir);
     if let Some(parent) = path.parent() {
@@ -82,8 +115,35 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
         existing = serde_json::json!({});
     }
 
-    let generation = serde_json::to_value(&config.generation)?;
+    let mut generation = serde_json::to_value(&config.generation)?;
     let embedding = serde_json::to_value(&config.embedding)?;
+
+    // Raw-document merge for the `api_key` field: the panel never writes
+    // new credentials, but a legacy plaintext key already on disk must
+    // survive a settings save. If the incoming config carries no key
+    // (either `null` or an empty/whitespace-only string — matching
+    // `update_provider_with_brain_path` in `inference/mod.rs`, which treats
+    // blank incoming values as absent), keep whatever was already on disk.
+    let incoming_key_is_blank = generation.get("api_key").map_or(true, |v| {
+        v.as_str()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(v.is_null())
+    });
+    if incoming_key_is_blank {
+        if let Some(existing_key) = existing
+            .get("generation")
+            .and_then(|g| g.get("api_key"))
+            .and_then(|k| k.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(gen_obj) = generation.as_object_mut() {
+                gen_obj.insert(
+                    "api_key".to_string(),
+                    serde_json::Value::String(existing_key.to_string()),
+                );
+            }
+        }
+    }
 
     let obj = existing.as_object_mut().unwrap();
     obj.insert("generation".to_string(), generation);
@@ -140,6 +200,7 @@ pub fn resolve_chat_completions_url(base_url: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

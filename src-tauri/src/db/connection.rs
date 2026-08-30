@@ -132,14 +132,14 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
 pub struct AppDb(pub Connection);
 
 impl AppDb {
+    /// Open the brain database, deriving the config path from the canonical
+    /// resolver (honors `CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG`).
+    /// All new callers should use [`AppDb::open_with_config`] directly so the
+    /// config path is explicit; this thin wrapper preserves the historical
+    /// single-arg API while routing through the unified resolver.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
-        let config_path = path
-            .parent()
-            .map(|p| p.join("config.json"))
-            .unwrap_or_else(|| VaultConfig::default_config_path());
-        Self::open_with_config(path, config_path)
+        let paths = crate::retrieval::resolve_brain_paths();
+        Self::open_with_config(path, &paths.config_path)
     }
 
     /// Open the brain database, resolving the vault root from an explicit

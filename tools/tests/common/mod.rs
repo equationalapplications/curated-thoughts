@@ -22,7 +22,8 @@ pub const DOC_PATH: &str = "/vault/code.rs";
 pub fn seed_vault(brain_path: &std::path::Path) -> i64 {
     fs::write(brain_path.join("config.json"), b"{}\n").unwrap();
     let paths = retrieval::resolve_brain_paths();
-    let db = AppDb::open(&paths.db_path).expect("writable brain db open");
+    let db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
+        .expect("writable brain db open");
     let doc_id = upsert_document(&db.0, DOC_PATH, "h_fixture").unwrap();
 
     let ast_chunk = Chunk {
@@ -62,7 +63,8 @@ pub fn seed_vault(brain_path: &std::path::Path) -> i64 {
 pub fn init_brain_db(brain_dir: &std::path::Path) {
     fs::write(brain_dir.join("config.json"), b"{}\n").unwrap();
     let paths = retrieval::resolve_brain_paths();
-    let _db = AppDb::open(&paths.db_path).expect("writable brain db open");
+    let _db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
+        .expect("writable brain db open");
 }
 
 /// Insert a pending `new_entity` proposal with `item_count` items directly via
