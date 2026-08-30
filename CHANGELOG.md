@@ -1,3 +1,13 @@
+## [1.37.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.36.0...v1.37.0) (2026-08-30)
+
+### Features
+
+* **mcp:** allow nested agent deposits under immutable-source-files/agents/ ([a552753](https://github.com/equationalapplications/curated-thoughts/commit/a552753fa5fda486470b5992b4434a7f4b1418db))
+
+### Bug Fixes
+
+* **okf:** harden deposit parent-bootstrap after self-review ([8b5c00d](https://github.com/equationalapplications/curated-thoughts/commit/8b5c00db1776b4c2114cacb48648fceaece353fb))
+
 ## [1.36.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.35.1...v1.36.0) (2026-08-30)
 
 ### Features
