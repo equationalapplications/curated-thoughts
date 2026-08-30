@@ -16,7 +16,7 @@ import {
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { SetupWizard } from "../setup/SetupWizard";
-import { startFileWatcher, needsChunkHashMigration, takePendingConfigMalformed } from "../../lib/tauri";
+import { startFileWatcher, needsChunkHashMigration, peekPendingConfigMalformed, ackPendingConfigMalformed } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
@@ -188,9 +188,13 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   //
   // The setup thread can fire the event before this listener registers
   // (Tauri does not buffer events), so we also drain any payload stashed
-  // by the backend via `takePendingConfigMalformed` on mount — PR #120.
+  // by the backend via `peekPendingConfigMalformed` on mount — PR #120.
+  //
+  // The drain uses a non-destructive peek so a non-null payload is
+  // always rendered, even if cleanup runs before the IPC `.then`
+  // resolves. After rendering we explicitly ack the backend so the
+  // payload is cleared — CodeRabbit #21, PR #120.
   useEffect(() => {
-    let cancelled = false;
     const renderMalformed = (payload: {
       config_path: string;
       diagnostics: string[];
@@ -202,10 +206,15 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
         diagnostics.map((d) => `• ${d}`).join("\n");
       reportBackgroundError(message);
     };
-    takePendingConfigMalformed()
+    peekPendingConfigMalformed()
       .then((payload) => {
-        if (cancelled || payload === null) return;
+        if (payload === null) return;
+        // Render regardless of mount state — a non-null payload must not
+        // be dropped just because cleanup ran first. The live listener
+        // below will still receive the same payload if we are still
+        // mounted, but the user would miss the banner otherwise.
         renderMalformed(payload);
+        return ackPendingConfigMalformed();
       })
       .catch((err: unknown) => {
         // Drain is best-effort — fall back to the live listener below.
@@ -219,7 +228,6 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
       renderMalformed(event.payload);
     });
     return () => {
-      cancelled = true;
       promise.then((unlisten) => unlisten());
     };
   }, []);

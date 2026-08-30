@@ -177,6 +177,8 @@ error state, forcing callers to grep `diagnostics` for `"malformed"` —
 fragile and easy to miss). Fatal cases:
 - malformed top-level JSON (parse failure)
 - non-object root (`[]`, `null`, `42`, etc. — see §1)
+- invalid `vault_path` type (present but not a string — masked here once and
+  it survives every refactor; never returned as `Ok(LoadReport)`)
 - any `fs::read_to_string` error other than `ErrorKind::NotFound` (permission
   denied, a directory in place of the file, transient I/O failure, …); these
   become `ConfigError::Io(e)` so the startup hook surfaces the real cause

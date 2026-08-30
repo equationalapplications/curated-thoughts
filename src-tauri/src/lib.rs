@@ -91,7 +91,7 @@ struct CloudBridgeLifecycle(tokio::sync::Mutex<()>);
 /// Latest `config-malformed` payload surfaced by the setup hook. The setup
 /// thread can emit before the frontend listener registers (Tauri does not
 /// buffer events), so we also stash the payload here and let `AppShell`
-/// drain it on mount via `take_pending_config_malformed` — CodeRabbit #19,
+/// drain it on mount via `peek_pending_config_malformed` — CodeRabbit #19,
 /// PR #120.
 #[derive(serde::Serialize, Clone)]
 struct ConfigMalformedPayload {
@@ -2573,17 +2573,29 @@ fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bo
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
 /// argument is not supported by `MockRuntime`'s `CommandArg` extractor).
 
-/// Drains the most recent `config-malformed` payload stashed by the setup
-/// hook. The setup thread can emit the event before the frontend listener
-/// registers (Tauri does not buffer events emitted before the corresponding
-/// `listen()` resolves), so `AppShell` calls this on mount to recover any
-/// payload that was missed — CodeRabbit #19, PR #120. Returns `None` if the
-/// setup hook never produced a malformed-config report.
+/// Non-destructive read of the most recent `config-malformed` payload
+/// stashed by the setup hook. The setup thread can emit the event before
+/// the frontend listener registers (Tauri does not buffer events emitted
+/// before the corresponding `listen()` resolves), so `AppShell` peeks on
+/// mount to recover any payload that was missed — CodeRabbit #19, PR #120.
+/// Returns `None` if the setup hook never produced a malformed-config
+/// report. Pairs with `ack_pending_config_malformed`, which the caller
+/// MUST invoke after successfully rendering the payload — CodeRabbit #21,
+/// PR #120. The earlier destructive `take_` variant dropped the payload
+/// whenever cleanup ran before the IPC `.then` resolved.
 #[tauri::command]
-fn take_pending_config_malformed(
+fn peek_pending_config_malformed(
     state: tauri::State<'_, PendingConfigMalformed>,
 ) -> Option<ConfigMalformedPayload> {
-    state.0.lock().unwrap().take()
+    state.0.lock().unwrap().clone()
+}
+
+/// Clears the stashed `config-malformed` payload after the caller has
+/// successfully rendered it — pairs with `peek_pending_config_malformed`.
+/// No-op if no payload is pending. Safe to call multiple times.
+#[tauri::command]
+fn ack_pending_config_malformed(state: tauri::State<'_, PendingConfigMalformed>) {
+    let _ = state.0.lock().unwrap().take();
 }
 fn run_ingest_with_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -3000,7 +3012,7 @@ pub fn run() {
                             resolved_paths.config_path.display()
                         );
                         // Stash the payload so `AppShell` can recover it on
-                        // mount via `take_pending_config_malformed`. Tauri
+                        // mount via `peek_pending_config_malformed`. Tauri
                         // does not buffer events emitted before the frontend
                         // listener registers, and this background thread can
                         // finish before the React app boots — CodeRabbit #19,
@@ -3147,7 +3159,8 @@ pub fn run() {
             commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
             needs_chunk_hash_migration,
-            take_pending_config_malformed,
+            peek_pending_config_malformed,
+            ack_pending_config_malformed,
             vault_write_note,
             vault_upsert_index_entry,
         ])
