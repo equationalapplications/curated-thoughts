@@ -267,8 +267,11 @@ Runs the same layout-creation code the desktop entrypoint runs today
 unified config atomically, and prints the agent-client snippet
 (`command/args/env`) for this brain dir.
 
-`--force` overwrites the modeled sections of an existing config; otherwise the
-existing config is merged/preserved and a warning printed. `--force` is also the
+`--force` replaces the modeled sections of an existing config wholesale
+(locked 2026-08-29); **unknown keys are still preserved** — `--force` widens
+which modeled sections get overwritten, it never turns the writer into a
+truncating whole-document replace. Without `--force`, the existing config is
+merged/preserved and a warning printed. `--force` is also the
 **only** path allowed to replace a malformed document (§1), and it must copy the
 original to `config.json.bak` before writing — never discard an unparseable file
 the user may still want to hand-repair.
@@ -319,6 +322,12 @@ line renders the resolved brain dir from `get_brain_dir` (final-review T1).
   `config.json`; assert each returns an error and the file bytes are
   **unchanged**. Then assert `--onboard --force` succeeds, writes a valid
   config, and leaves the original bytes in `config.json.bak`.
+- **No-credentials-on-disk test:** drive the desktop settings-panel save
+  command with an API key supplied in the request and assert the resulting
+  `config.json` contains no key material; drive `--onboard` against an external
+  provider and assert the same. Companion test: a config that already holds a
+  plaintext `api_key` keeps it verbatim across an unrelated panel save
+  (§7 back-compat rule 2).
 - **Unique-temp-name test:** assert the writer's temp path is not a fixed
   `config.json.tmp` (contains pid/nonce) and sits in the target's directory;
   assert no `*.tmp` remains after a successful write.
@@ -343,8 +352,8 @@ line renders the resolved brain dir from `get_brain_dir` (final-review T1).
   superseding T4's two-code map), plus an assertion that no credential value
   appears in `--doctor` output when one is set in the environment.
   `--onboard` merge-into-existing preserves unknown keys and prior sections;
-  `--force` over existing config replaces modeled sections wholesale
-  (final-review T3).
+  `--force` over existing config replaces modeled sections wholesale while
+  still preserving unknown keys (final-review T3, clarified 2026-08-29).
 - Live-machine round-trip (config.json from `~/.brain` and
   `~/.brain-equational-wiki`) runs **only when those paths exist and the env
   var `CT_LIVE_CONFIG_TESTS=1` is set** — CI uses copied fixtures instead
@@ -373,13 +382,23 @@ line renders the resolved brain dir from `get_brain_dir` (final-review T1).
   PR and (b) a code-structure test asserting the temp file is synced before
   rename in the unified writer (e.g. a seam function whose order is asserted in
   a unit test).
-- **Credential policy change (extends decision 3).** `--onboard` never prompts
-  for or writes an API key for either generation or embedding. For back-compat
-  the loader still *reads* a plaintext key already present in an existing
-  `config.json` (desktop users configured before this change must not break),
-  but `doctor` flags it as a finding and points at the env var. The plan
-  specifies whether the desktop settings panel stops writing keys in the same
-  release or a follow-up.
+- **Credential policy change (extends decision 3; locked 2026-08-29).**
+  `--onboard` never prompts for or writes an API key for either generation or
+  embedding, **and the desktop settings panel stops writing keys to
+  `config.json` in this same release** — not a follow-up. After this change no
+  code path in the product writes a credential to disk; keys come from the
+  environment only.
+  Back-compat, in three parts:
+  1. The loader still *reads* a plaintext key already present in an existing
+     `config.json`, so users configured before this change keep working.
+  2. A panel or `--onboard` write **must not silently drop** a pre-existing
+     `generation.api_key` / `embedding.api_key`. The section overlay would
+     otherwise delete the key on the user's next unrelated save — reintroducing
+     the Problem class 4 failure shape through the front door. The writer
+     carries an existing key through untouched; it just never creates one.
+  3. `doctor` reports the legacy plaintext key as a finding (presence only,
+     never the value) and prints the env-var migration step. An explicit
+     "remove stored key" affordance in the panel is a plan detail.
 - Watch items after release: re-check any code paths still calling
   `VaultConfig::default_config_path()` directly (grep should return only the
   config module + tests).
@@ -407,6 +426,12 @@ line renders the resolved brain dir from `get_brain_dir` (final-review T1).
   fixture callers at the developer's real `~/.brain/config.json` (ruling:
   migrate fixtures to `open_with_config` in the same PR); decision 3 extended
   to generation keys; `--doctor` exit codes split 0/1/2/3.
+- **2026-08-29 (Kurt, two open questions closed):** (a) the desktop settings
+  panel stops writing API keys to `config.json` in **this** release, not a
+  follow-up — so no product code path writes a credential to disk once this
+  lands; keys already on disk are read and carried through, never dropped or
+  echoed. (b) `--force` replaces modeled sections wholesale and still preserves
+  unknown keys — unknown-key preservation (§1) has no `--force` exemption.
 
 ## Resolved decisions (locked 2026-08-28, Kurt)
 
