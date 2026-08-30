@@ -104,8 +104,28 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
         existing = serde_json::json!({});
     }
 
-    let generation = serde_json::to_value(&config.generation)?;
+    let mut generation = serde_json::to_value(&config.generation)?;
     let embedding = serde_json::to_value(&config.embedding)?;
+
+    // Raw-document merge for the `api_key` field: the panel never writes
+    // new credentials, but a legacy plaintext key already on disk must
+    // survive a settings save. If the incoming config carries no key,
+    // keep whatever was already on disk.
+    if generation.get("api_key").map_or(true, |v| v.is_null()) {
+        if let Some(existing_key) = existing
+            .get("generation")
+            .and_then(|g| g.get("api_key"))
+            .and_then(|k| k.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(gen_obj) = generation.as_object_mut() {
+                gen_obj.insert(
+                    "api_key".to_string(),
+                    serde_json::Value::String(existing_key.to_string()),
+                );
+            }
+        }
+    }
 
     let obj = existing.as_object_mut().unwrap();
     obj.insert("generation".to_string(), generation);

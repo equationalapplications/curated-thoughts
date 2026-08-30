@@ -223,6 +223,10 @@ pub fn update_provider_with_brain_path(
         return Err("privacy-mode-strict: external generation is disabled".to_string());
     }
 
+    // Use the incoming config (including its api_key) for the immediate
+    // provider init only — never for disk persistence.  Credentials on disk
+    // come from the environment (or pre-existing legacy entries preserved by
+    // write_config's raw-document merge).
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {
@@ -241,7 +245,13 @@ pub fn update_provider_with_brain_path(
     };
 
     let mut llm_config = read_config(brain_path);
-    llm_config.generation = config;
+    // Strip api_key before persisting. write_config's raw-document merge
+    // will restore any legacy plaintext key already on disk when the new
+    // value is null — so the panel cannot wipe a pre-existing credential,
+    // but it also cannot write a new one.
+    let mut config_for_disk = config;
+    config_for_disk.api_key = None;
+    llm_config.generation = config_for_disk;
 
     if let Err(e) = write_config(brain_path, &llm_config) {
         let mut fallback = llm_config;
