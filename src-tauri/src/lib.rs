@@ -15,6 +15,7 @@ pub mod okf;
 mod okf_api;
 pub mod outbox;
 mod pipeline;
+pub mod config;
 pub mod privacy;
 mod proposals_api;
 pub mod recall_bench_fixture;
