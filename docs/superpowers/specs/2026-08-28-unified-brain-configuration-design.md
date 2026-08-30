@@ -1,7 +1,7 @@
 # Unified Brain Configuration — Design Spec
 
 **Date:** 2026-08-28
-**Status:** Approved design (pending implementation plan); write-path review pass folded in 2026-08-29
+**Status:** Implemented
 **Repo:** curated-thoughts
 **Origin:** Discord thread "Curated Thoughts Configuration" with Kurt, 2026-08-28.
 
