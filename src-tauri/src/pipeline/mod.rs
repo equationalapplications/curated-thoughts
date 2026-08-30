@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::chunker::{chunk_autodetect, should_ingest_extension, AstLang, ChunkStrategy};
+use crate::config::BrainConfig;
 use crate::db::queries::{
     delete_document, delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
     mark_document_error, mark_document_indexed, upsert_document,
@@ -18,7 +19,7 @@ use crate::db::queries::{
 use crate::embedder::{embed_batch, EmbedProfile};
 use crate::hasher::hash_bytes;
 use crate::indexer::{extract_references, RefLang};
-use crate::vault::VaultConfig;
+use crate::retrieval::BrainPaths;
 
 #[derive(Debug, Clone)]
 pub enum PipelineJob {
@@ -115,22 +116,50 @@ impl PipelineWorker {
     }
 
     pub fn run(self) {
+        if let Err(e) = self.run_inner() {
+            eprintln!("[pipeline] worker fatal: {e:#}");
+        }
+    }
+
+    fn run_inner(self) -> Result<()> {
+        // Resolve brain paths from the db_path, then load via the unified
+        // `BrainConfig::load_lenient()` loader. This ensures diagnostics are
+        // captured at startup and malformed JSON is hard-failed (rather than
+        // silently falling back to a default embed profile, which masks
+        // misconfiguration and re-triggers onboarding — Problem class 2).
         let config_path = self
             .db_path
             .parent()
             .map(|p| p.join("config.json"))
             .unwrap_or_else(|| PathBuf::from("config.json"));
-        let profile = VaultConfig::new(config_path)
-            .get_embed_profile()
-            .unwrap_or_else(|err| {
-                eprintln!("[pipeline] failed to read embed_profile: {err}, using default");
-                crate::embedder::EmbedProfile::default()
-            });
+        let brain_dir = self
+            .db_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let paths = BrainPaths {
+            brain_dir,
+            config_path,
+            db_path: self.db_path.clone(),
+        };
+        let report = BrainConfig::load_lenient(&paths);
+        for diagnostic in &report.diagnostics {
+            eprintln!("[pipeline] config diagnostic: {}", diagnostic);
+        }
+        // Hard fail on malformed top-level JSON: do NOT silently default the
+        // embed profile, which would route every embedding through an
+        // unconfigured LLM and look like an onboarding reset to the user.
+        if report.diagnostics.iter().any(|d| d.contains("malformed")) {
+            return Err(anyhow::anyhow!(
+                "malformed config.json; cannot proceed without explicit fix"
+            ));
+        }
+        let profile = report.config.embed_profile.unwrap_or_default();
         let mut conn = match Connection::open(&self.db_path) {
             Ok(c) => c,
             Err(err) => {
                 eprintln!("[pipeline] db open failed: {err}");
-                return;
+                return Ok(());
             }
         };
         if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON;") {
@@ -307,6 +336,7 @@ impl PipelineWorker {
                 }
             }
         }
+        Ok(())
     }
 }
 
