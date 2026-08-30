@@ -84,6 +84,17 @@ pub struct LoadReport {
     pub privacy_missing: bool,
 }
 
+/// Serializable summary of which config blocks were silently defaulted
+/// during a lenient load.  Designed for frontend consumption so the UI can
+/// show user-facing errors instead of silently falling back to defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MissingBlocks {
+    pub generation: bool,
+    pub embedding: bool,
+    pub vault_path: bool,
+    pub privacy: bool,
+}
+
 impl BrainConfig {
     /// Load config from disk with no leniency. Malformed top-level JSON is fatal.
     /// Missing or unparseable vault_path is fatal (never masked).
