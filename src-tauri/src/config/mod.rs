@@ -1,5 +1,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use uuid::Uuid;
 use crate::embedder::EmbedProfile;
 pub use crate::inference::config::{GenerationConfig, EmbeddingConfig};
 use crate::privacy::PrivacyConfig;
@@ -24,6 +26,15 @@ pub struct BrainConfig {
     /// Preserved raw JSON for unknown keys (round-trip vehicle).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_keys: Option<serde_json::Value>,
+    /// Preserved raw JSON for unknown keys inside generation block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_generation: Option<serde_json::Value>,
+    /// Preserved raw JSON for unknown keys inside embedding block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_embedding: Option<serde_json::Value>,
+    /// Preserved raw JSON for unknown keys inside privacy block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_privacy: Option<serde_json::Value>,
 }
 
 impl Default for BrainConfig {
@@ -36,6 +47,9 @@ impl Default for BrainConfig {
             embedding: EmbeddingConfig::default(),
             privacy: PrivacyConfig::default(),
             preserved_keys: None,
+            preserved_generation: None,
+            preserved_embedding: None,
+            preserved_privacy: None,
         }
     }
 }
@@ -95,6 +109,52 @@ impl BrainConfig {
         match serde_json::from_value::<BrainConfig>(known_value) {
             Ok(mut cfg) => {
                 cfg.preserved_keys = preserved_keys;
+
+                // Extract nested unknown keys from generation block
+                if let Some(gen_val) = obj.get("generation").and_then(|v| v.as_object()) {
+                    let known_gen_keys = ["provider", "model_path", "model_name", "external_url", "api_key", "timeout_secs"];
+                    let unknown: serde_json::Map<String, serde_json::Value> = gen_val
+                        .iter()
+                        .filter(|(k, _)| !known_gen_keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    cfg.preserved_generation = if unknown.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(unknown))
+                    };
+                }
+
+                // Extract nested unknown keys from embedding block
+                if let Some(emb_val) = obj.get("embedding").and_then(|v| v.as_object()) {
+                    let known_emb_keys = ["provider", "external_url"];
+                    let unknown: serde_json::Map<String, serde_json::Value> = emb_val
+                        .iter()
+                        .filter(|(k, _)| !known_emb_keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    cfg.preserved_embedding = if unknown.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(unknown))
+                    };
+                }
+
+                // Extract nested unknown keys from privacy block
+                if let Some(priv_val) = obj.get("privacy").and_then(|v| v.as_object()) {
+                    let known_priv_keys = ["mode", "chosen", "ephemeral_disclosure_acknowledged", "migration_disclosure_acknowledged"];
+                    let unknown: serde_json::Map<String, serde_json::Value> = priv_val
+                        .iter()
+                        .filter(|(k, _)| !known_priv_keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    cfg.preserved_privacy = if unknown.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(unknown))
+                    };
+                }
+
                 Ok(cfg)
             }
             Err(e) => bail!("Config deserialize error: {}", e),
@@ -162,6 +222,51 @@ impl BrainConfig {
         } else {
             Some(serde_json::Value::Object(unknown_keys))
         };
+
+        // Extract nested unknown keys from generation block
+        if let Some(gen_val) = obj.get("generation").and_then(|v| v.as_object()) {
+            let known_gen_keys = ["provider", "model_path", "model_name", "external_url", "api_key", "timeout_secs"];
+            let unknown: serde_json::Map<String, serde_json::Value> = gen_val
+                .iter()
+                .filter(|(k, _)| !known_gen_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            report.config.preserved_generation = if unknown.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(unknown))
+            };
+        }
+
+        // Extract nested unknown keys from embedding block
+        if let Some(emb_val) = obj.get("embedding").and_then(|v| v.as_object()) {
+            let known_emb_keys = ["provider", "external_url"];
+            let unknown: serde_json::Map<String, serde_json::Value> = emb_val
+                .iter()
+                .filter(|(k, _)| !known_emb_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            report.config.preserved_embedding = if unknown.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(unknown))
+            };
+        }
+
+        // Extract nested unknown keys from privacy block
+        if let Some(priv_val) = obj.get("privacy").and_then(|v| v.as_object()) {
+            let known_priv_keys = ["mode", "chosen", "ephemeral_disclosure_acknowledged", "migration_disclosure_acknowledged"];
+            let unknown: serde_json::Map<String, serde_json::Value> = priv_val
+                .iter()
+                .filter(|(k, _)| !known_priv_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            report.config.preserved_privacy = if unknown.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(unknown))
+            };
+        }
 
         // vault_path: hard error if present but not a string
         if let Some(vp) = obj.get("vault_path") {
@@ -248,5 +353,106 @@ impl BrainConfig {
         }
 
         report
+    }
+
+    /// Write config to disk using raw-document merge (preserves unknown keys).
+    /// - Reads existing JSON as Value tree.
+    /// - Overlays modeled sections (generation, embedding, privacy, etc.).
+    /// - Writes temp file with unique name, syncs, then renames.
+    /// - Malformed existing JSON is an error; file left untouched.
+    pub fn write(&self, paths: &BrainPaths) -> Result<()> {
+        // Read existing document, if it exists.
+        let mut root = if paths.config_path.exists() {
+            let text = fs::read_to_string(&paths.config_path)?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("malformed config.json: {}", e))?;
+
+            if !value.is_object() {
+                bail!("config.json root must be a JSON object");
+            }
+            value
+        } else {
+            serde_json::json!({})
+        };
+
+        // Ensure root is an object (checked above, but be explicit for overlay).
+        let obj = root.as_object_mut().unwrap();
+
+        // Build modeled sections as Values, then merge preserved nested keys into them
+        // before inserting into the root object.
+
+        // Generation section
+        let mut gen_value = serde_json::to_value(&self.generation)?;
+        if let Some(ref preserved) = self.preserved_generation {
+            if let Some(gen_obj) = gen_value.as_object_mut() {
+                if let Some(preserved_obj) = preserved.as_object() {
+                    for (k, v) in preserved_obj {
+                        gen_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        // Embedding section
+        let mut emb_value = serde_json::to_value(&self.embedding)?;
+        if let Some(ref preserved) = self.preserved_embedding {
+            if let Some(emb_obj) = emb_value.as_object_mut() {
+                if let Some(preserved_obj) = preserved.as_object() {
+                    for (k, v) in preserved_obj {
+                        emb_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        // Privacy section
+        let mut priv_value = serde_json::to_value(&self.privacy)?;
+        if let Some(ref preserved) = self.preserved_privacy {
+            if let Some(priv_obj) = priv_value.as_object_mut() {
+                if let Some(preserved_obj) = preserved.as_object() {
+                    for (k, v) in preserved_obj {
+                        priv_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        // Insert modeled sections with preserved nested keys merged in.
+        obj.insert("vault_path".to_string(), serde_json::to_value(&self.vault_path)?);
+        obj.insert("embed_profile".to_string(), serde_json::to_value(&self.embed_profile)?);
+        obj.insert("migrated_to_v2".to_string(), serde_json::to_value(&self.migrated_to_v2)?);
+        obj.insert("generation".to_string(), gen_value);
+        obj.insert("embedding".to_string(), emb_value);
+        obj.insert("privacy".to_string(), priv_value);
+
+        // Merge preserved top-level keys back in.
+        if let Some(ref preserved) = self.preserved_keys {
+            if let Some(preserved_obj) = preserved.as_object() {
+                for (k, v) in preserved_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        // Write to temp file with unique name.
+        let nonce = Uuid::new_v4();
+        let pid = std::process::id();
+        let tmp_name = format!("config.json.{}.{}.tmp", pid, nonce);
+        let tmp_path = paths.config_path.parent().unwrap_or_else(|| std::path::Path::new("."))
+            .join(&tmp_name);
+
+        let json = serde_json::to_string_pretty(&root)?;
+
+        // Write and sync before rename.
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_data()?;
+        }
+
+        // Atomic rename.
+        fs::rename(&tmp_path, &paths.config_path)?;
+
+        Ok(())
     }
 }
