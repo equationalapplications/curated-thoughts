@@ -134,9 +134,12 @@ impl VaultMcpServer {
         let Parameters(params) = args;
         let value = serde_json::to_value(params)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
-        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "vault_upsert_index_entry", value)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        let result =
+            tool_dispatch::dispatch_tool_call(&self.ctx, "vault_upsert_index_entry", value)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
+                })?;
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }

@@ -1,9 +1,9 @@
 //! Leniency policy tests: per-field drops, hard errors, missing blocks.
 
+use std::fs;
 use tauri_app_lib::config::BrainConfig;
 use tauri_app_lib::retrieval::BrainPaths;
 use tempfile::TempDir;
-use std::fs;
 
 fn temp_paths(json: &str) -> (TempDir, BrainPaths) {
     let temp = TempDir::new().unwrap();
@@ -27,7 +27,10 @@ fn leniency_drop_unknown_embed_variant() {
 
     let report = BrainConfig::load_lenient(&paths).unwrap();
     assert_eq!(report.config.embed_profile, None);
-    assert!(report.diagnostics.iter().any(|d| d.contains("embed_profile")));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("embed_profile")));
 }
 
 #[test]

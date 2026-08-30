@@ -36,8 +36,14 @@ fn resolve_dir_only() {
         || {
             let paths = resolve_brain_paths();
             assert_eq!(paths.brain_dir.to_string_lossy().to_string(), custom);
-            assert_eq!(paths.config_path.to_string_lossy().to_string(), format!("{}/config.json", custom));
-            assert_eq!(paths.db_path.to_string_lossy().to_string(), format!("{}/brain.db", custom));
+            assert_eq!(
+                paths.config_path.to_string_lossy().to_string(),
+                format!("{}/config.json", custom)
+            );
+            assert_eq!(
+                paths.db_path.to_string_lossy().to_string(),
+                format!("{}/brain.db", custom)
+            );
         },
     );
 }
@@ -57,7 +63,11 @@ fn resolve_db_only() {
             // DB-only: brain_dir still defaults, config_path derived from db parent
             assert_eq!(paths.db_path.to_string_lossy().to_string(), db_path);
             // Config derives from db parent
-            assert!(paths.config_path.to_string_lossy().to_string().contains("config.json"));
+            assert!(paths
+                .config_path
+                .to_string_lossy()
+                .to_string()
+                .contains("config.json"));
         },
     );
 }
@@ -65,7 +75,11 @@ fn resolve_db_only() {
 #[test]
 fn resolve_config_only() {
     let temp = TempDir::new().unwrap();
-    let config_path = temp.path().join("config.json").to_string_lossy().into_owned();
+    let config_path = temp
+        .path()
+        .join("config.json")
+        .to_string_lossy()
+        .into_owned();
     with_vars(
         [
             ("CURATED_BRAIN_DIR", None::<&str>),

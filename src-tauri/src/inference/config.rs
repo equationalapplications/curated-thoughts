@@ -290,27 +290,72 @@ mod tests {
     fn resolve_chat_completions_url_behavior_contract() {
         let cases: &[(&str, &str)] = &[
             // Spec behavior contract table
-            ("https://api.z.ai/api/coding/paas/v4", "https://api.z.ai/api/coding/paas/v4/chat/completions"),
-            ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
-            ("https://openrouter.ai/api/v1/", "https://openrouter.ai/api/v1/chat/completions"),
-            ("http://localhost:11434", "http://localhost:11434/v1/chat/completions"),
-            ("http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"),
-            ("https://example.com/api/v2", "https://example.com/api/v2/chat/completions"),
-            ("https://example.com/v10", "https://example.com/v10/chat/completions"),
+            (
+                "https://api.z.ai/api/coding/paas/v4",
+                "https://api.z.ai/api/coding/paas/v4/chat/completions",
+            ),
+            (
+                "https://openrouter.ai/api/v1",
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+            (
+                "https://openrouter.ai/api/v1/",
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+            (
+                "http://localhost:11434",
+                "http://localhost:11434/v1/chat/completions",
+            ),
+            (
+                "http://localhost:11434/v1",
+                "http://localhost:11434/v1/chat/completions",
+            ),
+            (
+                "https://example.com/api/v2",
+                "https://example.com/api/v2/chat/completions",
+            ),
+            (
+                "https://example.com/v10",
+                "https://example.com/v10/chat/completions",
+            ),
             // Multi-digit versions
-            ("https://example.com/v99", "https://example.com/v99/chat/completions"),
+            (
+                "https://example.com/v99",
+                "https://example.com/v99/chat/completions",
+            ),
             // Single-digit boundary: /v9 versioned
-            ("https://example.com/v9", "https://example.com/v9/chat/completions"),
+            (
+                "https://example.com/v9",
+                "https://example.com/v9/chat/completions",
+            ),
             // Qualified versions deliberately do NOT match (review round 1)
-            ("https://example.com/v1.1", "https://example.com/v1.1/v1/chat/completions"),
-            ("https://example.com/v2_beta", "https://example.com/v2_beta/v1/chat/completions"),
+            (
+                "https://example.com/v1.1",
+                "https://example.com/v1.1/v1/chat/completions",
+            ),
+            (
+                "https://example.com/v2_beta",
+                "https://example.com/v2_beta/v1/chat/completions",
+            ),
             // Empty tail and non-digit tail: NOT versioned
-            ("https://example.com/v", "https://example.com/v/v1/chat/completions"),
-            ("https://example.com/vX", "https://example.com/vX/v1/chat/completions"),
+            (
+                "https://example.com/v",
+                "https://example.com/v/v1/chat/completions",
+            ),
+            (
+                "https://example.com/vX",
+                "https://example.com/vX/v1/chat/completions",
+            ),
             // Whitespace-padded versioned base (round 1) — pins .trim()
-            (" https://host/api/paas/v4/ ", "https://host/api/paas/v4/chat/completions"),
+            (
+                " https://host/api/paas/v4/ ",
+                "https://host/api/paas/v4/chat/completions",
+            ),
             // Version segment that is NOT trailing — today's behavior preserved (Q3)
-            ("https://host/v1/models", "https://host/v1/models/v1/chat/completions"),
+            (
+                "https://host/v1/models",
+                "https://host/v1/models/v1/chat/completions",
+            ),
             // Degenerate inputs fall through to the legacy layout
             ("", "/v1/chat/completions"),
             ("   ", "/v1/chat/completions"),

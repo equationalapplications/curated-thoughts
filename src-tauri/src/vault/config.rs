@@ -107,8 +107,7 @@ impl VaultConfig {
 
     pub fn set_vault_path(&self, path: &str) -> Result<()> {
         let paths = self.brain_paths();
-        let mut config = BrainConfig::load(&paths)
-            .unwrap_or_else(|_| BrainConfig::default());
+        let mut config = BrainConfig::load(&paths).unwrap_or_else(|_| BrainConfig::default());
         config.vault_path = Some(path.to_string());
         config.write(&paths)
     }
@@ -128,8 +127,7 @@ impl VaultConfig {
     #[allow(dead_code)]
     pub fn set_embed_profile(&self, profile: EmbedProfile) -> Result<()> {
         let paths = self.brain_paths();
-        let mut config = BrainConfig::load(&paths)
-            .unwrap_or_else(|_| BrainConfig::default());
+        let mut config = BrainConfig::load(&paths).unwrap_or_else(|_| BrainConfig::default());
         config.embed_profile = Some(profile);
         config.write(&paths)
     }
@@ -143,8 +141,7 @@ impl VaultConfig {
 
     pub fn set_migrated_to_v2(&self) -> Result<()> {
         let paths = self.brain_paths();
-        let mut config = BrainConfig::load(&paths)
-            .unwrap_or_else(|_| BrainConfig::default());
+        let mut config = BrainConfig::load(&paths).unwrap_or_else(|_| BrainConfig::default());
         config.migrated_to_v2 = true;
         config.write(&paths)
     }
@@ -346,7 +343,7 @@ mod tests {
         let vault = tmp.path().join("vault");
         let old_dir = vault.join("documents");
         let new_dir = vault.join(IMMUTABLE_DIR);
-        
+
         fs::create_dir_all(&old_dir).unwrap();
         fs::write(old_dir.join("old.txt"), b"old").unwrap();
         fs::create_dir_all(&new_dir).unwrap();

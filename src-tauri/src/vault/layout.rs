@@ -2,12 +2,15 @@
 //!
 //! Creates the canonical Curated-Thoughts directory structure:
 
-use std::path::Path;
 use anyhow::Result;
+use std::path::Path;
 
 /// Creates the standard Curated-Thoughts vault layout under `vault_root`.
 ///
-/// Callers: `set_vault_path` (lib.rs) and `onboard::run_onboard`.
+/// Callers: `onboard::run_onboard`. Note that `set_vault_path`, `switch_vault`
+/// and the startup bootstrap (all in lib.rs) inline the equivalent
+/// `create_dir_all` calls instead of delegating here — see the duplication
+/// note in `docs/superpowers/specs/2026-08-27-agent-deposit-write-path.md`.
 pub fn create_vault_layout(vault_root: &Path) -> Result<()> {
     // v2 layout: migrate a v1 vault (documents/ → immutable-source-files/)
     // BEFORE creating subdirs, otherwise both folders would exist and the

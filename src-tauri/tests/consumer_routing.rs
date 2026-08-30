@@ -1,9 +1,9 @@
 //! Verify each consumer routes through the unified accessor.
 
+use std::fs;
 use tauri_app_lib::config::BrainConfig;
 use tauri_app_lib::retrieval::BrainPaths;
 use tempfile::TempDir;
-use std::fs;
 
 fn temp_paths() -> (TempDir, BrainPaths) {
     let temp = TempDir::new().unwrap();
@@ -37,8 +37,7 @@ fn brain_config_write_preserves_unknown_keys() {
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(value["vault_path"], "~/new");
     assert_eq!(
-        value["generation"]["model"],
-        "gpt4",
+        value["generation"]["model"], "gpt4",
         "generation block preserved"
     );
 }
@@ -49,7 +48,8 @@ fn load_lenient_returns_diagnostics() {
     let report = BrainConfig::load_lenient(&paths).unwrap();
     // Valid config should have no diagnostics (or no malformed-related ones)
     assert!(
-        report.diagnostics.is_empty() || !report.diagnostics.iter().any(|d| d.contains("malformed")),
+        report.diagnostics.is_empty()
+            || !report.diagnostics.iter().any(|d| d.contains("malformed")),
         "valid config should not have malformed diagnostics"
     );
 }

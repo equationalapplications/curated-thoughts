@@ -85,9 +85,7 @@ fn write_config_does_not_write_api_key_when_none_supplied_and_disk_empty() {
     match value["generation"].get("api_key") {
         None => {}
         Some(v) if v.is_null() => {}
-        Some(v) => panic!(
-            "api_key must not be a non-null value after a panel save; got: {v}"
-        ),
+        Some(v) => panic!("api_key must not be a non-null value after a panel save; got: {v}"),
     }
 }
 
@@ -137,7 +135,10 @@ fn update_provider_panel_save_does_not_overwrite_existing_api_key() {
         Some("legacy-secret"),
         "panel save must not overwrite an existing api_key"
     );
-    assert_eq!(report.config.generation.model_name.as_deref(), Some("new-model"));
+    assert_eq!(
+        report.config.generation.model_name.as_deref(),
+        Some("new-model")
+    );
 }
 
 #[test]
@@ -174,8 +175,6 @@ fn update_provider_panel_save_writes_no_api_key_when_disk_had_none() {
     match value["generation"].get("api_key") {
         None => {}
         Some(v) if v.is_null() => {}
-        Some(v) => panic!(
-            "api_key must not be a non-null value after a panel save; got: {v}"
-        ),
+        Some(v) => panic!("api_key must not be a non-null value after a panel save; got: {v}"),
     }
 }

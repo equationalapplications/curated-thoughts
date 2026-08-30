@@ -162,14 +162,13 @@ mod tests {
     fn run_with_config<F: FnOnce()>(tmp: &TempDir, body: F) {
         let _guard = ENV_LOCK.lock().unwrap();
         let config_path = tmp.path().join("config.json");
-        let config_path_str = config_path.to_str().expect("tempdir path is UTF-8").to_string();
-        temp_env::with_var(
-            "CURATED_BRAIN_CONFIG",
-            Some(config_path_str),
-            || {
-                body();
-            },
-        );
+        let config_path_str = config_path
+            .to_str()
+            .expect("tempdir path is UTF-8")
+            .to_string();
+        temp_env::with_var("CURATED_BRAIN_CONFIG", Some(config_path_str), || {
+            body();
+        });
     }
 
     struct NoTokenStore;

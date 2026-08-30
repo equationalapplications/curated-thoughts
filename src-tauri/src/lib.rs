@@ -35,6 +35,7 @@ use crate::inference::{
     download_model_weights, download_sidecar_engine, generate_text, get_provider_config,
     initialize_provider, update_provider, GenerationProvider, InferenceState,
 };
+use crate::vault::safe_path::AGENTS_DEPOSIT_DIR;
 use chunker::should_ingest_extension;
 use cloud_bridge::pairing::PairingTokenStore;
 use db::queue::enqueue_vault_event;
@@ -65,7 +66,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
-use crate::vault::safe_path::AGENTS_DEPOSIT_DIR;
 use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
 struct DbState(Mutex<AppDb>);
@@ -563,8 +563,7 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
     for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
     }
-    std::fs::create_dir_all(root.join(AGENTS_DEPOSIT_DIR))
-        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(root.join(AGENTS_DEPOSIT_DIR)).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1230,8 +1229,7 @@ async fn switch_vault(
     for subdir in &[crate::vault::IMMUTABLE_DIR, crate::vault::WIKI_DIR] {
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
     }
-    std::fs::create_dir_all(new_root.join(AGENTS_DEPOSIT_DIR))
-        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(new_root.join(AGENTS_DEPOSIT_DIR)).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(new_root.join(".brain").join("converted"))
         .map_err(|e| e.to_string())?;
 

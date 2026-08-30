@@ -5,9 +5,7 @@ use crate::db::proposals::{
     get_proposal_detail, insert_proposal, ItemDecision, ItemDecisionKind, NewProposal,
     NewProposalItem, NewProposalSource, ProposalKind, ProposalSourceRole, StoredEvidenceChunk,
 };
-use crate::inference::config::{
-    resolve_chat_completions_url, GenerationProviderKind, LlmConfig,
-};
+use crate::inference::config::{resolve_chat_completions_url, GenerationProviderKind, LlmConfig};
 use crate::librarian::{assemble_librarian_context, build_structural_context, ChunkRow};
 use crate::search::{bytes_to_f32, cosine_similarity};
 use anyhow::{Context, Result};

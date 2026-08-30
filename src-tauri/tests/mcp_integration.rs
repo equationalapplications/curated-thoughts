@@ -16,10 +16,10 @@ use tempfile::tempdir;
 
 use tauri_app_lib::chunker::{Chunk, ChunkStrategyTag};
 use tauri_app_lib::embedder::{embed_one, EmbedProfile};
+use tauri_app_lib::okf::sha256_hash;
 use tauri_app_lib::retrieval::{
     self, insert_chunk, insert_embedding, mark_document_indexed, upsert_document, AppDb,
 };
-use tauri_app_lib::okf::sha256_hash;
 use tauri_app_lib::search::SearchResult;
 use tauri_app_lib::wiki_graph::{
     f32_vec_to_blob, WikiOntologyResult, WikiSearchHit, WikiTraverseResult,
@@ -356,7 +356,10 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
     let tools = client.list_all_tools().await.expect("list_all_tools");
     let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(names.contains(&"vault_write_note"), "tools: {names:?}");
-    assert!(names.contains(&"vault_upsert_index_entry"), "tools: {names:?}");
+    assert!(
+        names.contains(&"vault_upsert_index_entry"),
+        "tools: {names:?}"
+    );
 
     // 1) vault_write_note over stdio
     let write_args = serde_json::json!({
@@ -387,12 +390,19 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
 
     let written =
         std::fs::read_to_string(vault.join("wiki/mcp-roundtrip.md")).expect("note on disk");
-    assert_eq!(parsed["sha256"], sha256_hash(&written), "sha256 matches disk bytes");
+    assert_eq!(
+        parsed["sha256"],
+        sha256_hash(&written),
+        "sha256 matches disk bytes"
+    );
     assert!(
         written.contains("updated_at:"),
         "create stamps an If-Match token: {written}"
     );
-    assert!(written.ends_with("\n"), "document ends with exactly one newline");
+    assert!(
+        written.ends_with("\n"),
+        "document ends with exactly one newline"
+    );
 
     // 2) vault_upsert_index_entry over stdio links the new note
     let upsert_args = serde_json::json!({
@@ -407,7 +417,9 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
     .clone();
     let res = client
         .peer()
-        .call_tool(CallToolRequestParams::new("vault_upsert_index_entry").with_arguments(upsert_args))
+        .call_tool(
+            CallToolRequestParams::new("vault_upsert_index_entry").with_arguments(upsert_args),
+        )
         .await
         .expect("call_tool vault_upsert_index_entry");
     let text = first_text_hit(&res);

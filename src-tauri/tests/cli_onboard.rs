@@ -5,10 +5,10 @@
 
 use std::fs;
 use std::sync::Mutex;
-use tempfile::TempDir;
 use tauri_app_lib::embedder::EmbedProfile;
 use tauri_app_lib::inference::config::GenerationConfig;
 use tauri_app_lib::onboard::{create_layout_and_onboard, OnboardConfig};
+use tempfile::TempDir;
 
 fn make_config(vault: &std::path::Path) -> OnboardConfig {
     OnboardConfig {
@@ -67,10 +67,7 @@ fn onboard_creates_vault_layout() {
     );
     assert!(vault.join("wiki").is_dir(), "wiki/ created");
     assert!(
-        vault
-            .join("immutable-source-files")
-            .join("agents")
-            .is_dir(),
+        vault.join("immutable-source-files").join("agents").is_dir(),
         "immutable-source-files/agents/ created"
     );
     assert!(
