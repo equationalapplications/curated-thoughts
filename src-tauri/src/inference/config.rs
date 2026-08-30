@@ -18,6 +18,7 @@ impl Default for GenerationProviderKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GenerationConfig {
+    #[serde(default)]
     pub provider: GenerationProviderKind,
     pub model_path: Option<String>,
     pub model_name: Option<String>,
@@ -39,6 +40,7 @@ pub enum EmbeddingProviderKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EmbeddingConfig {
+    #[serde(default)]
     pub provider: EmbeddingProviderKind,
     pub external_url: Option<String>,
 }
