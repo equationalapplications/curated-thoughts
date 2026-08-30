@@ -2636,7 +2636,7 @@ pub fn run() {
 
     let db_path = retrieval::resolve_brain_paths().db_path;
 
-    let config = VaultConfig::new(VaultConfig::default_config_path());
+    let config = VaultConfig::new(retrieval::resolve_brain_paths().config_path);
     let vault_path_for_migration = config.get_vault_path().ok().flatten();
     let vault_migration_needed = !config.has_migrated_to_v2().unwrap_or(false);
 
@@ -2751,7 +2751,7 @@ pub fn run() {
                 if vault_migration_needed {
                     if let Some(vault_path) = vault_path_for_migration {
                         let vault_root = PathBuf::from(&vault_path);
-                        let config_for_migration = VaultConfig::new(VaultConfig::default_config_path());
+                        let config_for_migration = VaultConfig::new(retrieval::resolve_brain_paths().config_path);
                         match crate::vault::config::migrate_vault(&vault_root) {
                             Ok(()) => {
                                 if let Err(e) = config_for_migration.set_migrated_to_v2() {
