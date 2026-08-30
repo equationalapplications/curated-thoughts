@@ -274,7 +274,13 @@ impl BrainConfig {
 
         let text = match fs::read_to_string(&paths.config_path) {
             Ok(t) => t,
-            Err(e) => {
+            // The only IO condition treated as "absent configuration" is a
+            // missing file — that is the normal post-onboarding state.
+            // Permission-denied, a directory in the path, and any other I/O
+            // failure are propagated as `ConfigError::Io` so the startup hook
+            // surfaces the real failure instead of silently re-onboarding.
+            // Matches the contract documented on `ConfigError` above.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 report.diagnostics.push(format!("config.json not found: {}", e));
                 report.generation_missing = true;
                 report.embedding_missing = true;
@@ -282,6 +288,7 @@ impl BrainConfig {
                 report.privacy_missing = true;
                 return Ok(report);
             }
+            Err(e) => return Err(ConfigError::Io(e)),
         };
 
         let value: serde_json::Value =

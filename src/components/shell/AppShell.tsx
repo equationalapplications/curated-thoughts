@@ -16,7 +16,7 @@ import {
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { SetupWizard } from "../setup/SetupWizard";
-import { startFileWatcher, needsChunkHashMigration } from "../../lib/tauri";
+import { startFileWatcher, needsChunkHashMigration, takePendingConfigMalformed } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
@@ -185,19 +185,41 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   // `config-malformed` with diagnostics + a remediation hint; we wrap
   // it as a background error so the existing ActivityFeed banner UI
   // shows it without needing a new component.
+  //
+  // The setup thread can fire the event before this listener registers
+  // (Tauri does not buffer events), so we also drain any payload stashed
+  // by the backend via `takePendingConfigMalformed` on mount — PR #120.
   useEffect(() => {
+    let cancelled = false;
+    const renderMalformed = (payload: {
+      config_path: string;
+      diagnostics: string[];
+      remediation: string;
+    }) => {
+      const { config_path, diagnostics, remediation } = payload;
+      const message =
+        `config.json at ${config_path} is malformed. ${remediation}\n\n` +
+        diagnostics.map((d) => `• ${d}`).join("\n");
+      reportBackgroundError(message);
+    };
+    takePendingConfigMalformed()
+      .then((payload) => {
+        if (cancelled || payload === null) return;
+        renderMalformed(payload);
+      })
+      .catch((err: unknown) => {
+        // Drain is best-effort — fall back to the live listener below.
+        console.warn("[config-malformed] drain failed:", err);
+      });
     const promise = listen<{
       config_path: string;
       diagnostics: string[];
       remediation: string;
     }>("config-malformed", (event) => {
-      const { config_path, diagnostics, remediation } = event.payload;
-      const message =
-        `config.json at ${config_path} is malformed. ${remediation}\n\n` +
-        diagnostics.map((d) => `• ${d}`).join("\n");
-      reportBackgroundError(message);
+      renderMalformed(event.payload);
     });
     return () => {
+      cancelled = true;
       promise.then((unlisten) => unlisten());
     };
   }, []);

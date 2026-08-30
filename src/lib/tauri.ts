@@ -97,6 +97,22 @@ export interface LlmConfig {
 export const getProviderConfig = (): Promise<LlmConfig> =>
   invoke("get_provider_config");
 
+/** Payload of the `config-malformed` event emitted by the desktop startup
+ * hook when `BrainConfig::load_lenient` reports fatal diagnostics. */
+export interface ConfigMalformedPayload {
+  config_path: string;
+  diagnostics: string[];
+  remediation: string;
+}
+
+/** Drains the most recent `config-malformed` payload stashed by the setup
+ * hook. Called on `AppShell` mount because the setup thread can emit the
+ * event before the React listener registers (Tauri does not buffer events)
+ * — see `PendingConfigMalformed` in `src-tauri/src/lib.rs`. Resolves to
+ * `null` if the startup hook never produced a malformed-config report. */
+export const takePendingConfigMalformed = (): Promise<ConfigMalformedPayload | null> =>
+  invoke("take_pending_config_malformed");
+
 export const updateProvider = (config: GenerationConfig): Promise<void> =>
   invoke("update_provider", { config });
 

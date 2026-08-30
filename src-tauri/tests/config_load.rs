@@ -1,4 +1,4 @@
-use tauri_app_lib::config::BrainConfig;
+use tauri_app_lib::config::{BrainConfig, ConfigError};
 use tauri_app_lib::retrieval::BrainPaths;
 use std::fs;
 use tempfile::TempDir;
@@ -194,5 +194,29 @@ fn load_lenient_preserves_unknown_keys() {
     assert_eq!(
         preserved_obj.get("another_unknown").and_then(|v| v.as_i64()),
         Some(42)
+    );
+}
+
+#[test]
+fn load_lenient_propagates_io_errors_other_than_not_found() {
+    // The only IO condition treated as "absent configuration" is a missing
+    // file. A directory in place of the file produces a non-`NotFound` IO
+    // error and must be propagated as `ConfigError::Io` so the startup hook
+    // surfaces the real failure instead of silently treating the user as a
+    // first-run installer.
+    let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("config.json");
+    fs::create_dir(&config_path).unwrap();
+
+    let paths = BrainPaths {
+        brain_dir: temp.path().to_path_buf(),
+        config_path,
+        db_path: temp.path().join("brain.db"),
+    };
+
+    let result = BrainConfig::load_lenient(&paths);
+    assert!(
+        matches!(result, Err(ConfigError::Io(_))),
+        "non-NotFound IO errors must propagate as ConfigError::Io, got {result:?}",
     );
 }

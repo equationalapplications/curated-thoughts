@@ -88,6 +88,20 @@ struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
 struct CloudBridgeState(Mutex<Option<cloud_bridge::CloudBridgeHandle>>);
 struct CloudBridgeLifecycle(tokio::sync::Mutex<()>);
 
+/// Latest `config-malformed` payload surfaced by the setup hook. The setup
+/// thread can emit before the frontend listener registers (Tauri does not
+/// buffer events), so we also stash the payload here and let `AppShell`
+/// drain it on mount via `take_pending_config_malformed` — CodeRabbit #19,
+/// PR #120.
+#[derive(serde::Serialize, Clone)]
+struct ConfigMalformedPayload {
+    config_path: String,
+    diagnostics: Vec<String>,
+    remediation: String,
+}
+
+struct PendingConfigMalformed(Mutex<Option<ConfigMalformedPayload>>);
+
 #[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
     ingesting: bool,
@@ -2558,6 +2572,19 @@ fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bo
 /// `ingest_document_cmd` so the event-emission sequence can be exercised in a
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
 /// argument is not supported by `MockRuntime`'s `CommandArg` extractor).
+
+/// Drains the most recent `config-malformed` payload stashed by the setup
+/// hook. The setup thread can emit the event before the frontend listener
+/// registers (Tauri does not buffer events emitted before the corresponding
+/// `listen()` resolves), so `AppShell` calls this on mount to recover any
+/// payload that was missed — CodeRabbit #19, PR #120. Returns `None` if the
+/// setup hook never produced a malformed-config report.
+#[tauri::command]
+fn take_pending_config_malformed(
+    state: tauri::State<'_, PendingConfigMalformed>,
+) -> Option<ConfigMalformedPayload> {
+    state.0.lock().unwrap().take()
+}
 fn run_ingest_with_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     db: &Mutex<AppDb>,
@@ -2972,14 +2999,20 @@ pub fn run() {
                             "warning: config.json is malformed at {}. Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
                             resolved_paths.config_path.display()
                         );
-                        let _ = app_handle.emit(
-                            "config-malformed",
-                            serde_json::json!({
-                                "config_path": resolved_paths.config_path.to_string_lossy(),
-                                "diagnostics": malformed_diagnostics,
-                                "remediation": "Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.",
-                            }),
-                        );
+                        // Stash the payload so `AppShell` can recover it on
+                        // mount via `take_pending_config_malformed`. Tauri
+                        // does not buffer events emitted before the frontend
+                        // listener registers, and this background thread can
+                        // finish before the React app boots — CodeRabbit #19,
+                        // PR #120.
+                        let payload = ConfigMalformedPayload {
+                            config_path: resolved_paths.config_path.to_string_lossy().to_string(),
+                            diagnostics: malformed_diagnostics,
+                            remediation: "Run `curated-thoughts --doctor`, then `curated-thoughts --onboard --force` to repair.".to_string(),
+                        };
+                        *app_handle.state::<PendingConfigMalformed>().0.lock().unwrap() =
+                            Some(payload.clone());
+                        let _ = app_handle.emit("config-malformed", payload);
                     }
 
                     match initialize_provider(brain_path, &config.generation, &app_handle) {
@@ -3026,6 +3059,7 @@ pub fn run() {
         .manage(InferenceState(Mutex::new(GenerationProvider::Unconfigured)))
         .manage(WatcherStarted(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
+        .manage(PendingConfigMalformed(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
             set_vault_path,
@@ -3113,6 +3147,7 @@ pub fn run() {
             commands::chunks::fetch_chunk_content,
             ingest_document_cmd,
             needs_chunk_hash_migration,
+            take_pending_config_malformed,
             vault_write_note,
             vault_upsert_index_entry,
         ])

@@ -177,6 +177,12 @@ error state, forcing callers to grep `diagnostics` for `"malformed"` —
 fragile and easy to miss). Fatal cases:
 - malformed top-level JSON (parse failure)
 - non-object root (`[]`, `null`, `42`, etc. — see §1)
+- any `fs::read_to_string` error other than `ErrorKind::NotFound` (permission
+  denied, a directory in place of the file, transient I/O failure, …); these
+  become `ConfigError::Io(e)` so the startup hook surfaces the real cause
+  rather than silently re-onboarding — CodeRabbit #15, PR #120. `NotFound` is
+  the only IO condition returned as `Ok` because it is the normal
+  post-onboarding state, not corruption.
 
 Callers MUST propagate the `Err` — pipeline hard-fails; `--doctor` returns
 exit code 2; desktop startup surfaces the §7 M2 banner and continues with
