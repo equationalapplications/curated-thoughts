@@ -62,6 +62,7 @@ http = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 rand = "0.10"
 tauri-plugin-notification = "2.3.3"
+uuid = { version = "1.6", features = ["v4", "fast-rng"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

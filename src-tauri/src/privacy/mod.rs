@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::cloud_bridge::pairing::PairingTokenStore;
-use crate::inference::config::config_path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,46 +44,19 @@ pub fn effective_mode(cfg: &PrivacyConfig) -> PrivacyMode {
 }
 
 pub fn read_privacy_config(brain_dir: &Path) -> Result<PrivacyConfig> {
-    let path = config_path(brain_dir);
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return Ok(PrivacyConfig::default());
-    };
-    let root: serde_json::Value = serde_json::from_str(&contents).unwrap_or(serde_json::json!({}));
-    Ok(root
-        .get("privacy")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default())
+    let paths = crate::retrieval::brain_paths_for(brain_dir);
+    let report = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?;
+    Ok(report.config.privacy)
 }
 
 pub fn write_privacy_config(brain_dir: &Path, privacy: &PrivacyConfig) -> Result<()> {
-    let path = config_path(brain_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut existing = if path.exists() {
-        let contents = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<serde_json::Value>(&contents)
-            .unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
-    if !existing.is_object() {
-        existing = serde_json::json!({});
-    }
-
-    let privacy_value = serde_json::to_value(privacy)?;
-    existing
-        .as_object_mut()
-        .unwrap()
-        .insert("privacy".to_string(), privacy_value);
-
-    let json = serde_json::to_string_pretty(&existing)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    let paths = crate::retrieval::brain_paths_for(brain_dir);
+    let mut config = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?
+        .config;
+    config.privacy = privacy.clone();
+    config.write(&paths)
 }
 
 pub fn write_privacy_mode(brain_dir: &Path, mode: PrivacyMode, chosen: bool) -> Result<()> {
@@ -174,7 +146,31 @@ pub fn resolve_privacy_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    // Privacy reads/writes now route through `crate::retrieval::resolve_brain_paths()`,
+    // which resolves the config path from `CURATED_BRAIN_CONFIG` / `CURATED_BRAIN_DB` /
+    // `CURATED_BRAIN_DIR`. Tests must pin one of these so the operations land in the
+    // tempdir, not in the developer's home directory. `temp_env::with_var` restores the
+    // previous value on drop, but unit tests run in parallel — serialize them with a
+    // static mutex to prevent one test from observing another test's env mutation.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Pin `CURATED_BRAIN_CONFIG` at `<tmp>/config.json` and run `body`. Restores the
+    /// prior env var value (or unsets it) on return.
+    fn run_with_config<F: FnOnce()>(tmp: &TempDir, body: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let config_path_str = config_path.to_str().expect("tempdir path is UTF-8").to_string();
+        temp_env::with_var(
+            "CURATED_BRAIN_CONFIG",
+            Some(config_path_str),
+            || {
+                body();
+            },
+        );
+    }
 
     struct NoTokenStore;
 
@@ -207,70 +203,84 @@ mod tests {
     #[test]
     fn absent_privacy_defaults_strict_without_token() {
         let dir = TempDir::new().unwrap();
-        let resolved = resolve_privacy_state(dir.path(), &NoTokenStore).unwrap();
-        assert_eq!(resolved.mode, PrivacyMode::Strict);
-        assert!(!resolved.needs_migration_disclosure);
-        assert_eq!(
-            read_privacy_config(dir.path()).unwrap().mode,
-            Some(PrivacyMode::Strict)
-        );
+        run_with_config(&dir, || {
+            let resolved = resolve_privacy_state(dir.path(), &NoTokenStore).unwrap();
+            assert_eq!(resolved.mode, PrivacyMode::Strict);
+            assert!(!resolved.needs_migration_disclosure);
+            assert_eq!(
+                read_privacy_config(dir.path()).unwrap().mode,
+                Some(PrivacyMode::Strict)
+            );
+        });
     }
 
     #[test]
     fn absent_privacy_with_token_migrates_to_connected() {
         let dir = TempDir::new().unwrap();
-        let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
-        assert_eq!(resolved.mode, PrivacyMode::Connected);
-        assert!(resolved.needs_migration_disclosure);
-        assert_eq!(
-            read_privacy_config(dir.path()).unwrap().mode,
-            Some(PrivacyMode::Connected)
-        );
+        run_with_config(&dir, || {
+            let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
+            assert_eq!(resolved.mode, PrivacyMode::Connected);
+            assert!(resolved.needs_migration_disclosure);
+            assert_eq!(
+                read_privacy_config(dir.path()).unwrap().mode,
+                Some(PrivacyMode::Connected)
+            );
+        });
     }
 
     #[test]
     fn explicit_strict_not_overridden_by_token() {
         let dir = TempDir::new().unwrap();
-        write_privacy_mode(dir.path(), PrivacyMode::Strict, true).unwrap();
-        let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
-        assert_eq!(resolved.mode, PrivacyMode::Strict);
-        assert!(!resolved.needs_migration_disclosure);
+        run_with_config(&dir, || {
+            write_privacy_mode(dir.path(), PrivacyMode::Strict, true).unwrap();
+            let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
+            assert_eq!(resolved.mode, PrivacyMode::Strict);
+            assert!(!resolved.needs_migration_disclosure);
+        });
     }
 
     #[test]
     fn write_privacy_config_preserves_other_config_keys() {
         let dir = TempDir::new().unwrap();
-        let path = config_path(dir.path());
+        let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"vault_path":"/tmp/vault"}"#).unwrap();
-        write_privacy_mode(dir.path(), PrivacyMode::Ephemeral, true).unwrap();
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(root["vault_path"], "/tmp/vault");
-        assert_eq!(root["privacy"]["mode"], "ephemeral");
+        run_with_config(&dir, || {
+            write_privacy_mode(dir.path(), PrivacyMode::Ephemeral, true).unwrap();
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let root: serde_json::Value = serde_json::from_str(&contents).unwrap();
+            assert_eq!(root["vault_path"], "/tmp/vault");
+            assert_eq!(root["privacy"]["mode"], "ephemeral");
+        });
     }
 
     #[test]
     fn migration_disclosure_suppressed_after_acknowledged() {
         let dir = TempDir::new().unwrap();
-        let mut cfg = PrivacyConfig::default();
-        cfg.migration_disclosure_acknowledged = true;
-        write_privacy_config(dir.path(), &cfg).unwrap();
-        let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
-        assert!(!resolved.needs_migration_disclosure);
+        run_with_config(&dir, || {
+            let mut cfg = PrivacyConfig::default();
+            cfg.migration_disclosure_acknowledged = true;
+            write_privacy_config(dir.path(), &cfg).unwrap();
+            let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
+            assert!(!resolved.needs_migration_disclosure);
+        });
     }
 
     #[test]
     fn cloud_bridge_not_permitted_in_strict_even_with_token() {
         let dir = TempDir::new().unwrap();
-        write_privacy_mode(dir.path(), PrivacyMode::Strict, true).unwrap();
-        assert!(!cloud_bridge_permitted(dir.path(), &TokenStore("tok")).unwrap());
+        run_with_config(&dir, || {
+            write_privacy_mode(dir.path(), PrivacyMode::Strict, true).unwrap();
+            assert!(!cloud_bridge_permitted(dir.path(), &TokenStore("tok")).unwrap());
+        });
     }
 
     #[test]
     fn cloud_bridge_permitted_in_connected_with_token() {
         let dir = TempDir::new().unwrap();
-        write_privacy_mode(dir.path(), PrivacyMode::Connected, true).unwrap();
-        assert!(cloud_bridge_permitted(dir.path(), &TokenStore("tok")).unwrap());
+        run_with_config(&dir, || {
+            write_privacy_mode(dir.path(), PrivacyMode::Connected, true).unwrap();
+            assert!(cloud_bridge_permitted(dir.path(), &TokenStore("tok")).unwrap());
+        });
     }
 
     #[test]
@@ -278,7 +288,6 @@ mod tests {
         use std::sync::Mutex;
 
         let dir = TempDir::new().unwrap();
-        write_privacy_mode(dir.path(), PrivacyMode::Connected, true).unwrap();
         struct MutableTokenStore(Mutex<Option<String>>);
         impl PairingTokenStore for MutableTokenStore {
             fn get(&self) -> Result<Option<String>> {
@@ -294,9 +303,12 @@ mod tests {
             }
         }
         let store = MutableTokenStore(Mutex::new(Some("tok".into())));
-        let (_, disconnected) =
-            set_privacy_mode_config(dir.path(), PrivacyMode::Strict, &store).unwrap();
-        assert!(disconnected);
-        assert!(store.get().unwrap().is_none());
+        run_with_config(&dir, || {
+            write_privacy_mode(dir.path(), PrivacyMode::Connected, true).unwrap();
+            let (_, disconnected) =
+                set_privacy_mode_config(dir.path(), PrivacyMode::Strict, &store).unwrap();
+            assert!(disconnected);
+            assert!(store.get().unwrap().is_none());
+        });
     }
 }

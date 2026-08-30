@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getBinaryPath } from "../../lib/tauri";
+import { getBinaryPath, getBrainDirInfo } from "../../lib/tauri";
 
 interface Props {
   brainDir: string | null;
@@ -27,6 +27,26 @@ function binaryPath(): string {
 export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
   const [commandPath, setCommandPath] = useState<string>(binaryPath());
   const [binaryPathError, setBinaryPathError] = useState<string | null>(null);
+  const [brainDirSource, setBrainDirSource] = useState<"env" | "default" | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    getBrainDirInfo()
+      .then((info) => {
+        if (active) {
+          setBrainDirSource(info.source);
+        }
+      })
+      .catch((error) => {
+        // Non-fatal: the MCP snippet still works without the source label.
+        console.error("Failed to resolve brain dir source:", error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -137,6 +157,15 @@ export function AgentIntegrationPanel({ brainDir, brainDirError }: Props) {
         Paste this into your agent's MCP server configuration (Cursor, Claude
         Code, etc.) to connect it to your vault.
       </p>
+      {brainDir !== null && brainDirSource !== null ? (
+        <p className="agent-snippet-status" data-testid="agent-snippet-status">
+          Sidecar bound to:{" "}
+          <code>{brainDir}</code>{" "}
+          <span className="agent-snippet-status-source">
+            (via {brainDirSource === "env" ? "CURATED_BRAIN_DIR" : "default"})
+          </span>
+        </p>
+      ) : null}
       <div className="agent-snippet-wrapper">
         <pre>
           <code data-testid="agent-snippet">{snippet}</code>

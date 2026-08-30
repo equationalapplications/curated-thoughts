@@ -6,7 +6,7 @@ use crate::db::proposals::{
     NewProposalItem, NewProposalSource, ProposalKind, ProposalSourceRole, StoredEvidenceChunk,
 };
 use crate::inference::config::{
-    read_config, resolve_chat_completions_url, GenerationProviderKind, LlmConfig,
+    resolve_chat_completions_url, GenerationProviderKind, LlmConfig,
 };
 use crate::librarian::{assemble_librarian_context, build_structural_context, ChunkRow};
 use crate::search::{bytes_to_f32, cosine_similarity};
@@ -208,7 +208,26 @@ fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> St
 /// the fallback here is a label of last resort, not the model that runs.
 pub fn active_generation_model(fallback_model: &str) -> String {
     let brain_dir_str = crate::get_brain_dir_inner();
-    let llm_config = read_config(Path::new(&brain_dir_str));
+    let brain_path = Path::new(&brain_dir_str);
+    // Route through the unified lenient loader so a malformed config surfaces
+    // a logged diagnostic instead of silently defaulting (the historical
+    // failure class the unified loader was created to remove).
+    let paths = crate::retrieval::brain_paths_for(brain_path);
+    let llm_config = match crate::config::BrainConfig::load_lenient(&paths) {
+        Ok(report) => {
+            for d in &report.diagnostics {
+                eprintln!("[active_generation_model] config diagnostic: {d}");
+            }
+            LlmConfig {
+                generation: report.config.generation,
+                embedding: report.config.embedding,
+            }
+        }
+        Err(e) => {
+            eprintln!("[active_generation_model] config.json failed to load: {e}");
+            LlmConfig::default()
+        }
+    };
     active_generation_model_from(&llm_config, fallback_model)
 }
 
@@ -230,7 +249,15 @@ pub fn active_generation_model_from(llm_config: &LlmConfig, fallback_model: &str
 fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
     let brain_dir_str = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir_str);
-    let llm_config = read_config(brain_path);
+    let report = crate::config::BrainConfig::load_lenient(&crate::retrieval::BrainPaths {
+        brain_dir: brain_path.to_path_buf(),
+        config_path: crate::inference::config::config_path(brain_path),
+        db_path: brain_path.join("brain.db"),
+    })?;
+    let llm_config = LlmConfig {
+        generation: report.config.generation,
+        embedding: report.config.embedding,
+    };
     let timeout_secs = llm_config
         .generation
         .timeout_secs

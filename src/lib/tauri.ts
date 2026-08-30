@@ -44,6 +44,18 @@ export const getRecommendedModel = (): Promise<string> =>
   invoke("get_recommended_model");
 
 export const getBrainDir = (): Promise<string> => invoke("get_brain_dir");
+
+/** Returns the resolved brain dir plus the source that produced it
+ * (env override vs. home-dir default) so the AgentIntegrationPanel can
+ * display a status line. */
+export interface BrainDirInfo {
+  brain_dir: string;
+  source: "env" | "default";
+}
+
+export const getBrainDirInfo = (): Promise<BrainDirInfo> =>
+  invoke("get_brain_dir_info");
+
 export const getBinaryPath = (): Promise<string> => invoke("get_binary_path");
 
 export const resolveChunkOverlay = (
@@ -84,6 +96,33 @@ export interface LlmConfig {
 
 export const getProviderConfig = (): Promise<LlmConfig> =>
   invoke("get_provider_config");
+
+/** Payload of the `config-malformed` event emitted by the desktop startup
+ * hook when `BrainConfig::load_lenient` reports fatal diagnostics. */
+export interface ConfigMalformedPayload {
+  config_path: string;
+  diagnostics: string[];
+  remediation: string;
+}
+
+/** Non-destructive read of the most recent `config-malformed` payload
+ * stashed by the setup hook. Called on `AppShell` mount because the setup
+ * thread can emit the event before the React listener registers (Tauri
+ * does not buffer events) — see `PendingConfigMalformed` in
+ * `src-tauri/src/lib.rs`. Resolves to `null` if the startup hook never
+ * produced a malformed-config report. Pairs with
+ * `ackPendingConfigMalformed`, which the caller MUST invoke after
+ * successfully rendering the payload — CodeRabbit #21, PR #120. The
+ * earlier destructive `takePendingConfigMalformed` dropped the payload
+ * whenever cleanup ran before the IPC `.then` resolved. */
+export const peekPendingConfigMalformed = (): Promise<ConfigMalformedPayload | null> =>
+  invoke("peek_pending_config_malformed");
+
+/** Clears the stashed `config-malformed` payload after the caller has
+ * successfully rendered it — pairs with `peekPendingConfigMalformed`.
+ * No-op if no payload is pending. Safe to call multiple times. */
+export const ackPendingConfigMalformed = (): Promise<void> =>
+  invoke("ack_pending_config_malformed");
 
 export const updateProvider = (config: GenerationConfig): Promise<void> =>
   invoke("update_provider", { config });

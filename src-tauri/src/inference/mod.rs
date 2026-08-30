@@ -3,7 +3,7 @@ pub mod sidecar;
 
 use crate::cloud_bridge::pairing::KeyringPairingTokenStore;
 use crate::inference::config::{
-    read_config, resolve_chat_completions_url, resolve_model_path, write_config, GenerationConfig,
+    resolve_chat_completions_url, resolve_model_path, EmbeddingConfig, GenerationConfig,
     GenerationProviderKind,
 };
 use crate::inference::sidecar::{await_sidecar_ready, pick_port, spawn_sidecar, SidecarProcess};
@@ -205,6 +205,12 @@ pub fn initialize_provider(
     initialize_provider_inner(brain_dir, config, Some(app))
 }
 
+/// Route a panel save through the unified loader + writer so we honor
+/// `CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG`, atomic temp files, and
+/// malformed-JSON safety.  Preserves any legacy plaintext `api_key` already
+/// on disk when the incoming value is None — matching the historical
+/// `write_config` raw-document-merge contract.
+#[allow(deprecated)]
 pub fn update_provider_with_brain_path(
     brain_path: &Path,
     config: GenerationConfig,
@@ -219,12 +225,18 @@ pub fn update_provider_with_brain_path(
         return Err("privacy-mode-strict: external generation is disabled".to_string());
     }
 
+    // Use the incoming config (including its api_key) for the immediate
+    // provider init only — never for disk persistence.  Credentials on disk
+    // come from the environment (or pre-existing legacy entries preserved
+    // here from the unified loader).
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {
-            let mut fallback_config = read_config(brain_path);
-            fallback_config.generation = GenerationConfig::default();
-            let rollback_err = write_config(brain_path, &fallback_config).err();
+            // Roll back to a default config via the unified writer so the
+            // panel state is cleared even when provider init fails.
+            let paths = crate::retrieval::brain_paths_for(brain_path);
+            let fallback = crate::config::BrainConfig::default();
+            let rollback_err = fallback.write(&paths).err();
             if let Some(rollback_err) = rollback_err {
                 return Err(format!(
                     "provider init failed: {e}; rollback failed: {rollback_err}"
@@ -236,13 +248,27 @@ pub fn update_provider_with_brain_path(
         }
     };
 
-    let mut llm_config = read_config(brain_path);
-    llm_config.generation = config;
+    // Load the current unified config (preserves any legacy plaintext api_key
+    // on disk), overlay the new generation block, and write via the unified
+    // writer.  `BrainConfig::write` honors `CURATED_BRAIN_DB` /
+    // `CURATED_BRAIN_CONFIG`, uses a unique temp filename, and treats
+    // malformed JSON as fatal.
+    let paths = crate::retrieval::brain_paths_for(brain_path);
+    let mut cfg = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| format!("config.json failed to load: {e}"))?
+        .config;
 
-    if let Err(e) = write_config(brain_path, &llm_config) {
-        let mut fallback = llm_config;
-        fallback.generation = GenerationConfig::default();
-        let rollback_err = write_config(brain_path, &fallback).err();
+    let mut config_for_disk = config;
+    // Strip the panel-supplied api_key before persisting: a new credential
+    // must come from the environment, never from the settings panel.  Any
+    // legacy plaintext key already on disk is carried through unchanged, so
+    // a panel save can neither wipe nor replace a pre-existing credential.
+    config_for_disk.api_key = cfg.generation.api_key.clone();
+    cfg.generation = config_for_disk;
+
+    if let Err(e) = cfg.write(&paths) {
+        let fallback = crate::config::BrainConfig::default();
+        let rollback_err = fallback.write(&paths).err();
         if let Some(rollback_err) = rollback_err {
             return Err(format!(
                 "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"
@@ -273,12 +299,53 @@ pub fn update_provider(
     update_provider_with_brain_path(brain_path, config, &state, Some(&app))
 }
 
+/// Frontend-facing response shape for `get_provider_config`.
+///
+/// The fields `generation` and `embedding` use the same flat shape the
+/// previous response did so existing UI code keeps working.  The
+/// `diagnostics` and `missing_blocks` surfaces expose lenient-loader output
+/// so the UI can surface missing/incomplete config blocks to the user
+/// rather than silently falling back to an unconfigured LLM.
+#[derive(serde::Serialize)]
+pub struct ProviderConfigResponse {
+    pub generation: GenerationConfig,
+    pub embedding: EmbeddingConfig,
+    pub diagnostics: Vec<String>,
+    pub missing_blocks: crate::config::MissingBlocks,
+}
+
+/// Build a [`ProviderConfigResponse`] from a [`BrainConfig::load_lenient`]
+/// report.  Pulled out of the command so tests can exercise the projection
+/// without standing up a full Tauri runtime.
+pub fn build_provider_config_response(
+    report: &crate::config::LoadReport,
+) -> ProviderConfigResponse {
+    let missing = crate::config::MissingBlocks {
+        generation: report.generation_missing,
+        embedding: report.embedding_missing,
+        vault_path: report.vault_path_missing,
+        privacy: report.privacy_missing,
+    };
+
+    ProviderConfigResponse {
+        generation: report.config.generation.clone(),
+        embedding: report.config.embedding.clone(),
+        diagnostics: report.diagnostics.clone(),
+        missing_blocks: missing,
+    }
+}
+
 #[tauri::command]
-pub fn get_provider_config() -> Result<serde_json::Value, String> {
-    let brain_dir = crate::get_brain_dir_inner();
-    let brain_path = Path::new(&brain_dir);
-    let config = read_config(brain_path);
-    serde_json::to_value(&config).map_err(|e| e.to_string())
+pub fn get_provider_config() -> Result<ProviderConfigResponse, String> {
+    // Use the unified lenient loader so we surface diagnostics rather than
+    // silently falling back to `LlmConfig::default()` via the deprecated
+    // `read_config`.  Callers that only need `generation`/`embedding` still
+    // see them at the top level; diagnostics and missing-block flags ride
+    // alongside them.
+    let paths = crate::retrieval::resolve_brain_paths();
+    let report = crate::config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| format!("config.json failed to load: {e}"))?;
+    Ok(build_provider_config_response(&report))
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -529,5 +596,97 @@ mod tests {
         let hash = sha256_file(&path).unwrap();
         assert_eq!(hash.len(), 64, "SHA-256 hex is 64 chars");
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// End-to-end: `build_provider_config_response` against the unified
+    /// lenient loader.  A configuration that is missing the generation
+    /// block must surface that fact via `missing_blocks.generation == true`
+    /// and a `diagnostics` entry rather than silently producing a default
+    /// `LlmConfig` (the historical failure mode of `read_config`).
+    #[test]
+    fn provider_config_response_surfaces_missing_blocks_as_diagnostics() {
+        use crate::config::BrainConfig;
+        use crate::retrieval::BrainPaths;
+        use std::fs;
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+        // Only vault_path; generation / embedding / privacy are absent.
+        fs::write(&config_path, r#"{"vault_path":"~/vault"}"#).unwrap();
+
+        let paths = BrainPaths {
+            brain_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join("config.json"),
+            db_path: temp.path().join("brain.db"),
+        };
+
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(report.generation_missing, "gen block should be missing");
+        assert!(report.embedding_missing, "emb block should be missing");
+
+        let resp = build_provider_config_response(&report);
+        assert!(
+            resp.missing_blocks.generation,
+            "missing_blocks.generation must be true so the UI can show it"
+        );
+        assert!(
+            resp.missing_blocks.embedding,
+            "missing_blocks.embedding must be true so the UI can show it"
+        );
+        assert!(
+            !resp.missing_blocks.vault_path,
+            "vault_path was present so missing flag must be false"
+        );
+        // Always-empty diagnostics for a missing-but-parseable file:
+        // the helper tracks missing blocks, the message lives in
+        // `missing_blocks`.  This test confirms the projection copies
+        // diagnostics verbatim.
+        assert_eq!(
+            resp.diagnostics.len(),
+            report.diagnostics.len(),
+            "diagnostics must be passed through verbatim"
+        );
+
+        // The response must serialize to a JSON shape that the existing
+        // frontend wrapper (`useSetupStatus`) can read without further
+        // parsing: `generation` and `embedding` ride at the top level.
+        let value = serde_json::to_value(&resp).unwrap();
+        assert!(value.get("generation").is_some(), "generation at top level");
+        assert!(value.get("embedding").is_some(), "embedding at top level");
+        assert!(value.get("missing_blocks").is_some());
+        assert!(value.get("diagnostics").is_some());
+    }
+
+    /// When `config.json` does not exist, the lenient loader returns
+    /// diagnostics (`config.json not found: ...`) and flags every block as
+    /// missing.  The provider-config command must relay that — never silently
+    /// drop it.
+    #[test]
+    fn provider_config_response_surfaces_missing_config_file() {
+        use crate::config::BrainConfig;
+        use crate::retrieval::BrainPaths;
+
+        let temp = TempDir::new().unwrap();
+        let paths = BrainPaths {
+            brain_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join("nonexistent.json"),
+            db_path: temp.path().join("brain.db"),
+        };
+
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(
+            report.diagnostics.iter().any(|d| d.contains("not found")),
+            "lenient load must report missing config.json, got {:?}",
+            report.diagnostics
+        );
+
+        let resp = build_provider_config_response(&report);
+        assert!(
+            resp.diagnostics.iter().any(|d| d.contains("not found")),
+            "missing-config diagnostics must surface verbatim"
+        );
+        assert!(resp.missing_blocks.generation);
+        assert!(resp.missing_blocks.embedding);
+        assert!(resp.missing_blocks.vault_path);
     }
 }

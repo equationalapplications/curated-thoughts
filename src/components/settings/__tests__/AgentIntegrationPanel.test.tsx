@@ -15,6 +15,19 @@ describe("AgentIntegrationPanel", () => {
     expect(screen.getByTestId("agent-snippet").textContent).toContain("/Users/test/.brain");
   });
 
+  it("renders a status line showing the resolved brain dir and source", async () => {
+    render(<AgentIntegrationPanel brainDir="/Users/test/.brain" />);
+    const status = await screen.findByTestId("agent-snippet-status");
+    expect(status.textContent).toContain("/Users/test/.brain");
+    expect(status.textContent).toContain("(via default)");
+  });
+
+  it("renders an empty snippet and no status line when brainDir is null", async () => {
+    const { container } = render(<AgentIntegrationPanel brainDir={null} />);
+    // Status line guards on brainDir !== null, so it must not appear.
+    expect(container.querySelector('[data-testid="agent-snippet-status"]')).toBeNull();
+  });
+
   it("copy button is enabled and copies the snippet", async () => {
     const user = userEvent.setup();
     const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");

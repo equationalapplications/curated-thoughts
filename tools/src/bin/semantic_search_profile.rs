@@ -16,6 +16,7 @@ use tauri_app_lib::db::{
     insert_chunk, insert_embedding, mark_document_indexed, upsert_document, AppDb,
 };
 use tauri_app_lib::embedder::{embed_one, EmbedProfile};
+use tauri_app_lib::retrieval::resolve_brain_paths;
 use tauri_app_lib::search::semantic_search;
 
 fn temp_db_path() -> PathBuf {
@@ -35,7 +36,8 @@ fn main() {
         .unwrap_or(3000);
 
     let db_path = temp_db_path();
-    let db = AppDb::open(&db_path).expect("open db");
+    let paths = resolve_brain_paths();
+    let db = AppDb::open_with_config(&db_path, &paths.config_path).expect("open db");
     let conn = &db.0;
 
     let profile = EmbedProfile::default();

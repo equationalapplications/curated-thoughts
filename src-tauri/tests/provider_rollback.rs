@@ -1,9 +1,11 @@
 use std::sync::Mutex;
-use tauri_app_lib::inference::config::{read_config, GenerationConfig, GenerationProviderKind};
+use tauri_app_lib::config::BrainConfig;
+use tauri_app_lib::inference::config::{GenerationConfig, GenerationProviderKind};
 use tauri_app_lib::inference::{
     update_provider_with_brain_path, GenerationProvider, InferenceState,
 };
 use tauri_app_lib::privacy::{self, PrivacyMode};
+use tauri_app_lib::retrieval::BrainPaths;
 use tempfile::TempDir;
 
 fn allow_external_generation(brain_path: &std::path::Path) {
@@ -55,8 +57,14 @@ fn update_provider_rolls_back_to_unconfigured_on_init_failure() {
         *state.0.lock().unwrap(),
         GenerationProvider::Unconfigured
     ));
+    let report = BrainConfig::load_lenient(&BrainPaths {
+        brain_dir: brain_path.to_path_buf(),
+        config_path: brain_path.join("config.json"),
+        db_path: brain_path.join("brain.db"),
+    })
+    .unwrap();
     assert_eq!(
-        read_config(brain_path).generation.provider,
+        report.config.generation.provider,
         GenerationProviderKind::Unconfigured
     );
 }
