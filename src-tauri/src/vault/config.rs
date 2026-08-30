@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::BrainConfig;
 use crate::embedder::EmbedProfile;
+use crate::retrieval::BrainPaths;
 use crate::vault::safe_path::IMMUTABLE_DIR;
 
 /// Migration errors for vault folder structure changes
@@ -81,30 +83,33 @@ impl VaultConfig {
             .join("config.json")
     }
 
-    fn read(&self) -> Result<ConfigFile> {
-        if !self.config_path.exists() {
-            return Ok(ConfigFile::default());
+    /// Build a BrainPaths that points at our own config_path, using the same
+    /// directory layout conventions as resolve_brain_paths().
+    fn brain_paths(&self) -> BrainPaths {
+        let brain_dir = self
+            .config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        BrainPaths {
+            brain_dir: brain_dir.clone(),
+            config_path: self.config_path.clone(),
+            db_path: brain_dir.join("brain.db"),
         }
-        let text = fs::read_to_string(&self.config_path)?;
-        Ok(ConfigFile::from_text(&text)?)
-    }
-
-    fn write(&self, cfg: &ConfigFile) -> Result<()> {
-        if let Some(parent) = self.config_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&self.config_path, serde_json::to_string_pretty(cfg)?)?;
-        Ok(())
     }
 
     pub fn get_vault_path(&self) -> Result<Option<String>> {
-        Ok(self.read()?.vault_path)
+        let paths = self.brain_paths();
+        let report = BrainConfig::load_lenient(&paths);
+        Ok(report.config.vault_path)
     }
 
     pub fn set_vault_path(&self, path: &str) -> Result<()> {
-        let mut cfg = self.read()?;
-        cfg.vault_path = Some(path.to_string());
-        self.write(&cfg)
+        let paths = self.brain_paths();
+        let mut config = BrainConfig::load(&paths)
+            .unwrap_or_else(|_| BrainConfig::default());
+        config.vault_path = Some(path.to_string());
+        config.write(&paths)
     }
 
     #[allow(dead_code)]
@@ -113,24 +118,32 @@ impl VaultConfig {
     }
 
     pub fn get_embed_profile(&self) -> Result<EmbedProfile> {
-        Ok(self.read()?.embed_profile.unwrap_or_default())
+        let paths = self.brain_paths();
+        let report = BrainConfig::load_lenient(&paths);
+        Ok(report.config.embed_profile.unwrap_or_default())
     }
 
     #[allow(dead_code)]
     pub fn set_embed_profile(&self, profile: EmbedProfile) -> Result<()> {
-        let mut cfg = self.read()?;
-        cfg.embed_profile = Some(profile);
-        self.write(&cfg)
+        let paths = self.brain_paths();
+        let mut config = BrainConfig::load(&paths)
+            .unwrap_or_else(|_| BrainConfig::default());
+        config.embed_profile = Some(profile);
+        config.write(&paths)
     }
 
     pub fn has_migrated_to_v2(&self) -> Result<bool> {
-        Ok(self.read()?.migrated_to_v2)
+        let paths = self.brain_paths();
+        let report = BrainConfig::load_lenient(&paths);
+        Ok(report.config.migrated_to_v2)
     }
 
     pub fn set_migrated_to_v2(&self) -> Result<()> {
-        let mut cfg = self.read()?;
-        cfg.migrated_to_v2 = true;
-        self.write(&cfg)
+        let paths = self.brain_paths();
+        let mut config = BrainConfig::load(&paths)
+            .unwrap_or_else(|_| BrainConfig::default());
+        config.migrated_to_v2 = true;
+        config.write(&paths)
     }
 }
 

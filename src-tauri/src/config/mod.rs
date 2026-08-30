@@ -35,6 +35,16 @@ pub struct BrainConfig {
     /// Preserved raw JSON for unknown keys inside privacy block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_privacy: Option<serde_json::Value>,
+    /// Raw generation block JSON used when typed deserialization fails.
+    /// When set, write() emits this verbatim instead of the typed generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_generation: Option<serde_json::Value>,
+    /// Raw embedding block JSON used when typed deserialization fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_embedding: Option<serde_json::Value>,
+    /// Raw privacy block JSON used when typed deserialization fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_privacy: Option<serde_json::Value>,
 }
 
 impl Default for BrainConfig {
@@ -50,6 +60,9 @@ impl Default for BrainConfig {
             preserved_generation: None,
             preserved_embedding: None,
             preserved_privacy: None,
+            raw_generation: None,
+            raw_embedding: None,
+            raw_privacy: None,
         }
     }
 }
@@ -84,6 +97,13 @@ impl BrainConfig {
             None => bail!("config.json root must be a JSON object"),
         };
 
+        // vault_path type errors are fatal — validate before attempting deserialize.
+        if let Some(vp) = obj.get("vault_path") {
+            if !vp.is_string() && !vp.is_null() {
+                bail!("vault_path must be a string");
+            }
+        }
+
         // Preserve unknown keys for round-trip
         let known_keys = [
             "vault_path",
@@ -103,6 +123,12 @@ impl BrainConfig {
         } else {
             Some(serde_json::Value::Object(unknown_keys))
         };
+
+        // Capture raw blocks up-front (before re-serializing), so we can restore
+        // them verbatim when serde silently defaults unknown enum variants.
+        let raw_gen = obj.get("generation").cloned();
+        let raw_emb = obj.get("embedding").cloned();
+        let raw_priv = obj.get("privacy").cloned();
 
         // Re-serialize the known fields for strict deserialization
         let known_value = serde_json::to_value(&obj)?;
@@ -155,9 +181,28 @@ impl BrainConfig {
                     };
                 }
 
+                // Even when serde does not error on unknown variants (it silently
+                // defaults them), preserve the original raw block so write() can
+                // restore it verbatim instead of the defaulted struct.
+                cfg.raw_generation = raw_gen;
+                cfg.raw_embedding = raw_emb;
+                cfg.raw_privacy = raw_priv;
+
                 Ok(cfg)
             }
-            Err(e) => bail!("Config deserialize error: {}", e),
+            Err(e) => {
+                // Strict load failed.  We pre-validated vault_path above, so any
+                // remaining error is from generation/embedding/privacy blocks
+                // (unknown enum variants or other schema mismatches).  Fall through
+                // to lenient loading to recover, and restore the original raw blocks
+                // verbatim so they survive the write cycle.
+                let mut report = BrainConfig::load_lenient(paths);
+                report.config.raw_generation = raw_gen;
+                report.config.raw_embedding = raw_emb;
+                report.config.raw_privacy = raw_priv;
+                report.config.preserved_keys = preserved_keys;
+                Ok(report.config)
+            }
         }
     }
 
@@ -380,42 +425,60 @@ impl BrainConfig {
 
         // Build modeled sections as Values, then merge preserved nested keys into them
         // before inserting into the root object.
+        //
+        // If a block failed to deserialize (captured in raw_*), use that verbatim
+        // so the unparseable block is preserved unchanged through the write cycle.
 
         // Generation section
-        let mut gen_value = serde_json::to_value(&self.generation)?;
-        if let Some(ref preserved) = self.preserved_generation {
-            if let Some(gen_obj) = gen_value.as_object_mut() {
-                if let Some(preserved_obj) = preserved.as_object() {
-                    for (k, v) in preserved_obj {
-                        gen_obj.insert(k.clone(), v.clone());
+        let gen_value = if let Some(ref raw) = self.raw_generation {
+            raw.clone()
+        } else {
+            let mut gen_value = serde_json::to_value(&self.generation)?;
+            if let Some(ref preserved) = self.preserved_generation {
+                if let Some(gen_obj) = gen_value.as_object_mut() {
+                    if let Some(preserved_obj) = preserved.as_object() {
+                        for (k, v) in preserved_obj {
+                            gen_obj.insert(k.clone(), v.clone());
+                        }
                     }
                 }
             }
-        }
+            gen_value
+        };
 
         // Embedding section
-        let mut emb_value = serde_json::to_value(&self.embedding)?;
-        if let Some(ref preserved) = self.preserved_embedding {
-            if let Some(emb_obj) = emb_value.as_object_mut() {
-                if let Some(preserved_obj) = preserved.as_object() {
-                    for (k, v) in preserved_obj {
-                        emb_obj.insert(k.clone(), v.clone());
+        let emb_value = if let Some(ref raw) = self.raw_embedding {
+            raw.clone()
+        } else {
+            let mut emb_value = serde_json::to_value(&self.embedding)?;
+            if let Some(ref preserved) = self.preserved_embedding {
+                if let Some(emb_obj) = emb_value.as_object_mut() {
+                    if let Some(preserved_obj) = preserved.as_object() {
+                        for (k, v) in preserved_obj {
+                            emb_obj.insert(k.clone(), v.clone());
+                        }
                     }
                 }
             }
-        }
+            emb_value
+        };
 
         // Privacy section
-        let mut priv_value = serde_json::to_value(&self.privacy)?;
-        if let Some(ref preserved) = self.preserved_privacy {
-            if let Some(priv_obj) = priv_value.as_object_mut() {
-                if let Some(preserved_obj) = preserved.as_object() {
-                    for (k, v) in preserved_obj {
-                        priv_obj.insert(k.clone(), v.clone());
+        let priv_value = if let Some(ref raw) = self.raw_privacy {
+            raw.clone()
+        } else {
+            let mut priv_value = serde_json::to_value(&self.privacy)?;
+            if let Some(ref preserved) = self.preserved_privacy {
+                if let Some(priv_obj) = priv_value.as_object_mut() {
+                    if let Some(preserved_obj) = preserved.as_object() {
+                        for (k, v) in preserved_obj {
+                            priv_obj.insert(k.clone(), v.clone());
+                        }
                     }
                 }
             }
-        }
+            priv_value
+        };
 
         // Insert modeled sections with preserved nested keys merged in.
         obj.insert("vault_path".to_string(), serde_json::to_value(&self.vault_path)?);
