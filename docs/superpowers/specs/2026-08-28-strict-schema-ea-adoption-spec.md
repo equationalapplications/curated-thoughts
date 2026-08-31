@@ -65,7 +65,7 @@ question:
 | `schema-org-llm-wiki` | `strict` | Package manifest is authoritative |
 | `schema-software-org` | `strict` | Package manifest is authoritative |
 | `emergent` | `emergent` | Engine may propose new types |
-| `off` | *(no manifest seeded)* | Facts stored untyped; no `okf_type`, no typed edges |
+| `off` | `off` | Facts stored untyped; no `okf_type`, no typed edges |
 
 Under `strict`, the package schema is the authoritative type system — Tessera
 never proposes ad-hoc types. Facts that don't fit any type get no `okf_type`
@@ -75,6 +75,9 @@ and no edges, rather than being forced into a wrong type.
 pipeline runs normally and produces facts, embeddings, and search — only the
 typed graph layer is inert. Retrieval and synthesis must not depend on
 `okf_type` being present.
+
+`'off'` is a real `OntologyMode` in the engine (and its default). CT passes
+`mode: 'off'` explicitly rather than omitting the manifest.
 
 ### D2: The manifest is seeded from TypeScript, not embedded in Rust
 
@@ -266,7 +269,10 @@ On change, CT must:
    connections will be rebuilt. Your notes, facts, and search are not
    affected.").
 2. Clear `okf_type` and manifest-derived edges for affected entities.
-3. Re-run the librarian to reclassify.
+3. Call `setOntologyManifest(entityId, manifest, { mode })` for each seeded
+   tier, then `runOntologyBackfill(entityId)` in a loop while
+   `result.remaining > 0`. Changing `seedManifests` alone is not sufficient —
+   seeds are written only when no row exists for that entity.
 
 Facts, embeddings, chunks, and documents are never touched. Switching **to**
 `off` clears typed data and does not reclassify; switching **from** `off`
@@ -285,9 +291,11 @@ is a plain first-time classification.
 - Add `@equationalapplications/schema-org-llm-wiki@6.2.0`.
 - Add `@equationalapplications/schema-software-org@6.2.0`.
 
-Both schema packages ship the manifest as a JS export
-(`schemaOrgLlmWikiManifest` / `schemaSoftwareOrgManifest`); no static
-`manifest.json` is required, because the seed happens in TypeScript (D2).
+Both schema packages ship the manifest as a JS export —
+`schemaOrgWarmAgentManifest` and `schemaSoftwareOrgManifest`. Both declare
+a hard dependency on `@equationalapplications/core-llm-wiki@6.2.0`, so the
+core and react packages are pinned to `6.2.0` exactly (not `>= 6.1.0`) to
+avoid installing a second engine copy.
 
 ### Ontology selection plumbing
 
@@ -449,7 +457,8 @@ deliberate `off` selection.
    `okf_type` and no typed edges are written.
 6. Ingest a design_spec file under `schema-software-org` → classified as
    `design_spec` with edges populated.
-7. Query `creativework` parent type → returns the expected child types.
+7. Query `creativework` parent type → returns design_specs, handoffs,
+   procedures, session_recaps, reference_docs.
 8. Ingest a test file via symlink → appears in DB. Assert `documents.path`
    stores the **vault-relative symlink path**, exactly preserving the
    prefix, and NOT the canonical target path. Assert the same for the
