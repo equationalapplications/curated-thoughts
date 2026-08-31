@@ -137,7 +137,16 @@ pub fn classify_link(
         return LinkVerdict::Denied(DenyReason::FilesystemRoot);
     }
     if let Some(h) = home {
-        if target == lexical_normalize(h) {
+        // `target` is canonicalized by the caller (symlinks resolved); `home`
+        // must be compared on the same footing or a symlinked $HOME (e.g.
+        // `/home/user` -> `/mnt/data/user`) fails to match here and falls
+        // through to whatever the resolved path's other rules produce,
+        // missing the "this literally is home" denial. Canonicalize `home`
+        // too, falling back to lexical normalization only when resolution
+        // fails (e.g. a dangling/unreadable path) — that fallback is no
+        // worse than the pre-fix behavior, not a regression.
+        let home_normalized = std::fs::canonicalize(h).unwrap_or_else(|_| lexical_normalize(h));
+        if target == home_normalized {
             return LinkVerdict::Denied(DenyReason::HomeDirectory);
         }
     }

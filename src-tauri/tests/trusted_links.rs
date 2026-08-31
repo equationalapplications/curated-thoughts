@@ -191,3 +191,43 @@ fn non_canonical_vault_root_must_be_canonicalized_before_classification() {
         "without canonicalization, the non-matching prefix leaves the link Pending"
     );
 }
+
+/// A symlinked `$HOME` must still be denied as `HomeDirectory`. `target` is
+/// canonicalized by the caller before `classify_link` runs; `home` must be
+/// compared on the same footing (canonicalized, symlinks resolved) or a
+/// symlinked home directory's *real* path — which is what an approved
+/// symlink's canonicalized target would resolve to — slips past the
+/// `home == target` check entirely (CodeRabbit review on PR #124).
+#[test]
+fn a_symlinked_home_directory_is_still_denied() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let real_home = tmp.path().join("real-home");
+    std::fs::create_dir_all(&real_home).unwrap();
+    let home_symlink = tmp.path().join("home-symlink");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_home, &home_symlink).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&real_home, &home_symlink).unwrap();
+
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+
+    // A target that canonicalizes to the REAL home path (as an approved
+    // symlink's target would, since callers canonicalize before calling
+    // classify_link) must be denied even though `home` is passed as the
+    // symlink path, not the resolved one.
+    let canonical_real_home = std::fs::canonicalize(&real_home).unwrap();
+    let verdict = classify_link(
+        "documents/whoops",
+        &canonical_real_home,
+        &vault,
+        Some(&home_symlink),
+        &[],
+    );
+    assert_eq!(
+        verdict,
+        LinkVerdict::Denied(DenyReason::HomeDirectory),
+        "a target resolving to the real (symlinked) home directory must be denied, got {:?}",
+        verdict
+    );
+}
