@@ -62,11 +62,13 @@ module header documents the duplication; the fix simply never crossed over.
 
 Mirror `fs_watcher.rs:131-140` exactly: `.truncate(false)`, carrying the same
 rationale comment. The lock file's contents are never read — the lock is held
-via `fs4::FileExt::lock_exclusive` on the open handle — so truncation was
-always unnecessary. The fix is narrow: it prevents truncation of a symlinked
-target. A planted symlink can still redirect the lock and cause contention or
-denial of service; no-follow / rejection behavior is a separate concern,
-explicitly out of scope here.
+via the **non-blocking** `fs4::FileExt::try_lock_exclusive` on the open handle
+(contention surfaces as `Err(AlreadyLocked)` / `Err(WouldBlock)`, not `Ok(false)`
+— see the API note in `lock.rs:63-73` and `fs_watcher.rs:106-113`). Truncation
+was therefore always unnecessary. The fix is narrow: it prevents truncation of a
+symlinked target. A planted symlink can still redirect the lock and cause
+contention or denial of service; no-follow / rejection behavior is a separate
+concern, explicitly out of scope here.
 
 ### Test
 
@@ -75,11 +77,24 @@ New test in `tools/src/lock.rs`'s `mod tests`, alongside
 
 `vault_lock_does_not_truncate_symlink_target` — create a temp vault, write a
 canary file with known contents, symlink `.curated_thoughts.lock` to the
-canary, call `VaultLock::acquire`, then assert the canary's contents are
-unchanged.
+canary, call `VaultLock::acquire`, drop the guard, then assert the canary's
+contents are unchanged.
 
 This exercises the real exploitation path against the real filesystem with no
 mocking. It fails on `truncate(true)` and passes after the fix.
+
+**Platform scope (Unix-only).** Symlink creation is gated to Unix
+(`#[cfg(unix)]` on the test module). On Windows, `std::os::windows::fs::symlink_file`
+requires Developer Mode or `SeCreateSymbolicLinkPrivilege`, and `LockFileEx`
+holds an exclusive lock on the handle that would defeat a follow-up
+`fs::read` (or any second handle to the locked range) with `ERROR_LOCK_VIOLATION`
+even on the same process. Dropping the `VaultLock` before reading the canary
+sidesteps the latter, but the former is a developer-environment property the
+test cannot rely on, so we skip on Windows rather than carry a flaky gate.
+The `tools` crate has no Windows CI surface today (`.github/workflows/ci.yml`
+runs `rust-ubuntu` and `rust-macos` against `src-tauri` only; `build.yml` builds
+but does not test), so the skip does not mask any CI signal — it only documents
+the platform restriction for future maintainers.
 
 ### Known follow-up
 
@@ -98,22 +113,38 @@ scoping keeps this change reviewable.
 println!("{} -> {}", entry.link, redact_home(&entry.target));
 ```
 
-The value is already sanitised: `redact_home` collapses a `$HOME` prefix to
-`~`, so a target like `~/.ssh` is never printed as an absolute path into CI
-logs or system journals.
+Two facts keep this safe from a cleartext-logging standpoint, neither of which
+the existing comment captures:
+
+1. **`entry.link` is vault-relative by construction.** `TrustedLink::link`
+   (`src-tauri/src/trusted_links.rs:14-21`) is documented as the
+   "Vault-relative path of the symlink itself, e.g. `documents/specs`". The
+   sole writer, `approve_into`, builds it from a `link_rel` string the caller
+   passes in — every call site (`cmds.rs`, `ct trust`) passes a vault-relative
+   path. So `entry.link` cannot contain `$HOME`, an absolute filesystem path,
+   or any other sensitive value: the type's docstring and the call sites
+   enforce that structurally. `BrainConfig::load` does not need to revalidate
+   it on read for this same reason.
+2. **`entry.target` is sanitised by `redact_home`.** `$HOME` prefixes collapse
+   to `~`, so a target like `~/.ssh` is never printed as an absolute path
+   into CI logs or system journals.
 
 CodeQL's `rust/cleartext-logging` query does not model `redact_home` as a
 sanitiser, so it flags the call anyway. The `// codeql[rust/cleartext-logging]`
 comment added above it is inert — inline suppression comments work for some
-CodeQL languages but **not** for Rust, so the alert has stayed open since #124
+CodeQL languages but **not** for Rust, so alert `#2` has stayed open since #124
 while appearing, to a reader, to be handled.
 
 ### Decision: false positive, dismissed upstream
 
 `ct trust --list` exists to show the user what they trusted. Printing the
 link without its target would remove most of the listing's value, so the
-`println!` stays as-is. The alert is a genuine false positive on a
-user-facing CLI listing of a user-authored, sanitised value.
+`println!` stays as-is. Alert `#2` is a genuine false positive on a
+user-facing CLI listing where both fields are constrained: `entry.link` is
+vault-relative by type-and-call-site contract (cannot contain `$HOME` or any
+absolute path); `entry.target` is sanitised by `redact_home` (collapses
+`$HOME` to `~`). Together those two invariants are the dismissal rationale
+recorded in the GitHub Security UI.
 
 ### Fix
 
@@ -122,12 +153,16 @@ records the sanitiser, the verdict, and a warning against re-adding the
 suppression:
 
 ```rust
-// `entry.target` is sanitised by `redact_home` above: the
-// `$HOME` prefix is collapsed to `~` before printing.
-// CodeQL rust/cleartext-logging flags this anyway (it does
-// not model the sanitiser); alert #2 dismissed as a false
-// positive. Inline `// codeql[...]` suppression does NOT
-// work for Rust — do not re-add it.
+// Both fields are constrained, so this is not a cleartext leak:
+//   * `entry.link` is vault-relative by type and call-site contract
+//     (TrustedLink::link doc, src-tauri/src/trusted_links.rs:14-21) —
+//     it cannot be `$HOME` or any absolute path.
+//   * `entry.target` is sanitised by `redact_home` above: the
+//     `$HOME` prefix is collapsed to `~` before printing.
+// CodeQL rust/cleartext-logging flags this anyway (it does not model
+// either constraint); alert #2 dismissed as a false positive citing
+// both. Inline `// codeql[...]` suppression does NOT work for Rust —
+// do not re-add it.
 println!("{} -> {}", entry.link, redact_home(&entry.target));
 ```
 
