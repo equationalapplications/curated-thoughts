@@ -1,7 +1,7 @@
 # Spec: UI/UX & Accessibility — WCAG 2.2 AA Foundation
 
 **Date:** 2026-08-31
-**Status:** Draft — not yet implemented
+**Status:** IMPLEMENTED — phase 1 (PR #127, 2026-08-31)
 **Type:** Cross-cutting frontend foundation + phased remediation. Phase 1 is the deliverable of the first implementation plan; phases 2–6 each get their own plan.
 **Related:** `2026-07-05-ux-vision-okf-native-design.md` (the north-star UX vision this makes accessible), `2026-08-22-phase-8-plan-c-command-palette-design.md` (⌘K palette — a focus-management surface), `2026-08-21-phase-8-plan-b-peek-panels-design.md` (peek panels — a focus-management surface)
 
