@@ -63,7 +63,10 @@ module header documents the duplication; the fix simply never crossed over.
 Mirror `fs_watcher.rs:131-140` exactly: `.truncate(false)`, carrying the same
 rationale comment. The lock file's contents are never read — the lock is held
 via `fs4::FileExt::lock_exclusive` on the open handle — so truncation was
-always unnecessary. This is a pure removal, not a tradeoff.
+always unnecessary. The fix is narrow: it prevents truncation of a symlinked
+target. A planted symlink can still redirect the lock and cause contention or
+denial of service; no-follow / rejection behavior is a separate concern,
+explicitly out of scope here.
 
 ### Test
 
@@ -102,8 +105,8 @@ logs or system journals.
 CodeQL's `rust/cleartext-logging` query does not model `redact_home` as a
 sanitiser, so it flags the call anyway. The `// codeql[rust/cleartext-logging]`
 comment added above it is inert — inline suppression comments work for some
-CodeQL languages but **not** for Rust, so the alert has stayed open since
-#124 while appearing, to a reader, to be handled.
+CodeQL languages but **not** for Rust, so the alert has stayed open since #124
+while appearing, to a reader, to be handled.
 
 ### Decision: false positive, dismissed upstream
 
