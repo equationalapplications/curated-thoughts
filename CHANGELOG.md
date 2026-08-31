@@ -1,3 +1,29 @@
+## [1.39.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.38.1...v1.39.0) (2026-08-31)
+
+### Features
+
+* **db:** add V13 watchdog tables and documents.quarantined_at ([c436488](https://github.com/equationalapplications/curated-thoughts/commit/c4364887ca5a39004bb4fdb6cb4da37e94f584be))
+* **pipeline:** publish stage heartbeat and honor the epoch guard ([6755871](https://github.com/equationalapplications/curated-thoughts/commit/67558710038a46b24fa77c32f5260be659782672))
+* **pipeline:** try_send producers and bounded shutdown join ([845c030](https://github.com/equationalapplications/curated-thoughts/commit/845c03042c95d9cfc7348744f41ee61fdbc0fc4f))
+* **status:** replace ingesting bool with an ingest health enum ([64cd492](https://github.com/equationalapplications/curated-thoughts/commit/64cd492fd155ebabf50984077bb09cfa0d7f3467))
+* **watchdog:** add Stage and non-blocking Heartbeat ([f7c5a93](https://github.com/equationalapplications/curated-thoughts/commit/f7c5a93fb25ddfac76dc082b7a6332ae861bec6c))
+* **watchdog:** add the missing pending-row drainer sweep ([d2e5e02](https://github.com/equationalapplications/curated-thoughts/commit/d2e5e026af317314720720cd996f6c6ce4b075f1))
+* **watchdog:** per-stage budgets derived from the active embed profile ([ffc0427](https://github.com/equationalapplications/curated-thoughts/commit/ffc0427ed1f5ab45c33f7299f4aff31627a9becf))
+* **watchdog:** persist trips to pipeline_stalls before recovery ([c6cf0c1](https://github.com/equationalapplications/curated-thoughts/commit/c6cf0c1d7f3122144630f68a47368e24b7ccf9a4))
+* **watchdog:** stage-stall and drain-stall detection ([2d19412](https://github.com/equationalapplications/curated-thoughts/commit/2d19412c5ec1cc74d7f2dbd4001b96d5d5d5058b))
+* **watchdog:** strike ledger, quarantine, and respawn cap ([a1c76b1](https://github.com/equationalapplications/curated-thoughts/commit/a1c76b1b2eba790dc686cf9277bb0f42ae3509c7))
+* **watchdog:** supervisor loop with recovery ladder and sweep ([f586ed1](https://github.com/equationalapplications/curated-thoughts/commit/f586ed1c926d38b2939be8a78223bc3bed8e32be))
+
+### Bug Fixes
+
+* **db:** harden add_column_if_missing helper ([ef754e0](https://github.com/equationalapplications/curated-thoughts/commit/ef754e0a492a6ff3f88329d792936e42154b5545))
+* **tests:** pass Heartbeat arg to PipelineWorker constructors ([2ce521b](https://github.com/equationalapplications/curated-thoughts/commit/2ce521ba3225eedd0942dbfec602ed91900c8842))
+* **watchdog:** address CodeRabbit review threads for atomicity, attribution, and sweep ([b91b7f1](https://github.com/equationalapplications/curated-thoughts/commit/b91b7f14bed8cd9000399b2c04add76aac13ade7))
+* **watchdog:** make worker replacement real; fix seqlock, sweep, and CI ([d21f71d](https://github.com/equationalapplications/curated-thoughts/commit/d21f71d4e6c7b485d22f1466f110786b8d213643)), closes [#130](https://github.com/equationalapplications/curated-thoughts/issues/130)
+* **watchdog:** order recovery per spec §4 and resolve endpoints for trips ([8f38980](https://github.com/equationalapplications/curated-thoughts/commit/8f3898012c45c69f4b6842a361693d5579874b13))
+* **watchdog:** pin over_cap rolling-hour invariant ([aaa91bf](https://github.com/equationalapplications/curated-thoughts/commit/aaa91bfffd29d18a2822912e9c546fbd2196081e))
+* **watchdog:** wire stage/subject through on_health; supervisor stop + replace; deferred reindex stage; epoch guards in linker; bounded stack capture; null metadata clear ([b06c60d](https://github.com/equationalapplications/curated-thoughts/commit/b06c60d7df96842e844b2c24be28e1fccc955ff0))
+
 ## [1.38.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.38.0...v1.38.1) (2026-08-31)
 
 ### Bug Fixes
