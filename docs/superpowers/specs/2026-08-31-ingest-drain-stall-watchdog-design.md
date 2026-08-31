@@ -1,15 +1,15 @@
 # Ingest Drain-Stall Watchdog — Design
 
 **Date:** 2026-08-31
-**Status:** Approved for planning
+**Status:** Approved for planning (revised after spec self-review)
 **Branch:** `spec/ingest-drain-stall-watchdog`
 **Priority:** P2
 
 ## 1. Problem
 
-On 2026-08-29 the ingest pipeline worker stopped consuming its queue and stayed
-wedged for 92+ minutes with the screen unlocked. Only an application restart
-recovered it, and the restart did not durably fix the condition.
+On 2026-08-29 the ingest pipeline stopped making progress and stayed stuck for
+92+ minutes with the screen unlocked. Only an application restart recovered it,
+and the restart did not durably fix the condition.
 
 ### 1.1 Evidence
 
@@ -19,227 +19,400 @@ operator's vault at `agents/operations/ct-drain-stall-evidence-inventory-2026-08
 on the incident host; it is not reachable from the development machine, so this
 spec restates the findings rather than citing the file.
 
-- The pipeline worker emitted **nothing** during the wedge — no panic, no DB
-  error, no stage trace. The log narrows the fault to "the worker thread stopped
-  consuming the queue" and can say nothing more.
-- The only output in the window came from the watcher thread, which kept
-  running: transient `[watch] enqueue_vault_event failed ... .hermes-tmp.*`
-  read errors.
+- The pipeline worker emitted **nothing** during the window — no panic, no DB
+  error, no stage trace. The log establishes only that ingest made no progress.
+- The only output came from the watcher thread, which kept running: transient
+  `[watch] enqueue_vault_event failed ... .hermes-tmp.*` read errors.
 - `errors.log` in the vault did not cover the incident (stale, mtime 2026-08-25);
   its 221 backlog entries date from an earlier misconfiguration.
-- **No stack sample was ever captured** while the process was wedged. This is the
-  single artifact that would have identified the wedged call.
-- Three app instances ran across the window. The ingest worker was silent in all
-  three. The outbox worker partially revived after each restart (12 → 4 rows).
-  The pending counter was frozen at 83. The session was unlocked throughout.
+- **No stack sample was captured** while the process was stuck.
+- Three app instances ran across the window. Ingest was silent in all three. The
+  outbox worker partially revived after each restart (12 → 4 rows). The pending
+  count was frozen at 83. The session was unlocked throughout.
 
-Because a full process restart did not durably fix the condition, the fault
-outlives the worker thread. The plausible classes are a poison document in the
-83 pending rows that re-wedges each fresh worker, or an unhealthy dependency
-(embedding or generation endpoint black-holing, or a lock held by another
-connection). The evidence cannot separate them, so the design must handle both.
+### 1.2 What the code actually does
 
-### 1.2 Why the current code cannot recover
+Traced through `src-tauri/src/pipeline/mod.rs`, `src-tauri/src/lib.rs`,
+`src-tauri/src/db/queue.rs`, and the `tools` crate. **The pending count and the
+pipeline worker are on two disconnected paths**, which reframes the incident:
 
-Read from `src-tauri/src/pipeline/mod.rs` and `src-tauri/src/lib.rs`:
+- The "83 pending" is `SELECT COUNT(*) FROM documents WHERE status = 'pending'`
+  (`db/queries.rs:130-136`) — a database row count, not the worker's
+  `AtomicUsize`.
+- The file watcher and the startup reconcile pass stage work by writing
+  `documents` rows with `status = 'pending'` via `enqueue_vault_event`
+  (`lib.rs:1097`, `:947`, `:977`). They never send a `PipelineJob`. They only
+  set `flags.ingesting = true` optimistically (`lib.rs:975`, `:1077`).
+- Both `PipelineJob` producers (`lib.rs:1502` in `queue_full_reindex`, `:1711`
+  in `run_wiki_reembed`) source their paths from `list_indexed_user_doc_paths`,
+  which filters `WHERE tier = 'user_doc' AND status = 'indexed'`
+  (`db/queries.rs:38-40`) — excluding pending rows by construction.
+- The headless CLI does not close the gap either: `ct ingest`
+  (`tools/src/cmds.rs:98`) walks the vault from disk rather than reading the
+  pending rows, and no query in `tools` selects `documents` by
+  `status = 'pending'`.
+
+**No component anywhere consumes `documents.status = 'pending'`.** Rows written
+by the watcher are cleared only if some other path happens to re-ingest that
+same file.
+
+This is a structural gap, not a stall: a worker whose channel is empty is
+correctly parked in `recv()`, so 83 pending rows beside a silent worker is the
+expected steady state of the current design. It also explains "restart did not
+durably fix" more directly than a poison document does — nothing about a restart
+creates a consumer. A stack sample, had one been taken, would most likely have
+shown a worker idle in `recv()`.
+
+### 1.3 Why the worker still cannot be supervised
+
+Independently of §1.2, the worker has no failure detection or recovery:
 
 - `PipelineWorker` is a single OS thread in a blocking `rx.recv()` loop
-  (`pipeline/mod.rs:170`). There is no heartbeat and no per-job deadline.
-- `catch_unwind` (`pipeline/mod.rs:191`) covers panics but nothing covers hangs.
+  (`pipeline/mod.rs:170`), with no heartbeat and no per-job deadline.
+- `catch_unwind` (`pipeline/mod.rs:191`) covers panics; nothing covers hangs.
 - The channel is `mpsc::sync_channel(256)` (`pipeline/mod.rs:678`) with blocking
-  `send`. Once it fills, every producer blocks forever — including
-  `queue_full_reindex` (`lib.rs:1502`), which runs on a Tauri IPC thread. A
-  wedged worker therefore wedges the frontend bridge.
-- Shutdown is `drop(tx); join()` (`lib.rs:1253`) with an unbounded join, so
-  `switch_vault` inherits the wedge instead of recovering from it.
-- The only status signal is `flags.ingesting = count > 0` (`lib.rs:862`), derived
-  from an in-memory counter. A worker that wedges mid-job leaves it above zero
-  permanently — the observed frozen 83.
-- Every network stage already has a ceiling (embed 120s at
-  `embedder/mod.rs:86`, Ollama 600s at `embedder/ollama.rs:21`, generation
-  `timeout_secs` default 600 at `librarian/synthesis.rs:138`). A 92-minute stall
-  therefore cannot be one HTTP call.
+  `send`. Once full, `queue_full_reindex` (`lib.rs:1502`) blocks on a Tauri IPC
+  thread and freezes the frontend bridge.
+- Shutdown is `drop(tx); join()` (`lib.rs:1253`), unbounded, so `switch_vault`
+  inherits a wedge instead of recovering from it.
+- Every network stage has a ceiling (embed 120s at `embedder/mod.rs:86`, Ollama
+  600s at `embedder/ollama.rs:21`, generation `timeout_secs` default 600 at
+  `librarian/synthesis.rs:138`), so a 92-minute stall cannot be one HTTP call.
 
-### 1.3 Non-goals
+### 1.4 Two failure classes
 
-- Identifying the specific 2026-08-29 root cause. The design is generic
-  detection plus recovery; §3 makes the *next* occurrence diagnosable.
-- Moving ingest out of process (see §7).
-- Rewriting the pipeline on an async runtime (see §7).
+The design must cover both, because §1.2 establishes the first and §1.3 leaves
+the second undetectable:
 
-## 2. Detection — heartbeat and per-stage budgets
+1. **Silent non-consumption** — work is queued but nothing drains it. This is
+   what the evidence supports. Detected by queue-depth liveness (§2.3), fixed by
+   the drainer (§5).
+2. **Worker stall** — a job is picked up and never completes. Not established by
+   the evidence, but currently invisible and unrecoverable. Detected by the stage
+   heartbeat (§2.1–2.2), recovered by the ladder (§4).
 
-The worker publishes progress to an `Arc<Heartbeat>` of atomics, updated at every
-stage transition. Lock-free, so a stalled reader can never block the worker and
-the worker's own cost is negligible.
+### 1.5 Non-goals
+
+- Identifying a specific wedged call from the 2026-08-29 logs. §3 makes the next
+  occurrence diagnosable instead.
+- Moving ingest out of process (see §8).
+- Rewriting the pipeline on an async runtime (see §8).
+- Reworking `ct ingest`'s disk-walk model. §5 adds a consumer for pending rows;
+  it does not unify the two ingest entrypoints.
+
+## 2. Detection
+
+### 2.1 Stage heartbeat
+
+The worker publishes progress to a shared `Heartbeat`, updated at every stage
+transition.
 
 ```rust
 pub struct Heartbeat {
-    seq: AtomicU64,          // bumped on every transition
-    stage: AtomicU8,         // Stage discriminant
+    epoch: AtomicU64,            // worker generation; see §4
+    seq: AtomicU64,              // bumped on every transition
+    stage: AtomicU8,             // Stage discriminant
     stage_started_ms: AtomicI64,
-    current_path: Mutex<Option<String>>, // written only on transition
+    subject: Mutex<Option<String>>, // path, or entity id while Linking
 }
 ```
 
 `Stage` is: `Idle`, `Reading`, `Extracting`, `Chunking`, `Embedding`,
-`Summarizing`, `Linking`, `Committing`.
+`Summarizing`, `Linking`, `Committing`, `Deleting`.
 
-Each stage carries its own budget rather than one global timeout, because the
-stages have wildly different legitimate durations and because the stage
-identity is the diagnostic:
+`Deleting` covers `PipelineJob::Delete`, which removes the converted shadow
+file, calls `delete_document`, and runs an unindexed
+`UPDATE wiki_pages ... WHERE source_doc_ids LIKE '%path%'`
+(`pipeline/mod.rs:229-256`). That scan is a plausible stall site under lock
+contention and must not be an unmodeled hole in the stage map.
+
+**The supervisor MUST NOT block on `subject`.** It reads with `try_lock` and
+degrades to `"unknown"` on contention. A wedged worker can be stalled while
+holding that mutex, and a supervisor that waits on it would deadlock against
+precisely the condition it exists to detect. Only the atomics are load-bearing
+for trip decisions; `subject` is diagnostic detail. (An `ArcSwap` slot is an
+acceptable alternative implementation; a blocking `lock()` in the supervisor is
+not.)
+
+### 2.2 Stage budgets
+
+Each stage carries its own budget, because the stages have very different
+legitimate durations and because the stage identity is itself the diagnostic.
 
 | Stage | Budget | Rationale |
 |---|---|---|
-| `Idle` | never trips | Blocked on `recv()` with an empty queue is correct behavior |
+| `Idle` | never trips | Blocked on `recv()` with an empty channel is correct |
 | `Reading` | 60s | Local file I/O |
 | `Extracting` | 300s | `pdf_extract` / docx have no internal ceiling |
 | `Chunking` | 120s | CPU-bound, bounded by file size |
-| `Embedding` | configured embed timeout + 60s | Slack above the HTTP ceiling |
-| `Summarizing` | `generation.timeout_secs` + 60s | Slack above the HTTP ceiling |
-| `Linking` | 60s | SQLite; a longer wait implies lock contention |
+| `Embedding` | active profile's HTTP timeout + 60s | See below |
+| `Summarizing` | `generation.timeout_secs` + 60s | Config-driven (`synthesis.rs:259`) |
+| `Linking` | 60s per entity | Per entity, not per flush batch |
 | `Committing` | 60s | SQLite writes |
+| `Deleting` | 120s | Unindexed `LIKE` scan over `wiki_pages` |
 
-A supervisor thread ticks every 5s and trips when `now - stage_started_ms`
-exceeds the current stage's budget. Exempting `Idle` is what makes an empty
-queue distinguishable from a wedged worker — the distinction the incident logs
-could not draw, and the reason `ingest_runs` (per-document) is insufficient.
+The embed budget must be derived from the **active** embed profile. The two
+timeouts are hardcoded literals today — `Duration::from_secs(120)`
+(`embedder/mod.rs:86`) for the external profile and `600`
+(`embedder/ollama.rs:21`) for Ollama — and neither is configurable. Computing
+one budget from the 120s literal would false-trip every Ollama embed at roughly
+three minutes. The implementation therefore lifts both literals into named
+constants that the watchdog reads per profile; making them configurable is
+optional and out of scope.
 
-The heartbeat is additionally mirrored to a single-row `pipeline_heartbeat`
-table at most every 5s, so the state survives to post-mortem and is readable by
-external tooling and the headless CLI.
+`Linking` is budgeted per entity because `flush_pending_linkers` runs *between*
+jobs — after the pending decrement, and again after the loop exits
+(`pipeline/mod.rs:280-296`, and again at `:328-340`) — iterating `run_linker`
+over a batch of entity ids whose size is unbounded. The worker enters `Linking`
+once per entity and writes that entity id to `subject`, so a batch of 50
+entities is 50 budgeted spans, not one. During `Linking` the heartbeat subject
+is an entity id, not a path.
 
-### 2.1 Database location
+A supervisor thread ticks every 5s and trips when
+`now - stage_started_ms` exceeds the current stage's budget.
+
+### 2.3 Queue-depth liveness
+
+The stage heartbeat cannot detect §1.4 class 1: a worker that consumes nothing
+is legitimately `Idle`, and `Idle` never trips. A second, independent check
+covers it.
+
+The supervisor trips a **drain-stall** when, for a continuous 15 minutes:
+
+- `count_pending_documents(conn) > 0`, and
+- no document has transitioned to `indexed` or `error`, and
+- the heartbeat stage has been `Idle` throughout.
+
+This is the check that would have fired on 2026-08-29. It is deliberately
+independent of the worker's internal state: it observes the queue from the
+outside and asks whether the system as a whole is making progress. Its recovery
+is §5's drainer sweep, not a worker respawn — respawning a healthy idle worker
+accomplishes nothing.
+
+The 15-minute window must exceed the longest legitimate single-document time
+(`Extracting` 300s + `Embedding` up to 660s ≈ 16 minutes for a worst-case Ollama
+PDF). Because the third condition requires `Idle` throughout, a long-running
+document cannot trip it regardless of duration; the window only needs to
+tolerate scheduling jitter.
+
+### 2.4 Database location
 
 All watchdog tables live in the brain database resolved by
 `retrieval::resolve_brain_paths().db_path` — the same connection the worker
-already opens. Implementations MUST NOT join `.brain` onto the vault root:
-there are three decoy `.brain` directories under the operator's vault, and
+already opens. Implementations MUST NOT join `.brain` onto the vault root: there
+are three decoy `.brain` directories under the operator's vault, and
 `lib.rs:1201-1204` records a prior bug where a hardcoded `~/.brain/brain.db`
 diverged from the resolver and operated on the wrong database.
 
+The heartbeat is mirrored to a single-row `pipeline_heartbeat` table at most
+every 5s so the state survives to post-mortem and is readable by external
+tooling and the headless CLI.
+
 ## 3. Diagnostics before recovery
 
-Recovery destroys the evidence, so capture strictly precedes it. On trip, before
-any escalation step:
+Recovery destroys evidence, so capture strictly precedes it. On any trip, before
+any recovery step:
 
-1. Insert a `pipeline_stalls` row: stage, current path, `stalled_ms`, heartbeat
-   `seq`, the resolved embed and generation endpoints, and the escalation action
-   about to be taken.
-2. Emit one structured stderr line (`[watchdog] stall stage=... path=... ms=...`)
-   so journald captures it in the same stream the incident was reconstructed
-   from.
-3. Capture thread stacks of the running process into the journal.
+1. Insert a `pipeline_stalls` row: trip kind (`stage_stall` or `drain_stall`),
+   stage, subject, `stalled_ms`, heartbeat `seq` and `epoch`, pending count, the
+   resolved embed and generation endpoints, and the recovery action about to be
+   taken.
+2. Emit one structured stderr line
+   (`[watchdog] <kind> stage=... subject=... ms=... pending=...`) so journald
+   captures it in the stream the incident was reconstructed from.
+3. For `stage_stall` only, capture thread stacks of the running process into the
+   journal.
 
 Stack capture is best-effort and platform-dependent; failure to capture MUST NOT
-block escalation. It is the artifact whose absence blocked the 2026-08-29
-diagnosis, so it is a first-class requirement rather than a debug aid.
+block recovery. It is the artifact whose absence limited the 2026-08-29 triage,
+so it is a first-class requirement rather than a debug aid.
 
-## 4. Recovery ladder
+## 4. Worker-stall recovery
 
-Escalation is ordered; each step runs only if the previous did not clear the
-stall.
+Applies to a `stage_stall` trip (§1.4 class 2). Steps 1–3 run in sequence within
+a single trip; steps 4 and 5 are thresholds evaluated during that sequence, not
+later escalations.
 
-1. **Trip.** Run §3 diagnostics.
-2. **Probe the dependency** used by the stalled stage — the embedding endpoint
-   for `Embedding`, the generation endpoint for `Summarizing`. Stages with no
-   network dependency (`Reading`, `Extracting`, `Chunking`, `Linking`,
-   `Committing`) skip the probe and are treated as healthy. If the probe passes,
-   record a strike against the current document (`stall_strikes` keyed by path);
-   if it fails, the document is not at fault and no strike is recorded. The
-   probe therefore runs *before* the strike, so a dead endpoint never
-   accumulates strikes against innocent documents.
-3. **Respawn.** Abandon the wedged thread (Rust cannot kill a thread; the
-   thread is detached and leaks, holding its `rusqlite` connection until process
-   exit). Rebuild the channel, spawn a fresh worker, requeue undrained jobs, and
-   **reconcile the pending counter from the database** rather than trusting the
-   in-memory `AtomicUsize`. The reconcile is what clears a frozen counter like
-   the observed 83.
-4. **Quarantine.** A document that accumulates 2 strikes is marked
-   `quarantined`, skipped when jobs are requeued, and surfaced in the UI. This
-   guarantees forward progress when a single poison file is the trigger —
-   directly addressing the observation that restarting did not durably fix the
-   condition.
-5. **Degrade.** Respawns are capped at 3 per rolling hour. Past the cap the
-   pipeline parks in a `degraded` state, stops respawning, and shows a
-   persistent banner. The cap prevents a respawn loop against an unhealthy
-   dependency and bounds the number of leaked threads to a small constant.
+1. **Diagnose.** Run §3.
+2. **Probe, then attribute.** Probe the dependency the stalled stage uses — the
+   embedding endpoint for `Embedding`, the generation endpoint for
+   `Summarizing`. Stages with no network dependency (`Reading`, `Extracting`,
+   `Chunking`, `Linking`, `Committing`, `Deleting`) skip the probe and are
+   treated as healthy. If the probe passes, record a strike against the current
+   subject (`stall_strikes` keyed by path); if it fails, the document is not at
+   fault and no strike is recorded. Probing before attributing keeps a dead
+   endpoint from accumulating strikes against innocent documents.
+3. **Respawn.** Bump the shared epoch, abandon the wedged thread, rebuild the
+   channel, and spawn a fresh worker at the new epoch. Requeue undrained jobs via
+   §5's sweep.
+4. **Quarantine threshold.** A document reaching 2 strikes is marked
+   `quarantined`, skipped by the sweep, and surfaced in the UI, guaranteeing
+   forward progress when one poison file is the trigger.
+5. **Degrade threshold.** Respawns are capped at 3 per rolling hour. Past the cap
+   the pipeline parks in `degraded`, stops respawning, and shows a persistent
+   banner. The cap prevents a respawn loop against an unhealthy dependency and
+   bounds leaked threads to a small constant.
 
-## 5. Unblocking producers
+### 4.1 Epoch guard for abandoned workers
 
-Independent of the watchdog, the blocking channel is what converts a worker
-stall into a whole-application freeze, and it must be fixed in the same change —
-otherwise the watchdog can detect a stall while callers remain frozen and
-`switch_vault` still cannot recover.
+Rust cannot kill a thread, so an abandoned worker is detached and leaks, holding
+its `rusqlite` connection until process exit. It may also **wake up later** — a
+stalled socket eventually returns — and it still holds `pending:
+Arc<AtomicUsize>`, `status_tx`, and the old `rx`. Left unguarded it would resume
+draining jobs against the same database as its replacement. Because `ingest_file`
+clears a document's chunks and then re-inserts
+(`pipeline/mod.rs:617-622`), a woken zombie calling `insert_chunk` /
+`insert_embedding` for a document the new worker has already re-ingested produces
+duplicate or orphaned chunks.
+
+Every worker therefore captures its epoch at spawn and compares it against the
+shared epoch at each stage transition. On mismatch the worker returns
+immediately without touching the database, the pending counter, or `status_tx`.
+The check costs one relaxed atomic load per transition.
+
+## 5. Pending-row drainer
+
+§1.2 establishes that nothing consumes `documents.status = 'pending'`. This spec
+adds that consumer, because §4.3's requeue step cannot exist without a
+pending-row-to-job path.
+
+A **sweep** selects `documents` rows where `status = 'pending'` and the path is
+not quarantined, ordered by rowid, and enqueues a `PipelineJob::ingest_counted`
+for each. It runs:
+
+- at pipeline startup, so rows staged while the app was closed are picked up;
+- after a worker respawn (§4.3), to requeue work the abandoned worker held;
+- on a `drain_stall` trip (§2.3), which is its recovery action;
+- on a periodic timer (60s), which is what makes the watcher's staged rows flow
+  in normal operation.
+
+The sweep is bounded per invocation by the channel's remaining capacity and uses
+`try_send` (§6), so it never blocks; leftover rows stay `pending` and are picked
+up on the next pass. Enqueuing is idempotent: re-ingesting a document that is
+already correct is a no-op via the hash check at `pipeline/mod.rs:616-620`, and a
+partially-ingested document is cleaned by `delete_document_chunks` before
+re-chunking, so a requeue after an abandoned mid-ingest is safe.
+
+The sweep does not change how `ct ingest` or `queue_full_reindex` select their
+work; it adds the missing path only.
+
+## 6. Producer backpressure
+
+The blocking `send` cannot freeze the watcher — the watcher writes to the
+database and never touches the channel (§1.2) — so this is hardening rather than
+incident causation. It still matters: `queue_full_reindex` blocks a Tauri IPC
+thread when the channel fills, and shutdown's unbounded join blocks
+`switch_vault`.
 
 - Producers move from `send` to `try_send`, returning a typed `QueueFull` error
   instead of blocking.
 - `queue_full_reindex` reports "queued N of M" rather than freezing its IPC
-  thread.
-- Shutdown's unbounded `join()` becomes a bounded wait. On timeout the worker is
-  detached and shutdown proceeds, so `switch_vault` recovers rather than
-  inheriting the wedge.
+  thread. The unqueued remainder stays `pending` and is picked up by §5's sweep,
+  so `QueueFull` defers work rather than dropping it.
+- Shutdown's unbounded `join()` becomes a bounded wait. On timeout the epoch is
+  bumped, the worker detached, and shutdown proceeds, so `switch_vault` recovers
+  rather than inheriting the wedge.
 
-## 6. Status surface
+## 7. Status surface
 
 `WikiStatusFlags.ingesting: bool` is replaced by a status enum:
 
 | Value | Meaning |
 |---|---|
-| `idle` | Queue empty, worker healthy |
-| `working` | Actively processing; carries stage and path |
+| `idle` | No pending rows, worker healthy |
+| `working` | Actively processing; carries stage and subject |
 | `stalled` | Watchdog tripped; recovery in progress |
 | `degraded` | Respawn cap exhausted; ingest parked, manual action needed |
 
-`stalled` and `degraded` carry the stalled stage and path so the frontend can
-render an actionable banner instead of a spinner that never resolves. Quarantined
-documents are listable so the user can inspect and re-enqueue them.
+`stalled` and `degraded` carry the trip kind, stage, and subject so the frontend
+renders an actionable banner instead of a spinner that never resolves.
+Quarantined documents are listable so the user can inspect and re-enqueue them.
 
-This is a breaking change to the status payload. Affected call sites, all
-updated in the same change:
+`idle` is derived from the pending count, not from the worker's stage. Under the
+current code an idle worker beside 83 pending rows renders as idle-and-fine,
+which is exactly how the incident stayed invisible.
+
+This is a breaking change to the status payload. Affected call sites, all updated
+in the same change:
 
 - `WikiStatusFlags` (`lib.rs:111`) — currently `#[derive(Clone, Copy)]`. Carrying
-  a stage and path means it can no longer be `Copy`; the derive is narrowed to
-  `Clone` and the write sites adjusted accordingly.
-- Backend writers: `lib.rs:864` (the status-event forwarder), `lib.rs:975`,
-  `lib.rs:1077`, and the JSON serialization at `lib.rs:124`.
+  a stage and subject means it can no longer be `Copy`; the derive narrows to
+  `Clone` and the write sites adjust accordingly.
+- Backend writers: `lib.rs:864` (status-event forwarder), `lib.rs:975`,
+  `lib.rs:1077`, and the JSON serialization at `lib.rs:124`. The two optimistic
+  `flags.ingesting = true` writes in the watcher and reconcile paths become
+  pending-count-derived rather than unconditional.
 - Frontend consumers: `src/components/shell/StatusBar.tsx:27`, `:33`, `:72`, and
   `src/__tests__/useWikiStatus.test.ts`.
 
-## 7. Approaches considered
+## 8. Approaches considered
 
 **Out-of-process ingest sidecar.** True isolation, recovery by `kill -9`, no
-leaked threads. Rejected for now: it requires IPC, bundling, and signing changes
-disproportionate to a single incident. This is the escalation path if leaked
-threads become a real cost.
+leaked threads and no epoch guard needed. Rejected for now: it requires IPC,
+bundling, and signing changes disproportionate to this work. It is the escalation
+path if leaked threads become a real cost.
 
-**Tokio rewrite with per-job `timeout`.** Clean cancellation for the HTTP
-stages, but `rusqlite` and `pdf_extract` are blocking FFI and CPU work that
+**Tokio rewrite with per-job `timeout`.** Clean cancellation for the HTTP stages,
+but `rusqlite` and `pdf_extract` are blocking FFI and CPU work that
 `tokio::time::timeout` cannot interrupt — the future would cancel while the
 blocking thread stayed wedged. A large rewrite for partial coverage.
 
 **In-process supervisor (chosen).** Cheap, testable, no packaging change. Its
-one real cost is that a wedged thread can only be abandoned, not killed; the
-respawn cap in §4.5 bounds that cost.
+real costs are that a wedged thread can only be abandoned (bounded by §4.5) and
+that abandonment needs the epoch guard of §4.1.
 
-## 8. Testing
+## 9. Testing
 
-- A fake worker that sleeps past its stage budget trips the watchdog.
-- A worker parked in `Idle` never trips, regardless of elapsed time.
-- Trip ordering: a `pipeline_stalls` row exists before the respawn occurs.
-- Two strikes on the same path mark it `quarantined`; a quarantined path is
-  skipped on requeue.
-- A failing dependency probe suppresses the strike.
-- Exceeding the respawn cap parks the pipeline in `degraded` and halts further
-  respawns.
-- `try_send` on a full channel returns `QueueFull` rather than blocking.
+Queue-depth liveness (§2.3):
+
+- Pending rows > 0, worker `Idle`, no completions for the window → `drain_stall`.
+- Pending rows > 0 with completions still occurring → no trip.
+- Pending rows = 0 and worker `Idle` → no trip.
+- A single document held in `Embedding` past the window → no trip, because the
+  stage is not `Idle`.
+
+Stage heartbeat and recovery (§2.1–2.2, §4):
+
+- A fake worker sleeping past its stage budget trips; one parked in `Idle` never
+  trips regardless of elapsed time.
+- The embed budget is derived from the active profile: an Ollama-profile worker
+  is not tripped at the external profile's 120s.
+- A `Deleting` job past its budget trips.
+- `Linking` is budgeted per entity: a batch of N entities each under budget does
+  not trip.
+- The supervisor's `subject` read does not block when the worker holds the mutex
+  (`try_lock` degrades to `"unknown"`).
+- A `pipeline_stalls` row exists before the respawn occurs.
+- A failing dependency probe suppresses the strike; a passing probe records it.
+- Two strikes on a path mark it `quarantined`; the sweep skips a quarantined
+  path.
+- Exceeding the respawn cap parks the pipeline in `degraded` and halts respawns.
+
+Epoch guard (§4.1):
+
+- A worker whose epoch is stale exits at its next stage transition without
+  writing chunks, decrementing the pending counter, or sending a status event.
+- A stale worker unblocking mid-`Embedding` after its document was re-ingested
+  by the replacement leaves no duplicate chunks.
+
+Drainer and backpressure (§5, §6):
+
+- The sweep enqueues pending rows and skips quarantined ones.
+- The sweep respects channel capacity; leftover rows remain `pending` and are
+  enqueued on the next pass.
+- Sweeping a document whose content is unchanged is a no-op.
+- Sweeping a partially-ingested document produces no duplicate chunks.
+- `try_send` on a full channel returns `QueueFull` rather than blocking, and
+  `queue_full_reindex` reports a partial count.
 - Bounded shutdown returns within its timeout when the worker is wedged.
-- Pending-counter reconcile derives from the database, not the in-memory
-  counter.
 
-## 9. Open items
+## 10. Open items
 
 - The stack-capture mechanism is platform-specific. The incident host is Linux;
-  the primary development machine is macOS. The implementation plan must choose
-  a mechanism per platform and define the no-op fallback where none is
-  available.
+  the primary development machine is macOS. The implementation plan must choose a
+  mechanism per platform and define the no-op fallback where none is available.
+- **Field confirmation of §1.2.** On the incident host, with the app healthy,
+  check whether `documents` still holds pending rows that never drain. A
+  non-zero, non-decreasing count while ingest otherwise works confirms the
+  missing-consumer diagnosis over the worker-stall hypothesis. The design covers
+  both classes either way, so this does not block implementation.
