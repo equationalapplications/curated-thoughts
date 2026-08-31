@@ -97,9 +97,9 @@ export function StepOllama({ onNext }: Props) {
             />
             <p className="ollama-hint">
               Recommended for your Mac. Browse more at{" "}
-              <span className="link" onClick={() => open("https://ollama.com/library")}>
+              <a className="link" href="https://ollama.com/library" target="_blank" rel="noreferrer">
                 ollama.com/library
-              </span>.
+              </a>.
             </p>
           </div>
           <button onClick={() => pull(model)} disabled={!model}>

@@ -23,6 +23,7 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:a11y": "vitest run src/__tests__/axe-core.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },
@@ -47,6 +48,7 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "axe-core": "4.13.0",
     "@semantic-release/changelog": "7.0.0",
     "@semantic-release/commit-analyzer": "13.0.1",
     "@semantic-release/exec": "7.1.0",
@@ -63,6 +65,7 @@
     "@vitejs/plugin-react": "6.0.5",
     "conventional-changelog-conventionalcommits": "9.3.1",
     "eslint": "9.39.4",
+    "eslint-plugin-jsx-a11y": "6.10.2",
     "eslint-plugin-react": "7.37.5",
     "jsdom": "30.0.1",
     "semantic-release": "25.0.9",

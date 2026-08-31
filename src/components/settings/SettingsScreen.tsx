@@ -74,7 +74,7 @@ export function SettingsScreen({ vaultPath, initialTab, onRerunWizard }: Props) 
 
   return (
     <div className="settings-screen">
-      <nav className="settings-nav" role="tablist" aria-label="Settings sections">
+      <div className="settings-nav" role="tablist" aria-label="Settings sections">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -88,7 +88,7 @@ export function SettingsScreen({ vaultPath, initialTab, onRerunWizard }: Props) 
             {t.label}
           </button>
         ))}
-      </nav>
+      </div>
       <div className="settings-content" role="tabpanel">
         {tab === "vault" && <VaultPanel vaultPath={vaultPath} onRerunWizard={onRerunWizard} />}
         {tab === "privacy" && <PrivacyPanel />}

@@ -40,6 +40,7 @@ export function EntityWikilinkSuggestion({
             type="button"
             className="entity-wikilink-suggestion-item"
             role="option"
+            aria-selected={false}
             onClick={() => onSelect(entity)}
           >
             <span className="entity-wikilink-suggestion-name">{entity.name}</span>

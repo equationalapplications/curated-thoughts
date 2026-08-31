@@ -1,6 +1,7 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import react from "eslint-plugin-react";
+import jsxA11y from "eslint-plugin-jsx-a11y";
 
 export default [
   {
@@ -27,6 +28,14 @@ export default [
       "react/react-in-jsx-scope": "off",
       "react/prop-types": "off",
       "no-empty": ["error", { allowEmptyCatch: true }],
+    },
+  },
+  {
+    files: ["**/*.{js,jsx,ts,tsx}"],
+    plugins: { "jsx-a11y": jsxA11y },
+    rules: {
+      ...jsxA11y.configs.recommended.rules,
+      "jsx-a11y/aria-role": ["error", { ignoreNonDOM: true }],
     },
   },
   {

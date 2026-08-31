@@ -173,16 +173,18 @@ export function CommandPalette({ scope, onClose }: Props) {
             <li className="palette-empty">No matching commands.</li>
           )}
           {visible.map((cmd, i) => (
-            <li
-              key={cmd.id}
-              id={`palette-option-${i}`}
-              role="option"
-              aria-selected={i === index}
-              className={`palette-option${i === index ? " palette-option--active" : ""}`}
-              onMouseEnter={() => setActiveIndex(i)}
-              onClick={() => dispatch(cmd)}
-            >
-              {cmd.label}
+            <li key={cmd.id}>
+              <button
+                type="button"
+                id={`palette-option-${i}`}
+                role="option"
+                aria-selected={i === index}
+                className={`palette-option${i === index ? " palette-option--active" : ""}`}
+                onMouseEnter={() => setActiveIndex(i)}
+                onClick={() => dispatch(cmd)}
+              >
+                {cmd.label}
+              </button>
             </li>
           ))}
         </ul>

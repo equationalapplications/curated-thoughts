@@ -190,7 +190,7 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
       <aside className="sidebar">
         {/* Status filter */}
         <div>
-          <label
+          <div
             style={{
               fontSize: "11px",
               fontWeight: 600,
@@ -199,7 +199,7 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
             }}
           >
             Status
-          </label>
+          </div>
           <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
             <label
               style={{
@@ -257,7 +257,7 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
 
         {/* Create new task form */}
         <div>
-          <label
+          <div
             style={{
               fontSize: "11px",
               fontWeight: 600,
@@ -266,7 +266,7 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
             }}
           >
             + New Task
-          </label>
+          </div>
           {createError && (
             <p
               style={{

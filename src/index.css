@@ -1058,7 +1058,13 @@ body {
   overflow-y: auto;
 }
 .palette-option {
+  display: block;
+  width: 100%;
   padding: 8px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
   border-radius: var(--r-sm);
   color: var(--on-surface);
   cursor: pointer;

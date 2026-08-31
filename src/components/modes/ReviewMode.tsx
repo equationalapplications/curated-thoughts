@@ -65,8 +65,16 @@ export function ReviewMode({
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [rejectPrompt, setRejectPrompt] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+  const rejectTextareaRef = useRef<HTMLTextAreaElement>(null);
   const detailRequestSeq = useRef(0);
   const editorRef = useRef<HTMLDivElement>(null);
+
+  // Focus the reject-reason textarea when the inline form opens. Programmatic
+  // focus from a user-initiated action rather than autoFocus: same
+  // convenience, none of the focus-steal pitfalls (jsx-a11y/no-autofocus).
+  useEffect(() => {
+    if (rejectPrompt) rejectTextareaRef.current?.focus();
+  }, [rejectPrompt]);
   const { indexed } = useIndexingStatus(vaultPath);
 
   const sortedQueue = useMemo(() => sortReviewQueue(queue), [queue]);
@@ -416,19 +424,19 @@ export function ReviewMode({
               <form
                 className="review-reject-form"
                 onSubmit={handleSubmitRejectForm}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    handleCancelRejectForm();
-                  }
-                }}
               >
                 <textarea
+                  ref={rejectTextareaRef}
                   className="review-reject-textarea"
                   value={rejectReason}
                   onChange={(e) => setRejectReason(e.target.value)}
                   placeholder="Optional: add a reason for rejection..."
-                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      handleCancelRejectForm();
+                    }
+                  }}
                 />
                 <div className="review-reject-buttons">
                   <button
