@@ -3,6 +3,25 @@ use clap::{Parser, Subcommand};
 use curated_thoughts_tools::cli_common::{self, print_json};
 use serde_json::json;
 
+/// Substitute the user's home directory with `~` so absolute paths that
+/// include it (e.g. `/Users/me/.ssh`) do not get logged verbatim when stdout
+/// is captured (CI logs, system journals). No-op outside the home directory.
+fn redact_home(target: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Some(home_str) = home.to_str() {
+            if target == home_str {
+                return "~".to_string();
+            }
+            if let Some(rest) = target.strip_prefix(home_str) {
+                if rest.starts_with('/') {
+                    return format!("~{}", rest);
+                }
+            }
+        }
+    }
+    target.to_string()
+}
+
 /// `ct` — headless CLI for Curated Thoughts brains.
 #[derive(Parser)]
 struct Ct {
@@ -511,12 +530,27 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
     use tauri_app_lib::config::BrainConfig;
     use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
 
+    // Exactly one of `<link>`, `--list`, or `--revoke <link>` must be present.
+    // Otherwise `ct trust --list --revoke documents/specs` would silently
+    // print the ledger and exit 0 without removing anything.
+    let actions = (link.is_some() as u32) + (list as u32) + (revoke.is_some() as u32);
+    if actions != 1 {
+        eprintln!(
+            "error: pass exactly one of <link>, --list, or --revoke <link> \
+             (got {actions} actions)"
+        );
+        return Ok(1);
+    }
+
     let paths = tauri_app_lib::retrieval::resolve_brain_paths();
     let mut cfg = BrainConfig::load(&paths)?;
 
     if list {
         for entry in &cfg.trusted_links {
-            println!("{} -> {}", entry.link, entry.target);
+            // Substitute `$HOME` with `~` so the ledger listing does not
+            // log a sensitive absolute path (e.g. ~/.ssh) when stdout is
+            // captured into CI logs or system journals (CodeQL alert).
+            println!("{} -> {}", entry.link, redact_home(&entry.target));
         }
         return Ok(0);
     }

@@ -174,11 +174,28 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
     let vault_root_str = vault_root.to_str().unwrap();
     let mut entity_ids = HashSet::new();
     for (i, f) in files.iter().enumerate() {
+        // File names come from the user's vault and can be non-UTF-8 on
+        // Linux/macOS. Skip with a recorded failure rather than panicking
+        // on `to_str().unwrap()` — one odd file must not abort the whole
+        // ingest run.
+        let (virtual_str, read_str) = match (f.virtual_path.to_str(), f.read_path.to_str()) {
+            (Some(v), Some(r)) => (v, r),
+            _ => {
+                failed += 1;
+                eprintln!(
+                    "[{}/{}] FAILED {}: path is not valid UTF-8",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display()
+                );
+                continue;
+            }
+        };
         match ingest_document_virtual(
             conn,
             &profile,
-            f.virtual_path.to_str().unwrap(),
-            f.read_path.to_str().unwrap(),
+            virtual_str,
+            read_str,
             true,
             Some(vault_root_str),
         ) {
@@ -187,7 +204,7 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
                 // virtual_path, so derive the entity from that — not from
                 // the canonical-target read_path that never reaches the DB.
                 entity_ids.insert(entity_id_for_virtual_path(
-                    f.virtual_path.to_str().unwrap(),
+                    virtual_str,
                     Some(vault_root_str),
                 ));
                 println!(

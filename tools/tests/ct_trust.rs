@@ -120,3 +120,62 @@ fn trust_list_prints_the_ledger_and_revoke_removes_an_entry() {
         serde_json::from_str(&fs::read_to_string(brain.join("config.json")).unwrap()).unwrap();
     assert!(cfg["trusted_links"].as_array().unwrap().is_empty());
 }
+
+/// `--list --revoke <link>` must not silently print the ledger and exit 0;
+/// the user clearly meant to revoke and the wrong action is dangerous.
+#[test]
+fn trust_rejects_combining_list_and_revoke() {
+    let (_tmp, brain, _vault) = seed_env();
+
+    let out = run_ct(&brain, &["trust", "--list", "--revoke", "documents/specs"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("exactly one"),
+        "must reject conflicting actions, got: {stderr}"
+    );
+}
+
+#[test]
+fn trust_rejects_combining_link_with_list() {
+    let (_tmp, brain, _vault) = seed_env();
+
+    let out = run_ct(&brain, &["trust", "documents/specs", "--list"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("exactly one"), "stderr: {stderr}");
+}
+
+#[test]
+fn trust_with_no_action_exits_1() {
+    let (_tmp, brain, _vault) = seed_env();
+
+    let out = run_ct(&brain, &["trust"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+/// `ct trust --list` must redact the target's home prefix to `~` so
+/// sensitive absolute paths (e.g. `/Users/me/.ssh`) are not logged verbatim.
+#[test]
+fn trust_list_redacts_home_prefix_in_target() {
+    let (tmp, brain, vault) = seed_env();
+    let docs = vault.join("documents");
+    fs::create_dir_all(&docs).unwrap();
+    // Symlink target lives inside $TMPDIR; redact_home leaves it alone.
+    let outside = tmp.path().join("repo-docs");
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, docs.join("specs")).unwrap();
+
+    let approved = run_ct(&brain, &["trust", "documents/specs"]);
+    assert_eq!(approved.status.code(), Some(0));
+
+    let listed = run_ct(&brain, &["trust", "--list"]);
+    assert_eq!(listed.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("documents/specs"), "stdout: {stdout}");
+    // Outside-of-home targets are printed verbatim — only HOME is redacted.
+    assert!(
+        stdout.contains(outside.display().to_string().as_str()),
+        "outside-home target should still appear (sanity): {stdout}"
+    );
+}

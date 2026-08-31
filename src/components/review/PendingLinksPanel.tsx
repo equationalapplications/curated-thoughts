@@ -12,7 +12,10 @@ export function PendingLinksPanel() {
 
   const refresh = useCallback(async () => {
     try {
-      setPending(await listPendingLinks());
+      const result = await listPendingLinks();
+      // Defend against mocks or older backends that return null instead
+      // of an empty array — `pending.length` would throw otherwise.
+      setPending(result ?? []);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

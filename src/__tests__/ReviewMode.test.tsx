@@ -116,6 +116,26 @@ test("empty state shows indexed document count from backend", async () => {
   ).toBeInTheDocument();
 });
 
+test("empty state still surfaces the pending-links panel so users can approve symlinks", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "list_pending_links") {
+      return Promise.resolve([
+        { link: "documents/specs", target: "/Users/me/code/foo/docs" },
+      ]);
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  renderWithTheme(<ReviewMode queue={[]} onAction={vi.fn()} vaultPath={VAULT} />);
+  expect(screen.getByText(/queue clear/i)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/documents\/specs/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /include/i }),
+  ).toBeInTheDocument();
+});
+
 test("renders queue cards oldest-first with target name, model, and source names", async () => {
   renderWithTheme(
     <ReviewMode

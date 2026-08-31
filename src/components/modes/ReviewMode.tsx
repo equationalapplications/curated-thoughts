@@ -344,6 +344,7 @@ export function ReviewMode({
   if (queue.length === 0) {
     return (
       <div className="mode-layout review-screen">
+        <PendingLinksPanel />
         <div className="review-empty">
           <h2>{queueError ? "Queue unavailable" : "Queue clear."}</h2>
           {queueError && <p className="review-hint">{queueError}</p>}

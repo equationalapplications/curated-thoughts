@@ -3470,6 +3470,11 @@ fn approve_link(link: String) -> Result<(), String> {
             .clone()
             .ok_or_else(|| "no vault configured".to_string())?,
     );
+    // Canonicalize the vault root so `classify_link` compares both sides on
+    // matching prefixes. Without this, a vault reached through a symlink
+    // would let a link to its physical parent pass as Pending instead of
+    // being refused as a vault ancestor.
+    let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
     let target = std::fs::canonicalize(vault_root.join(&link))
         .map_err(|e| format!("{link} could not be resolved: {e}"))?;
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ONTOLOGY_OPTIONS } from "../../lib/ontology";
 import { setOntologySelection, type OntologySelection } from "../../lib/tauri";
+import { applyOntologyChange } from "../../lib/wiki";
 
 /**
  * Ontology choice for the setup wizard. Deliberately not its own step: the
@@ -18,9 +19,14 @@ export function OntologyChoice() {
 
   const choose = async (next: OntologySelection) => {
     if (next === selection) return;
-    setSelection(next);
     try {
       await setOntologySelection(next);
+      // Run the shared D6 sequence so the wizard reuses the same reseed +
+      // backfill path as the Settings panel. On a fresh vault the backfill
+      // loop is a no-op; on a re-run of the wizard on an existing vault
+      // (if ever added) it rebuilds typed classifications correctly.
+      await applyOntologyChange(next);
+      setSelection(next);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

@@ -118,11 +118,20 @@ This requires a **two-path contract** threaded through ingestion:
 
 Guards on any selectively resolved symlink:
 
-- **Containment:** the target must resolve inside the vault root *or* be a
-  trusted link per D3a. (Plain vault containment cannot be the rule — repo
-  specs live outside the vault by design.)
+- **Containment:** the resolved target must satisfy one of:
+  1. **Inside the vault root** — no ledger entry needed; in-vault symlinks
+     are auto-trusted because nothing leaves the vault boundary. The
+     `classify_link` check returns `Trusted` for any target the vault
+     contains component-wise, regardless of `trusted_links`.
+  2. **Outside the vault, with a matching `(link, target)` pair** in
+     `trusted_links` (per D3a).
+
+  Plain vault containment *is* the rule for in-vault targets — the
+  exception is repo specs that intentionally live outside the vault, and
+  those go through D3a's ledger.
 - **Depth:** the virtual path may not exceed a fixed depth budget
-  (proposed: 16 segments) once the symlink prefix is applied.
+  (proposed: 16 segments) **measured vault-relative**, so the vault-root
+  components do not eat into the budget at deep vault locations.
 - **Cycles:** nested symlinks inside a resolved target are never followed
   (the current code's approach — preserve it). This makes cycle detection
   unnecessary rather than merely unimplemented.
@@ -276,6 +285,51 @@ Facts, embeddings, chunks, and documents are never touched. Switching **to**
 `off` clears typed data and does not reclassify; switching **from** `off`
 is a plain first-time classification.
 
+#### D6 runtime sequence (active wiki must be re-bound)
+
+The Tauri setter `set_ontology_selection` persists the selection; the
+runtime switch happens in the frontend so it can hold the active wiki
+instance. The shared helper `applyOntologyChange(next)` in `src/lib/wiki.ts`
+is the single contract — every caller (Settings panel, setup wizard) goes
+through it. The order matters:
+
+1. **Await any in-flight outbox work.** The `outbox-worker-started` /
+   `outbox-worker-stopped` listeners in `setupWiki()` maintain a per-event
+   `wikiUpdateGeneration` counter. Any in-flight `createWiki` / `setup()` from
+   an outbox transition is allowed to commit before the switch begins —
+   the helper runs after the active wiki has settled.
+2. **Replace manifests on every tier.** For each tier in
+   `[tier_fact, tier_wisdom, tier_working::<current_workspace>]`, call
+   `wiki.setOntologyManifest(entityId, manifest, { mode })`. The
+   helper passes an empty `OntologyManifest` when `manifestFor(next)` is
+   `null` — core 6.2.0 requires a manifest argument.
+3. **Drain the backfill backlog, except for `off`.** When `mode === 'off'`,
+   the engine reports `remaining === 0` immediately, so the helper skips
+   the loop. For every other mode, loop `wiki.runOntologyBackfill(entityId)`
+   while `result.remaining > 0`. `runOntologyBackfill` is additive — it
+   never overwrites an existing `okf_type` — so this drains in place rather
+   than clearing first.
+4. **Do not call the librarian mid-switch.** The `runLibrarian` sweep can
+   classify facts under whichever manifest is current at the time it reads
+   from the engine; if it runs after the new manifest is written but before
+   backfill has converged, it sees the new manifest with partial old
+   classifications. The helper completes the backfill loop synchronously
+   before returning, so any subsequent `runLibrarian` call sees a fully
+   converged corpus.
+5. **Hot-swap the wiki instance on next outbox transition.** Switching the
+   ontology does not require tearing down the wiki — `setOntologyManifest`
+   invalidates the per-entity `OntologyService` cache, so the next read or
+   heal call sees the new manifest. The existing
+   `outbox-worker-started/stopped` listeners rebuild the wiki only when the
+   outbox state actually flips; if it doesn't flip, the existing wiki
+   instance is correct.
+
+The Tauri command reports success only after step 1 settles — the
+frontend helper runs after the persist succeeds, so a mid-run failure
+surfaces through `applyOntologyChange`'s rejection and the caller can
+restore the prior selection without leaving the user in a half-switched
+state.
+
 ---
 
 ## Changes
@@ -294,6 +348,11 @@ Both schema packages ship the manifest as a JS export —
 a hard dependency on `@equationalapplications/core-llm-wiki@6.2.0`, so the
 core and react packages are pinned to `6.2.0` exactly (not `>= 6.1.0`) to
 avoid installing a second engine copy.
+
+`react-llm-wiki@6.1.0` itself still declares an exact `core-llm-wiki@6.1.0`
+peer; a `pnpm.overrides` entry in `package.json` forces the resolved core
+to `6.2.0` across the whole tree, so a second engine copy never installs.
+Track removing the override when `react-llm-wiki@6.2.0` ships.
 
 ### Ontology selection plumbing
 
@@ -485,3 +544,9 @@ deliberate `off` selection.
     `parent_type`) → `validateManifest` throws at engine startup and CT
     surfaces an app-boot failure naming the schema; it does not start
     untyped.
+17. **In-vault symlink** whose target resolves to a directory inside the
+    vault root → walked with no `trusted_links` entry required (vault
+    containment is the trust boundary). The symlink still surfaces in the
+    walker's `WalkedFile { virtual_path, read_path }` output, but is **never**
+    reported as pending or denied, regardless of how many in-vault links
+    exist.

@@ -2,10 +2,21 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OntologyChoice } from '../components/setup/OntologyChoice';
 import { setOntologySelection } from '../lib/tauri';
+import { wiki } from '../lib/wiki';
 
 vi.mock('../lib/tauri', () => ({
   getOntologySelection: vi.fn().mockResolvedValue('schema-org'),
   setOntologySelection: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../lib/wiki', () => ({
+  wiki: {
+    setOntologyManifest: vi.fn().mockResolvedValue(undefined),
+    runOntologyBackfill: vi.fn().mockResolvedValue({ remaining: 0, typed: 0, scanned: 0 }),
+  },
+  applyOntologyChange: vi.fn(async () => {
+    await wiki.setOntologyManifest('tier_fact', { node_types: [], edge_types: [] }, { mode: 'off' });
+  }),
 }));
 
 describe('OntologyChoice', () => {
@@ -39,5 +50,18 @@ describe('OntologyChoice', () => {
     render(<OntologyChoice />);
     await screen.findByRole('radio', { name: /General/ });
     expect(setOntologySelection).not.toHaveBeenCalled();
+  });
+
+  it('keeps the prior radio checked when persistence fails', async () => {
+    vi.mocked(setOntologySelection).mockRejectedValueOnce(new Error('save failed'));
+    render(<OntologyChoice />);
+    fireEvent.click(await screen.findByRole('button', { name: /change/i }));
+    const software = screen.getByRole('radio', { name: /Software team/ });
+    fireEvent.click(software);
+
+    await waitFor(() => expect(setOntologySelection).toHaveBeenCalled());
+    expect(software).not.toBeChecked();
+    expect(screen.getByRole('radio', { name: /General/ })).toBeChecked();
+    expect(screen.getByText(/save failed/i)).toBeInTheDocument();
   });
 });

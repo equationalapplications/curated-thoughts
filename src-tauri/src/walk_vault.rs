@@ -243,7 +243,14 @@ pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>
                         Err(_) => continue,
                     };
                     let virtual_path = p.join(rel);
-                    if virtual_path.components().count() > MAX_VIRTUAL_DEPTH {
+                    // Measure depth relative to the vault root so the budget
+                    // reflects symlinked content only — vault-root components
+                    // would otherwise eat most of the budget at deep paths.
+                    let relative_depth = virtual_path
+                        .strip_prefix(&vault_root)
+                        .map(|r| r.components().count())
+                        .unwrap_or_else(|_| virtual_path.components().count());
+                    if relative_depth > MAX_VIRTUAL_DEPTH {
                         outcome.errors.push(format!(
                             "depth: {} exceeds the {MAX_VIRTUAL_DEPTH}-segment budget, skipping",
                             virtual_path.display()

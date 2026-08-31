@@ -6,10 +6,53 @@ import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
 import { getOntologySelection, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
-import { ontologyConfigFor } from "./ontology";
+import { manifestFor, modeFor, ontologyConfigFor } from "./ontology";
 
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
+
+/**
+ * Empty manifest for selections without a fixed schema (`off`, `emergent`).
+ * core-llm-wiki 6.2.0 requires a non-null `OntologyManifest` on
+ * `setOntologyManifest`; an empty manifest signals "no typed schema" rather
+ * than "schema mismatch".
+ */
+const EMPTY_MANIFEST = { node_types: [] as never[], edge_types: [] as never[] };
+
+/**
+ * Every tier that carries a seeded manifest (spec D5). Exposed so the
+ * shared `applyOntologyChange` helper can iterate without each caller
+ * duplicating the list.
+ */
+export function seededOntologyEntityIds(): string[] {
+  return ["tier_fact", "tier_wisdom", getWorkspaceId()];
+}
+
+/**
+ * Spec D6: switching ontology invalidates typed classifications. Persists
+ * the new selection, reseeds every tier, and loops backfill until the
+ * engine reports no remaining work. Confirmation UX lives in the caller
+ * (the wizard skips it because the first run has no prior data).
+ *
+ * Shared by the Settings panel and the setup wizard so the contract is the
+ * same regardless of which surface the user switches from — every caller
+ * triggers D6 once a wiki instance is available.
+ */
+export async function applyOntologyChange(next: OntologySelection): Promise<void> {
+  const mode = modeFor(next);
+  const manifest = manifestFor(next) ?? EMPTY_MANIFEST;
+  for (const entityId of seededOntologyEntityIds()) {
+    await wiki.setOntologyManifest(entityId, manifest, { mode });
+    // `off` does not classify facts and the engine reports `remaining === 0`
+    // immediately; skip the loop to avoid the no-op round-trip.
+    if (mode === "off") continue;
+    let remaining = Infinity;
+    while (remaining > 0) {
+      const result = await wiki.runOntologyBackfill(entityId);
+      remaining = result.remaining;
+    }
+  }
+}
 
 export async function initWorkspaceId(vaultPath: string): Promise<void> {
   const requestId = ++_workspaceIdRequest;
@@ -96,7 +139,10 @@ let _ontologySelection: OntologySelection = 'schema-org';
 export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
 
 export async function setupWiki() {
-  _ontologySelection = await getOntologySelection().catch(() => 'schema-org');
+  // A rejected read must surface — silently defaulting to `schema-org`
+  // would seed strict manifests even when the persisted selection is
+  // `off` or `emergent`, leaving typed data misclassified.
+  _ontologySelection = await getOntologySelection();
 
   // Register worker lifecycle listeners before running the initial wiki setup.
   // This prevents a race where the worker starts or stops during setup and the

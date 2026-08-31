@@ -206,3 +206,90 @@ fn a_broken_symlink_is_an_error_not_a_silent_skip() {
         outcome.errors
     );
 }
+
+/// MAX_VIRTUAL_DEPTH must count vault-relative segments only — vault-root
+/// components should not eat into the budget. Without the strip_prefix
+/// guard, a vault reached through a deep absolute path would skip legitimate
+/// content.
+#[test]
+fn depth_budget_counts_only_vault_relative_segments() {
+    use curated_thoughts_tools::cmds::MAX_VIRTUAL_DEPTH;
+
+    // Build a deeply nested outside target — the deepest file lands well
+    // past MAX_VIRTUAL_DEPTH, but vault-relative only by a small margin.
+    let temp = TempDir::new().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(vault.join("documents")).unwrap();
+
+    // Vault itself lives many components deep so an absolute-path component
+    // count would overshoot the budget even for shallow inside-vault files.
+    let deep_outside = temp.path().join("a").join("b").join("c").join("d").join("outside");
+    fs::create_dir_all(&deep_outside).unwrap();
+    let leaf = deep_outside.join("leaf.md");
+    fs::write(&leaf, "# Leaf\n").unwrap();
+
+    symlink(&deep_outside, vault.join("documents").join("linked")).unwrap();
+
+    let target = std::fs::canonicalize(&deep_outside).unwrap();
+    let ledger = vec![TrustedLink {
+        link: "documents/linked".to_string(),
+        target: target.to_string_lossy().to_string(),
+        approved_at: 1,
+    }];
+
+    let outcome = walk_vault(&vault, &ledger, None);
+
+    // The leaf is 1 segment past `documents/linked/` — well inside the budget
+    // when measured relative to the vault root.
+    assert!(
+        outcome
+            .files
+            .iter()
+            .any(|f| f.virtual_path.ends_with("leaf.md")),
+        "vault-relative depth must not overshoot MAX_VIRTUAL_DEPTH; errors={:?}",
+        outcome.errors
+    );
+    assert!(
+        !outcome
+            .errors
+            .iter()
+            .any(|e| e.contains("exceeds the") && e.contains("leaf.md")),
+        "leaf.md must not be reported as over-depth; errors={:?}",
+        outcome.errors
+    );
+
+    // Sanity check: an actual over-depth file is still rejected.
+    let very_deep_outside = temp.path().join("x");
+    fs::create_dir_all(&very_deep_outside).unwrap();
+    let mut cur = very_deep_outside.clone();
+    for _ in 0..(MAX_VIRTUAL_DEPTH + 4) {
+        cur = cur.join("seg");
+        fs::create_dir_all(&cur).unwrap();
+    }
+    let too_deep = cur.join("deep.md");
+    fs::write(&too_deep, "# Deep\n").unwrap();
+    symlink(&very_deep_outside, vault.join("documents").join("deep")).unwrap();
+
+    let target2 = std::fs::canonicalize(&very_deep_outside).unwrap();
+    let ledger2 = vec![TrustedLink {
+        link: "documents/deep".to_string(),
+        target: target2.to_string_lossy().to_string(),
+        approved_at: 1,
+    }];
+    let outcome2 = walk_vault(&vault, &ledger2, None);
+    assert!(
+        !outcome2
+            .files
+            .iter()
+            .any(|f| f.virtual_path.ends_with("deep.md")),
+        "truly over-depth files must still be skipped"
+    );
+    assert!(
+        outcome2
+            .errors
+            .iter()
+            .any(|e| e.contains("deep.md") && e.contains("exceeds the")),
+        "over-depth file must surface as an error: {:?}",
+        outcome2.errors
+    );
+}

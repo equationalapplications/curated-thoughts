@@ -1,13 +1,8 @@
 import { useState } from "react";
 import { useOntologySelection } from "../../hooks/useOntologySelection";
-import { ONTOLOGY_OPTIONS, manifestFor, modeFor } from "../../lib/ontology";
+import { ONTOLOGY_OPTIONS } from "../../lib/ontology";
 import type { OntologySelection } from "../../lib/tauri";
-import { getWorkspaceId, wiki } from "../../lib/wiki";
-
-/** Every tier that carries a seeded manifest (spec D5). */
-function seededEntities(): string[] {
-  return ["tier_fact", "tier_wisdom", getWorkspaceId()];
-}
+import { applyOntologyChange } from "../../lib/wiki";
 
 export function OntologyPanel() {
   const { selection, save, loading } = useOntologySelection();
@@ -24,29 +19,26 @@ export function OntologyPanel() {
     );
     if (!ok) return;
 
+    // Capture the prior selection so a failed save/reseed/backfill can
+    // restore the user's previous choice and not leave the radio on a
+    // selection that did not actually take effect.
+    const prior = selection;
+
     setBusy(true);
     setError(null);
     try {
       await save(next);
-
-      // seedManifests only writes when an entity has no row, so an existing
-      // vault must be reseeded explicitly.
-      const manifest = manifestFor(next);
-      const mode = modeFor(next);
-      for (const entityId of seededEntities()) {
-        if (manifest) {
-          await wiki.setOntologyManifest(entityId, manifest, { mode });
-        }
-        // Reclassify under the new manifest. `remaining` is the engine's
-        // documented convergence signal; it is always 0 when mode is 'off'.
-        let remaining = Infinity;
-        while (remaining > 0) {
-          const result = await wiki.runOntologyBackfill(entityId);
-          remaining = result.remaining;
-        }
-      }
+      await applyOntologyChange(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      // Restore the prior selection so the radio reflects what is actually
+      // persisted and a retry is not blocked by the same-selection guard.
+      try {
+        await save(prior);
+      } catch {
+        // best-effort: surface the original error, leave the prior save
+        // to whichever future operation can succeed.
+      }
     } finally {
       setBusy(false);
     }

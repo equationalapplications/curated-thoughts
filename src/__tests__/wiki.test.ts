@@ -124,7 +124,10 @@ describe('tieredRead', () => {
       runHeal: vi.fn().mockResolvedValue(undefined),
     });
     vi.mocked(listen).mockResolvedValue(() => {});
-    vi.mocked(invoke).mockRejectedValue(new Error('not configured'));
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_ontology_selection') return 'schema-org';
+      throw new Error('not configured');
+    });
 
     await setupWiki();
 
@@ -221,19 +224,14 @@ describe('tieredRead', () => {
     expect(Object.keys(options.config.ontology?.seedManifests ?? {})).toContain('tier_wisdom');
   });
 
-  it('falls back to the desktop default when the selection cannot be read', async () => {
+  it('propagates the read failure instead of defaulting to schema-org', async () => {
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'get_ontology_selection') throw new Error('no config');
       if (cmd === 'outbox_is_configured') return false;
       return undefined;
     });
 
-    await setupWiki();
-
-    const options = vi.mocked(createWiki).mock.calls.at(-1)?.[1] as {
-      config: { ontology?: { mode?: string } };
-    };
-    expect(options.config.ontology?.mode).toBe('strict');
+    await expect(setupWiki()).rejects.toThrow(/no config/);
   });
 
   it('forwards graphExpansion option when provided', async () => {

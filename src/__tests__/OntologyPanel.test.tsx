@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OntologyPanel } from '../components/settings/OntologyPanel';
 import { setOntologySelection } from '../lib/tauri';
-import { wiki } from '../lib/wiki';
+import { applyOntologyChange } from '../lib/wiki';
 
 vi.mock('../lib/tauri', () => ({
   getOntologySelection: vi.fn().mockResolvedValue('schema-org'),
@@ -10,11 +10,7 @@ vi.mock('../lib/tauri', () => ({
 }));
 
 vi.mock('../lib/wiki', () => ({
-  wiki: {
-    setOntologyManifest: vi.fn().mockResolvedValue(undefined),
-    runOntologyBackfill: vi.fn().mockResolvedValue({ remaining: 0, typed: 3, scanned: 3 }),
-  },
-  getWorkspaceId: () => 'tier_working::abc123',
+  applyOntologyChange: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('OntologyPanel', () => {
@@ -29,7 +25,7 @@ describe('OntologyPanel', () => {
     expect(screen.getByText('@equationalapplications/schema-software-org')).toBeInTheDocument();
   });
 
-  it('confirms before switching, then reseeds every tier and backfills', async () => {
+  it('confirms before switching, then persists and applies the D6 sequence', async () => {
     render(<OntologyPanel />);
     fireEvent.click(await screen.findByRole('radio', { name: /Software team/ }));
 
@@ -37,10 +33,9 @@ describe('OntologyPanel', () => {
     await waitFor(() =>
       expect(setOntologySelection).toHaveBeenCalledWith('schema-software-org'),
     );
-
-    const seeded = vi.mocked(wiki.setOntologyManifest).mock.calls.map((c) => c[0]);
-    expect(seeded).toEqual(['tier_fact', 'tier_wisdom', 'tier_working::abc123']);
-    expect(wiki.runOntologyBackfill).toHaveBeenCalledTimes(3);
+    await waitFor(() =>
+      expect(applyOntologyChange).toHaveBeenCalledWith('schema-software-org'),
+    );
   });
 
   it('makes no changes when the confirmation is declined', async () => {
@@ -50,18 +45,23 @@ describe('OntologyPanel', () => {
 
     await waitFor(() => expect(window.confirm).toHaveBeenCalled());
     expect(setOntologySelection).not.toHaveBeenCalled();
-    expect(wiki.setOntologyManifest).not.toHaveBeenCalled();
+    expect(applyOntologyChange).not.toHaveBeenCalled();
   });
 
-  it('loops backfill until nothing remains', async () => {
-    vi.mocked(wiki.runOntologyBackfill)
-      .mockResolvedValueOnce({ remaining: 2, typed: 1, scanned: 3 } as never)
-      .mockResolvedValue({ remaining: 0, typed: 2, scanned: 2 } as never);
+  it('restores the prior selection when the D6 sequence fails', async () => {
+    vi.mocked(applyOntologyChange).mockRejectedValueOnce(
+      new Error('manifest reseed failed') as never,
+    );
 
     render(<OntologyPanel />);
-    fireEvent.click(await screen.findByRole('radio', { name: /None/ }));
+    fireEvent.click(await screen.findByRole('radio', { name: /Software team/ }));
 
-    // 3 tiers, first of which needs a second pass.
-    await waitFor(() => expect(wiki.runOntologyBackfill).toHaveBeenCalledTimes(4));
+    await waitFor(() =>
+      expect(setOntologySelection).toHaveBeenCalledWith('schema-software-org'),
+    );
+    await waitFor(() =>
+      expect(setOntologySelection).toHaveBeenLastCalledWith('schema-org'),
+    );
+    expect(await screen.findByText(/manifest reseed failed/)).toBeInTheDocument();
   });
 });

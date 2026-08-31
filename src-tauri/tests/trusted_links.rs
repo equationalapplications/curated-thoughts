@@ -134,3 +134,59 @@ fn a_target_inside_the_vault_needs_no_ledger_entry() {
     );
     assert_eq!(verdict, LinkVerdict::Trusted);
 }
+
+/// `approve_link` must canonicalize the vault root before classification,
+/// otherwise a vault reached through a symlink lets a link to its physical
+/// parent pass as Pending. With a non-canonical vault root (`/var/...` vs the
+/// canonical `/private/var/...` on macOS), the canonical target has no
+/// matching prefix against the non-canonical vault, so the VaultAncestor
+/// check fails and the link returns Pending. Canonicalizing the vault root
+/// aligns the prefixes and produces Denied(VaultAncestor).
+#[test]
+fn non_canonical_vault_root_must_be_canonicalized_before_classification() {
+    // Real macOS TempDir resolves through /var → /private/var, so a vault
+    // reached through /var/folders/... has the canonical form
+    // /private/var/folders/.../vault. The vault's physical parent
+    // canonicalizes to /private/var/folders/.... With the vault root
+    // canonicalized, the component-wise containment check sees the matching
+    // /private/var prefix and refuses the link; without that, the prefixes
+    // diverge and the link falls through to Pending.
+    let canonical_target = "/private/var/folders/abc/T";
+    let canonical_vault = "/private/var/folders/abc/T/vault";
+    let non_canonical_vault = "/var/folders/abc/T/vault";
+
+    let verdict_with_canonical_root = classify_link(
+        "documents/parent",
+        Path::new(canonical_target),
+        Path::new(canonical_vault),
+        Some(Path::new(HOME)),
+        &[],
+    );
+    // With the canonical root, the parent's prefix matches and the link
+    // is refused as either an ancestor of the vault (target sits above
+    // vault_root) or as containing the vault (vault_root lives inside the
+    // target). Both denials are valid — the assertion is that the link is
+    // refused, not the specific framing.
+    assert!(
+        matches!(
+            verdict_with_canonical_root,
+            LinkVerdict::Denied(DenyReason::VaultAncestor)
+                | LinkVerdict::Denied(DenyReason::ContainsVault)
+        ),
+        "with canonical vault root, a link to the physical parent must be refused; got {:?}",
+        verdict_with_canonical_root
+    );
+
+    let verdict_with_non_canonical_root = classify_link(
+        "documents/parent",
+        Path::new(canonical_target),
+        Path::new(non_canonical_vault),
+        Some(Path::new(HOME)),
+        &[],
+    );
+    assert_eq!(
+        verdict_with_non_canonical_root,
+        LinkVerdict::Pending,
+        "without canonicalization, the non-matching prefix leaves the link Pending"
+    );
+}
