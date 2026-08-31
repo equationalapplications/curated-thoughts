@@ -2184,6 +2184,38 @@ body {
   color: var(--error);
 }
 
+/* ── A11y primitives (Task 3) ──────────────────────────────────────────── */
+/* Skip link — off-canvas until keyboard focus (SC 2.4.1 bypass). */
+.skip-link {
+  position: fixed;
+  left: 16px;
+  top: -64px;
+  z-index: 1000;
+  padding: 10px 16px;
+  border-radius: var(--r-md);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  text-decoration: none;
+  transition: top 120ms ease;
+}
+.skip-link:focus-visible { top: 12px; }
+
+/* Live-region mount points for AnnouncerProvider — visually hidden. */
+.a11y-announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* WCAG 2.2 SC 2.3.3 — disable non-essential motion. Must remain the final
    rule in this file; the a11y contrast test asserts its position. */
 @media (prefers-reduced-motion: reduce) {
