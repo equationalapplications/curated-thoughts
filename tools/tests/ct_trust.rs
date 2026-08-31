@@ -58,7 +58,9 @@ fn trust_approves_a_pending_link_and_persists_the_pair() {
 
     let cfg: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(brain.join("config.json")).unwrap()).unwrap();
-    let links = cfg["trusted_links"].as_array().expect("trusted_links array");
+    let links = cfg["trusted_links"]
+        .as_array()
+        .expect("trusted_links array");
     assert_eq!(links.len(), 1);
     assert_eq!(links[0]["link"], "documents/specs");
     assert!(links[0]["target"].as_str().unwrap().ends_with("repo-docs"));

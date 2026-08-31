@@ -48,5 +48,5 @@
 // shared by both) — tracked separately; it can't happen in this PR
 // because of the cargo dependency direction
 // (`tools -> src-tauri`, so `src-tauri` cannot import from `tools`).
-pub use tauri_app_lib::watcher::*;
 pub use crate::lock::VaultLock;
+pub use tauri_app_lib::watcher::*;

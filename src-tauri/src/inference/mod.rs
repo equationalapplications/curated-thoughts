@@ -181,7 +181,7 @@ fn initialize_provider_inner(
             }
             let model_name = model_rel
                 .split(std::path::MAIN_SEPARATOR)
-                .last()
+                .next_back()
                 .unwrap_or_default()
                 .to_string();
             let port = pick_port()?;
@@ -415,18 +415,21 @@ fn llama_server_release_url() -> Result<(String, String)> {
         ));
     }
 
-    let url = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        TODO_URL.to_string()
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        TODO_URL.to_string()
-    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        TODO_URL.to_string()
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        TODO_URL.to_string()
-    } else {
-        return Err(anyhow::anyhow!(
-            "unsupported platform for automatic llama-server download"
-        ));
+    // Every supported target is currently served from the same release URL;
+    // `cfg!` is evaluated at compile time so the `match` collapses into a single
+    // concrete value at build time. When platform-specific release URLs land,
+    // populate each arm with its own value.
+    #[allow(clippy::if_same_then_else)]
+    let url = match () {
+        _ if cfg!(all(target_os = "macos", target_arch = "aarch64")) => TODO_URL.to_string(),
+        _ if cfg!(all(target_os = "macos", target_arch = "x86_64")) => TODO_URL.to_string(),
+        _ if cfg!(all(target_os = "windows", target_arch = "x86_64")) => TODO_URL.to_string(),
+        _ if cfg!(all(target_os = "linux", target_arch = "x86_64")) => TODO_URL.to_string(),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "unsupported platform for automatic llama-server download"
+            ));
+        }
     };
 
     Ok((url, TODO_SHA.to_string()))

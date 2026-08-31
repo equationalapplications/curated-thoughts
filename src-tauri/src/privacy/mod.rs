@@ -99,11 +99,12 @@ pub fn set_privacy_mode_config(
 ) -> Result<(PrivacyState, bool)> {
     let current = resolve_privacy_state(brain_dir, token_store)?;
     let mut disconnected_bridge = false;
-    if current.mode == PrivacyMode::Connected && mode != PrivacyMode::Connected {
-        if token_store.get()?.is_some() {
-            token_store.delete()?;
-            disconnected_bridge = true;
-        }
+    if current.mode == PrivacyMode::Connected
+        && mode != PrivacyMode::Connected
+        && token_store.get()?.is_some()
+    {
+        token_store.delete()?;
+        disconnected_bridge = true;
     }
     let mut cfg = read_privacy_config(brain_dir)?;
     cfg.mode = Some(mode);
@@ -256,8 +257,10 @@ mod tests {
     fn migration_disclosure_suppressed_after_acknowledged() {
         let dir = TempDir::new().unwrap();
         run_with_config(&dir, || {
-            let mut cfg = PrivacyConfig::default();
-            cfg.migration_disclosure_acknowledged = true;
+            let cfg = PrivacyConfig {
+                migration_disclosure_acknowledged: true,
+                ..PrivacyConfig::default()
+            };
             write_privacy_config(dir.path(), &cfg).unwrap();
             let resolved = resolve_privacy_state(dir.path(), &TokenStore("tok")).unwrap();
             assert!(!resolved.needs_migration_disclosure);

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use tauri_app_lib::trusted_links::{classify_link, is_within, DenyReason, LinkVerdict, TrustedLink};
+use tauri_app_lib::trusted_links::{
+    classify_link, is_within, DenyReason, LinkVerdict, TrustedLink,
+};
 
 fn ledger(link: &str, target: &str) -> Vec<TrustedLink> {
     vec![TrustedLink {

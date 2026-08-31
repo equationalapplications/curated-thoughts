@@ -163,15 +163,14 @@ pub fn aggregate_embeddings(sources: &[usize], embeddings: Vec<Vec<f32>>) -> Res
             slot @ None => *slot = Some((emb, 1)),
         }
     }
-    Ok(acc
-        .into_iter()
+    acc.into_iter()
         .enumerate()
         .map(|(i, slot)| {
             let (sum, count) =
                 slot.ok_or_else(|| anyhow!("no embedding produced for input {i}"))?;
             Ok(sum.into_iter().map(|v| v / count as f32).collect())
         })
-        .collect::<Result<Vec<_>>>()?)
+        .collect::<Result<Vec<_>>>()
 }
 
 /// Format the error message for a failed embed response, including (a
@@ -308,7 +307,7 @@ mod tests {
         let mut a: Vec<char> = text.chars().collect();
         let mut b: Vec<char> = rejoined.chars().collect();
         a.sort();
-        b.sort_by(|x, y| x.cmp(y));
+        b.sort();
         assert_eq!(a, b, "rejoined slices must preserve all characters");
     }
 

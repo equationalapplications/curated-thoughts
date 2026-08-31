@@ -51,6 +51,7 @@ fn onboard_never_writes_api_key_to_config() {
             api_key: None, // Never set
             timeout_secs: None,
         },
+        ontology: tauri_app_lib::ontology_config::OntologySelection::Off,
     };
 
     // Point CURATED_BRAIN_CONFIG at our temp file via temp_env.
@@ -122,14 +123,16 @@ fn brainconfig_default_has_no_api_key_in_json() {
     use tauri_app_lib::inference::config::{GenerationConfig, GenerationProviderKind};
 
     let (temp, paths) = temp_paths();
-    let mut config = BrainConfig::default();
-    config.generation = GenerationConfig {
-        provider: GenerationProviderKind::External,
-        model_path: None,
-        model_name: Some("gpt-4".to_string()),
-        external_url: Some("https://api.example.com".to_string()),
-        api_key: None,
-        timeout_secs: None,
+    let config = BrainConfig {
+        generation: GenerationConfig {
+            provider: GenerationProviderKind::External,
+            model_path: None,
+            model_name: Some("gpt-4".to_string()),
+            external_url: Some("https://api.example.com".to_string()),
+            api_key: None,
+            timeout_secs: None,
+        },
+        ..BrainConfig::default()
     };
     config.write(&paths).expect("write succeeds");
 

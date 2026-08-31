@@ -34,24 +34,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
-use walkdir::WalkDir;
 
-use tauri_app_lib::chunker::should_ingest_extension;
 use tauri_app_lib::db::commit::{resolve_proposal, ResolveOptions};
 use tauri_app_lib::db::connection::AppDb;
 use tauri_app_lib::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
-use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
 use tauri_app_lib::vault::VaultConfig;
 // Re-export walker types so `curated_thoughts_tools::cmds::WalkedFile` (and
 // friends) remain reachable from external callers and tests.
 pub use tauri_app_lib::walk_vault::{
-    collect_files, walk_vault, DeniedLink, PendingLink, WalkedFile, WalkOutcome, MAX_VIRTUAL_DEPTH,
+    collect_files, walk_vault, DeniedLink, PendingLink, WalkOutcome, WalkedFile, MAX_VIRTUAL_DEPTH,
 };
-use tauri_app_lib::{
-    entity_id_for_virtual_path, ingest_document_virtual,
-};
+use tauri_app_lib::{entity_id_for_virtual_path, ingest_document_virtual};
 
 /// Default `once` mode watchdog: exit after this many seconds even if no
 /// SIGINT arrives. The plan suggested 60s; using a named constant (per the
@@ -195,7 +190,12 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
                     f.virtual_path.to_str().unwrap(),
                     Some(vault_root_str),
                 ));
-                println!("[{}/{}] ok: {}", i + 1, files.len(), f.virtual_path.display());
+                println!(
+                    "[{}/{}] ok: {}",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display()
+                );
             }
             Err(e) => {
                 failed += 1;
@@ -718,8 +718,7 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
     // `run(opts)` below.
     let json_mode = opts.json_mode;
     let brain = crate::paths::resolve_brain_paths();
-    let vault_root = std::env::var("CURATED_VAULT_ROOT")
-        .unwrap_or_else(|_| "<unset>".to_string());
+    let vault_root = std::env::var("CURATED_VAULT_ROOT").unwrap_or_else(|_| "<unset>".to_string());
     let pid = std::process::id();
 
     let summary = format!(
@@ -746,10 +745,7 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
         // For unclassified errors the "path" carries the same
         // brain/vault/pid summary; consumers match the error+shutdown
         // pair to identify the run.
-        println!(
-            "{}",
-            format_event("shutdown", &summary, now_ms())
-        );
+        println!("{}", format_event("shutdown", &summary, now_ms()));
     }
 
     match final_err {
@@ -765,10 +761,11 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
     use crate::lock::VaultLock;
 
     let brain = crate::paths::resolve_brain_paths();
-    let vault_root = std::env::var("CURATED_VAULT_ROOT")
-        .map_err(|e| WatchError::Other(anyhow::Error::new(e).context(
-            "CURATED_VAULT_ROOT must be set (or pass --vault)",
-        )))?;
+    let vault_root = std::env::var("CURATED_VAULT_ROOT").map_err(|e| {
+        WatchError::Other(
+            anyhow::Error::new(e).context("CURATED_VAULT_ROOT must be set (or pass --vault)"),
+        )
+    })?;
 
     let vault_path = PathBuf::from(&vault_root);
     if !vault_path.exists() {
@@ -796,14 +793,17 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
     // freshly opened connection so corruption in the file header (SQLite
     // accepts an open-with-create against garbage bytes without complaint;
     // it only surfaces the error when you try to read) is caught here.
-    let brain_for_cb = crate::write::Brain { paths: brain.clone() };
+    let brain_for_cb = crate::write::Brain {
+        paths: brain.clone(),
+    };
     {
         let probe = crate::write::open_rw(&brain_for_cb)
             .map_err(|e| WatchError::Db(e.context("open brain.db for watcher startup")))?;
-        probe
-            .execute_batch("SELECT 1;")
-            .map_err(|e| WatchError::Db(anyhow::Error::new(e)
-                .context("brain.db schema probe failed at watcher startup")))?;
+        probe.execute_batch("SELECT 1;").map_err(|e| {
+            WatchError::Db(
+                anyhow::Error::new(e).context("brain.db schema probe failed at watcher startup"),
+            )
+        })?;
     }
 
     let lock = match VaultLock::acquire(&brain.brain_dir) {
@@ -879,7 +879,7 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
                 crate::watcher::VaultEvent::Modified(_) => "modified",
                 crate::watcher::VaultEvent::Deleted(_) => "removed",
             };
-            println!("{}", format_event(kind, &path, now_ms()));
+            println!("{}", format_event(kind, path, now_ms()));
         } else {
             eprintln!(
                 "[watch] {} {}",
@@ -959,8 +959,7 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
     // Fatal flag: written from the signal thread on startup failure, read
     // from the main thread's poll loop. `None` means "still starting or
     // SIGINT not yet fired"; `Some(msg)` means "fatal — surface to user".
-    let fatal: Arc<std::sync::Mutex<Option<String>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let fatal: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let fatal_signal = fatal.clone();
     std::thread::Builder::new()
         .name("ct-watch-sigint".into())
@@ -974,16 +973,14 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    *fatal_signal.lock().unwrap() = Some(format!(
-                        "failed to start signal runtime: {e}"
-                    ));
+                    *fatal_signal.lock().unwrap() =
+                        Some(format!("failed to start signal runtime: {e}"));
                     return;
                 }
             };
             rt.block_on(async {
                 if let Err(e) = tokio::signal::ctrl_c().await {
-                    *fatal_signal.lock().unwrap() =
-                        Some(format!("ctrl_c failed: {e}"));
+                    *fatal_signal.lock().unwrap() = Some(format!("ctrl_c failed: {e}"));
                     return;
                 }
                 term_signal.store(true, Ordering::SeqCst);
@@ -1007,6 +1004,12 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// TempDir is referenced in tests; we use the `tempfile` crate already in
+// dev-dependencies. Imported here so the use-statement doesn't have to live
+// in every test fn.
+#[cfg(test)]
+use tempfile::TempDir;
 
 #[cfg(test)]
 mod tests {
@@ -1269,13 +1272,13 @@ mod tests {
         let mut conn = open_seeded_conn();
 
         // Indexed docs with current synth_hash == hash + same model → clean.
-        seed_doc(&mut conn, "/v/a.md", "h-a", "indexed");
+        seed_doc(&conn, "/v/a.md", "h-a", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-a', synth_model = 'm' WHERE path = '/v/a.md'",
             [],
         )
         .unwrap();
-        seed_doc(&mut conn, "/v/b.md", "h-b", "indexed");
+        seed_doc(&conn, "/v/b.md", "h-b", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-b', synth_model = 'm' WHERE path = '/v/b.md'",
             [],
@@ -1283,7 +1286,7 @@ mod tests {
         .unwrap();
 
         // Indexed doc whose hash has changed since synth → dirty.
-        seed_doc(&mut conn, "/v/c.md", "h-c-new", "indexed");
+        seed_doc(&conn, "/v/c.md", "h-c-new", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-c-old', synth_model = 'm' WHERE path = '/v/c.md'",
             [],
@@ -1291,10 +1294,10 @@ mod tests {
         .unwrap();
 
         // Indexed doc with no synth record at all → dirty.
-        seed_doc(&mut conn, "/v/d.md", "h-d", "indexed");
+        seed_doc(&conn, "/v/d.md", "h-d", "indexed");
 
         // Indexed doc indexed by a different model → dirty.
-        seed_doc(&mut conn, "/v/e.md", "h-e", "indexed");
+        seed_doc(&conn, "/v/e.md", "h-e", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-e', synth_model = 'old-m' WHERE path = '/v/e.md'",
             [],
@@ -1302,7 +1305,7 @@ mod tests {
         .unwrap();
 
         // Non-indexed doc must never be selected.
-        seed_doc(&mut conn, "/v/f.md", "hash-f", "pending");
+        seed_doc(&conn, "/v/f.md", "hash-f", "pending");
 
         assert_eq!(
             dirty_paths(&mut conn, "m"),
@@ -1380,10 +1383,9 @@ mod tests {
             temp_env::with_var("CURATED_BRAIN_DIR", Some(&path_str), || {
                 // Hold the lock for the brain_dir (this is the path
                 // `VaultLock::acquire` in `watch_run` actually uses).
-                let _held = crate::lock::VaultLock::acquire(
-                    &crate::paths::resolve_brain_paths().brain_dir,
-                )
-                .expect("first lock acquire should succeed in test");
+                let _held =
+                    crate::lock::VaultLock::acquire(&crate::paths::resolve_brain_paths().brain_dir)
+                        .expect("first lock acquire should succeed in test");
                 let r = watch_run(watch_run_short_opts());
                 assert!(
                     matches!(r, Ok(2)),
@@ -1414,19 +1416,19 @@ mod tests {
         std::fs::write(&file_path, "x").unwrap();
         let file_str = file_path.to_str().unwrap().to_string();
         temp_env::with_var("CURATED_VAULT_ROOT", Some(&file_str), || {
-            temp_env::with_var("CURATED_BRAIN_DIR", Some(tmp.path().to_str().unwrap()), || {
-                let r = watch_run(watch_run_short_opts());
-                assert!(
-                    matches!(r, Ok(4)),
-                    "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
-                );
-            });
+            temp_env::with_var(
+                "CURATED_BRAIN_DIR",
+                Some(tmp.path().to_str().unwrap()),
+                || {
+                    let r = watch_run(watch_run_short_opts());
+                    assert!(
+                        matches!(r, Ok(4)),
+                        "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
+                    );
+                },
+            );
         });
     }
 }
 
-// TempDir is referenced in tests; we use the `tempfile` crate already in
-// dev-dependencies. Imported here so the use-statement doesn't have to live
-// in every test fn.
-#[cfg(test)]
-use tempfile::TempDir;
+// (TempDir is imported above the test module to satisfy clippy::items_after_test_module)

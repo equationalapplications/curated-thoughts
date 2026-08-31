@@ -46,7 +46,7 @@ fn root_kind(v: &serde_json::Value) -> &'static str {
 }
 
 /// Unified configuration for a brain directory.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BrainConfig {
     /// User's vault root path (e.g., ~/Curated-Thoughts).
     pub vault_path: Option<String>,
@@ -92,29 +92,6 @@ pub struct BrainConfig {
     /// Raw privacy block JSON used when typed deserialization fails.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_privacy: Option<serde_json::Value>,
-}
-
-impl Default for BrainConfig {
-    fn default() -> Self {
-        BrainConfig {
-            vault_path: None,
-            embed_profile: None,
-            migrated_to_v2: false,
-            generation: GenerationConfig::default(),
-            embedding: EmbeddingConfig::default(),
-            privacy: PrivacyConfig::default(),
-            ontology: OntologyConfigBlock::default(),
-            trusted_links: Vec::new(),
-            preserved_keys: None,
-            preserved_generation: None,
-            preserved_embedding: None,
-            preserved_privacy: None,
-            preserved_ontology: None,
-            raw_generation: None,
-            raw_embedding: None,
-            raw_privacy: None,
-        }
-    }
 }
 
 /// Report from lenient load, detailing which fields were silently defaulted.
@@ -657,7 +634,7 @@ impl BrainConfig {
         );
         obj.insert(
             "migrated_to_v2".to_string(),
-            serde_json::to_value(&self.migrated_to_v2)?,
+            serde_json::to_value(self.migrated_to_v2)?,
         );
         obj.insert("generation".to_string(), gen_value);
         obj.insert("embedding".to_string(), emb_value);

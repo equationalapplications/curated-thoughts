@@ -123,7 +123,7 @@ pub fn run_doctor_to(out: &mut dyn Write) -> Result<u32> {
         .generation
         .api_key
         .as_deref()
-        .map_or(false, |s| !s.is_empty())
+        .is_some_and(|s| !s.is_empty())
     {
         writeln!(
             out,
@@ -134,7 +134,7 @@ pub fn run_doctor_to(out: &mut dyn Write) -> Result<u32> {
         let key_present = match profile {
             crate::embedder::EmbedProfile::Cloud { api_key, .. } => !api_key.is_empty(),
             crate::embedder::EmbedProfile::External { profile } => {
-                profile.api_key.as_deref().map_or(false, |s| !s.is_empty())
+                profile.api_key.as_deref().is_some_and(|s| !s.is_empty())
             }
             crate::embedder::EmbedProfile::Local { .. } => false,
         };

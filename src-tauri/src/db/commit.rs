@@ -404,6 +404,7 @@ fn evidence_json_with_hashes(
     .to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wiki_fact_outbox_payload(
     id: &str,
     entity_id: &str,
@@ -454,6 +455,7 @@ pub(crate) fn wiki_fact_outbox_payload(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wiki_task_outbox_payload(
     id: &str,
     entity_id: &str,
@@ -738,7 +740,10 @@ fn commit_fact_update(
         .unwrap_or("inferred");
     let tags = parse_tags(payload);
 
-    let existing: Option<(
+    // (source_ref, created_at, source_hash, okf_type, okf_sources,
+    //  okf_verified, okf_usage_window, confidence, last_verified_at,
+    //  last_verified_by, stale_after, lifecycle_status)
+    type WikiFactRow = Option<(
         String,
         i64,
         Option<String>,
@@ -751,7 +756,9 @@ fn commit_fact_update(
         Option<String>,
         Option<i64>,
         Option<String>,
-    )> = conn
+    )>;
+
+    let existing: WikiFactRow = conn
         .query_row(
             // COALESCE handles imported facts with a NULL source_ref so
             // the r.get::<_, String>(0) deserializer doesn't bail before

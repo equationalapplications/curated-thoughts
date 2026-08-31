@@ -18,7 +18,11 @@ fn paths(temp: &TempDir) -> BrainPaths {
 fn absent_ontology_block_loads_as_none() {
     let temp = TempDir::new().unwrap();
     let p = paths(&temp);
-    fs::write(&p.config_path, r#"{"vault_path":"/tmp/v","migrated_to_v2":true}"#).unwrap();
+    fs::write(
+        &p.config_path,
+        r#"{"vault_path":"/tmp/v","migrated_to_v2":true}"#,
+    )
+    .unwrap();
 
     let cfg = BrainConfig::load(&p).expect("load succeeds");
     assert_eq!(cfg.ontology.schema, None);
@@ -28,7 +32,11 @@ fn absent_ontology_block_loads_as_none() {
 fn selection_round_trips_through_write() {
     let temp = TempDir::new().unwrap();
     let p = paths(&temp);
-    fs::write(&p.config_path, r#"{"vault_path":"/tmp/v","migrated_to_v2":true}"#).unwrap();
+    fs::write(
+        &p.config_path,
+        r#"{"vault_path":"/tmp/v","migrated_to_v2":true}"#,
+    )
+    .unwrap();
 
     let mut cfg = BrainConfig::load(&p).unwrap();
     cfg.ontology.schema = Some(OntologySelection::SchemaSoftwareOrg);

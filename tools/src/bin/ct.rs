@@ -242,7 +242,10 @@ fn run(cmd: Cmd) -> Result<i32> {
             yes,
             proposal_id,
         } => approve_cmd(all, yes, proposal_id),
-        Cmd::Ingest { yes, trust_new_links } => {
+        Cmd::Ingest {
+            yes,
+            trust_new_links,
+        } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
                 // can still print the refusal with the planned db path.
@@ -575,7 +578,11 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         &cfg.trusted_links,
     ) {
         LinkVerdict::Denied(reason) => {
-            eprintln!("refused: {link} -> {} ({})", target.display(), reason.message());
+            eprintln!(
+                "refused: {link} -> {} ({})",
+                target.display(),
+                reason.message()
+            );
             Ok(1)
         }
         LinkVerdict::Trusted => {

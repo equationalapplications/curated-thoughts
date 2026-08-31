@@ -132,11 +132,12 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
     "#
     );
 
-    let mut bound: Vec<&dyn rusqlite::ToSql> = Vec::new();
-    bound.push(&filter.entity_id);
-    bound.push(&filter.before_ms);
-    bound.push(&filter.since_ms);
-    bound.push(&filter.until_ms);
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
+        &filter.entity_id,
+        &filter.before_ms,
+        &filter.since_ms,
+        &filter.until_ms,
+    ];
     if let Some(kinds) = filter.kinds.as_ref() {
         for k in kinds {
             bound.push(k);

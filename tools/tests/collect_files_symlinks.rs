@@ -11,9 +11,7 @@
 
 #![cfg(unix)]
 
-use curated_thoughts_tools::cmds::{
-    collect_files, walk_vault, WalkedFile,
-};
+use curated_thoughts_tools::cmds::{collect_files, walk_vault, WalkedFile};
 use std::fs;
 use std::os::unix::fs::symlink;
 use tauri_app_lib::entity_id_for_virtual_path;
@@ -106,7 +104,10 @@ fn an_unapproved_symlink_is_pending_and_its_content_is_not_collected() {
     let outcome = walk_vault(&vault, &[], None);
 
     assert!(
-        !outcome.files.iter().any(|f| f.virtual_path.ends_with("design.md")),
+        !outcome
+            .files
+            .iter()
+            .any(|f| f.virtual_path.ends_with("design.md")),
         "unapproved symlink content must not be collected"
     );
     assert_eq!(outcome.pending.len(), 1);
@@ -127,9 +128,15 @@ fn an_approved_pair_is_walked() {
 
     let outcome = walk_vault(&vault, &ledger, None);
 
-    assert!(outcome.pending.is_empty(), "approved link must not be pending");
     assert!(
-        outcome.files.iter().any(|f| f.virtual_path.ends_with("design.md")),
+        outcome.pending.is_empty(),
+        "approved link must not be pending"
+    );
+    assert!(
+        outcome
+            .files
+            .iter()
+            .any(|f| f.virtual_path.ends_with("design.md")),
         "approved link content must be collected"
     );
 }
@@ -146,7 +153,11 @@ fn a_repointed_link_becomes_pending_again() {
 
     let outcome = walk_vault(&vault, &ledger, None);
 
-    assert_eq!(outcome.pending.len(), 1, "stale target must not grant trust");
+    assert_eq!(
+        outcome.pending.len(),
+        1,
+        "stale target must not grant trust"
+    );
     assert!(outcome.files.is_empty());
 }
 
@@ -181,7 +192,11 @@ fn a_broken_symlink_is_an_error_not_a_silent_skip() {
     let temp = TempDir::new().unwrap();
     let vault = temp.path().join("vault");
     fs::create_dir_all(vault.join("documents")).unwrap();
-    symlink(temp.path().join("does-not-exist"), vault.join("documents").join("dangling")).unwrap();
+    symlink(
+        temp.path().join("does-not-exist"),
+        vault.join("documents").join("dangling"),
+    )
+    .unwrap();
 
     let outcome = walk_vault(&vault, &[], None);
 

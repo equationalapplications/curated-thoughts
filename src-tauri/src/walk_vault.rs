@@ -160,11 +160,7 @@ pub fn collect_files(
 
 /// Walk a vault, consulting the trusted-links ledger for every direct-child
 /// symlink under `documents/`. Unapproved links are reported, never read.
-pub fn walk_vault(
-    vault_root: &Path,
-    ledger: &[TrustedLink],
-    home: Option<&Path>,
-) -> WalkOutcome {
+pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>) -> WalkOutcome {
     let mut outcome = WalkOutcome::default();
 
     // Canonicalize so classify_link's path comparisons see matching
@@ -273,8 +269,6 @@ pub fn entity_ids_for(files: &[WalkedFile], vault_root: &Path) -> HashSet<String
     let root = vault_root.to_str().unwrap_or("");
     files
         .iter()
-        .map(|f| {
-            entity_id_for_virtual_path(f.virtual_path.to_str().unwrap_or(""), Some(root))
-        })
+        .map(|f| entity_id_for_virtual_path(f.virtual_path.to_str().unwrap_or(""), Some(root)))
         .collect()
 }

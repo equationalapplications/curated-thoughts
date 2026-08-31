@@ -17,6 +17,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// (from_id, to_id, rel_type, symbol, entity_id, created_at) — the columns
+/// captured from `curated_relationships` by the legacy-bundle migration.
+type MigrationRelationshipRow = (i64, i64, String, String, String, i64);
+
 #[derive(Debug, Clone, Copy)]
 pub struct MigrationProgress {
     pub current: usize,
@@ -270,9 +274,7 @@ fn capture_embeddings(tx: &rusqlite::Transaction<'_>) -> Result<Vec<(i64, Vec<u8
 /// Capture every curated_relationship edge. Same rationale as
 /// `capture_embeddings`: a full-table scan avoids the unbounded
 /// `IN (?,?,...)` placeholder list.
-fn capture_relationships(
-    tx: &rusqlite::Transaction<'_>,
-) -> Result<Vec<(i64, i64, String, String, String, i64)>> {
+fn capture_relationships(tx: &rusqlite::Transaction<'_>) -> Result<Vec<MigrationRelationshipRow>> {
     let mut stmt = tx.prepare(
         "SELECT from_id, to_id, rel_type, symbol, entity_id, created_at
          FROM curated_relationships",

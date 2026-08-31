@@ -138,10 +138,10 @@ pub fn parse_task_file(content: &str) -> Result<ParsedTask> {
     // field would be misclassified as v0.2 — `status` (an execution value
     // in profile-1) would be routed to `lifecycle_status`, overwriting the
     // authoritative value.
-    let is_profile_v2 = match (status_v, exec_v) {
-        (Some(s), Some(_)) if VALID_LIFECYCLE_STATUSES.contains(&s) => true,
-        _ => false,
-    };
+    let is_profile_v2 = matches!(
+        (status_v, exec_v),
+        (Some(s), Some(_)) if VALID_LIFECYCLE_STATUSES.contains(&s)
+    );
     let (execution_status, lifecycle_status) = if is_profile_v2 {
         (exec_v.unwrap().to_string(), status_v.unwrap().to_string())
     } else {

@@ -15,12 +15,11 @@ pub mod librarian;
 pub mod mcp_server;
 pub mod okf;
 mod okf_api;
-pub mod ontology_config;
 pub mod onboard;
+pub mod ontology_config;
 pub mod outbox;
 mod pipeline;
 pub mod privacy;
-pub mod trusted_links;
 mod proposals_api;
 pub mod recall_bench_fixture;
 pub mod retrieval;
@@ -29,6 +28,7 @@ pub mod search;
 mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
+pub mod trusted_links;
 pub mod vault;
 pub mod walk_vault;
 pub mod watcher;
@@ -71,19 +71,22 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
-struct DbState(Mutex<AppDb>);
+pub struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
-struct PipelineHolder(
-    Mutex<
-        Option<(
-            SyncSender<PipelineJob>,
-            std::thread::JoinHandle<()>,
-            Arc<AtomicUsize>,
-            Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
-        )>,
-    >,
-);
+
+/// Inner components of `PipelineHolder`: the job sender, worker thread, the
+/// consumer-side job counter, and the optional channel for `PipelineStatusEvent`
+/// listeners. Extracted as a type alias so `PipelineHolder`'s declaration stays
+/// below clippy::type_complexity's threshold.
+type PipelineHolderInner = Option<(
+    SyncSender<PipelineJob>,
+    std::thread::JoinHandle<()>,
+    Arc<AtomicUsize>,
+    Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
+)>;
+
+struct PipelineHolder(Mutex<PipelineHolderInner>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
@@ -1124,6 +1127,7 @@ fn start_file_watcher_inner(
 
 /// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
+#[allow(clippy::too_many_arguments)]
 fn recover_after_failed_switch_vault(
     app: &AppHandle,
     db_path: &Path,
@@ -1179,6 +1183,7 @@ fn recover_after_failed_switch_vault(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn switch_vault(
     new_path: String,
     restore_backup: bool,
@@ -2183,10 +2188,8 @@ fn get_chunk_ids_for_wiki_entry(
         .map_err(|e| e.to_string())?;
 
     let mut ids = Vec::new();
-    for row in rows {
-        if let Ok(id) = row {
-            ids.push(id);
-        }
+    for id in rows.flatten() {
+        ids.push(id);
     }
 
     Ok(ids)
@@ -2576,7 +2579,6 @@ fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bo
 /// `ingest_document_cmd` so the event-emission sequence can be exercised in a
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
 /// argument is not supported by `MockRuntime`'s `CommandArg` extractor).
-
 /// Non-destructive read of the most recent `config-malformed` payload
 /// stashed by the setup hook. The setup thread can emit the event before
 /// the frontend listener registers (Tauri does not buffer events emitted
@@ -2898,7 +2900,7 @@ pub fn run() {
                         }
                     }
                 }
-                
+
                 if needs_migration {
                     let app_handle = app.app_handle().clone();
                     tauri::async_runtime::spawn_blocking(move || {
@@ -3646,7 +3648,7 @@ mod heal_invalid_sources_tests {
         config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
         let db_path = tmp.path().join("brain.db");
-        let db = AppDb::open_with_config(&db_path, &tmp.path().join("config.json")).unwrap();
+        let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json")).unwrap();
         let db_state = DbState(Mutex::new(db));
         let vault_state = VaultConfigState(Mutex::new(config));
 
@@ -4044,7 +4046,7 @@ mod maintenance_command_tests {
         // touched). The heal function takes &DbState directly so we seed
         // against the AppDb's connection rather than an in-memory one.
         let db_path = tmp.path().join("test.db");
-        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+        let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
             .expect("open test db");
         let manual = r#"{"proposal_id":null,"evidence":[]}"#;
         // Three rows: one librarian_inferred (must be touched), one
@@ -4153,7 +4155,7 @@ mod maintenance_command_tests {
 
         // (b) heal_invalid_sources
         let db_path = tmp.path().join("e4.db");
-        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("e4-config.json"))
+        let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("e4-config.json"))
             .expect("open test db");
         db.0.execute(
             "INSERT INTO llm_wiki_entries
@@ -4299,7 +4301,7 @@ mod ingest_document_command_tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("brain.db");
-        let db = db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+        let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
             .expect("open test db");
         let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
@@ -4368,7 +4370,7 @@ mod ingest_document_command_tests {
         let events = captured.lock().unwrap();
         let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
-            names.iter().any(|n| *n == "ingest-progress"),
+            names.contains(&"ingest-progress"),
             "expected at least one ingest-progress event, got: {events:?}",
         );
         assert!(
@@ -4384,7 +4386,7 @@ mod ingest_document_command_tests {
             "expected ingest-progress with phase=embedding, got: {events:?}",
         );
         assert!(
-            names.iter().any(|n| *n == "ingest-proposal-ready"),
+            names.contains(&"ingest-proposal-ready"),
             "expected at least one ingest-proposal-ready event, got: {events:?}",
         );
         // The test document doesn't produce a pending proposal (synthesis is

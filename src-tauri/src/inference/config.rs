@@ -5,16 +5,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum GenerationProviderKind {
+    #[default]
     Unconfigured,
     Sidecar,
     External,
-}
-
-impl Default for GenerationProviderKind {
-    fn default() -> Self {
-        GenerationProviderKind::Unconfigured
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -124,7 +120,7 @@ pub fn write_config(brain_dir: &Path, config: &LlmConfig) -> Result<()> {
     // (either `null` or an empty/whitespace-only string — matching
     // `update_provider_with_brain_path` in `inference/mod.rs`, which treats
     // blank incoming values as absent), keep whatever was already on disk.
-    let incoming_key_is_blank = generation.get("api_key").map_or(true, |v| {
+    let incoming_key_is_blank = generation.get("api_key").is_none_or(|v| {
         v.as_str()
             .map(|s| s.trim().is_empty())
             .unwrap_or(v.is_null())

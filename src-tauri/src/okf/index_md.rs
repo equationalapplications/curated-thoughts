@@ -6,8 +6,7 @@ fn escape_index_text(s: &str) -> String {
         .replace('[', "\\[")
         .replace(']', "\\]")
         .replace("\r\n", " ")
-        .replace('\n', " ")
-        .replace('\r', " ")
+        .replace(['\n', '\r'], " ")
 }
 
 fn render_entry(entry: &OkfIndexEntry) -> String {

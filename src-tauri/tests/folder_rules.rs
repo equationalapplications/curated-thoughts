@@ -1,3 +1,7 @@
+// `write_config` is the legacy merge path retained for backward compatibility;
+// these tests pin its behavior alongside the new `BrainConfig::write` path.
+#![allow(deprecated)]
+
 mod helpers;
 use helpers::TestApp;
 use serde_json::json;

@@ -62,7 +62,7 @@ pub fn okf_export_bundle_cmd(
         return Err("Nothing to export: no entities in the brain.".into());
     }
     let count = entities.len();
-    let files = write_bundle_with_profile(&entities, p, v).map_err(|e| e)?;
+    let files = write_bundle_with_profile(&entities, p, v)?;
     write_bundle_zip(&PathBuf::from(&dest_path), &files).map_err(|e| e.to_string())?;
 
     // Write exported event for each exported entity (after zip is finalized)

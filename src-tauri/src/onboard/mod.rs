@@ -10,7 +10,7 @@ use crate::ontology_config::OntologySelection;
 use crate::retrieval::resolve_brain_paths;
 use anyhow::{bail, Result};
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct OnboardOptions {
     /// Optional vault path; if absent, reads from stdin.
