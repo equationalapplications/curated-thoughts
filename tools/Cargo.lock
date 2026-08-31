@@ -1198,7 +1198,7 @@ dependencies = [
  "dirs",
  "fastembed",
  "flate2",
- "fs4",
+ "fs4 0.7.0",
  "futures-util",
  "hex",
  "http",
@@ -1245,7 +1245,7 @@ dependencies = [
  "curated-thoughts",
  "dirs",
  "flate2",
- "fs4",
+ "fs4 1.1.0",
  "notify",
  "rmcp",
  "rusqlite",
@@ -2044,6 +2044,16 @@ checksum = "29f9df8a11882c4e3335eb2d18a0137c505d9ca927470b0cac9c6f0ae07d28f7"
 dependencies = [
  "rustix 0.38.44",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
