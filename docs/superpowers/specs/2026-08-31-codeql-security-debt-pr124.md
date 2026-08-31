@@ -22,6 +22,12 @@ first hides a real inconsistency in how the CLI redacts filesystem paths, and
 the second destroys data the moment anyone writes content into the vault lock
 file — which the code's own doc comment already promises to do.
 
+Fixing the first surfaces a third issue that only exists once the fix lands:
+routing canonicalized paths through the redaction helper is a silent no-op on
+Windows (D2). The spec also takes one piece of adjacent hardening — restricting
+lock-file permissions (D5) — because the `OpenOptions` chain is already open in
+front of us and the file is expected to hold holder identity later.
+
 ## Background
 
 ### Defect 1 — `rust/cleartext-logging`, alert #2
@@ -48,7 +54,7 @@ created 2026-08-31T02:23Z and survived the 06:25Z merge.
 
 The `redact_home` helper it points at (`ct.rs:11-40`) is real, component-aware,
 and covered by four tests (`ct.rs:658-702`). The problem is not that the fix
-was fake — it is that the fix was applied to exactly one of the four sites that
+was fake — it is that the fix was applied to exactly one of the six sites that
 print filesystem paths, and then annotated as if that settled the query.
 
 Unredacted sites in the same file:
@@ -114,11 +120,16 @@ Both `truncate` calls originated in the same clippy pass
 
 ## Goals
 
-1. Apply path redaction consistently at every path-printing site in `ct.rs`.
-2. Remove the inert `codeql[...]` comment and replace it with an honest,
+1. Apply path redaction consistently at every human-readable path-printing
+   site in `ct.rs`.
+2. Make that redaction actually fire on Windows, where canonicalized paths
+   would otherwise slip through unredacted.
+3. Remove the inert `codeql[...]` comment and replace it with an honest,
    auditable disposition for alert #2.
-3. Restore `tools/src/lock.rs` to lock semantics matching `fs_watcher.rs`.
-4. Pin both twins with a behavioral test so the next divergence fails CI.
+4. Restore `tools/src/lock.rs` to lock semantics matching `fs_watcher.rs`.
+5. Restrict lock-file permissions in both twins before holder identity is
+   ever written to that file.
+6. Pin both twins with a behavioral test so the next divergence fails CI.
 
 ## Non-Goals
 
@@ -163,9 +174,41 @@ fn display_target(link_path: &Path) -> String {
 Lines 292, 469, and 530 wrap `db_path.display().to_string()` in `redact_home`
 directly; they need no canonicalization.
 
-`redact_home` itself is unchanged — it is already correct and tested.
+`redact_home`'s matching logic is unchanged. Its input handling is not — see D2.
 
-### D2 — Disposition for alert #2
+### D2 — UNC prefix normalization before redaction (Windows)
+
+`display_target` is the only place where `std::fs::canonicalize` output reaches
+`redact_home`, and on Windows that output is a verbatim UNC path
+(`\\?\C:\Users\Name\Vault`) while `dirs::home_dir()` returns a normal path
+(`C:\Users\Name`).
+
+`redact_home` compares `Path::components()` slices rather than doing string
+replacement, which is what makes it separator-agnostic today. That does **not**
+save it here. The two paths differ at component *zero*:
+`Component::Prefix(VerbatimDisk('C'))` versus `Component::Prefix(Disk('C'))`
+are distinct `Prefix` variants and compare unequal, so the prefix match fails
+immediately and `redact_home` returns the path untouched.
+
+The result is a silent no-op: on Windows, `ct trust` prints the fully resolved
+absolute target for both the `refused:` and `trusted:` messages — the two most
+sensitive sites in the file — while every test passes on Unix CI. This is a
+correctness bug in the fix D1 introduces, not a pre-existing one, because
+`display_target` is what newly routes canonicalized output into `redact_home`.
+
+Strip the verbatim prefix before redacting. In `display_target`, after
+canonicalizing and before calling `redact_home`, drop a leading `\\?\` (and
+`\\?\UNC\`, which canonicalize emits for network shares) so the components
+line up with `home_dir()`'s. Implement it as a small named helper with its own
+tests rather than inline, so the intent survives the next edit.
+
+Tests must cover the UNC shapes explicitly. They are `#[cfg(windows)]`-gated
+for the real `canonicalize` behavior, plus a platform-independent unit test of
+the stripping helper against literal `\\?\C:\...` input so the logic is
+exercised on Unix CI too — otherwise this regresses on a machine no one runs
+tests on.
+
+### D3 — Disposition for alert #2
 
 Delete the `codeql[...]` comment block at `ct.rs:571-574`. Replace it with a
 plain comment stating that `redact_home` is the sanitiser and pointing at its
@@ -190,7 +233,7 @@ dismissal is a human judgment about an alert and belongs where it can be
 audited and revisited — not in a comment that the next reader may again
 mistake for machine-honored suppression.
 
-### D3 — `tools/src/lock.rs` truncate parity
+### D4 — `tools/src/lock.rs` truncate parity
 
 Change `.truncate(true)` to `.truncate(false)` and carry over the rationale
 comment from `fs_watcher.rs:131-137`, adapted to name the CLI context. The
@@ -201,7 +244,35 @@ recorded in the desktop twin.
 No other change to `VaultLock`. The lint stays satisfied by the explicit
 `false`.
 
-### D4 — Parity regression test in both crates
+### D5 — Restrictive lock-file permissions in both twins
+
+The lock file is opened for write in the same `OpenOptions` chain D4 already
+edits, and `VaultLock::acquire`'s doc comment promises an error "identifying
+the existing holder" — i.e. holder identity (PID, process name, user) is
+expected to land in this file. Set the mode now, while the chain is already
+being touched, so that data is not world-readable the day it arrives.
+
+Add `.mode(0o600)` via `std::os::unix::fs::OpenOptionsExt`, `#[cfg(unix)]`-gated,
+to **both** `tools/src/lock.rs` and `src-tauri/src/watcher/fs_watcher.rs`.
+Applying it to only one twin re-opens the exact divergence this spec exists to
+close.
+
+Two limits, stated rather than papered over:
+
+- **`mode()` applies only at creation.** An existing `.curated_thoughts.lock`
+  keeps whatever mode it has. So this is a guarantee for new vaults and
+  best-effort for existing ones. The spec does not chmod existing files: a
+  silent permission change to a file the user may have created deliberately is
+  a worse default than leaving it, and the file holds nothing sensitive today.
+- **Unix only.** Windows has no `OpenOptions` equivalent; restricting the ACL
+  there needs `windows-sys` security attributes, which is disproportionate for
+  a currently-empty file. Out of scope, noted here so the gap is known.
+
+This is defense in depth for data that does not exist yet. It is worth doing
+because the cost is one gated line in a chain already being edited, not because
+there is a live exposure.
+
+### D6 — Parity regression test in both crates
 
 Add the same behavioral test to `tools/src/lock.rs` and to the `src-tauri`
 watcher tests:
@@ -238,18 +309,31 @@ holder identity is written to the file.
 6. Manual: `ct trust --list`, `ct trust <link>` on a home-directory symlink,
    `ct status`, and the `ct ingest` / `ct librarian run` refusals print
    `~`-collapsed paths; `ct status --json` still prints an absolute path.
-7. Post-merge: CodeQL run on `main` — alert #2 either closes or is dismissed
-   per D2, and this spec's Status line records which.
+7. UNC (D2): platform-independent unit test of the prefix-stripping helper
+   against literal `\\?\C:\Users\...` and `\\?\UNC\server\share\...` inputs, so
+   Unix CI exercises the logic; plus `#[cfg(windows)]` tests asserting
+   `display_target` collapses `$HOME` on real `canonicalize` output.
+8. Permissions (D5): `#[cfg(unix)]` test in **both** crates asserting a
+   newly-created `.curated_thoughts.lock` has mode `0o600`.
+9. Post-merge: CodeQL run on `main` — alert #2 either closes or is dismissed
+   per D3, and this spec's Status line records which.
 
 ## Risks
 
-- **Redaction is not a CodeQL sanitiser.** Addressed by D2's explicit
+- **Redaction is not a CodeQL sanitiser.** Addressed by D3's explicit
   either/or disposition; the fix is justified on its own merits regardless of
   what the query decides.
 - **`redact_home` depends on `dirs::home_dir()`**, which returns `None` in some
   sandboxed environments; the helper then returns the path unchanged. This is
   the existing documented behavior and is out of scope, but it means redaction
   is best-effort, not a guarantee. The spec does not claim otherwise.
-- **The duplication remains.** D4 makes divergence *detectable*, not
+- **Windows redaction is untested in CI.** The release workflow runs
+  `ubuntu-latest` only, so the `#[cfg(windows)]` half of D2's coverage never
+  executes here. The platform-independent helper test is the real guard; the
+  gated tests document intent for whoever adds a Windows runner.
+- **Lock-file mode is create-only and Unix-only.** Per D5: existing lock files
+  keep their current permissions, and Windows ACLs are untouched. This is
+  hardening for data that does not exist yet, not a fix for a live exposure.
+- **The duplication remains.** D6 makes divergence *detectable*, not
   impossible. Collapsing the twins stays queued for the phase-3 workspace
   migration.
