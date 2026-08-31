@@ -23,7 +23,11 @@ PR clears both.
 
 Deliberately out of scope, to keep this reviewable in minutes:
 
-- Auditing or changing the other path-printing sites in `ct.rs`.
+- Auditing the remaining path-printing sites in `ct.rs`. Specifically
+  deferred: `ct.rs:469` (`db_path` in `ct status`). The two `ct trust`
+  sites that print a canonicalized target (`ct.rs:634`, `ct.rs:646`) are
+  **in** scope — see Item 2 — because they are the same command and the
+  same leak class as the alert being dismissed.
 - `--json` output redaction carve-outs.
 - Lock-file byte-parity tests across the `tools` and `src-tauri` crates.
 - Collapsing the `lock.rs` / `fs_watcher.rs` duplication (still the planned
@@ -61,7 +65,13 @@ module header documents the duplication; the fix simply never crossed over.
 ### Fix
 
 Mirror `fs_watcher.rs:131-140` exactly: `.truncate(false)`, carrying the same
-rationale comment. The lock file's contents are never read — the lock is held
+rationale comment. Also correct the stale claim in the `lock.rs` module
+header (`lock.rs:13`) that "Both implementations use
+`fs4::FileExt::lock_exclusive`" — both actually use the **non-blocking**
+`try_lock_exclusive`, which is the semantics this fix relies on. It is a
+one-line doc fix, and it is the exact hand-sync drift listed under Risks;
+leaving it costs nothing today and misleads the next reader of the
+duplicate pair. The lock file's contents are never read — the lock is held
 via the **non-blocking** `fs4::FileExt::try_lock_exclusive` on the open handle
 (contention surfaces as `Err(AlreadyLocked)` / `Err(WouldBlock)`, not `Ok(false)`
 — see the API note in `lock.rs:63-73` and `fs_watcher.rs:106-113`). Truncation
@@ -82,6 +92,12 @@ contents are unchanged.
 
 This exercises the real exploitation path against the real filesystem with no
 mocking. It fails on `truncate(true)` and passes after the fix.
+
+The assertion is **only** that the canary's contents are unchanged — the
+test must not `expect()` a successful `acquire`. If a later hardening pass
+makes `acquire` reject a symlinked lock path outright, the call returns
+`Err`, the canary is still intact, and this test should keep passing
+unmodified.
 
 **Platform scope (Unix-only, this test only).** `#[cfg(unix)]` is applied to
 `vault_lock_does_not_truncate_symlink_target` itself (or, equivalently, that
@@ -136,11 +152,9 @@ this, and the gap is real:
   config, can put an absolute path (or any other string) into `link`,
   and `ct trust --list` would print it verbatim into stdout.
 
-The "structural" argument from the previous revision was right that the
-type docstring and the in-tree callers agree on vault-relative paths, but
-the serde boundary is the actual surface that reaches the println!, and
-that boundary does not enforce it. The dismissal rationale therefore has
-to be about the print site, not the load contract.
+The serde boundary — not the type docstring — is the surface that reaches
+the `println!`, and it enforces nothing. The dismissal rationale therefore
+has to rest on the print site, not on the load contract.
 
 CodeQL's `rust/cleartext-logging` query does not model `redact_home` as a
 sanitiser, so it flags the call anyway. The `// codeql[rust/cleartext-logging]`
@@ -166,7 +180,7 @@ review surface.
 
 ### Fix
 
-Two changes in `ct.rs`:
+Three changes in `ct.rs`:
 
 1. Pass `entry.link` through `redact_home` at the print site. `redact_home`
    collapses a `$HOME` prefix to `~` and leaves other strings untouched, so
@@ -175,14 +189,20 @@ Two changes in `ct.rs`:
    leak), and any other absolute path simply prints as-is — never as
    `$HOME/whatever` — which is the only invariant CodeQL's
    `rust/cleartext-logging` query is checking for.
-2. Delete the inert suppression comment and replace it with a plain comment
+2. Wrap `target_display` in `redact_home` at `ct.rs:634` and `ct.rs:646`.
+   Both print a raw `std::fs::canonicalize()` result — an absolute path,
+   commonly under `$HOME` — from the same `ct trust` command. CodeQL did
+   not flag them, but they are the same leak class as alert #2, and a
+   dismissal that says "`ct trust` sanitises its printed paths" is not
+   true while they stand. Two one-line changes.
+3. Delete the inert suppression comment and replace it with a plain comment
    that records the sanitiser, the verdict, and a warning against re-adding
    the suppression:
 
 ```rust
-// Both fields are sanitised by `redact_home` before printing:
-// the `$HOME` prefix is collapsed to `~`, so the values reaching
-// stdout cannot contain an absolute path under the user's home
+// Both fields on this line are sanitised by `redact_home` before
+// printing: the `$HOME` prefix is collapsed to `~`, so the values
+// this statement writes cannot contain an absolute path under the home
 // (e.g. `~/.ssh/keys`). CodeQL rust/cleartext-logging flags this
 // anyway (it does not model `redact_home` as a sanitiser); alert #2
 // dismissed as a false positive citing this sanitiser. Inline
@@ -206,7 +226,8 @@ correctly earns its own alert to triage.
 ## Verification
 
 - `cargo test -p tools` — new symlink canary test plus existing lock tests.
-- `cargo clippy` — clean.
+- `cargo clippy` — clean. **Run locally**: CI does not gate clippy today,
+  so a warning introduced here would not fail the PR.
 - CI green on the PR.
 - CodeQL green **except** alert #2, which persists until manually dismissed.
 
