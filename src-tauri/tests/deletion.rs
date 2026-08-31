@@ -1,6 +1,6 @@
 mod helpers;
 use std::sync::{atomic::AtomicUsize, mpsc, Arc};
-use tauri_app_lib::{PipelineJob, PipelineWorker};
+use tauri_app_lib::{Heartbeat, PipelineJob, PipelineWorker};
 use tempfile::TempDir;
 
 fn migrate_db(tmp: &TempDir) {
@@ -67,6 +67,7 @@ fn delete_cascades_chunks_embeddings_shadow_copy_and_orphans_wiki() {
         rx,
         Arc::new(AtomicUsize::new(0)),
         status_tx,
+        Arc::new(Heartbeat::new()),
     );
     let handle = std::thread::spawn(move || worker.run());
     tx.send(PipelineJob::Delete(doc_path_str.clone())).unwrap();

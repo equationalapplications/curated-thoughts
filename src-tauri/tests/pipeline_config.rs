@@ -10,7 +10,7 @@ use std::sync::{atomic::AtomicUsize, mpsc, Arc};
 
 use tauri_app_lib::config::BrainConfig;
 use tauri_app_lib::retrieval::BrainPaths;
-use tauri_app_lib::PipelineJob;
+use tauri_app_lib::{Heartbeat, PipelineJob};
 use tempfile::TempDir;
 
 static PIPELINE_STUB_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -75,6 +75,7 @@ fn pipeline_worker_exits_early_on_malformed_config() {
         rx,
         Arc::new(AtomicUsize::new(0)),
         status_tx,
+        Arc::new(Heartbeat::new()),
     );
     let handle = std::thread::Builder::new()
         .name("pipeline-worker-malformed".to_string())

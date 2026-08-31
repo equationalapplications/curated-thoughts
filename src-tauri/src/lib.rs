@@ -51,6 +51,8 @@ use outbox::{
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
 #[cfg(feature = "test-utils")]
+pub use pipeline::watchdog::heartbeat::Heartbeat;
+#[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
 use rusqlite::OptionalExtension;
