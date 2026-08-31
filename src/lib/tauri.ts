@@ -608,6 +608,18 @@ export const acknowledgeMigrationDisclosure = (): Promise<void> =>
 export const acknowledgeEphemeralDisclosure = (): Promise<void> =>
   invoke('acknowledge_ephemeral_disclosure');
 
+export type OntologySelection =
+  | 'schema-org'
+  | 'schema-software-org'
+  | 'emergent'
+  | 'off';
+
+export const getOntologySelection = (): Promise<OntologySelection> =>
+  invoke('get_ontology_selection');
+
+export const setOntologySelection = (selection: OntologySelection): Promise<void> =>
+  invoke('set_ontology_selection', { selection });
+
 export interface OkfExportSummary {
   path: string;
   entities: number;

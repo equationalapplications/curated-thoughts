@@ -20,6 +20,8 @@ import {
   addEntityFact,
   updateEntityFact,
   archiveEntityFact,
+  getOntologySelection,
+  setOntologySelection,
 } from '../lib/tauri';
 
 describe('tauri API helpers', () => {
@@ -72,5 +74,17 @@ describe('tauri API helpers', () => {
 
     await archiveEntityFact('ent_1', 'fact_1');
     expect(invoke).toHaveBeenCalledWith('archive_entity_fact_cmd', { entityId: 'ent_1', factId: 'fact_1' });
+  });
+
+  it('getOntologySelection invokes the command with no args', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce('schema-org');
+    await expect(getOntologySelection()).resolves.toBe('schema-org');
+    expect(invoke).toHaveBeenCalledWith('get_ontology_selection');
+  });
+
+  it('setOntologySelection passes the slug', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    await setOntologySelection('off');
+    expect(invoke).toHaveBeenCalledWith('set_ontology_selection', { selection: 'off' });
   });
 });

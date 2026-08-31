@@ -2698,6 +2698,8 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             needs_chunk_hash_migration,
             vault_write_note,
             vault_upsert_index_entry,
+            get_ontology_selection,
+            set_ontology_selection,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -3174,6 +3176,8 @@ pub fn run() {
             set_privacy_mode,
             acknowledge_migration_disclosure,
             acknowledge_ephemeral_disclosure,
+            get_ontology_selection,
+            set_ontology_selection,
             get_binary_path,
             get_brain_dir,
             get_brain_dir_info,
@@ -3377,6 +3381,39 @@ fn acknowledge_migration_disclosure() -> Result<(), String> {
 fn acknowledge_ephemeral_disclosure() -> Result<(), String> {
     let brain_dir = PathBuf::from(get_brain_dir_inner());
     privacy::acknowledge_ephemeral_disclosure(&brain_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_ontology_selection() -> Result<String, String> {
+    use crate::ontology_config::OntologySelection;
+    let paths = retrieval::resolve_brain_paths();
+    let selection = config::BrainConfig::load_lenient(&paths)
+        .map_err(|e| e.to_string())?
+        .config
+        .ontology
+        .schema
+        // Never chosen → the Desktop default. The CLI writes its own default
+        // during --onboard, so an absent value here means a Desktop-first vault.
+        .unwrap_or(OntologySelection::DESKTOP_DEFAULT);
+    serde_json::to_value(selection)
+        .map_err(|e| e.to_string())?
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "ontology selection did not serialize to a string".to_string())
+}
+
+#[tauri::command]
+fn set_ontology_selection(selection: String) -> Result<(), String> {
+    use crate::ontology_config::OntologySelection;
+    let parsed: OntologySelection =
+        serde_json::from_value(serde_json::Value::String(selection.clone()))
+            .map_err(|_| format!("unknown ontology selection: {selection}"))?;
+
+    let paths = retrieval::resolve_brain_paths();
+    let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    cfg.ontology.schema = Some(parsed);
+    cfg.write(&paths).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
