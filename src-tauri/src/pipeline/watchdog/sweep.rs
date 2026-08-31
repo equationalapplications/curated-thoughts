@@ -49,23 +49,65 @@ impl InFlightClaims {
         self.paths.clear();
     }
 
+    /// Drop claims for paths that are no longer sweepable.
+    ///
+    /// A claim is only meant to cover the window between `try_send` and the
+    /// worker finishing the job. Nothing signals completion back to the
+    /// supervisor, so completion is inferred from the document leaving the
+    /// pending set: once the row is `indexed`/`error` the claim is stale.
+    /// Without this the set grows to channel capacity and never shrinks, and
+    /// — worse — a path swept once is skipped by every later sweep, which
+    /// disables the backstop this module exists to provide
+    /// (CodeRabbit review PRRT_kwDOSVmXas6d3ZZQ).
+    pub fn retain_sweepable(&mut self, sweepable: &HashSet<String>) {
+        self.paths.retain(|p| sweepable.contains(p));
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.paths.len()
     }
 }
 
-pub fn list_sweepable_pending(conn: &Connection, limit: usize) -> Result<Vec<String>> {
+/// Status marking a row that was deferred by a full channel and must be
+/// re-enqueued as a *forced* rechunk rather than a plain ingest.
+pub const STATUS_PENDING_REINDEX: &str = "pending_reindex";
+
+/// Every sweepable path with its status. The status is load-bearing:
+/// `pending_reindex` rows were staged by `queue_full_reindex` /
+/// `run_wiki_reembed`, whose whole point is a forced rechunk. Re-enqueueing
+/// them as a plain ingest would let `ingest_file`'s unchanged-hash check
+/// short-circuit and silently drop the chunk-strategy or embedding-model
+/// upgrade (CodeRabbit review PRRT_kwDOSVmXas6d3ZZM).
+pub fn list_sweepable_pending(conn: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT path FROM documents
+        "SELECT path, status FROM documents
           WHERE status IN ('pending', 'pending_reindex') AND quarantined_at IS NULL
           ORDER BY id
           LIMIT ?1",
     )?;
-    let rows = stmt.query_map([limit as i64], |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
+    }
+    Ok(out)
+}
+
+/// The full sweepable set, used to expire stale claims. Unbounded on purpose:
+/// `retain_sweepable` must see every sweepable path or it would drop live
+/// claims for rows merely beyond the batch limit.
+pub fn sweepable_path_set(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM documents
+          WHERE status IN ('pending', 'pending_reindex') AND quarantined_at IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = HashSet::new();
+    for row in rows {
+        out.insert(row?);
     }
     Ok(out)
 }
@@ -79,13 +121,23 @@ pub fn sweep(
     claims: &mut InFlightClaims,
     limit: usize,
 ) -> Result<usize> {
+    // Expire claims for rows that have left the pending set — that is the
+    // only completion signal the supervisor gets (spec §5).
+    claims.retain_sweepable(&sweepable_path_set(conn)?);
+
     let paths = list_sweepable_pending(conn, limit)?;
     let mut queued = 0usize;
-    for path in paths {
+    for (path, status) in paths {
         if claims.contains(&path) {
             continue;
         }
-        match tx.try_send(PipelineJob::ingest_counted(path.clone())) {
+        // Preserve the deferred-reindex intent: those rows need force=true.
+        let job = if status == STATUS_PENDING_REINDEX {
+            PipelineJob::rechunk_for_reembed(path.clone())
+        } else {
+            PipelineJob::ingest_counted(path.clone())
+        };
+        match tx.try_send(job) {
             Ok(()) => {
                 claims.claim(path);
                 queued += 1;
@@ -223,6 +275,108 @@ mod tests {
         let n = sweep(&conn, &tx, &mut claims, 100).unwrap();
         assert_eq!(n, 0, "capacity 0 cannot accept any enqueue");
         assert_eq!(claims.len(), 0, "Full path stays pending");
+    }
+
+    #[test]
+    fn pending_reindex_rows_are_swept_as_a_forced_rechunk() {
+        // The whole point of a deferred reindex is force=true. Sweeping it as
+        // a plain ingest lets the unchanged-hash check short-circuit and the
+        // rechunk is silently dropped.
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/plain.md", "pending");
+        seed(&conn, "/reindex.md", "pending_reindex");
+
+        let (tx, rx) = sync_channel(16);
+        let mut claims = InFlightClaims::new();
+        assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 2);
+        drop(tx);
+
+        let got: Vec<(String, bool)> = rx
+            .iter()
+            .map(|j| match j {
+                PipelineJob::Ingest { path, force, .. } => (path, force),
+                PipelineJob::Delete(path) => (path, false),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("/plain.md".to_string(), false),
+                ("/reindex.md".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn claims_expire_once_the_document_leaves_the_pending_set() {
+        // Nothing signals job completion back to the supervisor, so the sweep
+        // infers it from the row leaving the pending set. Without this the
+        // claim set grows without bound and a path swept once is skipped
+        // forever, disabling the backstop.
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/done.md", "pending");
+
+        let (tx, _rx) = sync_channel(16);
+        let mut claims = InFlightClaims::new();
+        assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 1);
+        assert_eq!(claims.len(), 1);
+
+        // The worker finishes: the row is no longer sweepable.
+        conn.execute(
+            "UPDATE documents SET status = 'indexed' WHERE path = '/done.md'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 0);
+        assert_eq!(claims.len(), 0, "completed path must not stay claimed");
+    }
+
+    #[test]
+    fn an_expired_claim_lets_a_requeued_path_be_swept_again() {
+        // The regression that matters: a path swept once, completed, then made
+        // pending again by the watcher must still be rescued by the sweep.
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/again.md", "pending");
+
+        let (tx, _rx) = sync_channel(16);
+        let mut claims = InFlightClaims::new();
+        assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 1);
+
+        conn.execute(
+            "UPDATE documents SET status = 'indexed' WHERE path = '/again.md'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 0);
+
+        conn.execute(
+            "UPDATE documents SET status = 'pending' WHERE path = '/again.md'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            sweep(&conn, &tx, &mut claims, 100).unwrap(),
+            1,
+            "a re-pending path must be swept again"
+        );
+    }
+
+    #[test]
+    fn a_long_running_in_flight_path_keeps_its_claim() {
+        // The claim must survive while the row is still pending, or a slow
+        // Extracting/Embedding job gets re-enqueued every pass (spec §5).
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/slow.md", "pending");
+
+        let (tx, _rx) = sync_channel(16);
+        let mut claims = InFlightClaims::new();
+        assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 1);
+
+        for _ in 0..3 {
+            assert_eq!(sweep(&conn, &tx, &mut claims, 100).unwrap(), 0);
+        }
+        assert_eq!(claims.len(), 1, "still in flight, still claimed");
     }
 
     #[test]

@@ -33,6 +33,20 @@ function isIngestActive(ingest: IngestHealth | undefined): boolean {
   return !!ingest && ingest !== 'idle';
 }
 
+/// Whether ingest is doing work that a vault switch would interrupt.
+///
+/// Distinct from `isIngestActive`, which drives `activeJob` and the status
+/// banner. 'degraded' means the watchdog exhausted its respawn cap and parked
+/// the pipeline: no work is in flight and none will be until the user acts, so
+/// it still belongs in `activeJob` (the banner) but must NOT count as busy.
+/// Gating on it would put `switchVault` behind `wikiStatus.busy` — and the
+/// bounded `switch_vault` (10s join + epoch bump) is precisely the documented
+/// recovery from a parked pipeline (spec §7), leaving force-quitting the app
+/// as the only way out.
+function isIngestBusy(ingest: IngestHealth | undefined): boolean {
+  return isIngestActive(ingest) && ingest !== 'degraded';
+}
+
 function getActiveJob(payload: WikiStatusPayload): WikiStatus['activeJob'] {
   const active = [
     isIngestActive(payload.ingest) ? 'ingesting' : null,
@@ -98,7 +112,7 @@ export function useWikiStatus(): WikiStatus {
           forgetting: normalized.forgetting ?? prev.forgetting,
         };
         const activeJob = getActiveJob(payload);
-        const ingestBusy = isIngestActive(payload.ingest);
+        const ingestBusy = isIngestBusy(payload.ingest);
         return {
           ...payload,
           busy:

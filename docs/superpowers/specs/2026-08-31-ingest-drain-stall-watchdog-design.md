@@ -130,16 +130,26 @@ contention and must not be an unmodeled hole in the stage map.
 `stage_started_ms` are independent atomics; independent loads can interleave
 with a concurrent `enter()` and combine fields from different transitions —
 the classic torn-read hazard that produces a false trip or a missed stall.
-`Heartbeat::snapshot()` therefore implements a seqlock: read `seq` (the
-seqlock key), load the remaining fields, re-read `seq`, and retry if the two
-`seq` reads disagree. `enter()` bumps `seq` *after* writing
-`stage_started_ms` and `stage` so a successful retry observes a consistent
-point-in-time view. All `enter()` and snapshot reads use `Ordering::SeqCst`
-to make the seqlock protocol well-defined on every supported architecture.
-`subject` is loaded with `try_lock` per the next paragraph and may return
-`"unknown"`; it is excluded from the seqlock because the supervisor uses only
-the atomics for trip decisions. The retry budget is bounded (e.g. ≤ 4
-attempts) so a writer that races continuously cannot stall the supervisor.
+`Heartbeat::snapshot()` therefore implements a seqlock with the full writer
+protocol: `enter()` bumps `seq` to an **odd** value to open the write window,
+writes `subject`, `stage_started_ms` and `stage`, then bumps `seq` **even**
+again to close it. `snapshot()` reads `seq`, loads the remaining fields,
+re-reads `seq`, and accepts the read only when the two `seq` values are equal
+*and* even — a reader that lands mid-write sees either an odd `seq` or two
+different values, and retries. All `enter()` and snapshot reads use
+`Ordering::SeqCst` to make the protocol well-defined on every supported
+architecture.
+
+`subject` is written **inside** the window and read with `try_lock` per the
+next paragraph, degrading to `"unknown"` on contention; keeping it inside the
+window is what stops a snapshot from pairing a new stage with the previous
+document's path and striking an innocent file.
+
+The retry budget is bounded (`SNAPSHOT_RETRY_BUDGET`) so a writer that races
+continuously cannot stall the supervisor. Exhausting it does **not** yield a
+usable snapshot: the returned value carries `consistent: false`, and the
+supervisor skips the tick entirely rather than deciding a trip on fields that
+may straddle two transitions.
 
 **The supervisor MUST NOT block on `subject`.** It reads with `try_lock` and
 degrades to `"unknown"` on contention. A wedged worker can be stalled while
@@ -270,6 +280,18 @@ later escalations.
 3. **Respawn.** Bump the shared epoch, abandon the wedged thread, rebuild the
    channel, and spawn a fresh worker at the new epoch. Requeue undrained jobs via
    §5's sweep.
+
+   The rebuilt channel makes **publishing the new sender** part of the step, not
+   an afterthought: the abandoned worker still owns the *old* receiver, so any
+   producer — including the supervisor's own sweep — left holding the old sender
+   enqueues into a queue nobody drains, which is the wedge this step exists to
+   clear. The supervisor therefore obtains the replacement's sender from
+   `on_replace_worker` and adopts it before sweeping, and the same call
+   republishes it to the shared `PipelineHandle` that every IPC producer reads.
+   Because the replacement starts with an empty in-flight set, the supervisor
+   clears the claim set at the same moment. If the replacement cannot be
+   spawned, the pipeline parks in `degraded` (step 5) rather than reporting a
+   recovery that did not happen.
 4. **Quarantine threshold.** A document reaching 2 strikes is marked
    `quarantined`, skipped by the sweep, and surfaced in the UI, guaranteeing
    forward progress when one poison file is the trigger. A successful ingest
@@ -301,21 +323,52 @@ shared epoch at each stage transition. On mismatch the worker returns
 immediately without touching the database, the pending counter, or `status_tx`.
 The check costs one relaxed atomic load per transition.
 
+The guard must cover **every** transition, including the ones published from
+inside `ingest_file_virtual` (`Reading`, `Extracting`, `Chunking`, `Embedding`,
+`Committing`) — a job that passes the check at the top of the worker loop can
+still be superseded partway through. Code holding a bare `&Heartbeat` could
+publish past supersession and mask a stall on the *replacement* worker, so all
+in-job transitions go through `StageReporter`, which owns the epoch comparison
+and returns `false` once superseded; the caller must then return immediately.
+Standalone callers with no watchdog-managed worker (tooling, Tauri commands)
+use `StageReporter::unguarded`, which is never superseded.
+
 ## 5. Pending-row drainer
 
 §1.2 establishes that nothing consumes `documents.status = 'pending'`. This spec
 adds that consumer, because §4.3's requeue step cannot exist without a
 pending-row-to-job path.
 
-A **sweep** selects `documents` rows where `status = 'pending'` and the path is
-not quarantined, ordered by rowid, and enqueues a `PipelineJob::ingest_counted`
-for each. The sweep also tracks an **in-flight claim set** owned by the
-supervisor: a row whose path is currently in the set is skipped on subsequent
-passes, so a long `Extracting` or `Embedding` job does not get re-enqueued by
-the next 60s sweep. The claim is released when `try_send` returns `QueueFull`
-(the job was *not* enqueued — leave the row `pending` for the next pass) and
-when the worker is respawned (the abandoned in-flight set is gone with the
-worker). It runs:
+A **sweep** selects `documents` rows where `status` is `'pending'` or
+`'pending_reindex'` and the path is not quarantined, ordered by rowid, and
+enqueues a job for each. The status decides which job: `'pending'` becomes a
+`PipelineJob::ingest_counted` (`force: false`), while `'pending_reindex'` —
+staged by `queue_full_reindex` / `run_wiki_reembed` when the channel was full
+— becomes a `PipelineJob::rechunk_for_reembed` (`force: true`). Carrying that
+distinction is load-bearing: re-enqueueing a deferred reindex as a plain
+ingest lets the unchanged-hash check short-circuit, silently dropping the
+chunk-strategy or embedding-model upgrade the user asked for.
+
+`documents.status` admits `'pending_reindex'` as of schema V15; the original
+CHECK constraint did not, so every staging write failed and the deferral was
+lost.
+
+The sweep also tracks an **in-flight claim set** owned by the supervisor: a
+row whose path is currently in the set is skipped on subsequent passes, so a
+long `Extracting` or `Embedding` job does not get re-enqueued by the next 60s
+sweep. A claim is dropped when:
+
+- `try_send` returns `QueueFull` (the job was *not* enqueued — leave the row
+  `pending` for the next pass);
+- the worker is replaced (the abandoned in-flight set is gone with the worker);
+- **the row leaves the sweepable set**, which is how the supervisor infers
+  completion. Nothing signals job completion back to the watchdog, so each
+  sweep first expires claims for paths that are no longer `pending` /
+  `pending_reindex`. Without this the claim set grows to channel capacity and
+  never shrinks, and — worse — any path swept once is skipped by every later
+  sweep, disabling the very backstop this section describes.
+
+It runs:
 
 - at pipeline startup, so rows staged while the app was closed are picked up;
 - after a worker respawn (§4.3), to requeue work the abandoned worker held;

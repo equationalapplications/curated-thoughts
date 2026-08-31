@@ -151,6 +151,39 @@ describe('useWikiStatus', () => {
     });
   });
 
+  it('does not report degraded ingest as busy, so vault switching stays reachable', async () => {
+    // A degraded pipeline is parked, not working: the watchdog exhausted its
+    // respawn cap and nothing is in flight. `busy` gates switchVault, and the
+    // bounded switch_vault is the documented recovery from this exact state —
+    // gating it here would leave force-quitting as the only way out.
+    const { result } = renderHook(() => useWikiStatus());
+
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'degraded' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.ingest).toBe('degraded');
+      expect(result.current.busy).toBe(false);
+    });
+  });
+
+  it('still reports stalled ingest as busy while the watchdog is recovering', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'stalled' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.busy).toBe(true);
+    });
+  });
+
   it('treats idle ingest as not busy', async () => {
     const { result } = renderHook(() => useWikiStatus());
 

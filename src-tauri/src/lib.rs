@@ -63,9 +63,9 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 use std::sync::{
-    mpsc::{self, Sender, SyncSender},
+    mpsc::Sender,
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
@@ -82,13 +82,7 @@ struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
 /// listeners, and the worker's `Heartbeat` (spec §2.1) shared with the
 /// watchdog supervisor. Extracted as a type alias so `PipelineHolder`'s
 /// declaration stays below clippy::type_complexity's threshold.
-type PipelineHolderInner = Option<(
-    SyncSender<PipelineJob>,
-    std::thread::JoinHandle<()>,
-    Arc<AtomicUsize>,
-    Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
-    Arc<pipeline::watchdog::heartbeat::Heartbeat>,
-)>;
+type PipelineHolderInner = Option<pipeline::PipelineHandle>;
 
 struct PipelineHolder(Mutex<PipelineHolderInner>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
@@ -876,7 +870,7 @@ fn start_file_watcher_inner(
         let tuple = guard
             .as_mut()
             .ok_or_else(|| "pipeline not running".to_string())?;
-        tuple.3.take()
+        tuple.status_rx.take()
     };
 
     if let Some(status_rx) = status_rx {
@@ -910,7 +904,7 @@ fn start_file_watcher_inner(
         let (tx, heartbeat) = {
             let guard = pipeline.0.lock().unwrap();
             match guard.as_ref() {
-                Some(t) => (t.0.clone(), t.4.clone()),
+                Some(t) => (t.tx.clone(), t.heartbeat.clone()),
                 None => return Err("pipeline not running".to_string()),
             }
         };
@@ -922,11 +916,12 @@ fn start_file_watcher_inner(
 
         let app_handle = app.clone();
         let stop = Arc::new(AtomicBool::new(false));
-        // on_replace_worker: signal the orchestrator to spawn a fresh
-        // worker on a new channel after the watchdog supersedes a wedged
-        // worker (CodeRabbit review PRRT_kwDOSVmXas6d28dw).
-        let replace_signal = std::sync::Arc::new(std::sync::Mutex::new(false));
-        let replace_signal_for_callback = replace_signal.clone();
+        // on_replace_worker: actually rebuild the channel and spawn a fresh
+        // worker, then publish the new sender so every producer — and the
+        // supervisor's own sweep — stops writing into the queue the
+        // abandoned worker still owns
+        // (CodeRabbit review PRRT_kwDOSVmXas6d28dw / PRRT_kwDOSVmXas6d3ZYn).
+        let replace_app = app.clone();
         let join = pipeline::watchdog::spawn_supervisor(pipeline::watchdog::SupervisorConfig {
             db_path: brain_paths.db_path.clone(),
             heartbeat: heartbeat.clone(),
@@ -942,9 +937,20 @@ fn start_file_watcher_inner(
                 });
             }),
             on_replace_worker: Box::new(move || {
-                if let Ok(mut flag) = replace_signal_for_callback.lock() {
-                    *flag = true;
-                }
+                let holder = replace_app.try_state::<PipelineHolder>()?;
+                let mut guard = match holder.0.lock() {
+                    Ok(g) => g,
+                    // A panicking producer poisoned the holder; recovering the
+                    // sender from it would be worse than parking in degraded.
+                    Err(e) => {
+                        eprintln!("[watchdog] pipeline holder poisoned: {e}");
+                        return None;
+                    }
+                };
+                let handle = guard.as_mut()?;
+                let new_tx = handle.respawn_worker();
+                eprintln!("[watchdog] replacement pipeline worker spawned");
+                Some(new_tx)
             }),
         });
         // Stash the supervisor's stop flag + join handle so the next
@@ -1349,7 +1355,10 @@ async fn switch_vault(
 
     {
         let mut g = pipeline.0.lock().unwrap();
-        if let Some((tx, join, _pending, _status_rx, heartbeat)) = g.take() {
+        if let Some(handle) = g.take() {
+            let pipeline::PipelineHandle {
+                tx, join, heartbeat, ..
+            } = handle;
             drop(tx);
             // Supersede first, so a worker that later wakes exits without
             // racing the replacement (spec §4.1), then give it a bounded
@@ -1588,19 +1597,24 @@ fn queue_full_reindex(
     pipeline: State<PipelineHolder>,
     db_state: State<DbState>,
 ) -> Result<usize, String> {
-    let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+    // Read the work list under the lock, then release it. Holding `db_state`
+    // across the whole enqueue loop serializes every other IPC handler behind
+    // this command for the duration of a full-vault reindex, freezing the UI
+    // (spec §11 mutex trap).
+    let paths = {
+        let guard = db_state.0.lock().unwrap();
+        crate::db::list_indexed_user_doc_paths(&guard.0).map_err(|e| e.to_string())?
+    };
     let tx = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         pipeline_guard
             .as_ref()
             .ok_or_else(|| "pipeline not running".to_string())?
-            .0
+            .tx
             .clone()
     };
     let mut queued = 0usize;
-    let mut deferred = 0usize;
+    let mut deferred: Vec<String> = Vec::new();
     let total = paths.len();
     for path in paths {
         if !std::path::Path::new(&path).exists() {
@@ -1615,32 +1629,41 @@ fn queue_full_reindex(
         // try_send, not send: a blocking send here freezes the Tauri IPC
         // thread when the channel fills (spec §6). These rows were selected
         // from `list_indexed_user_doc_paths` (status='indexed'), so the §5
-        // pending sweep cannot rescue them. Mark them as 'pending_reindex'
-        // so a dedicated sweep picks them up as `PipelineJob::rechunk` and
-        // the rechunk semantics survive a full channel
-        // (CodeRabbit review PRRT_kwDOSVmXas6d28dn).
-        match tx.try_send(job.clone()) {
+        // pending sweep cannot rescue them — stage them below so the sweep
+        // can (CodeRabbit review PRRT_kwDOSVmXas6d28dn).
+        match tx.try_send(job) {
             Ok(()) => queued += 1,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                deferred += 1;
-                if let Err(e) = conn.execute(
-                    "UPDATE documents SET status = 'pending_reindex'
-                       WHERE path = ?1 AND status = 'indexed'",
-                    rusqlite::params![&path],
-                ) {
-                    eprintln!(
-                        "[queue_full_reindex] failed to stage {path} as pending_reindex: {e}"
-                    );
-                }
-            }
+            Err(std::sync::mpsc::TrySendError::Full(_)) => deferred.push(path),
             Err(std::sync::mpsc::TrySendError::Disconnected(e)) => {
                 return Err(format!("pipeline channel closed: {e:?}"));
             }
         }
     }
-    if deferred > 0 {
+
+    if !deferred.is_empty() {
+        // Stage every deferred row in one short critical section. The status
+        // must match the job that was dropped: only a forced rechunk becomes
+        // 'pending_reindex' (which the sweep re-enqueues with force=true); a
+        // plain ingest becomes 'pending' so the sweep does not silently
+        // upgrade it into a rechunk.
+        let staged_status = if force_rechunk {
+            crate::pipeline::watchdog::sweep::STATUS_PENDING_REINDEX
+        } else {
+            "pending"
+        };
+        let guard = db_state.0.lock().unwrap();
+        for path in &deferred {
+            if let Err(e) = guard.0.execute(
+                "UPDATE documents SET status = ?2
+                   WHERE path = ?1 AND status = 'indexed'",
+                rusqlite::params![path, staged_status],
+            ) {
+                eprintln!("[queue_full_reindex] failed to stage {path} as {staged_status}: {e}");
+            }
+        }
         eprintln!(
-            "[queue_full_reindex] queued {queued} of {total}; {deferred} deferred (status=pending_reindex for sweep pickup)"
+            "[queue_full_reindex] queued {queued} of {total}; {} deferred (status={staged_status} for sweep pickup)",
+            deferred.len()
         );
     }
     Ok(queued)
@@ -1828,7 +1851,7 @@ async fn run_wiki_reembed(
     let tx = {
         let pipeline_guard = pipeline.0.lock().unwrap();
         match pipeline_guard.as_ref() {
-            Some(p) => p.0.clone(),
+            Some(p) => p.tx.clone(),
             None => {
                 update_wiki_status(&app, &status_state, |flags| {
                     flags.ingest.health = pipeline::watchdog::PipelineHealth::Idle;
@@ -1839,11 +1862,17 @@ async fn run_wiki_reembed(
     };
 
     let result = (|| -> Result<usize, String> {
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
-        let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
+        // Read the work list under the lock, then release it. Holding
+        // `db_state` across the whole enqueue loop serializes every other IPC
+        // handler behind this command for the duration of a full-vault
+        // re-embed, which freezes the UI (spec §11 mutex trap).
+        let paths = {
+            let guard = db_state.0.lock().unwrap();
+            crate::db::list_indexed_user_doc_paths(&guard.0).map_err(|e| e.to_string())?
+        };
+
         let mut queued = 0usize;
-        let mut deferred = 0usize;
+        let mut deferred: Vec<String> = Vec::new();
         let total = paths.len();
         for path in paths {
             if !std::path::Path::new(&path).exists() {
@@ -1857,26 +1886,31 @@ async fn run_wiki_reembed(
             // (CodeRabbit review PRRT_kwDOSVmXas6d28dn).
             match tx.try_send(PipelineJob::rechunk_for_reembed(path.clone())) {
                 Ok(()) => queued += 1,
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    deferred += 1;
-                    if let Err(e) = conn.execute(
-                        "UPDATE documents SET status = 'pending_reindex'
-                           WHERE path = ?1 AND status = 'indexed'",
-                        rusqlite::params![&path],
-                    ) {
-                        eprintln!(
-                            "[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}"
-                        );
-                    }
-                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => deferred.push(path),
                 Err(std::sync::mpsc::TrySendError::Disconnected(e)) => {
                     return Err(format!("pipeline channel closed: {e:?}"));
                 }
             }
         }
-        if deferred > 0 {
+
+        // Stage every deferred row in one short critical section rather than
+        // re-taking the lock per path.
+        if !deferred.is_empty() {
+            let guard = db_state.0.lock().unwrap();
+            for path in &deferred {
+                if let Err(e) = guard.0.execute(
+                    "UPDATE documents SET status = 'pending_reindex'
+                       WHERE path = ?1 AND status = 'indexed'",
+                    rusqlite::params![path],
+                ) {
+                    eprintln!(
+                        "[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}"
+                    );
+                }
+            }
             eprintln!(
-                "[run_wiki_reembed] queued {queued} of {total}; {deferred} deferred (status=pending_reindex for sweep pickup)"
+                "[run_wiki_reembed] queued {queued} of {total}; {} deferred (status=pending_reindex for sweep pickup)",
+                deferred.len()
             );
         }
         Ok(queued)

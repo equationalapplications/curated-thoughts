@@ -1,6 +1,7 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
+    MIGRATION_V15,
     MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
@@ -109,6 +110,12 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     if version < 14 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V14))?;
     }
+    if version < 15 {
+        // Rebuilds `documents` to widen the status CHECK; the PRAGMA
+        // foreign_keys toggles inside must not sit in a transaction, so this
+        // constant manages its own statement sequence.
+        conn.execute_batch(MIGRATION_V15)?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -210,7 +217,83 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 14);
+        assert_eq!(max_version, 15);
+    }
+
+    /// V15 widens the `documents.status` CHECK so the deferred-reindex
+    /// staging writes are accepted. Before it, every
+    /// `UPDATE documents SET status = 'pending_reindex'` failed with a
+    /// constraint violation and the deferred rechunk was silently dropped.
+    #[test]
+    fn v15_documents_status_accepts_pending_reindex() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+
+        let n = conn
+            .execute(
+                "UPDATE documents SET status = 'pending_reindex'
+                   WHERE path = '/a.md' AND status = 'indexed'",
+                [],
+            )
+            .expect("pending_reindex must satisfy the status CHECK");
+        assert_eq!(n, 1);
+
+        let status: String = conn
+            .query_row("SELECT status FROM documents WHERE path = '/a.md'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "pending_reindex");
+
+        // The CHECK still rejects genuinely invalid values.
+        assert!(
+            conn.execute(
+                "UPDATE documents SET status = 'bogus' WHERE path = '/a.md'",
+                [],
+            )
+            .is_err(),
+            "the widened CHECK must still reject unknown statuses"
+        );
+    }
+
+    /// The V15 rebuild must carry every column forward — including the V11
+    /// synthesis watermark and the V13 quarantine stamp — and recreate the
+    /// partial index that was dropped with the old table.
+    #[test]
+    fn v15_rebuild_preserves_columns_rows_and_the_dirty_index() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO documents
+                (path, hash, tier, status, synth_hash, synth_model, synth_at, quarantined_at)
+             VALUES ('/keep.md', 'h1', 'user_doc', 'indexed', 'sh', 'sm', 42, 7)",
+            [],
+        )
+        .unwrap();
+
+        let (hash, sh, sm, sa, q): (String, String, String, i64, i64) = conn
+            .query_row(
+                "SELECT hash, synth_hash, synth_model, synth_at, quarantined_at
+                   FROM documents WHERE path = '/keep.md'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!((hash.as_str(), sh.as_str(), sm.as_str(), sa, q), ("h1", "sh", "sm", 42, 7));
+
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='idx_documents_dirty'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "idx_documents_dirty must survive the rebuild");
     }
 
     /// Fresh-DB path: `open_in_memory` applies every migration, so the

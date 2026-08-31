@@ -32,6 +32,13 @@ pub const DRAIN_STALL_WINDOW: Duration = Duration::from_secs(900);
 /// How often the supervisor wakes.
 pub const TICK: Duration = Duration::from_secs(5);
 
+/// Busy timeout for the supervisor's connections. Bounded so a contended
+/// database can never block recovery (spec §3).
+const DIAG_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Shorter deadline used only while probing for lock contention (spec §4.2).
+const PROBE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Which probe a stalled stage needs before blame can be attributed (spec §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeKind {
@@ -52,10 +59,14 @@ enum ProbeKind {
 /// false when lock contention is the most likely cause of the stall
 /// (spec §4.2).
 fn probe_shared_sqlite(diag_conn: &Connection) -> bool {
-    let _ = diag_conn.busy_timeout(Duration::from_secs(2));
-    diag_conn
-        .query_row("SELECT 1", [], |_| Ok(()))
-        .is_ok()
+    // The probe wants a shorter deadline than the 5s recovery ceiling, but the
+    // timeout is connection state: leaving it at 2s would silently downgrade
+    // every subsequent `record_trip` on this same connection and break the
+    // "<= 5s" contract in spec §3. Borrow it, then put it back.
+    let _ = diag_conn.busy_timeout(PROBE_BUSY_TIMEOUT);
+    let ok = diag_conn.query_row("SELECT 1", [], |_| Ok(())).is_ok();
+    let _ = diag_conn.busy_timeout(DIAG_BUSY_TIMEOUT);
+    ok
 }
 
 /// Wait for a worker thread, giving up after `timeout`. `std::thread` has no
@@ -192,13 +203,17 @@ pub struct SupervisorConfig {
     /// the previous supervisor exits instead of leaking a second writer of
     /// `flags.ingest.health` (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
     pub stop: Arc<AtomicBool>,
-    /// Invoked when the watchdog supersedes a wedged worker. The caller is
-    /// expected to spawn a replacement worker reading from a fresh
-    /// `SyncSender` (the abandoned worker holds the previous receiver and
-    /// leaks until it eventually exits). Without this hook the wedged
-    /// worker keeps the channel receiver and no one dequeues submitted
-    /// jobs (CodeRabbit review PRRT_kwDOSVmXas6d28dw).
-    pub on_replace_worker: Box<dyn Fn() + Send>,
+    /// Invoked when the watchdog supersedes a wedged worker. The callee must
+    /// rebuild the channel, spawn a replacement worker on the fresh receiver,
+    /// publish the new sender to every producer, and return it here.
+    ///
+    /// The return value is load-bearing: the abandoned worker still owns the
+    /// *old* receiver, so a supervisor that kept sweeping into the old sender
+    /// would enqueue into a queue nobody drains — the exact wedge this module
+    /// exists to clear. Returning `None` means the replacement failed; the
+    /// supervisor then parks in `Degraded` rather than pretending it recovered
+    /// (CodeRabbit review PRRT_kwDOSVmXas6d28dw / PRRT_kwDOSVmXas6d3ZYn).
+    pub on_replace_worker: Box<dyn Fn() -> Option<SyncSender<PipelineJob>> + Send>,
 }
 
 /// Snapshot of pipeline liveness, propagated to listeners (UI status, logs,
@@ -226,7 +241,7 @@ fn supervisor_loop(cfg: SupervisorConfig) {
             return;
         }
     };
-    let _ = conn.busy_timeout(Duration::from_secs(5));
+    let _ = conn.busy_timeout(DIAG_BUSY_TIMEOUT);
 
     // Dedicated diagnostic connection so lock contention on the brain
     // SQLite (most likely from the Committing/Deleting job the watchdog is
@@ -240,17 +255,26 @@ fn supervisor_loop(cfg: SupervisorConfig) {
             return;
         }
     };
-    let _ = diag_conn.busy_timeout(Duration::from_secs(5));
+    let _ = diag_conn.busy_timeout(DIAG_BUSY_TIMEOUT);
 
     let mut drain = DrainTracker::new();
     let mut respawns = RespawnLedger::new();
     let mut claims = InFlightClaims::new();
     let mut degraded = false;
-    // Trip gate: a stage that hasn't moved since the last trip (same epoch
-    // and stage_started_ms) is the same wedge — don't accumulate strikes,
-    // diagnostics, or respawns for it
-    // (CodeRabbit review PRRT_kwDOSVmXas6d28dw).
-    let mut last_trip_key: Option<(u64, i64)> = None;
+    // The sweep target. Replaced whenever `on_replace_worker` hands back a
+    // fresh sender, because the abandoned worker keeps the old receiver.
+    let mut tx = cfg.tx.clone();
+    // Trip gate: a stage that hasn't moved since the last trip is the same
+    // wedge — don't accumulate strikes, diagnostics, or respawns for it.
+    //
+    // The key deliberately excludes `epoch`: `handle_stage_stall` bumps the
+    // epoch on every trip, so an epoch-bearing key would differ on the very
+    // next tick and re-trip the same wedge every TICK — quarantining an
+    // innocent subject in two ticks and burning the respawn cap in seconds
+    // (CodeRabbit review PRRT_kwDOSVmXas6d3ZZF). `(stage, stage_started_ms)`
+    // changes only when the worker actually transitions, which is exactly
+    // the "this is a new wedge" signal we want.
+    let mut last_trip_key: Option<(u8, i64)> = None;
 
     loop {
         if cfg.stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -260,13 +284,17 @@ fn supervisor_loop(cfg: SupervisorConfig) {
         std::thread::sleep(TICK);
 
         let snapshot = cfg.heartbeat.snapshot();
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM documents WHERE status = 'pending'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+        if !snapshot.consistent {
+            // The seqlock retry budget was exhausted, so these fields may
+            // straddle two transitions. Tripping on a torn read would either
+            // invent a stall or mis-attribute a real one; skip the tick and
+            // re-read on the next one (spec §2.1).
+            continue;
+        }
+        // Canonical counter, shared with the UI's busy bit. Inlining the
+        // query here would let the watchdog's drain window and the UI's
+        // pending count drift apart on the next schema change.
+        let pending: i64 = crate::db::queries::count_pending_documents(&conn).unwrap_or(0);
         let completed: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM documents WHERE status IN ('indexed', 'error')",
@@ -295,7 +323,7 @@ fn supervisor_loop(cfg: SupervisorConfig) {
         ) {
             // Trip gate: same (epoch, stage_started_ms) means the wedge is
             // still the same wedge — skip the duplicate trip.
-            let trip_key = (snapshot.epoch, snapshot.stage_started_ms);
+            let trip_key = (snapshot.stage as u8, snapshot.stage_started_ms);
             if last_trip_key == Some(trip_key) {
                 continue;
             }
@@ -329,8 +357,30 @@ fn supervisor_loop(cfg: SupervisorConfig) {
             // Replace the wedged worker. The bumped epoch means the
             // abandoned worker exits on its next stage transition (or
             // leaks until process exit if truly wedged); the callback
-            // spawns a fresh worker on a new channel.
-            (cfg.on_replace_worker)();
+            // spawns a fresh worker on a new channel and returns its
+            // sender, which we must adopt — the old sender feeds the
+            // receiver the abandoned worker still owns.
+            match (cfg.on_replace_worker)() {
+                Some(new_tx) => {
+                    tx = new_tx;
+                    // The replacement worker starts with an empty in-flight
+                    // set; the old claims refer to jobs abandoned with the
+                    // old receiver (spec §5).
+                    claims.clear();
+                }
+                None => {
+                    eprintln!(
+                        "[watchdog] worker replacement failed; parking ingest in degraded"
+                    );
+                    degraded = true;
+                    (cfg.on_health)(HealthUpdate {
+                        health: PipelineHealth::Degraded,
+                        stage: Some(snapshot.stage),
+                        subject: Some(snapshot.subject.clone()),
+                    });
+                    continue;
+                }
+            }
 
             // Probe only after the trip is on disk. Stages without a network
             // dependency skip the endpoint probe and are treated as healthy
@@ -355,29 +405,29 @@ fn supervisor_loop(cfg: SupervisorConfig) {
             // Shared-local probe failed → unattributed system strike. Otherwise
             // (other dependency failed, or subject unknown) → no strike.
             match (probe_kind, probe_ok) {
-                (ProbeKind::None | ProbeKind::Network | ProbeKind::SharedSqlite, true) => {
-                    if snapshot.subject != "unknown" {
-                        if let Err(e) =
-                            recovery::record_strike(&conn, &snapshot.subject)
-                        {
-                            eprintln!("[watchdog] strike failed: {e}");
-                        } else {
-                            let strikes: i64 = conn
-                                .query_row(
-                                    "SELECT strikes FROM stall_strikes WHERE path = ?1",
-                                    [&snapshot.subject],
-                                    |r| r.get(0),
-                                )
-                                .unwrap_or(0);
-                            if strikes >= recovery::QUARANTINE_THRESHOLD {
-                                if let Err(e) = recovery::quarantine(&conn, &snapshot.subject) {
-                                    eprintln!("[watchdog] quarantine failed: {e}");
-                                } else {
-                                    eprintln!(
-                                        "[watchdog] quarantined {} after {strikes} strikes",
-                                        snapshot.subject
-                                    );
-                                }
+                // An unknown subject cannot be blamed, so it falls through to
+                // the no-strike arm below.
+                (ProbeKind::None | ProbeKind::Network | ProbeKind::SharedSqlite, true)
+                    if snapshot.subject != "unknown" =>
+                {
+                    if let Err(e) = recovery::record_strike(&conn, &snapshot.subject) {
+                        eprintln!("[watchdog] strike failed: {e}");
+                    } else {
+                        let strikes: i64 = conn
+                            .query_row(
+                                "SELECT strikes FROM stall_strikes WHERE path = ?1",
+                                [&snapshot.subject],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(0);
+                        if strikes >= recovery::QUARANTINE_THRESHOLD {
+                            if let Err(e) = recovery::quarantine(&conn, &snapshot.subject) {
+                                eprintln!("[watchdog] quarantine failed: {e}");
+                            } else {
+                                eprintln!(
+                                    "[watchdog] quarantined {} after {strikes} strikes",
+                                    snapshot.subject
+                                );
                             }
                         }
                     }
@@ -410,11 +460,9 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 continue;
             }
 
-            let _ = sweep::sweep(&conn, &cfg.tx, &mut claims, 256);
-            // Respawn abandons the in-flight set with the abandoned worker
-            // (spec §5); clear claims before the next sweep so abandoned
-            // rows re-enqueue.
-            claims.clear();
+            // Claims were cleared when the replacement was adopted, so this
+            // sweep re-enqueues the rows abandoned with the old receiver.
+            let _ = sweep::sweep(&conn, &tx, &mut claims, 256);
             continue;
         }
 
@@ -439,12 +487,12 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 eprintln!("[watchdog] failed to record drain stall: {e}; proceeding with sweep");
             }
             // A healthy idle worker needs work, not a respawn (spec §2.3).
-            let _ = sweep::sweep(&conn, &cfg.tx, &mut claims, 256);
+            let _ = sweep::sweep(&conn, &tx, &mut claims, 256);
             continue;
         }
 
         // Normal operation: keep the watcher's staged rows flowing.
-        let queued = sweep::sweep(&conn, &cfg.tx, &mut claims, 256).unwrap_or(0);
+        let queued = sweep::sweep(&conn, &tx, &mut claims, 256).unwrap_or(0);
         let health = if pending > 0 || queued > 0 {
             PipelineHealth::Working
         } else {
@@ -551,6 +599,7 @@ mod tests {
             stage,
             subject: "/a.md".to_string(),
             stage_started_ms: started_ms,
+            consistent: true,
         }
     }
 

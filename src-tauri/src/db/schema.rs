@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS documents (
     folder_rules_id INTEGER,
     last_indexed    INTEGER,
     status          TEXT    NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending', 'indexed', 'error', 'orphaned'))
+                    CHECK(status IN ('pending', 'pending_reindex', 'indexed', 'error', 'orphaned'))
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -273,4 +273,56 @@ CREATE TABLE IF NOT EXISTS system_strikes (
 INSERT OR IGNORE INTO system_strikes (id, strikes, last_ms) VALUES (1, 0, 0);
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (14);
+";
+
+pub const MIGRATION_V15: &str = "
+-- Widen `documents.status` to admit 'pending_reindex'.
+--
+-- `queue_full_reindex` and `run_wiki_reembed` stage rows as 'pending_reindex'
+-- when the pipeline channel is full, so the §5 sweep can re-enqueue them as a
+-- forced rechunk. The V1 CHECK constraint never listed that value, so every
+-- staging UPDATE failed with a constraint violation and the deferred work was
+-- silently dropped — the exact data loss the deferral exists to prevent.
+--
+-- SQLite cannot ALTER a CHECK constraint, so the table is rebuilt with the
+-- full column set as of V14: the V1 columns, the V11 synthesis watermark
+-- (synth_hash/synth_model/synth_at) and the V13 quarantine stamp. Columns are
+-- listed explicitly rather than via SELECT * so the copy does not depend on
+-- the order the ALTERs appended them in. `idx_documents_dirty` is dropped
+-- with the old table and recreated against the new one.
+PRAGMA foreign_keys = OFF;
+
+DROP INDEX IF EXISTS idx_documents_dirty;
+
+CREATE TABLE documents_v15 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    path            TEXT    NOT NULL UNIQUE,
+    hash            TEXT    NOT NULL,
+    tier            TEXT    NOT NULL CHECK(tier IN ('user_doc', 'wiki')),
+    folder_rules_id INTEGER,
+    last_indexed    INTEGER,
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'pending_reindex', 'indexed', 'error', 'orphaned')),
+    synth_hash      TEXT,
+    synth_model     TEXT,
+    synth_at        INTEGER,
+    quarantined_at  INTEGER
+);
+
+INSERT INTO documents_v15
+    (id, path, hash, tier, folder_rules_id, last_indexed, status,
+     synth_hash, synth_model, synth_at, quarantined_at)
+SELECT id, path, hash, tier, folder_rules_id, last_indexed, status,
+       synth_hash, synth_model, synth_at, quarantined_at
+  FROM documents;
+
+DROP TABLE documents;
+ALTER TABLE documents_v15 RENAME TO documents;
+
+CREATE INDEX IF NOT EXISTS idx_documents_dirty
+    ON documents(status) WHERE synth_hash IS NULL;
+
+PRAGMA foreign_keys = ON;
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (15);
 ";

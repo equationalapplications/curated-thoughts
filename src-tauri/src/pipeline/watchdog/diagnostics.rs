@@ -86,10 +86,18 @@ pub fn emit_trip_line(trip: &TripRecord) {
 /// worker respawn indefinitely. The detached thread is abandoned on timeout
 /// (CodeRabbit review PRRT_kwDOSVmXas6d28dt).
 pub fn capture_stacks(pid: u32) {
-    std::thread::Builder::new()
+    // Never panic here. `capture_stacks` runs inside `handle_stage_stall`,
+    // *before* `heartbeat.bump_epoch()`. A panic would unwind the supervisor
+    // thread, so no further stall would ever be detected and this recovery
+    // would never reach the epoch bump. Thread exhaustion is precisely the
+    // degraded state the watchdog exists to survive
+    // (CodeRabbit review PRRT_kwDOSVmXas6d3ZYu).
+    if let Err(e) = std::thread::Builder::new()
         .name("watchdog-stack-capture".to_string())
         .spawn(move || capture_stacks_blocking(pid))
-        .expect("spawn stack-capture thread");
+    {
+        eprintln!("[watchdog] stack capture unavailable (thread spawn failed: {e}); continuing recovery");
+    }
 }
 
 fn capture_stacks_blocking(pid: u32) {
@@ -142,6 +150,7 @@ mod tests {
             stage: Stage::Embedding,
             subject: "/vault/documents/a.md".to_string(),
             stage_started_ms: 1_000,
+            consistent: true,
         }
     }
 
