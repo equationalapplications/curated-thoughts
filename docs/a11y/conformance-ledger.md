@@ -12,7 +12,7 @@ Scan per file: aria-[a-z-]+ attributes; role="status|alert" or aria-live => live
 
 # Conformance Ledger — WCAG 2.2 AA Foundation (Phase 1)
 
-Generated: 2026-08-31 · branch `feat/a11y-wcag-aa-foundation` @ 8f9cb2e
+Generated: 2026-08-31 · branch `feat/a11y-wcag-aa-foundation` (refreshed post phase-1 fix loop; pass bar = axe assertion + keyboard-interaction test)
 
 **What this ledger is:** a *presence audit*, not a conformance claim. It records which 
 accessibility attributes each component currently exhibits and which remediation phase 
@@ -47,7 +47,7 @@ figure is the `.tsx` count at branch base a739cfb (65 non-test + 42 tests); this
 | `src/components/brain/EntitySummarySection.tsx` | — | yes | — | WATCH | live region — manual SR check |
 | `src/components/brain/EntityWikilinkSuggestion.tsx` | aria-label, aria-selected | — | — | REMEDIATED-PR127 | jsx-a11y remediation (d4fe4a6) |
 | `src/components/brain/FactCard.tsx` | aria-expanded, aria-label | yes | — | WATCH | live region — manual SR check |
-| `src/components/brain/FactPowerMenu.tsx` | aria-label | — | yes | PASS | axe smoke test: zero violations |
+| `src/components/brain/FactPowerMenu.tsx` | aria-label | — | yes | PASS | axe clean (expanded suite, axe-core.test.ts) + Escape test |
 | `src/components/brain/WikilinkText.tsx` | — | — | — | TODO-PHASE4 | — |
 | `src/components/health/ProviderNotice.tsx` | aria-hidden, aria-live | yes | — | WATCH | live region — manual SR check |
 | `src/components/modes/BrainMode.tsx` | aria-label, aria-live | yes | — | WATCH | live region — manual SR check |
@@ -55,8 +55,8 @@ figure is the `.tsx` count at branch base a739cfb (65 non-test + 42 tests); this
 | `src/components/modes/ReviewMode.tsx` | — | — | — | REMEDIATED-PR127 | jsx-a11y remediation (d4fe4a6) |
 | `src/components/modes/TasksMode.tsx` | aria-label | yes | — | REMEDIATED-PR127 | jsx-a11y remediation (d4fe4a6) |
 | `src/components/modes/TimelineMode.tsx` | — | yes | — | WATCH | live region — manual SR check |
-| `src/components/privacy/EphemeralDisclosureModal.tsx` | aria-labelledby, aria-modal | — | yes | WATCH | dialog/modal — manual SR check |
-| `src/components/privacy/MigrationDisclosureModal.tsx` | aria-labelledby, aria-modal | — | yes | WATCH | dialog/modal — manual SR check |
+| `src/components/privacy/EphemeralDisclosureModal.tsx` | aria-labelledby, aria-modal | — | yes | WATCH | dialog/modal — axe clean (axe-core.test.ts); keyboard-interaction test + manual SR check owed |
+| `src/components/privacy/MigrationDisclosureModal.tsx` | aria-labelledby, aria-modal | — | yes | WATCH | dialog/modal — axe clean (axe-core.test.ts); keyboard-interaction test + manual SR check owed |
 | `src/components/privacy/PrivacyModeCards.tsx` | aria-label | — | — | TODO-PHASE5 | — |
 | `src/components/privacy/PrivacyShieldIcon.tsx` | aria-hidden | — | — | TODO-PHASE5 | — |
 | `src/components/review/MemoryChunk.tsx` | — | — | — | TODO-PHASE3 | — |
@@ -90,14 +90,14 @@ figure is the `.tsx` count at branch base a739cfb (65 non-test + 42 tests); this
 | `src/components/setup/StepWatchItThink.tsx` | aria-label, aria-live | yes | — | WATCH | live region — manual SR check |
 | `src/components/setup/StepWelcome.tsx` | — | — | — | TODO-PHASE2 | — |
 | `src/components/setup/WizardStep.tsx` | aria-busy, aria-hidden, aria-labelledby | — | — | REMEDIATED-PR127 | jsx-a11y remediation (d4fe4a6) |
-| `src/components/shell/ActivityFeedPanel.tsx` | aria-label, aria-modal | yes | yes | WATCH | live region + dialog/modal — manual SR check |
+| `src/components/shell/ActivityFeedPanel.tsx` | aria-label, aria-modal | yes | yes | WATCH | live region + dialog/modal — axe clean (axe-core.test.ts); keyboard-interaction test + manual SR check owed |
 | `src/components/shell/AppShell.tsx` | — | — | — | TODO-PHASE6 | — |
-| `src/components/shell/CommandPalette.tsx` | aria-activedescendant, aria-controls, aria-expanded, aria-label, aria-modal, aria-selected | — | yes | REMEDIATED-PR127 | jsx-a11y remediation (d4fe4a6) |
+| `src/components/shell/CommandPalette.tsx` | aria-activedescendant, aria-controls, aria-expanded, aria-label, aria-modal, aria-selected | — | yes | PASS | axe clean (axe-core.test.ts) + roving/keyboard tests; option-role flatten (e636438) |
 | `src/components/shell/EditorPane.tsx` | aria-hidden | yes | — | WATCH | live region — manual SR check |
 | `src/components/shell/FolderTree.tsx` | aria-label | — | — | TODO-PHASE6 | — |
 | `src/components/shell/ModeRail.tsx` | aria-current, aria-hidden, aria-label | — | — | TODO-PHASE6 | — |
-| `src/components/shell/OkfInteropBar.tsx` | aria-label | — | yes | WATCH | dialog/modal — manual SR check |
-| `src/components/shell/PeekPanel.tsx` | aria-label, aria-modal | yes | yes | WATCH | live region + dialog/modal — manual SR check |
+| `src/components/shell/OkfInteropBar.tsx` | aria-label | — | yes | WATCH | dialog/modal — axe clean (axe-core.test.ts); keyboard-interaction test + manual SR check owed |
+| `src/components/shell/PeekPanel.tsx` | aria-label, aria-modal | yes | yes | PASS | axe clean + focus-trap/restore tests; trapped + inert-guarded (eb0ec08) |
 | `src/components/shell/RelatedNotes.tsx` | aria-label | — | — | TODO-PHASE6 | — |
 | `src/components/shell/SearchResults.tsx` | aria-label | — | — | TODO-PHASE6 | — |
 | `src/components/shell/SplashScreen.tsx` | aria-valuemax, aria-valuenow | yes | — | WATCH | live region — manual SR check |
@@ -108,5 +108,4 @@ figure is the `.tsx` count at branch base a739cfb (65 non-test + 42 tests); this
 
 ## Cross-cutting gaps (phase 1 scope, tracked separately)
 
-- `src/components/shell/AppShell.tsx` does not yet mount `SkipLink` / `AnnouncerProvider` — Task 4 wiring.
-- Focus-trap (`trapped`) applies to PeekPanel/EditorPane/palette dialogs from phase 4 onward.
+- `src/components/shell/AppShell.tsx` phase-1 wiring done: `SkipLink` mounted (`targetId="main-content"`), `AnnouncerProvider` wraps the app in `src/main.tsx`. Remaining dialog surfaces (palette, activity feed, privacy modals, OkfInteropBar) get traps in phases 3–5; `EditorPane` stays untrapped by documented spec amendment (BlockNote cursor ownership).
