@@ -31,6 +31,32 @@ pub fn record_strike(conn: &Connection, path: &str) -> Result<i64> {
     )?)
 }
 
+/// Record an unattributed system strike. Used when the stall is caused by a
+/// shared local dependency (e.g. brain SQLite contention under
+/// `Committing`/`Deleting`) so that no innocent document inherits blame
+/// (spec §4.2). Returns the new system-wide strike count.
+pub fn record_system_strike(conn: &Connection) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO system_strikes (id, strikes, last_ms)
+         VALUES (1, 1, ?1)
+         ON CONFLICT(id) DO UPDATE
+            SET strikes = strikes + 1, last_ms = excluded.last_ms",
+        rusqlite::params![now_ms()],
+    )?;
+    Ok(conn.query_row(
+        "SELECT strikes FROM system_strikes WHERE id = 1",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Clear prior strikes for a path. Called on successful ingest completion so
+/// that a replacement file at the same path does not inherit strikes from the
+/// previous document (spec §4.2).
+pub fn clear_strikes(conn: &Connection, path: &str) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM stall_strikes WHERE path = ?1", [path])?)
+}
+
 pub fn quarantine(conn: &Connection, path: &str) -> Result<()> {
     conn.execute(
         "UPDATE documents SET quarantined_at = ?1 WHERE path = ?2",
@@ -56,6 +82,12 @@ pub fn is_quarantined(conn: &Connection, path: &str) -> Result<bool> {
 /// before blaming the document (spec §4.2).
 pub fn stage_has_network_dependency(stage: Stage) -> bool {
     matches!(stage, Stage::Embedding | Stage::Summarizing)
+}
+
+/// Which stages share the brain SQLite as their dependency and therefore
+/// must probe it before attributing the stall to a path (spec §4.2).
+pub fn stage_uses_shared_sqlite(stage: Stage) -> bool {
+    matches!(stage, Stage::Committing | Stage::Deleting)
 }
 
 /// Rolling-window count of worker respawns.
@@ -128,6 +160,25 @@ mod tests {
         assert_eq!(record_strike(&conn, "/a.md").unwrap(), 1);
         assert_eq!(record_strike(&conn, "/a.md").unwrap(), 2);
         assert_eq!(record_strike(&conn, "/b.md").unwrap(), 1);
+    }
+
+    #[test]
+    fn system_strike_increments_a_single_row() {
+        let conn = open_in_memory().unwrap();
+        // `open_in_memory` runs migrations, which create `system_strikes` via V14.
+        assert_eq!(record_system_strike(&conn).unwrap(), 1);
+        assert_eq!(record_system_strike(&conn).unwrap(), 2);
+    }
+
+    #[test]
+    fn clearing_path_strikes_resets_quarantine_input() {
+        // Spec §4.2: a successful completion (or identity change) must reset
+        // prior strikes so a replacement document does not inherit them.
+        let conn = open_in_memory().unwrap();
+        assert_eq!(record_strike(&conn, "/p.md").unwrap(), 1);
+        assert_eq!(record_strike(&conn, "/p.md").unwrap(), 2);
+        clear_strikes(&conn, "/p.md").unwrap();
+        assert_eq!(record_strike(&conn, "/p.md").unwrap(), 1);
     }
 
     #[test]

@@ -31,6 +31,12 @@ pub struct TripRecord {
 
 /// Persist a trip. MUST be called before any recovery action — recovery
 /// destroys the evidence (spec §3).
+///
+/// `conn` must be the **dedicated diagnostic connection** with a bounded busy
+/// timeout (≤ 5s). The supervisor opens a separate connection for this purpose
+/// so that lock contention on the brain SQLite cannot block recovery (spec §3).
+/// Failures are returned to the caller, which must log a structured stderr
+/// line and continue with the recovery action rather than abort.
 pub fn record_trip(conn: &Connection, trip: &TripRecord) -> Result<i64> {
     conn.execute(
         "INSERT INTO pipeline_stalls
@@ -52,8 +58,14 @@ pub fn record_trip(conn: &Connection, trip: &TripRecord) -> Result<i64> {
         ],
     )?;
 
-    // One structured line so journald captures the trip in the same stream
-    // the 2026-08-29 incident was reconstructed from (spec §3.2).
+    emit_trip_line(trip);
+    Ok(conn.last_insert_rowid())
+}
+
+/// Emit the structured journald line for a trip. Always reachable even when
+/// the SQLite insert failed, so the operator still sees the trip in the
+/// stream the 2026-08-29 incident was reconstructed from (spec §3.2).
+pub fn emit_trip_line(trip: &TripRecord) {
     eprintln!(
         "[watchdog] {} stage={} subject={} ms={} pending={} action={}",
         trip.kind.as_str(),
@@ -63,8 +75,6 @@ pub fn record_trip(conn: &Connection, trip: &TripRecord) -> Result<i64> {
         trip.pending_count,
         trip.action,
     );
-
-    Ok(conn.last_insert_rowid())
 }
 
 /// Best-effort thread-stack capture into the journal. Failure MUST NOT block

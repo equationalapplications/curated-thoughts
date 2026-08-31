@@ -110,7 +110,7 @@ transition.
 ```rust
 pub struct Heartbeat {
     epoch: AtomicU64,            // worker generation; see §4
-    seq: AtomicU64,              // bumped on every transition
+    seq: AtomicU64,              // bumped on every transition; seqlock key
     stage: AtomicU8,             // Stage discriminant
     stage_started_ms: AtomicI64,
     subject: Mutex<Option<String>>, // path, or entity id while Linking
@@ -125,6 +125,21 @@ file, calls `delete_document`, and runs an unindexed
 `UPDATE wiki_pages ... WHERE source_doc_ids LIKE '%path%'`
 (`pipeline/mod.rs:229-256`). That scan is a plausible stall site under lock
 contention and must not be an unmodeled hole in the stage map.
+
+**Consistent snapshot reads (seqlock).** `epoch`, `seq`, `stage`, and
+`stage_started_ms` are independent atomics; independent loads can interleave
+with a concurrent `enter()` and combine fields from different transitions —
+the classic torn-read hazard that produces a false trip or a missed stall.
+`Heartbeat::snapshot()` therefore implements a seqlock: read `seq` (the
+seqlock key), load the remaining fields, re-read `seq`, and retry if the two
+`seq` reads disagree. `enter()` bumps `seq` *after* writing
+`stage_started_ms` and `stage` so a successful retry observes a consistent
+point-in-time view. All `enter()` and snapshot reads use `Ordering::SeqCst`
+to make the seqlock protocol well-defined on every supported architecture.
+`subject` is loaded with `try_lock` per the next paragraph and may return
+`"unknown"`; it is excluded from the seqlock because the supervisor uses only
+the atomics for trip decisions. The retry budget is bounded (e.g. ≤ 4
+attempts) so a writer that races continuously cannot stall the supervisor.
 
 **The supervisor MUST NOT block on `subject`.** It reads with `try_lock` and
 degrades to `"unknown"` on contention. A wedged worker can be stalled while
@@ -216,7 +231,13 @@ any recovery step:
 1. Insert a `pipeline_stalls` row: trip kind (`stage_stall` or `drain_stall`),
    stage, subject, `stalled_ms`, heartbeat `seq` and `epoch`, pending count, the
    resolved embed and generation endpoints, and the recovery action about to be
-   taken.
+   taken. The insert runs on a **dedicated diagnostic connection** (separate
+   from the supervisor's main connection) with a bounded busy timeout (≤ 5s)
+   so that lock contention on the brain SQLite — most likely from a
+   `Committing` or `Deleting` job the watchdog is itself about to recover —
+   cannot stall recovery. If the insert fails or times out, emit the structured
+   stderr line below and proceed with the recovery action anyway: lost
+   diagnostics must never delay a respawn or sweep.
 2. Emit one structured stderr line
    (`[watchdog] <kind> stage=... subject=... ms=... pending=...`) so journald
    captures it in the stream the incident was reconstructed from.
@@ -236,18 +257,28 @@ later escalations.
 1. **Diagnose.** Run §3.
 2. **Probe, then attribute.** Probe the dependency the stalled stage uses — the
    embedding endpoint for `Embedding`, the generation endpoint for
-   `Summarizing`. Stages with no network dependency (`Reading`, `Extracting`,
-   `Chunking`, `Linking`, `Committing`, `Deleting`) skip the probe and are
-   treated as healthy. If the probe passes, record a strike against the current
-   subject (`stall_strikes` keyed by path); if it fails, the document is not at
-   fault and no strike is recorded. Probing before attributing keeps a dead
-   endpoint from accumulating strikes against innocent documents.
+   `Summarizing`. Stages with no external dependency (`Reading`, `Extracting`,
+   `Chunking`, `Linking`) skip the probe and are treated as healthy. `Committing`
+   and `Deleting` use the **shared** brain SQLite; they probe the diagnostic
+   connection with a bounded busy timeout, and a stalled or contended database
+   records an **unattributed system strike** rather than incrementing
+   `stall_strikes` for the current path. If the probe passes, record a strike
+   against the current subject (`stall_strikes` keyed by path); if it fails,
+   the document is not at fault and no path strike is recorded. Probing before
+   attributing keeps a dead endpoint (or a contended shared DB) from
+   accumulating strikes against innocent documents.
 3. **Respawn.** Bump the shared epoch, abandon the wedged thread, rebuild the
    channel, and spawn a fresh worker at the new epoch. Requeue undrained jobs via
    §5's sweep.
 4. **Quarantine threshold.** A document reaching 2 strikes is marked
    `quarantined`, skipped by the sweep, and surfaced in the UI, guaranteeing
-   forward progress when one poison file is the trigger.
+   forward progress when one poison file is the trigger. A successful ingest
+   completion (status transitions to `indexed`) **clears prior strikes for that
+   path**, so a replacement file at the same path starts with no inherited
+   strikes. Equivalently, a content-identity change (different `hash`) keys a
+   fresh strike ledger row — both definitions produce the desired invariant;
+   the implementation uses the first because it piggybacks on the existing
+   completion event.
 5. **Degrade threshold.** Respawns are capped at 3 per rolling hour. Past the cap
    the pipeline parks in `degraded`, stops respawning, and shows a persistent
    banner. The cap prevents a respawn loop against an unhealthy dependency and
@@ -278,7 +309,13 @@ pending-row-to-job path.
 
 A **sweep** selects `documents` rows where `status = 'pending'` and the path is
 not quarantined, ordered by rowid, and enqueues a `PipelineJob::ingest_counted`
-for each. It runs:
+for each. The sweep also tracks an **in-flight claim set** owned by the
+supervisor: a row whose path is currently in the set is skipped on subsequent
+passes, so a long `Extracting` or `Embedding` job does not get re-enqueued by
+the next 60s sweep. The claim is released when `try_send` returns `QueueFull`
+(the job was *not* enqueued — leave the row `pending` for the next pass) and
+when the worker is respawned (the abandoned in-flight set is gone with the
+worker). It runs:
 
 - at pipeline startup, so rows staged while the app was closed are picked up;
 - after a worker respawn (§4.3), to requeue work the abandoned worker held;
@@ -382,10 +419,17 @@ Stage heartbeat and recovery (§2.1–2.2, §4):
   not trip.
 - The supervisor's `subject` read does not block when the worker holds the mutex
   (`try_lock` degrades to `"unknown"`).
+- `Heartbeat::snapshot()` is a seqlock: under concurrent `enter()` traffic, the
+  returned `(epoch, seq, stage, stage_started_ms)` is always consistent — the
+  test holds the snapshot invariant across N parallel transitions.
 - A `pipeline_stalls` row exists before the respawn occurs.
 - A failing dependency probe suppresses the strike; a passing probe records it.
+- A stall in `Committing` or `Deleting` does not blame a path: it records an
+  unattributed system strike or probes the shared SQLite dependency, so two
+  shared-local failures cannot quarantine an innocent document.
 - Two strikes on a path mark it `quarantined`; the sweep skips a quarantined
-  path.
+  path. A successful completion (or a content-identity change) clears prior
+  strikes for that path so a replacement document does not inherit them.
 - Exceeding the respawn cap parks the pipeline in `degraded` and halts respawns.
 
 Epoch guard (§4.1):
@@ -400,6 +444,10 @@ Drainer and backpressure (§5, §6):
 - The sweep enqueues pending rows and skips quarantined ones.
 - The sweep respects channel capacity; leftover rows remain `pending` and are
   enqueued on the next pass.
+- The sweep's in-flight claim set prevents re-enqueueing a path that is
+  currently being processed. A long `Embedding` does not get duplicated by
+  the next 60s sweep, and a `QueueFull` release returns the path to the
+  pending pool for the next pass.
 - Sweeping a document whose content is unchanged is a no-op.
 - Sweeping a partially-ingested document produces no duplicate chunks.
 - `try_send` on a full channel returns `QueueFull` rather than blocking, and

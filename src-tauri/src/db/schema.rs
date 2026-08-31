@@ -260,3 +260,17 @@ CREATE TABLE IF NOT EXISTS stall_strikes (
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (13);
 ";
+
+pub const MIGRATION_V14: &str = "
+-- Single-row ledger for unattributed system strikes. Used when the stall is
+-- caused by a shared local dependency (e.g. brain SQLite contention under
+-- Committing/Deleting) so that no innocent document inherits blame (§4.2).
+CREATE TABLE IF NOT EXISTS system_strikes (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    strikes  INTEGER NOT NULL DEFAULT 0,
+    last_ms  INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO system_strikes (id, strikes, last_ms) VALUES (1, 0, 0);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (14);
+";

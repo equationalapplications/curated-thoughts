@@ -722,6 +722,7 @@ fn ingest_file_virtual(
 
     if chunks.is_empty() {
         mark_document_indexed(conn, doc_id)?;
+        let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
         return Ok(());
     }
 
@@ -740,6 +741,7 @@ fn ingest_file_virtual(
     }
 
     mark_document_indexed(conn, doc_id)?;
+    let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
     Ok(())
 }
 

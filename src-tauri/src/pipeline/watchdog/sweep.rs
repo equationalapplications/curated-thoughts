@@ -1,5 +1,6 @@
 // Implementation is added in Step 3 after the test verifies compilation failure.
 
+use std::collections::HashSet;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Duration;
 
@@ -10,6 +11,49 @@ use crate::pipeline::PipelineJob;
 
 #[allow(dead_code)]
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Paths whose `PipelineJob::ingest_counted` is currently in the channel or
+/// being processed. The sweep skips these so a long `Extracting` /
+/// `Embedding` job is not re-enqueued by the next 60s pass (spec §5).
+#[derive(Debug, Default)]
+pub struct InFlightClaims {
+    paths: HashSet<String>,
+}
+
+impl InFlightClaims {
+    pub fn new() -> Self {
+        InFlightClaims {
+            paths: HashSet::new(),
+        }
+    }
+
+    /// Returns true when `path` is currently claimed.
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+    }
+
+    /// Mark `path` as in-flight. Called after `try_send` succeeds.
+    pub fn claim(&mut self, path: String) {
+        self.paths.insert(path);
+    }
+
+    /// Drop the claim because `try_send` returned `QueueFull`: the path stays
+    /// `pending` and will be picked up on the next sweep.
+    pub fn release(&mut self, path: &str) {
+        self.paths.remove(path);
+    }
+
+    /// Clear all claims. Called when the worker is respawned, since the
+    /// abandoned in-flight set is gone with the abandoned worker (spec §5).
+    pub fn clear(&mut self) {
+        self.paths.clear();
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+}
 
 pub fn list_sweepable_pending(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
@@ -26,17 +70,30 @@ pub fn list_sweepable_pending(conn: &Connection, limit: usize) -> Result<Vec<Str
     Ok(out)
 }
 
+/// Sweep one batch. Skips paths already in `claims`, claims successful enqueues,
+/// and releases the claim on `QueueFull` so the path stays pending for the next
+/// pass (spec §5).
 pub fn sweep(
     conn: &Connection,
     tx: &SyncSender<PipelineJob>,
+    claims: &mut InFlightClaims,
     limit: usize,
 ) -> Result<usize> {
     let paths = list_sweepable_pending(conn, limit)?;
     let mut queued = 0usize;
     for path in paths {
-        match tx.try_send(PipelineJob::ingest_counted(path)) {
-            Ok(()) => queued += 1,
-            Err(TrySendError::Full(_)) => break,
+        if claims.contains(&path) {
+            continue;
+        }
+        match tx.try_send(PipelineJob::ingest_counted(path.clone())) {
+            Ok(()) => {
+                claims.claim(path);
+                queued += 1;
+            }
+            Err(TrySendError::Full(_)) => {
+                claims.release(&path);
+                break;
+            }
             Err(TrySendError::Disconnected(_)) => {
                 eprintln!("[watchdog] sweep aborted: pipeline channel closed");
                 break;
@@ -69,7 +126,8 @@ mod tests {
         seed(&conn, "/c.md", "indexed");
 
         let (tx, rx) = sync_channel(16);
-        let n = sweep(&conn, &tx, 100).unwrap();
+        let mut claims = InFlightClaims::new();
+        let n = sweep(&conn, &tx, &mut claims, 100).unwrap();
 
         assert_eq!(n, 2, "only pending rows are swept");
         drop(tx);
@@ -81,6 +139,7 @@ mod tests {
             })
             .collect();
         assert_eq!(got, vec!["/a.md".to_string(), "/b.md".to_string()]);
+        assert_eq!(claims.len(), 2, "claimed paths must be tracked");
     }
 
     #[test]
@@ -91,7 +150,8 @@ mod tests {
         quarantine(&conn, "/poison.md").unwrap();
 
         let (tx, rx) = sync_channel(16);
-        let n = sweep(&conn, &tx, 100).unwrap();
+        let mut claims = InFlightClaims::new();
+        let n = sweep(&conn, &tx, &mut claims, 100).unwrap();
 
         assert_eq!(n, 1);
         drop(tx);
@@ -114,7 +174,8 @@ mod tests {
 
         // Capacity 2: try_send must stop rather than block (spec §5).
         let (tx, rx) = sync_channel(2);
-        let n = sweep(&conn, &tx, 100).unwrap();
+        let mut claims = InFlightClaims::new();
+        let n = sweep(&conn, &tx, &mut claims, 100).unwrap();
         assert_eq!(n, 2, "sweep stops at channel capacity");
 
         // The unswept rows are still pending for the next pass.
@@ -127,5 +188,60 @@ mod tests {
             .unwrap();
         assert_eq!(still, 5);
         drop(rx);
+    }
+
+    #[test]
+    fn sweep_skips_paths_already_in_flight() {
+        // Spec §5: a long Extracting/Embedding must not be re-enqueued by the
+        // next 60s sweep. Claiming a path keeps subsequent sweeps from
+        // selecting it.
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/long.md", "pending");
+        seed(&conn, "/new.md", "pending");
+
+        let (tx, _rx) = sync_channel(16);
+        let mut claims = InFlightClaims::new();
+
+        // First sweep claims both rows.
+        let n1 = sweep(&conn, &tx, &mut claims, 100).unwrap();
+        assert_eq!(n1, 2);
+
+        // Second sweep finds no unclaimed rows and queues nothing.
+        let n2 = sweep(&conn, &tx, &mut claims, 100).unwrap();
+        assert_eq!(n2, 0, "claimed paths must be skipped");
+    }
+
+    #[test]
+    fn queue_full_releases_the_claim_so_next_pass_can_retry() {
+        // Spec §5: try_send returning Full must release the claim so the path
+        // stays pending and a later sweep can pick it up.
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/retry.md", "pending");
+
+        let (tx, _rx) = sync_channel(0);
+        let mut claims = InFlightClaims::new();
+        let n = sweep(&conn, &tx, &mut claims, 100).unwrap();
+        assert_eq!(n, 0, "capacity 0 cannot accept any enqueue");
+        assert_eq!(claims.len(), 0, "Full path stays pending");
+    }
+
+    #[test]
+    fn claims_clear_on_respawn() {
+        // Spec §5: respawning the worker abandons the in-flight set, so the
+        // supervisor must clear the claims to avoid losing rows permanently.
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "/x.md", "pending");
+
+        let (tx, _rx) = sync_channel(16);
+        let mut claims = InFlightClaims::new();
+        sweep(&conn, &tx, &mut claims, 100).unwrap();
+        assert!(claims.len() > 0);
+
+        claims.clear();
+        assert_eq!(claims.len(), 0);
+
+        // After clear, the sweep picks the row up again.
+        let n = sweep(&conn, &tx, &mut claims, 100).unwrap();
+        assert_eq!(n, 1);
     }
 }

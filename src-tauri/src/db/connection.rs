@@ -1,7 +1,7 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
-    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V2,
-    MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
+    MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -106,6 +106,9 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         )?;
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13))?;
     }
+    if version < 14 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V14))?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -207,7 +210,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 13);
+        assert_eq!(max_version, 14);
     }
 
     /// Fresh-DB path: `open_in_memory` applies every migration, so the

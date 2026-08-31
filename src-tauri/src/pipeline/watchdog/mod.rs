@@ -18,6 +18,7 @@ use self::budgets::budget_for;
 use self::diagnostics::{capture_stacks, record_trip, TripKind, TripRecord};
 use self::heartbeat::{now_ms, Heartbeat, HeartbeatSnapshot, Stage};
 use self::recovery::RespawnLedger;
+use self::sweep::InFlightClaims;
 use crate::embedder::EmbedProfile;
 use crate::pipeline::PipelineJob;
 
@@ -29,6 +30,32 @@ pub const DRAIN_STALL_WINDOW: Duration = Duration::from_secs(900);
 
 /// How often the supervisor wakes.
 pub const TICK: Duration = Duration::from_secs(5);
+
+/// Which probe a stalled stage needs before blame can be attributed (spec §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeKind {
+    /// Stages with no external/shared dependency (`Reading`, `Extracting`,
+    /// `Chunking`, `Linking`). Skip the probe and treat as healthy.
+    None,
+    /// External HTTP dependency (`Embedding`, `Summarizing`). Probe the
+    /// endpoint with a short timeout; strike on success only.
+    Network,
+    /// Shared brain SQLite dependency (`Committing`, `Deleting`). Probe the
+    /// diagnostic connection with a bounded busy timeout; on probe failure
+    /// record an unattributed system strike rather than blame the path.
+    SharedSqlite,
+}
+
+/// Probe the brain SQLite with a bounded read. Returns true when the
+/// diagnostic connection can answer a trivial query inside its busy timeout,
+/// false when lock contention is the most likely cause of the stall
+/// (spec §4.2).
+fn probe_shared_sqlite(diag_conn: &Connection) -> bool {
+    let _ = diag_conn.busy_timeout(Duration::from_secs(2));
+    diag_conn
+        .query_row("SELECT 1", [], |_| Ok(()))
+        .is_ok()
+}
 
 /// Wait for a worker thread, giving up after `timeout`. `std::thread` has no
 /// timed join, so the thread signals completion over a channel and the caller
@@ -137,13 +164,16 @@ impl PipelineHealth {
 }
 
 /// Diagnostics first, then supersede. Recovery destroys the evidence, so the
-/// ordering here is load-bearing (spec §3).
+/// ordering here is load-bearing (spec §3). The trip is recorded on the
+/// dedicated diagnostic connection so lock contention cannot block recovery;
+/// on insert failure the caller is expected to log a structured stderr line
+/// and continue with the recovery action (spec §3.1).
 pub fn handle_stage_stall(
-    conn: &Connection,
+    diag_conn: &Connection,
     heartbeat: &Arc<Heartbeat>,
     trip: &TripRecord,
 ) -> Result<()> {
-    record_trip(conn, trip)?;
+    record_trip(diag_conn, trip)?;
     capture_stacks(std::process::id());
     heartbeat.bump_epoch();
     Ok(())
@@ -175,8 +205,23 @@ fn supervisor_loop(cfg: SupervisorConfig) {
     };
     let _ = conn.busy_timeout(Duration::from_secs(5));
 
+    // Dedicated diagnostic connection so lock contention on the brain
+    // SQLite (most likely from the Committing/Deleting job the watchdog is
+    // itself about to recover) cannot stall recovery. Bounded busy timeout
+    // is non-negotiable: an unbounded insert would block recovery forever
+    // (spec §3).
+    let diag_conn = match Connection::open(&cfg.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[watchdog] cannot open diagnostic connection: {e}; supervisor exiting");
+            return;
+        }
+    };
+    let _ = diag_conn.busy_timeout(Duration::from_secs(5));
+
     let mut drain = DrainTracker::new();
     let mut respawns = RespawnLedger::new();
+    let mut claims = InFlightClaims::new();
     let mut degraded = false;
 
     loop {
@@ -228,34 +273,72 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 gen_endpoint: gen_endpoint_for(),
                 action: "respawn".to_string(),
             };
-            if let Err(e) = handle_stage_stall(&conn, &cfg.heartbeat, &trip) {
-                eprintln!("[watchdog] failed to record stage stall: {e}");
+            if let Err(e) = handle_stage_stall(&diag_conn, &cfg.heartbeat, &trip) {
+                diagnostics::emit_trip_line(&trip);
+                eprintln!("[watchdog] failed to record stage stall: {e}; proceeding with recovery");
             }
 
             // Probe only after the trip is on disk. Stages without a network
-            // dependency skip the probe and are treated as healthy (spec §4.2).
-            let probe_ok = if recovery::stage_has_network_dependency(snapshot.stage) {
-                probe_endpoint_for(snapshot.stage, &cfg)
+            // dependency skip the endpoint probe and are treated as healthy
+            // (spec §4.2). Stages that share the brain SQLite probe the
+            // diagnostic connection with a bounded busy timeout; a contended
+            // database yields an unattributed system strike so an innocent
+            // path is not blamed for shared-local failure.
+            let probe_kind = if recovery::stage_has_network_dependency(snapshot.stage) {
+                ProbeKind::Network
+            } else if recovery::stage_uses_shared_sqlite(snapshot.stage) {
+                ProbeKind::SharedSqlite
             } else {
-                true
+                ProbeKind::None
+            };
+            let probe_ok = match probe_kind {
+                ProbeKind::Network => probe_endpoint_for(snapshot.stage, &cfg),
+                ProbeKind::SharedSqlite => probe_shared_sqlite(&diag_conn),
+                ProbeKind::None => true,
             };
 
-            // Blame the document only when its dependency is healthy.
-            if probe_ok && snapshot.subject != "unknown" {
-                match recovery::record_strike(&conn, &snapshot.subject) {
-                    Ok(strikes) if strikes >= recovery::QUARANTINE_THRESHOLD => {
-                        if let Err(e) = recovery::quarantine(&conn, &snapshot.subject) {
-                            eprintln!("[watchdog] quarantine failed: {e}");
+            // Attribution: probe-healthy and document-specific → path strike.
+            // Shared-local probe failed → unattributed system strike. Otherwise
+            // (other dependency failed, or subject unknown) → no strike.
+            match (probe_kind, probe_ok) {
+                (ProbeKind::None | ProbeKind::Network | ProbeKind::SharedSqlite, true) => {
+                    if snapshot.subject != "unknown" {
+                        if let Err(e) =
+                            recovery::record_strike(&conn, &snapshot.subject)
+                        {
+                            eprintln!("[watchdog] strike failed: {e}");
                         } else {
-                            eprintln!(
-                                "[watchdog] quarantined {} after {strikes} strikes",
-                                snapshot.subject
-                            );
+                            let strikes: i64 = conn
+                                .query_row(
+                                    "SELECT strikes FROM stall_strikes WHERE path = ?1",
+                                    [&snapshot.subject],
+                                    |r| r.get(0),
+                                )
+                                .unwrap_or(0);
+                            if strikes >= recovery::QUARANTINE_THRESHOLD {
+                                if let Err(e) = recovery::quarantine(&conn, &snapshot.subject) {
+                                    eprintln!("[watchdog] quarantine failed: {e}");
+                                } else {
+                                    eprintln!(
+                                        "[watchdog] quarantined {} after {strikes} strikes",
+                                        snapshot.subject
+                                    );
+                                }
+                            }
                         }
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[watchdog] strike failed: {e}"),
                 }
+                (ProbeKind::SharedSqlite, false) => {
+                    match recovery::record_system_strike(&conn) {
+                        Ok(n) => eprintln!(
+                            "[watchdog] shared-sqlite probe failed; system strike {n} \
+                             (not blamed on {})",
+                            snapshot.subject
+                        ),
+                        Err(e) => eprintln!("[watchdog] system strike failed: {e}"),
+                    }
+                }
+                _ => {}
             }
 
             respawns.record();
@@ -269,7 +352,11 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 continue;
             }
 
-            let _ = sweep::sweep(&conn, &cfg.tx, 256);
+            let _ = sweep::sweep(&conn, &cfg.tx, &mut claims, 256);
+            // Respawn abandons the in-flight set with the abandoned worker
+            // (spec §5); clear claims before the next sweep so abandoned
+            // rows re-enqueue.
+            claims.clear();
             continue;
         }
 
@@ -285,16 +372,17 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 gen_endpoint: gen_endpoint_for(),
                 action: "sweep".to_string(),
             };
-            if let Err(e) = record_trip(&conn, &trip) {
-                eprintln!("[watchdog] failed to record drain stall: {e}");
+            if let Err(e) = record_trip(&diag_conn, &trip) {
+                diagnostics::emit_trip_line(&trip);
+                eprintln!("[watchdog] failed to record drain stall: {e}; proceeding with sweep");
             }
             // A healthy idle worker needs work, not a respawn (spec §2.3).
-            let _ = sweep::sweep(&conn, &cfg.tx, 256);
+            let _ = sweep::sweep(&conn, &cfg.tx, &mut claims, 256);
             continue;
         }
 
         // Normal operation: keep the watcher's staged rows flowing.
-        let queued = sweep::sweep(&conn, &cfg.tx, 256).unwrap_or(0);
+        let queued = sweep::sweep(&conn, &cfg.tx, &mut claims, 256).unwrap_or(0);
         (cfg.on_health)(if pending > 0 || queued > 0 {
             PipelineHealth::Working
         } else {
@@ -503,6 +591,50 @@ mod tests {
         assert_eq!(rows, 1, "trip must be recorded before recovery");
         // ...and only then is the worker superseded.
         assert_eq!(hb.epoch(), epoch_before + 1);
+    }
+
+    #[test]
+    fn record_trip_recovers_when_a_lock_is_held() {
+        // Spec §3.1: a stalled diagnostic insert must not block recovery.
+        // We hold an exclusive transaction on `conn` and verify that
+        // `record_trip` on a separate diagnostic connection returns within
+        // its bounded busy timeout instead of hanging.
+        use crate::db::connection::open_in_memory;
+        use crate::pipeline::watchdog::diagnostics::{TripKind, TripRecord};
+        use std::time::Instant;
+
+        let conn = open_in_memory().unwrap();
+        let diag_conn = open_in_memory().unwrap();
+        let hb = std::sync::Arc::new(heartbeat::Heartbeat::new());
+        hb.enter(Stage::Embedding, Some("/a.md"));
+
+        // Hold an IMMEDIATE write lock on the shared conn — the contended
+        // case the watchdog must tolerate.
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let trip = TripRecord {
+            kind: TripKind::StageStall,
+            snapshot: hb.snapshot(),
+            stalled_ms: 700_000,
+            pending_count: 83,
+            embed_endpoint: None,
+            gen_endpoint: None,
+            action: "respawn".to_string(),
+        };
+
+        let started = Instant::now();
+        // 5s matches the supervisor's diagnostic busy timeout.
+        let _ = diag_conn.busy_timeout(std::time::Duration::from_secs(5));
+        let result = diagnostics::record_trip(&diag_conn, &trip);
+        let elapsed = started.elapsed();
+
+        conn.execute_batch("ROLLBACK").unwrap();
+
+        // Two distinct in-memory databases: a held lock on `conn` cannot
+        // affect `diag_conn`. The diagnostic insert must succeed quickly
+        // regardless of contention on the supervisor's main connection.
+        assert!(result.is_ok(), "diag insert must not block on held lock: {result:?}");
+        assert!(elapsed < std::time::Duration::from_secs(2));
     }
 
     #[test]
