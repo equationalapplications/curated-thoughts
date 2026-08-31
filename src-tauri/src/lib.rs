@@ -2539,7 +2539,10 @@ fn copy_os_drop_paths_to_vault(
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
-pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root};
+pub use pipeline::{
+    entity_id_for_path, entity_id_for_virtual_path, ingest_document, ingest_document_virtual,
+    ingest_document_with_vault_root,
+};
 
 #[tauri::command]
 fn ingest_document_cmd(
