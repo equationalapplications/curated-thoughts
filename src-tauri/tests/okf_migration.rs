@@ -200,5 +200,15 @@ fn test_app_open_runs_v7_schema() {
     // §4 / §6 — V12 idempotently multiplies seconds-valued
     // `llm_wiki_entries.deleted_at` by 1000 to lock the timestamp-unit
     // contract for the heal writers).
-    assert_eq!(max_version, 12);
+    //
+    // Bumped from 12 to 14 by the ingest drain-stall watchdog (see
+    // docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md):
+    // V13 adds `pipeline_heartbeat`, the `pipeline_stalls` trip journal and the
+    // per-path `stall_strikes` ledger (§2.4/§3/§4.2); V14 adds the single-row
+    // `system_strikes` ledger for unattributed shared-dependency stalls (§4.2).
+    //
+    // Bumped from 14 to 15 by MIGRATION_V15, which rebuilds `documents` to
+    // widen the status CHECK so the deferred-reindex staging writes
+    // ('pending_reindex') are actually accepted.
+    assert_eq!(max_version, 15);
 }

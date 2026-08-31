@@ -372,19 +372,46 @@ fn u14_v12_multiplication_is_value_times_1000() {
 /// `schema_version` at the latest value.
 #[test]
 fn u15_schema_version_bumped_to_12_and_idempotent() {
+    // `open_in_memory` applies every migration, so MAX(version) tracks the
+    // latest schema, not V12. Assert what this test is actually about: V12
+    // records its own version exactly once and re-running it is a no-op.
     let conn = open_in_memory().unwrap();
+
+    let rows_for_12 = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM schema_version WHERE version = 12",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let max_version = |conn: &Connection| -> i64 {
+        conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    assert_eq!(rows_for_12(&conn), 1, "V12 must record schema_version=12");
+    let before = max_version(&conn);
+
     conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
         .unwrap();
-    let v1: i64 = conn
-        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(v1, 12, "V12 must insert schema_version=12");
+    assert_eq!(
+        rows_for_12(&conn),
+        1,
+        "V12 must remain idempotent on schema_version"
+    );
     conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
         .unwrap();
-    let v2: i64 = conn
-        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(v2, 12, "V12 must remain idempotent on schema_version");
+    assert_eq!(
+        rows_for_12(&conn),
+        1,
+        "V12 must remain idempotent on schema_version"
+    );
+    assert_eq!(
+        max_version(&conn),
+        before,
+        "re-running V12 must not move the schema watermark"
+    );
 }
 
 fn read_deleted_at(conn: &Connection, id: &str) -> Option<i64> {

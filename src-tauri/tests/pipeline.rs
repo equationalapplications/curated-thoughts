@@ -2,7 +2,7 @@ mod helpers;
 
 use std::sync::{atomic::AtomicUsize, mpsc, Arc, Mutex};
 
-use tauri_app_lib::{PipelineJob, PipelineWorker};
+use tauri_app_lib::{Heartbeat, PipelineJob, PipelineWorker};
 use tempfile::TempDir;
 
 static PIPELINE_STUB_GUARD: Mutex<()> = Mutex::new(());
@@ -25,7 +25,13 @@ fn run_pipeline_job(tmp: &TempDir, jobs: Vec<PipelineJob>) {
     let db_path = tmp.path().join("brain.db");
     let (tx, rx) = mpsc::sync_channel::<PipelineJob>(64);
     let (status_tx, _status_rx) = mpsc::channel();
-    let worker = PipelineWorker::new(db_path, rx, Arc::new(AtomicUsize::new(0)), status_tx);
+    let worker = PipelineWorker::new(
+        db_path,
+        rx,
+        Arc::new(AtomicUsize::new(0)),
+        status_tx,
+        Arc::new(Heartbeat::new()),
+    );
     let handle = std::thread::spawn(move || worker.run());
     for job in jobs {
         tx.send(job).unwrap();
@@ -57,6 +63,7 @@ fn ingest_skips_vault_wiki_markdown_under_vault_root() {
         Arc::new(AtomicUsize::new(0)),
         Some(vault.clone()),
         status_tx,
+        Arc::new(Heartbeat::new()),
     );
     let handle = std::thread::spawn(move || worker.run());
     tx.send(PipelineJob::ingest(wiki_file.to_string_lossy().to_string()))

@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import type { WikiStatusEventPayload } from '../lib/tauri';
 
 type EventCallback = (e: { payload: WikiStatusEventPayload }) => void;
@@ -25,7 +25,9 @@ describe('useWikiStatus', () => {
   it('returns initial idle status', () => {
     const { result } = renderHook(() => useWikiStatus());
     expect(result.current).toEqual({
-      ingesting: false,
+      ingest: 'idle',
+      ingestStage: null,
+      ingestSubject: null,
       librarian: false,
       healing: false,
       pruning: false,
@@ -36,12 +38,14 @@ describe('useWikiStatus', () => {
     });
   });
 
-  it('updates when wiki-status-change fires with ingesting true', async () => {
+  it('updates when wiki-status-change fires with ingest working', async () => {
     const { result } = renderHook(() => useWikiStatus());
     await act(async () => {
       capturedCallback?.({
         payload: {
-          ingesting: true,
+          ingest: 'working',
+          ingestStage: 'Embedding',
+          ingestSubject: '/note.md',
           librarian: false,
           healing: false,
           pruning: false,
@@ -50,7 +54,9 @@ describe('useWikiStatus', () => {
       });
     });
     expect(result.current).toEqual({
-      ingesting: true,
+      ingest: 'working',
+      ingestStage: 'Embedding',
+      ingestSubject: '/note.md',
       librarian: false,
       healing: false,
       pruning: false,
@@ -66,7 +72,7 @@ describe('useWikiStatus', () => {
     await act(async () => {
       capturedCallback?.({
         payload: {
-          ingesting: false,
+          ingest: 'idle',
           librarian: false,
           healing: true,
           pruning: false,
@@ -75,7 +81,9 @@ describe('useWikiStatus', () => {
       });
     });
     expect(result.current).toEqual({
-      ingesting: false,
+      ingest: 'idle',
+      ingestStage: null,
+      ingestSubject: null,
       librarian: false,
       healing: true,
       pruning: false,
@@ -91,7 +99,7 @@ describe('useWikiStatus', () => {
     await act(async () => {
       capturedCallback?.({
         payload: {
-          ingesting: false,
+          ingest: 'idle',
           librarian: true,
           healing: false,
           pruning: false,
@@ -99,21 +107,21 @@ describe('useWikiStatus', () => {
         },
       });
     });
-    const { ingesting, librarian, healing, pruning, forgetting } = result.current;
-    expect(ingesting || librarian || healing || pruning || forgetting).toBe(true);
+    const { ingest, librarian, healing, pruning, forgetting } = result.current;
+    expect(ingest !== 'idle' || librarian || healing || pruning || forgetting).toBe(true);
   });
 
   it('merges partial payload preserving prior state', async () => {
     const { result } = renderHook(() => useWikiStatus());
     await act(async () => {
       capturedCallback?.({
-        payload: { ingesting: true, librarian: false, healing: false, pruning: false, forgetting: false },
+        payload: { ingest: 'working', librarian: false, healing: false, pruning: false, forgetting: false },
       });
     });
     await act(async () => {
       capturedCallback?.({ payload: { pruning: true } });
     });
-    expect(result.current.ingesting).toBe(true);
+    expect(result.current.ingest).toBe('working');
     expect(result.current.pruning).toBe(true);
     expect(result.current.busy).toBe(true);
   });
@@ -128,4 +136,65 @@ describe('useWikiStatus', () => {
     expect(result.current.busy).toBe(true);
   });
 
+  it('reports degraded ingest so the UI can show a banner instead of a spinner', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'degraded' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.ingest).toBe('degraded');
+      expect(result.current.activeJob).toBe('ingesting');
+    });
+  });
+
+  it('does not report degraded ingest as busy, so vault switching stays reachable', async () => {
+    // A degraded pipeline is parked, not working: the watchdog exhausted its
+    // respawn cap and nothing is in flight. `busy` gates switchVault, and the
+    // bounded switch_vault is the documented recovery from this exact state —
+    // gating it here would leave force-quitting as the only way out.
+    const { result } = renderHook(() => useWikiStatus());
+
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'degraded' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.ingest).toBe('degraded');
+      expect(result.current.busy).toBe(false);
+    });
+  });
+
+  it('still reports stalled ingest as busy while the watchdog is recovering', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'stalled' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.busy).toBe(true);
+    });
+  });
+
+  it('treats idle ingest as not busy', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'idle' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.busy).toBe(false);
+    });
+  });
 });

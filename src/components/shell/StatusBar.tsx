@@ -4,6 +4,7 @@ import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { useVaultSwitcher } from "../../hooks/useVaultSwitcher";
 import { useWikiStatus } from "../../hooks/useWikiStatus";
 import { PrivacyShieldIcon } from "../privacy/PrivacyShieldIcon";
+import type { IngestHealth } from "../../lib/tauri";
 
 interface Props {
   vaultPath: string;
@@ -24,13 +25,15 @@ function librarianLabel(
   wikiBusy: boolean,
   wikiLabel: string | null,
   librarian: boolean,
-  ingesting: boolean,
+  ingest: IngestHealth,
 ): string {
+  if (ingest === "degraded") return "Ingest stopped — needs attention";
+  if (ingest === "stalled") return "Ingest stalled — recovering…";
   if (pending > 0) {
     return `Embedding ${pending} file${pending === 1 ? "" : "s"}…`;
   }
   if (librarian) return "Synthesizing…";
-  if (ingesting) return "Ingesting…";
+  if (ingest === "working") return "Ingesting…";
   if (wikiBusy && wikiLabel) return `${wikiLabel}…`;
   if (indexed > 0) {
     return `Idle — ${indexed} doc${indexed === 1 ? "" : "s"} indexed`;
@@ -69,7 +72,7 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
     wikiStatus.busy,
     wikiStatus.activeJobLabel,
     wikiStatus.librarian,
-    wikiStatus.ingesting,
+    wikiStatus.ingest,
   );
   const busy = pending > 0 || wikiStatus.busy;
 

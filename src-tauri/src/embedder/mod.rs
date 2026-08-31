@@ -1,6 +1,6 @@
 mod ollama;
 
-pub use ollama::OllamaEmbedder;
+pub use ollama::{OllamaEmbedder, OLLAMA_TIMEOUT_SECS};
 
 use anyhow::{anyhow, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
@@ -83,7 +83,7 @@ impl ExternalEmbedProfile {
         let api_key = self.resolved_api_key()?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(EXTERNAL_EMBED_TIMEOUT_SECS))
             .build()?;
         let base = self.base_url.trim_end_matches('/');
         let base = base.strip_suffix("/v1").unwrap_or(base);
@@ -136,6 +136,11 @@ impl ExternalEmbedProfile {
         Ok(out)
     }
 }
+
+/// HTTP ceiling for external/cloud embedding requests. The watchdog derives
+/// its `Embedding` budget from this, so it must stay a shared constant rather
+/// than an inline literal (spec §2.2).
+pub const EXTERNAL_EMBED_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]

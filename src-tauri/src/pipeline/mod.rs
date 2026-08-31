@@ -1,3 +1,5 @@
+pub mod watchdog;
+
 use anyhow::Result;
 use rusqlite::Connection;
 use std::{
@@ -9,6 +11,9 @@ use std::{
         mpsc, Arc,
     },
 };
+
+use crate::pipeline::watchdog::heartbeat::Stage;
+use std::sync::mpsc::SyncSender;
 
 use crate::chunker::{chunk_autodetect, should_ingest_extension, AstLang, ChunkStrategy};
 use crate::config::BrainConfig;
@@ -80,6 +85,8 @@ pub struct PipelineWorker {
     pending: Arc<AtomicUsize>,
     vault_root: Option<PathBuf>,
     status_tx: mpsc::Sender<PipelineStatusEvent>,
+    heartbeat: Arc<watchdog::heartbeat::Heartbeat>,
+    my_epoch: u64,
 }
 
 impl PipelineWorker {
@@ -89,6 +96,7 @@ impl PipelineWorker {
         rx: mpsc::Receiver<PipelineJob>,
         pending: Arc<AtomicUsize>,
         status_tx: mpsc::Sender<PipelineStatusEvent>,
+        heartbeat: Arc<watchdog::heartbeat::Heartbeat>,
     ) -> Self {
         PipelineWorker {
             db_path,
@@ -96,6 +104,8 @@ impl PipelineWorker {
             pending,
             vault_root: None,
             status_tx,
+            my_epoch: heartbeat.epoch(),
+            heartbeat,
         }
     }
 
@@ -105,6 +115,7 @@ impl PipelineWorker {
         pending: Arc<AtomicUsize>,
         vault_root: Option<PathBuf>,
         status_tx: mpsc::Sender<PipelineStatusEvent>,
+        heartbeat: Arc<watchdog::heartbeat::Heartbeat>,
     ) -> Self {
         PipelineWorker {
             db_path,
@@ -112,7 +123,20 @@ impl PipelineWorker {
             pending,
             vault_root,
             status_tx,
+            my_epoch: heartbeat.epoch(),
+            heartbeat,
         }
+    }
+
+    /// Publish a stage transition, returning `false` if this worker has been
+    /// superseded and must return immediately.
+    fn enter(
+        &self,
+        stage: watchdog::heartbeat::Stage,
+        subject: Option<&str>,
+    ) -> bool {
+        watchdog::heartbeat::StageReporter::guarded(&self.heartbeat, self.my_epoch)
+            .enter(stage, subject)
     }
 
     pub fn run(self) {
@@ -172,6 +196,12 @@ impl PipelineWorker {
                 PipelineJob::Ingest { path, .. } => path.clone(),
                 PipelineJob::Delete(path) => path.clone(),
             };
+            // Epoch guard (spec §4.1): a superseded worker must not touch the
+            // pending counter, the status channel, or the database. Check
+            // BEFORE the count_pending increment below.
+            if !self.enter(Stage::Reading, Some(&job_path)) {
+                return Ok(());
+            }
             let count_pending = matches!(
                 &job,
                 PipelineJob::Ingest {
@@ -200,11 +230,21 @@ impl PipelineWorker {
                             })
                             .map(|p| p.to_path_buf());
                         let vault_root_str = worker_vault_root.as_deref().and_then(|p| p.to_str());
-                        match ingest_file(&conn, &profile, &path, force, vault_root_str) {
+                        let reporter = watchdog::heartbeat::StageReporter::guarded(
+                            &self.heartbeat,
+                            self.my_epoch,
+                        );
+                        match ingest_file(&conn, &profile, &path, force, vault_root_str, &reporter) {
                             Ok(()) => {
                                 let eid = entity_id_for_path(&path, vault_root_str);
                                 current_entity = Some(eid.clone());
                                 pending_linkers.insert(eid.clone());
+                                // Summarizing is in its own block so the watchdog can
+                                // attribute a long generate_summary stall to the right
+                                // stage instead of seeing the whole ingest as one span.
+                                if !self.enter(Stage::Summarizing, Some(&path)) {
+                                    return;
+                                }
                                 if let Err(e) = crate::librarian::generate_summary(
                                     &mut conn,
                                     &path,
@@ -227,6 +267,12 @@ impl PipelineWorker {
                         }
                     }
                     PipelineJob::Delete(path) => {
+                        // Epoch guard inside catch_unwind: this arm returns `()`,
+                        // not `Ok(())`, because the closure is panicking-unwind-safe
+                        // and the outer driver loop is what owns the Result type.
+                        if !self.enter(Stage::Deleting, Some(&path)) {
+                            return;
+                        }
                         // Remove shadow copy from .brain/converted/ (PDF/DOCX conversion artifact)
                         if let Some(original) = std::path::Path::new(&path).file_stem() {
                             let shadow_root = worker_vault_root.as_deref().or_else(|| {
@@ -277,6 +323,10 @@ impl PipelineWorker {
                     .send(PipelineStatusEvent::PendingCount(current));
             }
 
+            // The closure publishes a Linking transition per entity (spec §2.2
+            // budgets Linking per entity, not per batch, because the batch size
+            // is unbounded) through `self.enter`, so it inherits the epoch
+            // guard rather than writing to the heartbeat directly.
             let flush_pending_linkers =
                 |conn: &Connection, pending_linkers: &mut HashSet<String>| {
                     if pending_linkers.is_empty() {
@@ -288,6 +338,13 @@ impl PipelineWorker {
                         .unwrap_or(0)
                         .saturating_sub(300);
                     for eid in pending_linkers.drain() {
+                        // Epoch guard: a superseded worker must not run the
+                        // linker — that would race its replacement on the
+                        // same DB (spec §4.1, CodeRabbit review
+                        // PRRT_kwDOSVmXas6d28dq).
+                        if !self.enter(Stage::Linking, Some(&eid)) {
+                            return;
+                        }
                         if let Err(e) = crate::indexer::linker::run_linker(conn, &eid, since) {
                             eprintln!("[linker] run_linker error ({}): {}", eid, e);
                         }
@@ -323,6 +380,12 @@ impl PipelineWorker {
                     break;
                 }
             }
+
+            // End of iteration: return to Idle so the watchdog observes the
+            // job completing and any next iteration starts from a known stage.
+            if !self.enter(Stage::Idle, None) {
+                return Ok(());
+            }
         }
 
         if !pending_linkers.is_empty() {
@@ -332,6 +395,9 @@ impl PipelineWorker {
                 .unwrap_or(0)
                 .saturating_sub(300);
             for eid in pending_linkers.drain() {
+                if !self.enter(Stage::Linking, Some(&eid)) {
+                    return Ok(());
+                }
                 if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
                     eprintln!("[linker] run_linker error ({}): {}", eid, e);
                 }
@@ -442,7 +508,12 @@ pub fn ingest_document(
     path: &str,
     force_rechunk: bool,
 ) -> Result<()> {
-    ingest_file(conn, profile, path, force_rechunk, None)
+    // Standalone callers (Tauri commands, tooling) have no watchdog-managed
+    // heartbeat to publish to, so a freshly-defaulted one is constructed here.
+    // The worker-driven path passes a shared `Heartbeat` instead.
+    let hb = watchdog::heartbeat::Heartbeat::new();
+    let hb = watchdog::heartbeat::StageReporter::unguarded(&hb);
+    ingest_file(conn, profile, path, force_rechunk, None, &hb)
 }
 
 pub fn ingest_document_with_vault_root(
@@ -452,7 +523,9 @@ pub fn ingest_document_with_vault_root(
     force_rechunk: bool,
     vault_root: Option<&str>,
 ) -> Result<()> {
-    ingest_file(conn, profile, path, force_rechunk, vault_root)
+    let hb = watchdog::heartbeat::Heartbeat::new();
+    let hb = watchdog::heartbeat::StageReporter::unguarded(&hb);
+    ingest_file(conn, profile, path, force_rechunk, vault_root, &hb)
 }
 
 /// Ingest a file whose vault identity (`virtual_path`) differs from where its
@@ -466,6 +539,8 @@ pub fn ingest_document_virtual(
     force_rechunk: bool,
     vault_root: Option<&str>,
 ) -> Result<()> {
+    let hb = watchdog::heartbeat::Heartbeat::new();
+    let hb = watchdog::heartbeat::StageReporter::unguarded(&hb);
     ingest_file_virtual(
         conn,
         profile,
@@ -473,6 +548,7 @@ pub fn ingest_document_virtual(
         read_path,
         force_rechunk,
         vault_root,
+        &hb,
     )
 }
 
@@ -586,8 +662,9 @@ fn ingest_file(
     path: &str,
     force_rechunk: bool,
     vault_root: Option<&str>,
+    hb: &watchdog::heartbeat::StageReporter<'_>,
 ) -> Result<()> {
-    ingest_file_virtual(conn, profile, path, path, force_rechunk, vault_root)
+    ingest_file_virtual(conn, profile, path, path, force_rechunk, vault_root, hb)
 }
 
 fn ingest_file_virtual(
@@ -597,6 +674,7 @@ fn ingest_file_virtual(
     read_path: &str,
     force_rechunk: bool,
     vault_root: Option<&str>,
+    hb: &watchdog::heartbeat::StageReporter<'_>,
 ) -> Result<()> {
     let ext = Path::new(virtual_path)
         .extension()
@@ -610,6 +688,11 @@ fn ingest_file_virtual(
     }
 
     // Bytes come from the real file...
+    if !hb.enter(Stage::Reading, Some(virtual_path)) {
+        // Superseded mid-job: stop writing to the shared heartbeat and
+        // to the database, or we race the replacement worker (spec §4.1).
+        return Ok(());
+    }
     let raw_bytes = std::fs::read(read_path)?;
     let hash = hash_bytes(&raw_bytes);
 
@@ -621,6 +704,11 @@ fn ingest_file_virtual(
         delete_document_chunks(conn, doc.id)?;
     }
 
+    if !hb.enter(Stage::Extracting, Some(virtual_path)) {
+        // Superseded mid-job: stop writing to the shared heartbeat and
+        // to the database, or we race the replacement worker (spec §4.1).
+        return Ok(());
+    }
     let text = match extract_text(read_path)? {
         Some(t) => t,
         None => String::from_utf8_lossy(&raw_bytes).into_owned(),
@@ -629,6 +717,11 @@ fn ingest_file_virtual(
     let doc_id = upsert_document(conn, virtual_path, &hash)?;
     let eid = entity_id_for_virtual_path(virtual_path, vault_root);
 
+    if !hb.enter(Stage::Chunking, Some(virtual_path)) {
+        // Superseded mid-job: stop writing to the shared heartbeat and
+        // to the database, or we race the replacement worker (spec §4.1).
+        return Ok(());
+    }
     let mut chunks = chunk_autodetect(Path::new(virtual_path), &text);
 
     // Pass 2: extract reference/call-site chunks for supported code files
@@ -647,15 +740,26 @@ fn ingest_file_virtual(
 
     if chunks.is_empty() {
         mark_document_indexed(conn, doc_id)?;
+        let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
         return Ok(());
     }
 
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
 
+    if !hb.enter(Stage::Embedding, Some(virtual_path)) {
+        // Superseded mid-job: stop writing to the shared heartbeat and
+        // to the database, or we race the replacement worker (spec §4.1).
+        return Ok(());
+    }
     let embeddings = embed_batch(profile, texts).inspect_err(|_| {
         let _ = mark_document_error(conn, doc_id);
     })?;
 
+    if !hb.enter(Stage::Committing, Some(virtual_path)) {
+        // Superseded mid-job: stop writing to the shared heartbeat and
+        // to the database, or we race the replacement worker (spec §4.1).
+        return Ok(());
+    }
     for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {
         let content_hash = crate::db::chunk_hash::compute_chunk_hash(&chunk.text, virtual_path, i);
         let chunk_id = insert_chunk(conn, doc_id, chunk, i, &eid, &content_hash)?;
@@ -663,28 +767,100 @@ fn ingest_file_virtual(
     }
 
     mark_document_indexed(conn, doc_id)?;
+    let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
     Ok(())
 }
 
-pub fn start_pipeline(
+/// A running pipeline worker plus everything needed to replace it.
+///
+/// The watchdog can supersede a wedged worker (bump the epoch), but a
+/// superseded worker that is *truly* wedged never returns, and it still owns
+/// the receiving end of the job channel. Recovery therefore has to rebuild the
+/// channel and spawn a fresh worker on it, which means keeping the worker's
+/// construction inputs around — hence this struct rather than a bare tuple
+/// (CodeRabbit review PRRT_kwDOSVmXas6d3ZYn).
+pub struct PipelineHandle {
+    /// Current sender. Replaced by `respawn_worker`.
+    pub tx: SyncSender<PipelineJob>,
+    pub join: std::thread::JoinHandle<()>,
+    pub pending: Arc<AtomicUsize>,
+    /// Taken once by the status-event listener at startup.
+    pub status_rx: Option<mpsc::Receiver<PipelineStatusEvent>>,
+    pub heartbeat: Arc<watchdog::heartbeat::Heartbeat>,
+    // Retained construction inputs, so a replacement worker is identical to
+    // the one it replaces.
     db_path: PathBuf,
     vault_root: Option<PathBuf>,
-) -> (
-    mpsc::SyncSender<PipelineJob>,
-    std::thread::JoinHandle<()>,
-    Arc<AtomicUsize>,
-    Option<mpsc::Receiver<PipelineStatusEvent>>,
-) {
-    let (tx, rx) = mpsc::sync_channel::<PipelineJob>(256);
+    status_tx: mpsc::Sender<PipelineStatusEvent>,
+}
+
+/// Channel depth. Shared by `start_pipeline` and `respawn_worker` so a
+/// replacement worker inherits the same backpressure characteristics.
+pub const PIPELINE_CHANNEL_CAPACITY: usize = 256;
+
+impl PipelineHandle {
+    /// Rebuild the channel and spawn a replacement worker, returning the new
+    /// sender.
+    ///
+    /// The caller must publish the returned sender to every producer: the
+    /// abandoned worker keeps the old receiver, so anything still sending on
+    /// the old sender enqueues into a queue nobody drains.
+    ///
+    /// The epoch is bumped first, so the abandoned worker exits at its next
+    /// stage transition instead of racing its replacement on the same
+    /// database (spec §4.1).
+    pub fn respawn_worker(&mut self) -> SyncSender<PipelineJob> {
+        self.heartbeat.bump_epoch();
+
+        let (tx, rx) = mpsc::sync_channel::<PipelineJob>(PIPELINE_CHANNEL_CAPACITY);
+        let worker = PipelineWorker::new_with_vault(
+            self.db_path.clone(),
+            rx,
+            self.pending.clone(),
+            self.vault_root.clone(),
+            self.status_tx.clone(),
+            self.heartbeat.clone(),
+        );
+        let join = std::thread::Builder::new()
+            .name("pipeline-worker".to_string())
+            .spawn(move || worker.run())
+            .expect("spawn replacement pipeline worker");
+
+        // The old join handle belongs to a thread we are deliberately
+        // abandoning; dropping it detaches rather than blocks.
+        self.join = join;
+        self.tx = tx.clone();
+        tx
+    }
+}
+
+pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> PipelineHandle {
+    let (tx, rx) = mpsc::sync_channel::<PipelineJob>(PIPELINE_CHANNEL_CAPACITY);
     let (status_tx, status_rx) = mpsc::channel();
     let pending = Arc::new(AtomicUsize::new(0));
-    let worker =
-        PipelineWorker::new_with_vault(db_path, rx, pending.clone(), vault_root, status_tx);
+    let heartbeat = Arc::new(watchdog::heartbeat::Heartbeat::new());
+    let worker = PipelineWorker::new_with_vault(
+        db_path.clone(),
+        rx,
+        pending.clone(),
+        vault_root.clone(),
+        status_tx.clone(),
+        heartbeat.clone(),
+    );
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
-    (tx, join, pending, Some(status_rx))
+    PipelineHandle {
+        tx,
+        join,
+        pending,
+        status_rx: Some(status_rx),
+        heartbeat,
+        db_path,
+        vault_root,
+        status_tx,
+    }
 }
 
 #[cfg(test)]
@@ -838,12 +1014,15 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let vault_str = vault.to_string_lossy().to_string();
         let path_str = wiki_file.to_string_lossy().to_string();
+        let hb = crate::pipeline::watchdog::heartbeat::Heartbeat::new();
+        let hb = crate::pipeline::watchdog::heartbeat::StageReporter::unguarded(&hb);
         ingest_file(
             &conn,
             &EmbedProfile::default(),
             &path_str,
             false,
             Some(&vault_str),
+            &hb,
         )
         .unwrap();
 
@@ -858,5 +1037,88 @@ mod tests {
         let id_a = entity_id_for_path("/Users/foo/Vault/src/db.rs", Some("/Users/foo/Vault"));
         let id_b = entity_id_for_path("/Users/foo/Vault/src/db.rs", Some("/Users/foo/Vault/"));
         assert_eq!(id_a, id_b);
+    }
+}
+
+#[cfg(test)]
+mod watchdog_integration_tests {
+    use super::watchdog::heartbeat::{Heartbeat, Stage};
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn worker_returns_to_idle_after_draining() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        crate::db::connection::open_app_db(&db_path, None).unwrap();
+
+        let (tx, rx) = sync_channel::<PipelineJob>(8);
+        let heartbeat = Arc::new(Heartbeat::new());
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (status_tx, _status_rx) = mpsc::channel();
+
+        let worker = PipelineWorker::new_with_vault(
+            db_path,
+            rx,
+            pending,
+            None,
+            status_tx,
+            heartbeat.clone(),
+        );
+        let join = std::thread::spawn(move || worker.run());
+
+        drop(tx); // no jobs; worker should exit cleanly from Idle
+        join.join().unwrap();
+
+        assert_eq!(heartbeat.snapshot().stage, Stage::Idle);
+    }
+
+    #[test]
+    fn superseded_worker_exits_without_touching_the_pending_counter() {
+        // A worker whose epoch is stale must not decrement `pending`,
+        // send status, or write chunks (spec §4.1).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        crate::db::connection::open_app_db(&db_path, None).unwrap();
+
+        let doc = tmp.path().join("documents").join("a.md");
+        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        std::fs::write(&doc, "hello world").unwrap();
+
+        let (tx, rx) = sync_channel::<PipelineJob>(8);
+        let heartbeat = Arc::new(Heartbeat::new());
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let worker = PipelineWorker::new_with_vault(
+            db_path,
+            rx,
+            pending.clone(),
+            None,
+            status_tx,
+            heartbeat.clone(),
+        );
+
+        // Supersede BEFORE the worker starts, so its first epoch check fails.
+        heartbeat.bump_epoch();
+
+        tx.send(PipelineJob::ingest_counted(
+            doc.to_string_lossy().to_string(),
+        ))
+        .unwrap();
+        drop(tx);
+
+        let join = std::thread::spawn(move || worker.run());
+        join.join().unwrap();
+
+        assert_eq!(
+            pending.load(Ordering::SeqCst),
+            0,
+            "superseded worker must not touch the pending counter"
+        );
+        assert!(
+            status_rx.try_recv().is_err(),
+            "superseded worker must not emit status events"
+        );
     }
 }

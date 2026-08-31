@@ -377,7 +377,7 @@ export function startAutoMaintenance(): () => void {
   const handleStatusChange = (event: { payload: WikiStatusEventPayload }) => {
     const p = event.payload;
     isBusy = !!(
-      p.ingesting ||
+      (p.ingest && p.ingest !== "idle") ||
       p.librarian ||
       (p.healing ?? p.heal) ||
       (p.pruning ?? p.prune) ||
