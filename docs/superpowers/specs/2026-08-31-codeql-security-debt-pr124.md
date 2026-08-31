@@ -309,10 +309,16 @@ holder identity is written to the file.
 6. Manual: `ct trust --list`, `ct trust <link>` on a home-directory symlink,
    `ct status`, and the `ct ingest` / `ct librarian run` refusals print
    `~`-collapsed paths; `ct status --json` still prints an absolute path.
-7. UNC (D2): platform-independent unit test of the prefix-stripping helper
-   against literal `\\?\C:\Users\...` and `\\?\UNC\server\share\...` inputs, so
-   Unix CI exercises the logic; plus `#[cfg(windows)]` tests asserting
-   `display_target` collapses `$HOME` on real `canonicalize` output.
+7. UNC (D2): platform-independent unit tests of the prefix-stripping helper
+   against literal `\\?\C:\Users\...` and `\\?\UNC\server\share\...` inputs. These
+   are the *only* automated guard on the Windows path, deliberately: the
+   helper is pure string logic, so Unix CI exercises it fully. A
+   `#[cfg(windows)]` test of `display_target` cannot fake `$HOME` — `dirs 6`
+   resolves the home directory through a Windows known-folder API and ignores
+   the environment, so `temp_env` (which the four existing `redact_home` tests
+   rely on) has no effect there. Testing the composition on Windows would need
+   a real Windows runner and a real user profile; the release workflow is
+   `ubuntu-latest` only.
 8. Permissions (D5): `#[cfg(unix)]` test in **both** crates asserting a
    newly-created `.curated_thoughts.lock` has mode `0o600`.
 9. Post-merge: CodeQL run on `main` — alert #2 either closes or is dismissed
