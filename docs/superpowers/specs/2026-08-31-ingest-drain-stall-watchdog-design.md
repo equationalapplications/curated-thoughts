@@ -1,7 +1,7 @@
 # Ingest Drain-Stall Watchdog — Design
 
 **Date:** 2026-08-31
-**Status:** Approved for planning (revised after spec self-review)
+**Status:** Implemented (PR landed; per-task reviews + fix-rounds captured in `.superpowers/sdd/2026-08-31-ingest-drain-stall-watchdog/`)
 **Branch:** `spec/ingest-drain-stall-watchdog`
 **Priority:** P2
 
