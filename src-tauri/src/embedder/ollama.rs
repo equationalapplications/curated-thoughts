@@ -7,6 +7,9 @@ use serde::Deserialize;
 
 use super::EmbedProfile;
 
+/// HTTP ceiling for local Ollama requests. See `EXTERNAL_EMBED_TIMEOUT_SECS`.
+pub const OLLAMA_TIMEOUT_SECS: u64 = 600;
+
 static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 
 fn shared_client() -> Result<reqwest::blocking::Client, String> {
@@ -18,7 +21,7 @@ fn shared_client() -> Result<reqwest::blocking::Client, String> {
     }
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(std::time::Duration::from_secs(OLLAMA_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("{e:#}"))?; // full anyhow-style chain, not just top-level msg
     let _ = CLIENT.set(client.clone());
