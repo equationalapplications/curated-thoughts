@@ -25,8 +25,11 @@ export CURATED_BRAIN_CONFIG="$SMOKE_HOME/.brain/config.json"
 # Canned input for the interactive --onboard prompts:
 # Embedding: option 1 (Local Ollama)
 # Generation: option 0 (Skip / unconfigured)
+# Knowledge schema: option 1 (software-org, the CLI default) — prompt added in
+#   PR #124 (0b3bc15); a missing third line hits read_line EOF and aborts
+#   onboarding, which broke this smoke test on the v1.38.0 build run.
 # Vault path comes from --vault flag below so no stdin required for that.
-ONBOARD_INPUT=$'1\n0\n'
+ONBOARD_INPUT=$'1\n0\n1\n'
 if printf '%s' "$ONBOARD_INPUT" | "$BIN" --onboard --vault "$SMOKE_HOME/vault" --force >/dev/null 2>&1; then
     if [ -f "$CURATED_BRAIN_CONFIG" ]; then
         echo "PASS: --onboard wrote config.json"
@@ -44,6 +47,12 @@ else
     echo "FAIL: --onboard exited non-zero" >&2
     exit 1
 fi
+
+# Seed a minimal brain.db inside the stub HOME. Since PR #124 the sidecar
+# fail-fasts on a missing DB instead of probing the real ~/.brain, so the
+# smoke test must be self-contained (same recipe build.yml uses).
+mkdir -p "$SMOKE_HOME/.brain"
+python3 -c "import sqlite3; sqlite3.connect('$SMOKE_HOME/.brain/brain.db').execute('CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY)')"
 
 DOCTOR_RC=0
 # `|| DOCTOR_RC=$?` keeps the real exit status: with `|| true` the subsequent
