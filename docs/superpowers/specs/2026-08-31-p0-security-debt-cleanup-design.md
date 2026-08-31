@@ -83,18 +83,22 @@ contents are unchanged.
 This exercises the real exploitation path against the real filesystem with no
 mocking. It fails on `truncate(true)` and passes after the fix.
 
-**Platform scope (Unix-only).** Symlink creation is gated to Unix
-(`#[cfg(unix)]` on the test module). On Windows, `std::os::windows::fs::symlink_file`
-requires Developer Mode or `SeCreateSymbolicLinkPrivilege`, and `LockFileEx`
-holds an exclusive lock on the handle that would defeat a follow-up
-`fs::read` (or any second handle to the locked range) with `ERROR_LOCK_VIOLATION`
-even on the same process. Dropping the `VaultLock` before reading the canary
-sidesteps the latter, but the former is a developer-environment property the
-test cannot rely on, so we skip on Windows rather than carry a flaky gate.
-The `tools` crate has no Windows CI surface today (`.github/workflows/ci.yml`
-runs `rust-ubuntu` and `rust-macos` against `src-tauri` only; `build.yml` builds
-but does not test), so the skip does not mask any CI signal — it only documents
-the platform restriction for future maintainers.
+**Platform scope (Unix-only, this test only).** `#[cfg(unix)]` is applied to
+`vault_lock_does_not_truncate_symlink_target` itself (or, equivalently, that
+test lives in a Unix-only submodule) — **not** to the surrounding `mod tests`,
+so `vault_lock_blocks_second_acquire` and `vault_lock_released_on_drop`
+remain enabled on Windows. The skip exists because
+`std::os::windows::fs::symlink_file` requires Developer Mode or
+`SeCreateSymbolicLinkPrivilege`, and `LockFileEx` holds an exclusive lock on
+the handle that would defeat a follow-up `fs::read` (or any second handle to
+the locked range) with `ERROR_LOCK_VIOLATION` even on the same process.
+Dropping the `VaultLock` before reading the canary sidesteps the latter, but
+the former is a developer-environment property the test cannot rely on, so
+we skip on Windows rather than carry a flaky gate. The `tools` crate has no
+Windows CI surface today (`.github/workflows/ci.yml` runs `rust-ubuntu` and
+`rust-macos` against `src-tauri` only; `build.yml` builds but does not test),
+so the skip does not mask any CI signal — it only documents the platform
+restriction for future maintainers.
 
 ### Known follow-up
 
@@ -113,21 +117,30 @@ scoping keeps this change reviewable.
 println!("{} -> {}", entry.link, redact_home(&entry.target));
 ```
 
-Two facts keep this safe from a cleartext-logging standpoint, neither of which
-the existing comment captures:
+`entry.target` is sanitised by `redact_home`: `$HOME` prefixes collapse to
+`~`, so a target like `~/.ssh` is never printed as an absolute path into CI
+logs or system journals.
 
-1. **`entry.link` is vault-relative by construction.** `TrustedLink::link`
-   (`src-tauri/src/trusted_links.rs:14-21`) is documented as the
-   "Vault-relative path of the symlink itself, e.g. `documents/specs`". The
-   sole writer, `approve_into`, builds it from a `link_rel` string the caller
-   passes in — every call site (`cmds.rs`, `ct trust`) passes a vault-relative
-   path. So `entry.link` cannot contain `$HOME`, an absolute filesystem path,
-   or any other sensitive value: the type's docstring and the call sites
-   enforce that structurally. `BrainConfig::load` does not need to revalidate
-   it on read for this same reason.
-2. **`entry.target` is sanitised by `redact_home`.** `$HOME` prefixes collapse
-   to `~`, so a target like `~/.ssh` is never printed as an absolute path
-   into CI logs or system journals.
+`entry.link` is **not** sanitised by `redact_home`. The reviewer flagged
+this, and the gap is real:
+
+- `TrustedLink::link` (`src-tauri/src/trusted_links.rs:14-21`) is
+  documented as "Vault-relative path of the symlink itself, e.g.
+  `documents/specs`", and the in-tree writer `approve_into` does pass a
+  vault-relative string — so a value routed through `ct trust` /
+  `cmds.rs::approve_link` is structurally vault-relative.
+- But `BrainConfig::load_lenient` (`src-tauri/src/config/mod.rs:531-541`)
+  deserialises each ledger entry directly via
+  `serde_json::from_value::<TrustedLink>`. There is no path-shape check.
+  A hand-edited `~/.brain/config.json`, or any program that writes the
+  config, can put an absolute path (or any other string) into `link`,
+  and `ct trust --list` would print it verbatim into stdout.
+
+The "structural" argument from the previous revision was right that the
+type docstring and the in-tree callers agree on vault-relative paths, but
+the serde boundary is the actual surface that reaches the println!, and
+that boundary does not enforce it. The dismissal rationale therefore has
+to be about the print site, not the load contract.
 
 CodeQL's `rust/cleartext-logging` query does not model `redact_home` as a
 sanitiser, so it flags the call anyway. The `// codeql[rust/cleartext-logging]`
@@ -135,38 +148,50 @@ comment added above it is inert — inline suppression comments work for some
 CodeQL languages but **not** for Rust, so alert `#2` has stayed open since #124
 while appearing, to a reader, to be handled.
 
-### Decision: false positive, dismissed upstream
+### Decision: false positive after defense-in-depth fix, dismissed upstream
 
 `ct trust --list` exists to show the user what they trusted. Printing the
 link without its target would remove most of the listing's value, so the
-`println!` stays as-is. Alert `#2` is a genuine false positive on a
-user-facing CLI listing where both fields are constrained: `entry.link` is
-vault-relative by type-and-call-site contract (cannot contain `$HOME` or any
-absolute path); `entry.target` is sanitised by `redact_home` (collapses
-`$HOME` to `~`). Together those two invariants are the dismissal rationale
-recorded in the GitHub Security UI.
+`println!` stays as-is — but the dismissal is now conditional on a
+defense-in-depth fix in `ct.rs`: pass `entry.link` through `redact_home`
+at the print site so the printable form is constrained regardless of what
+the JSON on disk contains.
+
+The load-boundary check (`BrainConfig::load` validating `entry.link` is
+vault-relative, or rejecting it outright) is a **separate, tracked
+follow-up** and is **not** part of this PR's dismissal rationale. That
+follow-up is correct hardening but needs a vault_root-at-load-time
+discussion and its own spec; bundling it here would re-open PR #124's
+review surface.
 
 ### Fix
 
-Delete the inert suppression comment and replace it with a plain comment that
-records the sanitiser, the verdict, and a warning against re-adding the
-suppression:
+Two changes in `ct.rs`:
+
+1. Pass `entry.link` through `redact_home` at the print site. `redact_home`
+   collapses a `$HOME` prefix to `~` and leaves other strings untouched, so
+   the typical `documents/specs` ledger entry prints unchanged. A
+   misconfigured `~/.ssh/keys` entry would print as `~/.ssh/keys` (no
+   leak), and any other absolute path simply prints as-is — never as
+   `$HOME/whatever` — which is the only invariant CodeQL's
+   `rust/cleartext-logging` query is checking for.
+2. Delete the inert suppression comment and replace it with a plain comment
+   that records the sanitiser, the verdict, and a warning against re-adding
+   the suppression:
 
 ```rust
-// Both fields are constrained, so this is not a cleartext leak:
-//   * `entry.link` is vault-relative by type and call-site contract
-//     (TrustedLink::link doc, src-tauri/src/trusted_links.rs:14-21) —
-//     it cannot be `$HOME` or any absolute path.
-//   * `entry.target` is sanitised by `redact_home` above: the
-//     `$HOME` prefix is collapsed to `~` before printing.
-// CodeQL rust/cleartext-logging flags this anyway (it does not model
-// either constraint); alert #2 dismissed as a false positive citing
-// both. Inline `// codeql[...]` suppression does NOT work for Rust —
-// do not re-add it.
-println!("{} -> {}", entry.link, redact_home(&entry.target));
+// Both fields are sanitised by `redact_home` before printing:
+// the `$HOME` prefix is collapsed to `~`, so the values reaching
+// stdout cannot contain an absolute path under the user's home
+// (e.g. `~/.ssh/keys`). CodeQL rust/cleartext-logging flags this
+// anyway (it does not model `redact_home` as a sanitiser); alert #2
+// dismissed as a false positive citing this sanitiser. Inline
+// `// codeql[...]` suppression does NOT work for Rust — do not
+// re-add it.
+println!("{} -> {}", redact_home(&entry.link), redact_home(&entry.target));
 ```
 
-Alert #2 is then dismissed in the GitHub Security UI as a false positive,
+Alert `#2` is then dismissed in the GitHub Security UI as a false positive,
 citing that justification. **This is a manual maintainer step** — it cannot
 be done from the PR, and the CodeQL run on this PR will still report alert #2
 until it is performed. The PR body will call this out.
@@ -194,3 +219,12 @@ correctly earns its own alert to triage.
   sync by hand until the phase-3 workspace migration collapses them. Both
   module headers already document this; the divergence this PR fixes was
   caught only by manual review, not by any test or lint.
+- **Load-boundary validation is deferred.** This PR closes the
+  cleartext-logging print path via `redact_home` on both fields. The
+  underlying gap — `BrainConfig::load_lenient` accepting any
+  `TrustedLink` shape without validating `entry.link` as vault-relative
+  — is a separate hardening item (could be a validation that rejects
+  non-vault-relative entries, or a normalisation step that converts
+  absolute paths to vault-relative). That work needs a vault_root-at-load
+  discussion and its own spec; it is not a release-blocker for the
+  `redact_home` print-site fix.
