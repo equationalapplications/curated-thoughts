@@ -142,12 +142,15 @@ pub fn classify_link(
         }
     }
     if target != vault_root && is_within(&vault_root, &target) {
-        // The target sits above the vault — either framing is fatal.
-        return LinkVerdict::Denied(if vault_root.starts_with(&target) {
-            DenyReason::ContainsVault
-        } else {
-            DenyReason::VaultAncestor
-        });
+        // The target sits above the vault — that's the only condition the
+        // pre-check leaves when we get here (target != vault_root already
+        // excluded equality), and `is_within`/`starts_with` agree
+        // component-wise on normalized paths. There is no separate
+        // `VaultAncestor` framing reachable from this code; the variant is
+        // retained for taxonomy completeness and surfaced by callers that
+        // distinguish on it (see the regression test in
+        // `src-tauri/tests/trusted_links.rs`).
+        return LinkVerdict::Denied(DenyReason::ContainsVault);
     }
     for entry in ledger {
         let trusted = lexical_normalize(Path::new(&entry.target));

@@ -109,6 +109,13 @@ pub struct LoadReport {
     pub vault_path_missing: bool,
     /// True if privacy block was missing and filled by leniency.
     pub privacy_missing: bool,
+    /// True if an `ontology` block was present but failed to parse (e.g. an
+    /// unrecognized `schema` value). Distinct from "absent" — callers that
+    /// treat a `None` selection as "never chosen, use the desktop default"
+    /// must NOT apply that fallback here, or an invalid selection like
+    /// `{"ontology":{"schema":"unknown"}}` would silently start the General
+    /// ontology instead of surfacing the parse failure.
+    pub ontology_unparseable: bool,
 }
 
 /// Serializable summary of which config blocks were silently defaulted
@@ -296,6 +303,7 @@ impl BrainConfig {
             embedding_missing: false,
             vault_path_missing: false,
             privacy_missing: false,
+            ontology_unparseable: false,
         };
 
         let text = match fs::read_to_string(&paths.config_path) {
@@ -500,7 +508,11 @@ impl BrainConfig {
             report.privacy_missing = true;
         }
 
-        // ontology: lenient — an unrecognized selection drops to "never chosen"
+        // ontology: an unparseable block is NOT the same as "never chosen" —
+        // it must not silently fall back to the desktop default (that would
+        // start an ontology the user never selected). Flag it via
+        // `ontology_unparseable` so `get_ontology_selection` can propagate
+        // the failure instead of masking it.
         if let Some(ont) = obj.get("ontology") {
             match serde_json::from_value::<OntologyConfigBlock>(ont.clone()) {
                 Ok(o) => report.config.ontology = o,
@@ -508,6 +520,7 @@ impl BrainConfig {
                     report
                         .diagnostics
                         .push(format!("ontology block unparseable: {}", e));
+                    report.ontology_unparseable = true;
                 }
             }
         }

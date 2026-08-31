@@ -223,7 +223,13 @@ fn depth_budget_counts_only_vault_relative_segments() {
 
     // Vault itself lives many components deep so an absolute-path component
     // count would overshoot the budget even for shallow inside-vault files.
-    let deep_outside = temp.path().join("a").join("b").join("c").join("d").join("outside");
+    let deep_outside = temp
+        .path()
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("d")
+        .join("outside");
     fs::create_dir_all(&deep_outside).unwrap();
     let leaf = deep_outside.join("leaf.md");
     fs::write(&leaf, "# Leaf\n").unwrap();

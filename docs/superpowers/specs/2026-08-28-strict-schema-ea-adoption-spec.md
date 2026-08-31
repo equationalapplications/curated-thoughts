@@ -298,17 +298,29 @@ through it. The order matters:
    `wikiUpdateGeneration` counter. Any in-flight `createWiki` / `setup()` from
    an outbox transition is allowed to commit before the switch begins —
    the helper runs after the active wiki has settled.
-2. **Replace manifests on every tier.** For each tier in
-   `[tier_fact, tier_wisdom, tier_working::<current_workspace>]`, call
-   `wiki.setOntologyManifest(entityId, manifest, { mode })`. The
-   helper passes an empty `OntologyManifest` when `manifestFor(next)` is
-   `null` — core 6.2.0 requires a manifest argument.
+2. **Clear stale typed data, then replace manifests, per tier.**
+   `runOntologyBackfill` only fills `okf_type IS NULL` rows and never
+   overwrites one already set — it cannot repair a fact stamped with a type
+   from the *previous* manifest, which may not even exist in the new one.
+   So for each tier in `[tier_fact, tier_wisdom,
+   tier_working::<current_workspace>]`, the helper first nulls out
+   `okf_type` on every live entry/task for that entity and deletes its
+   manifest-derived edges (`llm_wiki_edges` holds only ontology-classified
+   edges — nothing else lands in that table), THEN calls
+   `wiki.setOntologyManifest(entityId, manifest, { mode })`. core-llm-wiki
+   has no public "clear typed data" API as of 6.2.0, so this reaches the
+   package's own SQLite tables directly via `tauriWikiAdapter`, coupled to
+   the package's default `llm_wiki_` table prefix (the app never overrides
+   `config.tablePrefix`). The helper passes an empty `OntologyManifest`
+   when `manifestFor(next)` is `null` — core 6.2.0 requires a manifest
+   argument.
 3. **Drain the backfill backlog, except for `off`.** When `mode === 'off'`,
    the engine reports `remaining === 0` immediately, so the helper skips
-   the loop. For every other mode, loop `wiki.runOntologyBackfill(entityId)`
-   while `result.remaining > 0`. `runOntologyBackfill` is additive — it
-   never overwrites an existing `okf_type` — so this drains in place rather
-   than clearing first.
+   the loop (clearing without reclassifying is the entire effect of
+   switching to `off`). For every other mode, loop
+   `wiki.runOntologyBackfill(entityId)` while `result.remaining > 0` —
+   every row was just cleared to `NULL`, so backfill classifies the whole
+   tier fresh under the new manifest.
 4. **Do not call the librarian mid-switch.** The `runLibrarian` sweep can
    classify facts under whichever manifest is current at the time it reads
    from the engine; if it runs after the new manifest is written but before
@@ -329,6 +341,22 @@ frontend helper runs after the persist succeeds, so a mid-run failure
 surfaces through `applyOntologyChange`'s rejection and the caller can
 restore the prior selection without leaving the user in a half-switched
 state.
+
+**Transactional across tiers.** The helper tracks every tier it has
+already cleared for the current attempt. If a later tier's manifest write
+or backfill loop rejects — including the failing tier itself, whose typed
+data was already cleared before the rejection — every cleared tier is
+rolled back: re-apply the *prior* selection's manifest and mode, then
+(unless prior mode is `off`) re-run the backfill loop so those tiers'
+typed data is reclassified from the cleared state under the prior
+manifest, rather than left empty. Only after every tier's manifest write
+and backfill loop succeeds does the helper update its cached
+`_ontologySelection`; on any failure the cache is left pointing at
+`prior`, matching what `OntologyPanel` persists back to `config.json` when
+it catches the rejection. This keeps the in-memory cache, the on-disk
+selection, and every tier's typed data mutually consistent even when a
+switch fails partway through — no tier is ever left holding data typed
+under a manifest that isn't the one currently persisted.
 
 ---
 

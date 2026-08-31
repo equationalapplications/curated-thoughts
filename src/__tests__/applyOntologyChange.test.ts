@@ -1,8 +1,9 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const { setOntologyManifest, runOntologyBackfill } = vi.hoisted(() => ({
+const { setOntologyManifest, runOntologyBackfill, wikiAdapterRunAsync } = vi.hoisted(() => ({
   setOntologyManifest: vi.fn().mockResolvedValue(undefined),
   runOntologyBackfill: vi.fn().mockResolvedValue({ remaining: 0, typed: 0, scanned: 0 }),
+  wikiAdapterRunAsync: vi.fn().mockResolvedValue({ changes: 0, lastInsertRowId: 0 }),
 }));
 
 vi.mock('@equationalapplications/react-llm-wiki', () => ({
@@ -28,7 +29,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 vi.mock('../lib/wikiAdapter', () => ({
-  tauriWikiAdapter: {},
+  tauriWikiAdapter: { runAsync: wikiAdapterRunAsync },
 }));
 
 vi.mock('../hooks/useWikiStatus', () => ({
@@ -74,5 +75,55 @@ describe('applyOntologyChange', () => {
     const firstCall = setOntologyManifest.mock.calls[0];
     expect(firstCall?.[1]).not.toEqual({ node_types: [], edge_types: [] });
     expect(firstCall?.[2]).toEqual({ mode: 'strict' });
+  });
+
+  it('clears stale okf_type + manifest-derived edges for every tier before reseeding', async () => {
+    await applyOntologyChange('schema-software-org');
+
+    // Every tier gets an entries-clear, a tasks-clear, and an edges-delete,
+    // each scoped by entity_id — runOntologyBackfill only fills okf_type IS
+    // NULL rows, so switching between disjoint schemas would otherwise
+    // leave stale classifications from the old manifest (spec D6 item 15).
+    const clearedEntries = wikiAdapterRunAsync.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('SET okf_type = NULL') && c[0].includes('entries'),
+    );
+    const clearedTasks = wikiAdapterRunAsync.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('SET okf_type = NULL') && c[0].includes('tasks'),
+    );
+    const clearedEdges = wikiAdapterRunAsync.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('DELETE FROM') && c[0].includes('edges'),
+    );
+    expect(clearedEntries).toHaveLength(3);
+    expect(clearedTasks).toHaveLength(3);
+    expect(clearedEdges).toHaveLength(3);
+    // Clearing must happen before the corresponding setOntologyManifest
+    // call for the same tier, or the fresh backfill classification could
+    // race the clear and get wiped.
+    const firstClearCallOrder = wikiAdapterRunAsync.mock.invocationCallOrder[0];
+    const firstManifestCallOrder = setOntologyManifest.mock.invocationCallOrder[0];
+    expect(firstClearCallOrder).toBeLessThan(firstManifestCallOrder);
+  });
+
+  it('rolls back every touched tier to the prior manifest when a later tier fails', async () => {
+    // Entering this test, the cached selection is 'schema-software-org'
+    // (left by the previous test) — switch to 'off' so this is a real
+    // transition. tier_fact succeeds; tier_wisdom's setOntologyManifest
+    // rejects.
+    setOntologyManifest
+      .mockResolvedValueOnce(undefined) // tier_fact: new ('off') manifest
+      .mockRejectedValueOnce(new Error('manifest write failed')) // tier_wisdom: new manifest
+      .mockResolvedValue(undefined); // rollback calls
+
+    await expect(applyOntologyChange('off')).rejects.toThrow('manifest write failed');
+
+    // Rollback re-applies the PRIOR manifest (schema-software-org, strict)
+    // for both cleared tiers (tier_fact fully committed; tier_wisdom was
+    // cleared before its failing setOntologyManifest call).
+    const rollbackCalls = setOntologyManifest.mock.calls.slice(2);
+    const rolledBackEntities = rollbackCalls.map((c) => c[0]);
+    expect(rolledBackEntities).toEqual(['tier_fact', 'tier_wisdom']);
+    for (const call of rollbackCalls) {
+      expect(call[2]).toEqual({ mode: 'strict' }); // schema-software-org's mode
+    }
   });
 });

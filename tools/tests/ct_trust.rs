@@ -156,26 +156,106 @@ fn trust_with_no_action_exits_1() {
 
 /// `ct trust --list` must redact the target's home prefix to `~` so
 /// sensitive absolute paths (e.g. `/Users/me/.ssh`) are not logged verbatim.
+/// Run the child process with a controlled `HOME` and seed one approved
+/// symlink beneath that directory + one outside it, so the redaction branch
+/// (`~/relative-target`) and the verbatim branch (outside-of-home) are both
+/// exercised in a single test. CodeRabbit review on PR #124: the previous
+/// version only seeded an outside-of-home target under `TempDir`, which
+/// meant a regression that dropped the redaction would pass silently when
+/// `TMPDIR` happened to be inside `$HOME`.
 #[test]
 fn trust_list_redacts_home_prefix_in_target() {
+    use std::process::Command;
+
     let (tmp, brain, vault) = seed_env();
     let docs = vault.join("documents");
     fs::create_dir_all(&docs).unwrap();
-    // Symlink target lives inside $TMPDIR; redact_home leaves it alone.
-    let outside = tmp.path().join("repo-docs");
+
+    // Controlled HOME that is NOT the tmp dir, so the redaction branch and
+    // the verbatim branch target two distinct parents. Canonicalize it —
+    // `approve_into` stores the symlink's CANONICALIZED target in the
+    // ledger (macOS resolves `/var` → `/private/var`), so `redact_home`'s
+    // `dirs::home_dir()` comparison must see the same canonical form or
+    // the prefixes never match.
+    let controlled_home = tmp.path().join("home");
+    fs::create_dir_all(&controlled_home).unwrap();
+    let controlled_home = fs::canonicalize(&controlled_home).unwrap();
+    let controlled_home_str = controlled_home.display().to_string();
+
+    // In-home target → must render as `~/relative-target`.
+    let in_home = controlled_home.join("repo-docs");
+    fs::create_dir_all(&in_home).unwrap();
+    symlink(&in_home, docs.join("in_home_specs")).unwrap();
+
+    // Outside-home target (under tmp, NOT under controlled_home) → must render
+    // verbatim so the user can see the real location when investigating.
+    let outside = tmp.path().join("outside-docs");
     fs::create_dir_all(&outside).unwrap();
-    symlink(&outside, docs.join("specs")).unwrap();
+    symlink(&outside, docs.join("outside_specs")).unwrap();
 
-    let approved = run_ct(&brain, &["trust", "documents/specs"]);
-    assert_eq!(approved.status.code(), Some(0));
+    // Approve both so the ledger has two rows to render.
+    let home_invocation = || -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_ct"))
+            .env("CURATED_BRAIN_DIR", &brain)
+            .env("HOME", &controlled_home_str)
+            .env_remove("CURATED_BRAIN_DB")
+            .env_remove("CURATED_BRAIN_CONFIG")
+            .args(["trust", "documents/in_home_specs"])
+            .output()
+            .expect("spawn ct (in-home approve)")
+    };
+    assert_eq!(home_invocation().status.code(), Some(0));
 
-    let listed = run_ct(&brain, &["trust", "--list"]);
+    let outside_invocation = || -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_ct"))
+            .env("CURATED_BRAIN_DIR", &brain)
+            .env("HOME", &controlled_home_str)
+            .env_remove("CURATED_BRAIN_DB")
+            .env_remove("CURATED_BRAIN_CONFIG")
+            .args(["trust", "documents/outside_specs"])
+            .output()
+            .expect("spawn ct (outside-home approve)")
+    };
+    assert_eq!(outside_invocation().status.code(), Some(0));
+
+    // Now `trust --list` with the same controlled HOME.
+    let listed = Command::new(env!("CARGO_BIN_EXE_ct"))
+        .env("CURATED_BRAIN_DIR", &brain)
+        .env("HOME", &controlled_home_str)
+        .env_remove("CURATED_BRAIN_DB")
+        .env_remove("CURATED_BRAIN_CONFIG")
+        .args(["trust", "--list"])
+        .output()
+        .expect("spawn ct (--list)");
+
     assert_eq!(listed.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&listed.stdout);
-    assert!(stdout.contains("documents/specs"), "stdout: {stdout}");
-    // Outside-of-home targets are printed verbatim — only HOME is redacted.
+
+    assert!(
+        stdout.contains("documents/in_home_specs"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("documents/outside_specs"),
+        "stdout: {stdout}"
+    );
+
+    // In-home target should render as `~/...`, never the absolute home
+    // path. Accept any non-empty tail after the slash since
+    // redact_home preserves the original separators.
+    assert!(
+        stdout.contains("~/repo-docs"),
+        "in-home target must render as `~/repo-docs` (redacted), got stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&controlled_home_str),
+        "controlled HOME path must not appear verbatim in --list output: {stdout}"
+    );
+
+    // Outside-of-home target stays verbatim — that branch is the user's
+    // escape hatch when the home redaction is unhelpful.
     assert!(
         stdout.contains(outside.display().to_string().as_str()),
-        "outside-home target should still appear (sanity): {stdout}"
+        "outside-of-home target should appear verbatim, got stdout: {stdout}"
     );
 }

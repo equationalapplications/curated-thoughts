@@ -66,6 +66,24 @@ const WATCH_SIGNAL_POLL: Duration = Duration::from_millis(200);
 // them directly without depending on `curated_thoughts_tools`. The imports
 // at the top of this file re-export those symbols through `curated_thoughts_tools::cmds`.
 
+/// Merge `newly_trusted` into `ledger`, replacing (not appending to) any
+/// existing entry for the same `link`. A repointed symlink that was
+/// previously approved would otherwise leave a stale row with the old
+/// `target` sitting alongside the fresh one — same `link`, two rows — which
+/// splits `classify_link`'s exact-pair matching across both and can trigger
+/// an `AncestorOfTrusted` denial sourced from the stale target. Mirrors
+/// `approve_into`'s `retain`-then-push pattern (`src-tauri/src/trusted_links.rs`)
+/// so the CLI's scripted-trust path and the interactive approval path agree.
+pub(crate) fn replace_trusted_links(
+    ledger: &mut Vec<tauri_app_lib::trusted_links::TrustedLink>,
+    newly_trusted: Vec<tauri_app_lib::trusted_links::TrustedLink>,
+) {
+    let replace_links: std::collections::HashSet<&str> =
+        newly_trusted.iter().map(|e| e.link.as_str()).collect();
+    ledger.retain(|e| !replace_links.contains(e.link.as_str()));
+    ledger.extend(newly_trusted);
+}
+
 /// Full ingest_vault_once flow: resolve brain paths + embed profile, open the
 /// brain DB, walk the vault honoring the exclusion rules AND the trusted-links
 /// ledger, ingest every ingestible file, then run the linker over each touched
@@ -130,7 +148,7 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
             }
         }
         if !newly_trusted.is_empty() {
-            brain_cfg.trusted_links.extend(newly_trusted);
+            replace_trusted_links(&mut brain_cfg.trusted_links, newly_trusted);
             brain_cfg
                 .write(&paths_b)
                 .context("persist newly-trusted links")?;
@@ -237,12 +255,25 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
             eprintln!("[linker] {}: {}", entity_id, e);
         }
     }
-    println!(
+    let summary = format!(
         "done: {} docs, {} entities, {} failed",
         files.len(),
         entity_ids.len(),
         failed
     );
+    if failed > 0 {
+        // Spec Risks: headless `ct ingest` runs must surface remediation so
+        // the operator does not see a clean exit code while files were
+        // skipped (pending or denied links) or errors occurred. Print the
+        // summary to stderr before bailing so CI / systemd / cron see both
+        // the diagnostic line and a non-zero exit code.
+        eprintln!("{summary}");
+        for p in &outcome.pending {
+            eprintln!("  approve with: ct trust {}", p.link);
+        }
+        bail!("ingest completed with {failed} failure(s)");
+    }
+    println!("{summary}");
     Ok(())
 }
 
@@ -1032,6 +1063,66 @@ use tempfile::TempDir;
 mod tests {
     use super::*;
     use tauri_app_lib::db::queries::upsert_document;
+
+    // ---- replace_trusted_links (repointed-symlink dedup) ----
+
+    fn trusted_link(
+        link: &str,
+        target: &str,
+        approved_at: i64,
+    ) -> tauri_app_lib::trusted_links::TrustedLink {
+        tauri_app_lib::trusted_links::TrustedLink {
+            link: link.to_string(),
+            target: target.to_string(),
+            approved_at,
+        }
+    }
+
+    #[test]
+    fn replace_trusted_links_drops_stale_entry_for_a_repointed_link() {
+        let mut ledger = vec![trusted_link("documents/specs", "/old/target", 1)];
+        replace_trusted_links(
+            &mut ledger,
+            vec![trusted_link("documents/specs", "/new/target", 2)],
+        );
+
+        assert_eq!(
+            ledger.len(),
+            1,
+            "repointed link must not leave a duplicate row"
+        );
+        assert_eq!(ledger[0].target, "/new/target");
+        assert_eq!(ledger[0].approved_at, 2);
+    }
+
+    #[test]
+    fn replace_trusted_links_appends_a_link_not_already_in_the_ledger() {
+        let mut ledger = vec![trusted_link("documents/specs", "/a", 1)];
+        replace_trusted_links(&mut ledger, vec![trusted_link("documents/other", "/b", 2)]);
+
+        assert_eq!(ledger.len(), 2);
+        assert!(ledger
+            .iter()
+            .any(|e| e.link == "documents/specs" && e.target == "/a"));
+        assert!(ledger
+            .iter()
+            .any(|e| e.link == "documents/other" && e.target == "/b"));
+    }
+
+    #[test]
+    fn replace_trusted_links_leaves_unrelated_entries_untouched() {
+        let mut ledger = vec![
+            trusted_link("documents/a", "/a", 1),
+            trusted_link("documents/b", "/b", 2),
+        ];
+        replace_trusted_links(&mut ledger, vec![trusted_link("documents/a", "/a-new", 3)]);
+
+        assert_eq!(ledger.len(), 2);
+        let a = ledger.iter().find(|e| e.link == "documents/a").unwrap();
+        assert_eq!(a.target, "/a-new");
+        let b = ledger.iter().find(|e| e.link == "documents/b").unwrap();
+        assert_eq!(b.target, "/b");
+    }
 
     // ---- librarian observability tests (moved verbatim from cli_common) -
 

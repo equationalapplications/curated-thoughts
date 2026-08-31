@@ -3400,8 +3400,24 @@ fn acknowledge_ephemeral_disclosure() -> Result<(), String> {
 fn get_ontology_selection() -> Result<String, String> {
     use crate::ontology_config::OntologySelection;
     let paths = retrieval::resolve_brain_paths();
-    let selection = config::BrainConfig::load_lenient(&paths)
-        .map_err(|e| e.to_string())?
+    let report = config::BrainConfig::load_lenient(&paths).map_err(|e| e.to_string())?;
+    // An unparseable `ontology` block (e.g. `{"schema":"unknown"}`) must
+    // surface as an error, not fall back to the desktop default — that
+    // fallback is reserved for "never chosen" (the field genuinely absent).
+    // Masking a parse failure here would silently start the General
+    // ontology when config.json actually names something else.
+    if report.ontology_unparseable {
+        return Err(format!(
+            "ontology selection in config.json is invalid: {}",
+            report
+                .diagnostics
+                .iter()
+                .find(|d| d.starts_with("ontology block unparseable"))
+                .cloned()
+                .unwrap_or_else(|| "unparseable ontology block".to_string())
+        ));
+    }
+    let selection = report
         .config
         .ontology
         .schema
@@ -3438,7 +3454,14 @@ struct PendingLinkPayload {
 #[tauri::command]
 fn list_pending_links() -> Result<Vec<PendingLinkPayload>, String> {
     let paths = retrieval::resolve_brain_paths();
-    let cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    // Use the lenient loader so a malformed-but-mine unrelated block
+    // (e.g. `generation` missing after an upstream provider rename) does
+    // not block the remediation surface. The walker only needs
+    // `vault_path` + `trusted_links`, both of which `load_lenient`
+    // populates with sensible fallbacks (`*_missing = true` if absent)
+    // and returns in the same shape.
+    let report = config::BrainConfig::load_lenient(&paths).map_err(|e| e.to_string())?;
+    let cfg = report.config;
     let vault_root = cfg
         .vault_path
         .clone()
@@ -3489,9 +3512,7 @@ fn approve_link(link: String) -> Result<(), String> {
         // containment is the trust boundary), so this write may be a
         // no-op for the in-vault case.
         LinkVerdict::Denied(reason) => Err(format!("refused: {}", reason.message())),
-        LinkVerdict::Trusted | LinkVerdict::Pending => {
-            cfg.write(&paths).map_err(|e| e.to_string())
-        }
+        LinkVerdict::Trusted | LinkVerdict::Pending => cfg.write(&paths).map_err(|e| e.to_string()),
     }
 }
 

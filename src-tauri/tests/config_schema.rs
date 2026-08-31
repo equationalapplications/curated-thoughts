@@ -34,6 +34,7 @@ fn load_report_tracks_missing_blocks() {
         embedding_missing: false,
         vault_path_missing: false,
         privacy_missing: false,
+        ontology_unparseable: false,
     };
 
     assert!(report.generation_missing);
