@@ -1,0 +1,2 @@
+//! Ingest watchdog. Spec: docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md
+pub mod heartbeat;

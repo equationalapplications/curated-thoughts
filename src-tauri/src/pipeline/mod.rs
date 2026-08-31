@@ -1,3 +1,5 @@
+pub mod watchdog;
+
 use anyhow::Result;
 use rusqlite::Connection;
 use std::{
