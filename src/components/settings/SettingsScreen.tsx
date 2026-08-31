@@ -6,12 +6,14 @@ import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
 import { GenerationPanel } from "./GenerationPanel";
 import { EmbeddingPanel } from "./EmbeddingPanel";
+import { OntologyPanel } from "./OntologyPanel";
 import { PrivacyPanel } from "./PrivacyPanel";
 import { VaultPanel } from "./VaultPanel";
 
 export type SettingsTab =
   | "vault"
   | "privacy"
+  | "ontology"
   | "models"
   | "librarian"
   | "agents"
@@ -21,6 +23,7 @@ export type SettingsTab =
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "vault", label: "Vault" },
   { id: "privacy", label: "Privacy" },
+  { id: "ontology", label: "Knowledge schema" },
   { id: "models", label: "Models" },
   { id: "librarian", label: "Librarian" },
   { id: "agents", label: "Agents" },
@@ -89,6 +92,7 @@ export function SettingsScreen({ vaultPath, initialTab, onRerunWizard }: Props) 
       <div className="settings-content" role="tabpanel">
         {tab === "vault" && <VaultPanel vaultPath={vaultPath} onRerunWizard={onRerunWizard} />}
         {tab === "privacy" && <PrivacyPanel />}
+        {tab === "ontology" && <OntologyPanel />}
         {tab === "models" && (
           <>
             <GenerationPanel />
