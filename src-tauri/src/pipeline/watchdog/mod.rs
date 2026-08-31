@@ -214,24 +214,31 @@ fn supervisor_loop(cfg: SupervisorConfig) {
         ) {
             (cfg.on_health)(PipelineHealth::Stalled);
 
-            let probe_ok = if recovery::stage_has_network_dependency(snapshot.stage) {
-                probe_endpoint_for(snapshot.stage, &cfg)
-            } else {
-                true
-            };
-
+            // Spec §4: diagnose → probe → respawn. handle_stage_stall fuses
+            // diagnose (record_trip → capture_stacks) and respawn
+            // (bump_epoch) into one load-bearing call, so it MUST run before
+            // the probe — the probe's strike attribution is meaningless if the
+            // evidence is gone.
             let trip = TripRecord {
                 kind: TripKind::StageStall,
                 snapshot: snapshot.clone(),
                 stalled_ms,
                 pending_count: pending,
-                embed_endpoint: None,
-                gen_endpoint: None,
+                embed_endpoint: embed_endpoint_for(&cfg),
+                gen_endpoint: gen_endpoint_for(),
                 action: "respawn".to_string(),
             };
             if let Err(e) = handle_stage_stall(&conn, &cfg.heartbeat, &trip) {
                 eprintln!("[watchdog] failed to record stage stall: {e}");
             }
+
+            // Probe only after the trip is on disk. Stages without a network
+            // dependency skip the probe and are treated as healthy (spec §4.2).
+            let probe_ok = if recovery::stage_has_network_dependency(snapshot.stage) {
+                probe_endpoint_for(snapshot.stage, &cfg)
+            } else {
+                true
+            };
 
             // Blame the document only when its dependency is healthy.
             if probe_ok && snapshot.subject != "unknown" {
@@ -274,8 +281,8 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 snapshot: snapshot.clone(),
                 stalled_ms: DRAIN_STALL_WINDOW.as_millis() as i64,
                 pending_count: pending,
-                embed_endpoint: None,
-                gen_endpoint: None,
+                embed_endpoint: embed_endpoint_for(&cfg),
+                gen_endpoint: gen_endpoint_for(),
                 action: "sweep".to_string(),
             };
             if let Err(e) = record_trip(&conn, &trip) {
@@ -331,6 +338,25 @@ fn probe_endpoint_for(stage: Stage, cfg: &SupervisorConfig) -> bool {
 
 fn local_llm_base() -> String {
     std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
+}
+
+/// Resolve the embed endpoint for the trip row from the active profile.
+/// Mirrors `probe_endpoint_for`'s URL selection so the row records what the
+/// embed stage actually talks to (spec §3).
+fn embed_endpoint_for(cfg: &SupervisorConfig) -> Option<String> {
+    match &cfg.profile {
+        EmbedProfile::Local { .. } => Some(local_llm_base()),
+        // Provider host — not ours to record or probe.
+        EmbedProfile::Cloud { .. } => None,
+        EmbedProfile::External { profile } => Some(profile.base_url.clone()),
+    }
+}
+
+/// Resolve the generation endpoint for the trip row. Generation always goes
+/// through the local Ollama runtime today; the helper is kept separate so the
+/// rule lives in one place (spec §3).
+fn gen_endpoint_for() -> Option<String> {
+    Some(local_llm_base())
 }
 
 fn mirror_heartbeat(conn: &Connection, snapshot: &HeartbeatSnapshot) {
