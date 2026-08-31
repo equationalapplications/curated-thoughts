@@ -94,7 +94,7 @@ impl DrainTracker {
         stage: Stage,
         now: Instant,
     ) -> bool {
-        let progressing = self.last_completed.map_or(false, |last| completed != last);
+        let progressing = self.last_completed.is_some_and(|last| completed != last);
         let quiet = pending > 0 && stage == Stage::Idle && !progressing;
 
         self.last_pending = Some(pending);

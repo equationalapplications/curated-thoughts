@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use crate::pipeline::PipelineJob;
 
+#[allow(dead_code)]
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn list_sweepable_pending(conn: &Connection, limit: usize) -> Result<Vec<String>> {

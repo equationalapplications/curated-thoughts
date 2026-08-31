@@ -1,7 +1,9 @@
 use std::sync::{
     atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering},
-    Mutex, MutexGuard,
+    Mutex,
 };
+#[allow(unused_imports)]
+use std::sync::MutexGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {

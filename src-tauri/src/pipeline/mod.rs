@@ -743,6 +743,7 @@ fn ingest_file_virtual(
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 pub fn start_pipeline(
     db_path: PathBuf,
     vault_root: Option<PathBuf>,

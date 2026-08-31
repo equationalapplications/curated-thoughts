@@ -39,6 +39,7 @@ pub fn quarantine(conn: &Connection, path: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn is_quarantined(conn: &Connection, path: &str) -> Result<bool> {
     // Outer Option: row missing. Inner Option: column NULL.
     let q: Option<Option<i64>> = conn
