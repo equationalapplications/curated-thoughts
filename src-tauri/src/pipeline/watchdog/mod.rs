@@ -3,3 +3,4 @@ pub mod diagnostics;
 pub mod heartbeat;
 pub mod budgets;
 pub mod recovery;
+pub mod sweep;
