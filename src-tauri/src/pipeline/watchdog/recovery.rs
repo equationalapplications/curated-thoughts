@@ -70,11 +70,23 @@ impl RespawnLedger {
         }
     }
 
+    /// Records a respawn, expiring any events that have fallen outside the
+    /// rolling hour window before adding the new event.
     pub fn record(&mut self) {
         self.expire(Instant::now());
         self.events.push_back(Instant::now());
     }
 
+    /// Returns `true` when the ledger has recorded `RESPAWN_CAP_PER_HOUR`
+    /// respawns within the rolling window.
+    ///
+    /// # Invariant
+    ///
+    /// This method does **not** expire stale entries. Callers must invoke
+    /// `record()` first to refresh the rolling window, or use this method only
+    /// immediately after a `record()` call. Using `over_cap()` on a stale
+    /// ledger (one where all events are older than the window) will continue
+    /// to return `true` until `record()` is called.
     pub fn over_cap(&self) -> bool {
         self.events.len() >= RESPAWN_CAP_PER_HOUR
     }
@@ -90,9 +102,8 @@ impl RespawnLedger {
     }
 
     #[cfg(test)]
-    pub fn expire_before_for_test(&mut self, _now: Instant) {
-        // Simulate the window elapsing without sleeping an hour.
-        self.events.clear();
+    pub fn expire_for_test(&mut self, now: Instant) {
+        self.expire(now);
     }
 }
 
@@ -162,11 +173,19 @@ mod tests {
     #[test]
     fn respawn_ledger_forgets_entries_older_than_an_hour() {
         let mut ledger = RespawnLedger::new();
+        let start = Instant::now();
+
+        // Fill the ledger.
         for _ in 0..RESPAWN_CAP_PER_HOUR {
             ledger.record();
         }
         assert!(ledger.over_cap());
-        ledger.expire_before_for_test(std::time::Instant::now());
+
+        // Simulate the rolling window elapsing: expire at start + 1 hour.
+        let elapsed = start + RESPAWN_WINDOW + Duration::from_secs(1);
+        ledger.expire_for_test(elapsed);
+
+        // After expiration `record()` clears the window, so `over_cap()` is false.
         assert!(!ledger.over_cap(), "old respawns must age out");
     }
 }
