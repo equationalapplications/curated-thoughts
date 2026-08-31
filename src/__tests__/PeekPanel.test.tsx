@@ -38,7 +38,9 @@ test("renders fetched chunk text", async () => {
 
 test("Escape dismisses the panel", () => {
   const { onDismiss } = renderPanel();
-  fireEvent.keyDown(window, { key: "Escape" });
+  // The focus trap listens on the dialog itself; with the background
+  // inert, Escape can only originate inside the panel.
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
 
@@ -90,7 +92,7 @@ test("not-found renders the source-moved notice and keeps the panel open", async
   const { onDismiss } = renderPanel();
   expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
   expect(screen.getByRole("dialog")).toBeInTheDocument();
-  fireEvent.keyDown(window, { key: "Escape" });
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
 

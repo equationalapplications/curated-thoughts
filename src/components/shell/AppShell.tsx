@@ -16,6 +16,7 @@ import {
   type SettingsTab,
 } from "../settings/SettingsScreen";
 import { SetupWizard } from "../setup/SetupWizard";
+import { SkipLink } from "../../a11y";
 import { startFileWatcher, needsChunkHashMigration, peekPendingConfigMalformed, ackPendingConfigMalformed } from "../../lib/tauri";
 import { onVaultSwitched } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
@@ -318,6 +319,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
 
   return (
     <div className="app-root">
+      <SkipLink targetId="main-content" />
       {migrationComplete === false ? (
         <SplashScreen onComplete={() => setMigrationComplete(true)} />
       ) : migrationComplete === null ? (
@@ -352,7 +354,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                   onForward={nav.goForward}
                   onOpenActivity={() => setActivityOpen(true)}
                 />
-                <div className="app-main">
+                <div className="app-main" id="main-content">
                   {nav.current.mode === "brain" && (
                     <BrainMode
                       selectedEntityId={brainEntityId}

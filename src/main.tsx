@@ -4,6 +4,7 @@ import { WikiProvider } from "@equationalapplications/react-llm-wiki";
 import { App } from "./App";
 import { wiki, setupWiki } from "./lib/wiki";
 import { ThemeProvider } from "./lib/ThemeContext";
+import { AnnouncerProvider } from "./a11y";
 import "./index.css";
 
 function Root() {
@@ -19,7 +20,9 @@ function Root() {
     <React.StrictMode>
       <WikiProvider wiki={wikiInstance}>
         <ThemeProvider>
-          <App />
+          <AnnouncerProvider>
+            <App />
+          </AnnouncerProvider>
         </ThemeProvider>
       </WikiProvider>
     </React.StrictMode>
