@@ -185,7 +185,10 @@ mod tests {
         let elapsed = start + RESPAWN_WINDOW + Duration::from_secs(1);
         ledger.expire_for_test(elapsed);
 
-        // After expiration `record()` clears the window, so `over_cap()` is false.
+        // `record()` is the caller's entry point — it expires stale entries before
+        // checking. After expiration a single `record()` pops all old events and
+        // pushes one new one, so the window is clear and `over_cap()` is false.
+        ledger.record();
         assert!(!ledger.over_cap(), "old respawns must age out");
     }
 }
