@@ -43,7 +43,10 @@ use tauri_app_lib::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisi
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
 use tauri_app_lib::vault::VaultConfig;
-use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
+use tauri_app_lib::{
+    entity_id_for_virtual_path, ingest_document_virtual,
+    ingest_document_with_vault_root,
+};
 
 /// Default `once` mode watchdog: exit after this many seconds even if no
 /// SIGINT arrives. The plan suggested 60s; using a named constant (per the
@@ -119,13 +122,22 @@ fn is_excluded_file(path: &Path) -> bool {
 /// `<vault_root>/documents` (the staging contract); nested symlinks and
 /// symlinks to files are never followed. Traversal errors are returned so an
 /// unreadable path can't silently shrink the corpus.
-fn collect_files(
+///
+/// The walker canonicalizes its root at entry (defense in depth — `ingest_run`
+/// already canonicalizes, but any future caller gets the same guarantee) so
+/// every virtual path is joined to the same absolute prefix that
+/// `entity_id_for_virtual_path` canonicalizes against. Without this, a vault
+/// reached through a non-canonical path (e.g. `/var/folders/...` on macOS,
+/// symlinked home dirs) silently misroutes every walked file to
+/// `tier_working::` because the prefix strip fails (Ruling 2).
+pub fn collect_files(
     root: &Path,
     follow_symlinked_doc_dirs: bool,
-    out: &mut Vec<PathBuf>,
+    out: &mut Vec<WalkedFile>,
     errors: &mut Vec<String>,
 ) {
-    let walker = WalkDir::new(root).follow_links(false);
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let walker = WalkDir::new(&canonical_root).follow_links(false);
     let it = walker.into_iter().filter_entry(|e| {
         // Skip excluded dirs by name at any depth.
         if e.file_type().is_dir() {
@@ -153,16 +165,21 @@ fn collect_files(
                 .map(|e| should_ingest_extension(&e.to_string_lossy()))
                 .unwrap_or(false)
         {
-            out.push(p.to_path_buf());
+            out.push(WalkedFile {
+                virtual_path: p.to_path_buf(),
+                read_path: p.to_path_buf(),
+            });
         } else if follow_symlinked_doc_dirs && ft.is_symlink() {
-            // Only follow symlinks that are DIRECT children of
-            // <root>/documents, whose names aren't excluded, and whose target
-            // is a directory. Never follow file symlinks or nested ones.
+            // Only follow symlinks whose parent is `<root>/documents`, whose
+            // names aren't excluded, and whose target is a directory. Never
+            // follow file symlinks, symlinks outside documents/, or nested
+            // symlinks inside a resolved target — walkdir's
+            // `follow_links(false)` already prevents the last category from
+            // ever being yielded.
             let parent_is_documents = p
                 .parent()
                 .map(|par| par.file_name().map(|n| n == "documents").unwrap_or(false))
-                .unwrap_or(false)
-                && entry.depth() == 1;
+                .unwrap_or(false);
             let name_excluded = p
                 .file_name()
                 .map(|n| is_excluded_dir(&n.to_string_lossy()))
@@ -172,9 +189,30 @@ fn collect_files(
             }
             match std::fs::canonicalize(p) {
                 Ok(target) if target.is_dir() => {
-                    // Recurse into the resolved target with symlink-following
-                    // OFF, so nested symlinks inside are never descended into.
-                    collect_files(&target, false, out, errors)
+                    // Walk the target separately (symlink-following OFF so
+                    // nested symlinks are never descended into), then re-root
+                    // every hit under the symlink's own path so the
+                    // vault-relative prefix survives into the DB identity.
+                    let mut target_hits: Vec<WalkedFile> = Vec::new();
+                    collect_files(&target, false, &mut target_hits, errors);
+                    for hit in target_hits {
+                        let rel = match hit.read_path.strip_prefix(&target) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+                        let virtual_path = p.join(rel);
+                        if virtual_path.components().count() > MAX_VIRTUAL_DEPTH {
+                            errors.push(format!(
+                                "depth: {} exceeds the {MAX_VIRTUAL_DEPTH}-segment budget, skipping",
+                                virtual_path.display()
+                            ));
+                            continue;
+                        }
+                        out.push(WalkedFile {
+                            virtual_path,
+                            read_path: hit.read_path,
+                        });
+                    }
                 }
                 Ok(_) => eprintln!(
                     "warn: symlink {} does not point at a directory, skipping",
@@ -185,6 +223,20 @@ fn collect_files(
         }
     }
 }
+
+/// A file the walker found. `virtual_path` is what the DB stores and what
+/// tier routing sees; `read_path` is where the bytes actually live. They
+/// differ only for content reached through a tracked symlink under
+/// `<vault_root>/documents/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedFile {
+    pub virtual_path: PathBuf,
+    pub read_path: PathBuf,
+}
+
+/// Maximum number of path components in a virtual path once a symlink prefix
+/// is applied. Bounds the work a single symlinked repo can add (spec D3).
+pub const MAX_VIRTUAL_DEPTH: usize = 16;
 
 /// Full ingest_vault_once flow: resolve brain paths + embed profile, open the
 /// brain DB, walk the vault honoring the exclusion rules, ingest every
@@ -205,11 +257,11 @@ pub fn ingest_run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
     let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
 
-    let mut files = Vec::new();
+    let mut files: Vec<WalkedFile> = Vec::new();
     let mut walk_errors = Vec::new();
     collect_files(&vault_root, true, &mut files, &mut walk_errors);
-    files.sort();
-    files.dedup();
+    files.sort_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
+    files.dedup_by(|a, b| a.virtual_path == b.virtual_path);
 
     // Traversal errors count as failures so an unreadable path can't make a
     // partial run look complete.
@@ -226,23 +278,33 @@ pub fn ingest_run() -> Result<()> {
     let vault_root_str = vault_root.to_str().unwrap();
     let mut entity_ids = HashSet::new();
     for (i, f) in files.iter().enumerate() {
-        match ingest_document_with_vault_root(
+        match ingest_document_virtual(
             conn,
             &profile,
-            f.to_str().unwrap(),
+            f.virtual_path.to_str().unwrap(),
+            f.read_path.to_str().unwrap(),
             true,
             Some(vault_root_str),
         ) {
             Ok(_) => {
-                entity_ids.insert(entity_id_for_path(
-                    f.to_str().unwrap(),
+                // Linker routes by entity; the document is stored under
+                // virtual_path, so derive the entity from that — not from
+                // the canonical-target read_path that never reaches the DB.
+                entity_ids.insert(entity_id_for_virtual_path(
+                    f.virtual_path.to_str().unwrap(),
                     Some(vault_root_str),
                 ));
-                println!("[{}/{}] ok: {}", i + 1, files.len(), f.display());
+                println!("[{}/{}] ok: {}", i + 1, files.len(), f.virtual_path.display());
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("[{}/{}] FAILED {}: {}", i + 1, files.len(), f.display(), e);
+                eprintln!(
+                    "[{}/{}] FAILED {}: {}",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display(),
+                    e
+                );
                 let mut src = e.source();
                 while let Some(s) = src {
                     eprintln!("    caused by: {s}");
