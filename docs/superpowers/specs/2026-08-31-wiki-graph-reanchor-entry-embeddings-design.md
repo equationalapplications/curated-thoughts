@@ -1,8 +1,15 @@
 # Spec: Wiki Graph Re-anchoring & Write-Time Entry Embeddings
 
 **Date:** 2026-08-31
-**Status:** DRAFT — awaiting Kurt's review
+**Status:** DRAFT rev 2 — revised after code review against baseline `86e18b4`
 **Type:** bug fix + librarian contract + one-time migration
+**Rev 2 changes:** reader-side filter found already implemented (§2, AC5
+downgraded to characterization); sweep trigger specified (none existed to
+inherit); edge outbox requirement removed as incoherent with unreplicated edge
+inserts; `prune_old_librarian_inferred` ms/s bug added as prerequisite §2.1;
+deletion-site table corrected and completed; Part B split into sweep-first
+(B.1) + write-time optimization (B.2) with the required `CommitContext`
+restructuring spelled out.
 **Baseline:** main @ v1.39.0 (`86e18b4`)
 **Merge convention:** regular merge commit (never squash, per Aug 2026 convention)
 **Docs:** this spec rides its implementation PR (Aug 31 2026 convention)
@@ -64,17 +71,24 @@ transaction, everywhere an entry dies.**
 
 When the librarian (or any core process) deletes, archives, or regenerates a
 `llm_wiki_entries` row, run a cascading delete of every edge whose `source_id`
-or `target_id` matches the dying entry's `id`. Exhaustive deletion-site list
-(grep-verified at baseline; the implementer must re-run this grep and confirm
-the list is still complete):
+or `target_id` matches the dying entry's `id`. Deletion-site list, re-verified
+against baseline `86e18b4` (line numbers are advisory — grep the `fn` name; the
+implementer must re-run this grep and confirm the list is still complete):
 
-| Site | Path | Kind |
-|---|---|---|
-| `commit_fact_archive` | `src-tauri/src/db/commit.rs:865` | librarian regeneration (archive old fact) |
-| `archive_fact` | `src-tauri/src/db/facts.rs:225` | Brain-mode archive |
-| `heal_invalid_sources` | `src-tauri/src/lib.rs:380` | auto-heal soft-delete |
-| `heal_lost_librarian_inferred` | `src-tauri/src/lib.rs:1511` | manual heal soft-delete |
-| `prune_old_librarian_inferred` | `src-tauri/src/lib.rs` (hard `DELETE FROM llm_wiki_entries` after 7-day window) | hard delete |
+| Site | Path | Kind | Cascade needed? |
+|---|---|---|---|
+| `commit_fact_archive` | `src-tauri/src/db/commit.rs:865` | librarian regeneration (archive old fact) | yes |
+| `archive_fact` | `src-tauri/src/db/facts.rs:225` | Brain-mode archive | yes |
+| `heal_invalid_sources` | `src-tauri/src/lib.rs:398` | auto-heal soft-delete | yes |
+| `heal_lost_librarian_inferred` | `src-tauri/src/lib.rs:1674` | manual heal soft-delete | yes |
+| `prune_old_librarian_inferred` | `src-tauri/src/lib.rs:1717` (hard `DELETE FROM llm_wiki_entries` after 7-day window) | hard delete | yes — but see §2.1, this site is inert today |
+| `clear_entity_content` | `src-tauri/src/db/bundle_apply.rs:606` | OKF bundle import, entity replacement (hard `DELETE ... WHERE entity_id=?1`) | **no — already correct** |
+
+`clear_entity_content` is called out because a previous draft of this spec
+called the list exhaustive and omitted it. It already deletes the entity's
+edges (`bundle_apply.rs:640`) in the same transaction as the entries delete,
+so it upholds the contract as written. Leave it alone; it is listed so the
+next reader does not conclude it was missed.
 
 Purge statement (per dying id, inside the site's existing transaction):
 
@@ -83,28 +97,78 @@ DELETE FROM llm_wiki_edges
  WHERE source_id = ?1 OR target_id = ?1;
 ```
 
-Every purge must also push outbox delete operations for the removed edge ids
-(same pattern as `push_entries_outbox`, `OutboxOperation::Delete`), so the
-Postgres/remote replica converges. An edge purge that skips the outbox
-re-creates the orphan problem downstream.
+`prune_old_librarian_inferred` deletes by predicate, not by id. Its cascade
+must collect the doomed ids first (`SELECT id ... WHERE <same predicate>`) and
+purge edges for that set inside the same transaction, rather than running the
+per-id statement above.
+
+**Edges are not replicated, and this spec does not change that.** A previous
+draft required each purge to push `OutboxOperation::Delete` rows for the
+removed edge ids. That is wrong in the current design: `commit_edge_add`
+(`commit.rs:1056`) and the bundle import path (`bundle_apply.rs:486`) both
+insert edges with **no** outbox push, and no `push_edges_outbox` helper exists
+(only `push_entries_outbox`, `commit.rs:501`, and `push_tasks_outbox`, `:523`).
+Replicating edge deletes while edge inserts were never replicated would make
+the remote diverge, not converge. `push_outbox_row` (`outbox_format.rs:60`)
+does take a generic `table_name`, so an edges channel is buildable — but
+"start replicating the edge table" is its own scope item with its own
+consumer-side work, and it is a **non-goal here** (§6). Purges are local-only,
+exactly like the inserts they undo.
 
 **Reviewed decision — soft-delete purges edges too.** Cascading at the
 soft-delete (archive/heal) sites means a recovered row (the
 `UPDATE ... SET deleted_at = NULL` recovery recipe) comes back without its
-edges. Accepted: edges are cheap derived structure the librarian can rebuild,
-and the alternative (purge only on hard delete) leaves ghost edges visible
-whenever a reader forgets the `deleted_at` filter. Kurt's acceptance criterion
-("regeneration automatically drops its old edges without leaving ghosts")
-chooses the strict rule.
+edges. Accepted, on two grounds: edges are cheap derived structure the
+librarian can rebuild, and — the load-bearing reason — one invariant
+("an edge exists only between two live entries") is cheaper to keep true and to
+test than a two-tier rule where edge liveness is a join away and every future
+reader has to remember it. Kurt's acceptance criterion ("regeneration
+automatically drops its old edges without leaving ghosts") chooses the strict
+rule.
 
-### Defense in depth — reader-side filter
+### 2.1 Prerequisite bug — `prune_old_librarian_inferred` is inert
 
-`wiki_graph.rs` traversal SQL joins `llm_wiki_entries` on endpoint ids. Add
-`AND s.deleted_at IS NULL` / `AND t.deleted_at IS NULL` to both direction
-queries (source-direction at `wiki_graph.rs:225ff`, target-direction at
-`:270ff`) so a pre-contract ghost edge can never surface even if one is
-reintroduced by a bug. This is belt-and-braces; Part A's transactional purge is
-the real fix.
+The hard-delete site in the table above **does not delete anything in
+production today**, and the spec must not build a cascade on top of it without
+saying so. It compares `deleted_at < ?1` where `?1` is unix **seconds**
+(`lib.rs:1780`, `SystemTime::…as_secs()`), while every writer stores
+**milliseconds**: `ms_now()` (`commit.rs:88`), `ctx.now_ms` in
+`commit_fact_archive`, and `ms_now()` in `heal_lost_librarian_inferred`. A
+millisecond stamp (~1.7e12) is never less than `unix_secs - 604800` (~1.7e9),
+so the 7-day prune has never fired. The existing test passes only because its
+fixture inserts `deleted_at` in seconds (`lib.rs:4095-4117`) — it agrees with
+the bug rather than catching it.
+
+**In scope for this PR:** fix the comparison to operate in milliseconds, and
+change the test fixture to store millisecond stamps so it exercises the
+production shape. Do this **before** wiring the edge cascade at that site,
+otherwise the cascade is untested-in-practice dead code and any new test
+written against a seconds-based fixture will go green while production stays
+broken.
+
+Two consequences to keep in mind while fixing it: the prune becomes live for
+the first time, so the first run after release may delete a backlog of
+long-soft-deleted `librarian_inferred` rows (expected and correct — but it is
+why Part C's preflight backup matters even for users who skip the migration);
+and it hard-deletes without pushing entries-outbox deletes, unlike
+`clear_entity_content`. That outbox gap is pre-existing, out of scope here, and
+should be filed as a follow-up rather than fixed in this PR.
+
+### Defense in depth — reader-side filter (ALREADY PRESENT, no work)
+
+A previous draft asked the implementer to add `AND s.deleted_at IS NULL` /
+`AND t.deleted_at IS NULL` to the traversal joins. **Both direction queries
+already carry both predicates on both joins** — `fetch_outbound_neighbors`
+(`wiki_graph.rs:233`) and `fetch_inbound_neighbors` (`wiki_graph.rs:270`).
+There is nothing to change here. The only deliverable is a characterization
+test pinning the behavior so a future refactor cannot silently drop it (see
+acceptance criterion 5).
+
+Note the consequence for the soft-delete decision below: because the sole
+traversal reader already filters soft-deleted endpoints, the "ghost edges
+visible whenever a reader forgets the `deleted_at` filter" argument does not
+actually apply to any code that exists today. The strict rule is still
+adopted, but on the narrower and more honest grounds stated next.
 
 ### Transaction boundary
 
@@ -119,11 +183,47 @@ nesting, no network I/O added inside it.
 
 Closes the loop so `wiki_search` actually works.
 
-### The write path
+### Sequencing: the sweep is the mechanism, write-time embed is the optimization
+
+Land these in order, ideally as two reviewable commits:
+
+- **B.1 — the null-embedding sweep** (see "Failure isolation" below). This alone
+  makes `wiki_search` work: entries land with `embedding_blob = NULL` exactly as
+  they do today, and the sweep fills them shortly after. Zero changes to the
+  commit path, zero new failure modes on the write path, and it is the same code
+  Part C's migration invokes.
+- **B.2 — write-time embedding.** Purely a latency optimization: it closes the
+  window (one maintenance interval, worst case) during which a just-committed
+  fact is invisible to `wiki_search`. It is worth doing — the librarian commits
+  a fact and an agent may query for it moments later — but it is not what makes
+  the feature work, and it carries the restructuring cost below. If B.2 slips,
+  the feature still ships.
+
+### The write path (B.2)
 
 `commit_fact_add` (`src-tauri/src/db/commit.rs:624`) currently hard-inserts
-`embedding_blob = NULL, embedding = NULL`. Change: compute the entry embedding
-**before** opening the commit transaction, and insert the blob when available.
+`embedding_blob = NULL, embedding = NULL` (`commit.rs:668`). Change: compute the
+entry embedding **before** opening the commit transaction, and insert the blob
+when available.
+
+**This does not fit the current function shape, and the restructuring is part of
+the work.** `commit_fact_add` receives `conn: &Connection` already inside the
+caller's transaction, parses `body` out of the payload itself, and runs the
+normalized-body dedupe check itself (`commit.rs:648-660`). It has no pre-tx
+phase to hook. Required structure:
+
+1. **Pre-pass, before `BEGIN IMMEDIATE`:** walk the loaded items, parse the
+   `body`/`title` of each `fact_add` (and each `fact_update` whose body
+   changed), and batch-embed them in one `embed_batch` call (≤64 per call).
+2. **Thread the results in:** carry a `HashMap<item_id, Vec<f32>>` on
+   `CommitContext`. `commit_fact_add` looks its own `item.id` up and inserts the
+   blob if present, `NULL` if absent. A missing entry is not an error — it is
+   the failure-isolation path below.
+3. **Accept that the pre-pass embeds before dedupe.** The dedupe check needs the
+   transaction (it reads sibling entries), so duplicates will burn provider
+   calls. Acceptable: proposal batches are small and exact-duplicate `fact_add`s
+   are rare. Do **not** try to hoist dedupe out of the transaction to avoid it —
+   that trades a few wasted API calls for a TOCTOU race on the dedupe invariant.
 
 - **Text embedded:** `format!("{title}\n\n{body}")` — the entry's prose, same
   convention as chunk text (prose is what the librarian curated; keep it
@@ -134,9 +234,12 @@ Closes the loop so `wiki_search` actually works.
   profile so the wiki-graph-tools dimension guard
   (`length(embedding_blob) / 4 == active profile dim`, mcp-wiki-graph-tools
   design line 46) holds.
-- **API:** `embedder::embed_one(&profile, text)` (`src-tauri/src/embedder/mod.rs:191`),
-  blob format little-endian f32, 4 bytes/dim — identical to the chunks
-  embedding path (`src-tauri/src/db/queries.rs:81`).
+- **API:** `embedder::embed_batch(&profile, texts)`
+  (`src-tauri/src/embedder/mod.rs:173`) for the pre-pass;
+  `embed_one` (`:196`) only where a single entry is genuinely all there is.
+  Blob format little-endian f32, 4 bytes/dim — identical to the chunks
+  embedding path (`src-tauri/src/db/queries.rs:81`). Both are synchronous
+  blocking calls, which is precisely why they must run outside the transaction.
 - **Ordering:** embed → open tx → insert entry + outbox row → commit. Never a
   network call inside the transaction (lock-hold hazard per
   architectural-pitfalls).
@@ -164,9 +267,29 @@ SELECT id, title, body FROM llm_wiki_entries
  WHERE deleted_at IS NULL AND embedding_blob IS NULL;
 ```
 
-The sweep runs on the existing periodic maintenance tick (same scheduler slot
-the heal/prune maintenance run uses), batches pending ids (≤64 per
-`embedder::embed_batch` call, `embedder/mod.rs:168`), and updates rows one
+**The sweep's trigger must be built — there is no periodic tick to inherit.** A
+previous draft placed the sweep on "the existing periodic maintenance tick
+(same scheduler slot the heal/prune maintenance run uses)". No such slot
+exists: `heal_invalid_sources` runs off a debounced mpsc channel driven by
+vault events (`lib.rs:506`), and `heal_lost_librarian_inferred` /
+`prune_old_librarian_inferred` are reachable only from the `run_wiki_heal` /
+`run_wiki_forget` Tauri commands (`lib.rs:1783`) — all event- or user-triggered,
+none periodic. Since the sweep is the sole recovery path for a failed embed,
+leaving its trigger unspecified would mean failed embeds are never retried.
+
+Required triggers (all three, cheapest first — the sweep's `WHERE
+embedding_blob IS NULL` predicate makes a no-op run nearly free):
+
+1. **After each successful commit batch**, on the same background thread that
+   already services the commit — the common case, and what keeps a
+   just-committed fact searchable when B.2's pre-pass failed.
+2. **At app startup**, once, after the schema guard runs — catches anything
+   left null by a crash or by a previous build predating B.1.
+3. **On the existing `run_wiki_heal` command path**, so there is a manual
+   recovery lever that does not require a restart.
+
+Each run batches pending ids (≤64 per
+`embedder::embed_batch` call, `embedder/mod.rs:173`), and updates rows one
 `UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = ?2 AND
 embedding_blob IS NULL` at a time. Bounded batch + bounded sweep duration,
 mirroring the v1.39.0 watchdog's budget discipline. Because the sweep keys on
@@ -229,8 +352,8 @@ SELECT COUNT(*) FROM llm_wiki_edges e
                     WHERE t.id = e.target_id AND t.deleted_at IS NULL);
 ```
 
-Run inside one `BEGIN IMMEDIATE` transaction; push outbox deletes for the
-removed ids, same as the runtime path.
+Run inside one `BEGIN IMMEDIATE` transaction. No outbox rows: edges are not
+replicated, and the migration matches the runtime path (§2).
 
 ### Step 2 — The embedding backfill
 
@@ -269,13 +392,24 @@ with the app/watcher stopped.
 3. **Regeneration drops old edges, no ghosts.** Unit test at the archive path:
    commit fact + edge → `commit_fact_archive` the fact → assert the edge row is
    gone and no `llm_wiki_edges` row references the archived id, all within the
-   test's transaction. Same assertion for the prune (hard-delete) path.
+   test's transaction. Same assertion for the prune (hard-delete) path — and
+   that test's fixture **must write `deleted_at` in milliseconds**, matching
+   production writers. A seconds-based fixture goes green against the §2.1 bug
+   and proves nothing; that is exactly how the existing prune test
+   (`lib.rs:4095-4117`) missed it.
+3a. **The prune actually prunes.** Regression test for §2.1: insert a
+   `librarian_inferred` row with a millisecond `deleted_at` older than 7 days,
+   run `prune_old_librarian_inferred` with a millisecond `now`, assert the row
+   is deleted and a fresher row survives.
 4. **Embed failure never loses curation.** Unit test with a failing embed
    profile: fact commit still succeeds, row lands with `embedding_blob IS
    NULL`, sweep run against a mock-good provider fills it.
-5. **Reader filter holds.** Regression test: manually insert an edge whose
-   endpoint is soft-deleted (simulating a pre-contract ghost) → both
-   `wiki_graph.rs` direction queries exclude it.
+5. **Reader filter holds (characterization — behavior already correct).**
+   Pin the existing `wiki_graph.rs` filtering so a refactor cannot drop it:
+   manually insert an edge whose endpoint is soft-deleted (simulating a
+   pre-contract ghost) → both direction queries exclude it. This test is
+   expected to pass on an unmodified `wiki_graph.rs`; if it fails, the premise
+   in §2 is wrong and the review should stop there.
 6. **PR #78's stopgap stays green.** Existing short-circuit tests (wiki legs
    return empty, not error, when the table is empty) still pass — this spec
    adds population, it does not remove the graceful-empty contract.
@@ -285,5 +419,10 @@ with the app/watcher stopped.
 - Code/AST symbol graph and `[[wiki-link]]` edge indexing — separate backlog
   items; this spec is strictly about the wiki fact graph.
 - Replicating embeddings through the outbox (remote re-derives).
+- **Replicating the edge table through the outbox.** Edge inserts are not
+  replicated today (§2), so edge purges are not either. Starting edge CDC is a
+  separate scope item with consumer-side work; file it as a follow-up.
+- Fixing `prune_old_librarian_inferred`'s missing entries-outbox deletes on hard
+  delete (pre-existing, noted in §2.1, follow-up).
 - Changing `wiki_search`'s public tool contract (its shape is already correct;
   only its results were empty).
