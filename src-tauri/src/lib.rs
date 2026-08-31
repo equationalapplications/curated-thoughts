@@ -76,14 +76,16 @@ struct VaultConfigState(Mutex<VaultConfig>);
 struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
 
 /// Inner components of `PipelineHolder`: the job sender, worker thread, the
-/// consumer-side job counter, and the optional channel for `PipelineStatusEvent`
-/// listeners. Extracted as a type alias so `PipelineHolder`'s declaration stays
-/// below clippy::type_complexity's threshold.
+/// consumer-side job counter, the optional channel for `PipelineStatusEvent`
+/// listeners, and the worker's `Heartbeat` (spec §2.1) shared with the
+/// watchdog supervisor. Extracted as a type alias so `PipelineHolder`'s
+/// declaration stays below clippy::type_complexity's threshold.
 type PipelineHolderInner = Option<(
     SyncSender<PipelineJob>,
     std::thread::JoinHandle<()>,
     Arc<AtomicUsize>,
     Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
+    Arc<pipeline::watchdog::heartbeat::Heartbeat>,
 )>;
 
 struct PipelineHolder(Mutex<PipelineHolderInner>);
@@ -1250,7 +1252,7 @@ async fn switch_vault(
 
     {
         let mut g = pipeline.0.lock().unwrap();
-        if let Some((tx, join, _pending, _status_rx)) = g.take() {
+        if let Some((tx, join, _pending, _status_rx, _heartbeat)) = g.take() {
             drop(tx);
             let _ = join.join();
         }

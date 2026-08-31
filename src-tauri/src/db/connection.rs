@@ -184,6 +184,19 @@ pub fn open_in_memory() -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open (and migrate) a brain database at an arbitrary path. Intended for
+/// tests that need an on-disk database file — production code must use
+/// [`AppDb::open_with_config`] so the config-derived vault root is honored.
+/// The `config` argument is accepted for API symmetry with `AppDb::open` and
+/// is currently unused.
+#[allow(dead_code)]
+pub fn open_app_db(path: &Path, _config: Option<&Path>) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
+    migrate(&conn, None)?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
