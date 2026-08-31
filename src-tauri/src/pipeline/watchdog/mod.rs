@@ -5,11 +5,21 @@ pub mod budgets;
 pub mod recovery;
 pub mod sweep;
 
+use std::path::PathBuf;
+use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
+use rusqlite::Connection;
+use serde::Serialize;
+
 use self::budgets::budget_for;
-use self::heartbeat::{HeartbeatSnapshot, Stage};
+use self::diagnostics::{capture_stacks, record_trip, TripKind, TripRecord};
+use self::heartbeat::{now_ms, Heartbeat, HeartbeatSnapshot, Stage};
+use self::recovery::RespawnLedger;
 use crate::embedder::EmbedProfile;
+use crate::pipeline::PipelineJob;
 
 /// How long the queue may sit non-empty and idle before it counts as a drain
 /// stall. Must exceed the longest legitimate single-document time
@@ -103,6 +113,241 @@ impl DrainTracker {
             Some(start) => now.duration_since(start) >= DRAIN_STALL_WINDOW,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineHealth {
+    #[default]
+    Idle,
+    Working,
+    Stalled,
+    Degraded,
+}
+
+impl PipelineHealth {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PipelineHealth::Idle => "idle",
+            PipelineHealth::Working => "working",
+            PipelineHealth::Stalled => "stalled",
+            PipelineHealth::Degraded => "degraded",
+        }
+    }
+}
+
+/// Diagnostics first, then supersede. Recovery destroys the evidence, so the
+/// ordering here is load-bearing (spec §3).
+pub fn handle_stage_stall(
+    conn: &Connection,
+    heartbeat: &Arc<Heartbeat>,
+    trip: &TripRecord,
+) -> Result<()> {
+    record_trip(conn, trip)?;
+    capture_stacks(std::process::id());
+    heartbeat.bump_epoch();
+    Ok(())
+}
+
+pub struct SupervisorConfig {
+    pub db_path: PathBuf,
+    pub heartbeat: Arc<Heartbeat>,
+    pub tx: SyncSender<PipelineJob>,
+    pub profile: EmbedProfile,
+    pub gen_timeout_secs: u64,
+    pub on_health: Box<dyn Fn(PipelineHealth) + Send>,
+}
+
+pub fn spawn_supervisor(cfg: SupervisorConfig) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("pipeline-watchdog".to_string())
+        .spawn(move || supervisor_loop(cfg))
+        .expect("spawn pipeline watchdog")
+}
+
+fn supervisor_loop(cfg: SupervisorConfig) {
+    let conn = match Connection::open(&cfg.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[watchdog] cannot open {:?}: {e}; supervisor exiting", cfg.db_path);
+            return;
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+
+    let mut drain = DrainTracker::new();
+    let mut respawns = RespawnLedger::new();
+    let mut degraded = false;
+
+    loop {
+        std::thread::sleep(TICK);
+
+        let snapshot = cfg.heartbeat.snapshot();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let completed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE status IN ('indexed', 'error')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        mirror_heartbeat(&conn, &snapshot);
+
+        if degraded {
+            (cfg.on_health)(PipelineHealth::Degraded);
+            continue;
+        }
+
+        // Class 2: a job was picked up and never finished.
+        if let Some(stalled_ms) = evaluate_stage_stall(
+            &snapshot,
+            &cfg.profile,
+            cfg.gen_timeout_secs,
+            now_ms(),
+        ) {
+            (cfg.on_health)(PipelineHealth::Stalled);
+
+            let probe_ok = if recovery::stage_has_network_dependency(snapshot.stage) {
+                probe_endpoint_for(snapshot.stage, &cfg)
+            } else {
+                true
+            };
+
+            let trip = TripRecord {
+                kind: TripKind::StageStall,
+                snapshot: snapshot.clone(),
+                stalled_ms,
+                pending_count: pending,
+                embed_endpoint: None,
+                gen_endpoint: None,
+                action: "respawn".to_string(),
+            };
+            if let Err(e) = handle_stage_stall(&conn, &cfg.heartbeat, &trip) {
+                eprintln!("[watchdog] failed to record stage stall: {e}");
+            }
+
+            // Blame the document only when its dependency is healthy.
+            if probe_ok && snapshot.subject != "unknown" {
+                match recovery::record_strike(&conn, &snapshot.subject) {
+                    Ok(strikes) if strikes >= recovery::QUARANTINE_THRESHOLD => {
+                        if let Err(e) = recovery::quarantine(&conn, &snapshot.subject) {
+                            eprintln!("[watchdog] quarantine failed: {e}");
+                        } else {
+                            eprintln!(
+                                "[watchdog] quarantined {} after {strikes} strikes",
+                                snapshot.subject
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[watchdog] strike failed: {e}"),
+                }
+            }
+
+            respawns.record();
+            if respawns.over_cap() {
+                degraded = true;
+                eprintln!(
+                    "[watchdog] respawn cap ({}) exhausted; parking ingest in degraded",
+                    recovery::RESPAWN_CAP_PER_HOUR
+                );
+                (cfg.on_health)(PipelineHealth::Degraded);
+                continue;
+            }
+
+            let _ = sweep::sweep(&conn, &cfg.tx, 256);
+            continue;
+        }
+
+        // Class 1: work is queued and nothing consumes it.
+        if drain.observe(pending, completed, snapshot.stage, Instant::now()) {
+            (cfg.on_health)(PipelineHealth::Stalled);
+            let trip = TripRecord {
+                kind: TripKind::DrainStall,
+                snapshot: snapshot.clone(),
+                stalled_ms: DRAIN_STALL_WINDOW.as_millis() as i64,
+                pending_count: pending,
+                embed_endpoint: None,
+                gen_endpoint: None,
+                action: "sweep".to_string(),
+            };
+            if let Err(e) = record_trip(&conn, &trip) {
+                eprintln!("[watchdog] failed to record drain stall: {e}");
+            }
+            // A healthy idle worker needs work, not a respawn (spec §2.3).
+            let _ = sweep::sweep(&conn, &cfg.tx, 256);
+            continue;
+        }
+
+        // Normal operation: keep the watcher's staged rows flowing.
+        let queued = sweep::sweep(&conn, &cfg.tx, 256).unwrap_or(0);
+        (cfg.on_health)(if pending > 0 || queued > 0 {
+            PipelineHealth::Working
+        } else {
+            PipelineHealth::Idle
+        });
+    }
+}
+
+/// Probe the endpoint the stalled stage actually uses. Treat an unreachable
+/// endpoint as "not the document's fault" (spec §4.2).
+///
+/// The URL must follow the active profile: probing localhost for a Cloud
+/// embed profile would report a healthy local Ollama while the real remote
+/// endpoint is down, and strike an innocent document.
+fn probe_endpoint_for(stage: Stage, cfg: &SupervisorConfig) -> bool {
+    let url = match stage {
+        Stage::Embedding => match &cfg.profile {
+            EmbedProfile::Local { .. } => local_llm_base(),
+            EmbedProfile::Cloud { .. } => return true, // provider host, not ours to probe
+            EmbedProfile::External { profile } => profile.base_url.clone(),
+        },
+        // Generation always goes through the local runtime today.
+        Stage::Summarizing => local_llm_base(),
+        _ => return true,
+    };
+
+    let client = match reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client
+        .get(&url)
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+fn local_llm_base() -> String {
+    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string())
+}
+
+fn mirror_heartbeat(conn: &Connection, snapshot: &HeartbeatSnapshot) {
+    let _ = conn.execute(
+        "UPDATE pipeline_heartbeat
+            SET epoch = ?1, seq = ?2, stage = ?3, subject = ?4,
+                stage_started_ms = ?5, updated_ms = ?6
+          WHERE id = 1",
+        rusqlite::params![
+            snapshot.epoch as i64,
+            snapshot.seq as i64,
+            snapshot.stage.as_str(),
+            snapshot.subject,
+            snapshot.stage_started_ms,
+            now_ms(),
+        ],
+    );
 }
 
 #[cfg(test)]
@@ -202,5 +447,58 @@ mod tests {
     fn join_with_timeout_returns_true_for_a_thread_that_finishes() {
         let handle = std::thread::spawn(|| {});
         assert!(join_with_timeout(handle, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn stage_stall_records_the_trip_before_bumping_the_epoch() {
+        use crate::db::connection::open_in_memory;
+        use crate::pipeline::watchdog::diagnostics::{TripKind, TripRecord};
+
+        let conn = open_in_memory().unwrap();
+        let hb = std::sync::Arc::new(heartbeat::Heartbeat::new());
+        hb.enter(Stage::Embedding, Some("/a.md"));
+
+        let epoch_before = hb.epoch();
+        let trip = TripRecord {
+            kind: TripKind::StageStall,
+            snapshot: hb.snapshot(),
+            stalled_ms: 700_000,
+            pending_count: 83,
+            embed_endpoint: None,
+            gen_endpoint: None,
+            action: "respawn".to_string(),
+        };
+        handle_stage_stall(&conn, &hb, &trip).unwrap();
+
+        // Evidence exists...
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pipeline_stalls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "trip must be recorded before recovery");
+        // ...and only then is the worker superseded.
+        assert_eq!(hb.epoch(), epoch_before + 1);
+    }
+
+    #[test]
+    fn second_strike_quarantines_the_document() {
+        use crate::db::connection::open_in_memory;
+        use crate::pipeline::watchdog::recovery::{
+            is_quarantined, record_strike, QUARANTINE_THRESHOLD,
+        };
+
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('/p.md', 'h', 'user_doc', 'pending')",
+            [],
+        )
+        .unwrap();
+
+        for _ in 0..QUARANTINE_THRESHOLD {
+            let strikes = record_strike(&conn, "/p.md").unwrap();
+            if strikes >= QUARANTINE_THRESHOLD {
+                recovery::quarantine(&conn, "/p.md").unwrap();
+            }
+        }
+        assert!(is_quarantined(&conn, "/p.md").unwrap());
     }
 }

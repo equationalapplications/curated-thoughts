@@ -111,12 +111,18 @@ struct ConfigMalformedPayload {
 struct PendingConfigMalformed(Mutex<Option<ConfigMalformedPayload>>);
 
 #[derive(Clone, Copy, Default)]
+struct IngestStatusFlags {
+    health: crate::pipeline::watchdog::PipelineHealth,
+}
+
+#[derive(Clone, Copy, Default)]
 struct WikiStatusFlags {
     ingesting: bool,
     librarian: bool,
     healing: bool,
     pruning: bool,
     forgetting: bool,
+    ingest: IngestStatusFlags,
 }
 
 fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
@@ -128,6 +134,7 @@ fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
             "healing": current.healing,
             "pruning": current.pruning,
             "forgetting": current.forgetting,
+            "ingest": { "health": current.ingest.health },
         }),
     );
 }
@@ -866,6 +873,35 @@ fn start_file_watcher_inner(
                     flags.ingesting = count > 0;
                 });
             }
+        });
+    }
+
+    {
+        let (tx, heartbeat) = {
+            let guard = pipeline.0.lock().unwrap();
+            match guard.as_ref() {
+                Some(t) => (t.0.clone(), t.4.clone()),
+                None => return Err("pipeline not running".to_string()),
+            }
+        };
+        let brain_paths = crate::retrieval::resolve_brain_paths();
+        let report = crate::config::BrainConfig::load_lenient(&brain_paths)
+            .map_err(|e| e.to_string())?;
+        let profile = report.config.embed_profile.clone().unwrap_or_default();
+        let gen_timeout_secs = 600; // matches librarian/synthesis.rs default
+
+        let app_handle = app.clone();
+        pipeline::watchdog::spawn_supervisor(pipeline::watchdog::SupervisorConfig {
+            db_path: brain_paths.db_path.clone(),
+            heartbeat,
+            tx,
+            profile,
+            gen_timeout_secs,
+            on_health: Box::new(move |health| {
+                update_wiki_status_from_app(&app_handle, |flags| {
+                    flags.ingest.health = health;
+                });
+            }),
         });
     }
 
