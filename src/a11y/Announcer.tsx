@@ -51,10 +51,11 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
     const at = Date.now();
     const setter = politeness === "assertive" ? setAssertive : setPolite;
     setter((queue) => {
-      // FIFO append; identical-message collapsing applies only within the 150ms
-      // floor window of the immediately preceding entry (spec: announcer).
+      // FIFO append; identical-message collapsing applies within the 150ms
+      // floor window of the immediately preceding entry, at either
+      // politeness level (spec: announcer — duplicates never read twice).
       const last = queue[queue.length - 1];
-      const collapsed = politeness === "polite" && last?.text === text && at - last.at < FLOOR_MS;
+      const collapsed = last?.text === text && at - last.at < FLOOR_MS;
       return collapsed ? queue : [...queue, { id, text, at }];
     });
     const timer = window.setTimeout(() => {

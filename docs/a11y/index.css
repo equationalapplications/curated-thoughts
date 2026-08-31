@@ -1,4 +1,10 @@
 /* ── Clanker-derived design tokens ─────────────────────────────────────── */
+/* GENERATED FILE — DO NOT EDIT BY HAND.
+ * Source of truth: src/index.css (kept byte-identical for the static
+ * palette preview harness, which loads this copy without a bundler).
+ * Regenerate after ANY change to src/index.css:
+ *   cp src/index.css docs/a11y/index.css
+ * Last regenerated: 2026-08-31 @ a22ab39 (Task 2, WCAG AA foundation). */
 :root {
   --bg:                 #fffbff;
   --surface:            #fffbff;

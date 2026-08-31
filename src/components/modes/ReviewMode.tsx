@@ -271,6 +271,17 @@ export function ReviewMode({
     setRejectReason("");
   }, []);
 
+  // Escape cancels the reject form from any interactive element in it. The
+  // textarea's own keydown is enough for real use (it holds focus when the
+  // form opens), but the buttons carry it too so the original pre-refactor
+  // behavior — Escape cancels regardless of focus position — is preserved.
+  const handleRejectFormEscape = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      handleCancelRejectForm();
+    }
+  }, [handleCancelRejectForm]);
+
   const handleBatchApprove = useCallback(async () => {
     if (checkedIds.size === 0 || busy) return;
     setActionError(null);
@@ -431,17 +442,13 @@ export function ReviewMode({
                   value={rejectReason}
                   onChange={(e) => setRejectReason(e.target.value)}
                   placeholder="Optional: add a reason for rejection..."
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      handleCancelRejectForm();
-                    }
-                  }}
+                  onKeyDown={handleRejectFormEscape}
                 />
                 <div className="review-reject-buttons">
                   <button
                     type="submit"
                     className="review-btn review-btn--reject-confirm"
+                    onKeyDown={handleRejectFormEscape}
                   >
                     Confirm Reject
                   </button>
@@ -449,6 +456,7 @@ export function ReviewMode({
                     type="button"
                     className="review-btn review-btn--cancel"
                     onClick={handleCancelRejectForm}
+                    onKeyDown={handleRejectFormEscape}
                   >
                     Cancel
                   </button>

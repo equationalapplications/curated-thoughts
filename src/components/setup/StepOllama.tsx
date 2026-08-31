@@ -97,7 +97,19 @@ export function StepOllama({ onNext }: Props) {
             />
             <p className="ollama-hint">
               Recommended for your Mac. Browse more at{" "}
-              <a className="link" href="https://ollama.com/library" target="_blank" rel="noreferrer">
+              <a
+                className="link"
+                href="https://ollama.com/library"
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => {
+                  // WebKitGTK/wry blocks new-window nav by default — route
+                  // through the Tauri shell opener so the link actually works
+                  // in the packaged app, not just in vite dev.
+                  e.preventDefault();
+                  open("https://ollama.com/library");
+                }}
+              >
                 ollama.com/library
               </a>.
             </p>

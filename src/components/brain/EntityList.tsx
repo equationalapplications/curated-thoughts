@@ -15,6 +15,7 @@ interface Props {
 export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onSortChange }: Props) {
   const [filter, setFilter] = useState("");
   const [creating, setCreating] = useState(false);
+  const [draftName, setDraftName] = useState("");
   const createInputRef = useRef<HTMLInputElement>(null);
 
   // Focus the new-entity input when the create form opens. Programmatic focus
@@ -23,7 +24,6 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onS
   useEffect(() => {
     if (creating) createInputRef.current?.focus();
   }, [creating]);
-  const [draftName, setDraftName] = useState("");
 
   const groups = useMemo(() => {
     const needle = filter.trim().toLowerCase();

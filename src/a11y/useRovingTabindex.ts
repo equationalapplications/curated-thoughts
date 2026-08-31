@@ -44,7 +44,6 @@ export function useRovingTabindex<T extends HTMLElement>(options: RovingOptions)
       }
       const enabled = items();
       if (enabled.length === 0) return;
-      event.preventDefault();
       const current = currentRef.current ?? enabled[0];
       const index = enabled.indexOf(current);
       const vertical = orientation !== "horizontal";
@@ -70,7 +69,11 @@ export function useRovingTabindex<T extends HTMLElement>(options: RovingOptions)
           next = enabled.length - 1;
           break;
       }
+      // preventDefault only when a navigation actually happens: keys this
+      // orientation ignores must keep native scroll behavior (e.g. vertical
+      // list must not swallow ArrowLeft/ArrowRight page scroll).
       if (next === -1) return;
+      event.preventDefault();
       const target = enabled[next];
       setTabStop(target);
       target.focus();
