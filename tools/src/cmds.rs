@@ -329,7 +329,13 @@ pub fn walk_vault(
 /// ledger, ingest every ingestible file, then run the linker over each touched
 /// entity. Extracted from `ingest_vault_once.rs`; behavior identical to the
 /// original bin main plus the ledger gate.
-pub fn ingest_run() -> Result<()> {
+///
+/// When `trust_new_links` is set, every `Pending` link from the first pass
+/// is auto-approved through `classify_link` (so non-approvable denials still
+/// refuse), persisted to config, and then a second `walk_vault` runs to
+/// collect their content. This is the scripted-setup escape hatch for the
+/// trust-on-first-use flow — never bypasses Denied rules.
+pub fn ingest_run(trust_new_links: bool) -> Result<()> {
     let paths_b = retrieval::resolve_brain_paths();
     let profile =
         retrieval::load_embed_profile(&paths_b.config_path).context("read embed profile")?;
@@ -346,9 +352,53 @@ pub fn ingest_run() -> Result<()> {
 
     // Load the ledger (Task 10) so walk_vault gates every direct-child
     // documents/ symlink through classify_link.
-    let brain_cfg = tauri_app_lib::config::BrainConfig::load(&paths_b)
+    let mut brain_cfg = tauri_app_lib::config::BrainConfig::load(&paths_b)
         .context("read trusted_links ledger from config.json")?;
-    let outcome = walk_vault(&vault_root, &brain_cfg.trusted_links, dirs::home_dir().as_deref());
+    let mut outcome = walk_vault(
+        &vault_root,
+        &brain_cfg.trusted_links,
+        dirs::home_dir().as_deref(),
+    );
+
+    // Scripted setups: promote every Pending link that survives
+    // classify_link (Denied stays Denied — that's the security boundary) and
+    // re-walk before ingesting. Persist first so a mid-run crash doesn't
+    // leave the walker half-collected with no ledger entry.
+    if trust_new_links && !outcome.pending.is_empty() {
+        use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
+        let mut newly_trusted: Vec<TrustedLink> = Vec::new();
+        for p in &outcome.pending {
+            match classify_link(
+                &p.link,
+                Path::new(&p.target),
+                &vault_root,
+                dirs::home_dir().as_deref(),
+                &brain_cfg.trusted_links,
+            ) {
+                LinkVerdict::Pending => newly_trusted.push(TrustedLink {
+                    link: p.link.clone(),
+                    target: p.target.clone(),
+                    approved_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                }),
+                LinkVerdict::Denied(_) => {}
+                LinkVerdict::Trusted => {}
+            }
+        }
+        if !newly_trusted.is_empty() {
+            brain_cfg.trusted_links.extend(newly_trusted);
+            brain_cfg
+                .write(&paths_b)
+                .context("persist newly-trusted links")?;
+            outcome = walk_vault(
+                &vault_root,
+                &brain_cfg.trusted_links,
+                dirs::home_dir().as_deref(),
+            );
+        }
+    }
 
     // Surface pending + denied so a headless run exits with the right
     // remediation hint (spec Risks).

@@ -75,11 +75,27 @@ enum Cmd {
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
+        /// Approve every pending symlink before ingesting. For scripted
+        /// setups only — this bypasses the per-link review, though never the
+        /// non-approvable deny rules.
+        #[arg(long)]
+        trust_new_links: bool,
     },
     /// Librarian operations.
     Librarian {
         #[command(subcommand)]
         cmd: LibrarianCmd,
+    },
+    /// Approve, list, or revoke symlinks the ingest walker may follow.
+    Trust {
+        /// Vault-relative path of the symlink, e.g. `documents/specs`.
+        link: Option<String>,
+        /// Print the current ledger and exit.
+        #[arg(long)]
+        list: bool,
+        /// Remove an approval by link path.
+        #[arg(long)]
+        revoke: Option<String>,
     },
     /// Run the headless vault watcher (foreground daemon).
     Watch {
@@ -226,7 +242,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             yes,
             proposal_id,
         } => approve_cmd(all, yes, proposal_id),
-        Cmd::Ingest { yes } => {
+        Cmd::Ingest { yes, trust_new_links } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
                 // can still print the refusal with the planned db path.
@@ -237,12 +253,13 @@ fn run(cmd: Cmd) -> Result<i32> {
                 );
                 return Ok(1);
             }
-            cli_common::ingest_run()?;
+            cli_common::ingest_run(trust_new_links)?;
             Ok(0)
         }
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {
             once,
             json,
@@ -476,4 +493,108 @@ fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {
     }
     cli_common::librarian_run("llama3.2:3b", force)?;
     Ok(0)
+}
+
+/// `ct trust` — the CLI half of the trust-on-first-use flow (spec D3a).
+///
+/// - `ct trust <link>`        — classify the link, persist if Pending.
+/// - `ct trust --list`        — print every entry in the ledger.
+/// - `ct trust --revoke <link>` — drop one entry from the ledger.
+///
+/// Denied (non-approvable) targets exit 1 with the rule name; broken or
+/// non-symlink paths exit 1 with a brief diagnostic. Successful approvals
+/// and revokes exit 0.
+fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result<i32> {
+    use tauri_app_lib::config::BrainConfig;
+    use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
+
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    let mut cfg = BrainConfig::load(&paths)?;
+
+    if list {
+        for entry in &cfg.trusted_links {
+            println!("{} -> {}", entry.link, entry.target);
+        }
+        return Ok(0);
+    }
+
+    if let Some(target_link) = revoke {
+        let before = cfg.trusted_links.len();
+        cfg.trusted_links.retain(|e| e.link != target_link);
+        if cfg.trusted_links.len() == before {
+            eprintln!("error: {target_link} is not in the ledger");
+            return Ok(1);
+        }
+        cfg.write(&paths)?;
+        println!("revoked {target_link}");
+        return Ok(0);
+    }
+
+    let link = match link {
+        Some(l) => l,
+        None => {
+            eprintln!("error: pass a link path, --list, or --revoke <link>");
+            return Ok(1);
+        }
+    };
+
+    let vault_root = match cfg.vault_path.clone() {
+        Some(v) => std::path::PathBuf::from(v),
+        None => bail!("no vault configured; run `curated-thoughts --onboard` first"),
+    };
+    // Canonicalize so classify_link's path comparisons see matching
+    // prefixes (macOS /var → /private/var is the common case).
+    let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
+    let link_path = vault_root.join(&link);
+
+    let meta = match std::fs::symlink_metadata(&link_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: no such link {link}: {e}");
+            return Ok(1);
+        }
+    };
+    if !meta.file_type().is_symlink() {
+        eprintln!("error: {link} is not a symlink");
+        return Ok(1);
+    }
+
+    let target = match std::fs::canonicalize(&link_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {link} is broken: {e}");
+            return Ok(1);
+        }
+    };
+
+    match classify_link(
+        &link,
+        &target,
+        &vault_root,
+        dirs::home_dir().as_deref(),
+        &cfg.trusted_links,
+    ) {
+        LinkVerdict::Denied(reason) => {
+            eprintln!("refused: {link} -> {} ({})", target.display(), reason.message());
+            Ok(1)
+        }
+        LinkVerdict::Trusted => {
+            println!("{link} is already trusted");
+            Ok(0)
+        }
+        LinkVerdict::Pending => {
+            cfg.trusted_links.retain(|e| e.link != link);
+            cfg.trusted_links.push(TrustedLink {
+                link: link.clone(),
+                target: target.to_string_lossy().to_string(),
+                approved_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+            });
+            cfg.write(&paths)?;
+            println!("trusted {link} -> {}", target.display());
+            Ok(0)
+        }
+    }
 }
