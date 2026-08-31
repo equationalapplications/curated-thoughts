@@ -17,6 +17,7 @@ import { allRejectDecisions, buildDecisions, defaultItemDecisions, hasAcceptedIt
 import { saveRejectReason } from "../../lib/reviewRejectReasons";
 import { ReviewQueueList } from "../review/ReviewQueueList";
 import { ReviewEvidencePanel } from "../review/ReviewEvidencePanel";
+import { PendingLinksPanel } from "../review/PendingLinksPanel";
 import { ReviewProposalEditor } from "../review/ReviewProposalEditor";
 
 interface Props {
@@ -343,6 +344,7 @@ export function ReviewMode({
   if (queue.length === 0) {
     return (
       <div className="mode-layout review-screen">
+        <PendingLinksPanel />
         <div className="review-empty">
           <h2>{queueError ? "Queue unavailable" : "Queue clear."}</h2>
           {queueError && <p className="review-hint">{queueError}</p>}
@@ -356,6 +358,7 @@ export function ReviewMode({
 
   return (
     <div className="mode-layout review-screen review-desk">
+      <PendingLinksPanel />
       <ReviewQueueList
         queue={queue}
         selectedId={proposal?.id ?? null}

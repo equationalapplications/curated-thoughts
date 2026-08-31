@@ -451,7 +451,8 @@ mod tests {
         );
         assert_eq!(a_model.as_deref(), Some("pre-watermark"));
 
-        for id in [errored_id] {
+        {
+            let id = errored_id;
             let (h, m): (Option<String>, Option<String>) = conn
                 .query_row(
                     "SELECT synth_hash, synth_model FROM documents WHERE id = ?1",

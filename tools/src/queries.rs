@@ -750,8 +750,8 @@ mod tests {
     // Suppress dead-code lints for items that exist for completeness but are
     // not exercised by these unit tests (they are exercised by integration
     // tests against a seeded brain).
-    use crate::write::Brain;
     use crate::paths::BrainPaths;
+    use crate::write::Brain;
     #[allow(dead_code)]
     fn _suppress_unused_for_helper_types(_b: Brain, _bp: BrainPaths) {}
 }

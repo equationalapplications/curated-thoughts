@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn approve_shim_commits_and_clears_queue() {
         let mut conn = open_in_memory().unwrap();
-        let rowid = seed_proposal(&mut conn, "prop-approve", "Beta");
+        let rowid = seed_proposal(&conn, "prop-approve", "Beta");
         approve_proposal_shim(&mut conn, rowid).unwrap();
         assert!(list_pending_review_pages(&conn).unwrap().is_empty());
         let status: String = conn
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn reject_shim_marks_rejected() {
         let mut conn = open_in_memory().unwrap();
-        let rowid = seed_proposal(&mut conn, "prop-reject", "Gamma");
+        let rowid = seed_proposal(&conn, "prop-reject", "Gamma");
         reject_proposal_shim(&mut conn, rowid, Some("Not relevant")).unwrap();
         let status: String = conn
             .query_row(

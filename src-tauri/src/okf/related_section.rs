@@ -6,8 +6,7 @@ pub(crate) fn escape_link_label(label: &str) -> String {
         .replace('[', "\\[")
         .replace(']', "\\]")
         .replace("\r\n", " ")
-        .replace('\n', " ")
-        .replace('\r', " ")
+        .replace(['\n', '\r'], " ")
 }
 
 pub fn append_related_section(body: &str, links: &[(&str, &str)]) -> String {
@@ -38,9 +37,7 @@ pub fn split_related_section(body: &str) -> (String, Vec<OkfMarkdownLink>) {
     }
 
     let mut scan = end;
-    if scan > 0 {
-        scan -= 1;
-    }
+    scan = scan.saturating_sub(1);
     while scan > 0 && lines[scan].trim_start().starts_with("- ") {
         if scan == 0 {
             break;

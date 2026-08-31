@@ -16,6 +16,7 @@ pub mod mcp_server;
 pub mod okf;
 mod okf_api;
 pub mod onboard;
+pub mod ontology_config;
 pub mod outbox;
 mod pipeline;
 pub mod privacy;
@@ -27,7 +28,9 @@ pub mod search;
 mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
+pub mod trusted_links;
 pub mod vault;
+pub mod walk_vault;
 pub mod watcher;
 pub mod wiki_graph;
 
@@ -68,19 +71,22 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
 use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
-struct DbState(Mutex<AppDb>);
+pub struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
 struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
-struct PipelineHolder(
-    Mutex<
-        Option<(
-            SyncSender<PipelineJob>,
-            std::thread::JoinHandle<()>,
-            Arc<AtomicUsize>,
-            Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
-        )>,
-    >,
-);
+
+/// Inner components of `PipelineHolder`: the job sender, worker thread, the
+/// consumer-side job counter, and the optional channel for `PipelineStatusEvent`
+/// listeners. Extracted as a type alias so `PipelineHolder`'s declaration stays
+/// below clippy::type_complexity's threshold.
+type PipelineHolderInner = Option<(
+    SyncSender<PipelineJob>,
+    std::thread::JoinHandle<()>,
+    Arc<AtomicUsize>,
+    Option<mpsc::Receiver<pipeline::PipelineStatusEvent>>,
+)>;
+
+struct PipelineHolder(Mutex<PipelineHolderInner>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
@@ -1121,6 +1127,7 @@ fn start_file_watcher_inner(
 
 /// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
+#[allow(clippy::too_many_arguments)]
 fn recover_after_failed_switch_vault(
     app: &AppHandle,
     db_path: &Path,
@@ -1176,6 +1183,7 @@ fn recover_after_failed_switch_vault(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn switch_vault(
     new_path: String,
     restore_backup: bool,
@@ -2180,10 +2188,8 @@ fn get_chunk_ids_for_wiki_entry(
         .map_err(|e| e.to_string())?;
 
     let mut ids = Vec::new();
-    for row in rows {
-        if let Ok(id) = row {
-            ids.push(id);
-        }
+    for id in rows.flatten() {
+        ids.push(id);
     }
 
     Ok(ids)
@@ -2538,7 +2544,10 @@ fn copy_os_drop_paths_to_vault(
 
 // ── Test utilities ────────────────────────────────────────────────────────────
 
-pub use pipeline::{entity_id_for_path, ingest_document, ingest_document_with_vault_root};
+pub use pipeline::{
+    entity_id_for_path, entity_id_for_virtual_path, ingest_document, ingest_document_virtual,
+    ingest_document_with_vault_root,
+};
 
 #[tauri::command]
 fn ingest_document_cmd(
@@ -2570,7 +2579,6 @@ fn needs_chunk_hash_migration(db: tauri::State<'_, crate::DbState>) -> Result<bo
 /// `ingest_document_cmd` so the event-emission sequence can be exercised in a
 /// test against a real `tauri::App<MockRuntime>` (AppHandle as a Tauri command
 /// argument is not supported by `MockRuntime`'s `CommandArg` extractor).
-
 /// Non-destructive read of the most recent `config-malformed` payload
 /// stashed by the setup hook. The setup thread can emit the event before
 /// the frontend listener registers (Tauri does not buffer events emitted
@@ -2697,6 +2705,11 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             needs_chunk_hash_migration,
             vault_write_note,
             vault_upsert_index_entry,
+            get_ontology_selection,
+            set_ontology_selection,
+            list_pending_links,
+            approve_link,
+            revoke_link,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -2887,7 +2900,7 @@ pub fn run() {
                         }
                     }
                 }
-                
+
                 if needs_migration {
                     let app_handle = app.app_handle().clone();
                     tauri::async_runtime::spawn_blocking(move || {
@@ -3173,6 +3186,11 @@ pub fn run() {
             set_privacy_mode,
             acknowledge_migration_disclosure,
             acknowledge_ephemeral_disclosure,
+            get_ontology_selection,
+            set_ontology_selection,
+            list_pending_links,
+            approve_link,
+            revoke_link,
             get_binary_path,
             get_brain_dir,
             get_brain_dir_info,
@@ -3379,6 +3397,134 @@ fn acknowledge_ephemeral_disclosure() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_ontology_selection() -> Result<String, String> {
+    use crate::ontology_config::OntologySelection;
+    let paths = retrieval::resolve_brain_paths();
+    let report = config::BrainConfig::load_lenient(&paths).map_err(|e| e.to_string())?;
+    // An unparseable `ontology` block (e.g. `{"schema":"unknown"}`) must
+    // surface as an error, not fall back to the desktop default — that
+    // fallback is reserved for "never chosen" (the field genuinely absent).
+    // Masking a parse failure here would silently start the General
+    // ontology when config.json actually names something else.
+    if report.ontology_unparseable {
+        return Err(format!(
+            "ontology selection in config.json is invalid: {}",
+            report
+                .diagnostics
+                .iter()
+                .find(|d| d.starts_with("ontology block unparseable"))
+                .cloned()
+                .unwrap_or_else(|| "unparseable ontology block".to_string())
+        ));
+    }
+    let selection = report
+        .config
+        .ontology
+        .schema
+        // Never chosen → the Desktop default. The CLI writes its own default
+        // during --onboard, so an absent value here means a Desktop-first vault.
+        .unwrap_or(OntologySelection::DESKTOP_DEFAULT);
+    serde_json::to_value(selection)
+        .map_err(|e| e.to_string())?
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "ontology selection did not serialize to a string".to_string())
+}
+
+#[tauri::command]
+fn set_ontology_selection(selection: String) -> Result<(), String> {
+    use crate::ontology_config::OntologySelection;
+    let parsed: OntologySelection =
+        serde_json::from_value(serde_json::Value::String(selection.clone()))
+            .map_err(|_| format!("unknown ontology selection: {selection}"))?;
+
+    let paths = retrieval::resolve_brain_paths();
+    let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    cfg.ontology.schema = Some(parsed);
+    cfg.write(&paths).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct PendingLinkPayload {
+    link: String,
+    target: String,
+}
+
+#[tauri::command]
+fn list_pending_links() -> Result<Vec<PendingLinkPayload>, String> {
+    let paths = retrieval::resolve_brain_paths();
+    // Use the lenient loader so a malformed-but-mine unrelated block
+    // (e.g. `generation` missing after an upstream provider rename) does
+    // not block the remediation surface. The walker only needs
+    // `vault_path` + `trusted_links`, both of which `load_lenient`
+    // populates with sensible fallbacks (`*_missing = true` if absent)
+    // and returns in the same shape.
+    let report = config::BrainConfig::load_lenient(&paths).map_err(|e| e.to_string())?;
+    let cfg = report.config;
+    let vault_root = cfg
+        .vault_path
+        .clone()
+        .ok_or_else(|| "no vault configured".to_string())?;
+
+    let outcome = walk_vault::walk_vault(
+        std::path::Path::new(&vault_root),
+        &cfg.trusted_links,
+        dirs::home_dir().as_deref(),
+    );
+    Ok(outcome
+        .pending
+        .into_iter()
+        .map(|p| PendingLinkPayload {
+            link: p.link,
+            target: p.target,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn approve_link(link: String) -> Result<(), String> {
+    use crate::trusted_links::{approve_into, LinkVerdict};
+
+    let paths = retrieval::resolve_brain_paths();
+    let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    let vault_root = std::path::PathBuf::from(
+        cfg.vault_path
+            .clone()
+            .ok_or_else(|| "no vault configured".to_string())?,
+    );
+    // Canonicalize the vault root so `classify_link` compares both sides on
+    // matching prefixes. Without this, a vault reached through a symlink
+    // would let a link to its physical parent pass as Pending instead of
+    // being refused as a vault ancestor.
+    let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
+
+    let verdict = approve_into(
+        &mut cfg.trusted_links,
+        &link,
+        &vault_root,
+        dirs::home_dir().as_deref(),
+    )?;
+    match verdict {
+        // In-vault (Trusted) and newly-approved (Pending) both produce a
+        // possibly-changed ledger, so persist either way. The helper
+        // already skipped the push for Trusted (spec D3a — vault
+        // containment is the trust boundary), so this write may be a
+        // no-op for the in-vault case.
+        LinkVerdict::Denied(reason) => Err(format!("refused: {}", reason.message())),
+        LinkVerdict::Trusted | LinkVerdict::Pending => cfg.write(&paths).map_err(|e| e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn revoke_link(link: String) -> Result<(), String> {
+    let paths = retrieval::resolve_brain_paths();
+    let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    cfg.trusted_links.retain(|e| e.link != link);
+    cfg.write(&paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn set_cloud_bridge_pairing_token(
     token: String,
     state: tauri::State<'_, CloudBridgeState>,
@@ -3522,7 +3668,7 @@ mod heal_invalid_sources_tests {
         config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
         let db_path = tmp.path().join("brain.db");
-        let db = AppDb::open_with_config(&db_path, &tmp.path().join("config.json")).unwrap();
+        let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json")).unwrap();
         let db_state = DbState(Mutex::new(db));
         let vault_state = VaultConfigState(Mutex::new(config));
 
@@ -3920,7 +4066,7 @@ mod maintenance_command_tests {
         // touched). The heal function takes &DbState directly so we seed
         // against the AppDb's connection rather than an in-memory one.
         let db_path = tmp.path().join("test.db");
-        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+        let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
             .expect("open test db");
         let manual = r#"{"proposal_id":null,"evidence":[]}"#;
         // Three rows: one librarian_inferred (must be touched), one
@@ -4029,7 +4175,7 @@ mod maintenance_command_tests {
 
         // (b) heal_invalid_sources
         let db_path = tmp.path().join("e4.db");
-        let db = crate::db::AppDb::open_with_config(&db_path, &tmp.path().join("e4-config.json"))
+        let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("e4-config.json"))
             .expect("open test db");
         db.0.execute(
             "INSERT INTO llm_wiki_entries
@@ -4175,7 +4321,7 @@ mod ingest_document_command_tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("brain.db");
-        let db = db::AppDb::open_with_config(&db_path, &tmp.path().join("config.json"))
+        let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
             .expect("open test db");
         let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
@@ -4244,7 +4390,7 @@ mod ingest_document_command_tests {
         let events = captured.lock().unwrap();
         let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
-            names.iter().any(|n| *n == "ingest-progress"),
+            names.contains(&"ingest-progress"),
             "expected at least one ingest-progress event, got: {events:?}",
         );
         assert!(
@@ -4260,7 +4406,7 @@ mod ingest_document_command_tests {
             "expected ingest-progress with phase=embedding, got: {events:?}",
         );
         assert!(
-            names.iter().any(|n| *n == "ingest-proposal-ready"),
+            names.contains(&"ingest-proposal-ready"),
             "expected at least one ingest-proposal-ready event, got: {events:?}",
         );
         // The test document doesn't produce a pending proposal (synthesis is

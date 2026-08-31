@@ -1,4 +1,5 @@
 import { WizardStep } from "./WizardStep";
+import { OntologyChoice } from "./OntologyChoice";
 
 interface Props { onNext: () => void; vaultPath?: string | null }
 
@@ -10,6 +11,7 @@ export function StepWelcome({ onNext, vaultPath }: Props) {
       onNext={onNext}
     >
       {vaultPath ? <p>{vaultPath}</p> : <p>Your vault path will appear here once selected.</p>}
+      <OntologyChoice />
     </WizardStep>
   );
 }

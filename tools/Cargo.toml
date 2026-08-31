@@ -23,6 +23,10 @@ clap = { version = "4", features = ["derive"] }
 # notification backend and a single SHA-2 implementation.
 notify = "6"
 sha2 = "0.11"
+# Home-dir resolution for the trusted-links ledger. Matches the version
+# pinned in src-tauri/Cargo.toml so behavior is identical between the
+# app and the headless CLI.
+dirs = "6"
 
 [dev-dependencies]
 tempfile = "3"

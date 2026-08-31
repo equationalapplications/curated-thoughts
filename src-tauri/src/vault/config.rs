@@ -1,5 +1,4 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,44 +22,6 @@ impl From<std::io::Error> for MigrationError {
     }
 }
 
-#[derive(Deserialize, Serialize, Default)]
-struct ConfigFile {
-    vault_path: Option<String>,
-    #[serde(default)]
-    embed_profile: Option<EmbedProfile>,
-    #[serde(default)]
-    migrated_to_v2: bool,
-}
-
-impl ConfigFile {
-    /// Lenient read: a config file whose `embed_profile` field uses an
-    /// unrecognized variant (e.g. `external` written by an older schema) must
-    /// not poison the whole file — that silently reset the vault path and
-    /// forced users back through onboarding. Leniency applies ONLY to
-    /// `embed_profile`: it is dropped (falling back to the default profile)
-    /// when it fails to parse. Malformed JSON or an invalid `vault_path` is a
-    /// real error and propagates.
-    fn from_text(text: &str) -> Result<Self> {
-        match serde_json::from_str::<ConfigFile>(text) {
-            Ok(cfg) => Ok(cfg),
-            Err(first_err) => {
-                // Retry with embed_profile removed; only tolerate failure that
-                // is attributable to embed_profile itself.
-                let mut value: serde_json::Value = serde_json::from_str(text)?;
-                if let Some(obj) = value.as_object_mut() {
-                    obj.remove("embed_profile");
-                }
-                let cfg: ConfigFile = serde_json::from_value(value)?;
-                if cfg.vault_path.is_none() && text.contains("\"vault_path\"") {
-                    // vault_path was present but unparseable — do not mask it.
-                    return Err(anyhow::anyhow!(first_err));
-                }
-                Ok(cfg)
-            }
-        }
-    }
-}
-
 pub struct VaultConfig {
     config_path: PathBuf,
 }
@@ -72,7 +33,7 @@ impl VaultConfig {
 
     pub fn default_vault_path() -> PathBuf {
         dirs::home_dir()
-            .unwrap_or_else(|| std::env::temp_dir())
+            .unwrap_or_else(std::env::temp_dir)
             .join("Curated-Thoughts")
     }
 

@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use tauri_app_lib::embedder::EmbedProfile;
 use tauri_app_lib::inference::config::GenerationConfig;
 use tauri_app_lib::onboard::{create_layout_and_onboard, OnboardConfig};
+use tauri_app_lib::ontology_config::OntologySelection;
 use tempfile::TempDir;
 
 fn make_config(vault: &std::path::Path) -> OnboardConfig {
@@ -18,6 +19,7 @@ fn make_config(vault: &std::path::Path) -> OnboardConfig {
             model: "nomic-embed-code".to_string(),
         },
         generation: GenerationConfig::default(),
+        ontology: OntologySelection::CLI_DEFAULT,
     }
 }
 
@@ -214,4 +216,46 @@ fn onboard_preserves_existing_config_unknown_keys() {
         "preserve_me",
         "unknown top-level key preserved"
     );
+}
+
+#[test]
+fn onboard_defaults_to_software_org_selection() {
+    use tauri_app_lib::ontology_config::OntologySelection;
+
+    let temp = TempDir::new().unwrap();
+    let vault = temp.path().join("test-vault");
+
+    with_temp_brain_dir(&temp, || {
+        create_layout_and_onboard(make_config(&vault)).expect("onboard succeeds");
+
+        let text = fs::read_to_string(temp.path().join("config.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["ontology"]["schema"], "schema-software-org",
+            "CLI onboarding must default to the software-org schema"
+        );
+        // And it must load back as the typed selection.
+        assert_eq!(
+            serde_json::from_value::<OntologySelection>(v["ontology"]["schema"].clone()).unwrap(),
+            OntologySelection::SchemaSoftwareOrg
+        );
+    });
+}
+
+#[test]
+fn onboard_honors_an_explicit_selection() {
+    use tauri_app_lib::ontology_config::OntologySelection;
+
+    let temp = TempDir::new().unwrap();
+    let vault = temp.path().join("test-vault");
+
+    with_temp_brain_dir(&temp, || {
+        let mut cfg = make_config(&vault);
+        cfg.ontology = OntologySelection::Off;
+        create_layout_and_onboard(cfg).expect("onboard succeeds");
+
+        let text = fs::read_to_string(temp.path().join("config.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["ontology"]["schema"], "off");
+    });
 }

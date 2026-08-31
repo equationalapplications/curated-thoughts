@@ -3,6 +3,43 @@ use clap::{Parser, Subcommand};
 use curated_thoughts_tools::cli_common::{self, print_json};
 use serde_json::json;
 
+/// Substitute the user's home directory with `~` so absolute paths that
+/// include it (e.g. `/Users/me/.ssh`) do not get logged verbatim when stdout
+/// is captured (CI logs, system journals). Component-aware so it accepts
+/// native Windows path separators (`\` on Windows, `/` on Unix) without a
+/// platform branch in this crate. No-op outside the home directory.
+fn redact_home(target: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return target.to_string();
+    };
+    // Component-wise comparison: walk the home prefix and require every
+    // component to match in order. `Path::components` handles both `/` and
+    // `\` separators, so this works on Windows and Unix without a #cfg.
+    let home_components: Vec<_> = home.components().collect();
+    let target_path = std::path::Path::new(target);
+    let target_components: Vec<_> = target_path.components().collect();
+    if target_components.len() < home_components.len()
+        || target_components[..home_components.len()] != home_components[..]
+    {
+        return target.to_string();
+    }
+    // Re-join the tail using the target's OS path semantics so the
+    // displayed separator matches what the caller gave us (no slash
+    // normalization mid-output).
+    let mut tail = std::path::PathBuf::new();
+    for comp in target_path.components().skip(home_components.len()) {
+        tail.push(comp.as_os_str());
+    }
+    if tail.as_os_str().is_empty() {
+        "~".to_string()
+    } else {
+        // Prefix with the platform's preferred separator so the rendered
+        // string always parses on the host that produced it.
+        let sep = std::path::MAIN_SEPARATOR;
+        format!("~{sep}{}", tail.display())
+    }
+}
+
 /// `ct` — headless CLI for Curated Thoughts brains.
 #[derive(Parser)]
 struct Ct {
@@ -75,11 +112,27 @@ enum Cmd {
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
+        /// Approve every pending symlink before ingesting. For scripted
+        /// setups only — this bypasses the per-link review, though never the
+        /// non-approvable deny rules.
+        #[arg(long)]
+        trust_new_links: bool,
     },
     /// Librarian operations.
     Librarian {
         #[command(subcommand)]
         cmd: LibrarianCmd,
+    },
+    /// Approve, list, or revoke symlinks the ingest walker may follow.
+    Trust {
+        /// Vault-relative path of the symlink, e.g. `documents/specs`.
+        link: Option<String>,
+        /// Print the current ledger and exit.
+        #[arg(long)]
+        list: bool,
+        /// Remove an approval by link path.
+        #[arg(long)]
+        revoke: Option<String>,
     },
     /// Run the headless vault watcher (foreground daemon).
     Watch {
@@ -226,7 +279,10 @@ fn run(cmd: Cmd) -> Result<i32> {
             yes,
             proposal_id,
         } => approve_cmd(all, yes, proposal_id),
-        Cmd::Ingest { yes } => {
+        Cmd::Ingest {
+            yes,
+            trust_new_links,
+        } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
                 // can still print the refusal with the planned db path.
@@ -237,12 +293,13 @@ fn run(cmd: Cmd) -> Result<i32> {
                 );
                 return Ok(1);
             }
-            cli_common::ingest_run()?;
+            cli_common::ingest_run(trust_new_links)?;
             Ok(0)
         }
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {
             once,
             json,
@@ -476,4 +533,173 @@ fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {
     }
     cli_common::librarian_run("llama3.2:3b", force)?;
     Ok(0)
+}
+
+/// `ct trust` — the CLI half of the trust-on-first-use flow (spec D3a).
+///
+/// - `ct trust <link>`        — classify the link, persist if Pending.
+/// - `ct trust --list`        — print every entry in the ledger.
+/// - `ct trust --revoke <link>` — drop one entry from the ledger.
+///
+/// Denied (non-approvable) targets exit 1 with the rule name; broken or
+/// non-symlink paths exit 1 with a brief diagnostic. Successful approvals
+/// and revokes exit 0.
+fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result<i32> {
+    use tauri_app_lib::config::BrainConfig;
+    use tauri_app_lib::trusted_links::{approve_into, LinkVerdict};
+
+    // Exactly one of `<link>`, `--list`, or `--revoke <link>` must be present.
+    // Otherwise `ct trust --list --revoke documents/specs` would silently
+    // print the ledger and exit 0 without removing anything.
+    let actions = (link.is_some() as u32) + (list as u32) + (revoke.is_some() as u32);
+    if actions != 1 {
+        eprintln!(
+            "error: pass exactly one of <link>, --list, or --revoke <link> \
+             (got {actions} actions)"
+        );
+        return Ok(1);
+    }
+
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    let mut cfg = BrainConfig::load(&paths)?;
+
+    if list {
+        for entry in &cfg.trusted_links {
+            // Substitute `$HOME` with `~` so the ledger listing does not
+            // log a sensitive absolute path (e.g. ~/.ssh) when stdout is
+            // captured into CI logs or system journals.
+            // codeql[rust/cleartext-logging]: `entry.target` is sanitised by
+            // `redact_home` above before reaching stdout — the value printed
+            // either has the `$HOME` prefix collapsed to `~` or is the
+            // original path (no other prefixes are considered sensitive).
+            println!("{} -> {}", entry.link, redact_home(&entry.target));
+        }
+        return Ok(0);
+    }
+
+    if let Some(target_link) = revoke {
+        let before = cfg.trusted_links.len();
+        cfg.trusted_links.retain(|e| e.link != target_link);
+        if cfg.trusted_links.len() == before {
+            eprintln!("error: {target_link} is not in the ledger");
+            return Ok(1);
+        }
+        cfg.write(&paths)?;
+        println!("revoked {target_link}");
+        return Ok(0);
+    }
+
+    let link = match link {
+        Some(l) => l,
+        None => {
+            eprintln!("error: pass a link path, --list, or --revoke <link>");
+            return Ok(1);
+        }
+    };
+
+    let vault_root = match cfg.vault_path.clone() {
+        Some(v) => std::path::PathBuf::from(v),
+        None => bail!("no vault configured; run `curated-thoughts --onboard` first"),
+    };
+    // Canonicalize so classify_link's path comparisons see matching
+    // prefixes (macOS /var → /private/var is the common case).
+    let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
+    let link_path = vault_root.join(&link);
+
+    // CLI-only guards: refuse to claim approval for a missing or non-symlink
+    // path up-front so the user gets a useful diagnostic instead of a
+    // canonicalize error from the helper.
+    let meta = match std::fs::symlink_metadata(&link_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: no such link {link}: {e}");
+            return Ok(1);
+        }
+    };
+    if !meta.file_type().is_symlink() {
+        eprintln!("error: {link} is not a symlink");
+        return Ok(1);
+    }
+
+    match approve_into(
+        &mut cfg.trusted_links,
+        &link,
+        &vault_root,
+        dirs::home_dir().as_deref(),
+    ) {
+        Ok(LinkVerdict::Denied(reason)) => {
+            let target_display = std::fs::canonicalize(&link_path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_else(|_| link_path.display().to_string());
+            eprintln!("refused: {link} -> {target_display} ({})", reason.message());
+            Ok(1)
+        }
+        Ok(LinkVerdict::Trusted) => {
+            println!("{link} is already trusted");
+            Ok(0)
+        }
+        Ok(LinkVerdict::Pending) => {
+            cfg.write(&paths)?;
+            let target_display = std::fs::canonicalize(&link_path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_else(|_| link_path.display().to_string());
+            println!("trusted {link} -> {target_display}");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_home;
+
+    /// Exact match on the home directory itself collapses to `~`.
+    #[test]
+    fn redact_home_collapses_exact_match() {
+        let home = "/Users/example-home";
+        temp_env::with_var("HOME", Some(home), || {
+            assert_eq!(redact_home(home), "~");
+        });
+    }
+
+    /// A path outside the home directory is left verbatim.
+    #[test]
+    fn redact_home_leaves_non_home_paths_untouched() {
+        temp_env::with_var("HOME", Some("/Users/example-home"), || {
+            let outside = "/var/tmp/repo-docs";
+            assert_eq!(redact_home(outside), outside);
+        });
+    }
+
+    /// A child path under home redacts to `~<sep><rest>` using the
+    /// platform's native separator — `Path::components()` is
+    /// separator-aware, so on Windows a target using `\` still matches the
+    /// home prefix and redacts, whereas the previous `str::strip_prefix` +
+    /// `starts_with('/')` implementation only recognized `/` and would
+    /// leave a `\`-separated Windows target printed verbatim (CodeRabbit
+    /// review on PR #124).
+    #[test]
+    fn redact_home_redacts_child_path_using_platform_separator() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let home = format!("{sep}Users{sep}example-home");
+        temp_env::with_var("HOME", Some(home.as_str()), || {
+            let target = format!("{home}{sep}.ssh{sep}id_ed25519");
+            assert_eq!(redact_home(&target), format!("~{sep}.ssh{sep}id_ed25519"));
+        });
+    }
+
+    /// A sibling directory that merely shares the home dir as a string
+    /// prefix (e.g. `/Users/example-home-secrets`) must NOT be redacted —
+    /// component-wise comparison must not treat it as "inside home".
+    #[test]
+    fn redact_home_does_not_match_a_string_prefix_sibling() {
+        temp_env::with_var("HOME", Some("/Users/example-home"), || {
+            let sibling = "/Users/example-home-secrets/file.txt";
+            assert_eq!(redact_home(sibling), sibling);
+        });
+    }
 }

@@ -314,8 +314,10 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_new_creates_table() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let Some(url) = db_url() else {
+        let Some(url) = ({
+            let _guard = ENV_LOCK.lock().unwrap();
+            db_url()
+        }) else {
             eprintln!("Skipping: OUTBOX_TEST_DATABASE_URL and DATABASE_URL not set");
             return;
         };
@@ -329,8 +331,10 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_new_is_idempotent() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let Some(url) = db_url() else {
+        let Some(url) = ({
+            let _guard = ENV_LOCK.lock().unwrap();
+            db_url()
+        }) else {
             return;
         };
         PgSink::new(&url).await.unwrap();
@@ -339,8 +343,10 @@ mod tests {
 
     #[tokio::test]
     async fn pg_sink_insert_event_and_idempotency() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let Some(url) = db_url() else {
+        let Some(url) = ({
+            let _guard = ENV_LOCK.lock().unwrap();
+            db_url()
+        }) else {
             return;
         };
         let sink = PgSink::new(&url).await.unwrap();

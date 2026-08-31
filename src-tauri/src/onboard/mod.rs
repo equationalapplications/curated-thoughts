@@ -6,10 +6,11 @@
 use crate::config::BrainConfig;
 use crate::embedder::{EmbedProfile, ExternalEmbedProfile};
 use crate::inference::config::{GenerationConfig, GenerationProviderKind};
+use crate::ontology_config::OntologySelection;
 use crate::retrieval::resolve_brain_paths;
 use anyhow::{bail, Result};
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct OnboardOptions {
     /// Optional vault path; if absent, reads from stdin.
@@ -25,6 +26,9 @@ pub struct OnboardConfig {
     pub force: bool,
     pub embed_profile: EmbedProfile,
     pub generation: GenerationConfig,
+    /// Which ontology the brain is seeded with. CLI default is
+    /// `OntologySelection::CLI_DEFAULT` (software-org).
+    pub ontology: OntologySelection,
 }
 
 impl Default for OnboardConfig {
@@ -36,6 +40,7 @@ impl Default for OnboardConfig {
                 model: "nomic-embed-code".to_string(),
             },
             generation: GenerationConfig::default(),
+            ontology: OntologySelection::CLI_DEFAULT,
         }
     }
 }
@@ -118,11 +123,26 @@ fn collect_onboard_config(vault_root: PathBuf, force: bool) -> Result<OnboardCon
         _ => GenerationConfig::default(),
     };
 
+    // ── ontology ──────────────────────────────────────────────────────────────
+    println!("Knowledge schema (what kinds of things Tessera tracks):");
+    println!("  1) Software team  — specs, handoffs, services, procedures");
+    println!("  2) General        — people, places, events, works");
+    println!("  3) Let it invent its own");
+    println!("  4) None");
+
+    let ontology = match read_line("Choice [1]: ")?.as_str() {
+        "2" => OntologySelection::SchemaOrg,
+        "3" => OntologySelection::Emergent,
+        "4" => OntologySelection::Off,
+        _ => OntologySelection::SchemaSoftwareOrg,
+    };
+
     Ok(OnboardConfig {
         vault_root,
         force,
         embed_profile,
         generation,
+        ontology,
     })
 }
 
@@ -182,6 +202,7 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
     cfg.vault_path = Some(config.vault_root.to_string_lossy().into_owned());
     cfg.embed_profile = Some(config.embed_profile);
     cfg.generation = config.generation;
+    cfg.ontology.schema = Some(config.ontology);
 
     cfg.write(&paths)
         .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
@@ -261,6 +282,7 @@ mod tests {
                 model: "nomic-embed-code".to_string(),
             },
             generation: GenerationConfig::default(),
+            ontology: OntologySelection::CLI_DEFAULT,
         };
 
         create_layout_and_onboard(cfg).expect("onboard should succeed");

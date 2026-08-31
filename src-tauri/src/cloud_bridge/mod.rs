@@ -236,14 +236,13 @@ pub async fn run_session<T: Transport>(
                                             tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
                                     }
                                     IncomingFrame::Pong if authenticated => {}
-                                    IncomingFrame::Task { .. } if authenticated => {
-                                        if handle_incoming(ctx, &mut transport, frame)
+                                    IncomingFrame::Task { .. } if authenticated
+                                        && handle_incoming(ctx, &mut transport, frame)
                                             .await
                                             .is_err()
-                                        {
+                                        => {
                                             return SessionEnd::Normal;
                                         }
-                                    }
                                     _ => {
                                         // task before ready, or unknown variant — drop
                                     }

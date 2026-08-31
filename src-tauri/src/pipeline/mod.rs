@@ -455,6 +455,27 @@ pub fn ingest_document_with_vault_root(
     ingest_file(conn, profile, path, force_rechunk, vault_root)
 }
 
+/// Ingest a file whose vault identity (`virtual_path`) differs from where its
+/// bytes live (`read_path`) — the symlink case. When they are equal this is
+/// exactly `ingest_document_with_vault_root`.
+pub fn ingest_document_virtual(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    virtual_path: &str,
+    read_path: &str,
+    force_rechunk: bool,
+    vault_root: Option<&str>,
+) -> Result<()> {
+    ingest_file_virtual(
+        conn,
+        profile,
+        virtual_path,
+        read_path,
+        force_rechunk,
+        vault_root,
+    )
+}
+
 fn normalize_workspace_root(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");
     if normalized != "/" {
@@ -504,6 +525,40 @@ pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
     }
 }
 
+/// Tier routing for a **virtual** path — one that preserves a vault-relative
+/// symlink prefix and may not exist on disk. Unlike `entity_id_for_path` this
+/// never canonicalizes: canonicalizing would resolve the symlink back to its
+/// target and lose the prefix that defines the file's vault identity.
+pub fn entity_id_for_virtual_path(virtual_path: &str, vault_root: Option<&str>) -> String {
+    let normalized = normalize_workspace_root(virtual_path);
+
+    if let Some(root) = vault_root {
+        // The vault root is a real directory, so canonicalizing it is safe and
+        // makes the prefix comparison robust to symlinked home dirs.
+        let root_prefix = std::path::Path::new(root)
+            .canonicalize()
+            .map(|p| normalize_workspace_root(&p.to_string_lossy()))
+            .unwrap_or_else(|_| normalize_workspace_root(root));
+        let rel = normalized
+            .strip_prefix(&format!("{}/", root_prefix))
+            .unwrap_or(&normalized);
+        let first = rel.split('/').next().unwrap_or("");
+        return match first {
+            "documents" => "tier_fact".to_string(),
+            _ => {
+                let hash = hash_bytes(root_prefix.as_bytes());
+                format!("tier_working::{}", &hash[..16])
+            }
+        };
+    }
+
+    if normalized.contains("/documents/") {
+        "tier_fact".to_string()
+    } else {
+        "tier_working".to_string()
+    }
+}
+
 /// Post-V7: `vault/wiki/` is archive-only; do not index markdown there as documents.
 pub fn is_vault_wiki_ingest_path(path: &str, vault_root: Option<&str>) -> bool {
     let normalized = std::path::Path::new(path)
@@ -532,39 +587,52 @@ fn ingest_file(
     force_rechunk: bool,
     vault_root: Option<&str>,
 ) -> Result<()> {
-    let ext = Path::new(path)
+    ingest_file_virtual(conn, profile, path, path, force_rechunk, vault_root)
+}
+
+fn ingest_file_virtual(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    virtual_path: &str,
+    read_path: &str,
+    force_rechunk: bool,
+    vault_root: Option<&str>,
+) -> Result<()> {
+    let ext = Path::new(virtual_path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
     if !should_ingest_extension(ext) {
         return Ok(());
     }
-    if is_vault_wiki_ingest_path(path, vault_root) {
+    if is_vault_wiki_ingest_path(virtual_path, vault_root) {
         return Ok(());
     }
 
-    let raw_bytes = std::fs::read(path)?;
+    // Bytes come from the real file...
+    let raw_bytes = std::fs::read(read_path)?;
     let hash = hash_bytes(&raw_bytes);
 
-    if let Some(doc) = get_document_by_path(conn, path)? {
+    // ...but identity is the virtual path.
+    if let Some(doc) = get_document_by_path(conn, virtual_path)? {
         if !force_rechunk && doc.hash == hash && doc.status == "indexed" {
             return Ok(());
         }
         delete_document_chunks(conn, doc.id)?;
     }
 
-    let text = match extract_text(path)? {
+    let text = match extract_text(read_path)? {
         Some(t) => t,
         None => String::from_utf8_lossy(&raw_bytes).into_owned(),
     };
 
-    let doc_id = upsert_document(conn, path, &hash)?;
-    let eid = entity_id_for_path(path, vault_root);
+    let doc_id = upsert_document(conn, virtual_path, &hash)?;
+    let eid = entity_id_for_virtual_path(virtual_path, vault_root);
 
-    let mut chunks = chunk_autodetect(Path::new(path), &text);
+    let mut chunks = chunk_autodetect(Path::new(virtual_path), &text);
 
     // Pass 2: extract reference/call-site chunks for supported code files
-    let strategy = crate::chunker::classify(Path::new(path));
+    let strategy = crate::chunker::classify(Path::new(virtual_path));
     if let ChunkStrategy::AstSymbol(ast_lang) = strategy {
         let ref_lang = match ast_lang {
             AstLang::Rust => RefLang::Rust,
@@ -589,7 +657,7 @@ fn ingest_file(
     })?;
 
     for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-        let content_hash = crate::db::chunk_hash::compute_chunk_hash(&chunk.text, path, i);
+        let content_hash = crate::db::chunk_hash::compute_chunk_hash(&chunk.text, virtual_path, i);
         let chunk_id = insert_chunk(conn, doc_id, chunk, i, &eid, &content_hash)?;
         insert_embedding(conn, chunk_id, vector)?;
     }

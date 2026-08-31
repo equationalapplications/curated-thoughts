@@ -608,6 +608,35 @@ export const acknowledgeMigrationDisclosure = (): Promise<void> =>
 export const acknowledgeEphemeralDisclosure = (): Promise<void> =>
   invoke('acknowledge_ephemeral_disclosure');
 
+export type OntologySelection =
+  | 'schema-org'
+  | 'schema-software-org'
+  | 'emergent'
+  | 'off';
+
+export const getOntologySelection = (): Promise<OntologySelection> =>
+  invoke('get_ontology_selection');
+
+export const setOntologySelection = (selection: OntologySelection): Promise<void> =>
+  invoke('set_ontology_selection', { selection });
+
+/** A symlink under documents/ that resolves outside the vault and is not yet
+ * approved by the trusted-links ledger. The Desktop review surface renders
+ * one card per pending link so the user can approve or revoke in place. */
+export interface PendingLink {
+  link: string;
+  target: string;
+}
+
+export const listPendingLinks = (): Promise<PendingLink[]> =>
+  invoke('list_pending_links');
+
+export const approveLink = (link: string): Promise<void> =>
+  invoke('approve_link', { link });
+
+export const revokeLink = (link: string): Promise<void> =>
+  invoke('revoke_link', { link });
+
 export interface OkfExportSummary {
   path: string;
   entities: number;

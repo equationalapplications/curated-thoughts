@@ -43,6 +43,7 @@ impl VaultLock {
         // both `try_lock_exclusive` and the held handle are valid.
         let file = fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .read(true)
             .open(&lock_path)

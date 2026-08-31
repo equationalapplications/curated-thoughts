@@ -34,16 +34,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
-use walkdir::WalkDir;
 
-use tauri_app_lib::chunker::should_ingest_extension;
 use tauri_app_lib::db::commit::{resolve_proposal, ResolveOptions};
 use tauri_app_lib::db::connection::AppDb;
 use tauri_app_lib::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
 use tauri_app_lib::vault::VaultConfig;
-use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
+// Re-export walker types so `curated_thoughts_tools::cmds::WalkedFile` (and
+// friends) remain reachable from external callers and tests.
+pub use tauri_app_lib::walk_vault::{
+    collect_files, walk_vault, DeniedLink, PendingLink, WalkOutcome, WalkedFile, MAX_VIRTUAL_DEPTH,
+};
+use tauri_app_lib::{entity_id_for_virtual_path, ingest_document_virtual};
 
 /// Default `once` mode watchdog: exit after this many seconds even if no
 /// SIGINT arrives. The plan suggested 60s; using a named constant (per the
@@ -58,139 +61,41 @@ const WATCH_SIGNAL_POLL: Duration = Duration::from_millis(200);
 // Ingest
 // ---------------------------------------------------------------------------
 
-/// Directory names never ingested (build artifacts, deps, VCS internals).
-const EXCLUDED_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    "dist",
-    "dist-newstyle",
-    ".git",
-    ".github",
-    ".next",
-    ".turbo",
-    ".cache",
-    "coverage",
-    "build",
-    "out",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".idea",
-    ".vscode",
-    ".fastembed_cache",
-];
+// Walker types and the `collect_files` / `walk_vault` entry points live in
+// `tauri_app_lib::walk_vault` so the app crate's Tauri commands can call
+// them directly without depending on `curated_thoughts_tools`. The imports
+// at the top of this file re-export those symbols through `curated_thoughts_tools::cmds`.
 
-fn is_excluded_dir(dir_name: &str) -> bool {
-    EXCLUDED_DIRS.contains(&dir_name)
-}
-
-/// File-name patterns never ingested: machine-generated dependency manifests
-/// and generated schemas. The chunker bounds chunk size, so this is not about
-/// file length — these files carry no retrieval value and just burn embedding
-/// API calls (all 20 failures in the Aug 24 full-corpus run were these).
-const EXCLUDED_FILE_NAMES: &[&str] = &[
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "Cargo.lock",
-    "poetry.lock",
-    "uv.lock",
-    "CHANGELOG.md",
-    "CHANGELOG.md.generated", // commitizen-style generated changelogs
-];
-
-/// Path segments (matched anywhere in the relative path) that mark generated
-/// machine output rather than authored knowledge.
-const EXCLUDED_PATH_SEGMENTS: &[&str] = &["drizzle/meta/", "gen/schemas/"];
-
-fn is_excluded_file(path: &Path) -> bool {
-    if let Some(name) = path.file_name() {
-        let name = name.to_string_lossy();
-        if EXCLUDED_FILE_NAMES.contains(&name.as_ref()) {
-            return true;
-        }
-    }
-    let p = path.to_string_lossy();
-    EXCLUDED_PATH_SEGMENTS.iter().any(|seg| p.contains(seg))
-}
-
-/// Collect files from a directory tree. `follow_symlinked_doc_dirs` enables
-/// following symlinked directories whose parent is exactly
-/// `<vault_root>/documents` (the staging contract); nested symlinks and
-/// symlinks to files are never followed. Traversal errors are returned so an
-/// unreadable path can't silently shrink the corpus.
-fn collect_files(
-    root: &Path,
-    follow_symlinked_doc_dirs: bool,
-    out: &mut Vec<PathBuf>,
-    errors: &mut Vec<String>,
+/// Merge `newly_trusted` into `ledger`, replacing (not appending to) any
+/// existing entry for the same `link`. A repointed symlink that was
+/// previously approved would otherwise leave a stale row with the old
+/// `target` sitting alongside the fresh one — same `link`, two rows — which
+/// splits `classify_link`'s exact-pair matching across both and can trigger
+/// an `AncestorOfTrusted` denial sourced from the stale target. Mirrors
+/// `approve_into`'s `retain`-then-push pattern (`src-tauri/src/trusted_links.rs`)
+/// so the CLI's scripted-trust path and the interactive approval path agree.
+pub(crate) fn replace_trusted_links(
+    ledger: &mut Vec<tauri_app_lib::trusted_links::TrustedLink>,
+    newly_trusted: Vec<tauri_app_lib::trusted_links::TrustedLink>,
 ) {
-    let walker = WalkDir::new(root).follow_links(false);
-    let it = walker.into_iter().filter_entry(|e| {
-        // Skip excluded dirs by name at any depth.
-        if e.file_type().is_dir() {
-            if let Some(name) = e.path().file_name() {
-                return !is_excluded_dir(&name.to_string_lossy());
-            }
-        }
-        true
-    });
-    for entry in it {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("traversal: {e}"));
-                continue;
-            }
-        };
-        let p = entry.path();
-        if entry.file_type().is_file() && is_excluded_file(p) {
-            continue;
-        }
-        let ft = entry.file_type();
-        if ft.is_file()
-            && p.extension()
-                .map(|e| should_ingest_extension(&e.to_string_lossy()))
-                .unwrap_or(false)
-        {
-            out.push(p.to_path_buf());
-        } else if follow_symlinked_doc_dirs && ft.is_symlink() {
-            // Only follow symlinks that are DIRECT children of
-            // <root>/documents, whose names aren't excluded, and whose target
-            // is a directory. Never follow file symlinks or nested ones.
-            let parent_is_documents = p
-                .parent()
-                .map(|par| par.file_name().map(|n| n == "documents").unwrap_or(false))
-                .unwrap_or(false)
-                && entry.depth() == 1;
-            let name_excluded = p
-                .file_name()
-                .map(|n| is_excluded_dir(&n.to_string_lossy()))
-                .unwrap_or(false);
-            if !parent_is_documents || name_excluded {
-                continue;
-            }
-            match std::fs::canonicalize(p) {
-                Ok(target) if target.is_dir() => {
-                    // Recurse into the resolved target with symlink-following
-                    // OFF, so nested symlinks inside are never descended into.
-                    collect_files(&target, false, out, errors)
-                }
-                Ok(_) => eprintln!(
-                    "warn: symlink {} does not point at a directory, skipping",
-                    p.display()
-                ),
-                Err(e) => eprintln!("warn: broken symlink {}, skipping: {e}", p.display()),
-            }
-        }
-    }
+    let replace_links: std::collections::HashSet<&str> =
+        newly_trusted.iter().map(|e| e.link.as_str()).collect();
+    ledger.retain(|e| !replace_links.contains(e.link.as_str()));
+    ledger.extend(newly_trusted);
 }
 
 /// Full ingest_vault_once flow: resolve brain paths + embed profile, open the
-/// brain DB, walk the vault honoring the exclusion rules, ingest every
-/// ingestible file, then run the linker over each touched entity. Extracted
-/// from `ingest_vault_once.rs`; behavior identical to the original bin main.
-pub fn ingest_run() -> Result<()> {
+/// brain DB, walk the vault honoring the exclusion rules AND the trusted-links
+/// ledger, ingest every ingestible file, then run the linker over each touched
+/// entity. Extracted from `ingest_vault_once.rs`; behavior identical to the
+/// original bin main plus the ledger gate.
+///
+/// When `trust_new_links` is set, every `Pending` link from the first pass
+/// is auto-approved through `classify_link` (so non-approvable denials still
+/// refuse), persisted to config, and then a second `walk_vault` runs to
+/// collect their content. This is the scripted-setup escape hatch for the
+/// trust-on-first-use flow — never bypasses Denied rules.
+pub fn ingest_run(trust_new_links: bool) -> Result<()> {
     let paths_b = retrieval::resolve_brain_paths();
     let profile =
         retrieval::load_embed_profile(&paths_b.config_path).context("read embed profile")?;
@@ -205,18 +110,79 @@ pub fn ingest_run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
     let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
 
-    let mut files = Vec::new();
-    let mut walk_errors = Vec::new();
-    collect_files(&vault_root, true, &mut files, &mut walk_errors);
-    files.sort();
-    files.dedup();
+    // Load the ledger (Task 10) so walk_vault gates every direct-child
+    // documents/ symlink through classify_link.
+    let mut brain_cfg = tauri_app_lib::config::BrainConfig::load(&paths_b)
+        .context("read trusted_links ledger from config.json")?;
+    let mut outcome = walk_vault(
+        &vault_root,
+        &brain_cfg.trusted_links,
+        dirs::home_dir().as_deref(),
+    );
 
-    // Traversal errors count as failures so an unreadable path can't make a
-    // partial run look complete.
-    let mut failed = walk_errors.len();
-    for e in &walk_errors {
+    // Scripted setups: promote every Pending link that survives
+    // classify_link (Denied stays Denied — that's the security boundary) and
+    // re-walk before ingesting. Persist first so a mid-run crash doesn't
+    // leave the walker half-collected with no ledger entry.
+    if trust_new_links && !outcome.pending.is_empty() {
+        use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
+        let mut newly_trusted: Vec<TrustedLink> = Vec::new();
+        for p in &outcome.pending {
+            match classify_link(
+                &p.link,
+                Path::new(&p.target),
+                &vault_root,
+                dirs::home_dir().as_deref(),
+                &brain_cfg.trusted_links,
+            ) {
+                LinkVerdict::Pending => newly_trusted.push(TrustedLink {
+                    link: p.link.clone(),
+                    target: p.target.clone(),
+                    approved_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                }),
+                LinkVerdict::Denied(_) => {}
+                LinkVerdict::Trusted => {}
+            }
+        }
+        if !newly_trusted.is_empty() {
+            replace_trusted_links(&mut brain_cfg.trusted_links, newly_trusted);
+            brain_cfg
+                .write(&paths_b)
+                .context("persist newly-trusted links")?;
+            outcome = walk_vault(
+                &vault_root,
+                &brain_cfg.trusted_links,
+                dirs::home_dir().as_deref(),
+            );
+        }
+    }
+
+    // Surface pending + denied so a headless run exits with the right
+    // remediation hint (spec Risks).
+    for d in &outcome.denied {
+        eprintln!(
+            "refused: {} -> {} ({}). This cannot be approved.",
+            d.link, d.target, d.reason
+        );
+    }
+    for p in &outcome.pending {
+        eprintln!(
+            "pending: {} -> {} is not approved; its content was skipped.\n  approve with: ct trust {}",
+            p.link, p.target, p.link
+        );
+    }
+    for e in &outcome.errors {
         eprintln!("warn: {e}");
     }
+
+    let mut files = outcome.files;
+    files.sort_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
+    files.dedup_by(|a, b| a.virtual_path == b.virtual_path);
+
+    let mut failed = outcome.errors.len() + outcome.pending.len() + outcome.denied.len();
     println!(
         "ingesting {} file(s) from {}",
         files.len(),
@@ -226,23 +192,55 @@ pub fn ingest_run() -> Result<()> {
     let vault_root_str = vault_root.to_str().unwrap();
     let mut entity_ids = HashSet::new();
     for (i, f) in files.iter().enumerate() {
-        match ingest_document_with_vault_root(
+        // File names come from the user's vault and can be non-UTF-8 on
+        // Linux/macOS. Skip with a recorded failure rather than panicking
+        // on `to_str().unwrap()` — one odd file must not abort the whole
+        // ingest run.
+        let (virtual_str, read_str) = match (f.virtual_path.to_str(), f.read_path.to_str()) {
+            (Some(v), Some(r)) => (v, r),
+            _ => {
+                failed += 1;
+                eprintln!(
+                    "[{}/{}] FAILED {}: path is not valid UTF-8",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display()
+                );
+                continue;
+            }
+        };
+        match ingest_document_virtual(
             conn,
             &profile,
-            f.to_str().unwrap(),
+            virtual_str,
+            read_str,
             true,
             Some(vault_root_str),
         ) {
             Ok(_) => {
-                entity_ids.insert(entity_id_for_path(
-                    f.to_str().unwrap(),
+                // Linker routes by entity; the document is stored under
+                // virtual_path, so derive the entity from that — not from
+                // the canonical-target read_path that never reaches the DB.
+                entity_ids.insert(entity_id_for_virtual_path(
+                    virtual_str,
                     Some(vault_root_str),
                 ));
-                println!("[{}/{}] ok: {}", i + 1, files.len(), f.display());
+                println!(
+                    "[{}/{}] ok: {}",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display()
+                );
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("[{}/{}] FAILED {}: {}", i + 1, files.len(), f.display(), e);
+                eprintln!(
+                    "[{}/{}] FAILED {}: {}",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display(),
+                    e
+                );
                 let mut src = e.source();
                 while let Some(s) = src {
                     eprintln!("    caused by: {s}");
@@ -257,12 +255,25 @@ pub fn ingest_run() -> Result<()> {
             eprintln!("[linker] {}: {}", entity_id, e);
         }
     }
-    println!(
+    let summary = format!(
         "done: {} docs, {} entities, {} failed",
         files.len(),
         entity_ids.len(),
         failed
     );
+    if failed > 0 {
+        // Spec Risks: headless `ct ingest` runs must surface remediation so
+        // the operator does not see a clean exit code while files were
+        // skipped (pending or denied links) or errors occurred. Print the
+        // summary to stderr before bailing so CI / systemd / cron see both
+        // the diagnostic line and a non-zero exit code.
+        eprintln!("{summary}");
+        for p in &outcome.pending {
+            eprintln!("  approve with: ct trust {}", p.link);
+        }
+        bail!("ingest completed with {failed} failure(s)");
+    }
+    println!("{summary}");
     Ok(())
 }
 
@@ -755,8 +766,7 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
     // `run(opts)` below.
     let json_mode = opts.json_mode;
     let brain = crate::paths::resolve_brain_paths();
-    let vault_root = std::env::var("CURATED_VAULT_ROOT")
-        .unwrap_or_else(|_| "<unset>".to_string());
+    let vault_root = std::env::var("CURATED_VAULT_ROOT").unwrap_or_else(|_| "<unset>".to_string());
     let pid = std::process::id();
 
     let summary = format!(
@@ -783,10 +793,7 @@ pub fn watch_run(opts: WatchOpts) -> Result<i32> {
         // For unclassified errors the "path" carries the same
         // brain/vault/pid summary; consumers match the error+shutdown
         // pair to identify the run.
-        println!(
-            "{}",
-            format_event("shutdown", &summary, now_ms())
-        );
+        println!("{}", format_event("shutdown", &summary, now_ms()));
     }
 
     match final_err {
@@ -802,10 +809,11 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
     use crate::lock::VaultLock;
 
     let brain = crate::paths::resolve_brain_paths();
-    let vault_root = std::env::var("CURATED_VAULT_ROOT")
-        .map_err(|e| WatchError::Other(anyhow::Error::new(e).context(
-            "CURATED_VAULT_ROOT must be set (or pass --vault)",
-        )))?;
+    let vault_root = std::env::var("CURATED_VAULT_ROOT").map_err(|e| {
+        WatchError::Other(
+            anyhow::Error::new(e).context("CURATED_VAULT_ROOT must be set (or pass --vault)"),
+        )
+    })?;
 
     let vault_path = PathBuf::from(&vault_root);
     if !vault_path.exists() {
@@ -833,14 +841,17 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
     // freshly opened connection so corruption in the file header (SQLite
     // accepts an open-with-create against garbage bytes without complaint;
     // it only surfaces the error when you try to read) is caught here.
-    let brain_for_cb = crate::write::Brain { paths: brain.clone() };
+    let brain_for_cb = crate::write::Brain {
+        paths: brain.clone(),
+    };
     {
         let probe = crate::write::open_rw(&brain_for_cb)
             .map_err(|e| WatchError::Db(e.context("open brain.db for watcher startup")))?;
-        probe
-            .execute_batch("SELECT 1;")
-            .map_err(|e| WatchError::Db(anyhow::Error::new(e)
-                .context("brain.db schema probe failed at watcher startup")))?;
+        probe.execute_batch("SELECT 1;").map_err(|e| {
+            WatchError::Db(
+                anyhow::Error::new(e).context("brain.db schema probe failed at watcher startup"),
+            )
+        })?;
     }
 
     let lock = match VaultLock::acquire(&brain.brain_dir) {
@@ -916,7 +927,7 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
                 crate::watcher::VaultEvent::Modified(_) => "modified",
                 crate::watcher::VaultEvent::Deleted(_) => "removed",
             };
-            println!("{}", format_event(kind, &path, now_ms()));
+            println!("{}", format_event(kind, path, now_ms()));
         } else {
             eprintln!(
                 "[watch] {} {}",
@@ -996,8 +1007,7 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
     // Fatal flag: written from the signal thread on startup failure, read
     // from the main thread's poll loop. `None` means "still starting or
     // SIGINT not yet fired"; `Some(msg)` means "fatal — surface to user".
-    let fatal: Arc<std::sync::Mutex<Option<String>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let fatal: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let fatal_signal = fatal.clone();
     std::thread::Builder::new()
         .name("ct-watch-sigint".into())
@@ -1011,16 +1021,14 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    *fatal_signal.lock().unwrap() = Some(format!(
-                        "failed to start signal runtime: {e}"
-                    ));
+                    *fatal_signal.lock().unwrap() =
+                        Some(format!("failed to start signal runtime: {e}"));
                     return;
                 }
             };
             rt.block_on(async {
                 if let Err(e) = tokio::signal::ctrl_c().await {
-                    *fatal_signal.lock().unwrap() =
-                        Some(format!("ctrl_c failed: {e}"));
+                    *fatal_signal.lock().unwrap() = Some(format!("ctrl_c failed: {e}"));
                     return;
                 }
                 term_signal.store(true, Ordering::SeqCst);
@@ -1045,10 +1053,76 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
 // Tests
 // ---------------------------------------------------------------------------
 
+// TempDir is referenced in tests; we use the `tempfile` crate already in
+// dev-dependencies. Imported here so the use-statement doesn't have to live
+// in every test fn.
+#[cfg(test)]
+use tempfile::TempDir;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tauri_app_lib::db::queries::upsert_document;
+
+    // ---- replace_trusted_links (repointed-symlink dedup) ----
+
+    fn trusted_link(
+        link: &str,
+        target: &str,
+        approved_at: i64,
+    ) -> tauri_app_lib::trusted_links::TrustedLink {
+        tauri_app_lib::trusted_links::TrustedLink {
+            link: link.to_string(),
+            target: target.to_string(),
+            approved_at,
+        }
+    }
+
+    #[test]
+    fn replace_trusted_links_drops_stale_entry_for_a_repointed_link() {
+        let mut ledger = vec![trusted_link("documents/specs", "/old/target", 1)];
+        replace_trusted_links(
+            &mut ledger,
+            vec![trusted_link("documents/specs", "/new/target", 2)],
+        );
+
+        assert_eq!(
+            ledger.len(),
+            1,
+            "repointed link must not leave a duplicate row"
+        );
+        assert_eq!(ledger[0].target, "/new/target");
+        assert_eq!(ledger[0].approved_at, 2);
+    }
+
+    #[test]
+    fn replace_trusted_links_appends_a_link_not_already_in_the_ledger() {
+        let mut ledger = vec![trusted_link("documents/specs", "/a", 1)];
+        replace_trusted_links(&mut ledger, vec![trusted_link("documents/other", "/b", 2)]);
+
+        assert_eq!(ledger.len(), 2);
+        assert!(ledger
+            .iter()
+            .any(|e| e.link == "documents/specs" && e.target == "/a"));
+        assert!(ledger
+            .iter()
+            .any(|e| e.link == "documents/other" && e.target == "/b"));
+    }
+
+    #[test]
+    fn replace_trusted_links_leaves_unrelated_entries_untouched() {
+        let mut ledger = vec![
+            trusted_link("documents/a", "/a", 1),
+            trusted_link("documents/b", "/b", 2),
+        ];
+        replace_trusted_links(&mut ledger, vec![trusted_link("documents/a", "/a-new", 3)]);
+
+        assert_eq!(ledger.len(), 2);
+        let a = ledger.iter().find(|e| e.link == "documents/a").unwrap();
+        assert_eq!(a.target, "/a-new");
+        let b = ledger.iter().find(|e| e.link == "documents/b").unwrap();
+        assert_eq!(b.target, "/b");
+    }
 
     // ---- librarian observability tests (moved verbatim from cli_common) -
 
@@ -1306,13 +1380,13 @@ mod tests {
         let mut conn = open_seeded_conn();
 
         // Indexed docs with current synth_hash == hash + same model → clean.
-        seed_doc(&mut conn, "/v/a.md", "h-a", "indexed");
+        seed_doc(&conn, "/v/a.md", "h-a", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-a', synth_model = 'm' WHERE path = '/v/a.md'",
             [],
         )
         .unwrap();
-        seed_doc(&mut conn, "/v/b.md", "h-b", "indexed");
+        seed_doc(&conn, "/v/b.md", "h-b", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-b', synth_model = 'm' WHERE path = '/v/b.md'",
             [],
@@ -1320,7 +1394,7 @@ mod tests {
         .unwrap();
 
         // Indexed doc whose hash has changed since synth → dirty.
-        seed_doc(&mut conn, "/v/c.md", "h-c-new", "indexed");
+        seed_doc(&conn, "/v/c.md", "h-c-new", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-c-old', synth_model = 'm' WHERE path = '/v/c.md'",
             [],
@@ -1328,10 +1402,10 @@ mod tests {
         .unwrap();
 
         // Indexed doc with no synth record at all → dirty.
-        seed_doc(&mut conn, "/v/d.md", "h-d", "indexed");
+        seed_doc(&conn, "/v/d.md", "h-d", "indexed");
 
         // Indexed doc indexed by a different model → dirty.
-        seed_doc(&mut conn, "/v/e.md", "h-e", "indexed");
+        seed_doc(&conn, "/v/e.md", "h-e", "indexed");
         conn.execute(
             "UPDATE documents SET synth_hash = 'h-e', synth_model = 'old-m' WHERE path = '/v/e.md'",
             [],
@@ -1339,7 +1413,7 @@ mod tests {
         .unwrap();
 
         // Non-indexed doc must never be selected.
-        seed_doc(&mut conn, "/v/f.md", "hash-f", "pending");
+        seed_doc(&conn, "/v/f.md", "hash-f", "pending");
 
         assert_eq!(
             dirty_paths(&mut conn, "m"),
@@ -1417,10 +1491,9 @@ mod tests {
             temp_env::with_var("CURATED_BRAIN_DIR", Some(&path_str), || {
                 // Hold the lock for the brain_dir (this is the path
                 // `VaultLock::acquire` in `watch_run` actually uses).
-                let _held = crate::lock::VaultLock::acquire(
-                    &crate::paths::resolve_brain_paths().brain_dir,
-                )
-                .expect("first lock acquire should succeed in test");
+                let _held =
+                    crate::lock::VaultLock::acquire(&crate::paths::resolve_brain_paths().brain_dir)
+                        .expect("first lock acquire should succeed in test");
                 let r = watch_run(watch_run_short_opts());
                 assert!(
                     matches!(r, Ok(2)),
@@ -1451,19 +1524,19 @@ mod tests {
         std::fs::write(&file_path, "x").unwrap();
         let file_str = file_path.to_str().unwrap().to_string();
         temp_env::with_var("CURATED_VAULT_ROOT", Some(&file_str), || {
-            temp_env::with_var("CURATED_BRAIN_DIR", Some(tmp.path().to_str().unwrap()), || {
-                let r = watch_run(watch_run_short_opts());
-                assert!(
-                    matches!(r, Ok(4)),
-                    "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
-                );
-            });
+            temp_env::with_var(
+                "CURATED_BRAIN_DIR",
+                Some(tmp.path().to_str().unwrap()),
+                || {
+                    let r = watch_run(watch_run_short_opts());
+                    assert!(
+                        matches!(r, Ok(4)),
+                        "non-directory vault root must surface as Ok(4) (notify init), got {r:?}"
+                    );
+                },
+            );
         });
     }
 }
 
-// TempDir is referenced in tests; we use the `tempfile` crate already in
-// dev-dependencies. Imported here so the use-statement doesn't have to live
-// in every test fn.
-#[cfg(test)]
-use tempfile::TempDir;
+// (TempDir is imported above the test module to satisfy clippy::items_after_test_module)

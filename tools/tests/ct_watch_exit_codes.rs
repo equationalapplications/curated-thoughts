@@ -35,7 +35,11 @@ fn ct() -> Command {
 /// `temp_env::with_var` here because that scope-wraps closures and we
 /// want `init_brain_db` to run before `ct()` to capture the
 /// desired schema state.
-fn seed_brain_and_run(brain_tmp: &TempDir, vault_root: &str, args: &[&str]) -> std::process::Output {
+fn seed_brain_and_run(
+    brain_tmp: &TempDir,
+    vault_root: &str,
+    args: &[&str],
+) -> std::process::Output {
     let brain_dir = brain_tmp.path().to_str().unwrap().to_string();
     temp_env::with_vars(
         [
@@ -45,8 +49,7 @@ fn seed_brain_and_run(brain_tmp: &TempDir, vault_root: &str, args: &[&str]) -> s
         ],
         || {
             common::init_brain_db(brain_tmp.path());
-            ct()
-                .env("CURATED_BRAIN_DIR", &brain_dir)
+            ct().env("CURATED_BRAIN_DIR", &brain_dir)
                 .env("CURATED_VAULT_ROOT", vault_root)
                 .env_remove("CURATED_BRAIN_DB")
                 .env_remove("CURATED_BRAIN_CONFIG")
@@ -113,8 +116,7 @@ fn ct_watch_brain_db_is_directory_exits_3() {
     // directory" error.
     let parent_tmp = TempDir::new().unwrap();
     let vault_tmp = TempDir::new().unwrap();
-    std::fs::create_dir(parent_tmp.path().join("brain.db"))
-        .expect("create brain.db as directory");
+    std::fs::create_dir(parent_tmp.path().join("brain.db")).expect("create brain.db as directory");
 
     let env_brain_dir = parent_tmp.path().to_str().unwrap().to_string();
     let vault_root = vault_tmp.path().to_str().unwrap().to_string();
@@ -127,8 +129,7 @@ fn ct_watch_brain_db_is_directory_exits_3() {
             ("CURATED_VAULT_ROOT", Some(vault_root.as_str())),
         ],
         || {
-            ct()
-                .env("CURATED_BRAIN_DIR", &env_brain_dir)
+            ct().env("CURATED_BRAIN_DIR", &env_brain_dir)
                 .env("CURATED_VAULT_ROOT", &vault_root)
                 .env_remove("CURATED_BRAIN_DB")
                 .env_remove("CURATED_BRAIN_CONFIG")

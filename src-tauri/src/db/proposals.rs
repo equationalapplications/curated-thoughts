@@ -5,6 +5,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// (id, kind, entity_id, proposed_name, model, created_at) — the columns
+/// surfaced for the Review surface's pending queue.
+type PendingProposalRow = (String, String, Option<String>, Option<String>, String, i64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalKind {
@@ -387,7 +391,7 @@ pub fn list_proposals(conn: &Connection, filter: &ProposalFilter) -> Result<Vec<
          WHERE status = ?1
          ORDER BY created_at ASC",
     )?;
-    let rows: Vec<(String, String, Option<String>, Option<String>, String, i64)> = stmt
+    let rows: Vec<PendingProposalRow> = stmt
         .query_map([status], |r| {
             Ok((
                 r.get(0)?,

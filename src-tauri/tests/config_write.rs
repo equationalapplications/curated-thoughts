@@ -87,7 +87,7 @@ fn write_uses_unique_temp_name() {
     let entries: Vec<_> = fs::read_dir(temp.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "tmp"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "tmp"))
         .collect();
 
     assert!(entries.is_empty(), "no .tmp files left after write");
@@ -172,8 +172,10 @@ fn concurrent_writes_use_different_temp_files() {
                 config_path: (*path).clone(),
                 db_path,
             };
-            let mut config = BrainConfig::default();
-            config.vault_path = Some("vault1".to_string());
+            let config = BrainConfig {
+                vault_path: Some("vault1".to_string()),
+                ..BrainConfig::default()
+            };
             b.wait();
             config.write(&paths).unwrap();
         })
@@ -190,8 +192,10 @@ fn concurrent_writes_use_different_temp_files() {
                 config_path: (*path).clone(),
                 db_path,
             };
-            let mut config = BrainConfig::default();
-            config.vault_path = Some("vault2".to_string());
+            let config = BrainConfig {
+                vault_path: Some("vault2".to_string()),
+                ..BrainConfig::default()
+            };
             b.wait();
             config.write(&paths).unwrap();
         })
@@ -204,7 +208,7 @@ fn concurrent_writes_use_different_temp_files() {
     let entries: Vec<_> = fs::read_dir(temp.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "tmp"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "tmp"))
         .collect();
     assert!(entries.is_empty(), "no .tmp files from concurrent writes");
 }

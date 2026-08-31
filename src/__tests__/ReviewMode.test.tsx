@@ -68,6 +68,11 @@ function defaultInvoke(cmd: string, args?: Record<string, unknown>) {
   if (cmd === "get_indexing_status") {
     return Promise.resolve({ indexed: 0, pending: 0 });
   }
+  if (cmd === "list_pending_links") {
+    // Default: no pending links so the panel renders nothing and the
+    // existing review tests are unaffected.
+    return Promise.resolve([]);
+  }
   if (cmd === "get_proposal_detail_cmd") {
     const proposalId = args?.proposalId as string;
     const summary = [PAGE, OLDER, NEWER].find((p) => p.id === proposalId) ?? PAGE;
@@ -108,6 +113,26 @@ test("empty state shows indexed document count from backend", async () => {
   renderWithTheme(<ReviewMode queue={[]} onAction={vi.fn()} vaultPath={VAULT} />);
   expect(
     await screen.findByText(/librarian is watching 142 documents/i),
+  ).toBeInTheDocument();
+});
+
+test("empty state still surfaces the pending-links panel so users can approve symlinks", async () => {
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "list_pending_links") {
+      return Promise.resolve([
+        { link: "documents/specs", target: "/Users/me/code/foo/docs" },
+      ]);
+    }
+    return defaultInvoke(cmd, args);
+  });
+
+  renderWithTheme(<ReviewMode queue={[]} onAction={vi.fn()} vaultPath={VAULT} />);
+  expect(screen.getByText(/queue clear/i)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/documents\/specs/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /include/i }),
   ).toBeInTheDocument();
 });
 

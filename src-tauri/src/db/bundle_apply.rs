@@ -62,16 +62,12 @@ fn find_http_ci(s: &str) -> Option<usize> {
     if bytes.len() < 4 {
         return None;
     }
-    for i in 0..=bytes.len() - 4 {
-        if bytes[i].eq_ignore_ascii_case(&b'h')
+    (0..=bytes.len() - 4).find(|&i| {
+        bytes[i].eq_ignore_ascii_case(&b'h')
             && bytes[i + 1].eq_ignore_ascii_case(&b't')
             && bytes[i + 2].eq_ignore_ascii_case(&b't')
             && bytes[i + 3].eq_ignore_ascii_case(&b'p')
-        {
-            return Some(i);
-        }
-    }
-    None
+    })
 }
 
 /// Scan a body for a `# Citations` section and collect every URL on subsequent lines.
@@ -701,7 +697,6 @@ mod tests {
                     related_entry_id: Some("fact_1".into()),
                     date: "2026-07-05".into(),
                 }],
-                ..ParsedEntity::default()
             }],
             ..ParsedBundle::default()
         }

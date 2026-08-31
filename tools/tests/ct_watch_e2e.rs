@@ -62,11 +62,7 @@ fn ct_watch_e2e_emits_event_and_flips_db_row_to_pending() {
                 "vault_path": vault_path.to_string_lossy().as_ref()
             })
             .to_string();
-            std::fs::write(
-                brain_path.join("config.json"),
-                config_json,
-            )
-            .unwrap();
+            std::fs::write(brain_path.join("config.json"), config_json).unwrap();
 
             // Step 1: seed brain.db via `ct ingest --yes`.
             let ingest = StdCommand::new(env!("CARGO_BIN_EXE_ct"))

@@ -243,7 +243,7 @@ impl OutboxWorker {
         let mut skip_error: Option<anyhow::Error> = None;
 
         for event in events {
-            if cancel.map_or(false, |c| c.load(Ordering::SeqCst)) {
+            if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
                 break;
             }
             let id = event.id.clone();

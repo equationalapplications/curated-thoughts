@@ -50,7 +50,7 @@ fn parse_meminfo_ram_gb(info: &str) -> Option<u64> {
         .trim()
         .parse()
         .ok()?;
-    (kb > 0).then(|| kb / (1024 * 1024))
+    (kb > 0).then_some(kb / (1024 * 1024))
 }
 
 pub fn recommended_model() -> &'static str {

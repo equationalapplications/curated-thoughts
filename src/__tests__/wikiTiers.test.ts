@@ -42,4 +42,16 @@ describe('entityIdForPath', () => {
   it('does not match documentsfoo/ as documents/', () => {
     expect(entityIdForPath('documentsfoo/bar.md', workspaceId).entityId).toBe(workspaceId);
   });
+
+  // Regression guard: a symlink under documents/ (`documents/linked/...`)
+  // must still route to tier_fact, because the Rust walker preserves the
+  // vault-relative prefix as the virtual_path. If entityIdForPath stopped
+  // matching the documents/ prefix here, every symlinked repo would silently
+  // misroute to the workspace tier.
+  it('routes a symlink-prefixed documents path to tier_fact', () => {
+    expect(entityIdForPath('documents/linked/design.md', workspaceId)).toEqual({
+      entityId: 'tier_fact',
+      sourceType: 'immutable_document',
+    });
+  });
 });

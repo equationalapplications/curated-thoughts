@@ -169,6 +169,11 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "update_entity_summary_cmd") return Promise.resolve();
     if (cmd === "archive_entity_cmd") return Promise.resolve();
     if (cmd === "fetch_chunk_content") return Promise.resolve("Chunk passage text.");
+    if (cmd === "list_pending_links") return Promise.resolve([]);
+    if (cmd === "approve_link") return Promise.resolve();
+    if (cmd === "revoke_link") return Promise.resolve();
+    if (cmd === "get_ontology_selection") return Promise.resolve("schema-org");
+    if (cmd === "set_ontology_selection") return Promise.resolve();
     return Promise.resolve(null);
   }),
 }));

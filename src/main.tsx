@@ -29,11 +29,21 @@ function Root() {
 setupWiki().then(() => {
   ReactDOM.createRoot(document.getElementById("root")!).render(<Root />);
 }).catch((err) => {
-  console.error("[wiki] setup failed, rendering without wiki:", err);
+  // A bad ontology manifest must reach the user — running untyped is
+  // indistinguishable from a deliberate "off" selection, so we render an
+  // error surface instead of falling back to a wiki-less App.
+  console.error("[wiki] setup failed:", err);
+  const detail = err instanceof Error ? err.message : String(err);
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <ThemeProvider>
-        <App />
+        <div className="loading-screen">
+          <p>The knowledge schema could not be loaded.</p>
+          <p style={{ fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{detail}</p>
+          <button type="button" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </div>
       </ThemeProvider>
     </React.StrictMode>
   );

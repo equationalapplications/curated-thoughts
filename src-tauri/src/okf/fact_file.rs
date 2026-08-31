@@ -521,9 +521,7 @@ fn flow_mapping_field(flow: &str, key: &str) -> Option<String> {
             }
             return Some(out);
         }
-        let end = after
-            .find(|c: char| c == ',' || c == '}')
-            .unwrap_or(after.len());
+        let end = after.find([',', '}']).unwrap_or(after.len());
         let value = after[..end].trim();
         if value.is_empty() {
             return None;
@@ -536,7 +534,7 @@ fn flow_mapping_field(flow: &str, key: &str) -> Option<String> {
 fn skip_flow_value(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
     // Skip until the next `,` at depth 0. Quotes don't carry depth here because
     // our flow values are single-level (no nested mappings inside this walker).
-    while let Some((_, c)) = chars.next() {
+    for (_, c) in chars.by_ref() {
         if c == ',' {
             return;
         }

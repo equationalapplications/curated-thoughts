@@ -128,10 +128,16 @@ impl VaultLock {
     /// existing holder (when the platform exposes one).
     pub fn acquire(vault: &Path) -> Result<Self> {
         let lock_path = vault.join(".curated_thoughts.lock");
-        // Create the lock file if missing; we open for read+write so
-        // both `try_lock_exclusive` and the held handle are valid.
+        // Open for read+write with create-if-missing, but DO NOT truncate.
+        // If `lock_path` happens to be a symlink, opening it for write would
+        // follow the link and truncate its target — opening any file in a
+        // location a principal can race into would let starting the watcher
+        // destroy content the application didn't otherwise touch. The OS
+        // lock (try_lock_exclusive) holds without modifying the file's
+        // contents, so truncate is unnecessary.
         let file = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .read(true)
             .open(&lock_path)

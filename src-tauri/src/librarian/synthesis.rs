@@ -146,7 +146,7 @@ impl LlmCompleter for HttpLlmCompleter {
             .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "model": self.model_name,
             "messages": [
                 { "role": "system", "content": system },
@@ -886,7 +886,7 @@ fn parse_and_validate(
 fn call_llm_with_retry(completer: &dyn LlmCompleter, system: &str, user: &str) -> Result<String> {
     let first = completer.complete(system, user)?;
     match parse_json_only(&first) {
-        Ok(_) => return Ok(first),
+        Ok(_) => Ok(first),
         Err(first_err) => {
             let retry_user = format!(
                 "{user}\n\nYour previous response was invalid JSON: {first_err}. \
@@ -927,6 +927,7 @@ fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()>
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_synthesis(
     conn: &mut Connection,
     source_path: &str,
@@ -969,6 +970,7 @@ fn write_synth_watermark(conn: &Connection, doc_id: i64, model: &str) -> Result<
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_synthesis_with_completer(
     conn: &mut Connection,
     source_path: &str,

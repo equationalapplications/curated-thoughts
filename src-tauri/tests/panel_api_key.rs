@@ -1,6 +1,11 @@
 //! Task 16: verify the settings panel never writes a new API key and
 //! preserves any legacy plaintext key already on disk via the
 //! raw-document merge in `inference::config::write_config`.
+//!
+//! These tests deliberately exercise the deprecated `write_config` path so
+//! the legacy-merge behavior stays pinned even after the new
+//! `BrainConfig::write` path is the canonical API.
+#![allow(deprecated)]
 
 use std::sync::Mutex;
 use tauri_app_lib::config::BrainConfig;
