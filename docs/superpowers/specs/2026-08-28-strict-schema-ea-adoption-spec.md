@@ -1,9 +1,7 @@
 # Selectable Ontology Adoption — Spec
 
 **Date:** 2026-08-28
-**Status:** Draft — revised 2026-08-30 (PR #124 review, then reconciled against
-the actual CT codebase; scope widened from "strict schema-software-org only" to
-a selectable ontology with onboarding)
+**Status:** Implemented — PR #124 (2026-08-30)
 **Packages:** `curated-thoughts` (Tauri app + tools)
 **Depends on:**
 - `@equationalapplications/core-llm-wiki` >= 6.1.0 with parent field (2026-08-28-ontology-parent-field-spec)

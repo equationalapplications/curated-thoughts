@@ -1243,6 +1243,7 @@ dependencies = [
  "anyhow",
  "clap",
  "curated-thoughts",
+ "dirs",
  "flate2",
  "fs4",
  "notify",

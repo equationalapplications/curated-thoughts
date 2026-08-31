@@ -44,7 +44,9 @@ use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
 use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
 use tauri_app_lib::vault::VaultConfig;
-use tauri_app_lib::walk_vault::{
+// Re-export walker types so `curated_thoughts_tools::cmds::WalkedFile` (and
+// friends) remain reachable from external callers and tests.
+pub use tauri_app_lib::walk_vault::{
     collect_files, walk_vault, DeniedLink, PendingLink, WalkedFile, WalkOutcome, MAX_VIRTUAL_DEPTH,
 };
 use tauri_app_lib::{

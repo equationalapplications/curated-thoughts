@@ -2,6 +2,11 @@
 
 ### Features
 
+* **ingest:** walker emits virtual/read path pairs for symlinked docs so a symlinked repo keeps its vault-relative identity ([eba8a44](https://github.com/equationalapplications/curated-thoughts/commit/eba8a44))
+* **security:** trusted-links ledger with non-approvable deny rules (filesystem root, home dir, vault ancestor, contains-vault, ancestor-of-trusted) ([baf0032](https://github.com/equationalapplications/curated-thoughts/commit/baf0032))
+* **ingest:** gate symlink traversal on the trusted-links ledger ([84d4093](https://github.com/equationalapplications/curated-thoughts/commit/84d4093))
+* **cli:** ct trust for approving symlinks, plus ingest --trust-new-links for scripted setups ([3d32913](https://github.com/equationalapplications/curated-thoughts/commit/3d32913))
+* **review:** approve pending symlinks from the desktop review surface ([3d043d8](https://github.com/equationalapplications/curated-thoughts/commit/3d043d8))
 * **cli:** add --doctor subcommand for configuration diagnostics ([5a362be](https://github.com/equationalapplications/curated-thoughts/commit/5a362bea99762fd4612dc5acd223be27df9ab60b))
 * **cli:** add --onboard subcommand for headless setup ([270f70a](https://github.com/equationalapplications/curated-thoughts/commit/270f70aeca3fe05c0351d7b77ff5c77751d73ce4))
 * **config:** add unified BrainConfig schema and LoadReport ([0cc3033](https://github.com/equationalapplications/curated-thoughts/commit/0cc3033dfc13e7363f4f120d4683068a4a0d5967))
