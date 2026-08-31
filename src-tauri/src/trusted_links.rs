@@ -86,6 +86,40 @@ fn lexical_normalize(p: &Path) -> std::path::PathBuf {
     out
 }
 
+/// Approve a symlink: canonicalize its target, classify it, and on a
+/// `Pending` verdict (the only case a ledger entry is needed — spec D3a)
+/// remove any stale entry for the same `link` and append the new pair.
+/// Centralizes the canonicalize-classify-retain-push pattern so the Tauri
+/// `approve_link` command and the CLI `ct trust` subcommand stay in sync.
+///
+/// On `Trusted` (in-vault) the ledger is left untouched, matching the CLI's
+/// existing "is already trusted" branch and spec D3a's "in-vault symlinks are
+/// auto-trusted because nothing leaves the vault boundary" rule.
+///
+/// `vault_root` should be canonicalized by the caller.
+pub fn approve_into(
+    ledger: &mut Vec<TrustedLink>,
+    link: &str,
+    vault_root: &Path,
+    home: Option<&Path>,
+) -> Result<LinkVerdict, String> {
+    let target = std::fs::canonicalize(vault_root.join(link))
+        .map_err(|e| format!("{link} could not be resolved: {e}"))?;
+    let verdict = classify_link(link, &target, vault_root, home, ledger);
+    if matches!(verdict, LinkVerdict::Pending) {
+        ledger.retain(|e| e.link != link);
+        ledger.push(TrustedLink {
+            link: link.to_string(),
+            target: target.to_string_lossy().to_string(),
+            approved_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        });
+    }
+    Ok(verdict)
+}
+
 /// Classify one symlink. `target` should already be canonicalized by the
 /// caller; `link_rel` is the vault-relative path of the link itself.
 pub fn classify_link(

@@ -44,7 +44,7 @@ fn plain_files_have_identical_virtual_and_read_paths() {
 
     let mut out: Vec<WalkedFile> = Vec::new();
     let mut errors = Vec::new();
-    collect_files(&vault, false, &mut out, &mut errors);
+    collect_files(&vault, &mut out, &mut errors);
 
     let hit = out
         .iter()
@@ -72,7 +72,7 @@ fn walker_canonicalizes_root_so_entity_id_routes_under_documents() {
 
     let mut out: Vec<WalkedFile> = Vec::new();
     let mut errors = Vec::new();
-    collect_files(&linked_vault, false, &mut out, &mut errors);
+    collect_files(&linked_vault, &mut out, &mut errors);
 
     let hit = out
         .iter()

@@ -3461,7 +3461,7 @@ fn list_pending_links() -> Result<Vec<PendingLinkPayload>, String> {
 
 #[tauri::command]
 fn approve_link(link: String) -> Result<(), String> {
-    use crate::trusted_links::{classify_link, LinkVerdict, TrustedLink};
+    use crate::trusted_links::{approve_into, LinkVerdict};
 
     let paths = retrieval::resolve_brain_paths();
     let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
@@ -3475,27 +3475,21 @@ fn approve_link(link: String) -> Result<(), String> {
     // would let a link to its physical parent pass as Pending instead of
     // being refused as a vault ancestor.
     let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
-    let target = std::fs::canonicalize(vault_root.join(&link))
-        .map_err(|e| format!("{link} could not be resolved: {e}"))?;
 
-    match classify_link(
+    let verdict = approve_into(
+        &mut cfg.trusted_links,
         &link,
-        &target,
         &vault_root,
         dirs::home_dir().as_deref(),
-        &cfg.trusted_links,
-    ) {
+    )?;
+    match verdict {
+        // In-vault (Trusted) and newly-approved (Pending) both produce a
+        // possibly-changed ledger, so persist either way. The helper
+        // already skipped the push for Trusted (spec D3a — vault
+        // containment is the trust boundary), so this write may be a
+        // no-op for the in-vault case.
         LinkVerdict::Denied(reason) => Err(format!("refused: {}", reason.message())),
-        _ => {
-            cfg.trusted_links.retain(|e| e.link != link);
-            cfg.trusted_links.push(TrustedLink {
-                link,
-                target: target.to_string_lossy().to_string(),
-                approved_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0),
-            });
+        LinkVerdict::Trusted | LinkVerdict::Pending => {
             cfg.write(&paths).map_err(|e| e.to_string())
         }
     }

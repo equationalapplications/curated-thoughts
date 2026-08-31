@@ -39,6 +39,14 @@ export function seededOntologyEntityIds(): string[] {
  * triggers D6 once a wiki instance is available.
  */
 export async function applyOntologyChange(next: OntologySelection): Promise<void> {
+  // Update the cached selection so any outbox transition that fires DURING
+  // this loop's awaits rebuilds the wiki with the new manifest, not the
+  // pre-switch one. Without this, the started/stopped listeners close over
+  // the stale `_ontologySelection` and the loop's later iterations run
+  // `setOntologyManifest` against a wiki seeded from the prior selection
+  // (spec D6 step 5: "Hot-swap the wiki instance on next outbox
+  // transition").
+  _ontologySelection = next;
   const mode = modeFor(next);
   const manifest = manifestFor(next) ?? EMPTY_MANIFEST;
   for (const entityId of seededOntologyEntityIds()) {

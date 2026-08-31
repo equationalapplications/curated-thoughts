@@ -113,15 +113,11 @@ pub const MAX_VIRTUAL_DEPTH: usize = 16;
 
 /// Plain non-following walker. Canonicalizes its root at entry so every
 /// virtual path is joined to the same absolute prefix that
-/// `entity_id_for_virtual_path` canonicalizes against (Ruling 2). The
-/// `follow_symlinked_doc_dirs` flag is vestigial — symlink following is
-/// exclusively [`walk_vault`]'s responsibility now.
-pub fn collect_files(
-    root: &Path,
-    _follow_symlinked_doc_dirs: bool,
-    out: &mut Vec<WalkedFile>,
-    errors: &mut Vec<String>,
-) {
+/// `entity_id_for_virtual_path` canonicalizes against (Ruling 2). Symlink
+/// following is exclusively [`walk_vault`]'s responsibility now — callers
+/// that need ledger-aware descent through `documents/` symlinks should use
+/// `walk_vault` directly rather than re-introducing following here.
+pub fn collect_files(root: &Path, out: &mut Vec<WalkedFile>, errors: &mut Vec<String>) {
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let walker = WalkDir::new(&canonical_root).follow_links(false);
     let it = walker.into_iter().filter_entry(|e| {
@@ -170,7 +166,7 @@ pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>
     let vault_root = std::fs::canonicalize(vault_root).unwrap_or_else(|_| vault_root.to_path_buf());
 
     // In-vault content first; this pass never follows symlinks.
-    collect_files(&vault_root, false, &mut outcome.files, &mut outcome.errors);
+    collect_files(&vault_root, &mut outcome.files, &mut outcome.errors);
 
     let documents = vault_root.join("documents");
     let entries = match std::fs::read_dir(&documents) {
@@ -236,7 +232,7 @@ pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>
             }),
             LinkVerdict::Trusted => {
                 let mut hits: Vec<WalkedFile> = Vec::new();
-                collect_files(&target, false, &mut hits, &mut outcome.errors);
+                collect_files(&target, &mut hits, &mut outcome.errors);
                 for hit in hits {
                     let rel = match hit.read_path.strip_prefix(&target) {
                         Ok(r) => r,
