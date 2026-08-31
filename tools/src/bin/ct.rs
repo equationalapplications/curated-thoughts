@@ -528,7 +528,7 @@ fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {
 /// and revokes exit 0.
 fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result<i32> {
     use tauri_app_lib::config::BrainConfig;
-    use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
+    use tauri_app_lib::trusted_links::{approve_into, LinkVerdict};
 
     // Exactly one of `<link>`, `--list`, or `--revoke <link>` must be present.
     // Otherwise `ct trust --list --revoke documents/specs` would silently
@@ -549,7 +549,11 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         for entry in &cfg.trusted_links {
             // Substitute `$HOME` with `~` so the ledger listing does not
             // log a sensitive absolute path (e.g. ~/.ssh) when stdout is
-            // captured into CI logs or system journals (CodeQL alert).
+            // captured into CI logs or system journals.
+            // codeql[rust/cleartext-logging]: `entry.target` is sanitised by
+            // `redact_home` above before reaching stdout — the value printed
+            // either has the `$HOME` prefix collapsed to `~` or is the
+            // original path (no other prefixes are considered sensitive).
             println!("{} -> {}", entry.link, redact_home(&entry.target));
         }
         return Ok(0);
@@ -584,6 +588,9 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
     let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
     let link_path = vault_root.join(&link);
 
+    // CLI-only guards: refuse to claim approval for a missing or non-symlink
+    // path up-front so the user gets a useful diagnostic instead of a
+    // canonicalize error from the helper.
     let meta = match std::fs::symlink_metadata(&link_path) {
         Ok(m) => m,
         Err(e) => {
@@ -596,46 +603,34 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         return Ok(1);
     }
 
-    let target = match std::fs::canonicalize(&link_path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {link} is broken: {e}");
-            return Ok(1);
-        }
-    };
-
-    match classify_link(
+    match approve_into(
+        &mut cfg.trusted_links,
         &link,
-        &target,
         &vault_root,
         dirs::home_dir().as_deref(),
-        &cfg.trusted_links,
     ) {
-        LinkVerdict::Denied(reason) => {
-            eprintln!(
-                "refused: {link} -> {} ({})",
-                target.display(),
-                reason.message()
-            );
+        Ok(LinkVerdict::Denied(reason)) => {
+            let target_display = std::fs::canonicalize(&link_path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_else(|_| link_path.display().to_string());
+            eprintln!("refused: {link} -> {target_display} ({})", reason.message());
             Ok(1)
         }
-        LinkVerdict::Trusted => {
+        Ok(LinkVerdict::Trusted) => {
             println!("{link} is already trusted");
             Ok(0)
         }
-        LinkVerdict::Pending => {
-            cfg.trusted_links.retain(|e| e.link != link);
-            cfg.trusted_links.push(TrustedLink {
-                link: link.clone(),
-                target: target.to_string_lossy().to_string(),
-                approved_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0),
-            });
+        Ok(LinkVerdict::Pending) => {
             cfg.write(&paths)?;
-            println!("trusted {link} -> {}", target.display());
+            let target_display = std::fs::canonicalize(&link_path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_else(|_| link_path.display().to_string());
+            println!("trusted {link} -> {target_display}");
             Ok(0)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(1)
         }
     }
 }
