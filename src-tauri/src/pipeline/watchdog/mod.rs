@@ -6,6 +6,7 @@ pub mod recovery;
 pub mod sweep;
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -185,7 +186,29 @@ pub struct SupervisorConfig {
     pub tx: SyncSender<PipelineJob>,
     pub profile: EmbedProfile,
     pub gen_timeout_secs: u64,
-    pub on_health: Box<dyn Fn(PipelineHealth) + Send>,
+    pub on_health: Box<dyn Fn(HealthUpdate) + Send>,
+    /// Cooperative stop signal. `switch_vault` (and the next
+    /// `start_file_watcher`) sets this before spawning a new supervisor so
+    /// the previous supervisor exits instead of leaking a second writer of
+    /// `flags.ingest.health` (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
+    pub stop: Arc<AtomicBool>,
+    /// Invoked when the watchdog supersedes a wedged worker. The caller is
+    /// expected to spawn a replacement worker reading from a fresh
+    /// `SyncSender` (the abandoned worker holds the previous receiver and
+    /// leaks until it eventually exits). Without this hook the wedged
+    /// worker keeps the channel receiver and no one dequeues submitted
+    /// jobs (CodeRabbit review PRRT_kwDOSVmXas6d28dw).
+    pub on_replace_worker: Box<dyn Fn() + Send>,
+}
+
+/// Snapshot of pipeline liveness, propagated to listeners (UI status, logs,
+/// tests). Carries the stage and subject that `IngestStatus.stage` and
+/// `IngestStatus.subject` render alongside the health enum (spec §7).
+#[derive(Debug, Clone)]
+pub struct HealthUpdate {
+    pub health: PipelineHealth,
+    pub stage: Option<Stage>,
+    pub subject: Option<String>,
 }
 
 pub fn spawn_supervisor(cfg: SupervisorConfig) -> std::thread::JoinHandle<()> {
@@ -223,8 +246,17 @@ fn supervisor_loop(cfg: SupervisorConfig) {
     let mut respawns = RespawnLedger::new();
     let mut claims = InFlightClaims::new();
     let mut degraded = false;
+    // Trip gate: a stage that hasn't moved since the last trip (same epoch
+    // and stage_started_ms) is the same wedge — don't accumulate strikes,
+    // diagnostics, or respawns for it
+    // (CodeRabbit review PRRT_kwDOSVmXas6d28dw).
+    let mut last_trip_key: Option<(u64, i64)> = None;
 
     loop {
+        if cfg.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("[watchdog] stop signaled; supervisor exiting");
+            break;
+        }
         std::thread::sleep(TICK);
 
         let snapshot = cfg.heartbeat.snapshot();
@@ -246,7 +278,11 @@ fn supervisor_loop(cfg: SupervisorConfig) {
         mirror_heartbeat(&conn, &snapshot);
 
         if degraded {
-            (cfg.on_health)(PipelineHealth::Degraded);
+            (cfg.on_health)(HealthUpdate {
+                health: PipelineHealth::Degraded,
+                stage: Some(snapshot.stage),
+                subject: Some(snapshot.subject.clone()),
+            });
             continue;
         }
 
@@ -257,7 +293,19 @@ fn supervisor_loop(cfg: SupervisorConfig) {
             cfg.gen_timeout_secs,
             now_ms(),
         ) {
-            (cfg.on_health)(PipelineHealth::Stalled);
+            // Trip gate: same (epoch, stage_started_ms) means the wedge is
+            // still the same wedge — skip the duplicate trip.
+            let trip_key = (snapshot.epoch, snapshot.stage_started_ms);
+            if last_trip_key == Some(trip_key) {
+                continue;
+            }
+            last_trip_key = Some(trip_key);
+
+            (cfg.on_health)(HealthUpdate {
+                health: PipelineHealth::Stalled,
+                stage: Some(snapshot.stage),
+                subject: Some(snapshot.subject.clone()),
+            });
 
             // Spec §4: diagnose → probe → respawn. handle_stage_stall fuses
             // diagnose (record_trip → capture_stacks) and respawn
@@ -277,6 +325,12 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                 diagnostics::emit_trip_line(&trip);
                 eprintln!("[watchdog] failed to record stage stall: {e}; proceeding with recovery");
             }
+
+            // Replace the wedged worker. The bumped epoch means the
+            // abandoned worker exits on its next stage transition (or
+            // leaks until process exit if truly wedged); the callback
+            // spawns a fresh worker on a new channel.
+            (cfg.on_replace_worker)();
 
             // Probe only after the trip is on disk. Stages without a network
             // dependency skip the endpoint probe and are treated as healthy
@@ -348,7 +402,11 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                     "[watchdog] respawn cap ({}) exhausted; parking ingest in degraded",
                     recovery::RESPAWN_CAP_PER_HOUR
                 );
-                (cfg.on_health)(PipelineHealth::Degraded);
+                (cfg.on_health)(HealthUpdate {
+                    health: PipelineHealth::Degraded,
+                    stage: Some(snapshot.stage),
+                    subject: Some(snapshot.subject.clone()),
+                });
                 continue;
             }
 
@@ -362,7 +420,11 @@ fn supervisor_loop(cfg: SupervisorConfig) {
 
         // Class 1: work is queued and nothing consumes it.
         if drain.observe(pending, completed, snapshot.stage, Instant::now()) {
-            (cfg.on_health)(PipelineHealth::Stalled);
+            (cfg.on_health)(HealthUpdate {
+                health: PipelineHealth::Stalled,
+                stage: Some(snapshot.stage),
+                subject: Some(snapshot.subject.clone()),
+            });
             let trip = TripRecord {
                 kind: TripKind::DrainStall,
                 snapshot: snapshot.clone(),
@@ -383,10 +445,15 @@ fn supervisor_loop(cfg: SupervisorConfig) {
 
         // Normal operation: keep the watcher's staged rows flowing.
         let queued = sweep::sweep(&conn, &cfg.tx, &mut claims, 256).unwrap_or(0);
-        (cfg.on_health)(if pending > 0 || queued > 0 {
+        let health = if pending > 0 || queued > 0 {
             PipelineHealth::Working
         } else {
             PipelineHealth::Idle
+        };
+        (cfg.on_health)(HealthUpdate {
+            health,
+            stage: Some(snapshot.stage),
+            subject: Some(snapshot.subject.clone()),
         });
     }
 }

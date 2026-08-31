@@ -79,7 +79,20 @@ pub fn emit_trip_line(trip: &TripRecord) {
 
 /// Best-effort thread-stack capture into the journal. Failure MUST NOT block
 /// recovery (spec §3) — every path here swallows its error.
+///
+/// Runs the capture on a detached thread with a deadline. The `eu-stack` /
+/// `sample` subprocesses can hang against a wedged process; waiting for them
+/// with `Command::output()` would postpone `heartbeat.bump_epoch()` and the
+/// worker respawn indefinitely. The detached thread is abandoned on timeout
+/// (CodeRabbit review PRRT_kwDOSVmXas6d28dt).
 pub fn capture_stacks(pid: u32) {
+    std::thread::Builder::new()
+        .name("watchdog-stack-capture".to_string())
+        .spawn(move || capture_stacks_blocking(pid))
+        .expect("spawn stack-capture thread");
+}
+
+fn capture_stacks_blocking(pid: u32) {
     #[cfg(target_os = "linux")]
     let attempt = std::process::Command::new("eu-stack")
         .args(["-p", &pid.to_string()])

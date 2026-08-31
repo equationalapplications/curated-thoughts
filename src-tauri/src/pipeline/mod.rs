@@ -343,7 +343,13 @@ impl PipelineWorker {
                         .unwrap_or(0)
                         .saturating_sub(300);
                     for eid in pending_linkers.drain() {
-                        heartbeat.enter(Stage::Linking, Some(&eid));
+                        // Epoch guard: a superseded worker must not run the
+                        // linker — that would race its replacement on the
+                        // same DB (spec §4.1, CodeRabbit review
+                        // PRRT_kwDOSVmXas6d28dq).
+                        if !self.enter(Stage::Linking, Some(&eid)) {
+                            return;
+                        }
                         if let Err(e) = crate::indexer::linker::run_linker(conn, &eid, since) {
                             eprintln!("[linker] run_linker error ({}): {}", eid, e);
                         }
@@ -394,7 +400,9 @@ impl PipelineWorker {
                 .unwrap_or(0)
                 .saturating_sub(300);
             for eid in pending_linkers.drain() {
-                self.heartbeat.enter(Stage::Linking, Some(&eid));
+                if !self.enter(Stage::Linking, Some(&eid)) {
+                    return Ok(());
+                }
                 if let Err(e) = crate::indexer::linker::run_linker(&conn, &eid, since) {
                     eprintln!("[linker] run_linker error ({}): {}", eid, e);
                 }

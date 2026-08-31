@@ -58,7 +58,7 @@ impl InFlightClaims {
 pub fn list_sweepable_pending(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT path FROM documents
-          WHERE status = 'pending' AND quarantined_at IS NULL
+          WHERE status IN ('pending', 'pending_reindex') AND quarantined_at IS NULL
           ORDER BY id
           LIMIT ?1",
     )?;

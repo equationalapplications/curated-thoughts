@@ -75,10 +75,23 @@ export function useWikiStatus(): WikiStatus {
     subscribeEntityStatus((e) => {
       setStatus((prev) => {
         const normalized = normalizePayload(e.payload);
+        // Use explicit undefined checks so a `null` from the backend
+        // clears the previous value rather than being treated as
+        // "absent" by `??`. Working → idle transition needs to drop the
+        // last stage/subject so the UI doesn't keep showing a stale
+        // banner (CodeRabbit review PRRT_kwDOSVmXas6d28eC).
+        const ingestStage =
+          normalized.ingestStage !== undefined
+            ? normalized.ingestStage
+            : prev.ingestStage;
+        const ingestSubject =
+          normalized.ingestSubject !== undefined
+            ? normalized.ingestSubject
+            : prev.ingestSubject;
         const payload: WikiStatusPayload = {
           ingest: (normalized.ingest ?? prev.ingest) as IngestHealth,
-          ingestStage: normalized.ingestStage ?? prev.ingestStage,
-          ingestSubject: normalized.ingestSubject ?? prev.ingestSubject,
+          ingestStage,
+          ingestSubject,
           librarian: normalized.librarian ?? prev.librarian,
           healing: normalized.healing ?? prev.healing,
           pruning: normalized.pruning ?? prev.pruning,

@@ -61,7 +61,7 @@ use setup::{
 };
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{
     mpsc::{self, Sender, SyncSender},
     Arc, Mutex,
@@ -92,6 +92,15 @@ struct PipelineHolder(Mutex<PipelineHolderInner>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
+/// Active watchdog supervisor: stop flag + JoinHandle. `switch_vault` and
+/// repeated `start_file_watcher` calls set the flag and join the handle
+/// before spawning a new supervisor so old supervisors cannot keep writing
+/// `flags.ingest.health` (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
+struct WatchdogSupervisor(Mutex<Option<WatchdogSupervisorHandle>>);
+struct WatchdogSupervisorHandle {
+    stop: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<()>,
+}
 struct OutboxWorkerState(Mutex<Option<OutboxWorkerHandle>>);
 struct CloudBridgeState(Mutex<Option<cloud_bridge::CloudBridgeHandle>>);
 struct CloudBridgeLifecycle(tokio::sync::Mutex<()>);
@@ -874,11 +883,22 @@ fn start_file_watcher_inner(
             for event in status_rx {
                 let PipelineStatusEvent::PendingCount(count) = event;
                 update_wiki_status_from_app(&app_handle, |flags| {
-                    flags.ingest.health = if count > 0 {
-                        pipeline::watchdog::PipelineHealth::Working
-                    } else {
-                        pipeline::watchdog::PipelineHealth::Idle
-                    };
+                    // The supervisor's on_health callback owns the
+                    // Stalled/Degraded latches; this listener only refreshes
+                    // the worker-derived stage/subject from the pending count
+                    // and avoids overwriting health while latched
+                    // (CodeRabbit review PRRT_kwDOSVmXas6d28dc).
+                    if !matches!(
+                        flags.ingest.health,
+                        pipeline::watchdog::PipelineHealth::Stalled
+                            | pipeline::watchdog::PipelineHealth::Degraded
+                    ) {
+                        flags.ingest.health = if count > 0 {
+                            pipeline::watchdog::PipelineHealth::Working
+                        } else {
+                            pipeline::watchdog::PipelineHealth::Idle
+                        };
+                    }
                 });
             }
         });
@@ -899,18 +919,46 @@ fn start_file_watcher_inner(
         let gen_timeout_secs = 600; // matches librarian/synthesis.rs default
 
         let app_handle = app.clone();
-        pipeline::watchdog::spawn_supervisor(pipeline::watchdog::SupervisorConfig {
+        let stop = Arc::new(AtomicBool::new(false));
+        // on_replace_worker: signal the orchestrator to spawn a fresh
+        // worker on a new channel after the watchdog supersedes a wedged
+        // worker (CodeRabbit review PRRT_kwDOSVmXas6d28dw).
+        let replace_signal = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let replace_signal_for_callback = replace_signal.clone();
+        let join = pipeline::watchdog::spawn_supervisor(pipeline::watchdog::SupervisorConfig {
             db_path: brain_paths.db_path.clone(),
-            heartbeat,
+            heartbeat: heartbeat.clone(),
             tx,
             profile,
             gen_timeout_secs,
-            on_health: Box::new(move |health| {
+            stop: stop.clone(),
+            on_health: Box::new(move |update| {
                 update_wiki_status_from_app(&app_handle, |flags| {
-                    flags.ingest.health = health;
+                    flags.ingest.health = update.health;
+                    flags.ingest.stage = update.stage.map(|s| s.as_str().to_string());
+                    flags.ingest.subject = update.subject;
                 });
             }),
+            on_replace_worker: Box::new(move || {
+                if let Ok(mut flag) = replace_signal_for_callback.lock() {
+                    *flag = true;
+                }
+            }),
         });
+        // Stash the supervisor's stop flag + join handle so the next
+        // `switch_vault` (or another watcher start) can signal and join
+        // before spawning a new supervisor
+        // (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
+        if let Some(sup_state) = app.try_state::<WatchdogSupervisor>() {
+            let prev = sup_state.0.lock().unwrap().replace(WatchdogSupervisorHandle {
+                stop: stop.clone(),
+                join,
+            });
+            if let Some(prev) = prev {
+                prev.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = prev.join.join();
+            }
+        }
     }
 
     let raw_docs = target_canonical.join(crate::vault::safe_path::IMMUTABLE_DIR);
@@ -1558,17 +1606,30 @@ fn queue_full_reindex(
             continue;
         }
         let job = if force_rechunk {
-            PipelineJob::rechunk(path)
+            PipelineJob::rechunk(&path)
         } else {
-            PipelineJob::ingest(path)
+            PipelineJob::ingest(&path)
         };
         // try_send, not send: a blocking send here freezes the Tauri IPC
-        // thread when the channel fills (spec §6). The remainder stays
-        // `pending` and is picked up by the watchdog sweep.
-        match tx.try_send(job) {
+        // thread when the channel fills (spec §6). These rows were selected
+        // from `list_indexed_user_doc_paths` (status='indexed'), so the §5
+        // pending sweep cannot rescue them. Mark them as 'pending_reindex'
+        // so a dedicated sweep picks them up as `PipelineJob::rechunk` and
+        // the rechunk semantics survive a full channel
+        // (CodeRabbit review PRRT_kwDOSVmXas6d28dn).
+        match tx.try_send(job.clone()) {
             Ok(()) => queued += 1,
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 deferred += 1;
+                if let Err(e) = conn.execute(
+                    "UPDATE documents SET status = 'pending_reindex'
+                       WHERE path = ?1 AND status = 'indexed'",
+                    rusqlite::params![&path],
+                ) {
+                    eprintln!(
+                        "[queue_full_reindex] failed to stage {path} as pending_reindex: {e}"
+                    );
+                }
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(e)) => {
                 return Err(format!("pipeline channel closed: {e:?}"));
@@ -1577,7 +1638,7 @@ fn queue_full_reindex(
     }
     if deferred > 0 {
         eprintln!(
-            "[queue_full_reindex] queued {queued} of {total}; {deferred} deferred to the watchdog sweep"
+            "[queue_full_reindex] queued {queued} of {total}; {deferred} deferred (status=pending_reindex for sweep pickup)"
         );
     }
     Ok(queued)
@@ -1779,7 +1840,6 @@ async fn run_wiki_reembed(
         let guard = db_state.0.lock().unwrap();
         let conn = &guard.0;
         let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
-        drop(guard);
         let mut queued = 0usize;
         let mut deferred = 0usize;
         let total = paths.len();
@@ -1788,12 +1848,24 @@ async fn run_wiki_reembed(
                 continue;
             }
             // try_send, not send: a blocking send here freezes the Tauri IPC
-            // thread when the channel fills (spec §6). The remainder stays
-            // `pending` and is picked up by the watchdog sweep.
-            match tx.try_send(PipelineJob::rechunk_for_reembed(path)) {
+            // thread when the channel fills (spec §6). The original rows
+            // were 'indexed' so the §5 pending sweep can't rescue them.
+            // Stage them as 'pending_reindex' so the sweep picks them up
+            // as `PipelineJob::rechunk_for_reembed`
+            // (CodeRabbit review PRRT_kwDOSVmXas6d28dn).
+            match tx.try_send(PipelineJob::rechunk_for_reembed(path.clone())) {
                 Ok(()) => queued += 1,
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     deferred += 1;
+                    if let Err(e) = conn.execute(
+                        "UPDATE documents SET status = 'pending_reindex'
+                           WHERE path = ?1 AND status = 'indexed'",
+                        rusqlite::params![&path],
+                    ) {
+                        eprintln!(
+                            "[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}"
+                        );
+                    }
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(e)) => {
                     return Err(format!("pipeline channel closed: {e:?}"));
@@ -1802,7 +1874,7 @@ async fn run_wiki_reembed(
         }
         if deferred > 0 {
             eprintln!(
-                "[run_wiki_reembed] queued {queued} of {total}; {deferred} deferred to the watchdog sweep"
+                "[run_wiki_reembed] queued {queued} of {total}; {deferred} deferred (status=pending_reindex for sweep pickup)"
             );
         }
         Ok(queued)
@@ -3198,6 +3270,7 @@ pub fn run() {
         .manage(InferenceState(Mutex::new(GenerationProvider::Unconfigured)))
         .manage(WatcherStarted(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
+        .manage(WatchdogSupervisor(Mutex::new(None)))
         .manage(PendingConfigMalformed(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_vault_path,
