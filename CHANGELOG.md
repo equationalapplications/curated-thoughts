@@ -1,3 +1,9 @@
+## [1.38.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.38.0...v1.38.1) (2026-08-31)
+
+### Bug Fixes
+
+* **ci:** smoke-test answers 3rd onboard prompt + seeds brain.db ([9cd4237](https://github.com/equationalapplications/curated-thoughts/commit/9cd42375447ac71f0124c91827fb5f2c3fbf784f)), closes [#124](https://github.com/equationalapplications/curated-thoughts/issues/124)
+
 ## [1.38.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.37.0...v1.38.0) (2026-08-31)
 
 ### Features
