@@ -1,14 +1,23 @@
-//! The walker must report symlinked content under its vault-relative virtual
-//! path, never the canonical target path. And the vault root must be
-//! canonicalized before virtual paths are built so entity_id_for_virtual_path's
-//! prefix-strip succeeds on non-canonical vault roots (Ruling 2).
+//! Tests for the walker, the trusted-links ledger integration, and the
+//! Ruling-2 canonicalization that keeps virtual paths from silently
+//! misrouting on non-canonical vault roots.
+//!
+//! The walker is now split into two layers:
+//! - `collect_files` is a plain non-following walker; it canonicalizes its
+//!   root (Ruling 2) and emits (virtual_path, read_path) pairs.
+//! - `walk_vault` consults the trusted-links ledger and only descends into
+//!   documents/-rooted symlinks whose target is Trusted; Pending and Denied
+//!   links are reported, never read.
 
 #![cfg(unix)]
 
-use curated_thoughts_tools::cmds::{collect_files, WalkedFile};
+use curated_thoughts_tools::cmds::{
+    collect_files, walk_vault, WalkedFile,
+};
 use std::fs;
 use std::os::unix::fs::symlink;
 use tauri_app_lib::entity_id_for_virtual_path;
+use tauri_app_lib::trusted_links::TrustedLink;
 use tempfile::TempDir;
 
 /// vault/documents/linked -> outside/docs, which holds one markdown file.
@@ -26,35 +35,9 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
     (temp, vault)
 }
 
-#[test]
-fn symlinked_file_is_reported_under_the_vault_relative_virtual_path() {
-    let (_temp, vault) = fixture();
-    let mut out: Vec<WalkedFile> = Vec::new();
-    let mut errors = Vec::new();
-
-    collect_files(&vault, true, &mut out, &mut errors);
-
-    let hit = out
-        .iter()
-        .find(|f| f.virtual_path.to_string_lossy().ends_with("design.md"))
-        .expect("symlinked file must be collected");
-
-    let virtual_str = hit.virtual_path.to_string_lossy().to_string();
-    assert!(
-        virtual_str.contains("/documents/linked/"),
-        "virtual path lost the symlink prefix: {virtual_str}"
-    );
-    assert!(
-        !virtual_str.contains("/outside/"),
-        "virtual path leaked the canonical target: {virtual_str}"
-    );
-    assert!(
-        hit.read_path.to_string_lossy().contains("/outside/"),
-        "read path must point at the real file: {:?}",
-        hit.read_path
-    );
-    assert!(hit.read_path.exists(), "read path must be openable");
-}
+// ---------------------------------------------------------------------------
+// collect_files (plain, non-following) — Ruling 2 regression lives here.
+// ---------------------------------------------------------------------------
 
 #[test]
 fn plain_files_have_identical_virtual_and_read_paths() {
@@ -63,31 +46,13 @@ fn plain_files_have_identical_virtual_and_read_paths() {
 
     let mut out: Vec<WalkedFile> = Vec::new();
     let mut errors = Vec::new();
-    collect_files(&vault, true, &mut out, &mut errors);
+    collect_files(&vault, false, &mut out, &mut errors);
 
     let hit = out
         .iter()
         .find(|f| f.virtual_path.ends_with("plain.md"))
         .expect("plain file collected");
     assert_eq!(hit.virtual_path, hit.read_path);
-}
-
-#[test]
-fn a_symlink_nested_inside_a_resolved_target_is_not_followed() {
-    let (temp, vault) = fixture();
-    let deeper = temp.path().join("deeper");
-    fs::create_dir_all(&deeper).unwrap();
-    fs::write(deeper.join("secret.md"), "# Secret\n").unwrap();
-    symlink(&deeper, temp.path().join("outside").join("docs").join("nested")).unwrap();
-
-    let mut out: Vec<WalkedFile> = Vec::new();
-    let mut errors = Vec::new();
-    collect_files(&vault, true, &mut out, &mut errors);
-
-    assert!(
-        !out.iter().any(|f| f.virtual_path.ends_with("secret.md")),
-        "nested symlinks must never be descended into"
-    );
 }
 
 /// Ruling 2 regression: a vault reached through a non-canonical path (a
@@ -109,7 +74,7 @@ fn walker_canonicalizes_root_so_entity_id_routes_under_documents() {
 
     let mut out: Vec<WalkedFile> = Vec::new();
     let mut errors = Vec::new();
-    collect_files(&linked_vault, true, &mut out, &mut errors);
+    collect_files(&linked_vault, false, &mut out, &mut errors);
 
     let hit = out
         .iter()
@@ -127,5 +92,102 @@ fn walker_canonicalizes_root_so_entity_id_routes_under_documents() {
          otherwise entity_id_for_virtual_path silently misroutes. \
          got virtual_path={:?}",
         hit.virtual_path
+    );
+}
+
+// ---------------------------------------------------------------------------
+// walk_vault — ledger integration.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unapproved_symlink_is_pending_and_its_content_is_not_collected() {
+    let (_temp, vault) = fixture();
+
+    let outcome = walk_vault(&vault, &[], None);
+
+    assert!(
+        !outcome.files.iter().any(|f| f.virtual_path.ends_with("design.md")),
+        "unapproved symlink content must not be collected"
+    );
+    assert_eq!(outcome.pending.len(), 1);
+    assert_eq!(outcome.pending[0].link, "documents/linked");
+    assert!(outcome.pending[0].target.ends_with("outside/docs"));
+}
+
+#[test]
+fn an_approved_pair_is_walked() {
+    let (temp, vault) = fixture();
+    let target = std::fs::canonicalize(temp.path().join("outside").join("docs")).unwrap();
+
+    let ledger = vec![TrustedLink {
+        link: "documents/linked".to_string(),
+        target: target.to_string_lossy().to_string(),
+        approved_at: 1,
+    }];
+
+    let outcome = walk_vault(&vault, &ledger, None);
+
+    assert!(outcome.pending.is_empty(), "approved link must not be pending");
+    assert!(
+        outcome.files.iter().any(|f| f.virtual_path.ends_with("design.md")),
+        "approved link content must be collected"
+    );
+}
+
+#[test]
+fn a_repointed_link_becomes_pending_again() {
+    let (temp, vault) = fixture();
+    let ledger = vec![TrustedLink {
+        link: "documents/linked".to_string(),
+        target: "/some/other/place".to_string(),
+        approved_at: 1,
+    }];
+    let _ = temp;
+
+    let outcome = walk_vault(&vault, &ledger, None);
+
+    assert_eq!(outcome.pending.len(), 1, "stale target must not grant trust");
+    assert!(outcome.files.is_empty());
+}
+
+#[test]
+fn a_denied_target_reports_its_rule_and_is_never_walked() {
+    let temp = TempDir::new().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(vault.join("documents")).unwrap();
+    // Link straight at the directory that contains the vault.
+    symlink(temp.path(), vault.join("documents").join("everything")).unwrap();
+
+    let target = fs::canonicalize(temp.path()).unwrap();
+    let ledger = vec![TrustedLink {
+        link: "documents/everything".to_string(),
+        target: target.to_string_lossy().to_string(),
+        approved_at: 1,
+    }];
+
+    let outcome = walk_vault(&vault, &ledger, None);
+
+    assert!(outcome.files.is_empty(), "denied target must not be walked");
+    assert_eq!(outcome.denied.len(), 1);
+    assert!(
+        outcome.denied[0].reason.contains("vault"),
+        "reason must name the rule, got: {}",
+        outcome.denied[0].reason
+    );
+}
+
+#[test]
+fn a_broken_symlink_is_an_error_not_a_silent_skip() {
+    let temp = TempDir::new().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir_all(vault.join("documents")).unwrap();
+    symlink(temp.path().join("does-not-exist"), vault.join("documents").join("dangling")).unwrap();
+
+    let outcome = walk_vault(&vault, &[], None);
+
+    assert!(
+        outcome.errors.iter().any(|e| e.contains("dangling")),
+        "broken symlink must be reported as an error: {:?}",
+        outcome.errors
     );
 }

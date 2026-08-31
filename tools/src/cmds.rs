@@ -42,10 +42,10 @@ use tauri_app_lib::db::connection::AppDb;
 use tauri_app_lib::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
+use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
 use tauri_app_lib::vault::VaultConfig;
 use tauri_app_lib::{
     entity_id_for_virtual_path, ingest_document_virtual,
-    ingest_document_with_vault_root,
 };
 
 /// Default `once` mode watchdog: exit after this many seconds even if no
@@ -117,22 +117,21 @@ fn is_excluded_file(path: &Path) -> bool {
     EXCLUDED_PATH_SEGMENTS.iter().any(|seg| p.contains(seg))
 }
 
-/// Collect files from a directory tree. `follow_symlinked_doc_dirs` enables
-/// following symlinked directories whose parent is exactly
-/// `<vault_root>/documents` (the staging contract); nested symlinks and
-/// symlinks to files are never followed. Traversal errors are returned so an
-/// unreadable path can't silently shrink the corpus.
+/// Collect files from a directory tree. `follow_symlinked_doc_dirs` is a
+/// vestigial flag retained for ABI compatibility with earlier tests; symlink
+/// following is now exclusively `walk_vault`'s responsibility. This function
+/// never follows symlinks, never descends into them, and never emits their
+/// contents.
 ///
-/// The walker canonicalizes its root at entry (defense in depth — `ingest_run`
-/// already canonicalizes, but any future caller gets the same guarantee) so
-/// every virtual path is joined to the same absolute prefix that
-/// `entity_id_for_virtual_path` canonicalizes against. Without this, a vault
-/// reached through a non-canonical path (e.g. `/var/folders/...` on macOS,
-/// symlinked home dirs) silently misroutes every walked file to
-/// `tier_working::` because the prefix strip fails (Ruling 2).
+/// The walker canonicalizes its root at entry so every virtual path is
+/// joined to the same absolute prefix that `entity_id_for_virtual_path`
+/// canonicalizes against. Without this, a vault reached through a
+/// non-canonical path (e.g. `/var/folders/...` on macOS, symlinked home
+/// dirs) silently misroutes every walked file to `tier_working::` because
+/// the prefix strip fails (Ruling 2).
 pub fn collect_files(
     root: &Path,
-    follow_symlinked_doc_dirs: bool,
+    _follow_symlinked_doc_dirs: bool,
     out: &mut Vec<WalkedFile>,
     errors: &mut Vec<String>,
 ) {
@@ -169,58 +168,9 @@ pub fn collect_files(
                 virtual_path: p.to_path_buf(),
                 read_path: p.to_path_buf(),
             });
-        } else if follow_symlinked_doc_dirs && ft.is_symlink() {
-            // Only follow symlinks whose parent is `<root>/documents`, whose
-            // names aren't excluded, and whose target is a directory. Never
-            // follow file symlinks, symlinks outside documents/, or nested
-            // symlinks inside a resolved target — walkdir's
-            // `follow_links(false)` already prevents the last category from
-            // ever being yielded.
-            let parent_is_documents = p
-                .parent()
-                .map(|par| par.file_name().map(|n| n == "documents").unwrap_or(false))
-                .unwrap_or(false);
-            let name_excluded = p
-                .file_name()
-                .map(|n| is_excluded_dir(&n.to_string_lossy()))
-                .unwrap_or(false);
-            if !parent_is_documents || name_excluded {
-                continue;
-            }
-            match std::fs::canonicalize(p) {
-                Ok(target) if target.is_dir() => {
-                    // Walk the target separately (symlink-following OFF so
-                    // nested symlinks are never descended into), then re-root
-                    // every hit under the symlink's own path so the
-                    // vault-relative prefix survives into the DB identity.
-                    let mut target_hits: Vec<WalkedFile> = Vec::new();
-                    collect_files(&target, false, &mut target_hits, errors);
-                    for hit in target_hits {
-                        let rel = match hit.read_path.strip_prefix(&target) {
-                            Ok(r) => r,
-                            Err(_) => continue,
-                        };
-                        let virtual_path = p.join(rel);
-                        if virtual_path.components().count() > MAX_VIRTUAL_DEPTH {
-                            errors.push(format!(
-                                "depth: {} exceeds the {MAX_VIRTUAL_DEPTH}-segment budget, skipping",
-                                virtual_path.display()
-                            ));
-                            continue;
-                        }
-                        out.push(WalkedFile {
-                            virtual_path,
-                            read_path: hit.read_path,
-                        });
-                    }
-                }
-                Ok(_) => eprintln!(
-                    "warn: symlink {} does not point at a directory, skipping",
-                    p.display()
-                ),
-                Err(e) => eprintln!("warn: broken symlink {}, skipping: {e}", p.display()),
-            }
         }
+        // Symlink branches are owned by `walk_vault`. Plain files are
+        // emitted; symlinks are left for the ledger-aware caller.
     }
 }
 
@@ -234,14 +184,151 @@ pub struct WalkedFile {
     pub read_path: PathBuf,
 }
 
+/// A symlink that needs approval before its content can be ingested.
+#[derive(Debug, Clone)]
+pub struct PendingLink {
+    /// Vault-relative path of the link, e.g. `documents/specs`.
+    pub link: String,
+    /// Canonicalized current target.
+    pub target: String,
+}
+
+/// A symlink refused by a non-approvable rule.
+#[derive(Debug, Clone)]
+pub struct DeniedLink {
+    pub link: String,
+    pub target: String,
+    /// Human-readable rule text from `DenyReason::message`.
+    pub reason: String,
+}
+
+#[derive(Debug, Default)]
+pub struct WalkOutcome {
+    pub files: Vec<WalkedFile>,
+    pub errors: Vec<String>,
+    pub pending: Vec<PendingLink>,
+    pub denied: Vec<DeniedLink>,
+}
+
 /// Maximum number of path components in a virtual path once a symlink prefix
 /// is applied. Bounds the work a single symlinked repo can add (spec D3).
 pub const MAX_VIRTUAL_DEPTH: usize = 16;
 
+/// Walk a vault, consulting the trusted-links ledger for every direct-child
+/// symlink under `documents/`. Unapproved links are reported, never read.
+pub fn walk_vault(
+    vault_root: &Path,
+    ledger: &[TrustedLink],
+    home: Option<&Path>,
+) -> WalkOutcome {
+    let mut outcome = WalkOutcome::default();
+
+    // Canonicalize so classify_link's path comparisons see matching
+    // prefixes; on macOS TempDir resolves through /var → /private/var and
+    // a non-canonical vault_root would silently match as Trusted against a
+    // canonicalized target. Falling back to the input is safe — the worst
+    // case is the same miscategorization the caller already has.
+    let vault_root = std::fs::canonicalize(vault_root).unwrap_or_else(|_| vault_root.to_path_buf());
+
+    // In-vault content first; this pass never follows symlinks.
+    collect_files(&vault_root, false, &mut outcome.files, &mut outcome.errors);
+
+    let documents = vault_root.join("documents");
+    let entries = match std::fs::read_dir(&documents) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return outcome,
+        Err(e) => {
+            outcome.errors.push(format!("read documents/: {e}"));
+            return outcome;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                outcome.errors.push(format!("read documents/: {e}"));
+                continue;
+            }
+        };
+        let p = entry.path();
+        let is_symlink = std::fs::symlink_metadata(&p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_symlink {
+            continue;
+        }
+
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if is_excluded_dir(&name) {
+            continue;
+        }
+        let link_rel = format!("documents/{name}");
+
+        let target = match std::fs::canonicalize(&p) {
+            Ok(t) => t,
+            Err(e) => {
+                // Broken links are failures, not warn-and-skip (spec Risks).
+                outcome
+                    .errors
+                    .push(format!("broken symlink {}: {e}", p.display()));
+                continue;
+            }
+        };
+        if !target.is_dir() {
+            outcome.errors.push(format!(
+                "symlink {} does not point at a directory",
+                p.display()
+            ));
+            continue;
+        }
+
+        match classify_link(&link_rel, &target, &vault_root, home, ledger) {
+            LinkVerdict::Denied(reason) => outcome.denied.push(DeniedLink {
+                link: link_rel,
+                target: target.to_string_lossy().to_string(),
+                reason: reason.message().to_string(),
+            }),
+            LinkVerdict::Pending => outcome.pending.push(PendingLink {
+                link: link_rel,
+                target: target.to_string_lossy().to_string(),
+            }),
+            LinkVerdict::Trusted => {
+                let mut hits: Vec<WalkedFile> = Vec::new();
+                collect_files(&target, false, &mut hits, &mut outcome.errors);
+                for hit in hits {
+                    let rel = match hit.read_path.strip_prefix(&target) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let virtual_path = p.join(rel);
+                    if virtual_path.components().count() > MAX_VIRTUAL_DEPTH {
+                        outcome.errors.push(format!(
+                            "depth: {} exceeds the {MAX_VIRTUAL_DEPTH}-segment budget, skipping",
+                            virtual_path.display()
+                        ));
+                        continue;
+                    }
+                    outcome.files.push(WalkedFile {
+                        virtual_path,
+                        read_path: hit.read_path,
+                    });
+                }
+            }
+        }
+    }
+
+    outcome
+}
+
 /// Full ingest_vault_once flow: resolve brain paths + embed profile, open the
-/// brain DB, walk the vault honoring the exclusion rules, ingest every
-/// ingestible file, then run the linker over each touched entity. Extracted
-/// from `ingest_vault_once.rs`; behavior identical to the original bin main.
+/// brain DB, walk the vault honoring the exclusion rules AND the trusted-links
+/// ledger, ingest every ingestible file, then run the linker over each touched
+/// entity. Extracted from `ingest_vault_once.rs`; behavior identical to the
+/// original bin main plus the ledger gate.
 pub fn ingest_run() -> Result<()> {
     let paths_b = retrieval::resolve_brain_paths();
     let profile =
@@ -257,18 +344,35 @@ pub fn ingest_run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
     let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
 
-    let mut files: Vec<WalkedFile> = Vec::new();
-    let mut walk_errors = Vec::new();
-    collect_files(&vault_root, true, &mut files, &mut walk_errors);
+    // Load the ledger (Task 10) so walk_vault gates every direct-child
+    // documents/ symlink through classify_link.
+    let brain_cfg = tauri_app_lib::config::BrainConfig::load(&paths_b)
+        .context("read trusted_links ledger from config.json")?;
+    let outcome = walk_vault(&vault_root, &brain_cfg.trusted_links, dirs::home_dir().as_deref());
+
+    // Surface pending + denied so a headless run exits with the right
+    // remediation hint (spec Risks).
+    for d in &outcome.denied {
+        eprintln!(
+            "refused: {} -> {} ({}). This cannot be approved.",
+            d.link, d.target, d.reason
+        );
+    }
+    for p in &outcome.pending {
+        eprintln!(
+            "pending: {} -> {} is not approved; its content was skipped.\n  approve with: ct trust {}",
+            p.link, p.target, p.link
+        );
+    }
+    for e in &outcome.errors {
+        eprintln!("warn: {e}");
+    }
+
+    let mut files = outcome.files;
     files.sort_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
     files.dedup_by(|a, b| a.virtual_path == b.virtual_path);
 
-    // Traversal errors count as failures so an unreadable path can't make a
-    // partial run look complete.
-    let mut failed = walk_errors.len();
-    for e in &walk_errors {
-        eprintln!("warn: {e}");
-    }
+    let mut failed = outcome.errors.len() + outcome.pending.len() + outcome.denied.len();
     println!(
         "ingesting {} file(s) from {}",
         files.len(),
