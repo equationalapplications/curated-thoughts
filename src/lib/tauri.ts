@@ -620,6 +620,23 @@ export const getOntologySelection = (): Promise<OntologySelection> =>
 export const setOntologySelection = (selection: OntologySelection): Promise<void> =>
   invoke('set_ontology_selection', { selection });
 
+/** A symlink under documents/ that resolves outside the vault and is not yet
+ * approved by the trusted-links ledger. The Desktop review surface renders
+ * one card per pending link so the user can approve or revoke in place. */
+export interface PendingLink {
+  link: string;
+  target: string;
+}
+
+export const listPendingLinks = (): Promise<PendingLink[]> =>
+  invoke('list_pending_links');
+
+export const approveLink = (link: string): Promise<void> =>
+  invoke('approve_link', { link });
+
+export const revokeLink = (link: string): Promise<void> =>
+  invoke('revoke_link', { link });
+
 export interface OkfExportSummary {
   path: string;
   entities: number;

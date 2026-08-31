@@ -30,6 +30,7 @@ mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
 pub mod vault;
+pub mod walk_vault;
 pub mod watcher;
 pub mod wiki_graph;
 
@@ -2704,6 +2705,9 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             vault_upsert_index_entry,
             get_ontology_selection,
             set_ontology_selection,
+            list_pending_links,
+            approve_link,
+            revoke_link,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -3182,6 +3186,9 @@ pub fn run() {
             acknowledge_ephemeral_disclosure,
             get_ontology_selection,
             set_ontology_selection,
+            list_pending_links,
+            approve_link,
+            revoke_link,
             get_binary_path,
             get_brain_dir,
             get_brain_dir_info,
@@ -3418,6 +3425,81 @@ fn set_ontology_selection(selection: String) -> Result<(), String> {
     cfg.ontology.schema = Some(parsed);
     cfg.write(&paths).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct PendingLinkPayload {
+    link: String,
+    target: String,
+}
+
+#[tauri::command]
+fn list_pending_links() -> Result<Vec<PendingLinkPayload>, String> {
+    let paths = retrieval::resolve_brain_paths();
+    let cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    let vault_root = cfg
+        .vault_path
+        .clone()
+        .ok_or_else(|| "no vault configured".to_string())?;
+
+    let outcome = walk_vault::walk_vault(
+        std::path::Path::new(&vault_root),
+        &cfg.trusted_links,
+        dirs::home_dir().as_deref(),
+    );
+    Ok(outcome
+        .pending
+        .into_iter()
+        .map(|p| PendingLinkPayload {
+            link: p.link,
+            target: p.target,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn approve_link(link: String) -> Result<(), String> {
+    use crate::trusted_links::{classify_link, LinkVerdict, TrustedLink};
+
+    let paths = retrieval::resolve_brain_paths();
+    let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    let vault_root = std::path::PathBuf::from(
+        cfg.vault_path
+            .clone()
+            .ok_or_else(|| "no vault configured".to_string())?,
+    );
+    let target = std::fs::canonicalize(vault_root.join(&link))
+        .map_err(|e| format!("{link} could not be resolved: {e}"))?;
+
+    match classify_link(
+        &link,
+        &target,
+        &vault_root,
+        dirs::home_dir().as_deref(),
+        &cfg.trusted_links,
+    ) {
+        LinkVerdict::Denied(reason) => Err(format!("refused: {}", reason.message())),
+        _ => {
+            cfg.trusted_links.retain(|e| e.link != link);
+            cfg.trusted_links.push(TrustedLink {
+                link,
+                target: target.to_string_lossy().to_string(),
+                approved_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+            });
+            cfg.write(&paths).map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn revoke_link(link: String) -> Result<(), String> {
+    let paths = retrieval::resolve_brain_paths();
+    let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
+    cfg.trusted_links.retain(|e| e.link != link);
+    cfg.write(&paths).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

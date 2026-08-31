@@ -17,6 +17,7 @@ import { allRejectDecisions, buildDecisions, defaultItemDecisions, hasAcceptedIt
 import { saveRejectReason } from "../../lib/reviewRejectReasons";
 import { ReviewQueueList } from "../review/ReviewQueueList";
 import { ReviewEvidencePanel } from "../review/ReviewEvidencePanel";
+import { PendingLinksPanel } from "../review/PendingLinksPanel";
 import { ReviewProposalEditor } from "../review/ReviewProposalEditor";
 
 interface Props {
@@ -356,6 +357,7 @@ export function ReviewMode({
 
   return (
     <div className="mode-layout review-screen review-desk">
+      <PendingLinksPanel />
       <ReviewQueueList
         queue={queue}
         selectedId={proposal?.id ?? null}

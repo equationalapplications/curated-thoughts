@@ -68,6 +68,11 @@ function defaultInvoke(cmd: string, args?: Record<string, unknown>) {
   if (cmd === "get_indexing_status") {
     return Promise.resolve({ indexed: 0, pending: 0 });
   }
+  if (cmd === "list_pending_links") {
+    // Default: no pending links so the panel renders nothing and the
+    // existing review tests are unaffected.
+    return Promise.resolve([]);
+  }
   if (cmd === "get_proposal_detail_cmd") {
     const proposalId = args?.proposalId as string;
     const summary = [PAGE, OLDER, NEWER].find((p) => p.id === proposalId) ?? PAGE;
