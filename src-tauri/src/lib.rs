@@ -20,6 +20,7 @@ pub mod onboard;
 pub mod outbox;
 mod pipeline;
 pub mod privacy;
+pub mod trusted_links;
 mod proposals_api;
 pub mod recall_bench_fixture;
 pub mod retrieval;

@@ -3,6 +3,7 @@ pub use crate::inference::config::{EmbeddingConfig, GenerationConfig};
 use crate::ontology_config::OntologyConfigBlock;
 use crate::privacy::PrivacyConfig;
 use crate::retrieval::BrainPaths;
+use crate::trusted_links::TrustedLink;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -62,6 +63,10 @@ pub struct BrainConfig {
     /// User's ontology selection (which schema the wiki engine is seeded with).
     #[serde(default)]
     pub ontology: OntologyConfigBlock,
+    /// Approved symlink `(link, target)` pairs. Written only by the approval
+    /// flows (`ct trust`, the Desktop review prompt) — never hand-edited.
+    #[serde(default)]
+    pub trusted_links: Vec<TrustedLink>,
     /// Preserved raw JSON for unknown keys (round-trip vehicle).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_keys: Option<serde_json::Value>,
@@ -99,6 +104,7 @@ impl Default for BrainConfig {
             embedding: EmbeddingConfig::default(),
             privacy: PrivacyConfig::default(),
             ontology: OntologyConfigBlock::default(),
+            trusted_links: Vec::new(),
             preserved_keys: None,
             preserved_generation: None,
             preserved_embedding: None,
@@ -168,6 +174,7 @@ impl BrainConfig {
             "embedding",
             "privacy",
             "ontology",
+            "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
             .iter()
@@ -352,6 +359,7 @@ impl BrainConfig {
             "embedding",
             "privacy",
             "ontology",
+            "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
             .iter()
@@ -527,6 +535,22 @@ impl BrainConfig {
             }
         }
 
+        // trusted_links: lenient — an unparseable entry is dropped, the rest
+        // survive. This is the only mutable-from-config surface for the
+        // ledger; a corruption in one entry must not nuke the whole list.
+        if let Some(tl) = obj.get("trusted_links").and_then(|v| v.as_array()) {
+            let mut kept = Vec::with_capacity(tl.len());
+            for entry in tl {
+                match serde_json::from_value::<TrustedLink>(entry.clone()) {
+                    Ok(e) => kept.push(e),
+                    Err(err) => report
+                        .diagnostics
+                        .push(format!("trusted_links entry unparseable: {}", err)),
+                }
+            }
+            report.config.trusted_links = kept;
+        }
+
         Ok(report)
     }
 
@@ -639,6 +663,10 @@ impl BrainConfig {
         obj.insert("embedding".to_string(), emb_value);
         obj.insert("privacy".to_string(), priv_value);
         obj.insert("ontology".to_string(), ont_value);
+        obj.insert(
+            "trusted_links".to_string(),
+            serde_json::to_value(&self.trusted_links)?,
+        );
 
         // Merge preserved top-level keys back in.
         if let Some(ref preserved) = self.preserved_keys {
