@@ -110,31 +110,35 @@ struct ConfigMalformedPayload {
 
 struct PendingConfigMalformed(Mutex<Option<ConfigMalformedPayload>>);
 
-#[derive(Clone, Copy, Default)]
-struct IngestStatusFlags {
+// No longer `Copy`: `ingest` carries a stage and subject, so the derive
+// narrows to `Clone` (spec §7).
+#[derive(Clone, Default)]
+struct IngestStatus {
     health: crate::pipeline::watchdog::PipelineHealth,
+    stage: Option<String>,
+    subject: Option<String>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct WikiStatusFlags {
-    ingesting: bool,
+    ingest: IngestStatus,
     librarian: bool,
     healing: bool,
     pruning: bool,
     forgetting: bool,
-    ingest: IngestStatusFlags,
 }
 
 fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
     let _ = app.emit(
         "wiki-status-change",
         json!({
-            "ingesting": current.ingesting,
+            "ingest": current.ingest.health.as_str(),
+            "ingestStage": current.ingest.stage,
+            "ingestSubject": current.ingest.subject,
             "librarian": current.librarian,
             "healing": current.healing,
             "pruning": current.pruning,
             "forgetting": current.forgetting,
-            "ingest": { "health": current.ingest.health },
         }),
     );
 }
@@ -870,7 +874,11 @@ fn start_file_watcher_inner(
             for event in status_rx {
                 let PipelineStatusEvent::PendingCount(count) = event;
                 update_wiki_status_from_app(&app_handle, |flags| {
-                    flags.ingesting = count > 0;
+                    flags.ingest.health = if count > 0 {
+                        pipeline::watchdog::PipelineHealth::Working
+                    } else {
+                        pipeline::watchdog::PipelineHealth::Idle
+                    };
                 });
             }
         });
@@ -1010,7 +1018,8 @@ fn start_file_watcher_inner(
                             .to_string_lossy()
                             .into_owned();
                         update_wiki_status(app, &status_state, |flags| {
-                            flags.ingesting = true;
+                            flags.ingest.health =
+                                pipeline::watchdog::PipelineHealth::Working;
                         });
                         if let Err(e) = enqueue_vault_event(
                             conn,
@@ -1112,13 +1121,15 @@ fn start_file_watcher_inner(
         let event_kind = match &event {
             VaultEvent::Added(_) => {
                 update_wiki_status_from_app(&app, |flags| {
-                    flags.ingesting = true;
+                    flags.ingest.health =
+                        pipeline::watchdog::PipelineHealth::Working;
                 });
                 Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
             }
             VaultEvent::Modified(_) => {
                 update_wiki_status_from_app(&app, |flags| {
-                    flags.ingesting = true;
+                    flags.ingest.health =
+                        pipeline::watchdog::PipelineHealth::Working;
                 });
                 Ok(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             }
@@ -1757,7 +1768,7 @@ async fn run_wiki_reembed(
             Some(p) => p.0.clone(),
             None => {
                 update_wiki_status(&app, &status_state, |flags| {
-                    flags.ingesting = false;
+                    flags.ingest.health = pipeline::watchdog::PipelineHealth::Idle;
                 });
                 return Err("pipeline not running".to_string());
             }
@@ -1799,7 +1810,7 @@ async fn run_wiki_reembed(
 
     if result.is_err() {
         update_wiki_status(&app, &status_state, |flags| {
-            flags.ingesting = false;
+            flags.ingest.health = pipeline::watchdog::PipelineHealth::Idle;
         });
     }
 

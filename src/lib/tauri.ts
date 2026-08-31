@@ -537,8 +537,12 @@ export const getImpactRadius = (
 ): Promise<NeighborRow[]> =>
   invoke('get_impact_radius', { rootChunkId, entityId, direction, maxHops });
 
+export type IngestHealth = 'idle' | 'working' | 'stalled' | 'degraded';
+
 export interface WikiStatusPayload {
-  ingesting: boolean;
+  ingest: IngestHealth;
+  ingestStage?: string | null;
+  ingestSubject?: string | null;
   librarian: boolean;
   healing: boolean;
   pruning: boolean;

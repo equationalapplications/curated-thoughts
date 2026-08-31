@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   subscribeEntityStatus,
+  type IngestHealth,
   type WikiStatusEventPayload,
   type WikiStatusPayload,
 } from '../lib/tauri';
@@ -28,9 +29,13 @@ const jobLabels: Record<WikiStatus['activeJob'], string | null> = {
   multiple: 'Multiple jobs',
 };
 
+function isIngestActive(ingest: IngestHealth | undefined): boolean {
+  return !!ingest && ingest !== 'idle';
+}
+
 function getActiveJob(payload: WikiStatusPayload): WikiStatus['activeJob'] {
   const active = [
-    payload.ingesting ? 'ingesting' : null,
+    isIngestActive(payload.ingest) ? 'ingesting' : null,
     payload.librarian ? 'librarian' : null,
     payload.healing ? 'healing' : null,
     payload.pruning ? 'pruning' : null,
@@ -44,7 +49,9 @@ function getActiveJob(payload: WikiStatusPayload): WikiStatus['activeJob'] {
 
 export function useWikiStatus(): WikiStatus {
   const [status, setStatus] = useState<WikiStatus>({
-    ingesting: false,
+    ingest: 'idle',
+    ingestStage: null,
+    ingestSubject: null,
     librarian: false,
     healing: false,
     pruning: false,
@@ -69,17 +76,20 @@ export function useWikiStatus(): WikiStatus {
       setStatus((prev) => {
         const normalized = normalizePayload(e.payload);
         const payload: WikiStatusPayload = {
-          ingesting: normalized.ingesting ?? prev.ingesting,
+          ingest: (normalized.ingest ?? prev.ingest) as IngestHealth,
+          ingestStage: normalized.ingestStage ?? prev.ingestStage,
+          ingestSubject: normalized.ingestSubject ?? prev.ingestSubject,
           librarian: normalized.librarian ?? prev.librarian,
           healing: normalized.healing ?? prev.healing,
           pruning: normalized.pruning ?? prev.pruning,
           forgetting: normalized.forgetting ?? prev.forgetting,
         };
         const activeJob = getActiveJob(payload);
+        const ingestBusy = isIngestActive(payload.ingest);
         return {
           ...payload,
           busy:
-            payload.ingesting ||
+            ingestBusy ||
             payload.librarian ||
             payload.healing ||
             payload.pruning ||

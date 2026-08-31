@@ -295,7 +295,9 @@ describe('VaultPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useWikiStatus).mockReturnValue({
-      ingesting: false,
+      ingest: 'idle',
+      ingestStage: null,
+      ingestSubject: null,
       librarian: false,
       healing: false,
       pruning: true,
