@@ -218,3 +218,45 @@ UPDATE llm_wiki_entries
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (12);
 ";
+
+pub const MIGRATION_V13: &str = "
+-- Watchdog state. Spec: docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md §2.4
+-- Single-row mirror of the in-memory heartbeat, so worker state survives to
+-- post-mortem and is readable by the headless CLI.
+CREATE TABLE IF NOT EXISTS pipeline_heartbeat (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch            INTEGER NOT NULL DEFAULT 0,
+    seq              INTEGER NOT NULL DEFAULT 0,
+    stage            TEXT    NOT NULL DEFAULT 'idle',
+    subject          TEXT,
+    stage_started_ms INTEGER NOT NULL DEFAULT 0,
+    updated_ms       INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO pipeline_heartbeat (id) VALUES (1);
+
+-- One row per watchdog trip. Written BEFORE any recovery action (§3).
+CREATE TABLE IF NOT EXISTS pipeline_stalls (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    tripped_ms    INTEGER NOT NULL,
+    kind          TEXT    NOT NULL,   -- 'stage_stall' | 'drain_stall'
+    stage         TEXT    NOT NULL,
+    subject       TEXT,
+    stalled_ms    INTEGER NOT NULL,
+    heartbeat_seq INTEGER NOT NULL,
+    epoch         INTEGER NOT NULL,
+    pending_count INTEGER NOT NULL,
+    embed_endpoint TEXT,
+    gen_endpoint   TEXT,
+    action        TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_stalls_tripped ON pipeline_stalls(tripped_ms);
+
+-- Strike ledger keyed by document path (§4.2).
+CREATE TABLE IF NOT EXISTS stall_strikes (
+    path        TEXT PRIMARY KEY,
+    strikes     INTEGER NOT NULL DEFAULT 0,
+    last_ms     INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (13);
+";

@@ -1,6 +1,7 @@
 //! Build-time guard: Rust DDL constants must match core-llm-wiki package setupDatabase.
 
 use crate::db::okf_ddl::{LLM_WIKI_PACKAGE_DDL, LLM_WIKI_PREFIX};
+use rusqlite::Connection;
 
 /// Collapse whitespace so cosmetic formatting differences do not fail the diff.
 pub fn normalize_ddl_statement(stmt: &str) -> String {
@@ -95,4 +96,27 @@ mod tests {
             "CREATE TABLE foo ( id TEXT )"
         );
     }
+}
+
+/// Adds a column to a table if it does not already exist. Safe against
+/// re-runs on pre-existing columns (idempotent). Uses `PRAGMA table_info`
+/// to check for existence before adding.
+pub fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    declared_type: &str,
+) -> anyhow::Result<()> {
+    let info: Vec<String> = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |row| row.get(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !info.contains(&column.to_string()) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {declared_type}"),
+            [],
+        )?;
+    }
+    Ok(())
 }

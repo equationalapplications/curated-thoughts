@@ -1,7 +1,7 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
-    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V2, MIGRATION_V3,
-    MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V2,
+    MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -95,6 +95,17 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     if version < 12 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))?;
     }
+    if version < 13 {
+        // `documents` predates this migration, so the column add is done
+        // through the additive helper rather than inside the SQL constant.
+        crate::db::ddl_compat::add_column_if_missing(
+            conn,
+            "documents",
+            "quarantined_at",
+            "INTEGER",
+        )?;
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13))?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -183,7 +194,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 12);
+        assert_eq!(max_version, 13);
     }
 
     /// Fresh-DB path: `open_in_memory` applies every migration, so the
@@ -721,6 +732,55 @@ mod tests {
     /// the OKF V7 DDL (the state of a Phase 5 production DB), runs the
     /// production migration gate (`migrate`), and asserts the
     /// `content_hash` column exists.
+    #[test]
+    fn migration_v13_creates_watchdog_tables_and_quarantine_column() {
+        let conn = open_in_memory().unwrap();
+
+        for table in ["pipeline_heartbeat", "pipeline_stalls", "stall_strikes"] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "missing table {table}");
+        }
+
+        // documents gains a nullable quarantine timestamp.
+        conn.execute_batch(
+            "INSERT INTO documents (path, hash, tier, status, quarantined_at)
+         VALUES ('/tmp/a.md', 'h', 'user_doc', 'pending', 123);",
+        )
+        .unwrap();
+        let q: Option<i64> = conn
+            .query_row(
+                "SELECT quarantined_at FROM documents WHERE path = '/tmp/a.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(q, Some(123));
+
+        // Heartbeat is a single-row table seeded at migration time.
+        let hb: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pipeline_heartbeat", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hb, 1);
+    }
+
+    #[test]
+    fn migration_v13_is_idempotent() {
+        let conn = open_in_memory().unwrap();
+        // Re-running the migration body must not error or duplicate the seed row.
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13))
+            .unwrap();
+        let hb: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pipeline_heartbeat", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hb, 1);
+    }
+
     #[test]
     fn migration_v9_adds_content_hash_column_to_phase5_database() {
         // Simulate a Phase 5 production database: V1..V6 + OKF V7 DDL,
