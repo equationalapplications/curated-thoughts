@@ -15,6 +15,7 @@ pub mod librarian;
 pub mod mcp_server;
 pub mod okf;
 mod okf_api;
+pub mod ontology_config;
 pub mod onboard;
 pub mod outbox;
 mod pipeline;

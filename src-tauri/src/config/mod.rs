@@ -1,5 +1,6 @@
 use crate::embedder::EmbedProfile;
 pub use crate::inference::config::{EmbeddingConfig, GenerationConfig};
+use crate::ontology_config::OntologyConfigBlock;
 use crate::privacy::PrivacyConfig;
 use crate::retrieval::BrainPaths;
 use anyhow::{bail, Result};
@@ -58,6 +59,9 @@ pub struct BrainConfig {
     pub embedding: EmbeddingConfig,
     /// Privacy mode and settings.
     pub privacy: PrivacyConfig,
+    /// User's ontology selection (which schema the wiki engine is seeded with).
+    #[serde(default)]
+    pub ontology: OntologyConfigBlock,
     /// Preserved raw JSON for unknown keys (round-trip vehicle).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_keys: Option<serde_json::Value>,
@@ -70,6 +74,9 @@ pub struct BrainConfig {
     /// Preserved raw JSON for unknown keys inside privacy block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_privacy: Option<serde_json::Value>,
+    /// Preserved raw JSON for unknown keys inside the ontology block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_ontology: Option<serde_json::Value>,
     /// Raw generation block JSON used when typed deserialization fails.
     /// When set, write() emits this verbatim instead of the typed generation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,10 +98,12 @@ impl Default for BrainConfig {
             generation: GenerationConfig::default(),
             embedding: EmbeddingConfig::default(),
             privacy: PrivacyConfig::default(),
+            ontology: OntologyConfigBlock::default(),
             preserved_keys: None,
             preserved_generation: None,
             preserved_embedding: None,
             preserved_privacy: None,
+            preserved_ontology: None,
             raw_generation: None,
             raw_embedding: None,
             raw_privacy: None,
@@ -158,6 +167,7 @@ impl BrainConfig {
             "generation",
             "embedding",
             "privacy",
+            "ontology",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
             .iter()
@@ -237,6 +247,21 @@ impl BrainConfig {
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     cfg.preserved_privacy = if unknown.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(unknown))
+                    };
+                }
+
+                // Extract nested unknown keys from ontology block
+                if let Some(ont_val) = obj.get("ontology").and_then(|v| v.as_object()) {
+                    let known_ont_keys = ["schema"];
+                    let unknown: serde_json::Map<String, serde_json::Value> = ont_val
+                        .iter()
+                        .filter(|(k, _)| !known_ont_keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    cfg.preserved_ontology = if unknown.is_empty() {
                         None
                     } else {
                         Some(serde_json::Value::Object(unknown))
@@ -326,6 +351,7 @@ impl BrainConfig {
             "generation",
             "embedding",
             "privacy",
+            "ontology",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
             .iter()
@@ -389,6 +415,21 @@ impl BrainConfig {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             report.config.preserved_privacy = if unknown.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(unknown))
+            };
+        }
+
+        // Extract nested unknown keys from ontology block
+        if let Some(ont_val) = obj.get("ontology").and_then(|v| v.as_object()) {
+            let known_ont_keys = ["schema"];
+            let unknown: serde_json::Map<String, serde_json::Value> = ont_val
+                .iter()
+                .filter(|(k, _)| !known_ont_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            report.config.preserved_ontology = if unknown.is_empty() {
                 None
             } else {
                 Some(serde_json::Value::Object(unknown))
@@ -474,6 +515,18 @@ impl BrainConfig {
             report.privacy_missing = true;
         }
 
+        // ontology: lenient — an unrecognized selection drops to "never chosen"
+        if let Some(ont) = obj.get("ontology") {
+            match serde_json::from_value::<OntologyConfigBlock>(ont.clone()) {
+                Ok(o) => report.config.ontology = o,
+                Err(e) => {
+                    report
+                        .diagnostics
+                        .push(format!("ontology block unparseable: {}", e));
+                }
+            }
+        }
+
         Ok(report)
     }
 
@@ -557,6 +610,18 @@ impl BrainConfig {
             priv_value
         };
 
+        // Ontology section
+        let mut ont_value = serde_json::to_value(&self.ontology)?;
+        if let Some(ref preserved) = self.preserved_ontology {
+            if let (Some(ont_obj), Some(preserved_obj)) =
+                (ont_value.as_object_mut(), preserved.as_object())
+            {
+                for (k, v) in preserved_obj {
+                    ont_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
         // Insert modeled sections with preserved nested keys merged in.
         obj.insert(
             "vault_path".to_string(),
@@ -573,6 +638,7 @@ impl BrainConfig {
         obj.insert("generation".to_string(), gen_value);
         obj.insert("embedding".to_string(), emb_value);
         obj.insert("privacy".to_string(), priv_value);
+        obj.insert("ontology".to_string(), ont_value);
 
         // Merge preserved top-level keys back in.
         if let Some(ref preserved) = self.preserved_keys {
