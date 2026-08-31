@@ -20,6 +20,22 @@ pub const DRAIN_STALL_WINDOW: Duration = Duration::from_secs(900);
 /// How often the supervisor wakes.
 pub const TICK: Duration = Duration::from_secs(5);
 
+/// Wait for a worker thread, giving up after `timeout`. `std::thread` has no
+/// timed join, so the thread signals completion over a channel and the caller
+/// abandons it on timeout — which is exactly what `switch_vault` needs so it
+/// stops inheriting a wedge (spec §6).
+pub fn join_with_timeout(
+    join: std::thread::JoinHandle<()>,
+    timeout: Duration,
+) -> bool {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = join.join();
+        let _ = done_tx.send(());
+    });
+    done_rx.recv_timeout(timeout).is_ok()
+}
+
 /// Returns `Some(stalled_ms)` when the current stage has exceeded its budget.
 pub fn evaluate_stage_stall(
     snapshot: &HeartbeatSnapshot,
@@ -166,5 +182,25 @@ mod tests {
             Stage::Embedding,
             t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn join_with_timeout_returns_false_for_a_wedged_thread() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // Blocks until the test drops `tx` — stands in for a wedge.
+            let _ = rx.recv();
+        });
+
+        let finished = join_with_timeout(handle, Duration::from_millis(200));
+        assert!(!finished, "a wedged thread must not be waited on forever");
+
+        drop(tx); // let the stand-in thread exit
+    }
+
+    #[test]
+    fn join_with_timeout_returns_true_for_a_thread_that_finishes() {
+        let handle = std::thread::spawn(|| {});
+        assert!(join_with_timeout(handle, Duration::from_secs(5)));
     }
 }

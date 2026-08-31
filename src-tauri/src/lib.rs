@@ -1252,9 +1252,21 @@ async fn switch_vault(
 
     {
         let mut g = pipeline.0.lock().unwrap();
-        if let Some((tx, join, _pending, _status_rx, _heartbeat)) = g.take() {
+        if let Some((tx, join, _pending, _status_rx, heartbeat)) = g.take() {
             drop(tx);
-            let _ = join.join();
+            // Supersede first, so a worker that later wakes exits without
+            // racing the replacement (spec §4.1), then give it a bounded
+            // window rather than blocking switch_vault forever (spec §6).
+            heartbeat.bump_epoch();
+            let finished = pipeline::watchdog::join_with_timeout(
+                join,
+                Duration::from_secs(10),
+            );
+            if !finished {
+                eprintln!(
+                    "[switch_vault] pipeline worker did not exit within 10s; abandoning it"
+                );
+            }
         }
     }
 
@@ -1491,6 +1503,8 @@ fn queue_full_reindex(
             .clone()
     };
     let mut queued = 0usize;
+    let mut deferred = 0usize;
+    let total = paths.len();
     for path in paths {
         if !std::path::Path::new(&path).exists() {
             eprintln!("[queue_full_reindex] skip missing file: {path}");
@@ -1501,9 +1515,23 @@ fn queue_full_reindex(
         } else {
             PipelineJob::ingest(path)
         };
-        tx.send(job)
-            .map_err(|e| format!("pipeline channel closed: {e}"))?;
-        queued += 1;
+        // try_send, not send: a blocking send here freezes the Tauri IPC
+        // thread when the channel fills (spec §6). The remainder stays
+        // `pending` and is picked up by the watchdog sweep.
+        match tx.try_send(job) {
+            Ok(()) => queued += 1,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                deferred += 1;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(e)) => {
+                return Err(format!("pipeline channel closed: {e:?}"));
+            }
+        }
+    }
+    if deferred > 0 {
+        eprintln!(
+            "[queue_full_reindex] queued {queued} of {total}; {deferred} deferred to the watchdog sweep"
+        );
     }
     Ok(queued)
 }
@@ -1706,13 +1734,29 @@ async fn run_wiki_reembed(
         let paths = crate::db::list_indexed_user_doc_paths(conn).map_err(|e| e.to_string())?;
         drop(guard);
         let mut queued = 0usize;
+        let mut deferred = 0usize;
+        let total = paths.len();
         for path in paths {
             if !std::path::Path::new(&path).exists() {
                 continue;
             }
-            tx.send(PipelineJob::rechunk_for_reembed(path))
-                .map_err(|e| format!("pipeline channel closed: {e}"))?;
-            queued += 1;
+            // try_send, not send: a blocking send here freezes the Tauri IPC
+            // thread when the channel fills (spec §6). The remainder stays
+            // `pending` and is picked up by the watchdog sweep.
+            match tx.try_send(PipelineJob::rechunk_for_reembed(path)) {
+                Ok(()) => queued += 1,
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    deferred += 1;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(e)) => {
+                    return Err(format!("pipeline channel closed: {e:?}"));
+                }
+            }
+        }
+        if deferred > 0 {
+            eprintln!(
+                "[run_wiki_reembed] queued {queued} of {total}; {deferred} deferred to the watchdog sweep"
+            );
         }
         Ok(queued)
     })();
