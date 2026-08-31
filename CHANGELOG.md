@@ -1,3 +1,29 @@
+## [1.38.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.37.0...v1.38.0) (2026-08-31)
+
+### Features
+
+* **cli:** ct trust for approving symlinks, plus ingest --trust-new-links ([3d32913](https://github.com/equationalapplications/curated-thoughts/commit/3d32913e726ee3be22934c402066c787a3578836))
+* **config:** add ontology selection block with preserved-key round-trip ([eb0db9c](https://github.com/equationalapplications/curated-thoughts/commit/eb0db9c72bf1f8e282bdea98ef1ab66cfb1cb4d3))
+* **deps:** pin llm-wiki 6.2.0, add schema packages; correct spec export names and off-mode ([79cd4c4](https://github.com/equationalapplications/curated-thoughts/commit/79cd4c470090ca1188d6a17318d7b2587427ee93))
+* **ingest:** gate symlink traversal on the trusted-links ledger ([84d4093](https://github.com/equationalapplications/curated-thoughts/commit/84d4093cfe011a5f6bb0302a2739ef604b1e627c))
+* **ingest:** walker emits virtual/read path pairs for symlinked docs ([eba8a44](https://github.com/equationalapplications/curated-thoughts/commit/eba8a4482f20dee718ae2860e01ad2fd40298d6e))
+* **ipc:** get/set ontology selection commands ([c2c5c19](https://github.com/equationalapplications/curated-thoughts/commit/c2c5c19e5e4d9afb8ea7168291c8145fa6a0f7b6))
+* **onboard:** prompt for knowledge schema, defaulting to software-org ([0b3bc15](https://github.com/equationalapplications/curated-thoughts/commit/0b3bc15b3e43a3d8b9be78b701624d2ea1fce117))
+* **pipeline:** virtual/read path split so symlinked files keep vault identity ([b0ca245](https://github.com/equationalapplications/curated-thoughts/commit/b0ca2451bce4edfd4297829de3a5a81f47892f98))
+* **review:** approve pending symlinks from the desktop review surface ([3d043d8](https://github.com/equationalapplications/curated-thoughts/commit/3d043d87c9b81c0bf12249b0bd57acab0482a9d0))
+* **security:** trusted-links ledger with non-approvable deny rules ([baf0032](https://github.com/equationalapplications/curated-thoughts/commit/baf0032c0f53e02c3a5cd55564969b4fe1b928e1))
+* **settings:** knowledge-schema panel with confirmed switch and backfill ([0278d39](https://github.com/equationalapplications/curated-thoughts/commit/0278d39331b3ca79f96be84170a3a8a60d99802c))
+* **setup:** preselected ontology choice in welcome step, no new wizard step ([a6b8e38](https://github.com/equationalapplications/curated-thoughts/commit/a6b8e380390c38ed76e450c4f7e0ffb7e5eaa58a))
+* **wiki:** seed the selected ontology manifest into createWiki, fail boot on bad manifest ([59a47f6](https://github.com/equationalapplications/curated-thoughts/commit/59a47f686ea32c4597ac70fe95c94001c77f8b11))
+
+### Bug Fixes
+
+* **review:** address CodeQL rust/cleartext-logging in ct trust --list ([088d972](https://github.com/equationalapplications/curated-thoughts/commit/088d972ba5241019f3eefb869063e1fa40d3095e))
+* **review:** address CodeRabbit + CodeQL findings for PR [#124](https://github.com/equationalapplications/curated-thoughts/issues/124) ([37697ea](https://github.com/equationalapplications/curated-thoughts/commit/37697eaa497007f659ac3b946c34bd5e194d0e83))
+* **review:** address second-round CodeRabbit + Copilot findings for PR [#124](https://github.com/equationalapplications/curated-thoughts/issues/124) ([6c1113e](https://github.com/equationalapplications/curated-thoughts/commit/6c1113e13bb4604f5f50d8dfd79994ffc5ad8dfe))
+* **review:** apply /code-review medium findings for PR [#124](https://github.com/equationalapplications/curated-thoughts/issues/124) ([0f63e98](https://github.com/equationalapplications/curated-thoughts/commit/0f63e9874513e2d8ef823e4785cd88725e93e6ed))
+* **review:** canonicalize home before comparison in classify_link ([f0c30e8](https://github.com/equationalapplications/curated-thoughts/commit/f0c30e818f06cb4578fa47afe9508717d7e13337))
+
 ## [1.37.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.36.0...v1.37.0) (2026-08-30)
 
 ### Features
