@@ -5,7 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
-import type { WikiStatusEventPayload } from "./tauri";
+import { getOntologySelection, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
+import { ontologyConfigFor } from "./ontology";
 
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
@@ -46,7 +47,7 @@ export async function ingestDocumentByPath(
   return wiki.ingestDocument(entityId, params);
 }
 
-function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, unknown> {
+function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): WikiOptions & Record<string, unknown> {
   return {
     llmProvider: {
       async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
@@ -71,6 +72,11 @@ function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, un
     config: {
       hybridWeight: 0.7,
       preFilterLimit: 50,
+      ontology: ontologyConfigFor(selection, [
+        'tier_fact',
+        'tier_wisdom',
+        getWorkspaceId(),
+      ]),
       ...(enableOutbox && { enableOutbox: true }),
     },
     onRetrievalFallback: (err: Error) => {
@@ -80,11 +86,18 @@ function makeWikiOptions(enableOutbox: boolean): WikiOptions & Record<string, un
   } as WikiOptions & Record<string, unknown>;
 }
 
+// Desktop default until setupWiki() reads the persisted choice. The CLI writes
+// its own default during --onboard, so an unreadable config here means a
+// Desktop-first vault.
+let _ontologySelection: OntologySelection = 'schema-org';
+
 // Initialized in setupWiki(). The live binding is updated before the app renders,
 // so all callers that access `wiki` after setupWiki() resolves see the correct instance.
-export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
 
 export async function setupWiki() {
+  _ontologySelection = await getOntologySelection().catch(() => 'schema-org');
+
   // Register worker lifecycle listeners before running the initial wiki setup.
   // This prevents a race where the worker starts or stops during setup and the
   // module keeps a stale wiki instance based on the earlier outbox status value.
@@ -92,7 +105,7 @@ export async function setupWiki() {
 
   const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
     const gen = ++wikiUpdateGeneration;
-    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true));
+    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true, _ontologySelection));
     await updatedWiki.setup();
     if (gen !== wikiUpdateGeneration) return;
     wiki = updatedWiki;
@@ -103,7 +116,7 @@ export async function setupWiki() {
 
   const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
     const gen = ++wikiUpdateGeneration;
-    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false));
+    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
     await updatedWiki.setup();
     if (gen !== wikiUpdateGeneration) return;
     wiki = updatedWiki;
@@ -113,8 +126,18 @@ export async function setupWiki() {
   });
 
   const effectiveOutboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
-  const newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(effectiveOutboxEnabled));
-  await newWiki.setup();
+  let newWiki;
+  try {
+    newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(effectiveOutboxEnabled, _ontologySelection));
+    await newWiki.setup();
+  } catch (e) {
+    // No fallback to an untyped engine: running untyped is indistinguishable
+    // from a deliberate "off" selection, so the failure must reach the user.
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Knowledge schema "${_ontologySelection}" failed to load: ${detail}`,
+    );
+  }
   if (wikiUpdateGeneration === 0) {
     wiki = newWiki;
   }

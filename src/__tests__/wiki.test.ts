@@ -164,6 +164,20 @@ describe('tieredRead', () => {
     expect(setupMock).toHaveBeenCalledTimes(2);
   });
 
+  it('rethrows an engine-init failure with the schema named', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_ontology_selection') return 'schema-software-org';
+      if (cmd === 'outbox_is_configured') return false;
+      return undefined;
+    });
+    vi.mocked(createWiki).mockImplementation(() => {
+      throw new Error('duplicate node type slug: design_spec');
+    });
+
+    await expect(setupWiki()).rejects.toThrow(/schema-software-org/);
+    await expect(setupWiki()).rejects.toThrow(/duplicate node type slug/);
+  });
+
   it('recreates wiki with enableOutbox false when outbox-worker-stopped fires', async () => {
     vi.clearAllMocks();
     const setupMock = vi.fn().mockResolvedValue(undefined);
@@ -188,6 +202,38 @@ describe('tieredRead', () => {
       })
     );
     expect(setupMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes the resolved ontology config to createWiki under config', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_ontology_selection') return 'schema-software-org';
+      if (cmd === 'outbox_is_configured') return false;
+      return undefined;
+    });
+
+    await setupWiki();
+
+    const options = vi.mocked(createWiki).mock.calls.at(-1)?.[1] as {
+      config: { ontology?: { mode?: string; seedManifests?: Record<string, unknown> } };
+    };
+    expect(options.config.ontology?.mode).toBe('strict');
+    expect(Object.keys(options.config.ontology?.seedManifests ?? {})).toContain('tier_fact');
+    expect(Object.keys(options.config.ontology?.seedManifests ?? {})).toContain('tier_wisdom');
+  });
+
+  it('falls back to the desktop default when the selection cannot be read', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_ontology_selection') throw new Error('no config');
+      if (cmd === 'outbox_is_configured') return false;
+      return undefined;
+    });
+
+    await setupWiki();
+
+    const options = vi.mocked(createWiki).mock.calls.at(-1)?.[1] as {
+      config: { ontology?: { mode?: string } };
+    };
+    expect(options.config.ontology?.mode).toBe('strict');
   });
 
   it('forwards graphExpansion option when provided', async () => {
