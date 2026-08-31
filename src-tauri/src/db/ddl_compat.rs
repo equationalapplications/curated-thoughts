@@ -1,6 +1,7 @@
 //! Build-time guard: Rust DDL constants must match core-llm-wiki package setupDatabase.
 
 use crate::db::okf_ddl::{LLM_WIKI_PACKAGE_DDL, LLM_WIKI_PREFIX};
+use anyhow::Context;
 use rusqlite::Connection;
 
 /// Collapse whitespace so cosmetic formatting differences do not fail the diff.
@@ -96,6 +97,61 @@ mod tests {
             "CREATE TABLE foo ( id TEXT )"
         );
     }
+
+    /// `add_column_if_missing`: adding a column to a fresh table succeeds and
+    /// the column is readable back.
+    #[test]
+    fn add_column_if_missing_adds_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", []).unwrap();
+
+        super::add_column_if_missing(&conn, "t", "new_col", "TEXT").unwrap();
+
+        conn.execute("INSERT INTO t (id, new_col) VALUES (1, 'hello')", [])
+            .unwrap();
+        let val: String = conn
+            .query_row("SELECT new_col FROM t WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    /// `add_column_if_missing`: re-running on an already-present column returns
+    /// Ok without error and without changing any row.
+    #[test]
+    fn add_column_if_missing_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, existing TEXT)", [])
+            .unwrap();
+        conn.execute("INSERT INTO t (id, existing) VALUES (1, '原始值')", [])
+            .unwrap();
+
+        // First call adds the column (no-op since it already exists).
+        super::add_column_if_missing(&conn, "t", "existing", "TEXT").unwrap();
+
+        // Second call is also a no-op — still Ok, no rows touched.
+        super::add_column_if_missing(&conn, "t", "existing", "TEXT").unwrap();
+
+        let val: String = conn
+            .query_row("SELECT existing FROM t WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(val, "原始值");
+    }
+
+    /// `add_column_if_missing`: fails with a contextual error when the table
+    /// does not exist, rather than leaking a raw SQLite pragma error.
+    #[test]
+    fn add_column_if_missing_fails_on_missing_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        let result =
+            super::add_column_if_missing(&conn, "nonexistent_table", "col", "INTEGER");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent_table"),
+            "error message should name the missing table: {msg}"
+        );
+    }
 }
 
 /// Adds a column to a table if it does not already exist. Safe against
@@ -107,6 +163,20 @@ pub fn add_column_if_missing(
     column: &str,
     declared_type: &str,
 ) -> anyhow::Result<()> {
+    // Fail with a clear message if the table itself does not exist, rather
+    // than letting the raw SQLite error from PRAGMA table_info propagate.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .context(format!("add_column_if_missing: failed to check table '{table}'"))?;
+    if !table_exists {
+        anyhow::bail!("add_column_if_missing: table '{table}' does not exist");
+    }
+
     let info: Vec<String> = conn
         .prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |row| row.get(1))?
