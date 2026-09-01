@@ -14,6 +14,21 @@ const FOCUSABLE = [
   '[contenteditable="plaintext-only" i]',
 ].join(",");
 
+/**
+ * Sequential-tab candidates for wrap-around. Mirrors the CSS list but adds
+ * the rule CSS can't express across branches: an explicit tabindex="-1" is
+ * OUT of sequential tab order even when the element matches a tag branch
+ * (e.g. <button tabindex="-1">, or an editable host carrying tabindex="-1").
+ * (CodeRabbit round-4.)
+ */
+function isTabCandidate(el: HTMLElement): boolean {
+  return el.getAttribute("tabindex") !== "-1";
+}
+
+function tabCandidates(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isTabCandidate);
+}
+
 export interface FocusTrapOptions {
   active: boolean;
   /** Return true to let the browser handle this Tab (e.g. rich-text editors keep cursor control). */
@@ -40,7 +55,7 @@ export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
     const container = containerRef.current;
     previousFocus.current = document.activeElement;
 
-    const first = container.querySelector<HTMLElement>(FOCUSABLE);
+    const first = tabCandidates(container)[0];
     (first ?? container).focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -53,9 +68,7 @@ export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
       // yieldTo: ProseMirror/BlockNote keeps Tab + cursor control (spec §useFocusTrap).
       if (event.target instanceof Element && yieldToRef.current?.(event.target)) return;
 
-      const focusables = Array.from(
-        container.querySelectorAll<HTMLElement>(FOCUSABLE),
-      );
+      const focusables = tabCandidates(container);
       if (focusables.length === 0) return;
       const firstEl = focusables[0];
       const lastEl = focusables[focusables.length - 1];

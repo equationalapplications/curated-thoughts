@@ -169,4 +169,39 @@ describe("useFocusTrap", () => {
       expect(document.activeElement).toBe(editor);
     },
   );
+
+  // An explicit tabindex="-1" removes an element from SEQUENTIAL tab order
+  // even when it matches a tag branch — the trap must not treat it as a
+  // wrap-around candidate (CodeRabbit round-4).
+  it("excludes a tabindex=-1 button from sequential candidates on activate and Tab wrap", () => {
+    mountWithPriorFocus(<TrapFixture active />);
+    const trap = document.querySelector('[data-testid="trap"]')!;
+    const middle = buttons()[1]!;
+    const hidden = buttons()[2]!;
+    hidden.setAttribute("tabindex", "-1");
+    // Activate-state: the first focusable must be First, not a tabindex=-1 node.
+    expect(document.activeElement).toHaveTextContent("First");
+    // Wrap: from the new last sequential candidate (Middle), Tab must close the
+    // cycle back to First, skipping the tabindex=-1 node.
+    middle.focus();
+    middle.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+    );
+    expect(document.activeElement).toHaveTextContent("First");
+    expect(trap.contains(document.activeElement)).toBe(true);
+  });
+
+  it("excludes a nested editable host carrying tabindex=-1 from sequential candidates", () => {
+    mountWithPriorFocus(<TrapFixture active withContenteditable />);
+    const editor = document.querySelector('[data-testid="editor"]') as HTMLElement;
+    editor.setAttribute("tabindex", "-1");
+    const last = buttons()[2]!;
+    last.focus();
+    // The editor is out of sequential order, so Tab from the last button must
+    // wrap to the FIRST element, not land on the excluded editor.
+    last.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+    );
+    expect(buttons()[0]).toBe(document.activeElement);
+  });
 });
