@@ -112,6 +112,10 @@ describe("useRovingTabindex", () => {
 
   it("does not manage items while inactive", () => {
     render(<RovingFixture active={false} />);
-    expect(byText("Alpha").tabIndex).toBe(0);
+    // Unmanaged = browser-default tab stops everywhere, not just on the item
+    // a previous activation happened to leave as the tab stop.
+    for (const label of ["Alpha", "Beta", "Gamma"]) {
+      expect(byText(label).tabIndex).toBe(0);
+    }
   });
 });

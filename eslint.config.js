@@ -36,6 +36,12 @@ export default [
     rules: {
       ...jsxA11y.configs.recommended.rules,
       "jsx-a11y/aria-role": ["error", { ignoreNonDOM: true }],
+      // `prefer-tag-over-role` is intentionally NOT enabled: it errors on the
+      // spec-mandated ARIA patterns this codebase relies on — role="dialog"
+      // surfaces with the custom focus trap, and CommandPalette's
+      // listbox/option combobox per WAI-ARIA APG (a native <select> cannot
+      // express it). Native-tag migration is phase 2–6 ledger work; revisit
+      // then. (CodeRabbit suggestion, evaluated and deferred 2026-09-01.)
     },
   },
   {

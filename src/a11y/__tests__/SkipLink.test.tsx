@@ -38,7 +38,7 @@ describe("skip-link CSS contract (SC 2.4.1)", () => {
     expect(body).toContain("position: fixed");
     expect(body).toContain("top: -64px");
 
-    const focusRule = indexCss.indexOf(".skip-link:focus-visible { top: 12px; }");
+    const focusRule = indexCss.search(/\.skip-link:focus-visible\s*\{[^}]*top:\s*12px/);
     expect(focusRule, ":focus-visible brings link on-canvas").toBeGreaterThan(-1);
     expect(focusRule, "focus rule must come after the base block").toBeGreaterThan(block);
   });

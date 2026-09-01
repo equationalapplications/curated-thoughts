@@ -354,7 +354,9 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                   onForward={nav.goForward}
                   onOpenActivity={() => setActivityOpen(true)}
                 />
-                <div className="app-main" id="main-content">
+                {/* tabIndex={-1}: destination of the SkipLink — focusable
+                    programmatically so the skip actually moves focus. */}
+                <div className="app-main" id="main-content" tabIndex={-1}>
                   {nav.current.mode === "brain" && (
                     <BrainMode
                       selectedEntityId={brainEntityId}

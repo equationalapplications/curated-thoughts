@@ -156,3 +156,6 @@ jobs:
 
       - name: A11y (contrast tokens + axe)
         run: pnpm run test:a11y
+
+      - name: Verify docs/a11y/index.css matches src/index.css
+        run: cmp src/index.css docs/a11y/index.css

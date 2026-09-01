@@ -63,8 +63,21 @@ for (const [name, t] of [["light", light], ["dark", dark]] as const) {
 
 describe("a11y: token contrast (WCAG 2.2 AA)", () => {
   it("every fg/bg pair meets its WCAG threshold", () => {
-    const failures = PAIRS.filter(([, fg, bg, min]) => fg === undefined || bg === undefined || contrast(fg, bg) < min)
-      .map(([, fg, bg, min, why]) => `${why}: ${fg} on ${bg} = ${fg && bg ? contrast(fg, bg).toFixed(2) : "undefined"} < ${min}`);
+    // Resolve token NAMES to their parsed hex values before the math. Passing
+    // the name strings into contrast() would yield NaN, and NaN < min is
+    // always false — the gate would silently pass on a failing palette
+    // (CodeRabbit finding, fixed 2026-09-01).
+    const failures = PAIRS.filter(([theme, fgName, bgName, min]) => {
+        const fg = theme[fgName];
+        const bg = theme[bgName];
+        return fg === undefined || bg === undefined || contrast(fg, bg) < min;
+      })
+      .map(([theme, fgName, bgName, min, why]) => {
+        const fg = theme[fgName];
+        const bg = theme[bgName];
+        const ratio = fg !== undefined && bg !== undefined ? contrast(fg, bg).toFixed(2) : "undefined";
+        return `${why}: ${fgName}(${fg ?? "missing"}) on ${bgName}(${bg ?? "missing"}) = ${ratio} < ${min}`;
+      });
     expect(failures).toEqual([]);
   });
 

@@ -95,6 +95,10 @@ describe("applyInertGuard", () => {
   it("falls back to aria-hidden + pointer-events when inert is unavailable", () => {
     const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
     const hadInert = supportsInert;
+    // Capture the exact descriptor so the finally block restores what was
+    // deleted — installing a hand-written substitute accessor would poison
+    // every later test in the file with a fake "supported" inert.
+    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "inert");
     let restored = false;
     if (hadInert) {
       try {
@@ -114,17 +118,8 @@ describe("applyInertGuard", () => {
         expect(background.getAttribute("aria-hidden")).toBeNull();
       }
     } finally {
-      if (hadInert && !restored && !("inert" in HTMLElement.prototype)) {
-        Object.defineProperty(HTMLElement.prototype, "inert", {
-          configurable: true,
-          enumerable: true,
-          get(this: HTMLElement) {
-            return (this as unknown as { _inert?: boolean })._inert ?? false;
-          },
-          set(this: HTMLElement, v: boolean) {
-            (this as unknown as { _inert?: boolean })._inert = v;
-          },
-        });
+      if (originalDescriptor && !("inert" in HTMLElement.prototype)) {
+        Object.defineProperty(HTMLElement.prototype, "inert", originalDescriptor);
       }
     }
   });

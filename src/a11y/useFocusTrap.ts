@@ -19,7 +19,16 @@ export interface FocusTrapOptions {
 
 export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
   const containerRef = useRef<T | null>(null);
-  const { active, yieldTo, onEscape } = options;
+  const { active } = options;
+  // Callbacks live in refs so consumer re-renders don't tear down and
+  // re-register listeners — which would re-focus the first element and steal
+  // focus mid-interaction. The effect depends only on `active`.
+  const yieldToRef = useRef(options.yieldTo);
+  const onEscapeRef = useRef(options.onEscape);
+  useEffect(() => {
+    yieldToRef.current = options.yieldTo;
+    onEscapeRef.current = options.onEscape;
+  });
   const previousFocus = useRef<Element | null>(null);
 
   useEffect(() => {
@@ -31,14 +40,14 @@ export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
     (first ?? container).focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && onEscape) {
+      if (event.key === "Escape" && onEscapeRef.current) {
         event.stopPropagation();
-        onEscape();
+        onEscapeRef.current();
         return;
       }
       if (event.key !== "Tab") return;
       // yieldTo: ProseMirror/BlockNote keeps Tab + cursor control (spec §useFocusTrap).
-      if (event.target instanceof Element && yieldTo?.(event.target)) return;
+      if (event.target instanceof Element && yieldToRef.current?.(event.target)) return;
 
       const focusables = Array.from(
         container.querySelectorAll<HTMLElement>(FOCUSABLE),
@@ -65,7 +74,7 @@ export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
       const prev = previousFocus.current;
       if (prev instanceof HTMLElement) prev.focus();
     };
-  }, [active, yieldTo, onEscape]);
+  }, [active]);
 
   return containerRef;
 }

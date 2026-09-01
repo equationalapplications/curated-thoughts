@@ -6,7 +6,9 @@ Scan per file: aria-[a-z-]+ attributes; role="status|alert" or aria-live => live
   REMEDIATED-PR127 = files touched by d4fe4a6 (jsx-a11y remediation, 8 files);
   PASS = a11y primitives (unit-tested) + FactPowerMenu (axe smoke test);
   WATCH = live region or dialog/modal present -> manual screen-reader check required;
-  TODO-PHASEn = per spec phasing table (2=setup, 3=review, 4=brain+palette/peek/editor,
+  TODO-PHASEn = per spec phasing table (1=app-shell wiring residue — App.tsx,
+  ThemeContext.tsx, main.tsx have no dialog/live-region surface of their own;
+  2=setup, 3=review, 4=brain+palette/peek/editor,
   5=settings+privacy, 6=timeline/tasks/library/health/shell remainder).
 -->
 

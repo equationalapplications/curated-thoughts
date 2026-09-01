@@ -10,10 +10,11 @@ WebView and host screen reader differ from Chrome's, and WebView2 in particular 
 inconsistencies conveying `aria-modal="true"` to NVDA.
 
 Check the dialog surfaces (`CommandPalette`, `PeekPanel`, `EditorPane`,
-`PrivacyModeCards` modals, `FactPowerMenu`) with extra care: with a dialog open, content
+`EphemeralDisclosureModal` + `MigrationDisclosureModal`, `FactPowerMenu`) with
+extra care: with a dialog open, content
 outside it must be unreachable by screen-reader browse mode, not merely by Tab. If a WebView
 does not honor `aria-modal`, verify the `aria-hidden`/`inert` fallback applied by the
-focus-trap primitive (`src/a11y/useFocusTrap.ts`) engages.
+inert guard (`src/a11y/inertGuard.ts`, `applyInertGuard` — used by `PeekPanel`) engages.
 
 ---
 

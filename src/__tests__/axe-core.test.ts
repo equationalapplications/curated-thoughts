@@ -13,7 +13,7 @@
 //   dialogs; the role itself carries full dialog semantics and is the
 //   accessible pattern these components intentionally use.
 // A green run here is NOT a full conformance claim — see
-// docs/a11y/MANUAL_CHECKLIST.md.
+// docs/a11y/manual-checklist.md.
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { createElement } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
