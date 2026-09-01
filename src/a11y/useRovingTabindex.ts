@@ -39,8 +39,8 @@ export function useRovingTabindex<T extends HTMLElement>(options: RovingOptions)
     // Reconcile whenever the item set changes: setTabStop writes 0/-1 across
     // ALL items, so newly added items can never leave two tabIndex=0 elements
     // behind, and a removed/disabled currentRef is replaced by a contained,
-    // enabled item. childList only — attribute flips (aria-disabled) are
-    // handled lazily by the items() filter on the next keypress.
+    // enabled item. childList mutations cover add/remove; the observer below
+    // also watches aria-disabled flips and reconciles immediately.
     const reconcile = () => {
       const enabled = items();
       if (enabled.length === 0) {

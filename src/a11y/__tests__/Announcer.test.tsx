@@ -32,6 +32,10 @@ function assertiveRegion(): HTMLElement {
   return document.querySelector('div[role="alert"].a11y-announcer')!;
 }
 
+function regionTexts(): Array<string | null> {
+  return Array.from(politeRegion().querySelectorAll("p")).map((p) => p.textContent);
+}
+
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
@@ -42,21 +46,47 @@ describe("AnnouncerProvider", () => {
     expect(politeRegion()).toHaveAttribute("aria-atomic", "true");
   });
 
-  it("keeps FIFO order for multiple polite messages", () => {
+  it("a lone announce() reaches the DOM immediately (no drain penalty)", () => {
+    announceAll([{ text: "instant" }]);
+    // Same tick, zero timer advancement: the write already happened.
+    expect(regionTexts()).toEqual(["instant"]);
+  });
+
+  it("spec acceptance: two same-tick calls reach the DOM in order WITH the 150ms gap between them", () => {
+    announceAll([{ text: "one" }, { text: "two" }]);
+    // First writes immediately; the second must NOT be in the DOM yet.
+    expect(regionTexts()).toEqual(["one"]);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(regionTexts()).toEqual(["two"]);
+  });
+
+  it("drains three same-tick messages sequentially, one per floor interval", () => {
     announceAll([{ text: "first" }, { text: "second" }, { text: "third" }]);
-    const rendered = Array.from(politeRegion().querySelectorAll("p")).map((p) => p.textContent);
-    expect(rendered).toEqual(["first", "second", "third"]);
+    expect(regionTexts()).toEqual(["first"]);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(regionTexts()).toEqual(["second"]);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(regionTexts()).toEqual(["third"]);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(regionTexts()).toEqual([]);
   });
 
   it("collapses an identical message announced together (same tick)", () => {
     announceAll([{ text: "Saved" }, { text: "Saved" }]);
     expect(politeRegion().querySelectorAll("p")).toHaveLength(1);
-  });
-
-  it("renders two different messages announced together", () => {
-    announceAll([{ text: "alpha" }, { text: "beta" }]);
-    expect(politeRegion()).toHaveTextContent("alpha");
-    expect(politeRegion()).toHaveTextContent("beta");
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    // The collapsed duplicate never got its own write.
+    expect(regionTexts()).toEqual([]);
   });
 
   it("announces again after the floor elapses (no stale collapse window)", () => {
