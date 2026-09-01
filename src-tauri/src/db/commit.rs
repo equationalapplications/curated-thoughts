@@ -2,15 +2,21 @@
 
 use crate::db::outbox_format::{self, OutboxOperation, OutboxPushParams};
 use crate::db::proposals::{ItemDecision, ItemDecisionKind, ProposalKind, StoredEvidenceChunk};
+use crate::embedder::EmbedProfile;
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ResolveOptions {
     /// When true, summary-update conflicts are skipped silently (auto-approve path).
     pub auto_approve: bool,
+    /// When `Some`, entry embeddings are computed before the commit transaction
+    /// opens and stored with the new facts. `None` disables write-time
+    /// embedding — rows land with NULL and the sweep fills them later. Either
+    /// way the fact is committed; this only affects how soon it is searchable.
+    pub embed_profile: Option<EmbedProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +71,10 @@ struct CommitContext {
     facts_archived: usize,
     tasks_added: usize,
     facts_duplicated: usize,
+    /// Entry embeddings computed before the transaction opened, keyed by
+    /// `LoadedItem::id`. A missing key means "no embedding available" — the
+    /// entry is inserted with NULL and the sweep retries it.
+    entry_embeddings: std::collections::HashMap<String, Vec<f32>>,
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
@@ -662,12 +672,17 @@ fn commit_fact_add(
     let title = fact_title_from_body(&body);
     let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
 
+    let embedding_blob: Option<Vec<u8>> = ctx
+        .entry_embeddings
+        .get(&item.id)
+        .map(|v| crate::wiki_graph::f32_vec_to_blob(v));
+
     conn.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
             access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, NULL, NULL)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, NULL)",
         params![
             fact_id,
             ctx.entity_id,
@@ -678,6 +693,7 @@ fn commit_fact_add(
             ctx.source_type,
             source_ref,
             ctx.now_ms,
+            embedding_blob,
         ],
     )?;
 
@@ -1156,6 +1172,74 @@ fn finalize_proposal_status(accepted: usize, rejected: usize) -> &'static str {
     }
 }
 
+/// Embed the bodies of every accepted `fact_add` in one batch.
+///
+/// Returns an empty map when no profile is configured or the provider fails —
+/// an embedding is a derived artifact and must never fail a commit. The
+/// null-embedding sweep picks up whatever is missing.
+fn precompute_entry_embeddings(
+    items: &[LoadedItem],
+    decisions: &[ItemDecision],
+    profile: Option<&EmbedProfile>,
+) -> std::collections::HashMap<String, Vec<f32>> {
+    use std::collections::HashMap;
+
+    let Some(profile) = profile else {
+        return HashMap::new();
+    };
+
+    let accepted: std::collections::HashSet<&str> = decisions
+        .iter()
+        .filter(|d| d.decision == ItemDecisionKind::Accept)
+        .map(|d| d.item_id.as_str())
+        .collect();
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    for item in items {
+        if item.item_type != "fact_add" || !accepted.contains(item.id.as_str()) {
+            continue;
+        }
+        let decision = decisions.iter().find(|d| d.item_id == item.id);
+        let payload = match decision {
+            Some(d) => effective_payload(item, d),
+            None => continue,
+        };
+        let Some(body) = payload.get("body").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let title = fact_title_from_body(body);
+        ids.push(item.id.clone());
+        texts.push(crate::embed_sweep::embed_text_for_entry(&title, body));
+    }
+
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+
+    // Cap the batch the same way the sweep does.
+    let mut out = HashMap::new();
+    for (id_chunk, text_chunk) in ids
+        .chunks(crate::embed_sweep::SWEEP_BATCH_SIZE)
+        .zip(texts.chunks(crate::embed_sweep::SWEEP_BATCH_SIZE))
+    {
+        match crate::embedder::embed_batch(profile, text_chunk.to_vec()) {
+            Ok(vectors) => {
+                for (id, vector) in id_chunk.iter().zip(vectors.into_iter()) {
+                    out.insert(id.clone(), vector);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "commit: entry embedding failed for {} items, leaving NULL for the sweep: {e}",
+                    id_chunk.len()
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Resolve a pending proposal inside `BEGIN IMMEDIATE` — all mutations and outbox rows roll back together on failure.
 pub fn resolve_proposal(
     conn: &mut Connection,
@@ -1190,6 +1274,16 @@ pub fn resolve_proposal(
         "user_confirmed"
     };
 
+    // Compute entry embeddings BEFORE opening the transaction: embed_batch is a
+    // blocking network call and must never run while a write lock is held.
+    //
+    // This necessarily happens before the dedupe check (which needs the
+    // transaction), so a duplicate fact_add burns a provider call. Accepted:
+    // batches are small, duplicates are rare, and hoisting dedupe out of the
+    // transaction would trade that for a TOCTOU race.
+    let entry_embeddings =
+        precompute_entry_embeddings(&items, decisions, options.embed_profile.as_ref());
+
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     let entity_id = create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?
@@ -1216,6 +1310,7 @@ pub fn resolve_proposal(
         facts_archived: 0,
         tasks_added: 0,
         facts_duplicated: 0,
+        entry_embeddings,
     };
 
     if let Some(eid) = entity_id.as_deref() {
@@ -1424,6 +1519,7 @@ mod tests {
             facts_archived: 0,
             tasks_added: 0,
             facts_duplicated: 0,
+            entry_embeddings: std::collections::HashMap::new(),
         }
     }
 
@@ -1574,6 +1670,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -1661,6 +1758,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -1708,6 +1806,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -1782,6 +1881,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .expect("fact_update must succeed when source_ref is NULL");
@@ -1845,6 +1945,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -1906,6 +2007,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -1969,6 +2071,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -2020,6 +2123,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap_err();
@@ -2066,6 +2170,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -2091,6 +2196,7 @@ mod tests {
             Some("not relevant"),
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -2162,6 +2268,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -2195,6 +2302,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap()
@@ -2426,6 +2534,7 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
             },
         )
         .unwrap();
@@ -2452,6 +2561,130 @@ mod tests {
             event_summary.contains("2 duplicate fact(s) skipped"),
             "rejected event summary must include duplicate count, got: {event_summary}"
         );
+    }
+
+    #[test]
+    fn fact_add_stores_an_embedding_when_a_profile_is_configured() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+            insert_test_proposal(
+                &conn,
+                "prop-embed",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![NewProposalItem {
+                    id: "fact-1".into(),
+                    item_type: "fact_add".into(),
+                    target_id: None,
+                    payload: serde_json::json!({ "body": "A fact worth embedding." }),
+                    evidence: vec![StoredEvidenceChunk {
+                        chunk_id: Some(chunk_id),
+                        content_hash: String::new(),
+                        quote: "x".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        source_kind: None,
+                    }],
+                }],
+                doc_id,
+            );
+
+            resolve_proposal(
+                &mut conn,
+                "prop-embed",
+                &[ItemDecision {
+                    item_id: "fact-1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: Some(EmbedProfile::default()),
+                },
+            )
+            .unwrap();
+
+            let blob_len: Option<i64> = conn
+                .query_row(
+                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE entity_id = 'ent-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(blob_len, Some(32), "constant8 gives 8 dims -> 32 bytes");
+        });
+    }
+
+    #[test]
+    fn fact_add_commits_with_null_embedding_when_the_provider_fails() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", None::<&str>)], || {
+            let mut conn = open_in_memory().unwrap();
+            let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+            insert_test_proposal(
+                &conn,
+                "prop-embed-fail",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![NewProposalItem {
+                    id: "fact-1".into(),
+                    item_type: "fact_add".into(),
+                    target_id: None,
+                    payload: serde_json::json!({ "body": "Curation that must survive." }),
+                    evidence: vec![StoredEvidenceChunk {
+                        chunk_id: Some(chunk_id),
+                        content_hash: String::new(),
+                        quote: "x".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        source_kind: None,
+                    }],
+                }],
+                doc_id,
+            );
+
+            // Cloud profiles always Err -> the embed pre-pass fails.
+            let result = resolve_proposal(
+                &mut conn,
+                "prop-embed-fail",
+                &[ItemDecision {
+                    item_id: "fact-1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: Some(EmbedProfile::Cloud {
+                        provider: crate::embedder::CloudProvider::OpenAi,
+                        model: "unreachable".into(),
+                        api_key: String::new(),
+                    }),
+                },
+            );
+
+            assert!(
+                result.is_ok(),
+                "an embed failure must never destroy the librarian's curation"
+            );
+            let (count, blob): (i64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(embedding_blob) FROM llm_wiki_entries
+                      WHERE entity_id = 'ent-1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "the fact is committed");
+            assert_eq!(blob, None, "with a NULL blob for the sweep to fill later");
+        });
     }
 }
 

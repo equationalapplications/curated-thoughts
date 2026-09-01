@@ -9,7 +9,7 @@ use crate::db::review_shim::{
     approve_proposal_shim, list_pending_review_pages, proposed_content_for_rowid,
     reject_proposal_shim, ShimReviewPage,
 };
-use crate::DbState;
+use crate::{run_embedding_sweep, DbState};
 use tauri::State;
 
 #[tauri::command]
@@ -39,16 +39,23 @@ pub fn resolve_proposal_cmd(
     db_state: State<DbState>,
 ) -> Result<CommitResult, String> {
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    resolve_proposal(
+    let result = resolve_proposal(
         &mut guard.0,
         &proposal_id,
         &decisions,
         reject_reason.as_deref(),
         ResolveOptions {
             auto_approve: auto_approve.unwrap_or(false),
+            embed_profile: None,
         },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Drop the write lock before the sweep; the sweep takes its own lock.
+    drop(guard);
+    if let Err(e) = run_embedding_sweep(&db_state) {
+        eprintln!("post-commit embedding sweep skipped: {e}");
+    }
+    Ok(result)
 }
 
 // ── Legacy Review desk shims (wiki_pages-shaped API) ─────────────────────────

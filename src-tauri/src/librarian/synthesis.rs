@@ -922,7 +922,7 @@ fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()>
         proposal_id,
         &decisions,
         None,
-        ResolveOptions { auto_approve: true },
+        ResolveOptions { auto_approve: true, embed_profile: None },
     )?;
     Ok(())
 }

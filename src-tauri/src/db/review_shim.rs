@@ -196,6 +196,7 @@ pub fn approve_proposal_shim(conn: &mut Connection, rowid: i64) -> Result<Commit
         None,
         ResolveOptions {
             auto_approve: false,
+            embed_profile: None,
         },
     )
 }
@@ -224,6 +225,7 @@ pub fn reject_proposal_shim(
         reject_reason,
         ResolveOptions {
             auto_approve: false,
+            embed_profile: None,
         },
     )
 }

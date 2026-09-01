@@ -1789,7 +1789,7 @@ fn prune_old_librarian_inferred(
 /// Errors from the embedding provider are absorbed by the sweep itself and
 /// reported in `SweepReport::failed`; this returns `Err` only if the database
 /// is unreachable.
-fn run_embedding_sweep(db_state: &DbState) -> Result<embed_sweep::SweepReport, String> {
+pub(crate) fn run_embedding_sweep(db_state: &DbState) -> Result<embed_sweep::SweepReport, String> {
     const MAX_BATCHES_PER_RUN: usize = 8; // <= 512 entries per trigger
 
     let paths = retrieval::resolve_brain_paths();
