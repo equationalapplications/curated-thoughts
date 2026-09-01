@@ -36,7 +36,25 @@ fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()>
 }
 
 /// Insert a user-authored fact with outbox row; returns the new fact.
+///
+/// Equivalent to `add_fact_with_profile(conn, entity_id, body, None)` — the
+/// entry lands with a NULL embedding for the sweep to fill.
 pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<EntityFact> {
+    add_fact_with_profile(conn, entity_id, body, None)
+}
+
+/// Insert a user-authored fact, optionally embedding it at write time.
+///
+/// The embedding is computed BEFORE the transaction opens — `embed_batch` is a
+/// blocking network call and must never run under a write lock. A failure
+/// leaves the blob NULL and the fact still commits: curation is durable, the
+/// embedding is a derived artifact the sweep retries.
+pub fn add_fact_with_profile(
+    conn: &mut Connection,
+    entity_id: &str,
+    body: &str,
+    profile: Option<&crate::embedder::EmbedProfile>,
+) -> Result<EntityFact> {
     let body = body.trim();
     if body.is_empty() {
         bail!("fact body must not be empty");
@@ -45,6 +63,20 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
     let fact_id = generate_llm_id("fact_");
     let title = fact_title_from_body(body);
 
+    // Outside the transaction, deliberately.
+    let embedding_blob: Option<Vec<u8>> = profile.and_then(|p| {
+        let text = crate::embed_sweep::embed_text_for_entry(&title, body);
+        match crate::embedder::embed_batch(p, vec![text]) {
+            Ok(vectors) => vectors
+                .first()
+                .map(|v| crate::wiki_graph::f32_vec_to_blob(v)),
+            Err(e) => {
+                eprintln!("add_fact: entry embedding failed, leaving NULL for the sweep: {e}");
+                None
+            }
+        }
+    });
+
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     assert_entity_active(&tx, entity_id)?;
     tx.execute(
@@ -52,8 +84,8 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
             access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, ?5, ?6, ?6, NULL, 0, NULL, NULL, NULL)",
-        params![fact_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms],
+         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, ?5, ?6, ?6, NULL, 0, NULL, ?7, NULL)",
+        params![fact_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms, embedding_blob],
     )?;
     push_entries_outbox(
         &tx,
@@ -262,6 +294,53 @@ mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
     use crate::db::entities::{create_entity, get_entity, CreateEntityInput};
+
+    // -------------------------------------------------------------------------
+    // add_fact_with_profile tests (Task 10)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn add_fact_with_profile_stores_an_embedding() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let entity_id = make_entity(&conn);
+            let profile = crate::embedder::EmbedProfile::default();
+
+            let fact =
+                add_fact_with_profile(&mut conn, &entity_id, "A user-stated fact.", Some(&profile))
+                    .unwrap();
+
+            let blob_len: Option<i64> = conn
+                .query_row(
+                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = ?1",
+                    [&fact.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(blob_len, Some(32));
+        });
+    }
+
+    #[test]
+    fn add_fact_without_a_profile_leaves_the_blob_null() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+
+        let fact = add_fact(&mut conn, &entity_id, "A user-stated fact.").unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
+                [&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(blob, None, "the sweep fills it later");
+    }
+
+    // -------------------------------------------------------------------------
+    // pre-existing tests
+    // -------------------------------------------------------------------------
 
     fn make_entity(conn: &Connection) -> String {
         create_entity(
