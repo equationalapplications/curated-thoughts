@@ -65,6 +65,10 @@ name = "bulk_reindex"
 path = "src/bin/bulk_reindex.rs"
 
 [[bin]]
+name = "graph_reanchor"
+path = "src/bin/graph_reanchor.rs"
+
+[[bin]]
 name = "ingest_vault_once"
 path = "src/bin/ingest_vault_once.rs"
 
