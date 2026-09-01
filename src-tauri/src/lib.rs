@@ -1714,16 +1714,24 @@ fn heal_lost_librarian_inferred(
     Ok(updated)
 }
 
+/// Hard-delete `librarian_inferred` entries that have been soft-deleted for
+/// more than 7 days.
+///
+/// `now_ms` is unix **milliseconds**, matching `llm_wiki_entries.deleted_at`,
+/// which every writer stores in milliseconds (`ms_now()`, `db::commit`). This
+/// function previously took seconds and compared them against millisecond
+/// stamps, so it never deleted anything; see design spec §2.1.
 fn prune_old_librarian_inferred(
     conn: &rusqlite::Connection,
-    current_unix: i64,
+    now_ms: i64,
 ) -> Result<usize, String> {
+    const SEVEN_DAYS_MS: i64 = 7 * 86_400 * 1000;
     conn.execute(
         "DELETE FROM llm_wiki_entries
              WHERE source_type = 'librarian_inferred'
                AND deleted_at IS NOT NULL
                AND deleted_at < ?1",
-        [current_unix - 7 * 86400],
+        [now_ms - SEVEN_DAYS_MS],
     )
     .map_err(|e| e.to_string())
 }
@@ -1776,11 +1784,7 @@ async fn run_wiki_prune(
     let result = (|| -> Result<(), String> {
         let guard = db_state.0.lock().unwrap();
         let conn = &guard.0;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_secs() as i64;
-        prune_old_librarian_inferred(conn, now)?;
+        prune_old_librarian_inferred(conn, crate::db::commit::ms_now())?;
         Ok(())
     })();
 
@@ -4084,6 +4088,77 @@ mod maintenance_command_tests {
         .unwrap();
     }
 
+    /// Like `insert_wiki_entry`, but names the unit explicitly: `deleted_at` is
+    /// MILLISECONDS, matching every production writer (`ms_now()`).
+    fn insert_wiki_entry_ms(
+        conn: &Connection,
+        id: &str,
+        source_type: &str,
+        source_ref: &str,
+        deleted_at_ms: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, 'ent-1', 'T', 'B', '[]', 'inferred', ?2,
+                       NULL, ?3, 100, 100, NULL, 0, ?4, NULL, NULL)",
+            params![id, source_type, source_ref, deleted_at_ms],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn prune_deletes_old_rows_when_deleted_at_is_milliseconds() {
+        let conn = open_in_memory().unwrap();
+        let now_ms: i64 = 1_756_000_000_000; // a plausible 2026 millisecond stamp
+        let eight_days_ms = 8 * 86_400 * 1000;
+        let one_day_ms = 86_400 * 1000;
+
+        // Production writers store `deleted_at` in MILLISECONDS (ms_now()).
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred",
+            "librarian_inferred",
+            "documents/old.md",
+            Some(now_ms - eight_days_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "fresh-inferred",
+            "librarian_inferred",
+            "documents/fresh.md",
+            Some(now_ms - one_day_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "old-immutable",
+            "immutable_document",
+            "documents/immutable.md",
+            Some(now_ms - eight_days_ms),
+        );
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+
+        assert_eq!(
+            deleted, 1,
+            "only the old librarian_inferred row should be deleted"
+        );
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2);
+        let old_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'old-inferred'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_gone, 0);
+    }
+
     #[test]
     fn prune_only_removes_old_librarian_inferred_rows() {
         let conn = open_in_memory().unwrap();
@@ -4092,29 +4167,29 @@ mod maintenance_command_tests {
         let old = now - Duration::from_secs(7 * 86400 + 1);
         let fresh = now - Duration::from_secs(7 * 86400 - 1);
 
-        insert_wiki_entry(
+        insert_wiki_entry_ms(
             &conn,
             "old-inferred",
             "librarian_inferred",
             "documents/old.md",
-            Some(old.as_secs() as i64),
+            Some(old.as_millis() as i64),
         );
-        insert_wiki_entry(
+        insert_wiki_entry_ms(
             &conn,
             "fresh-inferred",
             "librarian_inferred",
             "documents/fresh.md",
-            Some(fresh.as_secs() as i64),
+            Some(fresh.as_millis() as i64),
         );
-        insert_wiki_entry(
+        insert_wiki_entry_ms(
             &conn,
             "old-immutable",
             "immutable_document",
             "documents/immutable.md",
-            Some(old.as_secs() as i64),
+            Some(old.as_millis() as i64),
         );
 
-        let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
+        let deleted = prune_old_librarian_inferred(&conn, now.as_millis() as i64).unwrap();
         assert_eq!(
             deleted, 1,
             "only the old librarian_inferred row should be deleted"
