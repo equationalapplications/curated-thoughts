@@ -413,10 +413,10 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
 
-    let entries: Vec<(i64, String, String)> = {
+    let entries: Vec<(i64, String, String, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT e.rowid, e.source_ref, e.entity_id
+                "SELECT e.rowid, e.source_ref, e.entity_id, e.id
                  FROM llm_wiki_entries e
                  WHERE e.deleted_at IS NULL
                    AND e.source_ref IS NOT NULL
@@ -430,6 +430,7 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
                 row.get::<_, i64>(0).map_err(|e| e.to_string())?,
                 row.get::<_, String>(1).map_err(|e| e.to_string())?,
                 row.get::<_, String>(2).map_err(|e| e.to_string())?,
+                row.get::<_, String>(3).map_err(|e| e.to_string())?,
             ));
         }
         v
@@ -437,7 +438,7 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
 
     let mut healed_by_entity: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for (rowid, source_ref, entity_id) in entries {
+    for (rowid, source_ref, entity_id, entry_id) in entries {
         // Bug A + B fix: use the shared consumer helper
         // (`source_ref_is_still_grounded`) instead of `safe_vault_path`.
         // The legacy producer wrote a vault-relative path; the post-c30f141
@@ -445,11 +446,15 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
         // empty / unparseable values as still-grounded (defensive — see
         // its docs).
         if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            conn.execute(
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            tx.execute(
                 "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
                 rusqlite::params![crate::db::commit::ms_now(), rowid],
             )
             .map_err(|e| e.to_string())?;
+            crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
             *healed_by_entity.entry(entity_id).or_insert(0) += 1;
         }
     }
@@ -1680,10 +1685,10 @@ fn heal_lost_librarian_inferred(
     // JSON shapes, so the on-disk `vault_root` no longer participates in
     // the existence check. Kept in the signature so existing call sites
     // continue to compile unchanged.
-    let entries: Vec<(i64, String)> = {
+    let entries: Vec<(i64, String, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT rowid, source_ref FROM llm_wiki_entries
+                "SELECT rowid, source_ref, id FROM llm_wiki_entries
                      WHERE deleted_at IS NULL
                        AND source_ref IS NOT NULL
                        AND source_type = 'librarian_inferred'",
@@ -1695,20 +1700,28 @@ fn heal_lost_librarian_inferred(
             v.push((
                 row.get::<_, i64>(0).map_err(|e| e.to_string())?,
                 row.get::<_, String>(1).map_err(|e| e.to_string())?,
+                row.get::<_, String>(2).map_err(|e| e.to_string())?,
             ));
         }
         v
     };
 
     let mut updated = 0;
-    for (rowid, source_ref) in entries {
+    for (rowid, source_ref, entry_id) in entries {
         if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            updated += conn
+            // Soft-delete and edge purge must be atomic (spec §2): a crash
+            // between them would strand the edges. These sites had no
+            // transaction before this change.
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            updated += tx
                 .execute(
                     "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
                     rusqlite::params![crate::db::commit::ms_now(), rowid],
                 )
                 .map_err(|e| e.to_string())?;
+            crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
         }
     }
     Ok(updated)
@@ -1726,14 +1739,42 @@ fn prune_old_librarian_inferred(
     now_ms: i64,
 ) -> Result<usize, String> {
     const SEVEN_DAYS_MS: i64 = 7 * 86_400 * 1000;
-    conn.execute(
-        "DELETE FROM llm_wiki_entries
-             WHERE source_type = 'librarian_inferred'
-               AND deleted_at IS NOT NULL
-               AND deleted_at < ?1",
-        [now_ms - SEVEN_DAYS_MS],
-    )
-    .map_err(|e| e.to_string())
+    let cutoff = now_ms - SEVEN_DAYS_MS;
+
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+    // Collect the doomed ids first: the DELETE is predicate-driven, but the edge
+    // purge needs concrete ids. Both must commit together (spec §2).
+    let doomed: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id FROM llm_wiki_entries
+                     WHERE source_type = 'librarian_inferred'
+                       AND deleted_at IS NOT NULL
+                       AND deleted_at < ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([cutoff], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(|e| e.to_string())?
+    };
+
+    crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed).map_err(|e| e.to_string())?;
+
+    let deleted = tx
+        .execute(
+            "DELETE FROM llm_wiki_entries
+                 WHERE source_type = 'librarian_inferred'
+                   AND deleted_at IS NOT NULL
+                   AND deleted_at < ?1",
+            [cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(deleted)
 }
 
 #[tauri::command]
@@ -4562,6 +4603,88 @@ mod maintenance_command_tests {
             SEC_VS_MS_THRESHOLD + 60_000,
             "second run is no-op for ms"
         );
+    }
+
+    #[test]
+    fn prune_purges_edges_of_hard_deleted_entries() {
+        let conn = open_in_memory().unwrap();
+        let now_ms: i64 = 1_756_000_000_000;
+        let eight_days_ms = 8 * 86_400 * 1000;
+
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred",
+            "librarian_inferred",
+            "documents/old.md",
+            Some(now_ms - eight_days_ms),
+        );
+        insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", None);
+        insert_wiki_entry_ms(&conn, "live-b", "librarian_inferred", "documents/b.md", None);
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_doomed', 'ent-1', 'old-inferred', 'live-a', 'related_to', 100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_survivor', 'ent-1', 'live-a', 'live-b', 'related_to', 100)",
+            [],
+        )
+        .unwrap();
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM llm_wiki_edges ORDER BY id")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<String>>>().unwrap()
+        };
+        assert_eq!(
+            remaining,
+            vec!["edge_survivor".to_string()],
+            "the hard-deleted entry's edge must go, the live one must stay"
+        );
+    }
+
+    #[test]
+    fn heal_lost_librarian_inferred_purges_edges_of_soft_deleted_entries() {
+        let conn = open_in_memory().unwrap();
+        // An entry whose source_ref points at a document that does not exist in
+        // the DB is "lost" and gets soft-deleted by the heal pass.
+        insert_wiki_entry_ms(
+            &conn,
+            "lost-entry",
+            "librarian_inferred",
+            "{\"doc_path\":\"documents/vanished.md\"}",
+            None,
+        );
+        insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", None);
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_doomed', 'ent-1', 'lost-entry', 'live-a', 'related_to', 100)",
+            [],
+        )
+        .unwrap();
+
+        let healed =
+            heal_lost_librarian_inferred(&conn, std::path::Path::new("/vault")).unwrap();
+        assert_eq!(healed, 1, "the ungrounded entry should be soft-deleted");
+
+        let dangling: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges
+                  WHERE source_id = 'lost-entry' OR target_id = 'lost-entry'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dangling, 0, "soft-delete must purge edges too (spec §2)");
     }
 }
 
