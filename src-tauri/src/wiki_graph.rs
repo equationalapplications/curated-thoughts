@@ -368,6 +368,74 @@ pub fn wiki_traverse_graph(
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use crate::db::connection::open_in_memory;
+    use rusqlite::params;
+
+    fn seed_entry(conn: &Connection, id: &str, entity_id: &str, deleted_at_ms: Option<i64>) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, ?2, ?1, 'Body', '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, ?3, NULL, NULL)",
+            params![id, entity_id, deleted_at_ms],
+        )
+        .unwrap();
+    }
+
+    fn seed_edge(conn: &Connection, id: &str, entity_id: &str, source: &str, target: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'related_to', 100)",
+            params![id, entity_id, source, target],
+        )
+        .unwrap();
+    }
+
+    /// Characterization test — this behavior already exists and must not regress.
+    /// A ghost edge (endpoint soft-deleted) must be invisible in BOTH directions.
+    #[test]
+    fn traversal_excludes_edges_whose_endpoint_is_soft_deleted() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "fact_live", "ent-1", None);
+        seed_entry(&conn, "fact_ghost", "ent-1", Some(200_000)); // soft-deleted
+        seed_entry(&conn, "fact_other", "ent-1", None);
+
+        // Outbound from the live node into a dead target.
+        seed_edge(&conn, "edge_out", "ent-1", "fact_live", "fact_ghost");
+        // Inbound into the live node from a dead source.
+        seed_edge(&conn, "edge_in", "ent-1", "fact_ghost", "fact_live");
+        // A wholly live edge, as the positive control.
+        seed_edge(&conn, "edge_live", "ent-1", "fact_live", "fact_other");
+
+        let result =
+            wiki_traverse_graph(&conn, "ent-1", "fact_live", 2, TraverseDirection::Both, &[])
+                .unwrap();
+
+        let edge_targets: Vec<&str> = result
+            .edges
+            .iter()
+            .map(|e| e.target_id.as_str())
+            .collect();
+        assert!(
+            !edge_targets.contains(&"fact_ghost"),
+            "an edge into a soft-deleted target must not surface"
+        );
+        let edge_sources: Vec<&str> = result
+            .edges
+            .iter()
+            .map(|e| e.source_id.as_str())
+            .collect();
+        assert!(
+            !edge_sources.contains(&"fact_ghost"),
+            "an edge from a soft-deleted source must not surface"
+        );
+        assert!(
+            edge_targets.contains(&"fact_other"),
+            "the wholly-live edge is the positive control and must surface"
+        );
+    }
 
     #[test]
     fn tier_weight_matches_tiered_read() {
