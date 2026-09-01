@@ -882,6 +882,10 @@ fn commit_fact_archive(
         bail!("fact_archive target not found: {fact_id}");
     }
 
+    // Edges die with their endpoints, in the same transaction (design spec §2).
+    // No outbox rows: edges are not replicated.
+    crate::db::edge_purge::purge_edges_for_entry(conn, fact_id)?;
+
     push_entries_outbox(
         conn,
         &ctx.entity_id,
@@ -1374,6 +1378,130 @@ mod tests {
             params![id, name, summary, updated_at],
         )
         .unwrap();
+    }
+
+    /// Inserts a live `llm_wiki_entries` row directly. `deleted_at` is NULL.
+    fn seed_fact_row(conn: &Connection, id: &str, entity_id: &str, body: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, NULL, NULL, NULL)",
+            params![id, entity_id, body, body],
+        )
+        .unwrap();
+    }
+
+    fn seed_edge_row(conn: &Connection, id: &str, entity_id: &str, source: &str, target: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'related_to', 100)",
+            params![id, entity_id, source, target],
+        )
+        .unwrap();
+    }
+
+    /// A minimal `CommitContext` for exercising a single commit_* function
+    /// directly, without going through a whole proposal.
+    fn test_ctx(entity_id: &str) -> CommitContext {
+        CommitContext {
+            proposal_id: "prop-test".into(),
+            proposal_created_at: 100,
+            entity_id: entity_id.to_string(),
+            entity_name: "Test Entity".into(),
+            source_type: "librarian_inferred",
+            now_secs: 200,
+            now_ms: 200_000,
+            committed: Vec::new(),
+            conflicts: Vec::new(),
+            dropped_edges: Vec::new(),
+            accepted_count: 0,
+            rejected_count: 0,
+            facts_added: 0,
+            facts_updated: 0,
+            facts_archived: 0,
+            tasks_added: 0,
+            facts_duplicated: 0,
+        }
+    }
+
+    fn test_item(id: &str, item_type: &str, target_id: Option<&str>) -> LoadedItem {
+        LoadedItem {
+            id: id.into(),
+            item_type: item_type.into(),
+            target_id: target_id.map(|s| s.to_string()),
+            payload: serde_json::json!({}),
+            evidence: Vec::new(),
+            edited_payload: None,
+        }
+    }
+
+    #[test]
+    fn archiving_a_fact_purges_its_edges() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "Body A");
+        seed_fact_row(&conn, "fact_b", "ent-1", "Body B");
+        seed_fact_row(&conn, "fact_c", "ent-1", "Body C");
+        seed_edge_row(&conn, "edge_out", "ent-1", "fact_a", "fact_b");
+        seed_edge_row(&conn, "edge_in", "ent-1", "fact_c", "fact_a");
+        seed_edge_row(&conn, "edge_other", "ent-1", "fact_b", "fact_c");
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_archive", Some("fact_a"));
+        commit_fact_archive(&conn, &mut ctx, &item).unwrap();
+
+        // The entry is soft-deleted...
+        let deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted_at, Some(200_000), "deleted_at is milliseconds");
+
+        // ...and no edge references it any more.
+        let dangling: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges
+                  WHERE source_id = 'fact_a' OR target_id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dangling, 0, "archived entry must leave no ghost edges");
+
+        // The unrelated edge survives.
+        let survivors: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(survivors, 1);
+    }
+
+    #[test]
+    fn archiving_pushes_no_edge_outbox_rows() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "Body A");
+        seed_fact_row(&conn, "fact_b", "ent-1", "Body B");
+        seed_edge_row(&conn, "edge_ab", "ent-1", "fact_a", "fact_b");
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_archive", Some("fact_a"));
+        commit_fact_archive(&conn, &mut ctx, &item).unwrap();
+
+        // Edges are not replicated (spec §2). Only the entries delete is in the outbox.
+        let edge_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_outbox WHERE table_name = 'edges'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_rows, 0, "edge purges must not emit outbox rows");
     }
 
     fn insert_test_proposal(
