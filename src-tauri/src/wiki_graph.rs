@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::search::{bytes_to_f32, cosine_similarity};
 
-pub const DEFAULT_ENTITY_IDS: &[&str] = &["tier_fact", "tier_wisdom"];
 pub const MAX_TRAVERSAL_NODES: usize = 50;
 pub const DEFAULT_MAX_DEPTH: usize = 2;
 
@@ -112,29 +111,46 @@ pub fn wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntol
     })
 }
 
+/// Semantic search over live, embedded wiki entries.
+///
+/// `entity_ids` is the caller's filter:
+/// - `None` — search **every** live embedded entry. This is the default call
+///   path. It must not assume a namespace: entries written by the librarian
+///   carry `ent_<hash>` ids, and a reader that guesses at namespaces is
+///   exactly the bug this replaced (#133).
+/// - `Some(&[])` — match nothing, preserving the prior explicit-empty contract.
+/// - `Some(ids)` — filter to those entity ids.
+///
+/// Ranking is unaffected: `tier_weight` is applied per row either way, so a
+/// `tier_fact` entry keeps its 1.5x bonus wherever tier namespaces exist.
 pub fn wiki_search(
     conn: &Connection,
     query_vec: &[f32],
-    entity_ids: &[&str],
+    entity_ids: Option<&[&str]>,
     limit: usize,
 ) -> Result<Vec<WikiSearchHit>> {
-    if entity_ids.is_empty() {
+    if entity_ids.is_some_and(|ids| ids.is_empty()) {
         return Ok(Vec::new());
     }
     let limit = limit.clamp(1, 25);
     let dim = query_vec.len();
-    let placeholders = entity_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
+    let entity_filter = match entity_ids {
+        Some(ids) => {
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            format!("entity_id IN ({placeholders}) AND ")
+        }
+        None => String::new(),
+    };
     let sql = format!(
         "SELECT id, entity_id, title, embedding_blob
          FROM llm_wiki_entries
-         WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL AND embedding_blob IS NOT NULL"
+         WHERE {entity_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query(rusqlite::params_from_iter(entity_ids.iter()))?;
+    let mut rows = match entity_ids {
+        Some(ids) => stmt.query(rusqlite::params_from_iter(ids.iter()))?,
+        None => stmt.query([])?,
+    };
     let mut scored: Vec<WikiSearchHit> = Vec::new();
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
@@ -169,6 +185,20 @@ pub fn wiki_search(
     Ok(scored)
 }
 
+/// Which endpoint table a traversal is walking.
+///
+/// PR #131's write contract admits three endpoint tables
+/// (`llm_wiki_entries` ∪ `curated_entities` ∪ `llm_wiki_tasks`); the reader
+/// handles the two that carry live edges today. The space is decided once, at
+/// the seed, and a walk never crosses — mixed results would need a
+/// discriminator on `WikiTraverseNode` and a merge rule for two
+/// differently-keyed neighbor sets, which no caller needs (#134).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeSpace {
+    Entry,
+    Entity,
+}
+
 fn load_live_entry(
     conn: &Connection,
     entity_id: &str,
@@ -189,12 +219,64 @@ fn load_live_entry(
     }))
 }
 
+/// Resolve a live `curated_entities` row as a traversal node.
+///
+/// `curated_entities` has no `entity_id` column, so the caller's `entity_id`
+/// (the edge partition being walked) is what the node reports. `name` is the
+/// table's title-equivalent.
+fn load_live_curated_entity(
+    conn: &Connection,
+    entity_id: &str,
+    id: &str,
+) -> Result<Option<WikiTraverseNode>> {
+    // Test fixtures and older brains may carry only `llm_wiki_entries`. Treat
+    // a missing table as "no row in this space" so entry-anchored databases
+    // behave exactly as they did before heterogeneous traversal existed.
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'curated_entities'",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(None);
+    }
+    let mut stmt =
+        conn.prepare("SELECT id, name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL")?;
+    let mut rows = stmt.query(rusqlite::params![id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(WikiTraverseNode {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        entity_id: entity_id.to_string(),
+    }))
+}
+
+/// Resolve a seed or neighbor id in whichever endpoint space holds it.
+/// Entry space is tried first so entry-anchored databases behave exactly as
+/// they did before heterogeneous traversal existed.
+fn load_live_node(
+    conn: &Connection,
+    entity_id: &str,
+    id: &str,
+) -> Result<Option<(WikiTraverseNode, NodeSpace)>> {
+    if let Some(node) = load_live_entry(conn, entity_id, id)? {
+        return Ok(Some((node, NodeSpace::Entry)));
+    }
+    if let Some(node) = load_live_curated_entity(conn, entity_id, id)? {
+        return Ok(Some((node, NodeSpace::Entity)));
+    }
+    Ok(None)
+}
+
 fn fetch_neighbors(
     conn: &Connection,
     entity_id: &str,
     node_id: &str,
     direction: TraverseDirection,
     edge_types: &[&str],
+    space: NodeSpace,
 ) -> Result<Vec<(WikiTraverseEdge, String)>> {
     let edge_filter = if edge_types.is_empty() {
         String::new()
@@ -204,18 +286,62 @@ fn fetch_neighbors(
     };
 
     let mut out = Vec::new();
-
-    if matches!(
+    let want_outbound = matches!(
         direction,
         TraverseDirection::Outbound | TraverseDirection::Both
-    ) {
-        fetch_outbound_neighbors(conn, entity_id, node_id, &edge_filter, edge_types, &mut out)?;
-    }
-    if matches!(
+    );
+    let want_inbound = matches!(
         direction,
         TraverseDirection::Inbound | TraverseDirection::Both
-    ) {
-        fetch_inbound_neighbors(conn, entity_id, node_id, &edge_filter, edge_types, &mut out)?;
+    );
+
+    match space {
+        NodeSpace::Entry => {
+            if want_outbound {
+                fetch_outbound_neighbors(
+                    conn,
+                    entity_id,
+                    node_id,
+                    &edge_filter,
+                    edge_types,
+                    &mut out,
+                )?;
+            }
+            if want_inbound {
+                fetch_inbound_neighbors(
+                    conn,
+                    entity_id,
+                    node_id,
+                    &edge_filter,
+                    edge_types,
+                    &mut out,
+                )?;
+            }
+        }
+        NodeSpace::Entity => {
+            if want_outbound {
+                fetch_entity_neighbors(
+                    conn,
+                    entity_id,
+                    node_id,
+                    &edge_filter,
+                    edge_types,
+                    false,
+                    &mut out,
+                )?;
+            }
+            if want_inbound {
+                fetch_entity_neighbors(
+                    conn,
+                    entity_id,
+                    node_id,
+                    &edge_filter,
+                    edge_types,
+                    true,
+                    &mut out,
+                )?;
+            }
+        }
     }
     Ok(out)
 }
@@ -294,6 +420,52 @@ fn fetch_inbound_neighbors(
     Ok(())
 }
 
+/// Entity-space neighbor fetch. Both endpoints are resolved in
+/// `curated_entities`; the entity partition comes from the edge row because
+/// `curated_entities` carries no `entity_id` column.
+fn fetch_entity_neighbors(
+    conn: &Connection,
+    entity_id: &str,
+    node_id: &str,
+    edge_filter: &str,
+    edge_types: &[&str],
+    inbound: bool,
+    out: &mut Vec<(WikiTraverseEdge, String)>,
+) -> Result<()> {
+    let (neighbor_alias, anchor_col) = if inbound {
+        ("s", "e.target_id")
+    } else {
+        ("t", "e.source_id")
+    };
+    let sql = format!(
+        "SELECT e.source_id, e.target_id, e.edge_type, {neighbor_alias}.id
+         FROM llm_wiki_edges e
+         JOIN curated_entities s ON s.id = e.source_id AND s.deleted_at IS NULL
+         JOIN curated_entities t ON t.id = e.target_id AND t.deleted_at IS NULL
+         WHERE e.entity_id = ?1 AND {anchor_col} = ?2{edge_filter}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(entity_id.to_string()),
+        Box::new(node_id.to_string()),
+    ];
+    for et in edge_types {
+        params.push(Box::new(et.to_string()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    while let Some(row) = rows.next()? {
+        let edge = WikiTraverseEdge {
+            source_id: row.get(0)?,
+            target_id: row.get(1)?,
+            edge_type: row.get(2)?,
+        };
+        let neighbor_id: String = row.get(3)?;
+        out.push((edge, neighbor_id));
+    }
+    Ok(())
+}
+
 pub fn wiki_traverse_graph(
     conn: &Connection,
     entity_id: &str,
@@ -303,7 +475,7 @@ pub fn wiki_traverse_graph(
     edge_types: &[&str],
 ) -> Result<WikiTraverseResult> {
     let max_depth = clamp_max_depth(max_depth);
-    let Some(seed) = load_live_entry(conn, entity_id, source_id)? else {
+    let Some((seed, space)) = load_live_node(conn, entity_id, source_id)? else {
         return Ok(WikiTraverseResult {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -327,7 +499,7 @@ pub fn wiki_traverse_graph(
         if depth >= max_depth {
             continue;
         }
-        let pairs = fetch_neighbors(conn, entity_id, &current_id, direction, edge_types)?;
+        let pairs = fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
         for (edge, neighbor_id) in pairs {
             let is_new_neighbor = !visited.contains(&neighbor_id);
             if is_new_neighbor && nodes.len() >= MAX_TRAVERSAL_NODES {
@@ -343,7 +515,16 @@ pub fn wiki_traverse_graph(
                 edges.push(edge);
             }
             if is_new_neighbor {
-                if let Some(node) = load_live_entry(conn, entity_id, &neighbor_id)? {
+                // Resolve in the walk's own space. `load_live_node` tries entry
+                // space first, which would hand back an `llm_wiki_entries` title
+                // for a `curated_entities` neighbor whose id also exists there
+                // under this partition. A walk must not cross spaces at the
+                // neighbor boundary either (spec section 3).
+                let resolved = match space {
+                    NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
+                    NodeSpace::Entity => load_live_curated_entity(conn, entity_id, &neighbor_id)?,
+                };
+                if let Some(node) = resolved {
                     visited.insert(neighbor_id.clone());
                     nodes.insert(neighbor_id.clone(), node);
                     queue.push_back((neighbor_id, depth + 1));

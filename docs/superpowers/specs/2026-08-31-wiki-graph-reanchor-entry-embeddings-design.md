@@ -206,7 +206,16 @@ and it hard-deletes without pushing entries-outbox deletes, unlike
 `clear_entity_content`. That outbox gap is now in scope: the ms/s fix
 makes this hard-delete live for the first time, so the blast radius changed.
 `prune_old_librarian_inferred` must push one `OutboxOperation::Delete` row
-per pruned id, matching `clear_entity_content` and `wiki_forget`.
+per pruned id, matching `clear_entity_content`.
+
+> **Correction (2026-09-01):** this sentence originally read "matching
+> `clear_entity_content` and `wiki_forget`." The `wiki_forget` half was
+> false — `forget_entries_by_source_refs` had never pushed outbox rows, and
+> still had not when this spec was implemented. The claim is left recorded
+> rather than deleted because it is *why* the gap survived PR #131's review:
+> a reviewer reading it would reasonably conclude the work was already done.
+> Closed by issue #132 and
+> `docs/superpowers/specs/2026-09-01-wiki-reader-contract-and-forget-outbox-design.md`.
 
 ### Defense in depth — reader-side filter (ALREADY PRESENT, no work)
 
