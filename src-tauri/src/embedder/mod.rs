@@ -239,29 +239,40 @@ mod tests {
 
     #[test]
     fn embed_cloud_errors() {
-        let p = EmbedProfile::Cloud {
-            provider: CloudProvider::OpenAi,
-            model: "x".to_string(),
-            api_key: "k".to_string(),
-        };
-        assert!(embed_batch(&p, vec!["a".into()]).is_err());
+        // `embed_batch` checks CURATED_EMBED_STUB BEFORE it looks at the
+        // profile, so a concurrently-running test that sets the stub makes
+        // this return Ok and the assertion fail. Env is process-wide; pin it
+        // to unset and take the shared `temp_env` lock.
+        temp_env::with_vars([("CURATED_EMBED_STUB", None::<&str>)], || {
+            let p = EmbedProfile::Cloud {
+                provider: CloudProvider::OpenAi,
+                model: "x".to_string(),
+                api_key: "k".to_string(),
+            };
+            assert!(embed_batch(&p, vec!["a".into()]).is_err());
+        });
     }
 
     #[test]
     fn external_profile_requires_api_key() {
         // No key in profile; env vars must not leak a value into tests, so this
         // should fail with the "no api key" message unless CI sets one.
-        let p = EmbedProfile::External {
-            profile: ExternalEmbedProfile {
-                base_url: "https://openrouter.ai/api/v1".to_string(),
-                model: "openai/text-embedding-3-small".to_string(),
-                api_key: None,
-            },
-        };
-        match std::env::var("OPENROUTER_API_KEY") {
-            Ok(k) if !k.trim().is_empty() => {} // env-provided: fine
-            _ => assert!(embed_batch(&p, vec!["a".into()]).is_err()),
-        }
+        //
+        // Same stub hazard as `embed_cloud_errors` above: CURATED_EMBED_STUB
+        // short-circuits `embed_batch` before the profile is consulted.
+        temp_env::with_vars([("CURATED_EMBED_STUB", None::<&str>)], || {
+            let p = EmbedProfile::External {
+                profile: ExternalEmbedProfile {
+                    base_url: "https://openrouter.ai/api/v1".to_string(),
+                    model: "openai/text-embedding-3-small".to_string(),
+                    api_key: None,
+                },
+            };
+            match std::env::var("OPENROUTER_API_KEY") {
+                Ok(k) if !k.trim().is_empty() => {} // env-provided: fine
+                _ => assert!(embed_batch(&p, vec!["a".into()]).is_err()),
+            }
+        });
     }
 
     #[test]

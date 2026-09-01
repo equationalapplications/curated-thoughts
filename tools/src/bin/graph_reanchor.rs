@@ -104,6 +104,15 @@ fn main() -> Result<()> {
 
     let conn = Connection::open(&paths.db_path)
         .with_context(|| format!("open {}", paths.db_path.display()))?;
+    // Every writer connection in this workspace sets `busy_timeout` (see
+    // `tools/src/write.rs::open_rw`). SQLite's default is 0, so a transient
+    // lock from the desktop's WAL checkpoint would fail this migration
+    // instantly with SQLITE_BUSY — and because step 1 and step 2 commit
+    // separately, an instant failure can leave the DB half-migrated with the
+    // operator holding only a backup and no record of which step landed.
+    // 5s matches the rest of the workspace.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("set busy_timeout on the migration writer connection")?;
 
     // Step 1 — edge purge. No outbox rows: edges are not replicated (spec §2).
     let removed = purge_orphan_edges(&conn)?;

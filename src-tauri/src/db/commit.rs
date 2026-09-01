@@ -24,8 +24,29 @@ pub struct ResolveOptions {
     /// blocking and must not run while the lock is held). A missing key means
     /// "no embedding available" — the entry inserts with NULL and the sweep
     /// fills it later, matching the internal-compute contract.
-    pub entry_embeddings: Option<std::collections::HashMap<String, Vec<f32>>>,
+    pub entry_embeddings: Option<EntryEmbeddings>,
 }
+
+/// A precomputed entry embedding together with the exact text it was derived
+/// from.
+///
+/// The text is carried so the commit path can verify it before persisting.
+/// `resolve_proposal_cmd` loads items, drops the `DbState` mutex to embed, then
+/// re-acquires the mutex and re-loads items — so the body the commit is about
+/// to write is not guaranteed to be the body that was embedded. Without the
+/// check, a payload edited between those phases would persist a vector
+/// describing the *old* text, and semantic search would surface the entry for
+/// queries matching text it no longer contains. On a mismatch the vector is
+/// discarded and the row lands NULL for the sweep to re-embed correctly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrecomputedEmbedding {
+    /// Exactly what was fed to the embedder — `embed_text_for_entry(title, body)`.
+    pub embed_text: String,
+    pub vector: Vec<f32>,
+}
+
+/// Precomputed entry embeddings keyed by `LoadedItem::id`.
+pub type EntryEmbeddings = std::collections::HashMap<String, PrecomputedEmbedding>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommittedRef {
@@ -81,8 +102,10 @@ struct CommitContext {
     facts_duplicated: usize,
     /// Entry embeddings computed before the transaction opened, keyed by
     /// `LoadedItem::id`. A missing key means "no embedding available" — the
-    /// entry is inserted with NULL and the sweep retries it.
-    entry_embeddings: std::collections::HashMap<String, Vec<f32>>,
+    /// entry is inserted with NULL and the sweep retries it. A key whose
+    /// `embed_text` no longer matches the text being written is treated the
+    /// same way; see [`PrecomputedEmbedding`].
+    entry_embeddings: EntryEmbeddings,
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
@@ -680,10 +703,14 @@ fn commit_fact_add(
     let title = fact_title_from_body(&body);
     let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
 
+    // Use the precomputed vector only if it describes the text we are about
+    // to write — see `PrecomputedEmbedding`. A stale vector is worse than no
+    // vector: NULL is retried by the sweep, a wrong vector is not.
     let embedding_blob: Option<Vec<u8>> = ctx
         .entry_embeddings
         .get(&item.id)
-        .map(|v| crate::wiki_graph::f32_vec_to_blob(v));
+        .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
+        .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
 
     conn.execute(
         "INSERT INTO llm_wiki_entries (
@@ -835,15 +862,19 @@ fn commit_fact_update(
     };
     let body_changed = previous_body != body;
 
-    // Write the freshly computed embedding if the pre-pass produced one;
-    // otherwise NULL so the sweep re-embeds — never leave a vector describing
-    // text the entry no longer contains.
+    let title = fact_title_from_body(&body);
+
+    // Write the freshly computed embedding if the pre-pass produced one for
+    // exactly this text; otherwise NULL so the sweep re-embeds — never leave a
+    // vector describing text the entry no longer contains. The text check
+    // matters here specifically: the caller embeds a body loaded before the
+    // `DbState` mutex was dropped, and `resolve_proposal` re-loads items after
+    // re-acquiring it (see `PrecomputedEmbedding`).
     let embedding_blob: Option<Vec<u8>> = ctx
         .entry_embeddings
         .get(&item.id)
-        .map(|v| crate::wiki_graph::f32_vec_to_blob(v));
-
-    let title = fact_title_from_body(&body);
+        .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
+        .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
 
     if body_changed {
         conn.execute(
@@ -863,16 +894,23 @@ fn commit_fact_update(
             ],
         )?;
     } else {
+        // Body unchanged, so any stored vector still describes this text and
+        // must be preserved — but if the row is NULL (an earlier write-time
+        // embed failed and the sweep has not run yet) this is the moment to
+        // fill it: we already paid for the vector and it matches the body.
+        // COALESCE does both: overwrite when we have one, keep otherwise.
         conn.execute(
             "UPDATE llm_wiki_entries
-             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5
-             WHERE id = ?6 AND entity_id = ?7",
+             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
+                 embedding_blob = COALESCE(?6, embedding_blob)
+             WHERE id = ?7 AND entity_id = ?8",
             params![
                 title,
                 body,
                 serde_json::to_string(&tags)?,
                 confidence,
                 ctx.now_ms,
+                embedding_blob,
                 fact_id,
                 ctx.entity_id,
             ],
@@ -1229,7 +1267,7 @@ pub(crate) fn precompute_entry_embeddings(
     items: &[LoadedItem],
     decisions: &[ItemDecision],
     profile: Option<&EmbedProfile>,
-) -> std::collections::HashMap<String, Vec<f32>> {
+) -> EntryEmbeddings {
     use std::collections::HashMap;
 
     let Some(profile) = profile else {
@@ -1290,8 +1328,16 @@ pub(crate) fn precompute_entry_embeddings(
                     );
                     continue;
                 }
-                for (id, vector) in id_chunk.iter().zip(vectors) {
-                    out.insert(id.clone(), vector);
+                for ((id, embed_text), vector) in
+                    id_chunk.iter().zip(text_chunk.iter()).zip(vectors)
+                {
+                    out.insert(
+                        id.clone(),
+                        PrecomputedEmbedding {
+                            embed_text: embed_text.clone(),
+                            vector,
+                        },
+                    );
                 }
             }
             Err(e) => {
@@ -1705,10 +1751,19 @@ mod tests {
         .unwrap();
 
         let mut ctx = test_ctx("ent-1");
-        ctx.entry_embeddings
-            .insert("item-1".to_string(), vec![0.5_f32; 8]);
+        let new_body = "A completely different body.";
+        ctx.entry_embeddings.insert(
+            "item-1".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(new_body),
+                    new_body,
+                ),
+                vector: vec![0.5_f32; 8],
+            },
+        );
         let item = test_item("item-1", "fact_update", Some("fact_a"));
-        let payload = serde_json::json!({ "body": "A completely different body." });
+        let payload = serde_json::json!({ "body": new_body });
         commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
 
         let blob: Option<Vec<u8>> = conn
@@ -1722,6 +1777,120 @@ mod tests {
             blob,
             Some(crate::wiki_graph::f32_vec_to_blob(&[0.5_f32; 8])),
             "the fresh vector replaces the stale one"
+        );
+    }
+
+    #[test]
+    fn a_precomputed_vector_for_a_different_body_is_discarded() {
+        // `resolve_proposal_cmd` embeds phase-1's payload, drops the DbState
+        // mutex, then re-loads items in phase 3. If the payload changed in
+        // between, the map still holds a vector for the OLD text keyed by the
+        // same item id. Persisting it would make the entry match queries for
+        // text it no longer contains — worse than NULL, which the sweep fixes.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "The original body.");
+
+        let mut ctx = test_ctx("ent-1");
+        let stale_body = "The body that was embedded in phase one.";
+        ctx.entry_embeddings.insert(
+            "item-1".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(stale_body),
+                    stale_body,
+                ),
+                vector: vec![0.5_f32; 8],
+            },
+        );
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        // Phase 3 commits a DIFFERENT body than the one that was embedded.
+        let payload = serde_json::json!({ "body": "The body phase three actually commits." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob, None,
+            "a vector computed from different text must never be persisted"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_body_fills_a_null_blob_instead_of_discarding_the_vector() {
+        // The row is NULL because an earlier write-time embed failed. A later
+        // edit that does not change the body still carries a fresh, matching
+        // vector — filling it here is free and keeps the entry searchable
+        // without waiting for a sweep trigger this path never fires.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        let body = "The body that does not change.";
+        seed_fact_row(&conn, "fact_a", "ent-1", body);
+
+        let mut ctx = test_ctx("ent-1");
+        ctx.entry_embeddings.insert(
+            "item-1".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(body),
+                    body,
+                ),
+                vector: vec![0.25_f32; 8],
+            },
+        );
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": body });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob,
+            Some(crate::wiki_graph::f32_vec_to_blob(&[0.25_f32; 8])),
+            "an unchanged body should take the fresh vector rather than stay NULL"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_body_keeps_its_existing_blob_when_no_vector_was_precomputed() {
+        // COALESCE must not clobber a good vector with NULL when the provider
+        // was down and the precompute produced nothing.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        let body = "The body that does not change.";
+        seed_fact_row(&conn, "fact_a", "ent-1", body);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'",
+            params![vec![7u8; 32]],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": body });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob,
+            Some(vec![7u8; 32]),
+            "the existing vector still describes this body and must survive"
         );
     }
 

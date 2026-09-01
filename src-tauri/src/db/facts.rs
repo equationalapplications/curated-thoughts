@@ -194,11 +194,36 @@ pub fn add_fact_with_profile(
 }
 
 /// Rewrite a fact's body (title re-derived); pushes full-payload outbox UPDATE.
+///
+/// Equivalent to `update_fact_with_blob(conn, entity_id, fact_id, body, None)`
+/// — the entry lands with a NULL embedding for the sweep to fill. Kept for
+/// tests and callers with no embed profile to hand.
 pub fn update_fact(
     conn: &mut Connection,
     entity_id: &str,
     fact_id: &str,
     body: &str,
+) -> Result<()> {
+    update_fact_with_blob(conn, entity_id, fact_id, body, None)
+}
+
+/// Rewrite a fact's body, storing a caller-computed embedding blob.
+///
+/// The blob must be computed OUTSIDE the caller's DB lock via
+/// [`precompute_entry_embedding`], for the same reason as
+/// [`add_fact_with_blob`]: `embed_batch` is a blocking network round-trip.
+///
+/// `None` writes NULL, which is what a provider failure collapses to — the
+/// null-embedding sweep re-derives it later. Passing the fresh blob is what
+/// keeps an edited fact searchable immediately instead of falling out of
+/// semantic retrieval until the next sweep trigger (which this path does not
+/// itself fire).
+pub fn update_fact_with_blob(
+    conn: &mut Connection,
+    entity_id: &str,
+    fact_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
 ) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
@@ -260,12 +285,14 @@ pub fn update_fact(
         bail!("fact not found or archived: {fact_id}");
     };
 
-    // Wipe the blob so the sweep re-derives it; mirrors `commit_fact_update` (commit 207477a).
+    // Write the caller's freshly computed vector, or NULL when there is none
+    // so the sweep re-derives it — never leave a vector describing text the
+    // entry no longer contains. Mirrors `commit_fact_update`.
     tx.execute(
         "UPDATE llm_wiki_entries
-            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = NULL
-          WHERE id = ?4",
-        params![title, body, now_ms, fact_id],
+            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4
+          WHERE id = ?5",
+        params![title, body, now_ms, embedding_blob, fact_id],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(

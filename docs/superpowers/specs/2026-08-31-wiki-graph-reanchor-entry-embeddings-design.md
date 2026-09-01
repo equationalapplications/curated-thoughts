@@ -85,6 +85,9 @@ implementer must re-run this grep and confirm the list is still complete):
 | `run_wiki_forget` | `src-tauri/src/lib.rs:1867` (hard `DELETE FROM llm_wiki_entries WHERE source_ref = ?1 OR source_ref = ?2`) | "forget this source file" command | yes |
 | `clear_entity_content` | `src-tauri/src/db/bundle_apply.rs:606` | OKF bundle import, entity replacement (hard `DELETE ... WHERE entity_id=?1`) | **yes — see note below** |
 
+The three **hard**-delete rows above take a different purge predicate from the
+soft-delete rows; see "Refinement (post-implementation review)" below.
+
 `clear_entity_content` deletes by `entity_id = ?1` on `llm_wiki_entries` and
 `llm_wiki_tasks`, but edges are stamped with `ctx.entity_id` while pointing
 across entities (source from one, target from another). The original
@@ -127,6 +130,42 @@ does take a generic `table_name`, so an edges channel is buildable — but
 "start replicating the edge table" is its own scope item with its own
 consumer-side work, and it is a **non-goal here** (§6). Purges are local-only,
 exactly like the inserts they undo.
+
+**Refinement (post-implementation review, 2026-09-01) — soft delete and hard
+delete need different predicates.** The both-endpoints-dead rule above is
+written for the *soft*-delete sites, and its load-bearing justification is
+recovery: the dead row is still present, `deleted_at` can be cleared, and the
+edge is worth keeping so the surviving side does not lose its connection.
+
+That justification does not hold at the three sites that **hard**-delete
+(`run_wiki_forget`, `clear_entity_content`, and — since the seconds→ms fix made
+it live — `prune_old_librarian_inferred`). A hard-deleted id is gone from every
+endpoint table and can never come back, so an edge anchored on one references
+nothing. Worse, it is *uncollectable*: every purge predicate here needs the dead
+endpoint to be findable in order to fire, and the both-endpoints-dead rule (in
+`purge_dead_edges` and in Part C's `ORPHAN_PREDICATE`) never matches a
+half-dangling edge. Left as-is, every forget and every Replace-mode import
+accumulates permanent rows in `llm_wiki_edges`.
+
+The hard-delete sites therefore call `db::edge_purge::purge_edges_for_hard_deleted`,
+which drops an edge as soon as the **deleted** endpoint is dead everywhere,
+irrespective of its partner:
+
+```sql
+DELETE FROM llm_wiki_edges
+ WHERE (source_id IN (<doomed>) AND NOT <source is alive in any endpoint table>)
+    OR (target_id IN (<doomed>) AND NOT <target is alive in any endpoint table>);
+```
+
+The `NOT <alive>` guard is still required on the deleted side: an entry id may
+collide with a live `curated_entities` or `llm_wiki_tasks` id, which is exactly
+the R1 bug that motivated the heterogeneous predicate. What changes is only
+*which* endpoint the aliveness test applies to.
+
+This is not currently user-visible — `wiki_traverse_graph` inner-joins
+`llm_wiki_entries` on both endpoints (see "Defense in depth" below), so a
+dangling edge is filtered out at read time. It is a storage-hygiene fix and a
+guard against a future reader that trusts the edge table.
 
 **Reviewed decision — soft-delete purges edges too.** Cascading at the
 soft-delete (archive/heal) sites means a recovered row (the

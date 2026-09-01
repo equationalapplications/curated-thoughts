@@ -1767,7 +1767,14 @@ fn prune_old_librarian_inferred(conn: &rusqlite::Connection, now_ms: i64) -> Res
     };
 
     let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
-    crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed_ids).map_err(|e| e.to_string())?;
+    // HARD delete, so the hard-delete purge. `purge_edges_for_entries` keeps an
+    // edge whose partner is still alive — correct at the soft-delete sites,
+    // where the dead row can be recovered — but here the id disappears from
+    // every endpoint table, so such an edge would reference nothing and no
+    // later cascade could ever find it to clean up (spec §2, "Soft delete vs
+    // hard delete").
+    crate::db::edge_purge::purge_edges_for_hard_deleted(&tx, &doomed_ids)
+        .map_err(|e| e.to_string())?;
 
     // Push one OutboxOperation::Delete row per doomed entry so replicas
     // converge on the prune. Same shape as `commit_fact_archive` /
@@ -3013,11 +3020,26 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
         .manage(DbState(std::sync::Mutex::new(db)))
         .manage(VaultConfigState(std::sync::Mutex::new(config)))
         // Registered so commands that take `State<EmbedProfileState>` (e.g.,
-        // `add_entity_fact_cmd` after Task R3) can extract it. Defaults to the
-        // same shape `setup` initializes in production; tests that need a
-        // different profile mutate it through `app.state::<EmbedProfileState>()`.
+        // `add_entity_fact_cmd`, `update_entity_fact_cmd`) can extract it.
+        //
+        // Deliberately NOT `EmbedProfile::default()` — that is
+        // `Local { nomic-embed-code }`, an Ollama profile, so every commit
+        // path that now embeds at write time would make an HTTP call to
+        // localhost:11434 from the test suite: a hang or a connection error
+        // depending on whether the machine happens to run Ollama, and
+        // different results on a developer box than on CI. `Cloud` returns
+        // "cloud embed not implemented" without touching the network, which
+        // collapses to the NULL-blob path every non-embedding test expects.
+        //
+        // Tests that DO want vectors set `CURATED_EMBED_STUB=constant8`;
+        // `embed_batch` checks that env var before it looks at the profile, so
+        // the stub still works with this profile in place.
         .manage(EmbedProfileState(std::sync::Mutex::new(
-            crate::embedder::EmbedProfile::default(),
+            crate::embedder::EmbedProfile::Cloud {
+                provider: crate::embedder::CloudProvider::OpenAi,
+                model: "offline-test-profile".to_string(),
+                api_key: String::new(),
+            },
         )))
         // No background pipeline thread: integration tests invoke DB-only commands;
         // pipeline work is covered by `PipelineWorker` tests in `tests/pipeline.rs`.
@@ -5090,134 +5112,127 @@ mod ingest_document_command_tests {
     use tauri::Listener;
     use tempfile::TempDir;
 
-    // `pipeline::ingest_document` reads `CURATED_EMBED_STUB` to bypass Ollama.
-    // The pipeline test suite uses the same env var, so guard it with a static
-    // mutex to keep tests from racing on the value.
-    static EMBED_STUB_GUARD: Mutex<()> = Mutex::new(());
-
-    struct StubUnset;
-    impl Drop for StubUnset {
-        fn drop(&mut self) {
-            std::env::remove_var("CURATED_EMBED_STUB");
-        }
-    }
-
-    /// Locks the embedding-stub guard, sets `CURATED_EMBED_STUB=constant8`, and
-    /// returns an RAII guard that will unset the var when dropped.
-    fn lock_stub() -> StubUnset {
-        let _stub_lock = EMBED_STUB_GUARD.lock().unwrap();
-        std::env::set_var("CURATED_EMBED_STUB", "constant8");
-        StubUnset
-    }
+    // `pipeline::ingest_document` reads `CURATED_EMBED_STUB` to bypass Ollama,
+    // and so do tests elsewhere in this crate — `embed_sweep` in particular
+    // sets `constant8_short` and unsets the var entirely. Env is process-wide,
+    // so those must not run interleaved with this one.
+    //
+    // This used to be a private `EMBED_STUB_GUARD: Mutex<()>` taken by a
+    // `lock_stub()` helper — but the helper bound the guard to a local, so it
+    // was dropped on return and the mutex protected nothing. That is why this
+    // test failed intermittently under the full suite. `temp_env::with_vars`
+    // holds one global lock shared by every other caller in the crate, which
+    // is the property the static mutex was reaching for; use it instead of
+    // reintroducing a second, unshared lock.
 
     #[test]
     fn ingest_document_command_emits_progress_and_proposal_ready() {
-        let _stub_cleanup = lock_stub();
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let tmp = TempDir::new().expect("tempdir");
+            let db_path = tmp.path().join("brain.db");
+            let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
+                .expect("open test db");
+            let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
-        let tmp = TempDir::new().expect("tempdir");
-        let db_path = tmp.path().join("brain.db");
-        let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
-            .expect("open test db");
-        let config = vault::VaultConfig::new(tmp.path().join("config.json"));
+            // Real markdown doc with enough words for chunk_autodetect to produce
+            // at least one chunk — without a chunk, `ingest_document` returns Ok(())
+            // but the embedding leg still runs the same code path so we still emit
+            // both progress events.
+            let doc_path = tmp.path().join("note.md");
+            std::fs::write(
+                &doc_path,
+                "# Test Note\n\n".to_owned() + &"word ".repeat(40),
+            )
+            .expect("write doc");
 
-        // Real markdown doc with enough words for chunk_autodetect to produce
-        // at least one chunk — without a chunk, `ingest_document` returns Ok(())
-        // but the embedding leg still runs the same code path so we still emit
-        // both progress events.
-        let doc_path = tmp.path().join("note.md");
-        std::fs::write(
-            &doc_path,
-            "# Test Note\n\n".to_owned() + &"word ".repeat(40),
-        )
-        .expect("write doc");
+            // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
+            // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
+            // already hold works fine and listeners observe the events).
+            let app = tauri::test::mock_builder()
+                .manage(DbState(Mutex::new(db)))
+                .manage(VaultConfigState(Mutex::new(config)))
+                .manage(EmbedProfileState(Mutex::new(
+                    crate::embedder::EmbedProfile::default(),
+                )))
+                .manage(PipelineHolder(Mutex::new(None)))
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("build mock app");
 
-        // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
-        // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
-        // already hold works fine and listeners observe the events).
-        let app = tauri::test::mock_builder()
-            .manage(DbState(Mutex::new(db)))
-            .manage(VaultConfigState(Mutex::new(config)))
-            .manage(EmbedProfileState(Mutex::new(
-                crate::embedder::EmbedProfile::default(),
-            )))
-            .manage(PipelineHolder(Mutex::new(None)))
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("build mock app");
+            // Capture emitted events into a shared vector. We don't care about the
+            // payload of `ingest-error` here — the happy-path event shapes are what
+            // we lock in.
+            let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Capture emitted events into a shared vector. We don't care about the
-        // payload of `ingest-error` here — the happy-path event shapes are what
-        // we lock in.
-        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let progress_cap = captured.clone();
+            app.listen("ingest-progress", move |event| {
+                progress_cap
+                    .lock()
+                    .unwrap()
+                    .push(("ingest-progress".into(), event.payload().into()));
+            });
 
-        let progress_cap = captured.clone();
-        app.listen("ingest-progress", move |event| {
-            progress_cap
-                .lock()
-                .unwrap()
-                .push(("ingest-progress".into(), event.payload().into()));
-        });
+            let ready_cap = captured.clone();
+            app.listen("ingest-proposal-ready", move |event| {
+                ready_cap
+                    .lock()
+                    .unwrap()
+                    .push(("ingest-proposal-ready".into(), event.payload().into()));
+            });
 
-        let ready_cap = captured.clone();
-        app.listen("ingest-proposal-ready", move |event| {
-            ready_cap
-                .lock()
-                .unwrap()
-                .push(("ingest-proposal-ready".into(), event.payload().into()));
-        });
+            // Extract the state via `app.state::<T>()` — the same path the Tauri
+            // command argument extractor uses — and call the helper directly with
+            // the inner locks.
+            let db_state = app.state::<DbState>();
+            let profile_state = app.state::<EmbedProfileState>();
+            run_ingest_with_app(
+                app.handle(),
+                &db_state.0,
+                &profile_state.0,
+                doc_path.to_string_lossy().into_owned(),
+            )
+            .expect("run_ingest_with_app");
 
-        // Extract the state via `app.state::<T>()` — the same path the Tauri
-        // command argument extractor uses — and call the helper directly with
-        // the inner locks.
-        let db_state = app.state::<DbState>();
-        let profile_state = app.state::<EmbedProfileState>();
-        run_ingest_with_app(
-            app.handle(),
-            &db_state.0,
-            &profile_state.0,
-            doc_path.to_string_lossy().into_owned(),
-        )
-        .expect("run_ingest_with_app");
+            // Allow Tauri's event loop to deliver the listen notifications before
+            // we read the buffer.
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Allow Tauri's event loop to deliver the listen notifications before
-        // we read the buffer.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let events = captured.lock().unwrap();
-        let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(
-            names.contains(&"ingest-progress"),
-            "expected at least one ingest-progress event, got: {events:?}",
-        );
-        assert!(
-            events
+            let events = captured.lock().unwrap();
+            let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+            assert!(
+                names.contains(&"ingest-progress"),
+                "expected at least one ingest-progress event, got: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
+                "expected ingest-progress with phase=chunking, got: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
+                "expected ingest-progress with phase=embedding, got: {events:?}",
+            );
+            assert!(
+                names.contains(&"ingest-proposal-ready"),
+                "expected at least one ingest-proposal-ready event, got: {events:?}",
+            );
+            // The test document doesn't produce a pending proposal (synthesis is
+            // async), so `proposalId` must serialize as JSON `null` — not `""`,
+            // which the wizard would otherwise route to as a nonexistent id.
+            let ready_payload = events
                 .iter()
-                .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
-            "expected ingest-progress with phase=chunking, got: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
-            "expected ingest-progress with phase=embedding, got: {events:?}",
-        );
-        assert!(
-            names.contains(&"ingest-proposal-ready"),
-            "expected at least one ingest-proposal-ready event, got: {events:?}",
-        );
-        // The test document doesn't produce a pending proposal (synthesis is
-        // async), so `proposalId` must serialize as JSON `null` — not `""`,
-        // which the wizard would otherwise route to as a nonexistent id.
-        let ready_payload = events
-            .iter()
-            .find(|(n, _)| n == "ingest-proposal-ready")
-            .map(|(_, p)| p.clone())
-            .expect("ingest-proposal-ready payload");
-        let payload: serde_json::Value =
-            serde_json::from_str(&ready_payload).expect("parse ingest-proposal-ready payload");
-        assert_eq!(
-            payload.get("proposalId"),
-            Some(&serde_json::Value::Null),
-            "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
-        );
+                .find(|(n, _)| n == "ingest-proposal-ready")
+                .map(|(_, p)| p.clone())
+                .expect("ingest-proposal-ready payload");
+            let payload: serde_json::Value =
+                serde_json::from_str(&ready_payload).expect("parse ingest-proposal-ready payload");
+            assert_eq!(
+                payload.get("proposalId"),
+                Some(&serde_json::Value::Null),
+                "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
+            );
+        });
     }
 }

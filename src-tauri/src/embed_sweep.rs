@@ -160,9 +160,15 @@ pub fn sweep_null_embeddings(
         // R6 zip-truncation guard lives inside `apply_embeddings` so every
         // caller is protected; treat a length-mismatch error as a failed
         // batch and stop the run.
+        //
+        // Anything else is a DB failure (schema drift, SQLITE_BUSY, disk
+        // full) and must propagate: swallowing it here reports real data
+        // loss as a recoverable provider hiccup and lets `graph_reanchor`
+        // print "done." and exit 0 on a database it never actually touched.
+        // Mirrors `lib::run_embedding_sweep`, which already discriminates.
         match apply_embeddings(conn, &pending, &vectors) {
             Ok(n) => report.filled += n,
-            Err(_) => {
+            Err(e) if e.to_string().contains("length mismatch") => {
                 // Static message — the anyhow error chain may carry DB
                 // context but not the resolved embed key, and printing
                 // `{e}` here invites CodeQL to re-flag the data flow.
@@ -173,6 +179,7 @@ pub fn sweep_null_embeddings(
                 report.failed += pending.len();
                 break;
             }
+            Err(e) => return Err(e),
         }
     }
 
@@ -206,6 +213,34 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_db_failure_during_apply_propagates_instead_of_counting_as_a_provider_hiccup() {
+        // `graph_reanchor` drives this function. If a DB failure were folded
+        // into `report.failed` the tool would print "done." and exit 0 on a
+        // database it never actually wrote to, and tell the operator to
+        // re-run — forever. Only the length-mismatch guard is a soft failure.
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let conn = open_in_memory().unwrap();
+            seed_entry(&conn, "fact_a", None, None);
+            // Real DB failure inside `apply_embeddings`: the UPDATE target is
+            // gone. The SELECT that builds the batch runs against a view so
+            // the batch is non-empty before the table disappears.
+            conn.execute_batch(
+                "CREATE TABLE entries_backup AS SELECT * FROM llm_wiki_entries;
+                 DROP TABLE llm_wiki_entries;
+                 CREATE VIEW llm_wiki_entries AS SELECT * FROM entries_backup;",
+            )
+            .unwrap();
+
+            let err = sweep_null_embeddings(&conn, &EmbedProfile::default(), 4)
+                .expect_err("a DB failure must propagate, not be reported as a failed batch");
+            assert!(
+                !err.to_string().contains("length mismatch"),
+                "the soft path is only for provider cardinality errors, got: {err}"
+            );
+        });
     }
 
     #[test]

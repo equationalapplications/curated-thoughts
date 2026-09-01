@@ -20,6 +20,16 @@
 //! (with `deleted_at IS NULL` gates). The asymmetric helper below is reused by
 //! `purge_edges_for_entry` (single-id cascade) and `purge_dead_edges`
 //! (entity-content reset) so the three-table truth lives in one Rust file.
+//!
+//! ## Soft delete vs hard delete
+//!
+//! The partner-alive retention rule above is written for *soft* deletion: the
+//! dead row is still present, `deleted_at` can be cleared, and the edge is
+//! worth keeping. The two sites that **hard**-delete rows — `wiki_forget` and
+//! the bundle import's `clear_entity_content` — call
+//! `purge_edges_for_hard_deleted` instead, because an id that no longer exists
+//! anywhere can never come back and no later cascade could ever collect its
+//! edges.
 
 use anyhow::Result;
 use rusqlite::{params, params_from_iter, Connection};
@@ -93,6 +103,56 @@ pub fn purge_edges_for_entries(conn: &Connection, entry_ids: &[String]) -> Resul
              OR (target_id IN ({placeholders}) AND NOT ({source_alive}))",
             target_alive = TARGET_ALIVE_SQL,
             source_alive = SOURCE_ALIVE_SQL,
+        );
+        // Bind the chunk twice — once for each IN clause.
+        let bound: Vec<&str> = chunk
+            .iter()
+            .chain(chunk.iter())
+            .map(String::as_str)
+            .collect();
+        total += conn.execute(&sql, params_from_iter(bound))?;
+    }
+    Ok(total)
+}
+
+/// Purge edges anchored on ids that were **hard-deleted** (row physically
+/// gone), regardless of whether the partner endpoint is still alive.
+///
+/// This is the counterpart to [`purge_edges_for_entries`], not a duplicate of
+/// it. The partner-alive retention rule above exists because the usual
+/// deletion sites *soft*-delete: the row is still there, `deleted_at` can be
+/// cleared, and the edge is worth keeping so the surviving side does not lose
+/// its connection when the partner comes back. A hard-deleted id can never
+/// come back, so an edge anchored on one references nothing forever — and no
+/// later cascade can clean it, because every other purge predicate needs the
+/// dead endpoint to be *findable* to fire. Left alone, these rows accumulate
+/// permanently: `purge_dead_edges` and the `graph_reanchor` migration both
+/// require BOTH endpoints dead, so neither ever collects a half-dangling one.
+///
+/// (They are not user-visible today — `wiki_graph::wiki_traverse_graph` inner-
+/// joins `llm_wiki_entries` on both endpoints, so a dangling edge is filtered
+/// out at read time. This is a storage-hygiene fix and a guard against a
+/// future reader that trusts the edge table.)
+///
+/// The `NOT (alive)` guard on the deleted side is still required: an entry id
+/// may collide with a live `curated_entities` or `llm_wiki_tasks` id, and the
+/// naive `WHERE source_id = ?1 OR target_id = ?1` form is exactly the R1 bug
+/// this module was written to fix. Here the aliveness check applies to the
+/// *deleted* endpoint rather than its partner.
+///
+/// Takes `&Connection` so it composes inside the caller's transaction.
+pub fn purge_edges_for_hard_deleted(conn: &Connection, deleted_ids: &[String]) -> Result<usize> {
+    let mut total = 0;
+    for chunk in deleted_ids.chunks(BATCH_PURGE_CHUNK) {
+        let placeholders: String = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "DELETE FROM llm_wiki_edges
+          WHERE (source_id IN ({placeholders}) AND NOT ({source_alive}))
+             OR (target_id IN ({placeholders}) AND NOT ({target_alive}))",
+            source_alive = SOURCE_ALIVE_SQL,
+            target_alive = TARGET_ALIVE_SQL,
         );
         // Bind the chunk twice — once for each IN clause.
         let bound: Vec<&str> = chunk
@@ -402,6 +462,64 @@ mod tests {
             "edge stamped with an entity id must not be purged by an entry-id cascade"
         );
         assert_eq!(edge_ids(&conn), vec!["edge_pure_entity".to_string()]);
+    }
+
+    #[test]
+    fn hard_delete_purge_removes_edges_whose_partner_is_still_alive() {
+        // The soft-delete cascade deliberately keeps a half-live edge. A
+        // hard-deleted endpoint is different: the id is gone for good, so the
+        // edge references nothing and nothing else will ever collect it.
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "fact_gone", "ent-1");
+        seed_entry(&conn, "fact_alive", "ent-2");
+        seed_edge(&conn, "edge_out", "ent-1", "fact_gone", "fact_alive");
+        seed_edge(&conn, "edge_in", "ent-1", "fact_alive", "fact_gone");
+        seed_entry(&conn, "fact_other", "ent-2");
+        seed_edge(&conn, "edge_untouched", "ent-2", "fact_alive", "fact_other");
+
+        // HARD delete, as `wiki_forget` and `clear_entity_content` do.
+        conn.execute("DELETE FROM llm_wiki_entries WHERE id = 'fact_gone'", [])
+            .unwrap();
+
+        // The soft-delete cascade would keep both edges: fact_alive is alive.
+        assert_eq!(
+            purge_edges_for_entries(&conn, &["fact_gone".to_string()]).unwrap(),
+            0,
+            "the partner-alive rule keeps these — that is the gap being closed"
+        );
+
+        let removed = purge_edges_for_hard_deleted(&conn, &["fact_gone".to_string()]).unwrap();
+        assert_eq!(removed, 2, "both dangling edges go, in either direction");
+        assert_eq!(edge_ids(&conn), vec!["edge_untouched".to_string()]);
+    }
+
+    #[test]
+    fn hard_delete_purge_spares_an_id_that_still_lives_in_another_table() {
+        // R1: an entry id may collide with a live curated-entity or task id.
+        // Deleting the entry row must not strip edges anchored on the entity.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "shared_id");
+        seed_entry(&conn, "fact_alive", "ent-1");
+        seed_edge(&conn, "edge_shared", "ent-1", "shared_id", "fact_alive");
+
+        let removed = purge_edges_for_hard_deleted(&conn, &["shared_id".to_string()]).unwrap();
+
+        assert_eq!(
+            removed, 0,
+            "the id is still alive in curated_entities — the edge must survive"
+        );
+        assert_eq!(edge_ids(&conn), vec!["edge_shared".to_string()]);
+    }
+
+    #[test]
+    fn hard_delete_purge_with_no_ids_is_a_no_op() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "fact_a", "ent-1");
+        seed_entry(&conn, "fact_b", "ent-1");
+        seed_edge(&conn, "edge_ab", "ent-1", "fact_a", "fact_b");
+
+        assert_eq!(purge_edges_for_hard_deleted(&conn, &[]).unwrap(), 0);
+        assert_eq!(edge_ids(&conn), vec!["edge_ab".to_string()]);
     }
 
     #[test]

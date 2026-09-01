@@ -37,7 +37,11 @@ pub fn forget_entries_by_source_refs(conn: &Connection, source_refs: &[String]) 
     let removed = tx.execute(&delete_sql, rusqlite::params_from_iter(source_refs.iter()))?;
 
     if !doomed.is_empty() {
-        crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed)?;
+        // HARD delete, so the hard-delete purge: `purge_edges_for_entries`
+        // keeps an edge whose partner is still alive, which is right for a
+        // soft delete but strands the edge forever here — the doomed id is
+        // gone from every table, so no future cascade can ever find it again.
+        crate::db::edge_purge::purge_edges_for_hard_deleted(&tx, &doomed)?;
     }
 
     tx.commit()?;
@@ -96,11 +100,9 @@ mod tests {
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
         seed_entry(&conn, "fact_b", "ent-2", Some("/vault/a.pdf"));
         seed_entry(&conn, "fact_c", "ent-3", Some("/vault/c.pdf"));
-        // R1 (remediation): the new heterogeneous contract only purges edges
-        // whose partner is also dead in every endpoint table. Soft-delete
-        // fact_c so the cascade treats edge_ac and edge_bc as purgeable.
-        // Without this, both edges would survive because fact_c remains
-        // alive in `llm_wiki_entries`.
+        // fact_c is soft-deleted here so this test also covers the
+        // both-endpoints-dead shape. The partner-alive shape has its own test
+        // below — under `purge_edges_for_hard_deleted` it is purged too.
         conn.execute(
             "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'fact_c'",
             [],
@@ -136,6 +138,30 @@ mod tests {
     }
 
     #[test]
+    fn forget_purges_edges_even_when_the_partner_is_still_alive() {
+        // Forget HARD-deletes. Under the soft-delete cascade
+        // (`purge_edges_for_entries`) an edge to a live partner survives, and
+        // because the forgotten id no longer exists in any table, nothing
+        // would ever collect that edge again — it dangles forever.
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "fact_forgotten", "ent-1", Some("/vault/a.pdf"));
+        seed_entry(&conn, "fact_live", "ent-2", Some("/vault/keep.pdf"));
+        seed_edge(&conn, "edge_out", "ent-1", "fact_forgotten", "fact_live");
+        seed_edge(&conn, "edge_in", "ent-1", "fact_live", "fact_forgotten");
+
+        let removed = forget_entries_by_source_refs(&conn, &["/vault/a.pdf".to_string()]).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(
+            edge_ids(&conn).is_empty(),
+            "edges anchored on a forgotten (hard-deleted) entry must not survive, \
+             in either direction, even though fact_live is still alive"
+        );
+        // The live partner itself is untouched.
+        assert!(entry_ids(&conn).contains(&"fact_live".to_string()));
+    }
+
+    #[test]
     fn forget_entries_by_source_refs_with_no_matches_is_a_noop() {
         let conn = open_in_memory().unwrap();
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
@@ -162,9 +188,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
         seed_entry(&conn, "fact_c", "ent-3", Some("/vault/c.pdf"));
-        // R1 (remediation): soft-delete fact_c so the cascade treats
-        // edge_ac as purgeable. Without this, edge_ac would survive because
-        // fact_c remains alive in `llm_wiki_entries`.
+        // fact_c soft-deleted so the assertion covers the fully-dead shape.
         conn.execute(
             "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'fact_c'",
             [],
