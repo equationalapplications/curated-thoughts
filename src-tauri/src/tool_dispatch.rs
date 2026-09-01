@@ -14,7 +14,7 @@ use crate::embedder::EmbedProfile;
 use crate::search::SearchResult;
 use crate::wiki_graph::{
     self, TraverseDirection, WikiOntologyResult, WikiSearchHit, WikiTraverseResult,
-    DEFAULT_ENTITY_IDS, DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_DEPTH,
 };
 
 /// Typed error for unknown tool names so callers can classify without string matching.
@@ -202,14 +202,13 @@ pub fn dispatch_wiki_search(
     limit: Option<usize>,
 ) -> Result<Vec<WikiSearchHit>> {
     let limit = limit.unwrap_or(10).clamp(1, 25);
-    let entity_ids: Vec<String> = entity_ids.unwrap_or_else(|| {
-        DEFAULT_ENTITY_IDS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
-    });
-    let entity_refs: Vec<&str> = entity_ids.iter().map(|s| s.as_str()).collect();
-    wiki_graph::wiki_search(conn, query_vec, &entity_refs, limit)
+    // Pass the caller's intent through untouched. Substituting a default set
+    // here is what made the default call path unable to match any row (#133).
+    let owned = entity_ids;
+    let refs: Option<Vec<&str>> = owned
+        .as_ref()
+        .map(|ids| ids.iter().map(|s| s.as_str()).collect());
+    wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), limit)
 }
 
 pub fn dispatch_wiki_get_ontology(
@@ -562,16 +561,24 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn wiki_search_uses_default_entity_ids_when_none_given() {
+    fn wiki_search_with_no_entity_ids_searches_every_live_entry() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
-                embedding_blob BLOB, deleted_at INTEGER);
-             INSERT INTO llm_wiki_entries VALUES ('e1', 'tier_fact', 'Fact One', NULL, NULL);",
+                embedding_blob BLOB, deleted_at INTEGER);",
         )
         .unwrap();
+        let blob = crate::wiki_graph::f32_vec_to_blob(&[1.0]);
+        conn.execute(
+            "INSERT INTO llm_wiki_entries VALUES ('e1', 'ent_448a', 'Entity One', ?1, NULL)",
+            rusqlite::params![blob],
+        )
+        .unwrap();
+
         let hits = dispatch_wiki_search(&conn, &[1.0], None, None).unwrap();
-        assert!(hits.is_empty());
+
+        assert_eq!(hits.len(), 1, "the default path must reach ent_* rows");
+        assert_eq!(hits[0].entity_id, "ent_448a");
     }
 
     #[test]
