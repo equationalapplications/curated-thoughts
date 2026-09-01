@@ -3,22 +3,27 @@ import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useFocusTrap } from "../useFocusTrap";
 
+type TrapVariant = "buttons" | "firstHidden";
+
 function TrapFixture({
   active,
   onEscape,
   yieldTo,
   withContenteditable = false,
+  variant = "buttons",
 }: {
   active: boolean;
   onEscape?: () => void;
   yieldTo?: (target: Element) => boolean;
   withContenteditable?: boolean;
+  /** "firstHidden": first button carries tabindex="-1" BEFORE activation. */
+  variant?: TrapVariant;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useFocusTrap(ref, { active, onEscape, yieldTo });
   return (
     <div ref={ref} data-testid="trap">
-      <button>First</button>
+      <button tabIndex={variant === "firstHidden" ? -1 : undefined}>First</button>
       <button>Middle</button>
       <button>Last</button>
       {withContenteditable && (
@@ -174,22 +179,22 @@ describe("useFocusTrap", () => {
 
   // An explicit tabindex="-1" removes an element from SEQUENTIAL tab order
   // even when it matches a tag branch — the trap must not treat it as a
-  // wrap-around candidate (CodeRabbit round-4).
+  // wrap-around candidate (CodeRabbit round-4; round-5 moved the tabindex=-1
+  // onto the FIRST button BEFORE activation so the activate-state assertion
+  // can only pass when the excluded node is genuinely skipped).
   it("excludes a tabindex=-1 button from sequential candidates on activate and Tab wrap", () => {
-    mountWithPriorFocus(<TrapFixture active />);
+    mountWithPriorFocus(<TrapFixture active variant="firstHidden" />);
     const trap = document.querySelector('[data-testid="trap"]')!;
-    const middle = buttons()[1]!;
-    const hidden = buttons()[2]!;
-    hidden.setAttribute("tabindex", "-1");
-    // Activate-state: the first focusable must be First, not a tabindex=-1 node.
-    expect(document.activeElement).toHaveTextContent("First");
-    // Wrap: from the new last sequential candidate (Middle), Tab must close the
-    // cycle back to First, skipping the tabindex=-1 node.
-    middle.focus();
-    middle.dispatchEvent(
+    // Activate-state: with the FIRST button excluded, activation must focus
+    // the next sequential candidate (Middle), proving the -1 node is skipped.
+    expect(document.activeElement).toHaveTextContent("Middle");
+    // Wrap: from the last sequential candidate (Last), Tab must close the
+    // cycle back to Middle, skipping the tabindex=-1 first node.
+    buttons()[2]!.focus();
+    buttons()[2]!.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
     );
-    expect(document.activeElement).toHaveTextContent("First");
+    expect(document.activeElement).toHaveTextContent("Middle");
     expect(trap.contains(document.activeElement)).toBe(true);
   });
 

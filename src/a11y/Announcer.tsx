@@ -111,8 +111,9 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
       const ch = channelsRef.current[politeness];
       const at = Date.now();
       // FIFO append; identical-message collapsing applies within the 150ms
-      // floor window of the immediately preceding message, at either
-      // politeness level (spec: announcer — duplicates never read twice).
+      // floor window of the immediately preceding message on THIS politeness
+      // channel — cross-channel duplicates are still read twice (spec:
+      // announcer — duplicates never read twice within a channel).
       const last = ch.queue[ch.queue.length - 1] ?? ch.displayed;
       if (last && last.text === text && at - last.at < FLOOR_MS) return;
       ch.queue.push({ id: nextIdRef.current++, text, at });
@@ -122,9 +123,8 @@ export function AnnouncerProvider({ children }: { children: ReactNode }) {
       if (ch.drainTimer === null && Date.now() - ch.lastWriteAt >= FLOOR_MS) {
         writeNext(politeness);
         scheduleDrain(politeness);
-      } else {
-        scheduleDrain(politeness);
       }
+      if (ch.drainTimer === null && ch.queue.length > 0) scheduleDrain(politeness);
     },
     [scheduleDrain, writeNext],
   );
