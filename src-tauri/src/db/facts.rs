@@ -70,6 +70,10 @@ pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) ->
             .next()
             .map(|v| crate::wiki_graph::f32_vec_to_blob(&v)),
         Ok(vectors) => {
+            // False positive: the eprintln! below only interpolates the usize count
+            // (vectors.len) — the API key resolved inside embed_batch never reaches
+            // this format string.
+            // codeql[rust/cleartext-logging]
             eprintln!(
                 "precompute_entry_embedding: expected 1 vector, got {}; leaving NULL for the sweep",
                 vectors.len()
@@ -77,9 +81,10 @@ pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) ->
             None
         }
         Err(e) => {
-            // codeql[rust/cleartext-logging]: `e` is an anyhow chain from
-            // embed_batch; the resolved API key is used only inside the
-            // Bearer header and never reaches this format string.
+            // `e` is an anyhow chain from embed_batch; the resolved API key is
+            // used only inside the Bearer header and never reaches this format
+            // string (the chain carries API-key env-var *names* only).
+            // codeql[rust/cleartext-logging]
             eprintln!(
                 "precompute_entry_embedding: provider failed, leaving NULL for the sweep: {e}"
             );
