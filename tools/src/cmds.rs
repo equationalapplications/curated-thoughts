@@ -395,7 +395,10 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         pid,
         &decisions,
         None,
-        ResolveOptions { auto_approve: true },
+        ResolveOptions {
+            auto_approve: true,
+            embed_profile: None,
+        },
     )?;
     println!(
         "approved {pid}: items={} source={} committed={} conflicts={} dropped_edges={} status={}",
