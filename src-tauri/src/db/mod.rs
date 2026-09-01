@@ -5,6 +5,7 @@ pub mod commit;
 pub mod connection;
 pub mod connections;
 pub mod ddl_compat;
+pub mod edge_purge;
 pub mod entities;
 pub mod events;
 pub mod facts;
