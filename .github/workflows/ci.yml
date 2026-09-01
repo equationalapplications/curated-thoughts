@@ -157,5 +157,8 @@ jobs:
       - name: A11y (contrast tokens + axe)
         run: pnpm run test:a11y
 
-      - name: Verify docs/a11y/index.css matches src/index.css
-        run: cmp src/index.css docs/a11y/index.css
+      - name: Verify docs/a11y/index.css payload matches src/index.css
+        run: |
+          # docs/a11y/index.css carries a 6-line GENERATED header; the payload
+          # after it must be byte-identical to src/index.css.
+          diff <(tail -n +7 docs/a11y/index.css) src/index.css
