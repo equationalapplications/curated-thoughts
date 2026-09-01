@@ -236,6 +236,10 @@ pub fn archive_fact(conn: &mut Connection, entity_id: &str, fact_id: &str) -> Re
     if changes == 0 {
         bail!("fact not found or already archived: {fact_id}");
     }
+
+    // Edges die with their endpoints, inside this same transaction (spec §2).
+    crate::db::edge_purge::purge_edges_for_entry(&tx, fact_id)?;
+
     push_entries_outbox(
         &tx,
         entity_id,
@@ -372,5 +376,56 @@ mod tests {
             archive_fact(&mut conn, &entity_id, &fact.id).is_err(),
             "double archive errors"
         );
+    }
+
+    #[test]
+    fn archive_fact_purges_edges_touching_the_fact() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+        let fact = add_fact(&mut conn, &entity_id, "The archived fact body.").unwrap();
+        let other = add_fact(&mut conn, &entity_id, "The surviving fact body.").unwrap();
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_out', ?1, ?2, ?3, 'related_to', 100)",
+            params![entity_id, fact.id, other.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_in', ?1, ?2, ?3, 'related_to', 100)",
+            params![entity_id, other.id, fact.id],
+        )
+        .unwrap();
+
+        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "both edges touching the archived fact must go");
+    }
+
+    #[test]
+    fn archive_fact_leaves_unrelated_edges_alone() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+        let fact = add_fact(&mut conn, &entity_id, "The archived fact body.").unwrap();
+        let b = add_fact(&mut conn, &entity_id, "Fact B body.").unwrap();
+        let c = add_fact(&mut conn, &entity_id, "Fact C body.").unwrap();
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_bc', ?1, ?2, ?3, 'related_to', 100)",
+            params![entity_id, b.id, c.id],
+        )
+        .unwrap();
+
+        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1, "an edge between two live facts must survive");
     }
 }
