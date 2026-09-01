@@ -8,7 +8,7 @@ use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolveOptions {
     /// When true, summary-update conflicts are skipped silently (auto-approve path).
     pub auto_approve: bool,
@@ -17,6 +17,14 @@ pub struct ResolveOptions {
     /// embedding — rows land with NULL and the sweep fills them later. Either
     /// way the fact is committed; this only affects how soon it is searchable.
     pub embed_profile: Option<EmbedProfile>,
+    /// Pre-computed entry embeddings keyed by `LoadedItem::id`. When `Some`,
+    /// the resolver skips its internal `precompute_entry_embeddings` call and
+    /// uses this map directly. Used by callers that want to compute the
+    /// embeddings OUTSIDE an app-level mutex (the provider round-trip is
+    /// blocking and must not run while the lock is held). A missing key means
+    /// "no embedding available" — the entry inserts with NULL and the sweep
+    /// fills it later, matching the internal-compute contract.
+    pub entry_embeddings: Option<std::collections::HashMap<String, Vec<f32>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,23 +42,23 @@ pub struct CommitResult {
     pub proposal_status: String,
 }
 
-struct LoadedProposal {
-    id: String,
-    kind: ProposalKind,
-    entity_id: Option<String>,
-    proposed_name: Option<String>,
-    proposed_type: Option<String>,
-    created_at: i64,
-    status: String,
+pub(crate) struct LoadedProposal {
+    pub(crate) id: String,
+    pub(crate) kind: ProposalKind,
+    pub(crate) entity_id: Option<String>,
+    pub(crate) proposed_name: Option<String>,
+    pub(crate) proposed_type: Option<String>,
+    pub(crate) created_at: i64,
+    pub(crate) status: String,
 }
 
-struct LoadedItem {
-    id: String,
-    item_type: String,
-    target_id: Option<String>,
-    payload: serde_json::Value,
-    evidence: Vec<StoredEvidenceChunk>,
-    edited_payload: Option<serde_json::Value>,
+pub(crate) struct LoadedItem {
+    pub(crate) id: String,
+    pub(crate) item_type: String,
+    pub(crate) target_id: Option<String>,
+    pub(crate) payload: serde_json::Value,
+    pub(crate) evidence: Vec<StoredEvidenceChunk>,
+    pub(crate) edited_payload: Option<serde_json::Value>,
 }
 
 struct CommitContext {
@@ -235,7 +243,7 @@ fn effective_payload(item: &LoadedItem, decision: &ItemDecision) -> serde_json::
         .unwrap_or_else(|| item.payload.clone())
 }
 
-fn load_proposal(conn: &Connection, proposal_id: &str) -> Result<LoadedProposal> {
+pub(crate) fn load_proposal(conn: &Connection, proposal_id: &str) -> Result<LoadedProposal> {
     let row = conn
         .query_row(
             "SELECT kind, entity_id, proposed_name, proposed_type, created_at, status
@@ -266,7 +274,7 @@ fn load_proposal(conn: &Connection, proposal_id: &str) -> Result<LoadedProposal>
     })
 }
 
-fn load_items(conn: &Connection, proposal_id: &str) -> Result<Vec<LoadedItem>> {
+pub(crate) fn load_items(conn: &Connection, proposal_id: &str) -> Result<Vec<LoadedItem>> {
     let mut stmt = conn.prepare(
         "SELECT id, item_type, target_id, payload, evidence, edited_payload
          FROM curated_proposal_items
@@ -1210,7 +1218,14 @@ fn finalize_proposal_status(accepted: usize, rejected: usize) -> &'static str {
 /// Returns an empty map when no profile is configured or the provider fails —
 /// an embedding is a derived artifact and must never fail a commit. The
 /// null-embedding sweep picks up whatever is missing.
-fn precompute_entry_embeddings(
+///
+/// `pub(crate)` so the Tauri commands in `proposals_api.rs` can hoist this
+/// call outside the app-level `DbState` mutex. Inside `resolve_proposal`
+/// itself, the precompute runs while holding the SQLite IMMEDIATE
+/// transaction (acquired a few lines later), but the OUTER app-level mutex
+/// is what blocks other Tauri commands — and that is what this helper
+/// exists to escape.
+pub(crate) fn precompute_entry_embeddings(
     items: &[LoadedItem],
     decisions: &[ItemDecision],
     profile: Option<&EmbedProfile>,
@@ -1331,8 +1346,13 @@ pub fn resolve_proposal(
     // transaction), so a duplicate fact_add burns a provider call. Accepted:
     // batches are small, duplicates are rare, and hoisting dedupe out of the
     // transaction would trade that for a TOCTOU race.
-    let entry_embeddings =
-        precompute_entry_embeddings(&items, decisions, options.embed_profile.as_ref());
+    //
+    // When the caller supplies `entry_embeddings`, the work was already done
+    // outside the app-level `DbState` mutex — used by `resolve_proposal_cmd`
+    // so the blocking round-trip does not gate every other Tauri command.
+    let entry_embeddings = options.entry_embeddings.clone().unwrap_or_else(|| {
+        precompute_entry_embeddings(&items, decisions, options.embed_profile.as_ref())
+    });
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -1797,8 +1817,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1885,8 +1906,9 @@ mod tests {
             ],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1933,8 +1955,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2008,8 +2031,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .expect("fact_update must succeed when source_ref is NULL");
@@ -2072,8 +2096,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2134,8 +2159,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2198,8 +2224,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2250,8 +2277,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -2297,8 +2325,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2323,8 +2352,9 @@ mod tests {
             }],
             Some("not relevant"),
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2395,8 +2425,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2429,8 +2460,9 @@ mod tests {
             }],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2661,8 +2693,9 @@ mod tests {
             ],
             None,
             ResolveOptions {
-                auto_approve: false,
+auto_approve: false,
                 embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2731,8 +2764,9 @@ mod tests {
                 }],
                 None,
                 ResolveOptions {
-                    auto_approve: false,
+auto_approve: false,
                     embed_profile: Some(EmbedProfile::default()),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -2795,6 +2829,7 @@ mod tests {
                         model: "unreachable".into(),
                         api_key: String::new(),
                     }),
+                    ..Default::default()
                 },
             );
 
@@ -2861,8 +2896,9 @@ mod tests {
                     }],
                     None,
                     ResolveOptions {
-                        auto_approve: false,
+auto_approve: false,
                         embed_profile: Some(EmbedProfile::default()),
+                        entry_embeddings: None,
                     },
                 );
 

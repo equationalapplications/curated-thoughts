@@ -933,6 +933,7 @@ fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()>
         ResolveOptions {
             auto_approve: true,
             embed_profile,
+            ..Default::default()
         },
     )?;
     Ok(())

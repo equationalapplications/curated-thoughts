@@ -7,6 +7,7 @@ use crate::db::commit::{
 };
 use crate::db::entities::EntityFact;
 use crate::db::outbox_format::OutboxOperation;
+use crate::embedder::{embed_batch, EmbedProfile};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -37,23 +38,52 @@ fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()>
 
 /// Insert a user-authored fact with outbox row; returns the new fact.
 ///
-/// Equivalent to `add_fact_with_profile(conn, entity_id, body, None)` — the
+/// Equivalent to `add_fact_with_blob(conn, entity_id, body, None)` — the
 /// entry lands with a NULL embedding for the sweep to fill.
 pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<EntityFact> {
-    add_fact_with_profile(conn, entity_id, body, None)
+    add_fact_with_blob(conn, entity_id, body, None)
 }
 
-/// Insert a user-authored fact, optionally embedding it at write time.
+/// Compute the embedding blob for a single user-authored fact, OUTSIDE any
+/// DB or app-level mutex. `embed_batch` is a blocking network call and must
+/// never run while a write lock is held.
 ///
-/// The embedding is computed BEFORE the transaction opens — `embed_batch` is a
-/// blocking network call and must never run under a write lock. A failure
-/// leaves the blob NULL and the fact still commits: curation is durable, the
-/// embedding is a derived artifact the sweep retries.
-pub fn add_fact_with_profile(
+/// Returns `None` when no profile is configured, the body is empty after
+/// trim, or the provider fails — the caller commits the fact anyway and
+/// leaves the blob NULL for the null-embedding sweep to retry.
+pub fn precompute_entry_embedding(
+    profile: Option<&EmbedProfile>,
+    body: &str,
+) -> Option<Vec<u8>> {
+    let profile = profile?;
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let title = fact_title_from_body(body);
+    let text = crate::embed_sweep::embed_text_for_entry(&title, body);
+    match embed_batch(profile, vec![text]) {
+        Ok(mut vectors) => vectors
+            .pop()
+            .map(|v| crate::wiki_graph::f32_vec_to_blob(&v)),
+        Err(e) => {
+            // codeql[rust/cleartext-logging]: `e` is an anyhow chain from
+            // embed_batch; the resolved API key is used only inside the
+            // Bearer header and never reaches this format string.
+            eprintln!("precompute_entry_embedding: provider failed, leaving NULL for the sweep: {e}");
+            None
+        }
+    }
+}
+
+/// Insert a user-authored fact with an outbox row, taking a precomputed
+/// embedding blob. Callers that want write-time embeddings must compute the
+/// blob up front via [`precompute_entry_embedding`] — outside any lock.
+pub fn add_fact_with_blob(
     conn: &mut Connection,
     entity_id: &str,
     body: &str,
-    profile: Option<&crate::embedder::EmbedProfile>,
+    embedding_blob: Option<Vec<u8>>,
 ) -> Result<EntityFact> {
     let body = body.trim();
     if body.is_empty() {
@@ -62,20 +92,6 @@ pub fn add_fact_with_profile(
     let (now_secs, now_ms) = now_timestamps();
     let fact_id = generate_llm_id("fact_");
     let title = fact_title_from_body(body);
-
-    // Outside the transaction, deliberately.
-    let embedding_blob: Option<Vec<u8>> = profile.and_then(|p| {
-        let text = crate::embed_sweep::embed_text_for_entry(&title, body);
-        match crate::embedder::embed_batch(p, vec![text]) {
-            Ok(vectors) => vectors
-                .first()
-                .map(|v| crate::wiki_graph::f32_vec_to_blob(v)),
-            Err(e) => {
-                eprintln!("add_fact: entry embedding failed, leaving NULL for the sweep: {e}");
-                None
-            }
-        }
-    });
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     assert_entity_active(&tx, entity_id)?;
@@ -144,6 +160,20 @@ pub fn add_fact_with_profile(
         last_verified_at: None,
         last_verified_by: None,
     })
+}
+
+/// Insert a user-authored fact, computing the embedding blob inside the call.
+/// New callers should compute the blob up front via
+/// [`precompute_entry_embedding`] so the blocking network call does not run
+/// under a write lock; this wrapper keeps the old test/library API.
+pub fn add_fact_with_profile(
+    conn: &mut Connection,
+    entity_id: &str,
+    body: &str,
+    profile: Option<&EmbedProfile>,
+) -> Result<EntityFact> {
+    let embedding_blob = precompute_entry_embedding(profile, body);
+    add_fact_with_blob(conn, entity_id, body, embedding_blob)
 }
 
 /// Rewrite a fact's body (title re-derived); pushes full-payload outbox UPDATE.

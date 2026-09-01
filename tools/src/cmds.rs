@@ -405,6 +405,7 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         ResolveOptions {
             auto_approve: true,
             embed_profile,
+            ..Default::default()
         },
     )?;
     println!(

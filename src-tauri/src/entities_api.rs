@@ -5,7 +5,7 @@ use crate::db::entities::{
     archive_entity, create_entity, get_entity, list_entities, update_entity_summary,
     CreateEntityInput, EntityDetail, EntityFact, EntityListFilter, EntitySort, EntitySummary,
 };
-use crate::db::facts::{add_fact_with_profile, archive_fact, update_fact};
+use crate::db::facts::{add_fact_with_blob, archive_fact, precompute_entry_embedding, update_fact};
 use crate::DbState;
 use tauri::State;
 
@@ -74,9 +74,17 @@ pub fn add_entity_fact_cmd(
     db_state: State<DbState>,
     embed_profile: State<crate::EmbedProfileState>,
 ) -> Result<EntityFact, String> {
+    // Compute the embedding OUTSIDE the DbState mutex. `embed_batch` is a
+    // blocking HTTP round-trip and must never queue the app-level DB lock
+    // (which gates every other Tauri command behind this one). Provider
+    // failures collapse to None and the sweep fills the blob later.
+    let embedding_blob = {
+        let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
+        precompute_entry_embedding(Some(&profile), &body)
+    };
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
-    add_fact_with_profile(&mut guard.0, &entity_id, &body, Some(&profile)).map_err(|e| e.to_string())
+    add_fact_with_blob(&mut guard.0, &entity_id, &body, embedding_blob)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
