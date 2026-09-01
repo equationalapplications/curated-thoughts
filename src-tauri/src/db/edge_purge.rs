@@ -19,26 +19,33 @@
 //! (entity-content reset) so the three-table truth lives in one Rust file.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 
-/// SQL fragment evaluating whether `col` (a column reference on
-/// `llm_wiki_edges`) is **alive**: present in `llm_wiki_entries`,
-/// `curated_entities`, or `llm_wiki_tasks` with `deleted_at IS NULL`.
+/// SQL fragments evaluating whether the named `llm_wiki_edges` column is
+/// **alive**: present in `llm_wiki_entries`, `curated_entities`, or
+/// `llm_wiki_tasks` with `deleted_at IS NULL`.
 ///
 /// Edge endpoints are heterogeneous — see the module docs. An endpoint id may
 /// belong to any of the three tables; an edge is preserved as long as ONE
 /// endpoint resolves to at least one of the three.
 ///
-/// The returned fragment is a bare `OR` chain with no surrounding
-/// parentheses. Callers must parenthesize it before negating, for example
-/// `NOT ({fragment})`.
-fn endpoint_alive_sql(col: &str) -> String {
-    format!(
-        "EXISTS (SELECT 1 FROM llm_wiki_entries e  WHERE e.id  = {col} AND e.deleted_at  IS NULL) \
-      OR EXISTS (SELECT 1 FROM curated_entities ce WHERE ce.id = {col} AND ce.deleted_at IS NULL) \
-      OR EXISTS (SELECT 1 FROM llm_wiki_tasks st WHERE st.id = {col} AND st.deleted_at IS NULL)"
-    )
-}
+/// Each fragment is a bare `OR` chain with no surrounding parentheses.
+/// Callers must parenthesize it before negating, e.g. `NOT ({fragment})`.
+///
+/// The text depends only on the column name, so these are `const` rather than
+/// re-`format!`-built on every cascade call.
+const SOURCE_ALIVE_SQL: &str = "EXISTS (SELECT 1 FROM llm_wiki_entries e  WHERE e.id  = source_id AND e.deleted_at  IS NULL) \
+      OR EXISTS (SELECT 1 FROM curated_entities ce WHERE ce.id = source_id AND ce.deleted_at IS NULL) \
+      OR EXISTS (SELECT 1 FROM llm_wiki_tasks st WHERE st.id = source_id AND st.deleted_at IS NULL)";
+
+const TARGET_ALIVE_SQL: &str = "EXISTS (SELECT 1 FROM llm_wiki_entries e  WHERE e.id  = target_id AND e.deleted_at  IS NULL) \
+      OR EXISTS (SELECT 1 FROM curated_entities ce WHERE ce.id = target_id AND ce.deleted_at IS NULL) \
+      OR EXISTS (SELECT 1 FROM llm_wiki_tasks st WHERE st.id = target_id AND st.deleted_at IS NULL)";
+
+/// Max entry ids bound into one batch purge statement. Each id is bound twice
+/// (one IN clause per endpoint column), so 2 * this must stay under SQLite's
+/// SQLITE_MAX_VARIABLE_NUMBER (32766 on the bundled build).
+const BATCH_PURGE_CHUNK: usize = 8000;
 
 /// Delete every edge whose endpoint `entry_id` is dead in every valid home,
 /// even when the OTHER endpoint is still alive.
@@ -53,12 +60,12 @@ fn endpoint_alive_sql(col: &str) -> String {
 /// caller's open transaction — the entry deletion and this purge must commit or
 /// roll back together, otherwise a crash between them mints an orphan.
 pub fn purge_edges_for_entry(conn: &Connection, entry_id: &str) -> Result<usize> {
-    let alive_target = endpoint_alive_sql("target_id");
-    let alive_source = endpoint_alive_sql("source_id");
     let sql = format!(
         "DELETE FROM llm_wiki_edges
-          WHERE (source_id = ?1 AND NOT ({alive_target}))
-             OR (target_id = ?1 AND NOT ({alive_source}))"
+          WHERE (source_id = ?1 AND NOT ({target_alive}))
+             OR (target_id = ?1 AND NOT ({source_alive}))",
+        target_alive = TARGET_ALIVE_SQL,
+        source_alive = SOURCE_ALIVE_SQL,
     );
     let removed = conn.execute(&sql, params![entry_id])?;
     Ok(removed)
@@ -67,12 +74,30 @@ pub fn purge_edges_for_entry(conn: &Connection, entry_id: &str) -> Result<usize>
 /// Purge edges for a set of dying entries, for the predicate-driven deletion
 /// sites (`prune_old_librarian_inferred`) that do not have a single id to hand.
 ///
-/// An edge whose two endpoints are both in `entry_ids` is deleted by the first
-/// id that reaches it and contributes 1 to the total, not 2.
+/// One DELETE with both IN clauses per chunk, rather than one statement per
+/// id. Each matching row contributes 1 to the count (the WHERE OR semantics
+/// make the row match at most once, and a row deleted by an earlier chunk is
+/// gone), so the "counted once across both ids" invariant holds.
 pub fn purge_edges_for_entries(conn: &Connection, entry_ids: &[String]) -> Result<usize> {
     let mut total = 0;
-    for id in entry_ids {
-        total += purge_edges_for_entry(conn, id)?;
+    for chunk in entry_ids.chunks(BATCH_PURGE_CHUNK) {
+        let placeholders: String = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "DELETE FROM llm_wiki_edges
+          WHERE (source_id IN ({placeholders}) AND NOT ({target_alive}))
+             OR (target_id IN ({placeholders}) AND NOT ({source_alive}))",
+            target_alive = TARGET_ALIVE_SQL,
+            source_alive = SOURCE_ALIVE_SQL,
+        );
+        // Bind the chunk twice — once for each IN clause.
+        let bound: Vec<&str> = chunk
+            .iter()
+            .chain(chunk.iter())
+            .map(String::as_str)
+            .collect();
+        total += conn.execute(&sql, params_from_iter(bound))?;
     }
     Ok(total)
 }
@@ -93,12 +118,12 @@ pub fn purge_edges_for_entries(conn: &Connection, entry_ids: &[String]) -> Resul
 /// edges) but worth knowing if the post-import edge count ever looks
 /// surprising.
 pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
-    let alive_source = endpoint_alive_sql("source_id");
-    let alive_target = endpoint_alive_sql("target_id");
     let sql = format!(
         "DELETE FROM llm_wiki_edges
           WHERE NOT ({alive_source})
-            AND NOT ({alive_target})"
+            AND NOT ({alive_target})",
+        alive_source = SOURCE_ALIVE_SQL,
+        alive_target = TARGET_ALIVE_SQL,
     );
     let removed = conn.execute(&sql, [])?;
     Ok(removed)

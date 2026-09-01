@@ -62,9 +62,12 @@ pub fn pending_null_batch(
 
 /// Persist a batch of vectors to `embedding_blob` in a single transaction.
 ///
-/// The `IS NULL` guard keeps a concurrent write-time embed from being
-/// overwritten by this slower sweep. Returns the number of rows actually
-/// filled (matches `batch.len()` minus any rows that already had a blob).
+/// The `embedding_blob IS NULL` guard keeps a concurrent write-time embed from
+/// being overwritten by this slower sweep; the `deleted_at IS NULL` guard
+/// aligns the UPDATE with the SELECT that produced the batch, so a row
+/// soft-deleted between the two phases is not resurrected with a vector.
+/// Returns the number of rows actually filled — `batch.len()` minus any rows
+/// that gained a blob or were soft-deleted since the SELECT.
 ///
 /// R6 zip-truncation guard: if the provider returned a different number of
 /// vectors than the batch holds, we cannot safely pair them via `zip` — a
@@ -90,7 +93,7 @@ pub fn apply_embeddings(
         let updated = tx.execute(
             "UPDATE llm_wiki_entries
                 SET embedding_blob = ?1
-              WHERE id = ?2 AND embedding_blob IS NULL",
+              WHERE id = ?2 AND embedding_blob IS NULL AND deleted_at IS NULL",
             params![blob, id],
         )?;
         filled += updated;
