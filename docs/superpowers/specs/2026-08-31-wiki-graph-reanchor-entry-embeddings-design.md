@@ -1,7 +1,7 @@
 # Spec: Wiki Graph Re-anchoring & Write-Time Entry Embeddings
 
 **Date:** 2026-08-31
-**Status:** DRAFT rev 2 — revised after code review against baseline `86e18b4`
+**Status:** IMPLEMENTED — see `docs/superpowers/plans/2026-08-31-wiki-graph-reanchor-entry-embeddings.md`
 **Type:** bug fix + librarian contract + one-time migration
 **Rev 2 changes:** reader-side filter found already implemented (§2, AC5
 downgraded to characterization); sweep trigger specified (none existed to
@@ -82,6 +82,7 @@ implementer must re-run this grep and confirm the list is still complete):
 | `heal_invalid_sources` | `src-tauri/src/lib.rs:398` | auto-heal soft-delete | yes |
 | `heal_lost_librarian_inferred` | `src-tauri/src/lib.rs:1674` | manual heal soft-delete | yes |
 | `prune_old_librarian_inferred` | `src-tauri/src/lib.rs:1717` (hard `DELETE FROM llm_wiki_entries` after 7-day window) | hard delete | yes — but see §2.1, this site is inert today |
+| `run_wiki_forget` | `src-tauri/src/lib.rs:1795` (hard `DELETE FROM llm_wiki_entries WHERE source_ref = ?1 OR source_ref = ?2`) | "forget this source file" command | **yes — FOLLOW-UP REQUIRED**: this site was missed by Tasks 2–5 and still does not call `purge_edges_for_entry` / `purge_edges_for_entries`. Forgetting a file today orphans every edge whose `source_id`/`target_id` belonged to a now-deleted entry. File as a separate bug; do not silently leave it. |
 | `clear_entity_content` | `src-tauri/src/db/bundle_apply.rs:606` | OKF bundle import, entity replacement (hard `DELETE ... WHERE entity_id=?1`) | **no — already correct** |
 
 `clear_entity_content` is called out because a previous draft of this spec
@@ -413,6 +414,26 @@ with the app/watcher stopped.
 6. **PR #78's stopgap stays green.** Existing short-circuit tests (wiki legs
    return empty, not error, when the table is empty) still pass — this spec
    adds population, it does not remove the graceful-empty contract.
+
+## 5.1 Operator runbook — switching embedding models
+
+Entry vectors and chunk vectors must share the active profile. `wiki_search`
+compares `length(embedding_blob) / 4` against the query vector's dimension and
+**silently skips** rows that disagree (`wiki_graph.rs:150`) — a model switch
+therefore degrades wiki search to empty results with no error in the logs.
+
+After changing the embed profile, with the app and watcher stopped:
+
+1. Back up: `cp ~/.brain/brain.db ~/.brain/brain.db.bak-pre-modelswitch-$(date +%s)`
+2. Invalidate every entry vector:
+   `sqlite3 ~/.brain/brain.db "UPDATE llm_wiki_entries SET embedding_blob = NULL;"`
+3. Re-embed at the new dimension:
+   `cargo run --manifest-path tools/Cargo.toml --bin graph_reanchor -- --yes`
+   (Step 1's edge purge is a no-op on a healthy DB; step 2 does the backfill.)
+4. Verify: `wiki_search` returns hits again for a known entry title.
+
+Chunk vectors need the separate `bulk_reindex` tool; this procedure covers wiki
+entries only.
 
 ## 6. Non-Goals
 
