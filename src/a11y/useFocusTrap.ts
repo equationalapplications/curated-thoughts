@@ -7,7 +7,11 @@ const FOCUSABLE = [
   "select:not([disabled])",
   "textarea:not([disabled])",
   '[tabindex]:not([tabindex="-1"])',
-  '[contenteditable="true"]',
+  // All valid editable-host states (CodeRabbit round-3): contenteditable=""
+  // and "true"/"plaintext-only" (case-insensitive) are all editable per HTML.
+  '[contenteditable=""]',
+  '[contenteditable="true" i]',
+  '[contenteditable="plaintext-only" i]',
 ].join(",");
 
 export interface FocusTrapOptions {

@@ -45,6 +45,8 @@ export function useRovingTabindex<T extends HTMLElement>(options: RovingOptions)
       const enabled = items();
       if (enabled.length === 0) {
         currentRef.current = null;
+        // No enabled items: nothing in the group may stay tabbable.
+        for (const item of allItems()) item.tabIndex = -1;
         return;
       }
       const current = currentRef.current;
@@ -57,7 +59,15 @@ export function useRovingTabindex<T extends HTMLElement>(options: RovingOptions)
 
     reconcile();
     const observer = new MutationObserver(reconcile);
-    observer.observe(container, { childList: true, subtree: true });
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      // aria-disabled flips are attribute mutations, not childList ones —
+      // a newly disabled current item must leave the tab order (CodeRabbit
+      // round-3).
+      attributes: true,
+      attributeFilter: ["aria-disabled"],
+    });
 
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target;

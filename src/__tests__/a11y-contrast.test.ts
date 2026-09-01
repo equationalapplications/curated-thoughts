@@ -70,7 +70,14 @@ describe("a11y: token contrast (WCAG 2.2 AA)", () => {
     const failures = PAIRS.filter(([theme, fgName, bgName, min]) => {
         const fg = theme[fgName];
         const bg = theme[bgName];
-        return fg === undefined || bg === undefined || contrast(fg, bg) < min;
+        if (fg === undefined || bg === undefined) return true;
+        // Hex-format + finite-ratio guards: a malformed or shorthand token
+        // would make luminance() return NaN, and NaN < min is always false —
+        // the gate must fail loudly instead (CodeRabbit round-3).
+        const HEX = /^#[0-9a-fA-F]{6}$/;
+        if (!HEX.test(fg) || !HEX.test(bg)) return true;
+        const ratio = contrast(fg, bg);
+        return !Number.isFinite(ratio) || ratio < min;
       })
       .map(([theme, fgName, bgName, min, why]) => {
         const fg = theme[fgName];

@@ -147,4 +147,26 @@ describe("useFocusTrap", () => {
     expect(preventDefault).toHaveBeenCalled();
     expect(document.activeElement).toBe(first);
   });
+
+  // Boundary coverage for every valid editable-host state (CodeRabbit
+  // round-3): "" and "plaintext-only" (and case variants of "true") are all
+  // editable per HTML and must remain tab stops the trap holds.
+  it.each(["", "TRUE", "plaintext-only"])(
+    "keeps the trap closed when the last tab stop is contenteditable=%s",
+    (state) => {
+      mountWithPriorFocus(<TrapFixture active withContenteditable />);
+      const editor = document.querySelector('[data-testid="editor"]') as HTMLElement;
+      editor.setAttribute("contenteditable", state);
+      const first = buttons()[0]!;
+      first.focus();
+      const event = new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      first.dispatchEvent(event);
+      expect(document.activeElement).toBe(editor);
+    },
+  );
 });
