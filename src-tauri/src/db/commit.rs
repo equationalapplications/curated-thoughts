@@ -822,21 +822,59 @@ fn commit_fact_update(
         bail!("fact_update target not found: {fact_id}");
     };
 
-    let title = fact_title_from_body(&body);
-    conn.execute(
-        "UPDATE llm_wiki_entries
-         SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5
-         WHERE id = ?6 AND entity_id = ?7",
-        params![
-            title,
-            body,
-            serde_json::to_string(&tags)?,
-            confidence,
-            ctx.now_ms,
-            fact_id,
-            ctx.entity_id,
-        ],
+    // A changed body invalidates the stored vector. Read the existing body
+    // to determine whether this update actually changes it — an update that
+    // touches only tags or confidence must keep its vector (spec §3).
+    let previous_body: String = conn.query_row(
+        "SELECT body FROM llm_wiki_entries WHERE id = ?1 AND entity_id = ?2",
+        params![fact_id, ctx.entity_id],
+        |r| r.get(0),
     )?;
+    let body_changed = previous_body != body;
+
+    // Write the freshly computed embedding if the pre-pass produced one;
+    // otherwise NULL so the sweep re-embeds — never leave a vector describing
+    // text the entry no longer contains.
+    let embedding_blob: Option<Vec<u8>> = ctx
+        .entry_embeddings
+        .get(&item.id)
+        .map(|v| crate::wiki_graph::f32_vec_to_blob(v));
+
+    let title = fact_title_from_body(&body);
+
+    if body_changed {
+        conn.execute(
+            "UPDATE llm_wiki_entries
+             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
+                 embedding_blob = ?6
+             WHERE id = ?7 AND entity_id = ?8",
+            params![
+                title,
+                body,
+                serde_json::to_string(&tags)?,
+                confidence,
+                ctx.now_ms,
+                embedding_blob,
+                fact_id,
+                ctx.entity_id,
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE llm_wiki_entries
+             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5
+             WHERE id = ?6 AND entity_id = ?7",
+            params![
+                title,
+                body,
+                serde_json::to_string(&tags)?,
+                confidence,
+                ctx.now_ms,
+                fact_id,
+                ctx.entity_id,
+            ],
+        )?;
+    }
 
     push_entries_outbox(
         conn,
@@ -1197,7 +1235,9 @@ fn precompute_entry_embeddings(
     let mut ids: Vec<String> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
     for item in items {
-        if item.item_type != "fact_add" || !accepted.contains(item.id.as_str()) {
+        if !matches!(item.item_type.as_str(), "fact_add" | "fact_update")
+            || !accepted.contains(item.id.as_str())
+        {
             continue;
         }
         let decision = decisions.iter().find(|d| d.item_id == item.id);
@@ -1575,6 +1615,70 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
         assert_eq!(survivors, 1);
+    }
+
+    #[test]
+    fn updating_a_body_replaces_the_stale_embedding() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "The original body.");
+        // Give it a blob describing the ORIGINAL text.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'",
+            params![vec![1u8; 32]],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        // No pre-computed embedding for this item -> the stale blob must be
+        // cleared, not left describing text the entry no longer has.
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": "A completely different body." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob, None,
+            "a changed body must never keep the vector of the old text"
+        );
+    }
+
+    #[test]
+    fn updating_a_body_stores_a_fresh_embedding_when_one_was_precomputed() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "The original body.");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'",
+            params![vec![1u8; 32]],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        ctx.entry_embeddings
+            .insert("item-1".to_string(), vec![0.5_f32; 8]);
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": "A completely different body." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob,
+            Some(crate::wiki_graph::f32_vec_to_blob(&[0.5_f32; 8])),
+            "the fresh vector replaces the stale one"
+        );
     }
 
     #[test]
