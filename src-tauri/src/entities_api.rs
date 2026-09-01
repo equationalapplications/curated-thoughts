@@ -83,8 +83,7 @@ pub fn add_entity_fact_cmd(
         precompute_entry_embedding(Some(&profile), &body)
     };
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    add_fact_with_blob(&mut guard.0, &entity_id, &body, embedding_blob)
-        .map_err(|e| e.to_string())
+    add_fact_with_blob(&mut guard.0, &entity_id, &body, embedding_blob).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

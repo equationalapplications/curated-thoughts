@@ -135,6 +135,9 @@ fn main() -> Result<()> {
         println!("  re-run this tool to retry, or let the runtime sweep pick them up.");
     }
 
-    println!("done. rollback = stop the app and restore {}", backup.display());
+    println!(
+        "done. rollback = stop the app and restore {}",
+        backup.display()
+    );
     Ok(())
 }

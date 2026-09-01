@@ -16,10 +16,7 @@ use rusqlite::Connection;
 /// and returns 0. Edges are not replicated (spec §6) — this purge is
 /// local-only, exactly like the inserts `commit_edge_add` issues without
 /// an outbox push.
-pub fn forget_entries_by_source_refs(
-    conn: &Connection,
-    source_refs: &[String],
-) -> Result<usize> {
+pub fn forget_entries_by_source_refs(conn: &Connection, source_refs: &[String]) -> Result<usize> {
     if source_refs.is_empty() {
         return Ok(0);
     }
@@ -28,22 +25,16 @@ pub fn forget_entries_by_source_refs(
     let placeholders: String = std::iter::repeat_n("?", source_refs.len())
         .collect::<Vec<_>>()
         .join(",");
-    let select_sql = format!(
-        "SELECT id FROM llm_wiki_entries WHERE source_ref IN ({placeholders})"
-    );
+    let select_sql =
+        format!("SELECT id FROM llm_wiki_entries WHERE source_ref IN ({placeholders})");
     let mut stmt = tx.prepare(&select_sql)?;
     let doomed: Vec<String> = stmt
         .query_map(rusqlite::params_from_iter(source_refs.iter()), |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    let delete_sql = format!(
-        "DELETE FROM llm_wiki_entries WHERE source_ref IN ({placeholders})"
-    );
-    let removed = tx.execute(
-        &delete_sql,
-        rusqlite::params_from_iter(source_refs.iter()),
-    )?;
+    let delete_sql = format!("DELETE FROM llm_wiki_entries WHERE source_ref IN ({placeholders})");
+    let removed = tx.execute(&delete_sql, rusqlite::params_from_iter(source_refs.iter()))?;
 
     if !doomed.is_empty() {
         crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed)?;
@@ -121,24 +112,25 @@ mod tests {
         // One edge between two unrelated entries — must survive (fact_a and
         // fact_b never appear on its endpoints so the cascade never touches
         // it, and the broader `purge_orphan_edges` is not invoked here).
-        seed_edge(&conn, "edge_c_unrelated", "ent-3", "fact_c", "some_other_live_id");
+        seed_edge(
+            &conn,
+            "edge_c_unrelated",
+            "ent-3",
+            "fact_c",
+            "some_other_live_id",
+        );
 
-        let removed =
-            forget_entries_by_source_refs(&conn, &["/vault/a.pdf".to_string()]).unwrap();
+        let removed = forget_entries_by_source_refs(&conn, &["/vault/a.pdf".to_string()]).unwrap();
 
         assert_eq!(removed, 2, "two entries forgotten");
         // The two doomed entries are gone.
-        assert!(
-            entry_ids(&conn)
-                .iter()
-                .all(|id| id != "fact_a" && id != "fact_b")
-        );
+        assert!(entry_ids(&conn)
+            .iter()
+            .all(|id| id != "fact_a" && id != "fact_b"));
         // Edges touching doomed endpoints are gone.
-        assert!(
-            edge_ids(&conn)
-                .iter()
-                .all(|id| id != "edge_ac" && id != "edge_bc")
-        );
+        assert!(edge_ids(&conn)
+            .iter()
+            .all(|id| id != "edge_ac" && id != "edge_bc"));
         // The unrelated edge survives.
         assert!(edge_ids(&conn).contains(&"edge_c_unrelated".to_string()));
     }
@@ -147,13 +139,16 @@ mod tests {
     fn forget_entries_by_source_refs_with_no_matches_is_a_noop() {
         let conn = open_in_memory().unwrap();
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
-        seed_edge(&conn, "edge_unrelated", "ent-1", "fact_a", "some_other_live_id");
-
-        let removed = forget_entries_by_source_refs(
+        seed_edge(
             &conn,
-            &["/no/such/file.pdf".to_string()],
-        )
-        .unwrap();
+            "edge_unrelated",
+            "ent-1",
+            "fact_a",
+            "some_other_live_id",
+        );
+
+        let removed =
+            forget_entries_by_source_refs(&conn, &["/no/such/file.pdf".to_string()]).unwrap();
 
         assert_eq!(removed, 0);
         assert_eq!(edge_ids(&conn), vec!["edge_unrelated".to_string()]);
@@ -186,22 +181,30 @@ mod tests {
 
     #[test]
     fn forget_entries_by_source_refs_rolls_back_if_purge_fails() {
-        // If purge_edges_for_entries fails, the entry deletion must roll back too.
-        // We simulate this by using a nested transaction that we'll roll back.
+        // The DELETE and the edge purge share one transaction: if the purge
+        // fails, the entry deletion must roll back with it so a crash can
+        // never leave entries gone but their edges stranded.
         let conn = open_in_memory().unwrap();
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
         seed_entry(&conn, "fact_c", "ent-3", Some("/vault/c.pdf"));
         seed_edge(&conn, "edge_ac", "ent-1", "fact_a", "fact_c");
 
-        // Start an explicit transaction and rollback — this simulates what
-        // happens when the inner tx in forget_entries_by_source_refs rolls back.
-        let outer_tx = conn.unchecked_transaction().unwrap();
-        // Seed inside the outer tx so we can observe rollback.
-        // But we can't easily inject a purge failure here without mocking.
-        // Instead, verify the happy path: after the fn commits, changes persist.
-        drop(outer_tx);
+        // Inject a real failure into the purge step: drop the table it reads.
+        // `purge_edges_for_entries` then errors, `?` propagates out of the
+        // function, and `tx` is dropped without `commit()` — a rollback.
+        conn.execute("DROP TABLE llm_wiki_edges", []).unwrap();
 
-        forget_entries_by_source_refs(&conn, &["/vault/a.pdf".to_string()]).unwrap();
-        assert!(entry_ids(&conn).iter().all(|id| id != "fact_a"));
+        let err = forget_entries_by_source_refs(&conn, &["/vault/a.pdf".to_string()])
+            .expect_err("purge failure must propagate");
+        assert!(
+            err.to_string().contains("llm_wiki_edges"),
+            "expected the purge step to be the failing operation, got: {err}"
+        );
+
+        // The DELETE rolled back with it — fact_a is still here.
+        assert!(
+            entry_ids(&conn).iter().any(|id| id == "fact_a"),
+            "entry deletion must roll back when the edge purge fails"
+        );
     }
 }

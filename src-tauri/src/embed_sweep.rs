@@ -54,10 +54,9 @@ pub fn pending_null_batch(
           ORDER BY id
           LIMIT ?1",
     )?;
-    let rows = stmt.query_map([limit as i64], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-    })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Persist a batch of vectors to `embedding_blob` in a single transaction.
@@ -321,22 +320,19 @@ mod tests {
         // R6 length-mismatch guard: `constant8_short` returns N-1 vectors for
         // an N-text batch. The sweep must not pair them; it must report every
         // entry as `failed` and leave all rows NULL for a later run.
-        temp_env::with_vars(
-            [("CURATED_EMBED_STUB", Some("constant8_short"))],
-            || {
-                let conn = open_in_memory().unwrap();
-                seed_entry(&conn, "fact_a", None, None);
-                seed_entry(&conn, "fact_b", None, None);
-                let profile = EmbedProfile::default();
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8_short"))], || {
+            let conn = open_in_memory().unwrap();
+            seed_entry(&conn, "fact_a", None, None);
+            seed_entry(&conn, "fact_b", None, None);
+            let profile = EmbedProfile::default();
 
-                let report = sweep_null_embeddings(&conn, &profile, 10).unwrap();
+            let report = sweep_null_embeddings(&conn, &profile, 10).unwrap();
 
-                assert_eq!(report.filled, 0, "no rows may be paired");
-                assert_eq!(report.failed, 2, "the whole batch is reported failed");
-                assert_eq!(report.remaining_null, 2);
-                assert_eq!(blob_of(&conn, "fact_a"), None);
-                assert_eq!(blob_of(&conn, "fact_b"), None);
-            },
-        );
+            assert_eq!(report.filled, 0, "no rows may be paired");
+            assert_eq!(report.failed, 2, "the whole batch is reported failed");
+            assert_eq!(report.remaining_null, 2);
+            assert_eq!(blob_of(&conn, "fact_a"), None);
+            assert_eq!(blob_of(&conn, "fact_b"), None);
+        });
     }
 }

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use super::heartbeat::Stage;
-use crate::embedder::{EmbedProfile, EXTERNAL_EMBED_TIMEOUT_SECS};
 use crate::embedder::OLLAMA_TIMEOUT_SECS;
+use crate::embedder::{EmbedProfile, EXTERNAL_EMBED_TIMEOUT_SECS};
 
 /// Slack above a stage's own ceiling before the watchdog calls it stalled.
 const SLACK_SECS: u64 = 60;
@@ -13,18 +13,12 @@ const SLACK_SECS: u64 = 60;
 pub fn embed_ceiling_secs(profile: &EmbedProfile) -> u64 {
     match profile {
         EmbedProfile::Local { .. } => OLLAMA_TIMEOUT_SECS,
-        EmbedProfile::Cloud { .. } | EmbedProfile::External { .. } => {
-            EXTERNAL_EMBED_TIMEOUT_SECS
-        }
+        EmbedProfile::Cloud { .. } | EmbedProfile::External { .. } => EXTERNAL_EMBED_TIMEOUT_SECS,
     }
 }
 
 /// Budget for a stage. `None` means the stage never trips.
-pub fn budget_for(
-    stage: Stage,
-    profile: &EmbedProfile,
-    gen_timeout_secs: u64,
-) -> Option<Duration> {
+pub fn budget_for(stage: Stage, profile: &EmbedProfile, gen_timeout_secs: u64) -> Option<Duration> {
     let secs = match stage {
         // Blocked on `recv()` with an empty channel is correct behavior.
         Stage::Idle => return None,

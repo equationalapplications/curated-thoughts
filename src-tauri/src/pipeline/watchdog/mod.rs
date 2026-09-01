@@ -1,7 +1,7 @@
 //! Ingest watchdog. Spec: docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md
+pub mod budgets;
 pub mod diagnostics;
 pub mod heartbeat;
-pub mod budgets;
 pub mod recovery;
 pub mod sweep;
 
@@ -73,10 +73,7 @@ fn probe_shared_sqlite(diag_conn: &Connection) -> bool {
 /// timed join, so the thread signals completion over a channel and the caller
 /// abandons it on timeout — which is exactly what `switch_vault` needs so it
 /// stops inheriting a wedge (spec §6).
-pub fn join_with_timeout(
-    join: std::thread::JoinHandle<()>,
-    timeout: Duration,
-) -> bool {
+pub fn join_with_timeout(join: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let _ = join.join();
@@ -126,13 +123,7 @@ impl DrainTracker {
     /// `completed` is the count of documents in a terminal state
     /// (`indexed` or `error`) — any increase means the system is making
     /// progress, so the window resets.
-    pub fn observe(
-        &mut self,
-        pending: i64,
-        completed: i64,
-        stage: Stage,
-        now: Instant,
-    ) -> bool {
+    pub fn observe(&mut self, pending: i64, completed: i64, stage: Stage, now: Instant) -> bool {
         let progressing = self.last_completed.is_some_and(|last| completed != last);
         let quiet = pending > 0 && stage == Stage::Idle && !progressing;
 
@@ -237,7 +228,10 @@ fn supervisor_loop(cfg: SupervisorConfig) {
     let conn = match Connection::open(&cfg.db_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[watchdog] cannot open {:?}: {e}; supervisor exiting", cfg.db_path);
+            eprintln!(
+                "[watchdog] cannot open {:?}: {e}; supervisor exiting",
+                cfg.db_path
+            );
             return;
         }
     };
@@ -315,12 +309,9 @@ fn supervisor_loop(cfg: SupervisorConfig) {
         }
 
         // Class 2: a job was picked up and never finished.
-        if let Some(stalled_ms) = evaluate_stage_stall(
-            &snapshot,
-            &cfg.profile,
-            cfg.gen_timeout_secs,
-            now_ms(),
-        ) {
+        if let Some(stalled_ms) =
+            evaluate_stage_stall(&snapshot, &cfg.profile, cfg.gen_timeout_secs, now_ms())
+        {
             // Trip gate: same (epoch, stage_started_ms) means the wedge is
             // still the same wedge — skip the duplicate trip.
             let trip_key = (snapshot.stage as u8, snapshot.stage_started_ms);
@@ -369,9 +360,7 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                     claims.clear();
                 }
                 None => {
-                    eprintln!(
-                        "[watchdog] worker replacement failed; parking ingest in degraded"
-                    );
+                    eprintln!("[watchdog] worker replacement failed; parking ingest in degraded");
                     degraded = true;
                     (cfg.on_health)(HealthUpdate {
                         health: PipelineHealth::Degraded,
@@ -432,16 +421,14 @@ fn supervisor_loop(cfg: SupervisorConfig) {
                         }
                     }
                 }
-                (ProbeKind::SharedSqlite, false) => {
-                    match recovery::record_system_strike(&conn) {
-                        Ok(n) => eprintln!(
-                            "[watchdog] shared-sqlite probe failed; system strike {n} \
+                (ProbeKind::SharedSqlite, false) => match recovery::record_system_strike(&conn) {
+                    Ok(n) => eprintln!(
+                        "[watchdog] shared-sqlite probe failed; system strike {n} \
                              (not blamed on {})",
-                            snapshot.subject
-                        ),
-                        Err(e) => eprintln!("[watchdog] system strike failed: {e}"),
-                    }
-                }
+                        snapshot.subject
+                    ),
+                    Err(e) => eprintln!("[watchdog] system strike failed: {e}"),
+                },
                 _ => {}
             }
 
@@ -624,7 +611,12 @@ mod tests {
         let t0 = Instant::now();
         assert!(!t.observe(83, 10, Stage::Idle, t0));
         // Same pending, same completion count, still idle, past the window.
-        assert!(t.observe(83, 10, Stage::Idle, t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)));
+        assert!(t.observe(
+            83,
+            10,
+            Stage::Idle,
+            t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -633,7 +625,12 @@ mod tests {
         let t0 = Instant::now();
         assert!(!t.observe(83, 10, Stage::Idle, t0));
         // A completion landed — progress is being made.
-        assert!(!t.observe(82, 11, Stage::Idle, t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)));
+        assert!(!t.observe(
+            82,
+            11,
+            Stage::Idle,
+            t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -641,7 +638,12 @@ mod tests {
         let mut t = DrainTracker::new();
         let t0 = Instant::now();
         assert!(!t.observe(0, 10, Stage::Idle, t0));
-        assert!(!t.observe(0, 10, Stage::Idle, t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)));
+        assert!(!t.observe(
+            0,
+            10,
+            Stage::Idle,
+            t0 + DRAIN_STALL_WINDOW + Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -749,7 +751,10 @@ mod tests {
         // Two distinct in-memory databases: a held lock on `conn` cannot
         // affect `diag_conn`. The diagnostic insert must succeed quickly
         // regardless of contention on the supervisor's main connection.
-        assert!(result.is_ok(), "diag insert must not block on held lock: {result:?}");
+        assert!(
+            result.is_ok(),
+            "diag insert must not block on held lock: {result:?}"
+        );
         assert!(elapsed < std::time::Duration::from_secs(2));
     }
 

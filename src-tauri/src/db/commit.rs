@@ -1817,7 +1817,7 @@ mod tests {
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -1906,7 +1906,7 @@ auto_approve: false,
             ],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -1955,7 +1955,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2031,7 +2031,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2096,7 +2096,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2159,7 +2159,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2224,7 +2224,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2277,7 +2277,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2325,7 +2325,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2352,7 +2352,7 @@ auto_approve: false,
             }],
             Some("not relevant"),
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2425,7 +2425,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2460,7 +2460,7 @@ auto_approve: false,
             }],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2693,7 +2693,7 @@ auto_approve: false,
             ],
             None,
             ResolveOptions {
-auto_approve: false,
+                auto_approve: false,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -2764,7 +2764,7 @@ auto_approve: false,
                 }],
                 None,
                 ResolveOptions {
-auto_approve: false,
+                    auto_approve: false,
                     embed_profile: Some(EmbedProfile::default()),
                     ..Default::default()
                 },
@@ -2856,71 +2856,68 @@ auto_approve: false,
         // an N-text batch. The pre-pass must skip that chunk instead of
         // zipping the surviving vector onto the first id — the fact still
         // commits, but with a NULL blob that the sweep will fill later.
-        temp_env::with_vars(
-            [("CURATED_EMBED_STUB", Some("constant8_short"))],
-            || {
-                let mut conn = open_in_memory().unwrap();
-                let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
-                let chunk_id = seed_chunk(&conn, doc_id);
-                seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8_short"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
 
-                insert_test_proposal(
-                    &conn,
-                    "prop-embed-short",
-                    ProposalKind::UpdateEntity,
-                    Some("ent-1"),
-                    vec![NewProposalItem {
-                        id: "fact-1".into(),
-                        item_type: "fact_add".into(),
-                        target_id: None,
-                        payload: serde_json::json!({ "body": "Body that must commit cleanly." }),
-                        evidence: vec![StoredEvidenceChunk {
-                            chunk_id: Some(chunk_id),
-                            content_hash: String::new(),
-                            quote: "x".into(),
-                            start_line: Some(1),
-                            end_line: Some(1),
-                            source_kind: None,
-                        }],
+            insert_test_proposal(
+                &conn,
+                "prop-embed-short",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![NewProposalItem {
+                    id: "fact-1".into(),
+                    item_type: "fact_add".into(),
+                    target_id: None,
+                    payload: serde_json::json!({ "body": "Body that must commit cleanly." }),
+                    evidence: vec![StoredEvidenceChunk {
+                        chunk_id: Some(chunk_id),
+                        content_hash: String::new(),
+                        quote: "x".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        source_kind: None,
                     }],
-                    doc_id,
-                );
+                }],
+                doc_id,
+            );
 
-                let result = resolve_proposal(
-                    &mut conn,
-                    "prop-embed-short",
-                    &[ItemDecision {
-                        item_id: "fact-1".into(),
-                        decision: ItemDecisionKind::Accept,
-                        edited_payload: None,
-                    }],
-                    None,
-                    ResolveOptions {
-auto_approve: false,
-                        embed_profile: Some(EmbedProfile::default()),
-                        entry_embeddings: None,
-                    },
-                );
+            let result = resolve_proposal(
+                &mut conn,
+                "prop-embed-short",
+                &[ItemDecision {
+                    item_id: "fact-1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: Some(EmbedProfile::default()),
+                    entry_embeddings: None,
+                },
+            );
 
-                assert!(
-                    result.is_ok(),
-                    "a wrong-sized provider response must never destroy the librarian's curation"
-                );
-                let (count, blob): (i64, Option<Vec<u8>>) = conn
-                    .query_row(
-                        "SELECT COUNT(*), MAX(embedding_blob) FROM llm_wiki_entries
+            assert!(
+                result.is_ok(),
+                "a wrong-sized provider response must never destroy the librarian's curation"
+            );
+            let (count, blob): (i64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(embedding_blob) FROM llm_wiki_entries
                           WHERE entity_id = 'ent-1'",
-                        [],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .unwrap();
-                assert_eq!(count, 1, "the fact is committed");
-                assert_eq!(
-                    blob, None,
-                    "the wrong-sized batch must not pair a vector to this row"
-                );
-            },
-        );
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "the fact is committed");
+            assert_eq!(
+                blob, None,
+                "the wrong-sized batch must not pair a vector to this row"
+            );
+        });
     }
 }
 

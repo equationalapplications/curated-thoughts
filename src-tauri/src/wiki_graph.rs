@@ -413,20 +413,12 @@ mod unit_tests {
             wiki_traverse_graph(&conn, "ent-1", "fact_live", 2, TraverseDirection::Both, &[])
                 .unwrap();
 
-        let edge_targets: Vec<&str> = result
-            .edges
-            .iter()
-            .map(|e| e.target_id.as_str())
-            .collect();
+        let edge_targets: Vec<&str> = result.edges.iter().map(|e| e.target_id.as_str()).collect();
         assert!(
             !edge_targets.contains(&"fact_ghost"),
             "an edge into a soft-deleted target must not surface"
         );
-        let edge_sources: Vec<&str> = result
-            .edges
-            .iter()
-            .map(|e| e.source_id.as_str())
-            .collect();
+        let edge_sources: Vec<&str> = result.edges.iter().map(|e| e.source_id.as_str()).collect();
         assert!(
             !edge_sources.contains(&"fact_ghost"),
             "an edge from a soft-deleted source must not surface"

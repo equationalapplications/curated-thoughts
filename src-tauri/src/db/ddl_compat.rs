@@ -103,7 +103,9 @@ pub fn add_column_if_missing(
             |r| r.get::<_, i64>(0),
         )
         .map(|n| n > 0)
-        .context(format!("add_column_if_missing: failed to check table '{table}'"))?;
+        .context(format!(
+            "add_column_if_missing: failed to check table '{table}'"
+        ))?;
     if !table_exists {
         anyhow::bail!("add_column_if_missing: table '{table}' does not exist");
     }
@@ -131,9 +133,7 @@ pub fn add_column_if_missing(
 fn ensure_plain_identifier(kind: &str, value: &str) -> anyhow::Result<()> {
     let valid = !value.is_empty()
         && value.len() <= 64
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !value.starts_with(|c: char| c.is_ascii_digit());
     if !valid {
         anyhow::bail!(
@@ -165,16 +165,15 @@ mod tests {
     #[test]
     fn add_column_if_missing_adds_column() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", []).unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
 
         super::add_column_if_missing(&conn, "t", "new_col", "TEXT").unwrap();
 
         conn.execute("INSERT INTO t (id, new_col) VALUES (1, 'hello')", [])
             .unwrap();
         let val: String = conn
-            .query_row("SELECT new_col FROM t WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT new_col FROM t WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(val, "hello");
     }
@@ -207,7 +206,8 @@ mod tests {
     #[test]
     fn add_column_if_missing_rejects_non_identifier_arguments() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", []).unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
 
         let injected = "x); DROP TABLE t; --";
         let err = super::add_column_if_missing(&conn, "t", injected, "TEXT")
@@ -238,8 +238,7 @@ mod tests {
     #[test]
     fn add_column_if_missing_fails_on_missing_table() {
         let conn = Connection::open_in_memory().unwrap();
-        let result =
-            super::add_column_if_missing(&conn, "nonexistent_table", "col", "INTEGER");
+        let result = super::add_column_if_missing(&conn, "nonexistent_table", "col", "INTEGER");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("nonexistent_table"),

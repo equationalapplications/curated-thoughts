@@ -43,11 +43,11 @@ pub fn record_system_strike(conn: &Connection) -> Result<i64> {
             SET strikes = strikes + 1, last_ms = excluded.last_ms",
         rusqlite::params![now_ms()],
     )?;
-    Ok(conn.query_row(
-        "SELECT strikes FROM system_strikes WHERE id = 1",
-        [],
-        |r| r.get(0),
-    )?)
+    Ok(
+        conn.query_row("SELECT strikes FROM system_strikes WHERE id = 1", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 /// Clear prior strikes for a path. Called on successful ingest completion so

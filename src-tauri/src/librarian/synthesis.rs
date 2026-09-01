@@ -921,10 +921,9 @@ fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()>
     // we fall back to `None` — the row still commits, and the runtime
     // `embed_sweep` will fill the NULL `embedding_blob` later. Matches the
     // fallback rule documented in `task-R3-brief.md`.
-    let embed_profile = crate::retrieval::load_embed_profile(
-        &crate::retrieval::resolve_brain_paths().config_path,
-    )
-    .ok();
+    let embed_profile =
+        crate::retrieval::load_embed_profile(&crate::retrieval::resolve_brain_paths().config_path)
+            .ok();
     resolve_proposal(
         conn,
         proposal_id,

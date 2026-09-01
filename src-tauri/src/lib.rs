@@ -4,8 +4,8 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod doctor;
-pub mod embedder;
 pub mod embed_sweep;
+pub mod embedder;
 mod entities_api;
 pub mod graph;
 mod hasher;
@@ -35,6 +35,7 @@ pub mod walk_vault;
 pub mod watcher;
 pub mod wiki_graph;
 
+use crate::embedder::embed_batch;
 use crate::inference::{
     download_model_weights, download_sidecar_engine, generate_text, get_provider_config,
     initialize_provider, update_provider, GenerationProvider, InferenceState,
@@ -48,14 +49,13 @@ use outbox::{
     postgres::{spawn_postgres_worker, OutboxWorkerHandle},
     OutboxConfig,
 };
+#[cfg(feature = "test-utils")]
+pub use pipeline::watchdog::heartbeat::Heartbeat;
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
 #[cfg(feature = "test-utils")]
-pub use pipeline::watchdog::heartbeat::Heartbeat;
-#[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
-use crate::embedder::embed_batch;
 use rusqlite::types::Value as SqlVal;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value as JsonVal};
@@ -66,10 +66,7 @@ use setup::{
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{
-    mpsc::Sender,
-    Arc, Mutex,
-};
+use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
@@ -916,8 +913,8 @@ fn start_file_watcher_inner(
             }
         };
         let brain_paths = crate::retrieval::resolve_brain_paths();
-        let report = crate::config::BrainConfig::load_lenient(&brain_paths)
-            .map_err(|e| e.to_string())?;
+        let report =
+            crate::config::BrainConfig::load_lenient(&brain_paths).map_err(|e| e.to_string())?;
         let profile = report.config.embed_profile.clone().unwrap_or_default();
         let gen_timeout_secs = 600; // matches librarian/synthesis.rs default
 
@@ -965,10 +962,14 @@ fn start_file_watcher_inner(
         // before spawning a new supervisor
         // (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
         if let Some(sup_state) = app.try_state::<WatchdogSupervisor>() {
-            let prev = sup_state.0.lock().unwrap().replace(WatchdogSupervisorHandle {
-                stop: stop.clone(),
-                join,
-            });
+            let prev = sup_state
+                .0
+                .lock()
+                .unwrap()
+                .replace(WatchdogSupervisorHandle {
+                    stop: stop.clone(),
+                    join,
+                });
             if let Some(prev) = prev {
                 prev.stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = prev.join.join();
@@ -1081,8 +1082,7 @@ fn start_file_watcher_inner(
                             .to_string_lossy()
                             .into_owned();
                         update_wiki_status(app, &status_state, |flags| {
-                            flags.ingest.health =
-                                pipeline::watchdog::PipelineHealth::Working;
+                            flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
                         });
                         if let Err(e) = enqueue_vault_event(
                             conn,
@@ -1364,21 +1364,19 @@ async fn switch_vault(
         let mut g = pipeline.0.lock().unwrap();
         if let Some(handle) = g.take() {
             let pipeline::PipelineHandle {
-                tx, join, heartbeat, ..
+                tx,
+                join,
+                heartbeat,
+                ..
             } = handle;
             drop(tx);
             // Supersede first, so a worker that later wakes exits without
             // racing the replacement (spec §4.1), then give it a bounded
             // window rather than blocking switch_vault forever (spec §6).
             heartbeat.bump_epoch();
-            let finished = pipeline::watchdog::join_with_timeout(
-                join,
-                Duration::from_secs(10),
-            );
+            let finished = pipeline::watchdog::join_with_timeout(join, Duration::from_secs(10));
             if !finished {
-                eprintln!(
-                    "[switch_vault] pipeline worker did not exit within 10s; abandoning it"
-                );
+                eprintln!("[switch_vault] pipeline worker did not exit within 10s; abandoning it");
             }
         }
     }
@@ -1736,10 +1734,7 @@ fn heal_lost_librarian_inferred(
 /// which every writer stores in milliseconds (`ms_now()`, `db::commit`). This
 /// function previously took seconds and compared them against millisecond
 /// stamps, so it never deleted anything; see design spec §2.1.
-fn prune_old_librarian_inferred(
-    conn: &rusqlite::Connection,
-    now_ms: i64,
-) -> Result<usize, String> {
+fn prune_old_librarian_inferred(conn: &rusqlite::Connection, now_ms: i64) -> Result<usize, String> {
     const SEVEN_DAYS_MS: i64 = 7 * 86_400 * 1000;
     let cutoff = now_ms - SEVEN_DAYS_MS;
 
@@ -1772,8 +1767,7 @@ fn prune_old_librarian_inferred(
     };
 
     let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
-    crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed_ids)
-        .map_err(|e| e.to_string())?;
+    crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed_ids).map_err(|e| e.to_string())?;
 
     // Push one OutboxOperation::Delete row per doomed entry so replicas
     // converge on the prune. Same shape as `commit_fact_archive` /
@@ -2068,9 +2062,7 @@ async fn run_wiki_reembed(
                        WHERE path = ?1 AND status = 'indexed'",
                     rusqlite::params![path],
                 ) {
-                    eprintln!(
-                        "[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}"
-                    );
+                    eprintln!("[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}");
                 }
             }
             eprintln!(
@@ -4777,8 +4769,20 @@ mod maintenance_command_tests {
         // prune only matches `deleted_at < cutoff`) so the cascade treats
         // edge_doomed as purgeable. Without this, edge_doomed would survive
         // because live-a remains alive in `llm_wiki_entries`.
-        insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", Some(now_ms));
-        insert_wiki_entry_ms(&conn, "live-b", "librarian_inferred", "documents/b.md", None);
+        insert_wiki_entry_ms(
+            &conn,
+            "live-a",
+            "librarian_inferred",
+            "documents/a.md",
+            Some(now_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "live-b",
+            "librarian_inferred",
+            "documents/b.md",
+            None,
+        );
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -4894,11 +4898,17 @@ mod maintenance_command_tests {
         let expected: std::collections::BTreeMap<String, (String, String)> = [
             (
                 "old-inferred-1".to_string(),
-                ("ent-1".to_string(), r#"{"id":"old-inferred-1"}"#.to_string()),
+                (
+                    "ent-1".to_string(),
+                    r#"{"id":"old-inferred-1"}"#.to_string(),
+                ),
             ),
             (
                 "old-inferred-2".to_string(),
-                ("ent-1".to_string(), r#"{"id":"old-inferred-2"}"#.to_string()),
+                (
+                    "ent-1".to_string(),
+                    r#"{"id":"old-inferred-2"}"#.to_string(),
+                ),
             ),
         ]
         .into_iter()
@@ -4952,7 +4962,13 @@ mod maintenance_command_tests {
             "documents/vanished.md",
             None,
         );
-        insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", None);
+        insert_wiki_entry_ms(
+            &conn,
+            "live-a",
+            "librarian_inferred",
+            "documents/a.md",
+            None,
+        );
 
         // R1 (remediation): the new heterogeneous contract only purges edges
         // whose partner is also dead in every endpoint table. Soft-delete
@@ -4973,8 +4989,7 @@ mod maintenance_command_tests {
         )
         .unwrap();
 
-        let healed =
-            heal_lost_librarian_inferred(&conn, std::path::Path::new("/vault")).unwrap();
+        let healed = heal_lost_librarian_inferred(&conn, std::path::Path::new("/vault")).unwrap();
         assert_eq!(healed, 1, "the ungrounded entry should be soft-deleted");
 
         let dangling: i64 = conn
@@ -5032,8 +5047,20 @@ mod maintenance_command_tests {
             || {
                 {
                     let guard = db_state.0.lock().unwrap();
-                    insert_wiki_entry_ms(&guard.0, "fact_a", "librarian_inferred", "documents/a.md", None);
-                    insert_wiki_entry_ms(&guard.0, "fact_b", "librarian_inferred", "documents/b.md", None);
+                    insert_wiki_entry_ms(
+                        &guard.0,
+                        "fact_a",
+                        "librarian_inferred",
+                        "documents/a.md",
+                        None,
+                    );
+                    insert_wiki_entry_ms(
+                        &guard.0,
+                        "fact_b",
+                        "librarian_inferred",
+                        "documents/b.md",
+                        None,
+                    );
                 }
 
                 let report = run_embedding_sweep(&db_state).unwrap();

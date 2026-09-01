@@ -1,7 +1,10 @@
-//! Cascading edge deletion: an edge in `llm_wiki_edges` exists only between two
-//! live endpoints. Every site that deletes, archives, or regenerates content
-//! calls into here **inside its own transaction**, so a crash can never strand
-//! an edge.
+//! Cascading edge deletion: an edge in `llm_wiki_edges` is purged only once
+//! **both** of its endpoints are dead — that is, neither `source_id` nor
+//! `target_id` resolves to a live row in any of the three endpoint tables. A
+//! half-live edge (one endpoint still alive) is deliberately retained, so the
+//! surviving side keeps its connection. Every site that deletes, archives, or
+//! regenerates content calls into here **inside its own transaction**, so a
+//! crash can never strand an edge whose last endpoint just died.
 //!
 //! Edges are not replicated (no outbox rows) — `commit_edge_add` and the bundle
 //! import path insert them without CDC, so purges match. See the design spec §2.
@@ -385,7 +388,13 @@ mod tests {
         // edge's only home is curated_entities, so it must survive.
         let conn = open_in_memory().unwrap();
         seed_entity(&conn, "ce_only_endpoint");
-        seed_edge(&conn, "edge_pure_entity", "ent-1", "ce_only_endpoint", "ce_only_endpoint");
+        seed_edge(
+            &conn,
+            "edge_pure_entity",
+            "ent-1",
+            "ce_only_endpoint",
+            "ce_only_endpoint",
+        );
 
         let removed = purge_edges_for_entry(&conn, "non_existent_entry_id").unwrap();
         assert_eq!(

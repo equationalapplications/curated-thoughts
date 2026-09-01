@@ -199,7 +199,7 @@ pub fn approve_proposal_shim(
         &decisions,
         None,
         ResolveOptions {
-auto_approve: false,
+            auto_approve: false,
             embed_profile: embed_profile.cloned(),
             ..Default::default()
         },
@@ -230,7 +230,7 @@ pub fn reject_proposal_shim(
         &decisions,
         reject_reason,
         ResolveOptions {
-auto_approve: false,
+            auto_approve: false,
             embed_profile: embed_profile.cloned(),
             ..Default::default()
         },

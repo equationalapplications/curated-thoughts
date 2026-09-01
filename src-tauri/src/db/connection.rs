@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15,
-    MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V15, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+    MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -244,9 +244,11 @@ mod tests {
         assert_eq!(n, 1);
 
         let status: String = conn
-            .query_row("SELECT status FROM documents WHERE path = '/a.md'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT status FROM documents WHERE path = '/a.md'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "pending_reindex");
 
@@ -283,7 +285,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
-        assert_eq!((hash.as_str(), sh.as_str(), sm.as_str(), sa, q), ("h1", "sh", "sm", 42, 7));
+        assert_eq!(
+            (hash.as_str(), sh.as_str(), sm.as_str(), sa, q),
+            ("h1", "sh", "sm", 42, 7)
+        );
 
         let idx: i64 = conn
             .query_row(

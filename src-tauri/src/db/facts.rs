@@ -51,10 +51,7 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
 /// Returns `None` when no profile is configured, the body is empty after
 /// trim, or the provider fails — the caller commits the fact anyway and
 /// leaves the blob NULL for the null-embedding sweep to retry.
-pub fn precompute_entry_embedding(
-    profile: Option<&EmbedProfile>,
-    body: &str,
-) -> Option<Vec<u8>> {
+pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) -> Option<Vec<u8>> {
     let profile = profile?;
     let body = body.trim();
     if body.is_empty() {
@@ -63,14 +60,29 @@ pub fn precompute_entry_embedding(
     let title = fact_title_from_body(body);
     let text = crate::embed_sweep::embed_text_for_entry(&title, body);
     match embed_batch(profile, vec![text]) {
-        Ok(mut vectors) => vectors
-            .pop()
+        // Defensive cardinality check, mirroring the `vectors.len() != id_chunk.len()`
+        // guard in `db/commit.rs`: one text in, exactly one vector out. Both
+        // shipping providers bail on a mismatch, but `pop()` alone would silently
+        // persist the *last* vector of an over-long response, and the sweep's
+        // `embedding_blob IS NULL` predicate could never correct that mis-association.
+        Ok(vectors) if vectors.len() == 1 => vectors
+            .into_iter()
+            .next()
             .map(|v| crate::wiki_graph::f32_vec_to_blob(&v)),
+        Ok(vectors) => {
+            eprintln!(
+                "precompute_entry_embedding: expected 1 vector, got {}; leaving NULL for the sweep",
+                vectors.len()
+            );
+            None
+        }
         Err(e) => {
             // codeql[rust/cleartext-logging]: `e` is an anyhow chain from
             // embed_batch; the resolved API key is used only inside the
             // Bearer header and never reaches this format string.
-            eprintln!("precompute_entry_embedding: provider failed, leaving NULL for the sweep: {e}");
+            eprintln!(
+                "precompute_entry_embedding: provider failed, leaving NULL for the sweep: {e}"
+            );
             None
         }
     }
@@ -471,13 +483,9 @@ mod tests {
             let profile = crate::embedder::EmbedProfile::default();
 
             // Seed a fact with a real (non-NULL) embedding blob.
-            let fact = add_fact_with_profile(
-                &mut conn,
-                &entity_id,
-                "Original body.",
-                Some(&profile),
-            )
-            .unwrap();
+            let fact =
+                add_fact_with_profile(&mut conn, &entity_id, "Original body.", Some(&profile))
+                    .unwrap();
             let blob_before: Option<Vec<u8>> = conn
                 .query_row(
                     "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
@@ -570,7 +578,10 @@ mod tests {
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(remaining, 0, "both edges touching the archived fact must go");
+        assert_eq!(
+            remaining, 0,
+            "both edges touching the archived fact must go"
+        );
     }
 
     #[test]

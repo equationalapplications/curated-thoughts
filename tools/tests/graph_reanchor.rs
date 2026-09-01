@@ -137,7 +137,11 @@ fn purge_is_idempotent() {
     seed_edge(&conn, "edge_orphan", "ghost_a", "ghost_b");
 
     assert_eq!(purge_orphan_edges(&conn).unwrap(), 1);
-    assert_eq!(purge_orphan_edges(&conn).unwrap(), 0, "second run is a no-op");
+    assert_eq!(
+        purge_orphan_edges(&conn).unwrap(),
+        0,
+        "second run is a no-op"
+    );
 }
 
 #[test]
@@ -149,7 +153,10 @@ fn keeps_edges_pointing_only_at_a_live_curated_entity() {
     seed_edge(&conn, "edge_to_entity", "ce_only", "ce_only");
 
     let removed = purge_orphan_edges(&conn).unwrap();
-    assert_eq!(removed, 0, "endpoint alive in curated_entities — edge survives");
+    assert_eq!(
+        removed, 0,
+        "endpoint alive in curated_entities — edge survives"
+    );
     assert_eq!(edge_ids(&conn), vec!["edge_to_entity".to_string()]);
 }
 
@@ -160,7 +167,10 @@ fn keeps_edges_pointing_only_at_a_live_task() {
     seed_edge(&conn, "edge_to_task", "task_only", "task_only");
 
     let removed = purge_orphan_edges(&conn).unwrap();
-    assert_eq!(removed, 0, "endpoint alive in llm_wiki_tasks — edge survives");
+    assert_eq!(
+        removed, 0,
+        "endpoint alive in llm_wiki_tasks — edge survives"
+    );
     assert_eq!(edge_ids(&conn), vec!["edge_to_task".to_string()]);
 }
 
@@ -173,7 +183,9 @@ fn treats_soft_deleted_endpoint_in_every_table_as_dead() {
     seed_edge(&conn, "edge_all_soft_deleted", "ce_arc", "task_arc");
 
     let removed = purge_orphan_edges(&conn).unwrap();
-    assert_eq!(removed, 1, "soft-deleted in all three tables counts as dead");
+    assert_eq!(
+        removed, 1,
+        "soft-deleted in all three tables counts as dead"
+    );
     assert!(edge_ids(&conn).is_empty());
 }
-

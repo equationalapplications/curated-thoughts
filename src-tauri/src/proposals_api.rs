@@ -152,6 +152,15 @@ pub fn approve_wiki_page(
         },
     )
     .map_err(|e| e.to_string())?;
+    drop(guard);
+
+    // `precompute_entry_embeddings` leaves an entry NULL-embedded when the
+    // provider is transiently down, and `resolve_proposal` commits it that way.
+    // Without this sweep the approved entry stays invisible to semantic
+    // retrieval until a restart or an unrelated write happens to trigger one.
+    if let Err(e) = run_embedding_sweep(&db_state) {
+        eprintln!("post-commit embedding sweep skipped: {e}");
+    }
     Ok(())
 }
 
