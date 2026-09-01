@@ -553,3 +553,145 @@ fn wiki_traverse_graph_prefers_the_entry_table_when_an_id_exists_in_both() {
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.nodes[0].title, "Entry Title");
 }
+
+#[test]
+fn wiki_traverse_graph_walks_entity_anchored_edges() {
+    // The #134 shape: every edge endpoint lives in curated_entities.
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "ce_a", "Alpha", false);
+    insert_curated_entity(&conn, "ce_b", "Beta", false);
+    insert_curated_entity(&conn, "ce_c", "Gamma", false);
+    insert_edge(&conn, "edge_ab", "ent_448a", "ce_a", "ce_b", "related_to");
+    insert_edge(&conn, "edge_bc", "ent_448a", "ce_b", "ce_c", "related_to");
+
+    let result =
+        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+
+    let ids: HashSet<&str> = result.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        HashSet::from(["ce_a", "ce_b", "ce_c"]),
+        "two hops reached"
+    );
+    assert_eq!(result.edges.len(), 2);
+    assert!(!result.truncated);
+}
+
+#[test]
+fn wiki_traverse_graph_excludes_soft_deleted_entity_endpoint() {
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "ce_a", "Alpha", false);
+    insert_curated_entity(&conn, "ce_dead", "Gone", true);
+    insert_edge(
+        &conn,
+        "edge_ad",
+        "ent_448a",
+        "ce_a",
+        "ce_dead",
+        "related_to",
+    );
+
+    let result =
+        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+
+    assert_eq!(result.nodes.len(), 1, "only the seed survives");
+    assert!(
+        result.edges.is_empty(),
+        "an edge to a dead endpoint is not walkable"
+    );
+}
+
+#[test]
+fn wiki_traverse_graph_entity_space_respects_edge_partition() {
+    // An edge in another entity partition must not be walked.
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "ce_a", "Alpha", false);
+    insert_curated_entity(&conn, "ce_other", "Other partition", false);
+    insert_edge(
+        &conn,
+        "edge_x",
+        "ent_OTHER",
+        "ce_a",
+        "ce_other",
+        "related_to",
+    );
+
+    let result =
+        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+
+    assert_eq!(result.nodes.len(), 1);
+    assert!(result.edges.is_empty());
+}
+
+#[test]
+fn wiki_traverse_graph_entity_space_filters_edge_types() {
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "ce_a", "Alpha", false);
+    insert_curated_entity(&conn, "ce_b", "Beta", false);
+    insert_curated_entity(&conn, "ce_c", "Gamma", false);
+    insert_edge(&conn, "edge_ab", "ent_448a", "ce_a", "ce_b", "supports");
+    insert_edge(&conn, "edge_ac", "ent_448a", "ce_a", "ce_c", "contradicts");
+
+    let result = wiki_traverse_graph(
+        &conn,
+        "ent_448a",
+        "ce_a",
+        2,
+        TraverseDirection::Both,
+        &["supports"],
+    )
+    .unwrap();
+
+    assert_eq!(result.edges.len(), 1);
+    assert_eq!(result.edges[0].edge_type, "supports");
+}
+
+#[test]
+fn wiki_traverse_graph_entity_space_direction_inbound_only() {
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "ce_a", "Alpha", false);
+    insert_curated_entity(&conn, "ce_b", "Beta", false);
+    insert_edge(&conn, "edge_ba", "ent_448a", "ce_b", "ce_a", "related_to");
+    insert_edge(&conn, "edge_ac", "ent_448a", "ce_a", "ce_b", "related_to");
+
+    let result = wiki_traverse_graph(
+        &conn,
+        "ent_448a",
+        "ce_a",
+        1,
+        TraverseDirection::Inbound,
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(result.edges.len(), 1);
+    assert_eq!(result.edges[0].source_id, "ce_b");
+    assert_eq!(result.edges[0].target_id, "ce_a");
+}
+
+#[test]
+fn wiki_traverse_graph_entity_space_truncates_at_max_nodes() {
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "hub", "Hub", false);
+    for i in 0..(MAX_TRAVERSAL_NODES + 10) {
+        let id = format!("ce_{i}");
+        insert_curated_entity(&conn, &id, &format!("Spoke {i}"), false);
+        insert_edge(
+            &conn,
+            &format!("edge_{i}"),
+            "ent_448a",
+            "hub",
+            &id,
+            "related_to",
+        );
+    }
+
+    let result =
+        wiki_traverse_graph(&conn, "ent_448a", "hub", 2, TraverseDirection::Both, &[]).unwrap();
+
+    assert!(result.nodes.len() <= MAX_TRAVERSAL_NODES);
+    assert!(
+        result.truncated,
+        "an oversized entity graph must report truncation"
+    );
+}
