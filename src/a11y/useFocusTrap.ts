@@ -7,6 +7,7 @@ const FOCUSABLE = [
   "select:not([disabled])",
   "textarea:not([disabled])",
   '[tabindex]:not([tabindex="-1"])',
+  '[contenteditable="true"]',
 ].join(",");
 
 export interface FocusTrapOptions {

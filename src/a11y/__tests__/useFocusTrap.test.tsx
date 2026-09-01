@@ -112,7 +112,7 @@ describe("useFocusTrap", () => {
     expect(document.activeElement).toBe(editor);
   });
 
-  it("intercepts Tab when yieldTo does not match (Shift+Tab wraps first→Last)", () => {
+  it("intercepts Tab when yieldTo does not match (Shift+Tab wraps to the container's last tab stop)", () => {
     mountWithPriorFocus(
       <TrapFixture
         active
@@ -121,6 +121,7 @@ describe("useFocusTrap", () => {
       />,
     );
     const first = buttons()[0]!;
+    const editor = document.querySelector('[data-testid="editor"]') as HTMLElement;
     first.focus();
     const event = new KeyboardEvent("keydown", {
       key: "Tab",
@@ -129,6 +130,21 @@ describe("useFocusTrap", () => {
       cancelable: true,
     });
     first.dispatchEvent(event);
-    expect(document.activeElement).toHaveTextContent("Last");
+    // The contenteditable editor is a real tab stop (CodeRabbit follow-up),
+    // so it is the container's last focusable and receives the Shift+Tab wrap.
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it("cycles forward from a [contenteditable=true] last stop back to the first element", () => {
+    mountWithPriorFocus(<TrapFixture active withContenteditable />);
+    const first = buttons()[0]!;
+    const editor = document.querySelector('[data-testid="editor"]') as HTMLElement;
+    editor.focus();
+    // The editor is the container's last tab stop; native Tab from the last
+    // button reaches it without interception (jsdom can't simulate that), and
+    // the trap must close the cycle from here back to the first element.
+    const preventDefault = tabEvent(editor);
+    expect(preventDefault).toHaveBeenCalled();
+    expect(document.activeElement).toBe(first);
   });
 });
