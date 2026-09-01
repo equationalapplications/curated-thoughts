@@ -1,7 +1,8 @@
 # Spec: Wiki Reader Contract & Forget Outbox
 
 **Date:** 2026-09-01
-**Status:** DESIGN — not yet implemented
+**Status:** IMPLEMENTED — see `docs/superpowers/plans/2026-09-01-wiki-reader-contract-and-forget-outbox.md`
+**Shipped in:** PR #135 (branch `spec/wiki-reader-contract-forget-outbox`)
 **Type:** bug fix (reader contract) + privacy defect (replication gap) + spec correction
 **Closes:** #133, #134, #132
 **Baseline:** main @ v1.40.0 (`50ef618`)
