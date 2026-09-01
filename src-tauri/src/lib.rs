@@ -1895,14 +1895,14 @@ async fn run_wiki_forget(
         .map_err(|e| e.to_string())?;
         let safe_string = safe.to_string_lossy().into_owned();
 
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
-        conn.execute(
-            "DELETE FROM llm_wiki_entries
-             WHERE source_ref = ?1 OR source_ref = ?2",
-            [normalized_rel, safe_string],
+        let mut guard = db_state.0.lock().unwrap();
+        let conn = &mut guard.0;
+        let removed = crate::db::wiki_forget::forget_entries_by_source_refs(
+            conn,
+            &[normalized_rel.clone(), safe_string.clone()],
         )
         .map_err(|e| e.to_string())?;
+        eprintln!("run_wiki_forget: removed {removed} entries and their edges");
         Ok(())
     })();
 

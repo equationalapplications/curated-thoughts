@@ -82,7 +82,7 @@ implementer must re-run this grep and confirm the list is still complete):
 | `heal_invalid_sources` | `src-tauri/src/lib.rs:398` | auto-heal soft-delete | yes |
 | `heal_lost_librarian_inferred` | `src-tauri/src/lib.rs:1674` | manual heal soft-delete | yes |
 | `prune_old_librarian_inferred` | `src-tauri/src/lib.rs:1717` (hard `DELETE FROM llm_wiki_entries` after 7-day window) | hard delete | yes — but see §2.1, this site is inert today |
-| `run_wiki_forget` | `src-tauri/src/lib.rs:1795` (hard `DELETE FROM llm_wiki_entries WHERE source_ref = ?1 OR source_ref = ?2`) | "forget this source file" command | **yes — FOLLOW-UP REQUIRED**: this site was missed by Tasks 2–5 and still does not call `purge_edges_for_entry` / `purge_edges_for_entries`. Forgetting a file today orphans every edge whose `source_id`/`target_id` belonged to a now-deleted entry. File as a separate bug; do not silently leave it. |
+| `run_wiki_forget` | `src-tauri/src/lib.rs:1867` (hard `DELETE FROM llm_wiki_entries WHERE source_ref = ?1 OR source_ref = ?2`) | "forget this source file" command | yes |
 | `clear_entity_content` | `src-tauri/src/db/bundle_apply.rs:606` | OKF bundle import, entity replacement (hard `DELETE ... WHERE entity_id=?1`) | **no — already correct** |
 
 `clear_entity_content` is called out because a previous draft of this spec
