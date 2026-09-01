@@ -17,8 +17,6 @@
 //! (with `deleted_at IS NULL` gates). The asymmetric helper below is reused by
 //! `purge_edges_for_entry` (single-id cascade) and `purge_dead_edges`
 //! (entity-content reset) so the three-table truth lives in one Rust file.
-//! The migration binary `tools/src/graph_reanchor.rs` carries an independent
-//! copy of the same predicate — the two crates do not share a library.
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -31,9 +29,9 @@ use rusqlite::{params, Connection};
 /// belong to any of the three tables; an edge is preserved as long as ONE
 /// endpoint resolves to at least one of the three.
 ///
-/// Returned string is wrapped in `NOT (...)` is **not** included — callers
-/// wrap as needed (`NOT (...)` for "dead" predicates, or pass straight to a
-/// `WHERE NOT (... OR ...)` shape).
+/// The returned fragment is a bare `OR` chain with no surrounding
+/// parentheses. Callers must parenthesize it before negating, for example
+/// `NOT ({fragment})`.
 fn endpoint_alive_sql(col: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM llm_wiki_entries e  WHERE e.id  = {col} AND e.deleted_at  IS NULL) \
@@ -81,11 +79,19 @@ pub fn purge_edges_for_entries(conn: &Connection, entry_ids: &[String]) -> Resul
 
 /// Delete every edge with no live endpoint anywhere — symmetric, no id.
 ///
-/// Used by `bundle_apply::clear_entity_content` (remediation R1): edges are
-/// stamped with `ctx.entity_id` even when they span entities, so the old
-/// `DELETE FROM llm_wiki_edges WHERE entity_id = ?1` would strand the
-/// partner entity's edges as orphan-class. The correct contract is to purge
-/// only edges whose **both** endpoints are dead across all three tables.
+/// Used by `bundle_apply::apply_import` (remediation R1, post-loop inside the
+/// import transaction): edges are stamped with `ctx.entity_id` even when they
+/// span entities, so the old per-entity `DELETE FROM llm_wiki_edges WHERE
+/// entity_id = ?1` would strand the partner entity's edges as orphan-class.
+/// The correct contract is to purge only edges whose **both** endpoints are
+/// dead across all three tables. Running once after the entity loop covers
+/// every entity the import touched in a single scan.
+///
+/// Note: this runs on every import mode (Replace/Merge/Clone), not just
+/// Replace — a pre-existing orphan edge unrelated to the bundle will be swept
+/// by any import. Benign (the predicate restricts the delete to truly dead
+/// edges) but worth knowing if the post-import edge count ever looks
+/// surprising.
 pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
     let alive_source = endpoint_alive_sql("source_id");
     let alive_target = endpoint_alive_sql("target_id");

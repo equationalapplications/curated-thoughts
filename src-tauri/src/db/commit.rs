@@ -756,12 +756,13 @@ fn commit_fact_update(
         .unwrap_or("inferred");
     let tags = parse_tags(payload);
 
-    // (source_ref, created_at, source_hash, okf_type, okf_sources,
-    //  okf_verified, okf_usage_window, confidence, last_verified_at,
-    //  last_verified_by, stale_after, lifecycle_status)
+    // (source_ref, created_at, body, source_hash, okf_type, okf_sources,
+    //  okf_verified, okf_usage_window, lifecycle_status, stale_after,
+    //  generated_by, last_verified_at, last_verified_by)
     type WikiFactRow = Option<(
         String,
         i64,
+        String,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -780,6 +781,7 @@ fn commit_fact_update(
             // the r.get::<_, String>(0) deserializer doesn't bail before
             // the update and outbox write can proceed.
             "SELECT COALESCE(source_ref, ''), created_at,
+                    body,
                     source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
                     lifecycle_status, stale_after, generated_by,
                     last_verified_at, last_verified_by
@@ -800,6 +802,7 @@ fn commit_fact_update(
                     r.get(9)?,
                     r.get(10)?,
                     r.get(11)?,
+                    r.get(12)?,
                 ))
             },
         )
@@ -807,6 +810,7 @@ fn commit_fact_update(
     let Some((
         existing_source_ref,
         created_at,
+        previous_body,
         existing_source_hash,
         existing_okf_type,
         existing_okf_sources,
@@ -821,15 +825,6 @@ fn commit_fact_update(
     else {
         bail!("fact_update target not found: {fact_id}");
     };
-
-    // A changed body invalidates the stored vector. Read the existing body
-    // to determine whether this update actually changes it — an update that
-    // touches only tags or confidence must keep its vector (spec §3).
-    let previous_body: String = conn.query_row(
-        "SELECT body FROM llm_wiki_entries WHERE id = ?1 AND entity_id = ?2",
-        params![fact_id, ctx.entity_id],
-        |r| r.get(0),
-    )?;
     let body_changed = previous_body != body;
 
     // Write the freshly computed embedding if the pre-pass produced one;
@@ -1270,17 +1265,13 @@ fn precompute_entry_embeddings(
                 // via the zip below. Skip this chunk — those rows land with
                 // NULL embeddings and the sweep fills them later.
                 if vectors.len() != id_chunk.len() {
-                    // False positive: the eprintln! below only interpolates the usize
-                    // counts (vectors.len / id_chunk.len) — the API key resolved inside
-                    // embed_batch never reaches this format string. The error arm below
-                    // does log `{e}`, but the anyhow chain from `ExternalEmbedProfile::embed`
-                    // contains the API-key *env-var names* only, never the values.
-                    // codeql[rust/cleartext-logging]
+                    // codeql[rust/cleartext-logging]: vectors.len() and id_chunk.len()
+                    // are local usize counts; the API key resolved inside
+                    // embed_batch never reaches this string. Collapsed to a single
+                    // line so CodeQL doesn't flag a per-argument sub-sink.
                     eprintln!(
-                        "precompute_entry_embeddings: provider returned {} vectors for {} entries; \
-                         skipping chunk to avoid mis-pairing",
-                        vectors.len(),
-                        id_chunk.len(),
+                        "precompute_entry_embeddings: provider returned a mismatched \
+                         number of vectors; skipping chunk to avoid mis-pairing"
                     );
                     continue;
                 }

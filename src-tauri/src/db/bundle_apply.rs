@@ -556,6 +556,16 @@ pub fn apply_import(
         result.entities_touched += 1;
     }
 
+    // Edges stamped with any of the replaced entities' ids may point across
+    // entities; purge only edges whose BOTH endpoints have no live home
+    // (in llm_wiki_entries / curated_entities / llm_wiki_tasks), otherwise
+    // the bundle import strands partner edges (remediation brief R1). Done
+    // once after the loop instead of once per entity in
+    // `clear_entity_content` — the per-entity call was an unscoped DELETE
+    // over `llm_wiki_edges` per row, so for a bundle of N entities we were
+    // running N scans where one suffices (CodeRabbit thread on line 641).
+    purge_dead_edges(&tx)?;
+
     tx.commit()?;
     Ok(result)
 }
@@ -638,13 +648,10 @@ fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result
         [entity_id],
     )?;
     tx.execute("DELETE FROM llm_wiki_tasks WHERE entity_id=?1", [entity_id])?;
-    // edges stamped with `ctx.entity_id` can point across entities; we must
-    // purge only edges whose BOTH endpoints have no live home (in
-    // llm_wiki_entries / curated_entities / llm_wiki_tasks), otherwise the
-    // bundle import strands partner edges (remediation brief R1). The
-    // helper applies the same three-table alive check as
-    // `edge_purge::purge_edges_for_entry`.
-    purge_dead_edges(tx)?;
+    // NOTE: `purge_dead_edges` is intentionally NOT called here. It runs
+    // once after the entire entity loop (in `apply_import`) so the full
+    // table scan happens once per import rather than once per entity —
+    // see CodeRabbit review thread on `bundle_apply.rs` line 641.
     tx.execute(
         "DELETE FROM llm_wiki_events WHERE entity_id=?1",
         [entity_id],

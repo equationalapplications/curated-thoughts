@@ -61,11 +61,13 @@ fn edge_ids(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
-fn purges_edges_whose_endpoint_row_is_absent() {
+fn purges_edges_whose_endpoints_are_absent_in_every_table() {
+    // Shape of today's 41 production orphans (spec §4 Step 1, "all endpoints
+    // are hard-absent"): BOTH `source_id` and `target_id` have no row in
+    // llm_wiki_entries, curated_entities, or llm_wiki_tasks. The both-dead
+    // predicate matches the runtime `db::edge_purge::purge_dead_edges`.
     let conn = open_in_memory().unwrap();
-    seed_entry(&conn, "fact_live", None);
-    // 'ent_gone' has no row at all — the shape of today's 41 orphans.
-    seed_edge(&conn, "edge_orphan", "ent_gone", "fact_live");
+    seed_edge(&conn, "edge_orphan", "ghost_a", "ghost_b");
 
     let removed = purge_orphan_edges(&conn).unwrap();
 
@@ -75,7 +77,31 @@ fn purges_edges_whose_endpoint_row_is_absent() {
 }
 
 #[test]
-fn treats_a_soft_deleted_endpoint_as_dead() {
+fn keeps_edges_with_one_absent_endpoint_if_other_is_live() {
+    // Counterpart to the soft-delete case above: a hard-absent endpoint is
+    // "more dead" than a soft-deleted one, so the same both-endpoints-dead
+    // contract holds — the live partner preserves the edge. Production has
+    // no edges of this shape today (the 41 orphans have BOTH endpoints
+    // absent), but pinning it here keeps a future regression from silently
+    // widening the predicate to OR.
+    let conn = open_in_memory().unwrap();
+    seed_entry(&conn, "fact_live", None);
+    seed_edge(&conn, "edge_one_dead", "ent_gone", "fact_live");
+
+    let removed = purge_orphan_edges(&conn).unwrap();
+
+    assert_eq!(
+        removed, 0,
+        "live partner preserves the edge — only edges with BOTH endpoints dead are purged"
+    );
+    assert_eq!(edge_ids(&conn), vec!["edge_one_dead".to_string()]);
+}
+
+#[test]
+fn keeps_edges_with_one_live_endpoint_even_if_other_is_soft_deleted() {
+    // Both-endpoints-dead contract: an edge survives the repair tool as long
+    // as ONE endpoint is alive. A soft-deleted partner alone does not make
+    // the edge an orphan. (The runtime's symmetric purge uses the same rule.)
     let conn = open_in_memory().unwrap();
     seed_entry(&conn, "fact_live", None);
     seed_entry(&conn, "fact_ghost", Some(200_000)); // soft-deleted
@@ -84,11 +110,10 @@ fn treats_a_soft_deleted_endpoint_as_dead() {
     let removed = purge_orphan_edges(&conn).unwrap();
 
     assert_eq!(
-        removed, 1,
-        "the outline's NOT IN form would have kept this — soft-deleted ids are \
-         still present in the table"
+        removed, 0,
+        "live partner preserves the edge — only edges with BOTH endpoints dead are purged"
     );
-    assert!(edge_ids(&conn).is_empty());
+    assert_eq!(edge_ids(&conn), vec!["edge_ghost".to_string()]);
 }
 
 #[test]
@@ -107,9 +132,9 @@ fn keeps_edges_between_two_live_entries() {
 
 #[test]
 fn purge_is_idempotent() {
+    // Same both-absent fixture as `purges_edges_whose_endpoints_are_absent_*`.
     let conn = open_in_memory().unwrap();
-    seed_entry(&conn, "fact_live", None);
-    seed_edge(&conn, "edge_orphan", "ent_gone", "fact_live");
+    seed_edge(&conn, "edge_orphan", "ghost_a", "ghost_b");
 
     assert_eq!(purge_orphan_edges(&conn).unwrap(), 1);
     assert_eq!(purge_orphan_edges(&conn).unwrap(), 0, "second run is a no-op");

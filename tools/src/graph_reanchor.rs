@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-/// An edge is an orphan iff either endpoint is absent from EVERY valid home
+/// An edge is an orphan iff BOTH endpoints are absent from EVERY valid home
 /// the endpoint id can belong to: `llm_wiki_entries`, `curated_entities`, or
 /// `llm_wiki_tasks`. Each table carries a `deleted_at` column, so a row that
 /// exists but is soft-deleted counts as absent for this purpose.
@@ -12,12 +12,12 @@ use rusqlite::Connection;
 /// Edge endpoints are heterogeneous (design spec §2 + remediation R1): an
 /// endpoint id may live in any of the three tables. An edge is preserved as
 /// long as ONE endpoint resolves to a live row in at least one table. This
-/// predicate is the symmetric opposite — only delete when every endpoint
-/// is dead in every table.
+/// predicate is the symmetric both-endpoints-dead contract — it must match
+/// the runtime's `db::edge_purge::purge_dead_edges` so the repair tool and
+/// the runtime agree on what an orphan is.
 ///
 /// `NOT EXISTS` rather than `NOT IN`: the `NOT IN` form would treat a
 /// soft-deleted endpoint id as alive and trigger the NULL-subquery trap.
-/// This shape mirrors `db::edge_purge::purge_edges_for_entry` in `src-tauri/`.
 const ORPHAN_PREDICATE: &str = "
      NOT (
             EXISTS (SELECT 1 FROM llm_wiki_entries e
@@ -27,7 +27,7 @@ const ORPHAN_PREDICATE: &str = "
          OR EXISTS (SELECT 1 FROM llm_wiki_tasks st
                     WHERE st.id = llm_wiki_edges.source_id AND st.deleted_at IS NULL)
      )
-  OR NOT (
+  AND NOT (
             EXISTS (SELECT 1 FROM llm_wiki_entries e
                     WHERE e.id = llm_wiki_edges.target_id AND e.deleted_at IS NULL)
          OR EXISTS (SELECT 1 FROM curated_entities ce
@@ -199,12 +199,14 @@ mod tests {
     }
 
     #[test]
-    fn predicate_purges_only_when_endpoint_is_dead_in_every_table() {
+    fn predicate_purges_only_when_both_endpoints_are_dead_in_every_table() {
         let conn = fresh();
         // Both endpoints are dead: not in entries, not in entities, not in tasks.
         seed_edge(&conn, "edge_truly_dead", "ghost_a", "ghost_b");
 
         // Source is live in llm_wiki_tasks only; target is dead everywhere.
+        // Both-endpoints-dead contract: this edge SURVIVES because the source
+        // endpoint is still alive in at least one table.
         seed_task(&conn, "task_alive", None);
         seed_edge(&conn, "edge_one_dead", "task_alive", "ghost_b");
 
@@ -216,8 +218,8 @@ mod tests {
 
         let removed = purge_orphan_edges(&conn).unwrap();
         assert_eq!(
-            removed, 3,
-            "every edge above has at least one endpoint dead in all three tables"
+            removed, 2,
+            "only edges with BOTH endpoints dead go — half-live edges survive"
         );
 
         // Re-running is a no-op (idempotent).

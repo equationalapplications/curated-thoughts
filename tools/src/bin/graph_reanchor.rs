@@ -40,17 +40,25 @@ fn backup_db(db_path: &Path) -> Result<PathBuf> {
             .and_then(|s| s.to_str())
             .unwrap_or("brain.db")
     ));
-    std::fs::copy(db_path, &backup)
-        .with_context(|| format!("copy {} -> {}", db_path.display(), backup.display()))?;
-    // -wal and -shm may legitimately not exist (clean shutdown).
-    for suffix in ["-wal", "-shm"] {
-        let src = PathBuf::from(format!("{}{suffix}", db_path.display()));
-        if src.exists() {
-            let dst = PathBuf::from(format!("{}{suffix}", backup.display()));
-            std::fs::copy(&src, &dst)
-                .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
-        }
-    }
+    // Crash-consistent snapshot for a live WAL database: SQLite's own
+    // `VACUUM INTO` rewrites the db into a single self-contained file with
+    // no -wal / -shm handling required. The earlier `std::fs::copy` over
+    // brain.db / -wal / -shm could land torn if writes interleaved with
+    // the copies — and this binary's own printed instructions tell the
+    // operator that restoring this backup is the rollback path for the
+    // destructive purge.
+    let src = Connection::open(db_path)
+        .with_context(|| format!("open {} for backup", db_path.display()))?;
+    src.execute(
+        "VACUUM INTO ?1",
+        rusqlite::params![backup.to_string_lossy()],
+    )
+    .with_context(|| {
+        format!(
+            "VACUUM INTO {} failed — refusing to proceed without a consistent backup",
+            backup.display()
+        )
+    })?;
     Ok(backup)
 }
 
@@ -71,8 +79,6 @@ fn main() -> Result<()> {
     }
 
     let paths = retrieval::resolve_brain_paths();
-    let profile = retrieval::load_embed_profile(&paths.config_path)
-        .context("load the active embed profile")?;
 
     if !apply {
         let conn = retrieval::open_brain_readonly(&paths.db_path)?;
@@ -89,6 +95,9 @@ fn main() -> Result<()> {
         println!("  entries to embed:        {null_entries}");
         return Ok(());
     }
+
+    let profile = retrieval::load_embed_profile(&paths.config_path)
+        .context("load the active embed profile")?;
 
     let backup = backup_db(&paths.db_path)?;
     println!("backup written: {}", backup.display());

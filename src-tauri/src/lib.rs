@@ -1862,10 +1862,25 @@ pub(crate) fn run_embedding_sweep(db_state: &DbState) -> Result<embed_sweep::Swe
             }
         };
 
-        let filled = {
+        let apply_result = {
             let guard = db_state.0.lock().unwrap();
             embed_sweep::apply_embeddings(&guard.0, &pending, &vectors)
-                .map_err(|e| e.to_string())?
+        };
+        let filled = match apply_result {
+            Ok(n) => n,
+            // R6 zip-truncation guard: apply_embeddings refuses to pair a
+            // mismatched batch. Count it as failed and stop the run — the
+            // next batch could have different ids and we don't want to mix
+            // them in either.
+            Err(e) if e.to_string().contains("length mismatch") => {
+                eprintln!(
+                    "embed_sweep: provider returned a mismatched number of vectors; \
+                     skipping batch to avoid mis-pairing"
+                );
+                report.failed += pending.len();
+                break;
+            }
+            Err(e) => return Err(e.to_string()),
         };
         report.filled += filled;
     }

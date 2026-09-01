@@ -97,8 +97,18 @@ Purge statement (per dying id, inside the site's existing transaction):
 
 ```sql
 DELETE FROM llm_wiki_edges
- WHERE source_id = ?1 OR target_id = ?1;
+ WHERE (source_id = ?1 AND NOT <target is alive in any endpoint table>)
+    OR (target_id = ?1 AND NOT <source is alive in any endpoint table>);
 ```
+
+`<col is alive>` expands to a heterogeneous `EXISTS` chain over
+`llm_wiki_entries`, `curated_entities`, and `llm_wiki_tasks` with
+`deleted_at IS NULL` — see `db::edge_purge::endpoint_alive_sql` for the exact
+fragment. The contract is **both-endpoints-dead per side**: an edge survives
+the cascade as long as at least one endpoint is alive anywhere in any of the
+three tables. A recovered row (`UPDATE ... SET deleted_at = NULL`) comes back
+with its live-partner edges intact; only edges whose other side is itself dead
+go with the cascade.
 
 `prune_old_librarian_inferred` deletes by predicate, not by id. Its cascade
 must collect the doomed ids first (`SELECT id ... WHERE <same predicate>`) and
