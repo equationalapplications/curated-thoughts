@@ -1991,9 +1991,11 @@ async fn run_wiki_forget(
 
         let mut guard = db_state.0.lock().unwrap();
         let conn = &mut guard.0;
+        let (_, now_ms) = crate::db::commit::now_timestamps();
         let removed = crate::db::wiki_forget::forget_entries_by_source_refs(
             conn,
             &[normalized_rel.clone(), safe_string.clone()],
+            now_ms,
         )
         .map_err(|e| e.to_string())?;
         eprintln!("run_wiki_forget: removed {removed} entries and their edges");
