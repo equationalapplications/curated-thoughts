@@ -1778,6 +1778,28 @@ fn prune_old_librarian_inferred(
     Ok(deleted)
 }
 
+/// Run a bounded null-embedding sweep against the app's live DB connection.
+///
+/// The sweep is the only recovery path for an entry whose write-time embed
+/// failed, so it is triggered from three places (design spec §3): after each
+/// commit batch, once at startup, and from `run_wiki_heal`. Its
+/// `embedding_blob IS NULL` predicate makes a no-op run nearly free, so
+/// over-triggering is cheap and under-triggering loses embeddings.
+///
+/// Errors from the embedding provider are absorbed by the sweep itself and
+/// reported in `SweepReport::failed`; this returns `Err` only if the database
+/// is unreachable.
+fn run_embedding_sweep(db_state: &DbState) -> Result<embed_sweep::SweepReport, String> {
+    const MAX_BATCHES_PER_RUN: usize = 8; // <= 512 entries per trigger
+
+    let paths = retrieval::resolve_brain_paths();
+    let profile = retrieval::load_embed_profile(&paths.config_path).map_err(|e| e.to_string())?;
+
+    let guard = db_state.0.lock().unwrap();
+    embed_sweep::sweep_null_embeddings(&guard.0, &profile, MAX_BATCHES_PER_RUN)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn run_wiki_heal(
     app: AppHandle,
@@ -1799,10 +1821,14 @@ async fn run_wiki_heal(
             .ok_or_else(|| "no vault configured".to_string())?;
         let vault_root = std::path::PathBuf::from(&vault);
 
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
+        {
+            let guard = db_state.0.lock().unwrap();
+            heal_lost_librarian_inferred(&guard.0, &vault_root)?;
+        } // guard dropped here — run_embedding_sweep takes its own lock
 
-        heal_lost_librarian_inferred(conn, &vault_root)?;
+        if let Err(e) = run_embedding_sweep(&db_state) {
+            eprintln!("wiki heal: embedding sweep skipped: {e}");
+        }
         Ok(())
     })();
 
@@ -3323,6 +3349,24 @@ pub fn run() {
                         }
                     }
                 });
+
+                // Post-schema-guard null-embedding sweep (spec §3).
+                // Errors here are normal offline conditions (provider
+                // unreachable, missing config); the sweep itself absorbs
+                // provider failures into `SweepReport::failed` and only
+                // returns `Err` when the DB is unreachable.
+                let db_state = app.state::<DbState>();
+                match run_embedding_sweep(&db_state) {
+                    Ok(report) if report.filled > 0 || report.failed > 0 => {
+                        eprintln!(
+                            "startup embedding sweep: filled {}, failed {}, {} still null",
+                            report.filled, report.failed, report.remaining_null
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("startup embedding sweep skipped: {e}"),
+                }
+
                 Ok(())
             }
         })
@@ -4100,12 +4144,13 @@ mod workspace_id_tests {
 #[cfg(test)]
 mod maintenance_command_tests {
     use super::{
-        heal_invalid_sources, heal_lost_librarian_inferred, prune_old_librarian_inferred, DbState,
-        VaultConfigState,
+        heal_invalid_sources, heal_lost_librarian_inferred, prune_old_librarian_inferred,
+        run_embedding_sweep, DbState, VaultConfigState,
     };
     use crate::db::connection::open_in_memory;
     use rusqlite::{params, Connection};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     fn insert_wiki_entry(
         conn: &Connection,
@@ -4686,6 +4731,73 @@ mod maintenance_command_tests {
             )
             .unwrap();
         assert_eq!(dangling, 0, "soft-delete must purge edges too (spec §2)");
+    }
+
+    // ── Spec section 7: embedding sweep trigger ──────────────────────────────
+    // The sweep is the sole recovery path for a write-time embed that failed.
+    // `run_embedding_sweep` is wired at startup and on `run_wiki_heal`; this
+    // test pins the contract — given two live NULL-blob entries, it returns
+    // `SweepReport { filled: 2, remaining_null: 0 }` and writes 32-byte blobs
+    // (8 dims from the `constant8` stub).
+
+    /// Build a `DbState` backed by an in-memory-style file DB at `tmp`, then
+    /// point the resolver env vars at that temp dir so `run_embedding_sweep`
+    /// finds the same config. The stub (set by the caller via
+    /// `temp_env::with_vars`) determines the embedding shape; the profile
+    /// itself only needs to load cleanly.
+    fn build_test_db_state_with_brain_paths() -> (DbState, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let db_path = tmp.path().join("brain.db");
+        // Touch config.json with a minimal vault so `get_embed_profile` has
+        // something to read. The default `EmbedProfile` Local is fine — the
+        // `CURATED_EMBED_STUB` env overrides `embed_batch` regardless.
+        let cfg = crate::vault::VaultConfig::new(config_path.clone());
+        let _ = cfg.set_vault_path(tmp.path().to_str().unwrap());
+
+        let db = crate::db::AppDb::open_with_config(&db_path, &config_path).unwrap();
+        let db_state = DbState(std::sync::Mutex::new(db));
+        (db_state, tmp)
+    }
+
+    #[test]
+    fn run_embedding_sweep_fills_null_blobs_against_the_live_connection() {
+        let (db_state, tmp) = build_test_db_state_with_brain_paths();
+        let brain_dir = tmp.path().to_str().unwrap().to_string();
+        let config_path = tmp.path().join("config.json");
+        let db_path = tmp.path().join("brain.db");
+
+        temp_env::with_vars(
+            [
+                ("CURATED_EMBED_STUB", Some("constant8")),
+                ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
+                ("CURATED_BRAIN_CONFIG", Some(config_path.to_str().unwrap())),
+                ("CURATED_BRAIN_DB", Some(db_path.to_str().unwrap())),
+            ],
+            || {
+                {
+                    let guard = db_state.0.lock().unwrap();
+                    insert_wiki_entry_ms(&guard.0, "fact_a", "librarian_inferred", "documents/a.md", None);
+                    insert_wiki_entry_ms(&guard.0, "fact_b", "librarian_inferred", "documents/b.md", None);
+                }
+
+                let report = run_embedding_sweep(&db_state).unwrap();
+
+                assert_eq!(report.filled, 2);
+                assert_eq!(report.remaining_null, 0);
+
+                let guard = db_state.0.lock().unwrap();
+                let blob_len: i64 = guard
+                    .0
+                    .query_row(
+                        "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
+            },
+        );
     }
 }
 
