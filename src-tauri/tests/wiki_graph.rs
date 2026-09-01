@@ -695,3 +695,49 @@ fn wiki_traverse_graph_entity_space_truncates_at_max_nodes() {
         "an oversized entity graph must report truncation"
     );
 }
+
+#[test]
+fn wiki_traverse_graph_entity_space_neighbor_keeps_entity_identity_on_id_collision() {
+    // An id that exists in BOTH spaces, in the walked partition. The seed is
+    // entity-anchored, so the neighbor must resolve in curated_entities even
+    // though llm_wiki_entries would also match it.
+    let conn = open_graph_db_with_entities();
+    insert_curated_entity(&conn, "ce_a", "Alpha", false);
+    insert_curated_entity(&conn, "dup", "Entity Neighbor", false);
+    insert_node(&conn, "dup", "ent_448a", "Entry Neighbor", false);
+    insert_edge(&conn, "edge_ad", "ent_448a", "ce_a", "dup", "related_to");
+
+    let result =
+        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+
+    let dup = result
+        .nodes
+        .iter()
+        .find(|n| n.id == "dup")
+        .expect("the colliding neighbor is reachable");
+    assert_eq!(
+        dup.title, "Entity Neighbor",
+        "an entity-space walk keeps entity identity at the neighbor boundary"
+    );
+}
+
+#[test]
+fn wiki_traverse_graph_entry_space_neighbor_unaffected_by_id_collision() {
+    // The mirror case: an entry-anchored seed keeps entry identity, which is
+    // the behavior that predates heterogeneous traversal.
+    let conn = open_graph_db_with_entities();
+    insert_node(&conn, "e_a", "tier_fact", "Alpha", false);
+    insert_node(&conn, "dup", "tier_fact", "Entry Neighbor", false);
+    insert_curated_entity(&conn, "dup", "Entity Neighbor", false);
+    insert_edge(&conn, "edge_ad", "tier_fact", "e_a", "dup", "related_to");
+
+    let result =
+        wiki_traverse_graph(&conn, "tier_fact", "e_a", 2, TraverseDirection::Both, &[]).unwrap();
+
+    let dup = result
+        .nodes
+        .iter()
+        .find(|n| n.id == "dup")
+        .expect("the colliding neighbor is reachable");
+    assert_eq!(dup.title, "Entry Neighbor");
+}

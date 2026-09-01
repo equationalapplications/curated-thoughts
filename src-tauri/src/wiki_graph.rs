@@ -515,7 +515,16 @@ pub fn wiki_traverse_graph(
                 edges.push(edge);
             }
             if is_new_neighbor {
-                if let Some((node, _)) = load_live_node(conn, entity_id, &neighbor_id)? {
+                // Resolve in the walk's own space. `load_live_node` tries entry
+                // space first, which would hand back an `llm_wiki_entries` title
+                // for a `curated_entities` neighbor whose id also exists there
+                // under this partition. A walk must not cross spaces at the
+                // neighbor boundary either (spec section 3).
+                let resolved = match space {
+                    NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
+                    NodeSpace::Entity => load_live_curated_entity(conn, entity_id, &neighbor_id)?,
+                };
+                if let Some(node) = resolved {
                     visited.insert(neighbor_id.clone());
                     nodes.insert(neighbor_id.clone(), node);
                     queue.push_back((neighbor_id, depth + 1));
