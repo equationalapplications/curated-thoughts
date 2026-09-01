@@ -148,6 +148,10 @@ pub fn sweep_null_embeddings(
         // run — the next batch could have different ids and we don't want to
         // mix them in either.
         if vectors.len() != pending.len() {
+            // False positive: the eprintln! below only interpolates the usize
+            // counts (vectors.len / pending.len) — the API key resolved inside
+            // embed_batch never reaches this format string.
+            // codeql[rust/cleartext-logging]
             eprintln!(
                 "embed_sweep: provider returned {} vectors for {} entries; \
                  skipping batch to avoid mis-pairing",

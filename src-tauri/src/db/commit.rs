@@ -1270,6 +1270,12 @@ fn precompute_entry_embeddings(
                 // via the zip below. Skip this chunk — those rows land with
                 // NULL embeddings and the sweep fills them later.
                 if vectors.len() != id_chunk.len() {
+                    // False positive: the eprintln! below only interpolates the usize
+                    // counts (vectors.len / id_chunk.len) — the API key resolved inside
+                    // embed_batch never reaches this format string. The error arm below
+                    // does log `{e}`, but the anyhow chain from `ExternalEmbedProfile::embed`
+                    // contains the API-key *env-var names* only, never the values.
+                    // codeql[rust/cleartext-logging]
                     eprintln!(
                         "precompute_entry_embeddings: provider returned {} vectors for {} entries; \
                          skipping chunk to avoid mis-pairing",
