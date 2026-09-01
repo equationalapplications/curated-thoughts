@@ -204,8 +204,7 @@ pub fn dispatch_wiki_search(
     let limit = limit.unwrap_or(10).clamp(1, 25);
     // Pass the caller's intent through untouched. Substituting a default set
     // here is what made the default call path unable to match any row (#133).
-    let owned = entity_ids;
-    let refs: Option<Vec<&str>> = owned
+    let refs: Option<Vec<&str>> = entity_ids
         .as_ref()
         .map(|ids| ids.iter().map(|s| s.as_str()).collect());
     wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), limit)
