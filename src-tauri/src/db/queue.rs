@@ -156,12 +156,22 @@ mod tests {
         let (vault, file_path) = setup_vault_with_file(b"hello world");
         let mut conn = open_seeded_conn();
 
-        enqueue_vault_event(
-            &mut conn,
-            notify::EventKind::Create(notify::event::CreateKind::Any),
-            &file_path,
-        )
-        .unwrap();
+        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
+        // environment, which is shared by every test in this binary. The
+        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
+        // test that leaves it unset sees THEIR vault root when it happens to
+        // run concurrently — its own TempDir path then fails the containment
+        // check, the event is silently skipped, and the assertion below fails
+        // intermittently. Pin it to this test's own vault (and take the same
+        // `temp_env` lock) so the guard is deterministic.
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::Any),
+                &file_path,
+            )
+            .unwrap();
+        });
 
         let mut stmt = conn
             .prepare("SELECT status, hash, tier FROM documents WHERE path = ?1")
@@ -200,12 +210,22 @@ mod tests {
         // Now mutate the file on disk; Modify event arrives with the new hash.
         std::fs::write(&canonical, b"v2").unwrap();
 
-        enqueue_vault_event(
-            &mut conn,
-            notify::EventKind::Modify(notify::event::ModifyKind::Any),
-            &file_path,
-        )
-        .unwrap();
+        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
+        // environment, which is shared by every test in this binary. The
+        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
+        // test that leaves it unset sees THEIR vault root when it happens to
+        // run concurrently — its own TempDir path then fails the containment
+        // check, the event is silently skipped, and the assertion below fails
+        // intermittently. Pin it to this test's own vault (and take the same
+        // `temp_env` lock) so the guard is deterministic.
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                &file_path,
+            )
+            .unwrap();
+        });
 
         let mut stmt = conn
             .prepare("SELECT status, hash FROM documents WHERE path = ?1")
@@ -235,12 +255,22 @@ mod tests {
         .unwrap();
 
         // No filesystem mutation; Modify event fires but bytes are unchanged.
-        enqueue_vault_event(
-            &mut conn,
-            notify::EventKind::Modify(notify::event::ModifyKind::Any),
-            &file_path,
-        )
-        .unwrap();
+        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
+        // environment, which is shared by every test in this binary. The
+        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
+        // test that leaves it unset sees THEIR vault root when it happens to
+        // run concurrently — its own TempDir path then fails the containment
+        // check, the event is silently skipped, and the assertion below fails
+        // intermittently. Pin it to this test's own vault (and take the same
+        // `temp_env` lock) so the guard is deterministic.
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                &file_path,
+            )
+            .unwrap();
+        });
 
         let mut stmt = conn
             .prepare("SELECT status FROM documents WHERE path = ?1")
@@ -272,12 +302,22 @@ mod tests {
             .unwrap();
         assert_eq!(count_before, 1);
 
-        enqueue_vault_event(
-            &mut conn,
-            notify::EventKind::Remove(notify::event::RemoveKind::Any),
-            &file_path,
-        )
-        .unwrap();
+        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
+        // environment, which is shared by every test in this binary. The
+        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
+        // test that leaves it unset sees THEIR vault root when it happens to
+        // run concurrently — its own TempDir path then fails the containment
+        // check, the event is silently skipped, and the assertion below fails
+        // intermittently. Pin it to this test's own vault (and take the same
+        // `temp_env` lock) so the guard is deterministic.
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Remove(notify::event::RemoveKind::Any),
+                &file_path,
+            )
+            .unwrap();
+        });
 
         let count_after: i64 = conn
             .query_row(
@@ -303,12 +343,22 @@ mod tests {
         assert_eq!(before, 0);
 
         // Remove event for a path we never ingested must not error.
-        enqueue_vault_event(
-            &mut conn,
-            notify::EventKind::Remove(notify::event::RemoveKind::Any),
-            &file_path,
-        )
-        .unwrap();
+        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
+        // environment, which is shared by every test in this binary. The
+        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
+        // test that leaves it unset sees THEIR vault root when it happens to
+        // run concurrently — its own TempDir path then fails the containment
+        // check, the event is silently skipped, and the assertion below fails
+        // intermittently. Pin it to this test's own vault (and take the same
+        // `temp_env` lock) so the guard is deterministic.
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Remove(notify::event::RemoveKind::Any),
+                &file_path,
+            )
+            .unwrap();
+        });
 
         let after: i64 = conn
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))

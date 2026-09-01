@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod doctor;
+pub mod embed_sweep;
 pub mod embedder;
 mod entities_api;
 pub mod graph;
@@ -34,6 +35,7 @@ pub mod walk_vault;
 pub mod watcher;
 pub mod wiki_graph;
 
+use crate::embedder::embed_batch;
 use crate::inference::{
     download_model_weights, download_sidecar_engine, generate_text, get_provider_config,
     initialize_provider, update_provider, GenerationProvider, InferenceState,
@@ -47,11 +49,11 @@ use outbox::{
     postgres::{spawn_postgres_worker, OutboxWorkerHandle},
     OutboxConfig,
 };
+#[cfg(feature = "test-utils")]
+pub use pipeline::watchdog::heartbeat::Heartbeat;
 #[cfg(not(feature = "test-utils"))]
 use pipeline::PipelineJob;
 use pipeline::{start_pipeline, PipelineStatusEvent};
-#[cfg(feature = "test-utils")]
-pub use pipeline::watchdog::heartbeat::Heartbeat;
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
 use rusqlite::types::Value as SqlVal;
@@ -64,10 +66,7 @@ use setup::{
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{
-    mpsc::Sender,
-    Arc, Mutex,
-};
+use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault::VaultConfig;
@@ -413,10 +412,10 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
     let guard = db_state.0.lock().unwrap();
     let conn = &guard.0;
 
-    let entries: Vec<(i64, String, String)> = {
+    let entries: Vec<(i64, String, String, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT e.rowid, e.source_ref, e.entity_id
+                "SELECT e.rowid, e.source_ref, e.entity_id, e.id
                  FROM llm_wiki_entries e
                  WHERE e.deleted_at IS NULL
                    AND e.source_ref IS NOT NULL
@@ -430,6 +429,7 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
                 row.get::<_, i64>(0).map_err(|e| e.to_string())?,
                 row.get::<_, String>(1).map_err(|e| e.to_string())?,
                 row.get::<_, String>(2).map_err(|e| e.to_string())?,
+                row.get::<_, String>(3).map_err(|e| e.to_string())?,
             ));
         }
         v
@@ -437,7 +437,7 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
 
     let mut healed_by_entity: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for (rowid, source_ref, entity_id) in entries {
+    for (rowid, source_ref, entity_id, entry_id) in entries {
         // Bug A + B fix: use the shared consumer helper
         // (`source_ref_is_still_grounded`) instead of `safe_vault_path`.
         // The legacy producer wrote a vault-relative path; the post-c30f141
@@ -445,11 +445,15 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
         // empty / unparseable values as still-grounded (defensive — see
         // its docs).
         if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            conn.execute(
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            tx.execute(
                 "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
                 rusqlite::params![crate::db::commit::ms_now(), rowid],
             )
             .map_err(|e| e.to_string())?;
+            crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
             *healed_by_entity.entry(entity_id).or_insert(0) += 1;
         }
     }
@@ -909,8 +913,8 @@ fn start_file_watcher_inner(
             }
         };
         let brain_paths = crate::retrieval::resolve_brain_paths();
-        let report = crate::config::BrainConfig::load_lenient(&brain_paths)
-            .map_err(|e| e.to_string())?;
+        let report =
+            crate::config::BrainConfig::load_lenient(&brain_paths).map_err(|e| e.to_string())?;
         let profile = report.config.embed_profile.clone().unwrap_or_default();
         let gen_timeout_secs = 600; // matches librarian/synthesis.rs default
 
@@ -958,10 +962,14 @@ fn start_file_watcher_inner(
         // before spawning a new supervisor
         // (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
         if let Some(sup_state) = app.try_state::<WatchdogSupervisor>() {
-            let prev = sup_state.0.lock().unwrap().replace(WatchdogSupervisorHandle {
-                stop: stop.clone(),
-                join,
-            });
+            let prev = sup_state
+                .0
+                .lock()
+                .unwrap()
+                .replace(WatchdogSupervisorHandle {
+                    stop: stop.clone(),
+                    join,
+                });
             if let Some(prev) = prev {
                 prev.stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = prev.join.join();
@@ -1074,8 +1082,7 @@ fn start_file_watcher_inner(
                             .to_string_lossy()
                             .into_owned();
                         update_wiki_status(app, &status_state, |flags| {
-                            flags.ingest.health =
-                                pipeline::watchdog::PipelineHealth::Working;
+                            flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
                         });
                         if let Err(e) = enqueue_vault_event(
                             conn,
@@ -1357,21 +1364,19 @@ async fn switch_vault(
         let mut g = pipeline.0.lock().unwrap();
         if let Some(handle) = g.take() {
             let pipeline::PipelineHandle {
-                tx, join, heartbeat, ..
+                tx,
+                join,
+                heartbeat,
+                ..
             } = handle;
             drop(tx);
             // Supersede first, so a worker that later wakes exits without
             // racing the replacement (spec §4.1), then give it a bounded
             // window rather than blocking switch_vault forever (spec §6).
             heartbeat.bump_epoch();
-            let finished = pipeline::watchdog::join_with_timeout(
-                join,
-                Duration::from_secs(10),
-            );
+            let finished = pipeline::watchdog::join_with_timeout(join, Duration::from_secs(10));
             if !finished {
-                eprintln!(
-                    "[switch_vault] pipeline worker did not exit within 10s; abandoning it"
-                );
+                eprintln!("[switch_vault] pipeline worker did not exit within 10s; abandoning it");
             }
         }
     }
@@ -1680,10 +1685,10 @@ fn heal_lost_librarian_inferred(
     // JSON shapes, so the on-disk `vault_root` no longer participates in
     // the existence check. Kept in the signature so existing call sites
     // continue to compile unchanged.
-    let entries: Vec<(i64, String)> = {
+    let entries: Vec<(i64, String, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT rowid, source_ref FROM llm_wiki_entries
+                "SELECT rowid, source_ref, id FROM llm_wiki_entries
                      WHERE deleted_at IS NULL
                        AND source_ref IS NOT NULL
                        AND source_type = 'librarian_inferred'",
@@ -1695,37 +1700,198 @@ fn heal_lost_librarian_inferred(
             v.push((
                 row.get::<_, i64>(0).map_err(|e| e.to_string())?,
                 row.get::<_, String>(1).map_err(|e| e.to_string())?,
+                row.get::<_, String>(2).map_err(|e| e.to_string())?,
             ));
         }
         v
     };
 
     let mut updated = 0;
-    for (rowid, source_ref) in entries {
+    for (rowid, source_ref, entry_id) in entries {
         if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            updated += conn
+            // Soft-delete and edge purge must be atomic (spec §2): a crash
+            // between them would strand the edges. These sites had no
+            // transaction before this change.
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            updated += tx
                 .execute(
                     "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
                     rusqlite::params![crate::db::commit::ms_now(), rowid],
                 )
                 .map_err(|e| e.to_string())?;
+            crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
         }
     }
     Ok(updated)
 }
 
-fn prune_old_librarian_inferred(
-    conn: &rusqlite::Connection,
-    current_unix: i64,
-) -> Result<usize, String> {
-    conn.execute(
-        "DELETE FROM llm_wiki_entries
-             WHERE source_type = 'librarian_inferred'
-               AND deleted_at IS NOT NULL
-               AND deleted_at < ?1",
-        [current_unix - 7 * 86400],
-    )
-    .map_err(|e| e.to_string())
+/// Hard-delete `librarian_inferred` entries that have been soft-deleted for
+/// more than 7 days.
+///
+/// `now_ms` is unix **milliseconds**, matching `llm_wiki_entries.deleted_at`,
+/// which every writer stores in milliseconds (`ms_now()`, `db::commit`). This
+/// function previously took seconds and compared them against millisecond
+/// stamps, so it never deleted anything; see design spec §2.1.
+fn prune_old_librarian_inferred(conn: &rusqlite::Connection, now_ms: i64) -> Result<usize, String> {
+    const SEVEN_DAYS_MS: i64 = 7 * 86_400 * 1000;
+    let cutoff = now_ms - SEVEN_DAYS_MS;
+
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+    // Collect the doomed ids first: the DELETE is predicate-driven, but the edge
+    // purge and the outbox push both need concrete ids (and the outbox push
+    // also needs entity_id). All three must commit together (spec §2).
+    //
+    // Spec override (2026-09-01): the seconds→ms fix (commit `2333479`) made
+    // this hard-delete actually fire for the first time. Without an
+    // `OutboxOperation::Delete` push, replicas created from any prune that
+    // runs after that fix will silently retain pruned rows. The spec had this
+    // as a non-goal; the human partner upgraded it to in-scope once the ms/s
+    // fix was live. See `.superpowers/sdd/.../remediation/task-R7-brief.md`.
+    let doomed: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, entity_id FROM llm_wiki_entries
+                     WHERE source_type = 'librarian_inferred'
+                       AND deleted_at IS NOT NULL
+                       AND deleted_at < ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+            .map_err(|e| e.to_string())?
+    };
+
+    let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
+    // HARD delete, so the hard-delete purge. `purge_edges_for_entries` keeps an
+    // edge whose partner is still alive — correct at the soft-delete sites,
+    // where the dead row can be recovered — but here the id disappears from
+    // every endpoint table, so such an edge would reference nothing and no
+    // later cascade could ever find it to clean up (spec §2, "Soft delete vs
+    // hard delete").
+    crate::db::edge_purge::purge_edges_for_hard_deleted(&tx, &doomed_ids)
+        .map_err(|e| e.to_string())?;
+
+    // Push one OutboxOperation::Delete row per doomed entry so replicas
+    // converge on the prune. Same shape as `commit_fact_archive` /
+    // `archive_fact`. The entity_id is sourced from the doomed row itself
+    // (not assumed uniform) because pruning may span multiple entities if a
+    // future migration ever allows that; today all librarian_inferred rows
+    // share an entity in practice, but the outbox is keyed on entity and
+    // pushing the wrong one would mis-attribute the delete.
+    for (id, entity_id) in &doomed {
+        crate::db::commit::push_entries_outbox(
+            &tx,
+            entity_id,
+            id,
+            crate::db::outbox_format::OutboxOperation::Delete,
+            serde_json::json!({ "id": id }),
+            now_ms,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let deleted = tx
+        .execute(
+            "DELETE FROM llm_wiki_entries
+                 WHERE source_type = 'librarian_inferred'
+                   AND deleted_at IS NOT NULL
+                   AND deleted_at < ?1",
+            [cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(deleted)
+}
+
+/// Run a bounded null-embedding sweep against the app's live DB connection.
+///
+/// The sweep is the recovery path for entries whose write-time embed did not
+/// run or failed (Part B's `precompute_entry_embeddings` returns an empty map
+/// on provider error). It is triggered from two places (design spec §3):
+/// once at startup and from `run_wiki_heal`. Its `embedding_blob IS NULL`
+/// predicate makes a no-op run nearly free, so over-triggering is cheap and
+/// under-triggering loses embeddings.
+///
+/// Errors from the embedding provider are absorbed by the sweep itself and
+/// reported in `SweepReport::failed`; this returns `Err` only if the database
+/// is unreachable.
+pub(crate) fn run_embedding_sweep(db_state: &DbState) -> Result<embed_sweep::SweepReport, String> {
+    const MAX_BATCHES_PER_RUN: usize = 8; // <= 512 entries per trigger
+
+    let paths = retrieval::resolve_brain_paths();
+    let profile = retrieval::load_embed_profile(&paths.config_path).map_err(|e| e.to_string())?;
+
+    // Critical: do NOT hold `db_state.0` across `embed_batch` (the blocking
+    // network round-trip) — every Tauri DB command queues behind this mutex,
+    // and a long embed would starve proposal approval, the heal path, and
+    // user-initiated reads. The invariant is: lock only for the SELECT and
+    // UPDATE halves of a batch, drop it before the network call.
+    let mut report = embed_sweep::SweepReport::default();
+
+    for _ in 0..MAX_BATCHES_PER_RUN {
+        let pending: Vec<(String, String, String)> = {
+            let guard = db_state.0.lock().unwrap();
+            embed_sweep::pending_null_batch(&guard.0, embed_sweep::SWEEP_BATCH_SIZE)
+                .map_err(|e| e.to_string())?
+        };
+        if pending.is_empty() {
+            break;
+        }
+
+        let texts: Vec<String> = pending
+            .iter()
+            .map(|(_, title, body)| embed_sweep::embed_text_for_entry(title, body))
+            .collect();
+
+        // Lock is NOT held here — other Tauri DB commands may interleave.
+        let vectors = match embed_batch(&profile, texts) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "embed_sweep: batch of {} entries failed to embed: {e}",
+                    pending.len()
+                );
+                report.failed += pending.len();
+                // Stop rather than hammering a provider that is already failing.
+                break;
+            }
+        };
+
+        let apply_result = {
+            let guard = db_state.0.lock().unwrap();
+            embed_sweep::apply_embeddings(&guard.0, &pending, &vectors)
+        };
+        let filled = match apply_result {
+            Ok(n) => n,
+            // R6 zip-truncation guard: apply_embeddings refuses to pair a
+            // mismatched batch. Count it as failed and stop the run — the
+            // next batch could have different ids and we don't want to mix
+            // them in either.
+            Err(e) if e.to_string().contains("length mismatch") => {
+                eprintln!(
+                    "embed_sweep: provider returned a mismatched number of vectors; \
+                     skipping batch to avoid mis-pairing"
+                );
+                report.failed += pending.len();
+                break;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        report.filled += filled;
+    }
+
+    report.remaining_null = {
+        let guard = db_state.0.lock().unwrap();
+        embed_sweep::count_null_entries(&guard.0).map_err(|e| e.to_string())?
+    };
+
+    Ok(report)
 }
 
 #[tauri::command]
@@ -1749,10 +1915,14 @@ async fn run_wiki_heal(
             .ok_or_else(|| "no vault configured".to_string())?;
         let vault_root = std::path::PathBuf::from(&vault);
 
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
+        {
+            let guard = db_state.0.lock().unwrap();
+            heal_lost_librarian_inferred(&guard.0, &vault_root)?;
+        } // guard dropped here — run_embedding_sweep takes its own lock
 
-        heal_lost_librarian_inferred(conn, &vault_root)?;
+        if let Err(e) = run_embedding_sweep(&db_state) {
+            eprintln!("wiki heal: embedding sweep skipped: {e}");
+        }
         Ok(())
     })();
 
@@ -1776,11 +1946,7 @@ async fn run_wiki_prune(
     let result = (|| -> Result<(), String> {
         let guard = db_state.0.lock().unwrap();
         let conn = &guard.0;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_secs() as i64;
-        prune_old_librarian_inferred(conn, now)?;
+        prune_old_librarian_inferred(conn, crate::db::commit::ms_now())?;
         Ok(())
     })();
 
@@ -1823,14 +1989,14 @@ async fn run_wiki_forget(
         .map_err(|e| e.to_string())?;
         let safe_string = safe.to_string_lossy().into_owned();
 
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
-        conn.execute(
-            "DELETE FROM llm_wiki_entries
-             WHERE source_ref = ?1 OR source_ref = ?2",
-            [normalized_rel, safe_string],
+        let mut guard = db_state.0.lock().unwrap();
+        let conn = &mut guard.0;
+        let removed = crate::db::wiki_forget::forget_entries_by_source_refs(
+            conn,
+            &[normalized_rel.clone(), safe_string.clone()],
         )
         .map_err(|e| e.to_string())?;
+        eprintln!("run_wiki_forget: removed {removed} entries and their edges");
         Ok(())
     })();
 
@@ -1903,9 +2069,7 @@ async fn run_wiki_reembed(
                        WHERE path = ?1 AND status = 'indexed'",
                     rusqlite::params![path],
                 ) {
-                    eprintln!(
-                        "[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}"
-                    );
+                    eprintln!("[run_wiki_reembed] failed to stage {path} as pending_reindex: {e}");
                 }
             }
             eprintln!(
@@ -2855,6 +3019,28 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
     tauri::test::mock_builder()
         .manage(DbState(std::sync::Mutex::new(db)))
         .manage(VaultConfigState(std::sync::Mutex::new(config)))
+        // Registered so commands that take `State<EmbedProfileState>` (e.g.,
+        // `add_entity_fact_cmd`, `update_entity_fact_cmd`) can extract it.
+        //
+        // Deliberately NOT `EmbedProfile::default()` — that is
+        // `Local { nomic-embed-code }`, an Ollama profile, so every commit
+        // path that now embeds at write time would make an HTTP call to
+        // localhost:11434 from the test suite: a hang or a connection error
+        // depending on whether the machine happens to run Ollama, and
+        // different results on a developer box than on CI. `Cloud` returns
+        // "cloud embed not implemented" without touching the network, which
+        // collapses to the NULL-blob path every non-embedding test expects.
+        //
+        // Tests that DO want vectors set `CURATED_EMBED_STUB=constant8`;
+        // `embed_batch` checks that env var before it looks at the profile, so
+        // the stub still works with this profile in place.
+        .manage(EmbedProfileState(std::sync::Mutex::new(
+            crate::embedder::EmbedProfile::Cloud {
+                provider: crate::embedder::CloudProvider::OpenAi,
+                model: "offline-test-profile".to_string(),
+                api_key: String::new(),
+            },
+        )))
         // No background pipeline thread: integration tests invoke DB-only commands;
         // pipeline work is covered by `PipelineWorker` tests in `tests/pipeline.rs`.
         .manage(PipelineHolder(std::sync::Mutex::new(None)))
@@ -3277,6 +3463,31 @@ pub fn run() {
                         }
                     }
                 });
+
+                // Post-schema-guard null-embedding sweep (spec §3). Errors
+                // here are normal offline conditions (provider unreachable,
+                // missing config); the sweep itself absorbs provider failures
+                // into `SweepReport::failed` and only returns `Err` when the
+                // DB is unreachable. Runs on a background thread so up to 8
+                // remote-embedding round-trips never freeze the wry/window
+                // event loop on first launch. The mutex is locked only for
+                // each DB read/write half (per the `run_embedding_sweep`
+                // contract) — never across the network call.
+                let app_handle = app.app_handle().clone();
+                std::thread::spawn(move || {
+                    let db_state = app_handle.state::<DbState>();
+                    match run_embedding_sweep(&db_state) {
+                        Ok(report) if report.filled > 0 || report.failed > 0 => {
+                            eprintln!(
+                                "startup embedding sweep: filled {}, failed {}, {} still null",
+                                report.filled, report.failed, report.remaining_null
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("startup embedding sweep skipped: {e}"),
+                    }
+                });
+
                 Ok(())
             }
         })
@@ -4054,12 +4265,13 @@ mod workspace_id_tests {
 #[cfg(test)]
 mod maintenance_command_tests {
     use super::{
-        heal_invalid_sources, heal_lost_librarian_inferred, prune_old_librarian_inferred, DbState,
-        VaultConfigState,
+        heal_invalid_sources, heal_lost_librarian_inferred, prune_old_librarian_inferred,
+        run_embedding_sweep, DbState, VaultConfigState,
     };
     use crate::db::connection::open_in_memory;
     use rusqlite::{params, Connection};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     fn insert_wiki_entry(
         conn: &Connection,
@@ -4084,6 +4296,77 @@ mod maintenance_command_tests {
         .unwrap();
     }
 
+    /// Like `insert_wiki_entry`, but names the unit explicitly: `deleted_at` is
+    /// MILLISECONDS, matching every production writer (`ms_now()`).
+    fn insert_wiki_entry_ms(
+        conn: &Connection,
+        id: &str,
+        source_type: &str,
+        source_ref: &str,
+        deleted_at_ms: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, 'ent-1', 'T', 'B', '[]', 'inferred', ?2,
+                       NULL, ?3, 100, 100, NULL, 0, ?4, NULL, NULL)",
+            params![id, source_type, source_ref, deleted_at_ms],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn prune_deletes_old_rows_when_deleted_at_is_milliseconds() {
+        let conn = open_in_memory().unwrap();
+        let now_ms: i64 = 1_756_000_000_000; // a plausible 2026 millisecond stamp
+        let eight_days_ms = 8 * 86_400 * 1000;
+        let one_day_ms = 86_400 * 1000;
+
+        // Production writers store `deleted_at` in MILLISECONDS (ms_now()).
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred",
+            "librarian_inferred",
+            "documents/old.md",
+            Some(now_ms - eight_days_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "fresh-inferred",
+            "librarian_inferred",
+            "documents/fresh.md",
+            Some(now_ms - one_day_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "old-immutable",
+            "immutable_document",
+            "documents/immutable.md",
+            Some(now_ms - eight_days_ms),
+        );
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+
+        assert_eq!(
+            deleted, 1,
+            "only the old librarian_inferred row should be deleted"
+        );
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2);
+        let old_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'old-inferred'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_gone, 0);
+    }
+
     #[test]
     fn prune_only_removes_old_librarian_inferred_rows() {
         let conn = open_in_memory().unwrap();
@@ -4092,29 +4375,29 @@ mod maintenance_command_tests {
         let old = now - Duration::from_secs(7 * 86400 + 1);
         let fresh = now - Duration::from_secs(7 * 86400 - 1);
 
-        insert_wiki_entry(
+        insert_wiki_entry_ms(
             &conn,
             "old-inferred",
             "librarian_inferred",
             "documents/old.md",
-            Some(old.as_secs() as i64),
+            Some(old.as_millis() as i64),
         );
-        insert_wiki_entry(
+        insert_wiki_entry_ms(
             &conn,
             "fresh-inferred",
             "librarian_inferred",
             "documents/fresh.md",
-            Some(fresh.as_secs() as i64),
+            Some(fresh.as_millis() as i64),
         );
-        insert_wiki_entry(
+        insert_wiki_entry_ms(
             &conn,
             "old-immutable",
             "immutable_document",
             "documents/immutable.md",
-            Some(old.as_secs() as i64),
+            Some(old.as_millis() as i64),
         );
 
-        let deleted = prune_old_librarian_inferred(&conn, now.as_secs() as i64).unwrap();
+        let deleted = prune_old_librarian_inferred(&conn, now.as_millis() as i64).unwrap();
         assert_eq!(
             deleted, 1,
             "only the old librarian_inferred row should be deleted"
@@ -4488,6 +4771,338 @@ mod maintenance_command_tests {
             "second run is no-op for ms"
         );
     }
+
+    #[test]
+    fn prune_purges_edges_of_hard_deleted_entries() {
+        let conn = open_in_memory().unwrap();
+        let now_ms: i64 = 1_756_000_000_000;
+        let eight_days_ms = 8 * 86_400 * 1000;
+
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred",
+            "librarian_inferred",
+            "documents/old.md",
+            Some(now_ms - eight_days_ms),
+        );
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // live-a (with a recent timestamp so it is NOT prune-eligible —
+        // prune only matches `deleted_at < cutoff`) so the cascade treats
+        // edge_doomed as purgeable. Without this, edge_doomed would survive
+        // because live-a remains alive in `llm_wiki_entries`.
+        insert_wiki_entry_ms(
+            &conn,
+            "live-a",
+            "librarian_inferred",
+            "documents/a.md",
+            Some(now_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "live-b",
+            "librarian_inferred",
+            "documents/b.md",
+            None,
+        );
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_doomed', 'ent-1', 'old-inferred', 'live-a', 'related_to', 100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_survivor', 'ent-1', 'live-a', 'live-b', 'related_to', 100)",
+            [],
+        )
+        .unwrap();
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+        assert_eq!(deleted, 1, "only old-inferred is older than 7 days");
+
+        let remaining: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM llm_wiki_edges ORDER BY id")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<String>>>().unwrap()
+        };
+        assert_eq!(
+            remaining,
+            vec!["edge_survivor".to_string()],
+            "the hard-deleted entry's edge must go, the live one must stay"
+        );
+    }
+
+    /// R7: each hard-deleted `librarian_inferred` row must produce exactly
+    /// one `llm_wiki_outbox` row with `operation = 'Delete'`, keyed by the
+    /// doomed row's entity_id (so replicas converge on the prune). Rows that
+    /// are too fresh, or that are not `librarian_inferred`, must NOT emit
+    /// outbox rows.
+    #[test]
+    fn prune_old_librarian_inferred_pushes_delete_outbox_per_pruned_id() {
+        let conn = open_in_memory().unwrap();
+        let now_ms: i64 = 1_756_000_000_000;
+        let eight_days_ms = 8 * 86_400 * 1000;
+        let one_day_ms = 86_400 * 1000;
+
+        // Two doomed librarian_inferred rows that must each produce an outbox Delete.
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred-1",
+            "librarian_inferred",
+            "documents/old1.md",
+            Some(now_ms - eight_days_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred-2",
+            "librarian_inferred",
+            "documents/old2.md",
+            Some(now_ms - eight_days_ms),
+        );
+        // Fresh librarian_inferred row: must NOT be pruned and must NOT produce an outbox row.
+        insert_wiki_entry_ms(
+            &conn,
+            "fresh-inferred",
+            "librarian_inferred",
+            "documents/fresh.md",
+            Some(now_ms - one_day_ms),
+        );
+        // Old non-librarian row: must NOT be pruned and must NOT produce an outbox row.
+        insert_wiki_entry_ms(
+            &conn,
+            "old-immutable",
+            "immutable_document",
+            "documents/immutable.md",
+            Some(now_ms - eight_days_ms),
+        );
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+        assert_eq!(
+            deleted, 2,
+            "only the two old librarian_inferred rows should be deleted"
+        );
+
+        // Outbox: exactly two entries-table Delete rows, one per pruned id,
+        // both carrying entity_id = 'ent-1' (the entity the doomed rows lived
+        // in). No rows for the fresh row or the immutable row.
+        let outbox_rows: Vec<(String, String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_id, entity_id, operation, payload
+                     FROM llm_wiki_outbox
+                     WHERE table_name = 'entries'
+                     ORDER BY record_id",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+
+        assert_eq!(
+            outbox_rows.len(),
+            2,
+            "expected exactly two entries-table outbox rows, got: {outbox_rows:?}"
+        );
+
+        let expected: std::collections::BTreeMap<String, (String, String)> = [
+            (
+                "old-inferred-1".to_string(),
+                (
+                    "ent-1".to_string(),
+                    r#"{"id":"old-inferred-1"}"#.to_string(),
+                ),
+            ),
+            (
+                "old-inferred-2".to_string(),
+                (
+                    "ent-1".to_string(),
+                    r#"{"id":"old-inferred-2"}"#.to_string(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let actual: std::collections::BTreeMap<String, (String, String)> = outbox_rows
+            .into_iter()
+            .map(|(record_id, entity_id, operation, payload)| {
+                assert_eq!(
+                    operation, "DELETE",
+                    "prune must push DELETE outbox rows, got {operation} for {record_id}"
+                );
+                (record_id, (entity_id, payload))
+            })
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "outbox rows must be Delete keyed by doomed id with matching entity_id"
+        );
+
+        // Belt-and-braces: the doomed rows are gone, the survivors remain.
+        let remaining_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM llm_wiki_entries ORDER BY id")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(
+            remaining_ids,
+            vec!["fresh-inferred".to_string(), "old-immutable".to_string()],
+            "only the pruned rows should be gone; the fresh and immutable rows stay"
+        );
+    }
+
+    #[test]
+    fn heal_lost_librarian_inferred_purges_edges_of_soft_deleted_entries() {
+        let conn = open_in_memory().unwrap();
+        // An entry whose source_ref points at a document that does not exist
+        // in the `documents` table is "lost" and gets soft-deleted by the
+        // heal pass. Use a legacy path shape (not the JSON `{"doc_path":...}`
+        // shape) because `source_ref_is_still_grounded` treats a JSON shape
+        // without an `evidence` field as already-grounded; the legacy path
+        // branch is what the heal's "demonstrably stale" policy actually
+        // catches in this fixture.
+        insert_wiki_entry_ms(
+            &conn,
+            "lost-entry",
+            "librarian_inferred",
+            "documents/vanished.md",
+            None,
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "live-a",
+            "librarian_inferred",
+            "documents/a.md",
+            None,
+        );
+
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // live-a so the cascade treats edge_doomed as purgeable, and so live-a
+        // is excluded from the heal's own SELECT (which filters
+        // `deleted_at IS NULL`) — without the exclusion, live-a would also
+        // be considered ungrounded and the heal would report `healed = 2`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'live-a'",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_doomed', 'ent-1', 'lost-entry', 'live-a', 'related_to', 100)",
+            [],
+        )
+        .unwrap();
+
+        let healed = heal_lost_librarian_inferred(&conn, std::path::Path::new("/vault")).unwrap();
+        assert_eq!(healed, 1, "the ungrounded entry should be soft-deleted");
+
+        let dangling: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges
+                  WHERE source_id = 'lost-entry' OR target_id = 'lost-entry'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dangling, 0, "soft-delete must purge edges too (spec §2)");
+    }
+
+    // ── Spec section 7: embedding sweep trigger ──────────────────────────────
+    // The sweep is the sole recovery path for a write-time embed that failed.
+    // `run_embedding_sweep` is wired at startup and on `run_wiki_heal`; this
+    // test pins the contract — given two live NULL-blob entries, it returns
+    // `SweepReport { filled: 2, remaining_null: 0 }` and writes 32-byte blobs
+    // (8 dims from the `constant8` stub).
+
+    /// Build a `DbState` backed by an in-memory-style file DB at `tmp`, then
+    /// point the resolver env vars at that temp dir so `run_embedding_sweep`
+    /// finds the same config. The stub (set by the caller via
+    /// `temp_env::with_vars`) determines the embedding shape; the profile
+    /// itself only needs to load cleanly.
+    fn build_test_db_state_with_brain_paths() -> (DbState, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let db_path = tmp.path().join("brain.db");
+        // Touch config.json with a minimal vault so `get_embed_profile` has
+        // something to read. The default `EmbedProfile` Local is fine — the
+        // `CURATED_EMBED_STUB` env overrides `embed_batch` regardless.
+        let cfg = crate::vault::VaultConfig::new(config_path.clone());
+        let _ = cfg.set_vault_path(tmp.path().to_str().unwrap());
+
+        let db = crate::db::AppDb::open_with_config(&db_path, &config_path).unwrap();
+        let db_state = DbState(std::sync::Mutex::new(db));
+        (db_state, tmp)
+    }
+
+    #[test]
+    fn run_embedding_sweep_fills_null_blobs_against_the_live_connection() {
+        let (db_state, tmp) = build_test_db_state_with_brain_paths();
+        let brain_dir = tmp.path().to_str().unwrap().to_string();
+        let config_path = tmp.path().join("config.json");
+        let db_path = tmp.path().join("brain.db");
+
+        temp_env::with_vars(
+            [
+                ("CURATED_EMBED_STUB", Some("constant8")),
+                ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
+                ("CURATED_BRAIN_CONFIG", Some(config_path.to_str().unwrap())),
+                ("CURATED_BRAIN_DB", Some(db_path.to_str().unwrap())),
+            ],
+            || {
+                {
+                    let guard = db_state.0.lock().unwrap();
+                    insert_wiki_entry_ms(
+                        &guard.0,
+                        "fact_a",
+                        "librarian_inferred",
+                        "documents/a.md",
+                        None,
+                    );
+                    insert_wiki_entry_ms(
+                        &guard.0,
+                        "fact_b",
+                        "librarian_inferred",
+                        "documents/b.md",
+                        None,
+                    );
+                }
+
+                let report = run_embedding_sweep(&db_state).unwrap();
+
+                assert_eq!(report.filled, 2);
+                assert_eq!(report.remaining_null, 0);
+
+                let guard = db_state.0.lock().unwrap();
+                let blob_len: i64 = guard
+                    .0
+                    .query_row(
+                        "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4497,134 +5112,127 @@ mod ingest_document_command_tests {
     use tauri::Listener;
     use tempfile::TempDir;
 
-    // `pipeline::ingest_document` reads `CURATED_EMBED_STUB` to bypass Ollama.
-    // The pipeline test suite uses the same env var, so guard it with a static
-    // mutex to keep tests from racing on the value.
-    static EMBED_STUB_GUARD: Mutex<()> = Mutex::new(());
-
-    struct StubUnset;
-    impl Drop for StubUnset {
-        fn drop(&mut self) {
-            std::env::remove_var("CURATED_EMBED_STUB");
-        }
-    }
-
-    /// Locks the embedding-stub guard, sets `CURATED_EMBED_STUB=constant8`, and
-    /// returns an RAII guard that will unset the var when dropped.
-    fn lock_stub() -> StubUnset {
-        let _stub_lock = EMBED_STUB_GUARD.lock().unwrap();
-        std::env::set_var("CURATED_EMBED_STUB", "constant8");
-        StubUnset
-    }
+    // `pipeline::ingest_document` reads `CURATED_EMBED_STUB` to bypass Ollama,
+    // and so do tests elsewhere in this crate — `embed_sweep` in particular
+    // sets `constant8_short` and unsets the var entirely. Env is process-wide,
+    // so those must not run interleaved with this one.
+    //
+    // This used to be a private `EMBED_STUB_GUARD: Mutex<()>` taken by a
+    // `lock_stub()` helper — but the helper bound the guard to a local, so it
+    // was dropped on return and the mutex protected nothing. That is why this
+    // test failed intermittently under the full suite. `temp_env::with_vars`
+    // holds one global lock shared by every other caller in the crate, which
+    // is the property the static mutex was reaching for; use it instead of
+    // reintroducing a second, unshared lock.
 
     #[test]
     fn ingest_document_command_emits_progress_and_proposal_ready() {
-        let _stub_cleanup = lock_stub();
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let tmp = TempDir::new().expect("tempdir");
+            let db_path = tmp.path().join("brain.db");
+            let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
+                .expect("open test db");
+            let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
-        let tmp = TempDir::new().expect("tempdir");
-        let db_path = tmp.path().join("brain.db");
-        let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
-            .expect("open test db");
-        let config = vault::VaultConfig::new(tmp.path().join("config.json"));
+            // Real markdown doc with enough words for chunk_autodetect to produce
+            // at least one chunk — without a chunk, `ingest_document` returns Ok(())
+            // but the embedding leg still runs the same code path so we still emit
+            // both progress events.
+            let doc_path = tmp.path().join("note.md");
+            std::fs::write(
+                &doc_path,
+                "# Test Note\n\n".to_owned() + &"word ".repeat(40),
+            )
+            .expect("write doc");
 
-        // Real markdown doc with enough words for chunk_autodetect to produce
-        // at least one chunk — without a chunk, `ingest_document` returns Ok(())
-        // but the embedding leg still runs the same code path so we still emit
-        // both progress events.
-        let doc_path = tmp.path().join("note.md");
-        std::fs::write(
-            &doc_path,
-            "# Test Note\n\n".to_owned() + &"word ".repeat(40),
-        )
-        .expect("write doc");
+            // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
+            // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
+            // already hold works fine and listeners observe the events).
+            let app = tauri::test::mock_builder()
+                .manage(DbState(Mutex::new(db)))
+                .manage(VaultConfigState(Mutex::new(config)))
+                .manage(EmbedProfileState(Mutex::new(
+                    crate::embedder::EmbedProfile::default(),
+                )))
+                .manage(PipelineHolder(Mutex::new(None)))
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("build mock app");
 
-        // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
-        // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
-        // already hold works fine and listeners observe the events).
-        let app = tauri::test::mock_builder()
-            .manage(DbState(Mutex::new(db)))
-            .manage(VaultConfigState(Mutex::new(config)))
-            .manage(EmbedProfileState(Mutex::new(
-                crate::embedder::EmbedProfile::default(),
-            )))
-            .manage(PipelineHolder(Mutex::new(None)))
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("build mock app");
+            // Capture emitted events into a shared vector. We don't care about the
+            // payload of `ingest-error` here — the happy-path event shapes are what
+            // we lock in.
+            let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Capture emitted events into a shared vector. We don't care about the
-        // payload of `ingest-error` here — the happy-path event shapes are what
-        // we lock in.
-        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let progress_cap = captured.clone();
+            app.listen("ingest-progress", move |event| {
+                progress_cap
+                    .lock()
+                    .unwrap()
+                    .push(("ingest-progress".into(), event.payload().into()));
+            });
 
-        let progress_cap = captured.clone();
-        app.listen("ingest-progress", move |event| {
-            progress_cap
-                .lock()
-                .unwrap()
-                .push(("ingest-progress".into(), event.payload().into()));
-        });
+            let ready_cap = captured.clone();
+            app.listen("ingest-proposal-ready", move |event| {
+                ready_cap
+                    .lock()
+                    .unwrap()
+                    .push(("ingest-proposal-ready".into(), event.payload().into()));
+            });
 
-        let ready_cap = captured.clone();
-        app.listen("ingest-proposal-ready", move |event| {
-            ready_cap
-                .lock()
-                .unwrap()
-                .push(("ingest-proposal-ready".into(), event.payload().into()));
-        });
+            // Extract the state via `app.state::<T>()` — the same path the Tauri
+            // command argument extractor uses — and call the helper directly with
+            // the inner locks.
+            let db_state = app.state::<DbState>();
+            let profile_state = app.state::<EmbedProfileState>();
+            run_ingest_with_app(
+                app.handle(),
+                &db_state.0,
+                &profile_state.0,
+                doc_path.to_string_lossy().into_owned(),
+            )
+            .expect("run_ingest_with_app");
 
-        // Extract the state via `app.state::<T>()` — the same path the Tauri
-        // command argument extractor uses — and call the helper directly with
-        // the inner locks.
-        let db_state = app.state::<DbState>();
-        let profile_state = app.state::<EmbedProfileState>();
-        run_ingest_with_app(
-            app.handle(),
-            &db_state.0,
-            &profile_state.0,
-            doc_path.to_string_lossy().into_owned(),
-        )
-        .expect("run_ingest_with_app");
+            // Allow Tauri's event loop to deliver the listen notifications before
+            // we read the buffer.
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Allow Tauri's event loop to deliver the listen notifications before
-        // we read the buffer.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let events = captured.lock().unwrap();
-        let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(
-            names.contains(&"ingest-progress"),
-            "expected at least one ingest-progress event, got: {events:?}",
-        );
-        assert!(
-            events
+            let events = captured.lock().unwrap();
+            let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+            assert!(
+                names.contains(&"ingest-progress"),
+                "expected at least one ingest-progress event, got: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
+                "expected ingest-progress with phase=chunking, got: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
+                "expected ingest-progress with phase=embedding, got: {events:?}",
+            );
+            assert!(
+                names.contains(&"ingest-proposal-ready"),
+                "expected at least one ingest-proposal-ready event, got: {events:?}",
+            );
+            // The test document doesn't produce a pending proposal (synthesis is
+            // async), so `proposalId` must serialize as JSON `null` — not `""`,
+            // which the wizard would otherwise route to as a nonexistent id.
+            let ready_payload = events
                 .iter()
-                .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
-            "expected ingest-progress with phase=chunking, got: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
-            "expected ingest-progress with phase=embedding, got: {events:?}",
-        );
-        assert!(
-            names.contains(&"ingest-proposal-ready"),
-            "expected at least one ingest-proposal-ready event, got: {events:?}",
-        );
-        // The test document doesn't produce a pending proposal (synthesis is
-        // async), so `proposalId` must serialize as JSON `null` — not `""`,
-        // which the wizard would otherwise route to as a nonexistent id.
-        let ready_payload = events
-            .iter()
-            .find(|(n, _)| n == "ingest-proposal-ready")
-            .map(|(_, p)| p.clone())
-            .expect("ingest-proposal-ready payload");
-        let payload: serde_json::Value =
-            serde_json::from_str(&ready_payload).expect("parse ingest-proposal-ready payload");
-        assert_eq!(
-            payload.get("proposalId"),
-            Some(&serde_json::Value::Null),
-            "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
-        );
+                .find(|(n, _)| n == "ingest-proposal-ready")
+                .map(|(_, p)| p.clone())
+                .expect("ingest-proposal-ready payload");
+            let payload: serde_json::Value =
+                serde_json::from_str(&ready_payload).expect("parse ingest-proposal-ready payload");
+            assert_eq!(
+                payload.get("proposalId"),
+                Some(&serde_json::Value::Null),
+                "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
+            );
+        });
     }
 }

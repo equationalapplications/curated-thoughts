@@ -130,11 +130,7 @@ impl PipelineWorker {
 
     /// Publish a stage transition, returning `false` if this worker has been
     /// superseded and must return immediately.
-    fn enter(
-        &self,
-        stage: watchdog::heartbeat::Stage,
-        subject: Option<&str>,
-    ) -> bool {
+    fn enter(&self, stage: watchdog::heartbeat::Stage, subject: Option<&str>) -> bool {
         watchdog::heartbeat::StageReporter::guarded(&self.heartbeat, self.my_epoch)
             .enter(stage, subject)
     }
@@ -234,7 +230,8 @@ impl PipelineWorker {
                             &self.heartbeat,
                             self.my_epoch,
                         );
-                        match ingest_file(&conn, &profile, &path, force, vault_root_str, &reporter) {
+                        match ingest_file(&conn, &profile, &path, force, vault_root_str, &reporter)
+                        {
                             Ok(()) => {
                                 let eid = entity_id_for_path(&path, vault_root_str);
                                 current_entity = Some(eid.clone());

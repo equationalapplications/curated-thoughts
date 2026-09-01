@@ -5,7 +5,9 @@ use crate::db::entities::{
     archive_entity, create_entity, get_entity, list_entities, update_entity_summary,
     CreateEntityInput, EntityDetail, EntityFact, EntityListFilter, EntitySort, EntitySummary,
 };
-use crate::db::facts::{add_fact, archive_fact, update_fact};
+use crate::db::facts::{
+    add_fact_with_blob, archive_fact, precompute_entry_embedding, update_fact_with_blob,
+};
 use crate::DbState;
 use tauri::State;
 
@@ -72,9 +74,18 @@ pub fn add_entity_fact_cmd(
     entity_id: String,
     body: String,
     db_state: State<DbState>,
+    embed_profile: State<crate::EmbedProfileState>,
 ) -> Result<EntityFact, String> {
+    // Compute the embedding OUTSIDE the DbState mutex. `embed_batch` is a
+    // blocking HTTP round-trip and must never queue the app-level DB lock
+    // (which gates every other Tauri command behind this one). Provider
+    // failures collapse to None and the sweep fills the blob later.
+    let embedding_blob = {
+        let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
+        precompute_entry_embedding(Some(&profile), &body)
+    };
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    add_fact(&mut guard.0, &entity_id, &body).map_err(|e| e.to_string())
+    add_fact_with_blob(&mut guard.0, &entity_id, &body, embedding_blob).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -83,9 +94,20 @@ pub fn update_entity_fact_cmd(
     fact_id: String,
     body: String,
     db_state: State<DbState>,
+    embed_profile: State<crate::EmbedProfileState>,
 ) -> Result<(), String> {
+    // Same contract as `add_entity_fact_cmd`: embed OUTSIDE the DbState mutex,
+    // then write the blob with the body. Without this the edit would NULL the
+    // vector and rely on a sweep that nothing on this path triggers, leaving
+    // the just-edited fact invisible to semantic retrieval until a restart or
+    // an unrelated write happened to fire one.
+    let embedding_blob = {
+        let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
+        precompute_entry_embedding(Some(&profile), &body)
+    };
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    update_fact(&mut guard.0, &entity_id, &fact_id, &body).map_err(|e| e.to_string())
+    update_fact_with_blob(&mut guard.0, &entity_id, &fact_id, &body, embedding_blob)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

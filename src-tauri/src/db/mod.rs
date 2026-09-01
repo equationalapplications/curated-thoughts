@@ -5,6 +5,7 @@ pub mod commit;
 pub mod connection;
 pub mod connections;
 pub mod ddl_compat;
+pub mod edge_purge;
 pub mod entities;
 pub mod events;
 pub mod facts;
@@ -19,6 +20,7 @@ pub mod review_shim;
 pub mod schema;
 pub mod schema_guard;
 pub mod tasks;
+pub mod wiki_forget;
 
 pub use connection::AppDb;
 pub use queries::*;

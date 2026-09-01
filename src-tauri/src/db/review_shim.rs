@@ -176,7 +176,11 @@ pub fn format_proposal_preview(detail: &ProposalDetail) -> String {
     md
 }
 
-pub fn approve_proposal_shim(conn: &mut Connection, rowid: i64) -> Result<CommitResult> {
+pub fn approve_proposal_shim(
+    conn: &mut Connection,
+    rowid: i64,
+    embed_profile: Option<&crate::embedder::EmbedProfile>,
+) -> Result<CommitResult> {
     let proposal_id =
         proposal_id_for_rowid(conn, rowid)?.context("proposal not found for review id")?;
     let detail = get_proposal_detail(conn, &proposal_id)?.context("proposal detail missing")?;
@@ -196,6 +200,8 @@ pub fn approve_proposal_shim(conn: &mut Connection, rowid: i64) -> Result<Commit
         None,
         ResolveOptions {
             auto_approve: false,
+            embed_profile: embed_profile.cloned(),
+            ..Default::default()
         },
     )
 }
@@ -204,6 +210,7 @@ pub fn reject_proposal_shim(
     conn: &mut Connection,
     rowid: i64,
     reject_reason: Option<&str>,
+    embed_profile: Option<&crate::embedder::EmbedProfile>,
 ) -> Result<CommitResult> {
     let proposal_id =
         proposal_id_for_rowid(conn, rowid)?.context("proposal not found for review id")?;
@@ -224,6 +231,8 @@ pub fn reject_proposal_shim(
         reject_reason,
         ResolveOptions {
             auto_approve: false,
+            embed_profile: embed_profile.cloned(),
+            ..Default::default()
         },
     )
 }
@@ -333,7 +342,7 @@ mod tests {
     fn approve_shim_commits_and_clears_queue() {
         let mut conn = open_in_memory().unwrap();
         let rowid = seed_proposal(&conn, "prop-approve", "Beta");
-        approve_proposal_shim(&mut conn, rowid).unwrap();
+        approve_proposal_shim(&mut conn, rowid, None).unwrap();
         assert!(list_pending_review_pages(&conn).unwrap().is_empty());
         let status: String = conn
             .query_row(
@@ -349,7 +358,7 @@ mod tests {
     fn reject_shim_marks_rejected() {
         let mut conn = open_in_memory().unwrap();
         let rowid = seed_proposal(&conn, "prop-reject", "Gamma");
-        reject_proposal_shim(&mut conn, rowid, Some("Not relevant")).unwrap();
+        reject_proposal_shim(&mut conn, rowid, Some("Not relevant"), None).unwrap();
         let status: String = conn
             .query_row(
                 "SELECT status FROM curated_proposals WHERE id = 'prop-reject'",

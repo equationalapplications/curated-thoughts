@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::commit::{
     push_entries_outbox, push_tasks_outbox, wiki_fact_outbox_payload, wiki_task_outbox_payload,
 };
+use crate::db::edge_purge::{purge_dead_edges, purge_edges_for_hard_deleted};
 use crate::db::outbox_format::OutboxOperation;
 use crate::okf::bundle_read::{ParsedBundle, ParsedEntity};
 use crate::okf::ids::generate_id;
@@ -308,6 +309,10 @@ pub fn apply_import(
     // the URLs (capturing every URL, not just the first).
     let synthetic_sources = synthesize_sources_from_body(bundle);
 
+    // Ids hard-deleted by Replace-mode `clear_entity_content`, accumulated
+    // across the loop and purged from `llm_wiki_edges` once at the end.
+    let mut hard_deleted_ids: Vec<String> = Vec::new();
+
     for entity in &bundle.entities {
         let mut id_map: HashMap<String, String> = HashMap::new();
         let target_entity_id = match mode {
@@ -329,7 +334,7 @@ pub fn apply_import(
         ensure_entity(&tx, entity, &target_entity_id, mode, now_secs)?;
 
         if mode == ImportMode::Replace {
-            clear_entity_content(&tx, &target_entity_id, now_ms)?;
+            hard_deleted_ids.extend(clear_entity_content(&tx, &target_entity_id, now_ms)?);
         }
 
         for fact in &entity.facts {
@@ -555,6 +560,25 @@ pub fn apply_import(
         result.entities_touched += 1;
     }
 
+    // Edges stamped with any of the replaced entities' ids may point across
+    // entities; purge only edges whose BOTH endpoints have no live home
+    // (in llm_wiki_entries / curated_entities / llm_wiki_tasks), otherwise
+    // the bundle import strands partner edges (remediation brief R1). Done
+    // once after the loop instead of once per entity in
+    // `clear_entity_content` — the per-entity call was an unscoped DELETE
+    // over `llm_wiki_edges` per row, so for a bundle of N entities we were
+    // running N scans where one suffices (CodeRabbit thread on line 641).
+    // Replace mode HARD-deletes the entity's entries and tasks. Those ids are
+    // gone from every endpoint table, so an edge anchored on one references
+    // nothing and no later cascade could ever find it — `purge_dead_edges`
+    // below needs BOTH endpoints dead and would leave it behind forever.
+    // Batched once after the loop, for the same reason as `purge_dead_edges`.
+    if !hard_deleted_ids.is_empty() {
+        purge_edges_for_hard_deleted(&tx, &hard_deleted_ids)?;
+    }
+
+    purge_dead_edges(&tx)?;
+
     tx.commit()?;
     Ok(result)
 }
@@ -603,7 +627,12 @@ fn ensure_entity(
     Ok(())
 }
 
-fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result<()> {
+/// Wipe an entity's entries, tasks and events for a Replace-mode import.
+///
+/// Returns the ids that were **hard**-deleted (entries + tasks) so the caller
+/// can purge their edges once, after the entity loop — see the call site in
+/// `apply_import`.
+fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result<Vec<String>> {
     let fact_ids: Vec<String> = tx
         .prepare("SELECT id FROM llm_wiki_entries WHERE entity_id=?1")?
         .query_map([entity_id], |r| r.get(0))?
@@ -637,12 +666,18 @@ fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result
         [entity_id],
     )?;
     tx.execute("DELETE FROM llm_wiki_tasks WHERE entity_id=?1", [entity_id])?;
-    tx.execute("DELETE FROM llm_wiki_edges WHERE entity_id=?1", [entity_id])?;
+    // NOTE: neither `purge_dead_edges` nor `purge_edges_for_hard_deleted` is
+    // called here. Both run once after the entire entity loop (in
+    // `apply_import`) so the scan happens once per import rather than once
+    // per entity — see CodeRabbit review thread on `bundle_apply.rs` line 641.
+    // That is why the hard-deleted ids are returned rather than acted on.
     tx.execute(
         "DELETE FROM llm_wiki_events WHERE entity_id=?1",
         [entity_id],
     )?;
-    Ok(())
+    let mut hard_deleted = fact_ids;
+    hard_deleted.extend(task_ids);
+    Ok(hard_deleted)
 }
 
 #[cfg(test)]
@@ -816,6 +851,147 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dangling, 0);
+    }
+
+    #[test]
+    fn replace_keeps_edges_stamped_with_the_entity_whose_endpoints_live_elsewhere() {
+        // R1 proof: `clear_entity_content` (called by Replace mode) used to
+        // DELETE every llm_wiki_edges row stamped with the dying entity_id,
+        // even when the edge points into another live entity. That strands the
+        // partner's edges. The `entity_id` STAMP must never decide an edge's
+        // fate — only its endpoints do.
+        //
+        // Note the distinction this test now pins, which the earlier version
+        // conflated: an edge stamped `ent_a` whose endpoints both live in
+        // other entities survives a Replace on `ent_a`; an edge with an
+        // endpoint IN `ent_a` does not, because Replace hard-deletes that
+        // endpoint and the edge would reference a row that no longer exists in
+        // any table (see `replace_purges_edges_anchored_on_its_hard_deleted_facts`).
+        let mut conn = open_in_memory().unwrap();
+
+        // Two entities, each with a fact.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'A', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_b', 'B', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        for (fact_id, entity_id) in [
+            ("fact_a_1", "ent_a"),
+            ("fact_b_1", "ent_b"),
+            ("fact_b_2", "ent_b"),
+        ] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'librarian_inferred', 1, 1)",
+                params![fact_id, entity_id],
+            )
+            .unwrap();
+        }
+
+        // Stamped with ent_a, but BOTH endpoints are ent_b's facts. The stamp
+        // is the only thing tying it to the replaced entity, so it MUST
+        // survive — this is the R1 regression guard.
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_cross', 'ent_a', 'fact_b_1', 'fact_b_2', 'related_to', 1)",
+            [],
+        )
+        .unwrap();
+        // Truly dead edge: neither endpoint exists anywhere.
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_orphan', 'ent_a', 'ghost_a', 'ghost_b', 'related_to', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Replace ent_a — clears ent_a's facts/edges/etc.
+        apply_import(&mut conn, &sample_bundle(), ImportMode::Replace).unwrap();
+
+        let surviving_ids: Vec<String> = conn
+            .prepare("SELECT id FROM llm_wiki_edges ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            surviving_ids,
+            vec!["edge_cross".to_string()],
+            "an edge merely STAMPED with the replaced entity survives when both \
+             its endpoints live elsewhere; the orphan edge is purged because \
+             both endpoints are dead everywhere"
+        );
+    }
+
+    #[test]
+    fn replace_purges_edges_anchored_on_its_hard_deleted_facts() {
+        // Replace HARD-deletes the entity's facts. An edge from one of them
+        // into a live fact in another entity references a row that is gone
+        // from every endpoint table — the `purge_dead_edges` contract needs
+        // BOTH endpoints dead, so nothing would ever collect it and it would
+        // dangle for the life of the database.
+        let mut conn = open_in_memory().unwrap();
+        for (entity_id, name) in [("ent_a", "A"), ("ent_b", "B")] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?2, 'concept', '', 1, 1)",
+                params![entity_id, name],
+            )
+            .unwrap();
+        }
+        for (fact_id, entity_id) in [("fact_a_1", "ent_a"), ("fact_b_1", "ent_b")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'librarian_inferred', 1, 1)",
+                params![fact_id, entity_id],
+            )
+            .unwrap();
+        }
+        // One in each direction, both anchored on the fact Replace destroys.
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_out', 'ent_a', 'fact_a_1', 'fact_b_1', 'related_to', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_in', 'ent_b', 'fact_b_1', 'fact_a_1', 'related_to', 1)",
+            [],
+        )
+        .unwrap();
+
+        apply_import(&mut conn, &sample_bundle(), ImportMode::Replace).unwrap();
+
+        let surviving: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            surviving, 0,
+            "edges anchored on a hard-deleted fact must not survive the import \
+             that destroyed it, in either direction"
+        );
+        // The surviving partner is untouched.
+        let partner: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'fact_b_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(partner, 1);
     }
 
     #[test]

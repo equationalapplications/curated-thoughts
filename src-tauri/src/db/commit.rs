@@ -2,16 +2,51 @@
 
 use crate::db::outbox_format::{self, OutboxOperation, OutboxPushParams};
 use crate::db::proposals::{ItemDecision, ItemDecisionKind, ProposalKind, StoredEvidenceChunk};
+use crate::embedder::EmbedProfile;
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolveOptions {
     /// When true, summary-update conflicts are skipped silently (auto-approve path).
     pub auto_approve: bool,
+    /// When `Some`, entry embeddings are computed before the commit transaction
+    /// opens and stored with the new facts. `None` disables write-time
+    /// embedding — rows land with NULL and the sweep fills them later. Either
+    /// way the fact is committed; this only affects how soon it is searchable.
+    pub embed_profile: Option<EmbedProfile>,
+    /// Pre-computed entry embeddings keyed by `LoadedItem::id`. When `Some`,
+    /// the resolver skips its internal `precompute_entry_embeddings` call and
+    /// uses this map directly. Used by callers that want to compute the
+    /// embeddings OUTSIDE an app-level mutex (the provider round-trip is
+    /// blocking and must not run while the lock is held). A missing key means
+    /// "no embedding available" — the entry inserts with NULL and the sweep
+    /// fills it later, matching the internal-compute contract.
+    pub entry_embeddings: Option<EntryEmbeddings>,
 }
+
+/// A precomputed entry embedding together with the exact text it was derived
+/// from.
+///
+/// The text is carried so the commit path can verify it before persisting.
+/// `resolve_proposal_cmd` loads items, drops the `DbState` mutex to embed, then
+/// re-acquires the mutex and re-loads items — so the body the commit is about
+/// to write is not guaranteed to be the body that was embedded. Without the
+/// check, a payload edited between those phases would persist a vector
+/// describing the *old* text, and semantic search would surface the entry for
+/// queries matching text it no longer contains. On a mismatch the vector is
+/// discarded and the row lands NULL for the sweep to re-embed correctly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrecomputedEmbedding {
+    /// Exactly what was fed to the embedder — `embed_text_for_entry(title, body)`.
+    pub embed_text: String,
+    pub vector: Vec<f32>,
+}
+
+/// Precomputed entry embeddings keyed by `LoadedItem::id`.
+pub type EntryEmbeddings = std::collections::HashMap<String, PrecomputedEmbedding>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommittedRef {
@@ -28,23 +63,23 @@ pub struct CommitResult {
     pub proposal_status: String,
 }
 
-struct LoadedProposal {
-    id: String,
-    kind: ProposalKind,
-    entity_id: Option<String>,
-    proposed_name: Option<String>,
-    proposed_type: Option<String>,
-    created_at: i64,
-    status: String,
+pub(crate) struct LoadedProposal {
+    pub(crate) id: String,
+    pub(crate) kind: ProposalKind,
+    pub(crate) entity_id: Option<String>,
+    pub(crate) proposed_name: Option<String>,
+    pub(crate) proposed_type: Option<String>,
+    pub(crate) created_at: i64,
+    pub(crate) status: String,
 }
 
-struct LoadedItem {
-    id: String,
-    item_type: String,
-    target_id: Option<String>,
-    payload: serde_json::Value,
-    evidence: Vec<StoredEvidenceChunk>,
-    edited_payload: Option<serde_json::Value>,
+pub(crate) struct LoadedItem {
+    pub(crate) id: String,
+    pub(crate) item_type: String,
+    pub(crate) target_id: Option<String>,
+    pub(crate) payload: serde_json::Value,
+    pub(crate) evidence: Vec<StoredEvidenceChunk>,
+    pub(crate) edited_payload: Option<serde_json::Value>,
 }
 
 struct CommitContext {
@@ -65,6 +100,12 @@ struct CommitContext {
     facts_archived: usize,
     tasks_added: usize,
     facts_duplicated: usize,
+    /// Entry embeddings computed before the transaction opened, keyed by
+    /// `LoadedItem::id`. A missing key means "no embedding available" — the
+    /// entry is inserted with NULL and the sweep retries it. A key whose
+    /// `embed_text` no longer matches the text being written is treated the
+    /// same way; see [`PrecomputedEmbedding`].
+    entry_embeddings: EntryEmbeddings,
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
@@ -225,7 +266,7 @@ fn effective_payload(item: &LoadedItem, decision: &ItemDecision) -> serde_json::
         .unwrap_or_else(|| item.payload.clone())
 }
 
-fn load_proposal(conn: &Connection, proposal_id: &str) -> Result<LoadedProposal> {
+pub(crate) fn load_proposal(conn: &Connection, proposal_id: &str) -> Result<LoadedProposal> {
     let row = conn
         .query_row(
             "SELECT kind, entity_id, proposed_name, proposed_type, created_at, status
@@ -256,7 +297,7 @@ fn load_proposal(conn: &Connection, proposal_id: &str) -> Result<LoadedProposal>
     })
 }
 
-fn load_items(conn: &Connection, proposal_id: &str) -> Result<Vec<LoadedItem>> {
+pub(crate) fn load_items(conn: &Connection, proposal_id: &str) -> Result<Vec<LoadedItem>> {
     let mut stmt = conn.prepare(
         "SELECT id, item_type, target_id, payload, evidence, edited_payload
          FROM curated_proposal_items
@@ -662,12 +703,21 @@ fn commit_fact_add(
     let title = fact_title_from_body(&body);
     let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
 
+    // Use the precomputed vector only if it describes the text we are about
+    // to write — see `PrecomputedEmbedding`. A stale vector is worse than no
+    // vector: NULL is retried by the sweep, a wrong vector is not.
+    let embedding_blob: Option<Vec<u8>> = ctx
+        .entry_embeddings
+        .get(&item.id)
+        .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
+        .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
+
     conn.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
             access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, NULL, NULL)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, NULL)",
         params![
             fact_id,
             ctx.entity_id,
@@ -678,6 +728,7 @@ fn commit_fact_add(
             ctx.source_type,
             source_ref,
             ctx.now_ms,
+            embedding_blob,
         ],
     )?;
 
@@ -740,12 +791,13 @@ fn commit_fact_update(
         .unwrap_or("inferred");
     let tags = parse_tags(payload);
 
-    // (source_ref, created_at, source_hash, okf_type, okf_sources,
-    //  okf_verified, okf_usage_window, confidence, last_verified_at,
-    //  last_verified_by, stale_after, lifecycle_status)
+    // (source_ref, created_at, body, source_hash, okf_type, okf_sources,
+    //  okf_verified, okf_usage_window, lifecycle_status, stale_after,
+    //  generated_by, last_verified_at, last_verified_by)
     type WikiFactRow = Option<(
         String,
         i64,
+        String,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -764,6 +816,7 @@ fn commit_fact_update(
             // the r.get::<_, String>(0) deserializer doesn't bail before
             // the update and outbox write can proceed.
             "SELECT COALESCE(source_ref, ''), created_at,
+                    body,
                     source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
                     lifecycle_status, stale_after, generated_by,
                     last_verified_at, last_verified_by
@@ -784,6 +837,7 @@ fn commit_fact_update(
                     r.get(9)?,
                     r.get(10)?,
                     r.get(11)?,
+                    r.get(12)?,
                 ))
             },
         )
@@ -791,6 +845,7 @@ fn commit_fact_update(
     let Some((
         existing_source_ref,
         created_at,
+        previous_body,
         existing_source_hash,
         existing_okf_type,
         existing_okf_sources,
@@ -805,22 +860,62 @@ fn commit_fact_update(
     else {
         bail!("fact_update target not found: {fact_id}");
     };
+    let body_changed = previous_body != body;
 
     let title = fact_title_from_body(&body);
-    conn.execute(
-        "UPDATE llm_wiki_entries
-         SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5
-         WHERE id = ?6 AND entity_id = ?7",
-        params![
-            title,
-            body,
-            serde_json::to_string(&tags)?,
-            confidence,
-            ctx.now_ms,
-            fact_id,
-            ctx.entity_id,
-        ],
-    )?;
+
+    // Write the freshly computed embedding if the pre-pass produced one for
+    // exactly this text; otherwise NULL so the sweep re-embeds — never leave a
+    // vector describing text the entry no longer contains. The text check
+    // matters here specifically: the caller embeds a body loaded before the
+    // `DbState` mutex was dropped, and `resolve_proposal` re-loads items after
+    // re-acquiring it (see `PrecomputedEmbedding`).
+    let embedding_blob: Option<Vec<u8>> = ctx
+        .entry_embeddings
+        .get(&item.id)
+        .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
+        .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
+
+    if body_changed {
+        conn.execute(
+            "UPDATE llm_wiki_entries
+             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
+                 embedding_blob = ?6
+             WHERE id = ?7 AND entity_id = ?8",
+            params![
+                title,
+                body,
+                serde_json::to_string(&tags)?,
+                confidence,
+                ctx.now_ms,
+                embedding_blob,
+                fact_id,
+                ctx.entity_id,
+            ],
+        )?;
+    } else {
+        // Body unchanged, so any stored vector still describes this text and
+        // must be preserved — but if the row is NULL (an earlier write-time
+        // embed failed and the sweep has not run yet) this is the moment to
+        // fill it: we already paid for the vector and it matches the body.
+        // COALESCE does both: overwrite when we have one, keep otherwise.
+        conn.execute(
+            "UPDATE llm_wiki_entries
+             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
+                 embedding_blob = COALESCE(?6, embedding_blob)
+             WHERE id = ?7 AND entity_id = ?8",
+            params![
+                title,
+                body,
+                serde_json::to_string(&tags)?,
+                confidence,
+                ctx.now_ms,
+                embedding_blob,
+                fact_id,
+                ctx.entity_id,
+            ],
+        )?;
+    }
 
     push_entries_outbox(
         conn,
@@ -881,6 +976,10 @@ fn commit_fact_archive(
     if changes == 0 {
         bail!("fact_archive target not found: {fact_id}");
     }
+
+    // Edges die with their endpoints, in the same transaction (design spec §2).
+    // No outbox rows: edges are not replicated.
+    crate::db::edge_purge::purge_edges_for_entry(conn, fact_id)?;
 
     push_entries_outbox(
         conn,
@@ -1152,6 +1251,106 @@ fn finalize_proposal_status(accepted: usize, rejected: usize) -> &'static str {
     }
 }
 
+/// Embed the bodies of every accepted `fact_add` in one batch.
+///
+/// Returns an empty map when no profile is configured or the provider fails —
+/// an embedding is a derived artifact and must never fail a commit. The
+/// null-embedding sweep picks up whatever is missing.
+///
+/// `pub(crate)` so the Tauri commands in `proposals_api.rs` can hoist this
+/// call outside the app-level `DbState` mutex. Inside `resolve_proposal`
+/// itself, the precompute runs while holding the SQLite IMMEDIATE
+/// transaction (acquired a few lines later), but the OUTER app-level mutex
+/// is what blocks other Tauri commands — and that is what this helper
+/// exists to escape.
+pub(crate) fn precompute_entry_embeddings(
+    items: &[LoadedItem],
+    decisions: &[ItemDecision],
+    profile: Option<&EmbedProfile>,
+) -> EntryEmbeddings {
+    use std::collections::HashMap;
+
+    let Some(profile) = profile else {
+        return HashMap::new();
+    };
+
+    let accepted: std::collections::HashSet<&str> = decisions
+        .iter()
+        .filter(|d| d.decision == ItemDecisionKind::Accept)
+        .map(|d| d.item_id.as_str())
+        .collect();
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    for item in items {
+        if !matches!(item.item_type.as_str(), "fact_add" | "fact_update")
+            || !accepted.contains(item.id.as_str())
+        {
+            continue;
+        }
+        let decision = decisions.iter().find(|d| d.item_id == item.id);
+        let payload = match decision {
+            Some(d) => effective_payload(item, d),
+            None => continue,
+        };
+        let Some(body) = payload.get("body").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let title = fact_title_from_body(body);
+        ids.push(item.id.clone());
+        texts.push(crate::embed_sweep::embed_text_for_entry(&title, body));
+    }
+
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+
+    // Cap the batch the same way the sweep does.
+    let mut out = HashMap::new();
+    for (id_chunk, text_chunk) in ids
+        .chunks(crate::embed_sweep::SWEEP_BATCH_SIZE)
+        .zip(texts.chunks(crate::embed_sweep::SWEEP_BATCH_SIZE))
+    {
+        match crate::embedder::embed_batch(profile, text_chunk.to_vec()) {
+            Ok(vectors) => {
+                // R6 zip-truncation guard: a provider that drops a row would
+                // silently mis-pair the surviving vectors with the wrong ids
+                // via the zip below. Skip this chunk — those rows land with
+                // NULL embeddings and the sweep fills them later.
+                if vectors.len() != id_chunk.len() {
+                    // codeql[rust/cleartext-logging]: vectors.len() and id_chunk.len()
+                    // are local usize counts; the API key resolved inside
+                    // embed_batch never reaches this string. Collapsed to a single
+                    // line so CodeQL doesn't flag a per-argument sub-sink.
+                    eprintln!(
+                        "precompute_entry_embeddings: provider returned a mismatched \
+                         number of vectors; skipping chunk to avoid mis-pairing"
+                    );
+                    continue;
+                }
+                for ((id, embed_text), vector) in
+                    id_chunk.iter().zip(text_chunk.iter()).zip(vectors)
+                {
+                    out.insert(
+                        id.clone(),
+                        PrecomputedEmbedding {
+                            embed_text: embed_text.clone(),
+                            vector,
+                        },
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "commit: entry embedding failed for {} items, leaving NULL for the sweep: {e}",
+                    id_chunk.len()
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Resolve a pending proposal inside `BEGIN IMMEDIATE` — all mutations and outbox rows roll back together on failure.
 pub fn resolve_proposal(
     conn: &mut Connection,
@@ -1186,6 +1385,21 @@ pub fn resolve_proposal(
         "user_confirmed"
     };
 
+    // Compute entry embeddings BEFORE opening the transaction: embed_batch is a
+    // blocking network call and must never run while a write lock is held.
+    //
+    // This necessarily happens before the dedupe check (which needs the
+    // transaction), so a duplicate fact_add burns a provider call. Accepted:
+    // batches are small, duplicates are rare, and hoisting dedupe out of the
+    // transaction would trade that for a TOCTOU race.
+    //
+    // When the caller supplies `entry_embeddings`, the work was already done
+    // outside the app-level `DbState` mutex — used by `resolve_proposal_cmd`
+    // so the blocking round-trip does not gate every other Tauri command.
+    let entry_embeddings = options.entry_embeddings.clone().unwrap_or_else(|| {
+        precompute_entry_embeddings(&items, decisions, options.embed_profile.as_ref())
+    });
+
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     let entity_id = create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?
@@ -1212,6 +1426,7 @@ pub fn resolve_proposal(
         facts_archived: 0,
         tasks_added: 0,
         facts_duplicated: 0,
+        entry_embeddings,
     };
 
     if let Some(eid) = entity_id.as_deref() {
@@ -1376,6 +1591,332 @@ mod tests {
         .unwrap();
     }
 
+    /// Inserts a live `llm_wiki_entries` row directly. `deleted_at` is NULL.
+    fn seed_fact_row(conn: &Connection, id: &str, entity_id: &str, body: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, NULL, NULL, NULL)",
+            params![id, entity_id, body, body],
+        )
+        .unwrap();
+    }
+
+    fn seed_edge_row(conn: &Connection, id: &str, entity_id: &str, source: &str, target: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'related_to', 100)",
+            params![id, entity_id, source, target],
+        )
+        .unwrap();
+    }
+
+    /// A minimal `CommitContext` for exercising a single commit_* function
+    /// directly, without going through a whole proposal.
+    fn test_ctx(entity_id: &str) -> CommitContext {
+        CommitContext {
+            proposal_id: "prop-test".into(),
+            proposal_created_at: 100,
+            entity_id: entity_id.to_string(),
+            entity_name: "Test Entity".into(),
+            source_type: "librarian_inferred",
+            now_secs: 200,
+            now_ms: 200_000,
+            committed: Vec::new(),
+            conflicts: Vec::new(),
+            dropped_edges: Vec::new(),
+            accepted_count: 0,
+            rejected_count: 0,
+            facts_added: 0,
+            facts_updated: 0,
+            facts_archived: 0,
+            tasks_added: 0,
+            facts_duplicated: 0,
+            entry_embeddings: std::collections::HashMap::new(),
+        }
+    }
+
+    fn test_item(id: &str, item_type: &str, target_id: Option<&str>) -> LoadedItem {
+        LoadedItem {
+            id: id.into(),
+            item_type: item_type.into(),
+            target_id: target_id.map(|s| s.to_string()),
+            payload: serde_json::json!({}),
+            evidence: Vec::new(),
+            edited_payload: None,
+        }
+    }
+
+    #[test]
+    fn archiving_a_fact_purges_its_edges() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "Body A");
+        seed_fact_row(&conn, "fact_b", "ent-1", "Body B");
+        seed_fact_row(&conn, "fact_c", "ent-1", "Body C");
+        seed_edge_row(&conn, "edge_out", "ent-1", "fact_a", "fact_b");
+        seed_edge_row(&conn, "edge_in", "ent-1", "fact_c", "fact_a");
+        seed_edge_row(&conn, "edge_other", "ent-1", "fact_b", "fact_c");
+
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // fact_b and fact_c so the cascade treats their edges as purgeable.
+        // Without this, edge_out and edge_in would survive because fact_b /
+        // fact_c remain alive in `llm_wiki_entries`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id IN ('fact_b', 'fact_c')",
+            [],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_archive", Some("fact_a"));
+        commit_fact_archive(&conn, &mut ctx, &item).unwrap();
+
+        // The entry is soft-deleted...
+        let deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted_at, Some(200_000), "deleted_at is milliseconds");
+
+        // ...and no edge references it any more.
+        let dangling: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges
+                  WHERE source_id = 'fact_a' OR target_id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dangling, 0, "archived entry must leave no ghost edges");
+
+        // edge_other (fact_b → fact_c) is not touched by the cascade from
+        // fact_a because fact_a is on neither endpoint. Under the R1
+        // contract it survives even though both its partners are soft-
+        // deleted; the broader `purge_orphan_edges` would clean it up.
+        let survivors: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(survivors, 1);
+    }
+
+    #[test]
+    fn updating_a_body_replaces_the_stale_embedding() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "The original body.");
+        // Give it a blob describing the ORIGINAL text.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'",
+            params![vec![1u8; 32]],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        // No pre-computed embedding for this item -> the stale blob must be
+        // cleared, not left describing text the entry no longer has.
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": "A completely different body." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob, None,
+            "a changed body must never keep the vector of the old text"
+        );
+    }
+
+    #[test]
+    fn updating_a_body_stores_a_fresh_embedding_when_one_was_precomputed() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "The original body.");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'",
+            params![vec![1u8; 32]],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        let new_body = "A completely different body.";
+        ctx.entry_embeddings.insert(
+            "item-1".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(new_body),
+                    new_body,
+                ),
+                vector: vec![0.5_f32; 8],
+            },
+        );
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": new_body });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob,
+            Some(crate::wiki_graph::f32_vec_to_blob(&[0.5_f32; 8])),
+            "the fresh vector replaces the stale one"
+        );
+    }
+
+    #[test]
+    fn a_precomputed_vector_for_a_different_body_is_discarded() {
+        // `resolve_proposal_cmd` embeds phase-1's payload, drops the DbState
+        // mutex, then re-loads items in phase 3. If the payload changed in
+        // between, the map still holds a vector for the OLD text keyed by the
+        // same item id. Persisting it would make the entry match queries for
+        // text it no longer contains — worse than NULL, which the sweep fixes.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "The original body.");
+
+        let mut ctx = test_ctx("ent-1");
+        let stale_body = "The body that was embedded in phase one.";
+        ctx.entry_embeddings.insert(
+            "item-1".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(stale_body),
+                    stale_body,
+                ),
+                vector: vec![0.5_f32; 8],
+            },
+        );
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        // Phase 3 commits a DIFFERENT body than the one that was embedded.
+        let payload = serde_json::json!({ "body": "The body phase three actually commits." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob, None,
+            "a vector computed from different text must never be persisted"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_body_fills_a_null_blob_instead_of_discarding_the_vector() {
+        // The row is NULL because an earlier write-time embed failed. A later
+        // edit that does not change the body still carries a fresh, matching
+        // vector — filling it here is free and keeps the entry searchable
+        // without waiting for a sweep trigger this path never fires.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        let body = "The body that does not change.";
+        seed_fact_row(&conn, "fact_a", "ent-1", body);
+
+        let mut ctx = test_ctx("ent-1");
+        ctx.entry_embeddings.insert(
+            "item-1".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(body),
+                    body,
+                ),
+                vector: vec![0.25_f32; 8],
+            },
+        );
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": body });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob,
+            Some(crate::wiki_graph::f32_vec_to_blob(&[0.25_f32; 8])),
+            "an unchanged body should take the fresh vector rather than stay NULL"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_body_keeps_its_existing_blob_when_no_vector_was_precomputed() {
+        // COALESCE must not clobber a good vector with NULL when the provider
+        // was down and the precompute produced nothing.
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        let body = "The body that does not change.";
+        seed_fact_row(&conn, "fact_a", "ent-1", body);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'",
+            params![vec![7u8; 32]],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": body });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blob,
+            Some(vec![7u8; 32]),
+            "the existing vector still describes this body and must survive"
+        );
+    }
+
+    #[test]
+    fn archiving_pushes_no_edge_outbox_rows() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_a", "ent-1", "Body A");
+        seed_fact_row(&conn, "fact_b", "ent-1", "Body B");
+        seed_edge_row(&conn, "edge_ab", "ent-1", "fact_a", "fact_b");
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_archive", Some("fact_a"));
+        commit_fact_archive(&conn, &mut ctx, &item).unwrap();
+
+        // Edges are not replicated (spec §2). Only the entries delete is in the outbox.
+        let edge_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_outbox WHERE table_name = 'edges'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_rows, 0, "edge purges must not emit outbox rows");
+    }
+
     fn insert_test_proposal(
         conn: &Connection,
         id: &str,
@@ -1446,6 +1987,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1533,6 +2076,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1580,6 +2125,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1654,6 +2201,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .expect("fact_update must succeed when source_ref is NULL");
@@ -1717,6 +2266,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1778,6 +2329,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1841,6 +2394,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1892,6 +2447,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -1938,6 +2495,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1963,6 +2522,8 @@ mod tests {
             Some("not relevant"),
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2034,6 +2595,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2067,6 +2630,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2298,6 +2863,8 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2324,6 +2891,202 @@ mod tests {
             event_summary.contains("2 duplicate fact(s) skipped"),
             "rejected event summary must include duplicate count, got: {event_summary}"
         );
+    }
+
+    #[test]
+    fn fact_add_stores_an_embedding_when_a_profile_is_configured() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+            insert_test_proposal(
+                &conn,
+                "prop-embed",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![NewProposalItem {
+                    id: "fact-1".into(),
+                    item_type: "fact_add".into(),
+                    target_id: None,
+                    payload: serde_json::json!({ "body": "A fact worth embedding." }),
+                    evidence: vec![StoredEvidenceChunk {
+                        chunk_id: Some(chunk_id),
+                        content_hash: String::new(),
+                        quote: "x".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        source_kind: None,
+                    }],
+                }],
+                doc_id,
+            );
+
+            resolve_proposal(
+                &mut conn,
+                "prop-embed",
+                &[ItemDecision {
+                    item_id: "fact-1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: Some(EmbedProfile::default()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let blob_len: Option<i64> = conn
+                .query_row(
+                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE entity_id = 'ent-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(blob_len, Some(32), "constant8 gives 8 dims -> 32 bytes");
+        });
+    }
+
+    #[test]
+    fn fact_add_commits_with_null_embedding_when_the_provider_fails() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", None::<&str>)], || {
+            let mut conn = open_in_memory().unwrap();
+            let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+            insert_test_proposal(
+                &conn,
+                "prop-embed-fail",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![NewProposalItem {
+                    id: "fact-1".into(),
+                    item_type: "fact_add".into(),
+                    target_id: None,
+                    payload: serde_json::json!({ "body": "Curation that must survive." }),
+                    evidence: vec![StoredEvidenceChunk {
+                        chunk_id: Some(chunk_id),
+                        content_hash: String::new(),
+                        quote: "x".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        source_kind: None,
+                    }],
+                }],
+                doc_id,
+            );
+
+            // Cloud profiles always Err -> the embed pre-pass fails.
+            let result = resolve_proposal(
+                &mut conn,
+                "prop-embed-fail",
+                &[ItemDecision {
+                    item_id: "fact-1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: Some(EmbedProfile::Cloud {
+                        provider: crate::embedder::CloudProvider::OpenAi,
+                        model: "unreachable".into(),
+                        api_key: String::new(),
+                    }),
+                    ..Default::default()
+                },
+            );
+
+            assert!(
+                result.is_ok(),
+                "an embed failure must never destroy the librarian's curation"
+            );
+            let (count, blob): (i64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(embedding_blob) FROM llm_wiki_entries
+                      WHERE entity_id = 'ent-1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "the fact is committed");
+            assert_eq!(blob, None, "with a NULL blob for the sweep to fill later");
+        });
+    }
+
+    #[test]
+    fn fact_add_commits_with_null_embedding_when_provider_returns_wrong_size() {
+        // R6 length-mismatch guard: `constant8_short` returns N-1 vectors for
+        // an N-text batch. The pre-pass must skip that chunk instead of
+        // zipping the surviving vector onto the first id — the fact still
+        // commits, but with a NULL blob that the sweep will fill later.
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8_short"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+            insert_test_proposal(
+                &conn,
+                "prop-embed-short",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![NewProposalItem {
+                    id: "fact-1".into(),
+                    item_type: "fact_add".into(),
+                    target_id: None,
+                    payload: serde_json::json!({ "body": "Body that must commit cleanly." }),
+                    evidence: vec![StoredEvidenceChunk {
+                        chunk_id: Some(chunk_id),
+                        content_hash: String::new(),
+                        quote: "x".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        source_kind: None,
+                    }],
+                }],
+                doc_id,
+            );
+
+            let result = resolve_proposal(
+                &mut conn,
+                "prop-embed-short",
+                &[ItemDecision {
+                    item_id: "fact-1".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: Some(EmbedProfile::default()),
+                    entry_embeddings: None,
+                },
+            );
+
+            assert!(
+                result.is_ok(),
+                "a wrong-sized provider response must never destroy the librarian's curation"
+            );
+            let (count, blob): (i64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(embedding_blob) FROM llm_wiki_entries
+                          WHERE entity_id = 'ent-1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "the fact is committed");
+            assert_eq!(
+                blob, None,
+                "the wrong-sized batch must not pair a vector to this row"
+            );
+        });
     }
 }
 

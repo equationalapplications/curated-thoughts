@@ -7,6 +7,7 @@ use crate::db::commit::{
 };
 use crate::db::entities::EntityFact;
 use crate::db::outbox_format::OutboxOperation;
+use crate::embedder::{embed_batch, EmbedProfile};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -36,7 +37,71 @@ fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()>
 }
 
 /// Insert a user-authored fact with outbox row; returns the new fact.
+///
+/// Equivalent to `add_fact_with_blob(conn, entity_id, body, None)` — the
+/// entry lands with a NULL embedding for the sweep to fill.
 pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<EntityFact> {
+    add_fact_with_blob(conn, entity_id, body, None)
+}
+
+/// Compute the embedding blob for a single user-authored fact, OUTSIDE any
+/// DB or app-level mutex. `embed_batch` is a blocking network call and must
+/// never run while a write lock is held.
+///
+/// Returns `None` when no profile is configured, the body is empty after
+/// trim, or the provider fails — the caller commits the fact anyway and
+/// leaves the blob NULL for the null-embedding sweep to retry.
+pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) -> Option<Vec<u8>> {
+    let profile = profile?;
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let title = fact_title_from_body(body);
+    let text = crate::embed_sweep::embed_text_for_entry(&title, body);
+    match embed_batch(profile, vec![text]) {
+        // Defensive cardinality check, mirroring the `vectors.len() != id_chunk.len()`
+        // guard in `db/commit.rs`: one text in, exactly one vector out. Both
+        // shipping providers bail on a mismatch, but `pop()` alone would silently
+        // persist the *last* vector of an over-long response, and the sweep's
+        // `embedding_blob IS NULL` predicate could never correct that mis-association.
+        Ok(vectors) if vectors.len() == 1 => vectors
+            .into_iter()
+            .next()
+            .map(|v| crate::wiki_graph::f32_vec_to_blob(&v)),
+        Ok(vectors) => {
+            // False positive: the eprintln! below only interpolates the usize count
+            // (vectors.len) — the API key resolved inside embed_batch never reaches
+            // this format string.
+            // codeql[rust/cleartext-logging]
+            eprintln!(
+                "precompute_entry_embedding: expected 1 vector, got {}; leaving NULL for the sweep",
+                vectors.len()
+            );
+            None
+        }
+        Err(e) => {
+            // `e` is an anyhow chain from embed_batch; the resolved API key is
+            // used only inside the Bearer header and never reaches this format
+            // string (the chain carries API-key env-var *names* only).
+            // codeql[rust/cleartext-logging]
+            eprintln!(
+                "precompute_entry_embedding: provider failed, leaving NULL for the sweep: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Insert a user-authored fact with an outbox row, taking a precomputed
+/// embedding blob. Callers that want write-time embeddings must compute the
+/// blob up front via [`precompute_entry_embedding`] — outside any lock.
+pub fn add_fact_with_blob(
+    conn: &mut Connection,
+    entity_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
+) -> Result<EntityFact> {
     let body = body.trim();
     if body.is_empty() {
         bail!("fact body must not be empty");
@@ -52,8 +117,8 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
             access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, ?5, ?6, ?6, NULL, 0, NULL, NULL, NULL)",
-        params![fact_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms],
+         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, ?5, ?6, ?6, NULL, 0, NULL, ?7, NULL)",
+        params![fact_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms, embedding_blob],
     )?;
     push_entries_outbox(
         &tx,
@@ -114,12 +179,51 @@ pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<En
     })
 }
 
+/// Insert a user-authored fact, computing the embedding blob inside the call.
+/// New callers should compute the blob up front via
+/// [`precompute_entry_embedding`] so the blocking network call does not run
+/// under a write lock; this wrapper keeps the old test/library API.
+pub fn add_fact_with_profile(
+    conn: &mut Connection,
+    entity_id: &str,
+    body: &str,
+    profile: Option<&EmbedProfile>,
+) -> Result<EntityFact> {
+    let embedding_blob = precompute_entry_embedding(profile, body);
+    add_fact_with_blob(conn, entity_id, body, embedding_blob)
+}
+
 /// Rewrite a fact's body (title re-derived); pushes full-payload outbox UPDATE.
+///
+/// Equivalent to `update_fact_with_blob(conn, entity_id, fact_id, body, None)`
+/// — the entry lands with a NULL embedding for the sweep to fill. Kept for
+/// tests and callers with no embed profile to hand.
 pub fn update_fact(
     conn: &mut Connection,
     entity_id: &str,
     fact_id: &str,
     body: &str,
+) -> Result<()> {
+    update_fact_with_blob(conn, entity_id, fact_id, body, None)
+}
+
+/// Rewrite a fact's body, storing a caller-computed embedding blob.
+///
+/// The blob must be computed OUTSIDE the caller's DB lock via
+/// [`precompute_entry_embedding`], for the same reason as
+/// [`add_fact_with_blob`]: `embed_batch` is a blocking network round-trip.
+///
+/// `None` writes NULL, which is what a provider failure collapses to — the
+/// null-embedding sweep re-derives it later. Passing the fresh blob is what
+/// keeps an edited fact searchable immediately instead of falling out of
+/// semantic retrieval until the next sweep trigger (which this path does not
+/// itself fire).
+pub fn update_fact_with_blob(
+    conn: &mut Connection,
+    entity_id: &str,
+    fact_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
 ) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
@@ -181,9 +285,14 @@ pub fn update_fact(
         bail!("fact not found or archived: {fact_id}");
     };
 
+    // Write the caller's freshly computed vector, or NULL when there is none
+    // so the sweep re-derives it — never leave a vector describing text the
+    // entry no longer contains. Mirrors `commit_fact_update`.
     tx.execute(
-        "UPDATE llm_wiki_entries SET title = ?1, body = ?2, updated_at = ?3 WHERE id = ?4",
-        params![title, body, now_ms, fact_id],
+        "UPDATE llm_wiki_entries
+            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4
+          WHERE id = ?5",
+        params![title, body, now_ms, embedding_blob, fact_id],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
@@ -236,6 +345,10 @@ pub fn archive_fact(conn: &mut Connection, entity_id: &str, fact_id: &str) -> Re
     if changes == 0 {
         bail!("fact not found or already archived: {fact_id}");
     }
+
+    // Edges die with their endpoints, inside this same transaction (spec §2).
+    crate::db::edge_purge::purge_edges_for_entry(&tx, fact_id)?;
+
     push_entries_outbox(
         &tx,
         entity_id,
@@ -258,6 +371,53 @@ mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
     use crate::db::entities::{create_entity, get_entity, CreateEntityInput};
+
+    // -------------------------------------------------------------------------
+    // add_fact_with_profile tests (Task 10)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn add_fact_with_profile_stores_an_embedding() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let entity_id = make_entity(&conn);
+            let profile = crate::embedder::EmbedProfile::default();
+
+            let fact =
+                add_fact_with_profile(&mut conn, &entity_id, "A user-stated fact.", Some(&profile))
+                    .unwrap();
+
+            let blob_len: Option<i64> = conn
+                .query_row(
+                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = ?1",
+                    [&fact.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(blob_len, Some(32));
+        });
+    }
+
+    #[test]
+    fn add_fact_without_a_profile_leaves_the_blob_null() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+
+        let fact = add_fact(&mut conn, &entity_id, "A user-stated fact.").unwrap();
+
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
+                [&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(blob, None, "the sweep fills it later");
+    }
+
+    // -------------------------------------------------------------------------
+    // pre-existing tests
+    // -------------------------------------------------------------------------
 
     fn make_entity(conn: &Connection) -> String {
         create_entity(
@@ -348,6 +508,46 @@ mod tests {
     }
 
     #[test]
+    fn update_fact_clears_embedding_blob_so_sweep_rederives_it() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let entity_id = make_entity(&conn);
+            let profile = crate::embedder::EmbedProfile::default();
+
+            // Seed a fact with a real (non-NULL) embedding blob.
+            let fact =
+                add_fact_with_profile(&mut conn, &entity_id, "Original body.", Some(&profile))
+                    .unwrap();
+            let blob_before: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
+                    [&fact.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                blob_before.is_some(),
+                "precondition: seeded row must have a non-NULL blob",
+            );
+
+            // Edit the fact — body changes, blob must be wiped.
+            update_fact(&mut conn, &entity_id, &fact.id, "Edited body.").unwrap();
+
+            let blob_after: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
+                    [&fact.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                blob_after, None,
+                "update_fact must NULL embedding_blob so the sweep re-derives it",
+            );
+        });
+    }
+
+    #[test]
     fn update_fact_rejects_unknown_or_archived_fact() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
@@ -372,5 +572,70 @@ mod tests {
             archive_fact(&mut conn, &entity_id, &fact.id).is_err(),
             "double archive errors"
         );
+    }
+
+    #[test]
+    fn archive_fact_purges_edges_touching_the_fact() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+        let fact = add_fact(&mut conn, &entity_id, "The archived fact body.").unwrap();
+        let other = add_fact(&mut conn, &entity_id, "The surviving fact body.").unwrap();
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_out', ?1, ?2, ?3, 'related_to', 100)",
+            params![entity_id, fact.id, other.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_in', ?1, ?2, ?3, 'related_to', 100)",
+            params![entity_id, other.id, fact.id],
+        )
+        .unwrap();
+
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // `other` so both seeded edges have dead partners and are
+        // purgeable. Without this, both edges would survive because `other`
+        // remains alive in `llm_wiki_entries`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = ?1",
+            params![other.id],
+        )
+        .unwrap();
+
+        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "both edges touching the archived fact must go"
+        );
+    }
+
+    #[test]
+    fn archive_fact_leaves_unrelated_edges_alone() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+        let fact = add_fact(&mut conn, &entity_id, "The archived fact body.").unwrap();
+        let b = add_fact(&mut conn, &entity_id, "Fact B body.").unwrap();
+        let c = add_fact(&mut conn, &entity_id, "Fact C body.").unwrap();
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_bc', ?1, ?2, ?3, 'related_to', 100)",
+            params![entity_id, b.id, c.id],
+        )
+        .unwrap();
+
+        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1, "an edge between two live facts must survive");
     }
 }

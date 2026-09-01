@@ -96,7 +96,9 @@ pub fn capture_stacks(pid: u32) {
         .name("watchdog-stack-capture".to_string())
         .spawn(move || capture_stacks_blocking(pid))
     {
-        eprintln!("[watchdog] stack capture unavailable (thread spawn failed: {e}); continuing recovery");
+        eprintln!(
+            "[watchdog] stack capture unavailable (thread spawn failed: {e}); continuing recovery"
+        );
     }
 }
 
@@ -171,7 +173,14 @@ mod tests {
         assert!(id > 0);
 
         let (kind, stage, subject, stalled, seq, epoch, pending, action): (
-            String, String, String, i64, i64, i64, i64, String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+            String,
         ) = conn
             .query_row(
                 "SELECT kind, stage, subject, stalled_ms, heartbeat_seq, epoch,
@@ -180,8 +189,14 @@ mod tests {
                 [id],
                 |r| {
                     Ok((
-                        r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                        r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
                     ))
                 },
             )

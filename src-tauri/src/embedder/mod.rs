@@ -170,18 +170,29 @@ impl Default for EmbedProfile {
 
 /// When env `CURATED_EMBED_STUB=constant8`, returns tiny deterministic vectors (pipeline integration tests / CI).
 /// Bench fixtures (`tests/scifact.rs`, etc.) still load frozen FastEmbed vectors — do not point those at Ollama.
+///
+/// `CURATED_EMBED_STUB=constant8_short` is the same shape but returns
+/// `texts.len() - 1` vectors. It exists solely for the R6 length-mismatch
+/// guard tests in `embed_sweep` and `db::commit` — a misbehaving provider that
+/// drops a row must trip the guard, not silently mis-pair vectors.
 pub fn embed_batch(profile: &EmbedProfile, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-    if matches!(
-        std::env::var("CURATED_EMBED_STUB").ok().as_deref(),
-        Some("constant8")
-    ) {
-        let mut out = Vec::with_capacity(texts.len());
-        for i in 0..texts.len() {
-            let mut v = vec![0_f32; 8];
-            v[0] = (i + 1) as f32 * 1e-4;
-            out.push(v);
+    let stub = std::env::var("CURATED_EMBED_STUB").ok();
+    if let Some(name) = stub.as_deref() {
+        if name == "constant8" || name == "constant8_short" {
+            let n = texts.len();
+            let deliver = if name == "constant8_short" {
+                n.saturating_sub(1)
+            } else {
+                n
+            };
+            let mut out = Vec::with_capacity(deliver);
+            for i in 0..deliver {
+                let mut v = vec![0_f32; 8];
+                v[0] = (i + 1) as f32 * 1e-4;
+                out.push(v);
+            }
+            return Ok(out);
         }
-        return Ok(out);
     }
     match profile {
         EmbedProfile::Local { .. } => {
@@ -228,29 +239,40 @@ mod tests {
 
     #[test]
     fn embed_cloud_errors() {
-        let p = EmbedProfile::Cloud {
-            provider: CloudProvider::OpenAi,
-            model: "x".to_string(),
-            api_key: "k".to_string(),
-        };
-        assert!(embed_batch(&p, vec!["a".into()]).is_err());
+        // `embed_batch` checks CURATED_EMBED_STUB BEFORE it looks at the
+        // profile, so a concurrently-running test that sets the stub makes
+        // this return Ok and the assertion fail. Env is process-wide; pin it
+        // to unset and take the shared `temp_env` lock.
+        temp_env::with_vars([("CURATED_EMBED_STUB", None::<&str>)], || {
+            let p = EmbedProfile::Cloud {
+                provider: CloudProvider::OpenAi,
+                model: "x".to_string(),
+                api_key: "k".to_string(),
+            };
+            assert!(embed_batch(&p, vec!["a".into()]).is_err());
+        });
     }
 
     #[test]
     fn external_profile_requires_api_key() {
         // No key in profile; env vars must not leak a value into tests, so this
         // should fail with the "no api key" message unless CI sets one.
-        let p = EmbedProfile::External {
-            profile: ExternalEmbedProfile {
-                base_url: "https://openrouter.ai/api/v1".to_string(),
-                model: "openai/text-embedding-3-small".to_string(),
-                api_key: None,
-            },
-        };
-        match std::env::var("OPENROUTER_API_KEY") {
-            Ok(k) if !k.trim().is_empty() => {} // env-provided: fine
-            _ => assert!(embed_batch(&p, vec!["a".into()]).is_err()),
-        }
+        //
+        // Same stub hazard as `embed_cloud_errors` above: CURATED_EMBED_STUB
+        // short-circuits `embed_batch` before the profile is consulted.
+        temp_env::with_vars([("CURATED_EMBED_STUB", None::<&str>)], || {
+            let p = EmbedProfile::External {
+                profile: ExternalEmbedProfile {
+                    base_url: "https://openrouter.ai/api/v1".to_string(),
+                    model: "openai/text-embedding-3-small".to_string(),
+                    api_key: None,
+                },
+            };
+            match std::env::var("OPENROUTER_API_KEY") {
+                Ok(k) if !k.trim().is_empty() => {} // env-provided: fine
+                _ => assert!(embed_batch(&p, vec!["a".into()]).is_err()),
+            }
+        });
     }
 
     #[test]
