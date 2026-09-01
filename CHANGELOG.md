@@ -1,3 +1,32 @@
+## [1.40.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.39.0...v1.40.0) (2026-09-01)
+
+### Features
+
+* **commit:** embed wiki entries at write time, outside the transaction ([baa39ed](https://github.com/equationalapplications/curated-thoughts/commit/baa39ed66e637f9068d96be9e6962658e37e9fc6))
+* **db:** add cascading edge-purge helper for entry deletion ([4743f9a](https://github.com/equationalapplications/curated-thoughts/commit/4743f9acf948b9cfba1e8a0b14621e36aa0f0804))
+* **embed:** add bounded null-embedding sweep for wiki entries ([ce4c4ee](https://github.com/equationalapplications/curated-thoughts/commit/ce4c4eeb9e3621296f3f6e60f07a9aa1da5f9583))
+* **embed:** trigger the null-embedding sweep at startup and on wiki heal ([57c7f7f](https://github.com/equationalapplications/curated-thoughts/commit/57c7f7f09cc00f15bf4ff3b43953f1dc473d1ce6))
+* **facts:** optional write-time embedding for Brain-mode facts ([2e64ca0](https://github.com/equationalapplications/curated-thoughts/commit/2e64ca0619708014971ea044e6495f19ac6000f3))
+* **tools:** add graph_reanchor migration for orphan edges and null embeddings ([3639bd8](https://github.com/equationalapplications/curated-thoughts/commit/3639bd8bcadab77937761986f98819ceff241d45))
+
+### Bug Fixes
+
+* **commit:** purge edges when a fact is archived during regeneration ([f0f8269](https://github.com/equationalapplications/curated-thoughts/commit/f0f82694dbc98c836a371d0c0b01f0952b8d4670))
+* **commit:** re-embed on fact update so vectors never describe stale text ([207477a](https://github.com/equationalapplications/curated-thoughts/commit/207477a9c4a1143abe6dfb63f9b279322e3dbe11))
+* **facts:** purge edges when a fact is archived in Brain mode ([6d0b1cb](https://github.com/equationalapplications/curated-thoughts/commit/6d0b1cb195db42f4880f3ab7cb8357a027191588))
+* **security:** suppress CodeQL cleartext-logging false positive in facts.rs ([95d84ca](https://github.com/equationalapplications/curated-thoughts/commit/95d84ca9551249a129058e67e2ecc85323e77056)), closes [#5](https://github.com/equationalapplications/curated-thoughts/issues/5)
+* **security:** suppress CodeQL cleartext-logging false positives in embed paths ([b2bc2fb](https://github.com/equationalapplications/curated-thoughts/commit/b2bc2fbb1d1dc7a40bb98de3da8925fed6c9acf5))
+* **tools:** add embed_profile to ResolveOptions in approve_one_on ([eb16c1c](https://github.com/equationalapplications/curated-thoughts/commit/eb16c1c4210c03e087b5768e44fcb91de55fd8e5))
+* **wiki:** address PR [#131](https://github.com/equationalapplications/curated-thoughts/issues/131) code-review findings — embeddings, edges, flakes ([aa03579](https://github.com/equationalapplications/curated-thoughts/commit/aa03579e3fcd842e7ed37422d06f68eebefd682f)), closes [#1](https://github.com/equationalapplications/curated-thoughts/issues/1) [#8](https://github.com/equationalapplications/curated-thoughts/issues/8) [#10](https://github.com/equationalapplications/curated-thoughts/issues/10)
+* **wiki:** cascade edge purge through heal and prune deletion sites ([6241046](https://github.com/equationalapplications/curated-thoughts/commit/6241046d4d78b60bd1081ea50ea2f9045eb28984))
+* **wiki:** cascade edges at run_wiki_forget (closes spec §2 follow-up) ([8f33b1a](https://github.com/equationalapplications/curated-thoughts/commit/8f33b1a34bd8a1274aa97c337bb9628511706858))
+* **wiki:** edge_purge SQL caching and consolidation + embed_sweep defensive guard ([052d832](https://github.com/equationalapplications/curated-thoughts/commit/052d8324f910d20c57bf955f02a21e43f76181a4))
+* **wiki:** post-review remediation for graph_reanchor migration + write-time embed ([09f6905](https://github.com/equationalapplications/curated-thoughts/commit/09f6905ed61a308f5db3633a34376e910b8a5bdf)), closes [#1-2](https://github.com/equationalapplications/curated-thoughts/issues/1-2) [#1](https://github.com/equationalapplications/curated-thoughts/issues/1) [#5](https://github.com/equationalapplications/curated-thoughts/issues/5) [#18](https://github.com/equationalapplications/curated-thoughts/issues/18) [#4](https://github.com/equationalapplications/curated-thoughts/issues/4) [6/#7](https://github.com/6/curated-thoughts/issues/7)
+* **wiki:** post-review remediation for heterogeneous edges + write-time embed ([184d43e](https://github.com/equationalapplications/curated-thoughts/commit/184d43e95d8b7825a17fa19b8df70d4a9e665bbe))
+* **wiki:** precompute entry embeddings outside the DbState mutex ([9cf3b03](https://github.com/equationalapplications/curated-thoughts/commit/9cf3b0329295bc244ed47fc77af2a560d76bddc7))
+* **wiki:** prune compared ms deleted_at against unix seconds, never fired ([2333479](https://github.com/equationalapplications/curated-thoughts/commit/23334797535dfcda42d6d1baf81559c5b3b6cd09))
+* **wiki:** round-3 review remediation — embed cardinality, approve sweep, honest rollback test ([4fc2fd1](https://github.com/equationalapplications/curated-thoughts/commit/4fc2fd1cc449828c894abb98cba699bc77611be3))
+
 ## [1.39.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.38.1...v1.39.0) (2026-08-31)
 
 ### Features
