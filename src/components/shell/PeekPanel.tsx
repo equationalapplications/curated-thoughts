@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchChunkContent } from "../../lib/tauri";
 import { applyInertGuard, useFocusTrap } from "../../a11y";
 
@@ -26,7 +26,23 @@ function basename(path: string): string {
 function PeekPanelBody({ target, onDismiss, onPromote }: BodyProps) {
   const [status, setStatus] = useState<BodyStatus>("loading");
   const [text, setText] = useState<string | null>(null);
-  const panelRef = useFocusTrap<HTMLElement>({
+  // Guard BEFORE trap (spec §3 ref-first API): React runs unmount cleanups
+  // in declaration order, so the guard releases inert BEFORE the trap
+  // restores focus to the opener. Reversed, the restore targets an inert
+  // (unfocusable) opener and silently no-ops in every real WebView — focus
+  // drops to <body> (WCAG 2.4.3 regression; invisible to jsdom, which does
+  // not implement inert). Requires the ref-first useFocusTrap signature —
+  // with a hook-created ref the trap is always registered first.
+  const panelRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (!panelRef.current) return;
+    return applyInertGuard(panelRef.current, document.body, {
+      allow: (el) => el.classList.contains("peek-backdrop"),
+    });
+  }, []);
+
+  useFocusTrap(panelRef, {
     active: true,
     onEscape: onDismiss,
   });
@@ -53,17 +69,6 @@ function PeekPanelBody({ target, onDismiss, onPromote }: BodyProps) {
       cancelled = true;
     };
   }, [target.path, target.hash]);
-
-  // Background guard: everything outside the dialog gets inert +
-  // aria-hidden while the peek is open; released on unmount/close.
-  // The backdrop button is exempt — it IS the click-outside dismiss
-  // affordance. (Focus capture/restore is handled by useFocusTrap.)
-  useEffect(() => {
-    if (!panelRef.current) return;
-    return applyInertGuard(panelRef.current, document.body, {
-      allow: (el) => el.classList.contains("peek-backdrop"),
-    });
-  }, []);
 
   return (
     <>

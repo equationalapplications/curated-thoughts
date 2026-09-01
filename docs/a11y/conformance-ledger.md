@@ -21,8 +21,8 @@ accessibility attributes each component currently exhibits and which remediation
 owns it. Conformance is established by the CI gates (jsx-a11y lint, axe smoke test, 
 contrast tests) plus `docs/a11y/manual-checklist.md`.
 
-**Component counts:** HEAD contains **115** `.tsx` files under `src/` — **68** components 
-(this ledger, `__tests__` excluded) + **47** colocated test files. The original "107 components" 
+**Component counts:** HEAD contains **116** `.tsx` files under `src/` — **68** components 
+(this ledger, `__tests__` excluded) + **48** colocated test files. The original "107 components" 
 figure is the `.tsx` count at branch base a739cfb (65 non-test + 42 tests); this branch added 
 `src/a11y/{Announcer,SkipLink,VisuallyHidden}.tsx` and 5 test files.
 

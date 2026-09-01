@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE = [
   "a[href]",
@@ -36,8 +36,17 @@ export interface FocusTrapOptions {
   onEscape?: () => void;
 }
 
-export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
-  const containerRef = useRef<T | null>(null);
+/**
+ * Ref-first API per spec §3 (`useFocusTrap(ref, { active, yieldTo })`): the
+ * caller owns the ref so a sibling effect that must release BEFORE the trap
+ * restores focus (e.g. the inert guard) can be declared first — React runs
+ * unmount cleanups in declaration order. With a hook-created ref, the trap
+ * is always registered first and the release/restore order is unfixable.
+ */
+export function useFocusTrap<T extends HTMLElement>(
+  containerRef: RefObject<T | null>,
+  options: FocusTrapOptions,
+): void {
   const { active } = options;
   // Callbacks live in refs so consumer re-renders don't tear down and
   // re-register listeners — which would re-focus the first element and steal
@@ -91,7 +100,5 @@ export function useFocusTrap<T extends HTMLElement>(options: FocusTrapOptions) {
       const prev = previousFocus.current;
       if (prev instanceof HTMLElement) prev.focus();
     };
-  }, [active]);
-
-  return containerRef;
+  }, [active, containerRef]);
 }

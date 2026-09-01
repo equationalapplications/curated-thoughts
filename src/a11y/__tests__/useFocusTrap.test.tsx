@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useFocusTrap } from "../useFocusTrap";
@@ -13,7 +14,8 @@ function TrapFixture({
   yieldTo?: (target: Element) => boolean;
   withContenteditable?: boolean;
 }) {
-  const ref = useFocusTrap<HTMLDivElement>({ active, onEscape, yieldTo });
+  const ref = useRef<HTMLDivElement>(null);
+  useFocusTrap(ref, { active, onEscape, yieldTo });
   return (
     <div ref={ref} data-testid="trap">
       <button>First</button>
