@@ -5,7 +5,7 @@ use crate::db::entities::{
     archive_entity, create_entity, get_entity, list_entities, update_entity_summary,
     CreateEntityInput, EntityDetail, EntityFact, EntityListFilter, EntitySort, EntitySummary,
 };
-use crate::db::facts::{add_fact, archive_fact, update_fact};
+use crate::db::facts::{add_fact_with_profile, archive_fact, update_fact};
 use crate::DbState;
 use tauri::State;
 
@@ -72,9 +72,11 @@ pub fn add_entity_fact_cmd(
     entity_id: String,
     body: String,
     db_state: State<DbState>,
+    embed_profile: State<crate::EmbedProfileState>,
 ) -> Result<EntityFact, String> {
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    add_fact(&mut guard.0, &entity_id, &body).map_err(|e| e.to_string())
+    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
+    add_fact_with_profile(&mut guard.0, &entity_id, &body, Some(&profile)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

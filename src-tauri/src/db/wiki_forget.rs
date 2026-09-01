@@ -25,8 +25,7 @@ pub fn forget_entries_by_source_refs(
     }
     let tx = conn.unchecked_transaction()?;
     // Collect doomed ids BEFORE the DELETE — once deleted, they're gone.
-    let placeholders: String = std::iter::repeat("?")
-        .take(source_refs.len())
+    let placeholders: String = std::iter::repeat_n("?", source_refs.len())
         .collect::<Vec<_>>()
         .join(",");
     let select_sql = format!(
@@ -106,10 +105,22 @@ mod tests {
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
         seed_entry(&conn, "fact_b", "ent-2", Some("/vault/a.pdf"));
         seed_entry(&conn, "fact_c", "ent-3", Some("/vault/c.pdf"));
-        // Two edges from the doomed entries to the unrelated one.
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // fact_c so the cascade treats edge_ac and edge_bc as purgeable.
+        // Without this, both edges would survive because fact_c remains
+        // alive in `llm_wiki_entries`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'fact_c'",
+            [],
+        )
+        .unwrap();
+        // Two edges from the doomed entries to the (now-dead) unrelated one.
         seed_edge(&conn, "edge_ac", "ent-1", "fact_a", "fact_c");
         seed_edge(&conn, "edge_bc", "ent-2", "fact_b", "fact_c");
-        // One edge between two unrelated entries — must survive.
+        // One edge between two unrelated entries — must survive (fact_a and
+        // fact_b never appear on its endpoints so the cascade never touches
+        // it, and the broader `purge_orphan_edges` is not invoked here).
         seed_edge(&conn, "edge_c_unrelated", "ent-3", "fact_c", "some_other_live_id");
 
         let removed =
@@ -155,8 +166,16 @@ mod tests {
         // After the call, the entry should be gone and the change durable.
         let conn = open_in_memory().unwrap();
         seed_entry(&conn, "fact_a", "ent-1", Some("/vault/a.pdf"));
-        seed_edge(&conn, "edge_ac", "ent-1", "fact_a", "fact_c");
         seed_entry(&conn, "fact_c", "ent-3", Some("/vault/c.pdf"));
+        // R1 (remediation): soft-delete fact_c so the cascade treats
+        // edge_ac as purgeable. Without this, edge_ac would survive because
+        // fact_c remains alive in `llm_wiki_entries`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'fact_c'",
+            [],
+        )
+        .unwrap();
+        seed_edge(&conn, "edge_ac", "ent-1", "fact_a", "fact_c");
 
         forget_entries_by_source_refs(&conn, &["/vault/a.pdf".to_string()]).unwrap();
 

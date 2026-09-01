@@ -1,5 +1,10 @@
 //! Migration correctness: the orphan predicate must treat a soft-deleted
 //! endpoint as dead, not alive.
+//!
+//! Edge endpoints are heterogeneous (R1): an endpoint id may live in
+//! `llm_wiki_entries`, `curated_entities`, or `llm_wiki_tasks`. An edge is
+//! preserved as long as ONE endpoint resolves to at least one of the three
+//! (with `deleted_at IS NULL`).
 
 use rusqlite::{params, Connection};
 use tauri_app_lib::db::connection::open_in_memory;
@@ -14,6 +19,25 @@ fn seed_entry(conn: &Connection, id: &str, deleted_at_ms: Option<i64>) {
             access_count, deleted_at, embedding_blob, embedding
          ) VALUES (?1, 'ent-1', 'T', 'B', '[]', 'inferred', 'librarian_inferred',
                    NULL, NULL, 100, 100, NULL, 0, ?2, NULL, NULL)",
+        params![id, deleted_at_ms],
+    )
+    .unwrap();
+}
+
+fn seed_entity(conn: &Connection, id: &str, deleted_at_ms: Option<i64>) {
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at, deleted_at)
+         VALUES (?1, 'n', 'concept', '', 100, 100, ?2)",
+        params![id, deleted_at_ms],
+    )
+    .unwrap();
+}
+
+fn seed_task(conn: &Connection, id: &str, deleted_at_ms: Option<i64>) {
+    conn.execute(
+        "INSERT INTO llm_wiki_tasks (id, entity_id, description, status, priority,
+            created_at, updated_at, resolved_at, deleted_at)
+         VALUES (?1, 'ent-1', 'd', 'pending', 0, 100, 100, NULL, ?2)",
         params![id, deleted_at_ms],
     )
     .unwrap();
@@ -90,3 +114,41 @@ fn purge_is_idempotent() {
     assert_eq!(purge_orphan_edges(&conn).unwrap(), 1);
     assert_eq!(purge_orphan_edges(&conn).unwrap(), 0, "second run is a no-op");
 }
+
+#[test]
+fn keeps_edges_pointing_only_at_a_live_curated_entity() {
+    // The R1 proof: an endpoint id present ONLY in curated_entities is alive.
+    // A naive entry-only predicate would delete this edge.
+    let conn = open_in_memory().unwrap();
+    seed_entity(&conn, "ce_only", None);
+    seed_edge(&conn, "edge_to_entity", "ce_only", "ce_only");
+
+    let removed = purge_orphan_edges(&conn).unwrap();
+    assert_eq!(removed, 0, "endpoint alive in curated_entities — edge survives");
+    assert_eq!(edge_ids(&conn), vec!["edge_to_entity".to_string()]);
+}
+
+#[test]
+fn keeps_edges_pointing_only_at_a_live_task() {
+    let conn = open_in_memory().unwrap();
+    seed_task(&conn, "task_only", None);
+    seed_edge(&conn, "edge_to_task", "task_only", "task_only");
+
+    let removed = purge_orphan_edges(&conn).unwrap();
+    assert_eq!(removed, 0, "endpoint alive in llm_wiki_tasks — edge survives");
+    assert_eq!(edge_ids(&conn), vec!["edge_to_task".to_string()]);
+}
+
+#[test]
+fn treats_soft_deleted_endpoint_in_every_table_as_dead() {
+    let conn = open_in_memory().unwrap();
+    seed_entity(&conn, "ce_arc", Some(1));
+    seed_task(&conn, "task_arc", Some(1));
+    seed_entry(&conn, "fact_arc", Some(1));
+    seed_edge(&conn, "edge_all_soft_deleted", "ce_arc", "task_arc");
+
+    let removed = purge_orphan_edges(&conn).unwrap();
+    assert_eq!(removed, 1, "soft-deleted in all three tables counts as dead");
+    assert!(edge_ids(&conn).is_empty());
+}
+

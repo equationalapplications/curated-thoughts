@@ -390,6 +390,13 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
             edited_payload: None,
         })
         .collect();
+    // Write-time entry embedding: best-effort. Failures fall back to `None` so
+    // the proposal still commits and the runtime `embed_sweep` fills NULLs.
+    // Matches the fallback rule documented in `task-R3-brief.md`.
+    let embed_profile = retrieval::load_embed_profile(
+        &retrieval::resolve_brain_paths().config_path,
+    )
+    .ok();
     let result = resolve_proposal(
         conn,
         pid,
@@ -397,7 +404,7 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         None,
         ResolveOptions {
             auto_approve: true,
-            embed_profile: None,
+            embed_profile,
         },
     )?;
     println!(

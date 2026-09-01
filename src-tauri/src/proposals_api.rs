@@ -37,8 +37,10 @@ pub fn resolve_proposal_cmd(
     reject_reason: Option<String>,
     auto_approve: Option<bool>,
     db_state: State<DbState>,
+    embed_profile: State<crate::EmbedProfileState>,
 ) -> Result<CommitResult, String> {
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?.clone();
     let result = resolve_proposal(
         &mut guard.0,
         &proposal_id,
@@ -46,7 +48,7 @@ pub fn resolve_proposal_cmd(
         reject_reason.as_deref(),
         ResolveOptions {
             auto_approve: auto_approve.unwrap_or(false),
-            embed_profile: None,
+            embed_profile: Some(profile),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -73,16 +75,23 @@ pub fn approve_wiki_page(
     id: i64,
     _content: String,
     db_state: State<DbState>,
+    embed_profile: State<crate::EmbedProfileState>,
 ) -> Result<(), String> {
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    approve_proposal_shim(&mut guard.0, id).map_err(|e| e.to_string())?;
+    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
+    approve_proposal_shim(&mut guard.0, id, Some(&profile)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn reject_wiki_page(id: i64, db_state: State<DbState>) -> Result<(), String> {
+pub fn reject_wiki_page(
+    id: i64,
+    db_state: State<DbState>,
+    embed_profile: State<crate::EmbedProfileState>,
+) -> Result<(), String> {
     let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    reject_proposal_shim(&mut guard.0, id, None).map_err(|e| e.to_string())?;
+    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
+    reject_proposal_shim(&mut guard.0, id, None, Some(&profile)).map_err(|e| e.to_string())?;
     Ok(())
 }
 

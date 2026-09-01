@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::commit::{
     push_entries_outbox, push_tasks_outbox, wiki_fact_outbox_payload, wiki_task_outbox_payload,
 };
+use crate::db::edge_purge::purge_dead_edges;
 use crate::db::outbox_format::OutboxOperation;
 use crate::okf::bundle_read::{ParsedBundle, ParsedEntity};
 use crate::okf::ids::generate_id;
@@ -637,7 +638,13 @@ fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result
         [entity_id],
     )?;
     tx.execute("DELETE FROM llm_wiki_tasks WHERE entity_id=?1", [entity_id])?;
-    tx.execute("DELETE FROM llm_wiki_edges WHERE entity_id=?1", [entity_id])?;
+    // edges stamped with `ctx.entity_id` can point across entities; we must
+    // purge only edges whose BOTH endpoints have no live home (in
+    // llm_wiki_entries / curated_entities / llm_wiki_tasks), otherwise the
+    // bundle import strands partner edges (remediation brief R1). The
+    // helper applies the same three-table alive check as
+    // `edge_purge::purge_edges_for_entry`.
+    purge_dead_edges(tx)?;
     tx.execute(
         "DELETE FROM llm_wiki_events WHERE entity_id=?1",
         [entity_id],
@@ -816,6 +823,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dangling, 0);
+    }
+
+    #[test]
+    fn replace_keeps_cross_entity_edges_when_partner_endpoint_remains_live() {
+        // R1 proof: `clear_entity_content` (called by Replace mode) used to
+        // DELETE every llm_wiki_edges row stamped with the dying entity_id,
+        // even when the edge points into another live entity. That strands
+        // the partner's edges. The new contract is: only purge edges whose
+        // BOTH endpoints are dead across all three tables.
+        let mut conn = open_in_memory().unwrap();
+
+        // Two entities, each with a fact.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'A', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_b', 'B', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        for (fact_id, entity_id) in [("fact_a_1", "ent_a"), ("fact_b_1", "ent_b")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'librarian_inferred', 1, 1)",
+                params![fact_id, entity_id],
+            )
+            .unwrap();
+        }
+
+        // Cross-entity edge: stamped with ent_a, but one endpoint is ent_b's fact.
+        // This MUST survive a Replace on ent_a.
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_cross', 'ent_a', 'fact_a_1', 'fact_b_1', 'related_to', 1)",
+            [],
+        )
+        .unwrap();
+        // Truly dead edge: neither endpoint exists anywhere.
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_orphan', 'ent_a', 'ghost_a', 'ghost_b', 'related_to', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Replace ent_a — clears ent_a's facts/edges/etc.
+        apply_import(&mut conn, &sample_bundle(), ImportMode::Replace).unwrap();
+
+        let surviving_ids: Vec<String> = conn
+            .prepare("SELECT id FROM llm_wiki_edges ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            surviving_ids,
+            vec!["edge_cross".to_string()],
+            "the cross-entity edge survives because fact_b_1 is still alive; \
+             the orphan edge is purged because both endpoints are dead everywhere"
+        );
     }
 
     #[test]

@@ -1265,7 +1265,20 @@ fn precompute_entry_embeddings(
     {
         match crate::embedder::embed_batch(profile, text_chunk.to_vec()) {
             Ok(vectors) => {
-                for (id, vector) in id_chunk.iter().zip(vectors.into_iter()) {
+                // R6 zip-truncation guard: a provider that drops a row would
+                // silently mis-pair the surviving vectors with the wrong ids
+                // via the zip below. Skip this chunk — those rows land with
+                // NULL embeddings and the sweep fills them later.
+                if vectors.len() != id_chunk.len() {
+                    eprintln!(
+                        "precompute_entry_embeddings: provider returned {} vectors for {} entries; \
+                         skipping chunk to avoid mis-pairing",
+                        vectors.len(),
+                        id_chunk.len(),
+                    );
+                    continue;
+                }
+                for (id, vector) in id_chunk.iter().zip(vectors) {
                     out.insert(id.clone(), vector);
                 }
             }
@@ -1585,6 +1598,17 @@ mod tests {
         seed_edge_row(&conn, "edge_in", "ent-1", "fact_c", "fact_a");
         seed_edge_row(&conn, "edge_other", "ent-1", "fact_b", "fact_c");
 
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // fact_b and fact_c so the cascade treats their edges as purgeable.
+        // Without this, edge_out and edge_in would survive because fact_b /
+        // fact_c remain alive in `llm_wiki_entries`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id IN ('fact_b', 'fact_c')",
+            [],
+        )
+        .unwrap();
+
         let mut ctx = test_ctx("ent-1");
         let item = test_item("item-1", "fact_archive", Some("fact_a"));
         commit_fact_archive(&conn, &mut ctx, &item).unwrap();
@@ -1610,7 +1634,10 @@ mod tests {
             .unwrap();
         assert_eq!(dangling, 0, "archived entry must leave no ghost edges");
 
-        // The unrelated edge survives.
+        // edge_other (fact_b → fact_c) is not touched by the cascade from
+        // fact_a because fact_a is on neither endpoint. Under the R1
+        // contract it survives even though both its partners are soft-
+        // deleted; the broader `purge_orphan_edges` would clean it up.
         let survivors: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
@@ -2789,6 +2816,78 @@ mod tests {
             assert_eq!(count, 1, "the fact is committed");
             assert_eq!(blob, None, "with a NULL blob for the sweep to fill later");
         });
+    }
+
+    #[test]
+    fn fact_add_commits_with_null_embedding_when_provider_returns_wrong_size() {
+        // R6 length-mismatch guard: `constant8_short` returns N-1 vectors for
+        // an N-text batch. The pre-pass must skip that chunk instead of
+        // zipping the surviving vector onto the first id — the fact still
+        // commits, but with a NULL blob that the sweep will fill later.
+        temp_env::with_vars(
+            [("CURATED_EMBED_STUB", Some("constant8_short"))],
+            || {
+                let mut conn = open_in_memory().unwrap();
+                let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+                let chunk_id = seed_chunk(&conn, doc_id);
+                seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+                insert_test_proposal(
+                    &conn,
+                    "prop-embed-short",
+                    ProposalKind::UpdateEntity,
+                    Some("ent-1"),
+                    vec![NewProposalItem {
+                        id: "fact-1".into(),
+                        item_type: "fact_add".into(),
+                        target_id: None,
+                        payload: serde_json::json!({ "body": "Body that must commit cleanly." }),
+                        evidence: vec![StoredEvidenceChunk {
+                            chunk_id: Some(chunk_id),
+                            content_hash: String::new(),
+                            quote: "x".into(),
+                            start_line: Some(1),
+                            end_line: Some(1),
+                            source_kind: None,
+                        }],
+                    }],
+                    doc_id,
+                );
+
+                let result = resolve_proposal(
+                    &mut conn,
+                    "prop-embed-short",
+                    &[ItemDecision {
+                        item_id: "fact-1".into(),
+                        decision: ItemDecisionKind::Accept,
+                        edited_payload: None,
+                    }],
+                    None,
+                    ResolveOptions {
+                        auto_approve: false,
+                        embed_profile: Some(EmbedProfile::default()),
+                    },
+                );
+
+                assert!(
+                    result.is_ok(),
+                    "a wrong-sized provider response must never destroy the librarian's curation"
+                );
+                let (count, blob): (i64, Option<Vec<u8>>) = conn
+                    .query_row(
+                        "SELECT COUNT(*), MAX(embedding_blob) FROM llm_wiki_entries
+                          WHERE entity_id = 'ent-1'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(count, 1, "the fact is committed");
+                assert_eq!(
+                    blob, None,
+                    "the wrong-sized batch must not pair a vector to this row"
+                );
+            },
+        );
     }
 }
 

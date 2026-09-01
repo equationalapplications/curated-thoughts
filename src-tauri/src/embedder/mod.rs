@@ -170,18 +170,29 @@ impl Default for EmbedProfile {
 
 /// When env `CURATED_EMBED_STUB=constant8`, returns tiny deterministic vectors (pipeline integration tests / CI).
 /// Bench fixtures (`tests/scifact.rs`, etc.) still load frozen FastEmbed vectors — do not point those at Ollama.
+///
+/// `CURATED_EMBED_STUB=constant8_short` is the same shape but returns
+/// `texts.len() - 1` vectors. It exists solely for the R6 length-mismatch
+/// guard tests in `embed_sweep` and `db::commit` — a misbehaving provider that
+/// drops a row must trip the guard, not silently mis-pair vectors.
 pub fn embed_batch(profile: &EmbedProfile, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-    if matches!(
-        std::env::var("CURATED_EMBED_STUB").ok().as_deref(),
-        Some("constant8")
-    ) {
-        let mut out = Vec::with_capacity(texts.len());
-        for i in 0..texts.len() {
-            let mut v = vec![0_f32; 8];
-            v[0] = (i + 1) as f32 * 1e-4;
-            out.push(v);
+    let stub = std::env::var("CURATED_EMBED_STUB").ok();
+    if let Some(name) = stub.as_deref() {
+        if name == "constant8" || name == "constant8_short" {
+            let n = texts.len();
+            let deliver = if name == "constant8_short" {
+                n.saturating_sub(1)
+            } else {
+                n
+            };
+            let mut out = Vec::with_capacity(deliver);
+            for i in 0..deliver {
+                let mut v = vec![0_f32; 8];
+                v[0] = (i + 1) as f32 * 1e-4;
+                out.push(v);
+            }
+            return Ok(out);
         }
-        return Ok(out);
     }
     match profile {
         EmbedProfile::Local { .. } => {

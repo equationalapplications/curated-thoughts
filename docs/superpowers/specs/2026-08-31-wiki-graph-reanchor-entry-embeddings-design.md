@@ -83,13 +83,15 @@ implementer must re-run this grep and confirm the list is still complete):
 | `heal_lost_librarian_inferred` | `src-tauri/src/lib.rs:1674` | manual heal soft-delete | yes |
 | `prune_old_librarian_inferred` | `src-tauri/src/lib.rs:1717` (hard `DELETE FROM llm_wiki_entries` after 7-day window) | hard delete | yes — but see §2.1, this site is inert today |
 | `run_wiki_forget` | `src-tauri/src/lib.rs:1867` (hard `DELETE FROM llm_wiki_entries WHERE source_ref = ?1 OR source_ref = ?2`) | "forget this source file" command | yes |
-| `clear_entity_content` | `src-tauri/src/db/bundle_apply.rs:606` | OKF bundle import, entity replacement (hard `DELETE ... WHERE entity_id=?1`) | **no — already correct** |
+| `clear_entity_content` | `src-tauri/src/db/bundle_apply.rs:606` | OKF bundle import, entity replacement (hard `DELETE ... WHERE entity_id=?1`) | **yes — see note below** |
 
-`clear_entity_content` is called out because a previous draft of this spec
-called the list exhaustive and omitted it. It already deletes the entity's
-edges (`bundle_apply.rs:640`) in the same transaction as the entries delete,
-so it upholds the contract as written. Leave it alone; it is listed so the
-next reader does not conclude it was missed.
+`clear_entity_content` deletes by `entity_id = ?1` on `llm_wiki_entries` and
+`llm_wiki_tasks`, but edges are stamped with `ctx.entity_id` while pointing
+across entities (source from one, target from another). The original
+`WHERE entity_id = ?1` DELETE on `llm_wiki_edges` strands the partner's
+edges as orphan-class. The fix: replace with the heterogeneous-aware
+predicate from Part C Step 1, restricted to the imported entity's id set,
+so edges with a live endpoint anywhere in any of the three tables survive.
 
 Purge statement (per dying id, inside the site's existing transaction):
 
@@ -152,8 +154,10 @@ the first time, so the first run after release may delete a backlog of
 long-soft-deleted `librarian_inferred` rows (expected and correct — but it is
 why Part C's preflight backup matters even for users who skip the migration);
 and it hard-deletes without pushing entries-outbox deletes, unlike
-`clear_entity_content`. That outbox gap is pre-existing, out of scope here, and
-should be filed as a follow-up rather than fixed in this PR.
+`clear_entity_content`. That outbox gap is now in scope: the ms/s fix
+makes this hard-delete live for the first time, so the blast radius changed.
+`prune_old_librarian_inferred` must push one `OutboxOperation::Delete` row
+per pruned id, matching `clear_entity_content` and `wiki_forget`.
 
 ### Defense in depth — reader-side filter (ALREADY PRESENT, no work)
 
@@ -244,8 +248,11 @@ phase to hook. Required structure:
 - **Ordering:** embed → open tx → insert entry + outbox row → commit. Never a
   network call inside the transaction (lock-hold hazard per
   architectural-pitfalls).
-- **Update path:** `commit_fact_update` (`commit.rs:726`) and the facts.rs edit
-  path re-embed when `body` changes; unchanged bodies keep their blob.
+- **Update path:** `commit_fact_update` (`commit.rs:726`) and `update_fact`
+  (`facts.rs:215`) set `embedding_blob = NULL` when the row is edited. The
+  sweep then re-derives the vector from the new title/body. This delegates
+  re-embedding to the next sweep trigger (startup or `run_wiki_heal`) rather
+  than running a blocking network call inside the edit transaction.
 - **Outbox:** `wiki_fact_outbox_payload` (`commit.rs:408`) is unchanged —
   embeddings are locally derived artifacts, not replicated state. Remote
   surfaces re-derive or backfill via Part C's sweep.
@@ -331,26 +338,54 @@ also reads oddly against Part A's contract, which defines "dead" as
 `deleted_at IS NOT NULL` or absent. Adopted form:
 
 ```sql
--- Migration Step 1: purge edges with no live endpoint.
--- Live = row present AND deleted_at IS NULL. Matches Part A's contract.
+-- Migration Step 1: purge edges with no live endpoint anywhere.
+-- Heterogeneous endpoint contract: an endpoint is alive if it exists in
+-- llm_wiki_entries (deleted_at IS NULL), curated_entities (deleted_at IS NULL),
+-- or llm_wiki_tasks (deleted_at IS NULL). An edge is orphan iff an endpoint
+-- is absent from every table. Matches Part A's revised contract.
 DELETE FROM llm_wiki_edges
- WHERE NOT EXISTS (SELECT 1 FROM llm_wiki_entries s
-                    WHERE s.id = llm_wiki_edges.source_id AND s.deleted_at IS NULL)
-    OR NOT EXISTS (SELECT 1 FROM llm_wiki_entries t
-                    WHERE t.id = llm_wiki_edges.target_id AND t.deleted_at IS NULL);
+ WHERE NOT (
+       EXISTS (SELECT 1 FROM llm_wiki_entries s
+                WHERE s.id = llm_wiki_edges.source_id AND s.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM curated_entities ce
+                WHERE ce.id = llm_wiki_edges.source_id AND ce.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM llm_wiki_tasks st
+                WHERE st.id = llm_wiki_edges.source_id AND st.deleted_at IS NULL)
+ )
+ OR NOT (
+       EXISTS (SELECT 1 FROM llm_wiki_entries t
+                WHERE t.id = llm_wiki_edges.target_id AND t.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM curated_entities ce
+                WHERE ce.id = llm_wiki_edges.target_id AND ce.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM llm_wiki_tasks st
+                WHERE st.id = llm_wiki_edges.target_id AND st.deleted_at IS NULL)
+ );
 ```
 
 On today's DB both forms delete the same 41 rows (all endpoints are
-hard-absent); the `NOT EXISTS` + `deleted_at` form is the one that stays
-correct as the table evolves. (`NOT IN` → `NOT EXISTS` also sidesteps the
-classic NULL-subquery trap.) Post-condition check, must print 0:
+hard-absent), so the broader contract is a no-op here; the heterogeneous form
+is the one that stays correct as the table evolves, because the contract was
+broadened to handle the three endpoint tables. (`NOT IN` → `NOT EXISTS` also
+sidesteps the classic NULL-subquery trap.) Post-condition check, must print 0:
 
 ```sql
 SELECT COUNT(*) FROM llm_wiki_edges e
- WHERE NOT EXISTS (SELECT 1 FROM llm_wiki_entries s
-                    WHERE s.id = e.source_id AND s.deleted_at IS NULL)
-    OR NOT EXISTS (SELECT 1 FROM llm_wiki_entries t
-                    WHERE t.id = e.target_id AND t.deleted_at IS NULL);
+ WHERE NOT (
+       EXISTS (SELECT 1 FROM llm_wiki_entries s
+                WHERE s.id = e.source_id AND s.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM curated_entities ce
+                WHERE ce.id = e.source_id AND ce.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM llm_wiki_tasks st
+                WHERE st.id = e.source_id AND st.deleted_at IS NULL)
+ )
+ OR NOT (
+       EXISTS (SELECT 1 FROM llm_wiki_entries t
+                WHERE t.id = e.target_id AND t.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM curated_entities ce
+                WHERE ce.id = e.target_id AND ce.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM llm_wiki_tasks st
+                WHERE st.id = e.target_id AND st.deleted_at IS NULL)
+ );
 ```
 
 Run inside one `BEGIN IMMEDIATE` transaction. No outbox rows: edges are not
@@ -443,7 +478,5 @@ entries only.
 - **Replicating the edge table through the outbox.** Edge inserts are not
   replicated today (§2), so edge purges are not either. Starting edge CDC is a
   separate scope item with consumer-side work; file it as a follow-up.
-- Fixing `prune_old_librarian_inferred`'s missing entries-outbox deletes on hard
-  delete (pre-existing, noted in §2.1, follow-up).
 - Changing `wiki_search`'s public tool contract (its shape is already correct;
   only its results were empty).

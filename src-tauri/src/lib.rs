@@ -55,6 +55,7 @@ use pipeline::{start_pipeline, PipelineStatusEvent};
 pub use pipeline::watchdog::heartbeat::Heartbeat;
 #[cfg(feature = "test-utils")]
 pub use pipeline::{PipelineJob, PipelineWorker};
+use crate::embedder::embed_batch;
 use rusqlite::types::Value as SqlVal;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value as JsonVal};
@@ -1745,24 +1746,53 @@ fn prune_old_librarian_inferred(
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
 
     // Collect the doomed ids first: the DELETE is predicate-driven, but the edge
-    // purge needs concrete ids. Both must commit together (spec §2).
-    let doomed: Vec<String> = {
+    // purge and the outbox push both need concrete ids (and the outbox push
+    // also needs entity_id). All three must commit together (spec §2).
+    //
+    // Spec override (2026-09-01): the seconds→ms fix (commit `2333479`) made
+    // this hard-delete actually fire for the first time. Without an
+    // `OutboxOperation::Delete` push, replicas created from any prune that
+    // runs after that fix will silently retain pruned rows. The spec had this
+    // as a non-goal; the human partner upgraded it to in-scope once the ms/s
+    // fix was live. See `.superpowers/sdd/.../remediation/task-R7-brief.md`.
+    let doomed: Vec<(String, String)> = {
         let mut stmt = tx
             .prepare(
-                "SELECT id FROM llm_wiki_entries
+                "SELECT id, entity_id FROM llm_wiki_entries
                      WHERE source_type = 'librarian_inferred'
                        AND deleted_at IS NOT NULL
                        AND deleted_at < ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([cutoff], |r| r.get(0))
+            .query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(|e| e.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<String>>>()
+        rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
             .map_err(|e| e.to_string())?
     };
 
-    crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed).map_err(|e| e.to_string())?;
+    let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
+    crate::db::edge_purge::purge_edges_for_entries(&tx, &doomed_ids)
+        .map_err(|e| e.to_string())?;
+
+    // Push one OutboxOperation::Delete row per doomed entry so replicas
+    // converge on the prune. Same shape as `commit_fact_archive` /
+    // `archive_fact`. The entity_id is sourced from the doomed row itself
+    // (not assumed uniform) because pruning may span multiple entities if a
+    // future migration ever allows that; today all librarian_inferred rows
+    // share an entity in practice, but the outbox is keyed on entity and
+    // pushing the wrong one would mis-attribute the delete.
+    for (id, entity_id) in &doomed {
+        crate::db::commit::push_entries_outbox(
+            &tx,
+            entity_id,
+            id,
+            crate::db::outbox_format::OutboxOperation::Delete,
+            serde_json::json!({ "id": id }),
+            now_ms,
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     let deleted = tx
         .execute(
@@ -1780,11 +1810,12 @@ fn prune_old_librarian_inferred(
 
 /// Run a bounded null-embedding sweep against the app's live DB connection.
 ///
-/// The sweep is the only recovery path for an entry whose write-time embed
-/// failed, so it is triggered from three places (design spec §3): after each
-/// commit batch, once at startup, and from `run_wiki_heal`. Its
-/// `embedding_blob IS NULL` predicate makes a no-op run nearly free, so
-/// over-triggering is cheap and under-triggering loses embeddings.
+/// The sweep is the recovery path for entries whose write-time embed did not
+/// run or failed (Part B's `precompute_entry_embeddings` returns an empty map
+/// on provider error). It is triggered from two places (design spec §3):
+/// once at startup and from `run_wiki_heal`. Its `embedding_blob IS NULL`
+/// predicate makes a no-op run nearly free, so over-triggering is cheap and
+/// under-triggering loses embeddings.
 ///
 /// Errors from the embedding provider are absorbed by the sweep itself and
 /// reported in `SweepReport::failed`; this returns `Err` only if the database
@@ -1795,9 +1826,56 @@ pub(crate) fn run_embedding_sweep(db_state: &DbState) -> Result<embed_sweep::Swe
     let paths = retrieval::resolve_brain_paths();
     let profile = retrieval::load_embed_profile(&paths.config_path).map_err(|e| e.to_string())?;
 
-    let guard = db_state.0.lock().unwrap();
-    embed_sweep::sweep_null_embeddings(&guard.0, &profile, MAX_BATCHES_PER_RUN)
-        .map_err(|e| e.to_string())
+    // Critical: do NOT hold `db_state.0` across `embed_batch` (the blocking
+    // network round-trip) — every Tauri DB command queues behind this mutex,
+    // and a long embed would starve proposal approval, the heal path, and
+    // user-initiated reads. The invariant is: lock only for the SELECT and
+    // UPDATE halves of a batch, drop it before the network call.
+    let mut report = embed_sweep::SweepReport::default();
+
+    for _ in 0..MAX_BATCHES_PER_RUN {
+        let pending: Vec<(String, String, String)> = {
+            let guard = db_state.0.lock().unwrap();
+            embed_sweep::pending_null_batch(&guard.0, embed_sweep::SWEEP_BATCH_SIZE)
+                .map_err(|e| e.to_string())?
+        };
+        if pending.is_empty() {
+            break;
+        }
+
+        let texts: Vec<String> = pending
+            .iter()
+            .map(|(_, title, body)| embed_sweep::embed_text_for_entry(title, body))
+            .collect();
+
+        // Lock is NOT held here — other Tauri DB commands may interleave.
+        let vectors = match embed_batch(&profile, texts) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "embed_sweep: batch of {} entries failed to embed: {e}",
+                    pending.len()
+                );
+                report.failed += pending.len();
+                // Stop rather than hammering a provider that is already failing.
+                break;
+            }
+        };
+
+        let filled = {
+            let guard = db_state.0.lock().unwrap();
+            embed_sweep::apply_embeddings(&guard.0, &pending, &vectors)
+                .map_err(|e| e.to_string())?
+        };
+        report.filled += filled;
+    }
+
+    report.remaining_null = {
+        let guard = db_state.0.lock().unwrap();
+        embed_sweep::count_null_entries(&guard.0).map_err(|e| e.to_string())?
+    };
+
+    Ok(report)
 }
 
 #[tauri::command]
@@ -2927,6 +3005,13 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
     tauri::test::mock_builder()
         .manage(DbState(std::sync::Mutex::new(db)))
         .manage(VaultConfigState(std::sync::Mutex::new(config)))
+        // Registered so commands that take `State<EmbedProfileState>` (e.g.,
+        // `add_entity_fact_cmd` after Task R3) can extract it. Defaults to the
+        // same shape `setup` initializes in production; tests that need a
+        // different profile mutate it through `app.state::<EmbedProfileState>()`.
+        .manage(EmbedProfileState(std::sync::Mutex::new(
+            crate::embedder::EmbedProfile::default(),
+        )))
         // No background pipeline thread: integration tests invoke DB-only commands;
         // pipeline work is covered by `PipelineWorker` tests in `tests/pipeline.rs`.
         .manage(PipelineHolder(std::sync::Mutex::new(None)))
@@ -3350,22 +3435,29 @@ pub fn run() {
                     }
                 });
 
-                // Post-schema-guard null-embedding sweep (spec §3).
-                // Errors here are normal offline conditions (provider
-                // unreachable, missing config); the sweep itself absorbs
-                // provider failures into `SweepReport::failed` and only
-                // returns `Err` when the DB is unreachable.
-                let db_state = app.state::<DbState>();
-                match run_embedding_sweep(&db_state) {
-                    Ok(report) if report.filled > 0 || report.failed > 0 => {
-                        eprintln!(
-                            "startup embedding sweep: filled {}, failed {}, {} still null",
-                            report.filled, report.failed, report.remaining_null
-                        );
+                // Post-schema-guard null-embedding sweep (spec §3). Errors
+                // here are normal offline conditions (provider unreachable,
+                // missing config); the sweep itself absorbs provider failures
+                // into `SweepReport::failed` and only returns `Err` when the
+                // DB is unreachable. Runs on a background thread so up to 8
+                // remote-embedding round-trips never freeze the wry/window
+                // event loop on first launch. The mutex is locked only for
+                // each DB read/write half (per the `run_embedding_sweep`
+                // contract) — never across the network call.
+                let app_handle = app.app_handle().clone();
+                std::thread::spawn(move || {
+                    let db_state = app_handle.state::<DbState>();
+                    match run_embedding_sweep(&db_state) {
+                        Ok(report) if report.filled > 0 || report.failed > 0 => {
+                            eprintln!(
+                                "startup embedding sweep: filled {}, failed {}, {} still null",
+                                report.filled, report.failed, report.remaining_null
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("startup embedding sweep skipped: {e}"),
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("startup embedding sweep skipped: {e}"),
-                }
+                });
 
                 Ok(())
             }
@@ -4664,7 +4756,13 @@ mod maintenance_command_tests {
             "documents/old.md",
             Some(now_ms - eight_days_ms),
         );
-        insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", None);
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // live-a (with a recent timestamp so it is NOT prune-eligible —
+        // prune only matches `deleted_at < cutoff`) so the cascade treats
+        // edge_doomed as purgeable. Without this, edge_doomed would survive
+        // because live-a remains alive in `llm_wiki_entries`.
+        insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", Some(now_ms));
         insert_wiki_entry_ms(&conn, "live-b", "librarian_inferred", "documents/b.md", None);
 
         conn.execute(
@@ -4681,7 +4779,7 @@ mod maintenance_command_tests {
         .unwrap();
 
         let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, 1, "only old-inferred is older than 7 days");
 
         let remaining: Vec<String> = {
             let mut stmt = conn
@@ -4697,19 +4795,161 @@ mod maintenance_command_tests {
         );
     }
 
+    /// R7: each hard-deleted `librarian_inferred` row must produce exactly
+    /// one `llm_wiki_outbox` row with `operation = 'Delete'`, keyed by the
+    /// doomed row's entity_id (so replicas converge on the prune). Rows that
+    /// are too fresh, or that are not `librarian_inferred`, must NOT emit
+    /// outbox rows.
+    #[test]
+    fn prune_old_librarian_inferred_pushes_delete_outbox_per_pruned_id() {
+        let conn = open_in_memory().unwrap();
+        let now_ms: i64 = 1_756_000_000_000;
+        let eight_days_ms = 8 * 86_400 * 1000;
+        let one_day_ms = 86_400 * 1000;
+
+        // Two doomed librarian_inferred rows that must each produce an outbox Delete.
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred-1",
+            "librarian_inferred",
+            "documents/old1.md",
+            Some(now_ms - eight_days_ms),
+        );
+        insert_wiki_entry_ms(
+            &conn,
+            "old-inferred-2",
+            "librarian_inferred",
+            "documents/old2.md",
+            Some(now_ms - eight_days_ms),
+        );
+        // Fresh librarian_inferred row: must NOT be pruned and must NOT produce an outbox row.
+        insert_wiki_entry_ms(
+            &conn,
+            "fresh-inferred",
+            "librarian_inferred",
+            "documents/fresh.md",
+            Some(now_ms - one_day_ms),
+        );
+        // Old non-librarian row: must NOT be pruned and must NOT produce an outbox row.
+        insert_wiki_entry_ms(
+            &conn,
+            "old-immutable",
+            "immutable_document",
+            "documents/immutable.md",
+            Some(now_ms - eight_days_ms),
+        );
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+        assert_eq!(
+            deleted, 2,
+            "only the two old librarian_inferred rows should be deleted"
+        );
+
+        // Outbox: exactly two entries-table Delete rows, one per pruned id,
+        // both carrying entity_id = 'ent-1' (the entity the doomed rows lived
+        // in). No rows for the fresh row or the immutable row.
+        let outbox_rows: Vec<(String, String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_id, entity_id, operation, payload
+                     FROM llm_wiki_outbox
+                     WHERE table_name = 'entries'
+                     ORDER BY record_id",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+
+        assert_eq!(
+            outbox_rows.len(),
+            2,
+            "expected exactly two entries-table outbox rows, got: {outbox_rows:?}"
+        );
+
+        let expected: std::collections::BTreeMap<String, (String, String)> = [
+            (
+                "old-inferred-1".to_string(),
+                ("ent-1".to_string(), r#"{"id":"old-inferred-1"}"#.to_string()),
+            ),
+            (
+                "old-inferred-2".to_string(),
+                ("ent-1".to_string(), r#"{"id":"old-inferred-2"}"#.to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let actual: std::collections::BTreeMap<String, (String, String)> = outbox_rows
+            .into_iter()
+            .map(|(record_id, entity_id, operation, payload)| {
+                assert_eq!(
+                    operation, "DELETE",
+                    "prune must push DELETE outbox rows, got {operation} for {record_id}"
+                );
+                (record_id, (entity_id, payload))
+            })
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "outbox rows must be Delete keyed by doomed id with matching entity_id"
+        );
+
+        // Belt-and-braces: the doomed rows are gone, the survivors remain.
+        let remaining_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM llm_wiki_entries ORDER BY id")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(
+            remaining_ids,
+            vec!["fresh-inferred".to_string(), "old-immutable".to_string()],
+            "only the pruned rows should be gone; the fresh and immutable rows stay"
+        );
+    }
+
     #[test]
     fn heal_lost_librarian_inferred_purges_edges_of_soft_deleted_entries() {
         let conn = open_in_memory().unwrap();
-        // An entry whose source_ref points at a document that does not exist in
-        // the DB is "lost" and gets soft-deleted by the heal pass.
+        // An entry whose source_ref points at a document that does not exist
+        // in the `documents` table is "lost" and gets soft-deleted by the
+        // heal pass. Use a legacy path shape (not the JSON `{"doc_path":...}`
+        // shape) because `source_ref_is_still_grounded` treats a JSON shape
+        // without an `evidence` field as already-grounded; the legacy path
+        // branch is what the heal's "demonstrably stale" policy actually
+        // catches in this fixture.
         insert_wiki_entry_ms(
             &conn,
             "lost-entry",
             "librarian_inferred",
-            "{\"doc_path\":\"documents/vanished.md\"}",
+            "documents/vanished.md",
             None,
         );
         insert_wiki_entry_ms(&conn, "live-a", "librarian_inferred", "documents/a.md", None);
+
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // live-a so the cascade treats edge_doomed as purgeable, and so live-a
+        // is excluded from the heal's own SELECT (which filters
+        // `deleted_at IS NULL`) — without the exclusion, live-a would also
+        // be considered ungrounded and the heal would report `healed = 2`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'live-a'",
+            [],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)

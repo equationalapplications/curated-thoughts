@@ -213,8 +213,11 @@ pub fn update_fact(
         bail!("fact not found or archived: {fact_id}");
     };
 
+    // Wipe the blob so the sweep re-derives it; mirrors `commit_fact_update` (commit 207477a).
     tx.execute(
-        "UPDATE llm_wiki_entries SET title = ?1, body = ?2, updated_at = ?3 WHERE id = ?4",
+        "UPDATE llm_wiki_entries
+            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = NULL
+          WHERE id = ?4",
         params![title, body, now_ms, fact_id],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
@@ -431,6 +434,50 @@ mod tests {
     }
 
     #[test]
+    fn update_fact_clears_embedding_blob_so_sweep_rederives_it() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let mut conn = open_in_memory().unwrap();
+            let entity_id = make_entity(&conn);
+            let profile = crate::embedder::EmbedProfile::default();
+
+            // Seed a fact with a real (non-NULL) embedding blob.
+            let fact = add_fact_with_profile(
+                &mut conn,
+                &entity_id,
+                "Original body.",
+                Some(&profile),
+            )
+            .unwrap();
+            let blob_before: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
+                    [&fact.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                blob_before.is_some(),
+                "precondition: seeded row must have a non-NULL blob",
+            );
+
+            // Edit the fact — body changes, blob must be wiped.
+            update_fact(&mut conn, &entity_id, &fact.id, "Edited body.").unwrap();
+
+            let blob_after: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
+                    [&fact.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                blob_after, None,
+                "update_fact must NULL embedding_blob so the sweep re-derives it",
+            );
+        });
+    }
+
+    #[test]
     fn update_fact_rejects_unknown_or_archived_fact() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
@@ -474,6 +521,17 @@ mod tests {
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
              VALUES ('edge_in', ?1, ?2, ?3, 'related_to', 100)",
             params![entity_id, other.id, fact.id],
+        )
+        .unwrap();
+
+        // R1 (remediation): the new heterogeneous contract only purges edges
+        // whose partner is also dead in every endpoint table. Soft-delete
+        // `other` so both seeded edges have dead partners and are
+        // purgeable. Without this, both edges would survive because `other`
+        // remains alive in `llm_wiki_entries`.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = ?1",
+            params![other.id],
         )
         .unwrap();
 
