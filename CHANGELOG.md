@@ -1,3 +1,12 @@
+## [1.40.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.40.0...v1.40.1) (2026-09-01)
+
+### Bug Fixes
+
+* **wiki:** push OutboxOperation::Delete rows from wiki_forget ([#132](https://github.com/equationalapplications/curated-thoughts/issues/132)) ([ef10efe](https://github.com/equationalapplications/curated-thoughts/commit/ef10efe0f972dd10ed2c22b79d2b64e7fc2c8b87))
+* **wiki:** resolve BFS neighbors in the walk's own node space ([#134](https://github.com/equationalapplications/curated-thoughts/issues/134)) ([55bc37a](https://github.com/equationalapplications/curated-thoughts/commit/55bc37a9aa6073d30baa3410cd3bc50b2d8ec610))
+* **wiki:** search all live entries, and resolve traversal seeds across spaces ([#133](https://github.com/equationalapplications/curated-thoughts/issues/133), [#134](https://github.com/equationalapplications/curated-thoughts/issues/134)) ([1f255e1](https://github.com/equationalapplications/curated-thoughts/commit/1f255e131aa0c3dfee2d12e8ea7d27d171607a98))
+* **wiki:** walk entity-anchored edges in wiki_traverse_graph ([#134](https://github.com/equationalapplications/curated-thoughts/issues/134)) ([909907d](https://github.com/equationalapplications/curated-thoughts/commit/909907db0ccd8376416cc26300d86d25e501416f))
+
 ## [1.40.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.39.0...v1.40.0) (2026-09-01)
 
 ### Features
