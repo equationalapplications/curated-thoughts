@@ -3,23 +3,68 @@ use clap::{Parser, Subcommand};
 use curated_thoughts_tools::cli_common::{self, print_json};
 use serde_json::json;
 
+/// Compare two path prefixes, treating the verbatim (`\\?\`) forms that
+/// `std::fs::canonicalize` emits on Windows as equal to the plain forms
+/// `dirs::home_dir` returns. Without this, a canonicalized
+/// `\\?\C:\Users\me\.ssh` fails to match a `C:\Users\me` home prefix —
+/// `Prefix::VerbatimDisk(b'C')` and `Prefix::Disk(b'C')` are distinct values —
+/// so the absolute path would print verbatim, which is the exact leak
+/// `redact_home` exists to prevent. Drive letters and share names compare
+/// ASCII-case-insensitively, matching Windows' own path semantics.
+///
+/// `std::path::Prefix` is available on every platform even though
+/// `Path::components` only ever yields one on Windows, so this stays compiled
+/// and unit-testable on Unix (see `prefix_eq_*` tests).
+fn prefix_eq(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
+    use std::path::Prefix::{Disk, VerbatimDisk, VerbatimUNC, UNC};
+    match (a, b) {
+        (Disk(x) | VerbatimDisk(x), Disk(y) | VerbatimDisk(y)) => x.eq_ignore_ascii_case(&y),
+        (
+            UNC(server_a, share_a) | VerbatimUNC(server_a, share_a),
+            UNC(server_b, share_b) | VerbatimUNC(server_b, share_b),
+        ) => server_a.eq_ignore_ascii_case(server_b) && share_a.eq_ignore_ascii_case(share_b),
+        _ => a == b,
+    }
+}
+
+/// Compare one component of the home prefix. `Prefix` components go through
+/// [`prefix_eq`] so path *representation* differences do not defeat the match.
+/// On Windows the remaining components compare ASCII-case-insensitively,
+/// because `canonicalize` returns the on-disk casing while `dirs::home_dir`
+/// returns `%USERPROFILE%`'s and NTFS treats the two as the same directory; on
+/// Unix they keep exact comparison, so `/Users/Me` and `/users/me` stay the
+/// distinct directories they really are.
+fn component_eq(a: &std::path::Component<'_>, b: &std::path::Component<'_>) -> bool {
+    use std::path::Component;
+    match (a, b) {
+        (Component::Prefix(a), Component::Prefix(b)) => prefix_eq(a.kind(), b.kind()),
+        _ if cfg!(windows) => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
+        _ => a == b,
+    }
+}
+
 /// Substitute the user's home directory with `~` so absolute paths that
 /// include it (e.g. `/Users/me/.ssh`) do not get logged verbatim when stdout
 /// is captured (CI logs, system journals). Component-aware so it accepts
-/// native Windows path separators (`\` on Windows, `/` on Unix) without a
-/// platform branch in this crate. No-op outside the home directory.
+/// native Windows path separators (`\` on Windows, `/` on Unix) and the
+/// verbatim prefixes `canonicalize` produces there, without a `#[cfg]` branch
+/// in this crate. No-op outside the home directory.
 fn redact_home(target: &str) -> String {
     let Some(home) = dirs::home_dir() else {
         return target.to_string();
     };
     // Component-wise comparison: walk the home prefix and require every
     // component to match in order. `Path::components` handles both `/` and
-    // `\` separators, so this works on Windows and Unix without a #cfg.
+    // `\` separators, and `component_eq` absorbs the Windows verbatim-prefix
+    // and casing differences, so this works on Windows and Unix without a #cfg.
     let home_components: Vec<_> = home.components().collect();
     let target_path = std::path::Path::new(target);
     let target_components: Vec<_> = target_path.components().collect();
     if target_components.len() < home_components.len()
-        || target_components[..home_components.len()] != home_components[..]
+        || !home_components
+            .iter()
+            .zip(&target_components)
+            .all(|(h, t)| component_eq(h, t))
     {
         return target.to_string();
     }
@@ -565,14 +610,23 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
 
     if list {
         for entry in &cfg.trusted_links {
-            // Substitute `$HOME` with `~` so the ledger listing does not
-            // log a sensitive absolute path (e.g. ~/.ssh) when stdout is
-            // captured into CI logs or system journals.
-            // codeql[rust/cleartext-logging]: `entry.target` is sanitised by
-            // `redact_home` above before reaching stdout — the value printed
-            // either has the `$HOME` prefix collapsed to `~` or is the
-            // original path (no other prefixes are considered sensitive).
-            println!("{} -> {}", entry.link, redact_home(&entry.target));
+            // Both fields on this line are sanitised by `redact_home` before
+            // printing: the `$HOME` prefix is collapsed to `~`, so the values
+            // this statement writes cannot contain an absolute path under the
+            // home (e.g. `~/.ssh/keys`). `entry.link` is sanitised too, not
+            // just `entry.target`: `TrustedLink::link` is *documented* as
+            // vault-relative, but `BrainConfig::load_lenient` deserialises it
+            // with no path-shape check, so a hand-edited config can put an
+            // absolute path there (tracked as #140). CodeQL
+            // rust/cleartext-logging flags this anyway (it does not model
+            // `redact_home` as a sanitiser); the persisted alert dismissed as
+            // a false positive citing this sanitiser. Inline `// codeql[...]`
+            // suppression does NOT work for Rust — do not re-add it.
+            println!(
+                "{} -> {}",
+                redact_home(&entry.link),
+                redact_home(&entry.target)
+            );
         }
         return Ok(0);
     }
@@ -581,11 +635,11 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         let before = cfg.trusted_links.len();
         cfg.trusted_links.retain(|e| e.link != target_link);
         if cfg.trusted_links.len() == before {
-            eprintln!("error: {target_link} is not in the ledger");
+            eprintln!("error: {} is not in the ledger", redact_home(&target_link));
             return Ok(1);
         }
         cfg.write(&paths)?;
-        println!("revoked {target_link}");
+        println!("revoked {}", redact_home(&target_link));
         return Ok(0);
     }
 
@@ -601,6 +655,28 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         Some(v) => std::path::PathBuf::from(v),
         None => bail!("no vault configured; run `curated-thoughts --onboard` first"),
     };
+    // Refuse a `link` that is not vault-relative, *before* any join. Both
+    // `vault_root.join(&link)` below and `approve_into`'s own
+    // `vault_root.join(link)` (src-tauri/src/trusted_links.rs) **replace** the
+    // base when the argument is absolute — or, on Windows, merely carries a
+    // prefix (`C:foo`) or a root (`\foo`). So `ct trust /Users/me/.ssh` would
+    // escape the vault entirely, classify a path the vault does not contain,
+    // and on a `Pending` verdict persist that absolute string into the ledger
+    // as `TrustedLink::link`, which every consumer documents as vault-relative
+    // — reaching the #140 gap from the CLI instead of only by hand-editing.
+    // Rejecting here also keeps every `{link}` echo below structurally
+    // incapable of carrying a `$HOME`-rooted absolute path.
+    let first_component = std::path::Path::new(&link).components().next();
+    if matches!(
+        first_component,
+        Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)
+    ) {
+        eprintln!(
+            "error: link must be vault-relative, got {}",
+            redact_home(&link)
+        );
+        return Ok(1);
+    }
     // Canonicalize so classify_link's path comparisons see matching
     // prefixes (macOS /var → /private/var is the common case).
     let vault_root = std::fs::canonicalize(&vault_root).unwrap_or(vault_root);
@@ -612,12 +688,12 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
     let meta = match std::fs::symlink_metadata(&link_path) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: no such link {link}: {e}");
+            eprintln!("error: no such link {}: {e}", redact_home(&link));
             return Ok(1);
         }
     };
     if !meta.file_type().is_symlink() {
-        eprintln!("error: {link} is not a symlink");
+        eprintln!("error: {} is not a symlink", redact_home(&link));
         return Ok(1);
     }
 
@@ -631,11 +707,16 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             let target_display = std::fs::canonicalize(&link_path)
                 .map(|t| t.display().to_string())
                 .unwrap_or_else(|_| link_path.display().to_string());
-            eprintln!("refused: {link} -> {target_display} ({})", reason.message());
+            eprintln!(
+                "refused: {} -> {} ({})",
+                redact_home(&link),
+                redact_home(&target_display),
+                reason.message()
+            );
             Ok(1)
         }
         Ok(LinkVerdict::Trusted) => {
-            println!("{link} is already trusted");
+            println!("{} is already trusted", redact_home(&link));
             Ok(0)
         }
         Ok(LinkVerdict::Pending) => {
@@ -643,7 +724,11 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             let target_display = std::fs::canonicalize(&link_path)
                 .map(|t| t.display().to_string())
                 .unwrap_or_else(|_| link_path.display().to_string());
-            println!("trusted {link} -> {target_display}");
+            println!(
+                "trusted {} -> {}",
+                redact_home(&link),
+                redact_home(&target_display)
+            );
             Ok(0)
         }
         Err(e) => {
@@ -655,7 +740,7 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::redact_home;
+    use super::{prefix_eq, redact_home};
 
     /// Exact match on the home directory itself collapses to `~`.
     #[test]
@@ -701,5 +786,81 @@ mod tests {
             let sibling = "/Users/example-home-secrets/file.txt";
             assert_eq!(redact_home(sibling), sibling);
         });
+    }
+
+    /// `std::fs::canonicalize` returns extended-length (`\\?\C:\...`) paths on
+    /// Windows, whose leading component is `Prefix::VerbatimDisk`, while
+    /// `dirs::home_dir` returns a plain `Prefix::Disk` path. Before
+    /// `prefix_eq`, those compared unequal and a canonicalized home path
+    /// printed verbatim — the leak `redact_home` exists to prevent, on a
+    /// platform `build.yml` ships (`windows-latest`). `std::path::Prefix` is
+    /// constructible on every platform, so this asserts the normalization
+    /// itself on the dev's and CI's Unix hosts too (CodeRabbit, PR #129).
+    #[test]
+    fn prefix_eq_treats_a_verbatim_disk_as_the_plain_disk() {
+        use std::path::Prefix::{Disk, VerbatimDisk};
+        assert!(prefix_eq(VerbatimDisk(b'C'), Disk(b'C')));
+        // Drive letters are case-insensitive on Windows.
+        assert!(prefix_eq(VerbatimDisk(b'C'), Disk(b'c')));
+        assert!(prefix_eq(Disk(b'c'), VerbatimDisk(b'C')));
+        // Different drives must still be different roots.
+        assert!(!prefix_eq(VerbatimDisk(b'C'), Disk(b'D')));
+    }
+
+    /// The UNC pair normalizes the same way, case-insensitively per share.
+    #[test]
+    fn prefix_eq_treats_a_verbatim_unc_as_the_plain_unc() {
+        use std::ffi::OsStr;
+        use std::path::Prefix::{VerbatimUNC, UNC};
+        assert!(prefix_eq(
+            VerbatimUNC(OsStr::new("server"), OsStr::new("share")),
+            UNC(OsStr::new("SERVER"), OsStr::new("Share")),
+        ));
+        assert!(!prefix_eq(
+            VerbatimUNC(OsStr::new("server"), OsStr::new("share")),
+            UNC(OsStr::new("server"), OsStr::new("other")),
+        ));
+    }
+
+    /// End-to-end over *actual* `canonicalize` output for the real home dir,
+    /// rather than a hand-written string: on Windows this is the
+    /// `\\?\`-prefixed form, which must still collapse to `~`.
+    ///
+    /// Skipped when `canonicalize` resolved a symlink somewhere in `$HOME`
+    /// (the two paths then name the same directory by genuinely different
+    /// components, which no prefix normalization can bridge — that is the
+    /// macOS `/var` → `/private/var` class of problem, handled at the call
+    /// site by canonicalizing `vault_root`, not here).
+    #[test]
+    fn redact_home_collapses_actual_canonicalize_output_for_home() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let Ok(canonical) = std::fs::canonicalize(&home) else {
+            return;
+        };
+        // Everything below the prefix/root must name the same components; only
+        // the *representation* of the root may differ for this to be a fair
+        // test of `component_eq`.
+        let tail = |p: &std::path::Path| {
+            p.components()
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        std::path::Component::Prefix(_) | std::path::Component::RootDir
+                    )
+                })
+                .map(|c| c.as_os_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        if tail(&canonical) != tail(&home) {
+            return;
+        }
+        assert_eq!(
+            redact_home(&canonical.display().to_string()),
+            "~",
+            "canonicalize output for the home dir must redact to `~`; got {}",
+            canonical.display()
+        );
     }
 }

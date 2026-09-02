@@ -10,10 +10,13 @@
 //! duplication so `ct watch` can lock the vault when no desktop is
 //! running.
 //!
-//! Both implementations use `fs4::FileExt::lock_exclusive`, which
-//! works on Linux (flock), macOS (fcntl), and Windows (LockFileEx).
-//! Keeping the lock-file path and semantics identical ensures the two
-//! lockers see each other across a desktop/CLI hand-off.
+//! Both implementations use the **non-blocking**
+//! `fs4::FileExt::try_lock_exclusive`, which works on Linux (flock),
+//! macOS (fcntl), and Windows (LockFileEx). Contention surfaces as
+//! `Err(AlreadyLocked)` / `Err(WouldBlock)`, not `Ok(false)` — see the
+//! API note on `try_lock_exclusive` below. Keeping the lock-file path
+//! and semantics identical ensures the two lockers see each other
+//! across a desktop/CLI hand-off.
 
 use anyhow::{anyhow, Result};
 use fs4::FileExt;
@@ -39,11 +42,16 @@ impl VaultLock {
     /// existing holder (when the platform exposes one).
     pub fn acquire(vault: &Path) -> Result<Self> {
         let lock_path = vault.join(".curated_thoughts.lock");
-        // Create the lock file if missing; we open for read+write so
-        // both `try_lock_exclusive` and the held handle are valid.
+        // Open for read+write with create-if-missing, but DO NOT truncate.
+        // If `lock_path` happens to be a symlink, opening it for write would
+        // follow the link and truncate its target — opening any file in a
+        // location a principal can race into would let starting the watcher
+        // destroy content the application didn't otherwise touch. The OS
+        // lock (try_lock_exclusive) holds without modifying the file's
+        // contents, so truncate is unnecessary.
         let file = fs::OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .write(true)
             .read(true)
             .open(&lock_path)
@@ -125,6 +133,43 @@ mod tests {
             second.is_ok(),
             "second acquire after drop must succeed, got {:?}",
             second
+        );
+    }
+
+    /// A symlinked lock path must not have its target truncated by
+    /// `acquire`. The lock is advisory and held on the open handle —
+    /// the file's bytes are never read or written — so opening with
+    /// `truncate(true)` would destroy an attacker- or accident-planted
+    /// symlink target for no benefit. Mirrors the fix `6c1113e` made in
+    /// `src-tauri/src/watcher/fs_watcher.rs`.
+    ///
+    /// Unix-only: `std::os::windows::fs::symlink_file` requires
+    /// Developer Mode or `SeCreateSymbolicLinkPrivilege`, which we
+    /// cannot rely on in a developer environment. `#[cfg(unix)]` is on
+    /// this test alone so the sibling tests still run on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn vault_lock_does_not_truncate_symlink_target() {
+        let tmp = TempDir::new().unwrap();
+        let canary = tmp.path().join("canary.txt");
+        let contents = "do not truncate me";
+        fs::write(&canary, contents).unwrap();
+
+        std::os::unix::fs::symlink(&canary, tmp.path().join(".curated_thoughts.lock")).unwrap();
+
+        {
+            // Deliberately NOT `.expect(...)`: if a later hardening pass
+            // makes `acquire` reject a symlinked lock path outright, it
+            // returns `Err`, the canary is still intact, and this test
+            // must keep passing unmodified. The only assertion that
+            // matters is the canary's contents below.
+            let _guard = VaultLock::acquire(tmp.path());
+        }
+
+        assert_eq!(
+            fs::read_to_string(&canary).unwrap(),
+            contents,
+            "acquire must not truncate the symlink's target"
         );
     }
 }
