@@ -21,7 +21,7 @@ clap = { version = "4", features = ["derive"] }
 # transitive resolution through `tauri_app_lib`. Both versions match the
 # pins in `src-tauri/Cargo.toml` to keep the workspace on a single
 # notification backend and a single SHA-2 implementation.
-notify = "6"
+notify = "8"
 sha2 = "0.11"
 # Home-dir resolution for the trusted-links ledger. Matches the version
 # pinned in src-tauri/Cargo.toml so behavior is identical between the
