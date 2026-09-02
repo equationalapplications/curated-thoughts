@@ -909,7 +909,10 @@ mod tests {
              VALUES ('d', 'ent_1', 'D', '', 0, 0, 'anchor')",
             [],
         );
-        assert!(bad.is_err(), "CHECK must reject a tier outside fact/wisdom/NULL");
+        assert!(
+            bad.is_err(),
+            "CHECK must reject a tier outside fact/wisdom/NULL"
+        );
     }
 
     #[test]
@@ -923,7 +926,11 @@ mod tests {
         )
         .unwrap();
         let tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id = 'a'", [], |r| r.get(0))
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id = 'a'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(tier, None);
     }

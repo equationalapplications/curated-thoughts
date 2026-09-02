@@ -55,19 +55,22 @@ pub struct WikiConfig {
 
 /// Unified configuration for a brain directory.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
 pub struct BrainConfig {
     /// User's vault root path (e.g., ~/Curated-Thoughts).
     pub vault_path: Option<String>,
     /// Embedding model profile (local Ollama or external).
     pub embed_profile: Option<EmbedProfile>,
     /// Whether the vault has migrated to v2 (immutable-source-files folder structure).
+    #[serde(default)]
     pub migrated_to_v2: bool,
     /// LLM generation config (model, provider, base_url).
+    #[serde(default)]
     pub generation: GenerationConfig,
     /// Embedding config (model, provider, base_url).
+    #[serde(default)]
     pub embedding: EmbeddingConfig,
     /// Privacy mode and settings.
+    #[serde(default)]
     pub privacy: PrivacyConfig,
     /// User's ontology selection (which schema the wiki engine is seeded with).
     #[serde(default)]
@@ -667,6 +670,7 @@ impl BrainConfig {
         obj.insert("embedding".to_string(), emb_value);
         obj.insert("privacy".to_string(), priv_value);
         obj.insert("ontology".to_string(), ont_value);
+        obj.insert("wiki".to_string(), serde_json::to_value(&self.wiki)?);
         obj.insert(
             "trusted_links".to_string(),
             serde_json::to_value(&self.trusted_links)?,

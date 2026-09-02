@@ -601,9 +601,15 @@ mod dispatch_tests {
         let conn = test_conn();
         seed_tiered_entries(&conn);
         let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
-        let mut got: Vec<_> = hits.iter().map(|h| (h.id.as_str(), h.tier.as_deref())).collect();
+        let mut got: Vec<_> = hits
+            .iter()
+            .map(|h| (h.id.as_str(), h.tier.as_deref()))
+            .collect();
         got.sort();
-        assert_eq!(got, vec![("f1", Some("fact")), ("n1", None), ("w1", Some("wisdom"))]);
+        assert_eq!(
+            got,
+            vec![("f1", Some("fact")), ("n1", None), ("w1", Some("wisdom"))]
+        );
     }
 
     #[test]
@@ -629,9 +635,14 @@ mod dispatch_tests {
         // Tier and partition are orthogonal — neither substitutes for the other.
         let conn = test_conn();
         seed_tiered_entries(&conn);
-        let hits =
-            dispatch_wiki_search(&conn, &[1.0], Some(vec!["ent_1".into()]), Some("fact".into()), None)
-                .unwrap();
+        let hits = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            Some(vec!["ent_1".into()]),
+            Some("fact".into()),
+            None,
+        )
+        .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "f1");
 
