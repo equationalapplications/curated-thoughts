@@ -111,8 +111,8 @@ Three conclusions:
    security patch is the wrong PR to absorb editor-selection behavior risk.
 
 **Target: 3.30.6** — the newest patch in the 3.30 line. It contains both
-security fixes, stays within BlockNote's declared `^3.29.2` range, carries no
-API or behavior change, and satisfies Dependabot's `first_patched_version >=
+security fixes, stays within BlockNote's declared `^3.29.2` range, introduces
+no public API changes, and satisfies Dependabot's `first_patched_version >=
 3.30.4` so alert #50 still auto-closes. All 12 packages are confirmed published
 at 3.30.6.
 
@@ -237,7 +237,7 @@ entries (`@tiptap/core@3.30.2(@tiptap/pm@3.30.2)` → `...3.30.6(...)`).
   already allows; semver risk is minimal. Two of the four intervening patches
   are security fixes; the other two are bug fixes with no API surface change.
 - **The one behavioral surface worth smoking** is 3.30.6's nested-list Markdown
-  serialization change — covered by acceptance criterion 8.
+  serialization change — covered by acceptance criterion 9.
 - **Release-age policy is honored, not bypassed:** the exclude list is the
   repo's own documented mechanism for shipping pinned versions before the
   14-day window, used for the exact same tiptap packages at 3.30.2.
@@ -274,6 +274,8 @@ single PR, three files, mechanical edits plus regenerated lockfile.
 2. Apply §3.1 (package.json overrides + removal-reminder comment) and §3.2
    (workspace exclude swap + section-comment fix).
 3. `pnpm install --lockfile-only` → regenerate `pnpm-lock.yaml`.
-4. Run acceptance criteria 1–7; fix anything that surfaces.
+4. Run acceptance criteria 1–7, then criterion 9 (the manual editor smoke —
+   it is the only real exercise of the editor, since every BlockNote test in
+   the suite mocks the library); fix anything that surfaces.
 5. Commit: `fix(deps): bump @tiptap/* 3.30.2 → 3.30.6 (GHSA-cp6q-959q-f8rh, Dependabot #50)` — regular merge commit on merge, per house convention (no squash).
 6. Open PR with this spec linked; merge when green; verify criterion 8 the next day.
