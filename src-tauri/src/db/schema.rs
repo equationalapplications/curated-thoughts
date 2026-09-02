@@ -350,3 +350,19 @@ CREATE INDEX IF NOT EXISTS idx_llm_wiki_entries_tier
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (16);
 ";
+
+/// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
+///
+/// The V16 CHECK is the database-level floor; this is the same set expressed
+/// once for every write boundary above it, so a caller gets a diagnostic
+/// instead of a constraint violation. Adding a tier means editing the CHECK in
+/// [`MIGRATION_V16`] and this slice together — nothing else hard-codes the set.
+pub const VALID_TIERS: &[&str] = &["fact", "wisdom"];
+
+/// Whether `tier` is a value the V16 CHECK will admit as non-NULL.
+///
+/// NULL (working/unclassified) is represented by `Option::None` at every
+/// boundary rather than by a string, so it is deliberately not a member here.
+pub fn is_valid_tier(tier: &str) -> bool {
+    VALID_TIERS.contains(&tier)
+}

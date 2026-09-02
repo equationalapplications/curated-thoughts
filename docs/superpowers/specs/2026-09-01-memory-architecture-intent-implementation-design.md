@@ -1,6 +1,45 @@
 # Spec: Ontology Activation, Entry Tier Dimension, Composite Context Primitive
 
-**Status:** Implemented — branch `spec/memory-architecture-intent-implementation` (10 commits: A1 ontology seed, A2 folderTypeMap, B1 V16 tier column, B2 tier filter, B3 deposit default config, B4 tier_backfill, C1 wiki_context; manual AC1/AC2/AC6 deferred to PR review). Workspace: `.superpowers/sdd/2026-09-01-memory-architecture-intent-implementation/`.
+**Status:** Implemented — branch `spec/memory-architecture-intent-implementation`
+(A1 ontology seed, A2 folderTypeMap, B1 V16 tier column, B2 tier filter,
+B3 deposit default config + writer, B4 tier_backfill, C1 `wiki_context`).
+Manual AC6 (fresh-session ergonomics check) is still deferred to PR review;
+AC1/AC2 remain covered only at the unit seam (see Known gaps below).
+Workspace: `.superpowers/sdd/2026-09-01-memory-architecture-intent-implementation/`.
+
+**Known gaps at time of writing** — carried openly rather than closed silently:
+
+- **AC1 has no end-to-end test.** `seedManifestsIfAbsent` is covered at the unit
+  seam; the production wiring in `setupWiki` is not. AC2 is now covered (full
+  manifest content, snapshotted against a persisting store and compared after
+  two restarts) — see `src/__tests__/ontologySeed.test.ts`.
+- ~~**§2.3's strict-mode edge rejection does not run in CT.**~~ **Now
+  implemented CT-side** (see §2.3). The investigation that led there is kept
+  because it is the reason the guard lives in Rust rather than being left to
+  the engine: settled against
+  `core-llm-wiki` 6.2.0 source, not assumed. The engine *does* enforce it:
+  `IngestionService` computes `strictEffective = opts.strict === true || mode
+  === 'strict'` and passes it to `validateInlineEdges`, which throws
+  `WikiStrictOntologyViolation` for an `edge_type` absent from the manifest.
+  But that guard sits on `wiki.ingestDocument`, and **CT never calls it** — its
+  only wrapper, `ingestDocumentByPath`, has no production call site (§3.4), and
+  the app's `ingestDocument` is a Tauri invoke into the Rust pipeline. Every
+  edge CT writes comes from `commit_edge_add`, a raw
+  `INSERT OR IGNORE INTO llm_wiki_edges` that takes `edge_type` verbatim from
+  the proposal payload; no Rust writer consults a manifest. The boundary
+  therefore had to be built CT-side.
+- ~~**§2.2's "one transaction for the whole seed" is not reachable at 6.2.0.**~~
+  **Closed by `core-llm-wiki` 6.3.0.** The gap was real at 6.2.0:
+  `WikiMemory.setOntologyManifest` opened its own `withTransactionAsync` per
+  call and accepted no `tx`, and the adapter contract states nested
+  transactions throw (`types.ts:25`); the repository beneath it
+  (`metadataRepo.setManifest`) did take a `tx` but was not on the public
+  surface. 6.3.0 adds `setOntologyManifests(entries, { ifAbsent })`, which
+  writes the whole set in one transaction **it owns** — consumers pass data,
+  never a transaction handle, because a consumer holds the *unwrapped* adapter
+  and a transaction opened on it would bypass `withSerializedTransactions`. See
+  §2.2 and the upstream spec
+  `expo-llm-wiki: docs/superpowers/specs/2026-09-02-atomic-multi-entity-manifest-seed-design.md`.
 
 Baseline: v1.40.1 (`d31c208`, main). Scope: **Curated Thoughts codebase only** —
 general-purpose features for any deployment using an immutable source archive +
@@ -54,32 +93,43 @@ Non-goals: no librarian model changes; no re-embedding; no UI work.
 On desktop-app startup (or first wiki tool use), when the entity manifest is
 empty/absent AND a concrete `ontology.schema` selection is recorded: the TS
 engine seeds the manifest from the selected npm schema package **pinned to the
-version recorded at adoption** (`schema-software-org` → 6.2.0) via the existing
+version recorded at adoption** (`schema-software-org` → 6.3.0) via the existing
 `createWiki` path, and sets ontology mode to `strict` (package manifest
 authoritative, per the adoption spec's decision table). No re-onboarding
 wizard; the recorded selection is the trigger.
 
 ### A.2 Idempotence, atomicity, and failure isolation
 
-`seedManifests` persists one manifest per entity namespace. `core-llm-wiki`'s
-`OntologyService.setManifest(entityId, data, tx)` takes an `SQLiteAdapter`
-transaction handle but does **not** wrap a multi-entity seed in one itself —
-atomicity is the caller's responsibility. This spec makes CT that caller:
+`seedManifests` persists one manifest per entity namespace. `core-llm-wiki`
+6.3.0's `setOntologyManifests(entries, { ifAbsent })` writes a whole set in one
+transaction it opens on its own serialized adapter. CT passes data only — never
+a transaction handle, which would bypass the engine's serialization mutex:
 
-- **One transaction for the whole seed.** All manifests written under a single
-  `tx`. If any write fails, the entire seed rolls back — never a partial set
-  where one namespace is typed and another is not.
-- **Conflict-safe creation.** Each write is an idempotent
-  create-if-absent against the `entity_id` uniqueness constraint, so a
-  concurrent initializer (two windows, or startup racing a first tool call)
-  loses the race harmlessly instead of erroring.
+- **Two atomic calls, not one.** Each call is all-or-nothing; if any entry
+  fails, that whole call rolls back — never a partial set where one namespace
+  is typed and another is not. It is **two** calls rather than one because the
+  workspace tier's id does not exist during `setupWiki`: `getWorkspaceId()` is
+  still the `tier_working::default` placeholder until `initWorkspaceId`
+  resolves, so the stable tiers (`tier_fact`, `tier_wisdom`) are seeded at
+  setup and the workspace tier is seeded once its id is known. Failure
+  isolation is unaffected; a partial *set* within either call is unreachable.
+- **Conflict-safe creation.** `ifAbsent: true` makes the check and the write
+  one atomic step, closing the read-then-write TOCTOU that the previous
+  `getOntology`-then-`setOntologyManifest` loop carried: a concurrent
+  initializer (two windows, or startup racing a first tool call) loses the race
+  harmlessly instead of erroring or double-writing. Sharp edge: `ifAbsent`
+  tests for a **persisted row**, not an effective manifest, so an entity whose
+  manifest so far comes only from `WikiConfig.ontology.seedManifests` is
+  reported in `seeded` and its row materialized — with identical content.
 - **Once-per-DB.** If a manifest is already present, startup must not rewrite
   or duplicate it. Combined with conflict-safe creation, a second seed attempt
   is a no-op rather than a rewrite.
 - **Failure isolation.** If the package is missing/unparseable: stay
   `mode: off`, emit a startup health warning, **never block ingest or wiki
   tools** (PR #78 graceful-degradation contract extends to the ontology). A
-  rolled-back seed leaves `mode: off`, which is a working state.
+  rolled-back seed leaves `mode: off`, which is a working state. No
+  compensating rollback is written CT-side: the engine owns the transaction, so
+  a thrown call has already left nothing behind.
 
 Tests: concurrent initialization converges on one manifest set; an injected
 mid-seed failure leaves zero manifests and `mode: off`, not a partial set.
@@ -107,6 +157,38 @@ Tests: a manifest-defined `edge_type` writes successfully in strict mode; an
 unknown type is rejected with a diagnostic naming the manifest; a grandfathered
 untyped row still reads and traverses; `curated_relationships` writes are
 unaffected by mode.
+
+**Where the guard lives, and why it is CT's.** This section originally assumed
+the write boundary was the engine's. It is not, for CT: the engine's check runs
+inside `wiki.ingestDocument`, which CT has no production caller for, while every
+CT edge is written by `commit_edge_add` in Rust with no manifest lookup. The
+guard is therefore implemented in the Rust commit path, resolving mode and
+manifest for `ctx.entity_id` **once per commit** (the entity is fixed for the
+whole proposal, so a per-item read would be pure waste) and acting only when
+mode is `strict`.
+
+The rev-2 deferral — "whether the strict-mode edge rejection surfaces as a tool
+error or a skipped-with-warning proposal" — resolves to **skipped-with-warning**,
+because `commit_edge_add` already does exactly that for the adjacent failure:
+an edge whose endpoint will not resolve is pushed onto `ctx.dropped_edges`, the
+item is marked rejected, and the commit continues. An off-manifest `edge_type` is
+the same class of event — one bad item in an otherwise good proposal — and
+failing the whole commit would make one hallucinated edge type discard a batch of
+good facts. The drop is reported, never silent.
+
+Three states deliberately do **not** gate, each logged: a manifest that cannot
+be read (a degraded brain is not a licence to reject the librarian's whole
+output — PR #78), a non-`strict` mode, and `strict` with an empty `edge_types`
+list. The last is the one judgement call: a gate needs a vocabulary to be a
+gate, and `strict` with zero declared edge types is far more likely a
+half-finished seed than a deliberate "no edges permitted" policy, where
+silently dropping every edge of every proposal would be severe and very hard to
+diagnose. It is the most permissive reading of an ambiguous state, and it is
+pinned by a test so that flipping it is a conscious decision.
+
+Edge-type membership is compared **case-insensitively**, matching the engine's
+own `resolveEdgeDefinitions`; a guard stricter than the producer would reject
+types the librarian was told were legal.
 
 ### A.4 Optional folder → node-type mapping (mechanism)
 
@@ -161,9 +243,18 @@ every retrieval.
 
 ### B.2 Writer contract
 
-- Librarian synthesis: entries minted from `user_doc` chunks (tier_fact prompt
-  lineage) → `'fact'`; wisdom-tier lineage → `'wisdom'`.
-- Deposit-ingested entries: default from config `wiki.deposit_default_tier`.
+- Deposit-ingested entries: default from config `wiki.deposit_default_tier`,
+  stamped at write time in the commit path (`commit_fact_add`). Deposit origin
+  is the only classification a writer can make with certainty, so it is the only
+  one it makes: an entry is deposit-origin when any evidence chunk resolves to a
+  document under the agent deposit directory.
+- Everything else stays NULL — the working/unclassified posture, where the
+  librarian falls back to its chunk heuristics. Deriving `'fact'` from
+  `user_doc` chunk lineage is deliberately **not** implemented: `chunk.tier`
+  distinguishes `user_doc` from `wiki`, which is a *source-folder* distinction,
+  not the revisability distinction tier encodes. Stamping every `user_doc`-derived
+  entry `'fact'` would freeze the bulk of the corpus under "ANCHOR TRUTH — do not
+  propose modifications" on the strength of where a file happened to sit.
 
 **Shipped default: `'wisdom'`. This is decided, not open** (rev 1 left it
 ambiguous — asserting `'wisdom'` here while listing it as blocking elsewhere).
@@ -186,6 +277,16 @@ AC4 asserts this same value.
 Classify existing entries only where provenance is certain: entries whose
 evidence shows deposit origin → the configured deposit default; all others stay
 NULL. Print a table, require `--yes` (PR #131 Part C pattern).
+
+**Deposit provenance is tested in both path shapes.** `documents.path` is
+written by the ingest walker, which canonicalizes to an **absolute** path, while
+the legacy `source_ref` producer and every fixture store a **vault-relative**
+path. A predicate anchored to the relative prefix alone therefore matches
+nothing on a real brain while passing every relative-path unit test — so the
+anchored form is paired with a `'%/' || prefix` form, and the Rust writer shares
+the same two-shape test via `safe_path::is_deposit_path`. The trailing separator
+is load-bearing: it makes the test a path-segment test rather than a string
+prefix, so `agents-but-not-really/` is not a deposit.
 
 "One-shot" is enforced, not assumed:
 
@@ -424,6 +525,41 @@ settled in rev 3 (§3.3): `llm_wiki_meta`, committed in the data transaction.
 
 ## 8. Revision history
 
+**Rev 4 (2026-09-02)** — implementation review response. Changes made in code,
+recorded here so the spec matches what shipped:
+
+| # | Change | Source |
+|---|---|---|
+| 17 | §3.2 deposit default given an actual writer (`commit_fact_add`); the `user_doc`→`'fact'` lineage rule is withdrawn with rationale | Review — the config key had no writer at all, so the setting was inert until the offline backfill ran |
+| 18 | §3.3 provenance predicate matches absolute **and** vault-relative document paths | Review — production `documents.path` is absolute, so the shipped anchored-relative predicate classified zero rows on every real brain while its relative fixtures passed |
+| 19 | §4 `wiki_context` implemented: dispatcher arm, MCP registration, composite walker with the node cap applied across all seeds; AC5/AC8 covered | Review — Part C had no implementation in any file |
+| 20 | §2.1 seed no longer runs against the placeholder workspace id | Review — `setupWiki` resolves before React mounts, so `getWorkspaceId()` was still `tier_working::default`; the real workspace tier went unseeded and a junk entity was written |
+| 21 | Tier vocabulary centralized (`schema::VALID_TIERS` / `is_valid_tier`) and read by both write boundaries | Review — the set was hand-coded in three places with no shared validator |
+| 22 | `wiki.deposit_default_tier` now survives the lenient config path | Review — `wiki` was in `known_keys` (so excluded from `preserved_keys`) but had no extraction branch, silently losing the setting |
+| 23 | Per-field `#[serde(default)]` on `BrainConfig`'s typed blocks reverted | Review — it made strict `load()` succeed on an incomplete config, defeating the gate that routes such a config to `load_lenient`; a regression guard now pins the asymmetry |
+| 24 | `folder_type_map` glob translation rewritten as a single pass | Review — `?` was left live as a regex quantifier, and staging `**` through a space placeholder corrupted any glob containing a space |
+
+| 25 | §2.3 strict-mode edge gate implemented in `commit_edge_add`, resolved once per commit, skip-with-warning via the existing `dropped_edges` path | Settled against `core-llm-wiki` 6.2.0 source: the engine enforces this only inside `ingestDocument`, which CT never calls |
+| 26 | `WikiManifest` reparsed to the shape the engine actually persists | **`wiki_get_ontology` could not read a real manifest at all.** The engine writes `edge_types` as objects (`{type, source_type, target_type, description}`); CT typed them `Vec<String>`, so `serde_json::from_str` failed on every seeded brain and the tool returned an error a caller cannot distinguish from "no ontology". Bare strings are still accepted so a legacy row degrades instead of failing |
+| 27 | AC2 covered: full manifest content snapshotted against a persisting store, compared equal after two restarts, with a companion test proving the snapshot detects a same-count content swap | Review — AC2 had no coverage at all |
+
+Two review findings were **not** adopted, on the evidence:
+
+- **Rekeying `tier_weight` off the stored `tier` column.** §3.4 keeps
+  `tier_fact`/`tier_wisdom` as "live ranking-weight keys", and AC7 requires
+  `entityIds` behavior byte-identical to v1.40.1. Rekeying ranking would change
+  scores for existing rows — the one thing this additive spec promised not to do.
+- **Applying the `tier` filter before `wiki_search`'s empty-`entityIds` early
+  return.** `Some(&[])` matches nothing by contract, so the result is already
+  correct; only the diagnostic would differ, and #133's explicit-empty contract
+  is worth more than the message.
+
+**Rev 4 (2026-09-02)** — upstream dependency landed. One change:
+
+| # | Change | Source |
+|---|---|---|
+| 17 | §2.2's atomicity gap closed: `core-llm-wiki` 6.3.0 ships `setOntologyManifests(entries, { ifAbsent })`, so the read-then-write loop and its compensating rollback are deleted. Restated as **two** atomic calls, since the workspace tier's id does not exist during `setupWiki` | The gap was carried openly in rev 3; the fix was specced upstream (`expo-llm-wiki`, `2026-09-02-atomic-multi-entity-manifest-seed-design.md`) and released as 6.3.0 |
+
 **Rev 3 (2026-09-01)** — implementation-hardening review (Kurt). Three changes,
 all closing crash/platform-determinism windows rather than altering design:
 
@@ -439,7 +575,7 @@ all closing crash/platform-determinism windows rather than altering design:
 | # | Change | Source |
 |---|---|---|
 | 1 | §3.4 rewritten: tier is a `wiki_search` filter, not an `entityIds` namespace | Own review — rev 1 required the writer migration PR #135 rejected; `tier_fact`/`tier_wisdom` have no production writer and `entityIdForPath` tests the v1 prefix |
-| 2 | §2.2 seed made transactional + conflict-safe with rollback | Review (atomic multi-entity seeding) |
+| 2 | §2.2 seed made transactional + conflict-safe with rollback | Review (atomic multi-entity seeding). Superseded by change 17: the rollback is gone, the engine owns the transaction |
 | 3 | §2.3 edge write boundary scoped to `llm_wiki_edges`; `curated_relationships` excluded with rationale | Review raised the boundary; scope decision is own analysis — it is the AST linker graph, not librarian output |
 | 4 | §3.1 CHECK constraint on `tier` | Review (tier value invariant) |
 | 5 | §3.2 deposit default resolved to `'wisdom'`, contradiction removed | Review (inconsistent shipped default) |

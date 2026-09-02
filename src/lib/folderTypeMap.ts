@@ -26,13 +26,38 @@ export function orderGlobs(map: Record<string, string>): string[] {
   });
 }
 
-/** Anchored glob match supporting `*` (within a segment) and `**` (across segments). */
+/** Every character that is meaningful to a RegExp and must survive as a literal. */
+const REGEX_METACHARS = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * Anchored glob match supporting `**` (across segments), `*` (within a
+ * segment) and `?` (one non-separator character).
+ *
+ * Translated by a single left-to-right scan rather than by chained
+ * `String.replace` calls. Chaining is not safe here: escaping a fixed
+ * metacharacter list and then rewriting `*` leaves `?` behind as a live
+ * quantifier (so `notes?/**` would match `note/x.md`), and staging `**`
+ * through a placeholder character corrupts any glob that legitimately
+ * contains that character (a space, for `my docs/**`). Scanning once means
+ * every character is classified exactly as either a wildcard or a literal.
+ */
 function globMatches(glob: string, path: string): boolean {
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  const pattern = escaped
-    .replace(/\*\*/g, ' ')
-    .replace(/\*/g, '[^/]*')
-    .replace(/ /g, '.*');
+  let pattern = '';
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i];
+    if (char === '*') {
+      if (glob[i + 1] === '*') {
+        pattern += '.*';
+        i += 1;
+      } else {
+        pattern += '[^/]*';
+      }
+    } else if (char === '?') {
+      pattern += '[^/]';
+    } else {
+      pattern += char.replace(REGEX_METACHARS, '\\$&');
+    }
+  }
   return new RegExp(`^${pattern}$`).test(path);
 }
 

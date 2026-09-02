@@ -22,6 +22,49 @@ pub const MARKER_VERSION: u32 = 1;
 /// (`safe_path.rs` AGENTS_DEPOSIT_DIR). Anything else is not certain provenance.
 const DEPOSIT_EVIDENCE_PREFIX: &str = "immutable-source-files/agents/";
 
+/// Matches a path column against the deposit prefix in **both** shapes the
+/// database actually holds.
+///
+/// `documents.path` is written by the ingest walker, which canonicalizes to an
+/// absolute path (`lib.rs` reconcile: `std::fs::canonicalize(entry.path())`),
+/// while the legacy `source_ref` producer and the fixtures store a
+/// vault-relative path. An anchored `LIKE 'immutable-source-files/agents/%'`
+/// therefore matched nothing on a real brain while every relative-path unit
+/// test passed — so the anchored form is deliberately paired with a
+/// `'%/' || prefix` form here. Mirrors `safe_path::is_deposit_path`.
+///
+/// `{col}` is interpolated, never user input; the prefix stays a bound `?1`.
+fn deposit_path_predicate(col: &str) -> String {
+    format!("({col} LIKE ?1 || '%' OR {col} LIKE '%/' || ?1 || '%')")
+}
+
+/// The shared `WHERE` body naming rows eligible for classification: a live,
+/// unclassified entry whose provenance is certainly a deposit. `plan_backfill`
+/// and `apply_backfill` must never drift, so they read the same predicate.
+fn eligible_rows_predicate() -> String {
+    format!(
+        "tier IS NULL
+           AND deleted_at IS NULL
+           AND (
+             -- Legacy form: source_ref is a plain vault-relative path
+             (source_ref NOT LIKE '{{%' AND {legacy})
+             OR
+             -- Current form: source_ref is the JSON blob; the deposit path is
+             -- recovered via chunks.content_hash -> documents.path. Gate on
+             -- leading-byte '{{' so legacy rows never hit json_extract (which
+             -- raises on non-JSON input).
+             (substr(source_ref, 1, 1) = '{{' AND json_valid(source_ref) AND EXISTS (
+               SELECT 1 FROM json_each(json_extract(source_ref, '$.evidence')) AS ev
+               JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
+               JOIN documents d ON d.id = c.doc_id
+               WHERE {doc}
+             ))
+           )",
+        legacy = deposit_path_predicate("source_ref"),
+        doc = deposit_path_predicate("d.path"),
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BackfillMarker {
     pub version: u32,
@@ -67,27 +110,11 @@ pub fn read_marker(conn: &Connection) -> Result<Option<BackfillMarker>> {
 /// `source_docs_from_ref` at `src-tauri/src/db/entities.rs:195-238` for the same
 /// join shape used at read time.
 pub fn plan_backfill(conn: &Connection, tier: &str) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM llm_wiki_entries e
-          WHERE e.tier IS NULL
-            AND e.deleted_at IS NULL
-            AND (
-              -- Legacy form: source_ref is a plain vault-relative path
-              (e.source_ref NOT LIKE '{%' AND e.source_ref LIKE ?1 || '%')
-              OR
-              -- Current form: source_ref is the JSON blob; the deposit path is
-              -- recovered via chunks.content_hash -> documents.path. Gate on
-              -- leading-byte '{' so legacy rows never hit json_extract (which
-              -- raises on non-JSON input).
-              (substr(e.source_ref, 1, 1) = '{' AND json_valid(e.source_ref) AND EXISTS (
-                SELECT 1 FROM json_each(json_extract(e.source_ref, '$.evidence')) AS ev
-                JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
-                JOIN documents d ON d.id = c.doc_id
-                WHERE d.path LIKE ?1 || '%'
-              ))
-            )
-          ORDER BY e.id",
-    )?;
+    let sql = format!(
+        "SELECT id FROM llm_wiki_entries WHERE {} ORDER BY id",
+        eligible_rows_predicate()
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([DEPOSIT_EVIDENCE_PREFIX], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for id in rows {
@@ -116,25 +143,23 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
         .unwrap_or_else(|| config_default.to_string());
 
     let schema_version: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
 
     let tx = conn.transaction()?;
+    // The predicate binds the prefix as ?1, so the tier value takes ?2 and the
+    // parameter order is (prefix, tier) — the reverse of the reading order.
+    let update_sql = format!(
+        "UPDATE llm_wiki_entries SET tier = ?2 WHERE {}",
+        eligible_rows_predicate()
+    );
     let changed = tx.execute(
-        "UPDATE llm_wiki_entries
-            SET tier = ?1
-          WHERE tier IS NULL
-            AND deleted_at IS NULL
-            AND (
-              (source_ref NOT LIKE '{%' AND source_ref LIKE ?2 || '%')
-              OR (substr(source_ref, 1, 1) = '{' AND json_valid(source_ref) AND EXISTS (
-                SELECT 1 FROM json_each(json_extract(source_ref, '$.evidence')) AS ev
-                JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
-                JOIN documents d ON d.id = c.doc_id
-                WHERE d.path LIKE ?2 || '%'
-              ))
-            )",
-        rusqlite::params![tier, DEPOSIT_EVIDENCE_PREFIX],
+        &update_sql,
+        rusqlite::params![DEPOSIT_EVIDENCE_PREFIX, tier],
     )? as i64;
 
     // A run that changes no data leaves no trace, matching the dry-run-default
@@ -197,7 +222,8 @@ mod tests {
     ///   * `j3` — NULL source_ref; must NOT classify (purely ungrounded)
     fn seeded_conn() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(r#"CREATE TABLE llm_wiki_entries (
+        conn.execute_batch(
+            r#"CREATE TABLE llm_wiki_entries (
                  id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT,
                  source_ref TEXT, deleted_at INTEGER,
                  tier TEXT NULL CHECK (tier IN ('fact','wisdom') OR tier IS NULL));
@@ -255,7 +281,11 @@ mod tests {
         let conn = seeded_conn();
         plan_backfill(&conn, "wisdom").unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM llm_wiki_entries WHERE tier IS NOT NULL", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE tier IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 0);
         assert!(read_marker(&conn).unwrap().is_none());
@@ -271,29 +301,54 @@ mod tests {
 
         // Sample one of each form to confirm both branches wrote.
         let legacy_tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(legacy_tier.as_deref(), Some("wisdom"));
         let json_tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j1'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(json_tier.as_deref(), Some("wisdom"));
 
         // Non-deposit-origin entries stay NULL.
         let untouched_spec: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='x1'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='x1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(untouched_spec, None, "spec-origin legacy row must stay NULL");
+        assert_eq!(
+            untouched_spec, None,
+            "spec-origin legacy row must stay NULL"
+        );
         let untouched_json_spec: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='jx1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id='jx1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(untouched_json_spec, None, "spec-origin JSON row must stay NULL");
+        assert_eq!(
+            untouched_json_spec, None,
+            "spec-origin JSON row must stay NULL"
+        );
         let untouched_soft: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='dsoft'", [], |r| r.get(0))
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id='dsoft'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(untouched_soft, None, "prefix-but-not-segment must stay NULL");
+        assert_eq!(
+            untouched_soft, None,
+            "prefix-but-not-segment must stay NULL"
+        );
         let untouched_null: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j3'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j3'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(untouched_null, None, "NULL source_ref must stay NULL");
     }
@@ -317,9 +372,17 @@ mod tests {
         // Config flipped since run 1 — the cohort must not split.
         let marker = apply_backfill(&mut conn, "fact").unwrap();
         let tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j3_late'", [], |r| r.get(0))
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id='j3_late'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(tier.as_deref(), Some("wisdom"), "rerun must use deposit_default_used, not current config");
+        assert_eq!(
+            tier.as_deref(),
+            Some("wisdom"),
+            "rerun must use deposit_default_used, not current config"
+        );
 
         assert_eq!(marker.deposit_default_used, "wisdom", "write-once");
         assert_eq!(marker.rows_classified, 5, "accumulates (4 + 1 late JSON)");
@@ -333,11 +396,15 @@ mod tests {
         apply_backfill(&mut conn, "fact").unwrap();
         // Sample one legacy and one JSON-blob row to lock both branches.
         let legacy_tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(legacy_tier.as_deref(), Some("wisdom"));
         let json_tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j1'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(json_tier.as_deref(), Some("wisdom"));
     }
@@ -347,11 +414,19 @@ mod tests {
         let mut conn = seeded_conn();
         apply_backfill(&mut conn, "wisdom").unwrap();
         let before: String = conn
-            .query_row("SELECT value FROM llm_wiki_meta WHERE key=?1", [MARKER_KEY], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key=?1",
+                [MARKER_KEY],
+                |r| r.get(0),
+            )
             .unwrap();
         apply_backfill(&mut conn, "wisdom").unwrap();
         let after: String = conn
-            .query_row("SELECT value FROM llm_wiki_meta WHERE key=?1", [MARKER_KEY], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key=?1",
+                [MARKER_KEY],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(before, after);
     }
@@ -362,12 +437,78 @@ mod tests {
         // parameterizes the run rather than gating it (spec §3.3).
         let mut conn = seeded_conn();
         apply_backfill(&mut conn, "wisdom").unwrap();
-        conn.execute("DELETE FROM llm_wiki_meta WHERE key=?1", [MARKER_KEY]).unwrap();
+        conn.execute("DELETE FROM llm_wiki_meta WHERE key=?1", [MARKER_KEY])
+            .unwrap();
         apply_backfill(&mut conn, "fact").unwrap();
         let tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(tier.as_deref(), Some("wisdom"), "NULL-only scope protects classified rows");
+        assert_eq!(
+            tier.as_deref(),
+            Some("wisdom"),
+            "NULL-only scope protects classified rows"
+        );
+    }
+
+    /// The production shape. `documents.path` is written by the ingest walker,
+    /// which canonicalizes to an **absolute** path, so the anchored
+    /// `LIKE 'immutable-source-files/agents/%'` predicate this tool shipped
+    /// with matched nothing on a real brain — while every relative-path
+    /// fixture above passed. Both shapes must classify.
+    #[test]
+    fn classifies_deposit_rows_whose_document_path_is_absolute() {
+        let mut conn = seeded_conn();
+        conn.execute_batch(
+            r#"INSERT INTO documents (id, path) VALUES
+                   ('doc_abs','/Users/x/Vault/immutable-source-files/agents/abs.md'),
+                   ('doc_abs_sib','/Users/x/Vault/immutable-source-files/agents-but-not-really/abs.md');
+               INSERT INTO chunks (content_hash, doc_id) VALUES
+                   ('h_abs','doc_abs'),
+                   ('h_abs_sib','doc_abs_sib');
+               INSERT INTO llm_wiki_entries (id, entity_id, title, source_ref) VALUES
+                   ('j_abs','ent_1','JAbs','{"proposal_id":"p_abs","evidence":[{"content_hash":"h_abs"}]}'),
+                   ('j_abs_sib','ent_1','JAbsSib','{"proposal_id":"p_sib","evidence":[{"content_hash":"h_abs_sib"}]}'),
+                   ('d_abs','ent_1','DAbs','/Users/x/Vault/immutable-source-files/agents/legacy-abs.md');"#,
+        )
+        .unwrap();
+
+        let plan = plan_backfill(&conn, "wisdom").unwrap();
+        let ids: Vec<&str> = plan.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(
+            ids.contains(&"j_abs"),
+            "an absolute documents.path must classify via the JSON branch, got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"d_abs"),
+            "an absolute legacy source_ref must classify too, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"j_abs_sib"),
+            "the trailing separator must still reject an absolute sibling directory"
+        );
+
+        // Relative fixtures keep classifying — the fix is additive.
+        assert!(ids.contains(&"d1") && ids.contains(&"j1"));
+
+        apply_backfill(&mut conn, "wisdom").unwrap();
+        for id in ["j_abs", "d_abs"] {
+            let tier: Option<String> = conn
+                .query_row("SELECT tier FROM llm_wiki_entries WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(tier.as_deref(), Some("wisdom"), "{id} must be classified");
+        }
+        let sib: Option<String> = conn
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id='j_abs_sib'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sib, None, "sibling directory must stay NULL");
     }
 
     #[test]
@@ -392,9 +533,16 @@ mod tests {
 
         // apply_backfill must not raise.
         let marker = apply_backfill(&mut conn, "wisdom").unwrap();
-        assert_eq!(marker.rows_classified, 4, "malformed-JSON row is not counted");
+        assert_eq!(
+            marker.rows_classified, 4,
+            "malformed-JSON row is not counted"
+        );
         let tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='bad_json'", [], |r| r.get(0))
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id='bad_json'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(tier, None, "malformed-JSON source_ref stays NULL");
     }

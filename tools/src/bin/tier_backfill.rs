@@ -66,8 +66,11 @@ fn main() -> Result<()> {
         for (id, t) in &plan {
             println!("{id:<40} {t}");
         }
-        println!("\n{} entr{} would be classified. Re-run with --yes to apply.",
-            plan.len(), if plan.len() == 1 { "y" } else { "ies" });
+        println!(
+            "\n{} entr{} would be classified. Re-run with --yes to apply.",
+            plan.len(),
+            if plan.len() == 1 { "y" } else { "ies" }
+        );
         return Ok(());
     }
 

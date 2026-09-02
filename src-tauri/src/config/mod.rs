@@ -45,6 +45,14 @@ fn root_kind(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Tier stamped on deposit-ingested entries when config does not say otherwise.
+///
+/// Shipped default per spec §3.2: deposits are agent-written notes under active
+/// revision, and `"fact"` invokes the librarian's "ANCHOR TRUTH — do not propose
+/// modifications" framing, which would freeze exactly the content agents are
+/// expected to keep correcting.
+pub const DEFAULT_DEPOSIT_TIER: &str = "wisdom";
+
 /// Wiki-layer settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WikiConfig {
@@ -61,16 +69,19 @@ pub struct BrainConfig {
     /// Embedding model profile (local Ollama or external).
     pub embed_profile: Option<EmbedProfile>,
     /// Whether the vault has migrated to v2 (immutable-source-files folder structure).
-    #[serde(default)]
+    ///
+    /// Deliberately NOT `#[serde(default)]`. `load()`'s strict deserialize is
+    /// the gate that routes a config with a missing or malformed block to
+    /// `load_lenient`, which records a diagnostic and reports the block as
+    /// missing. Defaulting these fields here makes the strict parse succeed on
+    /// an incomplete file, so `load()` returns a config that silently forgot
+    /// the user's settings — and the next `write()` persists that loss.
     pub migrated_to_v2: bool,
     /// LLM generation config (model, provider, base_url).
-    #[serde(default)]
     pub generation: GenerationConfig,
     /// Embedding config (model, provider, base_url).
-    #[serde(default)]
     pub embedding: EmbeddingConfig,
     /// Privacy mode and settings.
-    #[serde(default)]
     pub privacy: PrivacyConfig,
     /// User's ontology selection (which schema the wiki engine is seeded with).
     #[serde(default)]
@@ -97,6 +108,11 @@ pub struct BrainConfig {
     /// Preserved raw JSON for unknown keys inside the ontology block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_ontology: Option<serde_json::Value>,
+    /// Preserved raw JSON for unknown keys inside the wiki block. `wiki` is in
+    /// `known_keys`, so its unknown nested keys are not covered by
+    /// `preserved_keys` and would be dropped by `write()` without this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_wiki: Option<serde_json::Value>,
     /// Raw generation block JSON used when typed deserialization fails.
     /// When set, write() emits this verbatim instead of the typed generation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +291,21 @@ impl BrainConfig {
                     };
                 }
 
+                // Extract nested unknown keys from wiki block
+                if let Some(wiki_val) = obj.get("wiki").and_then(|v| v.as_object()) {
+                    let known_wiki_keys = ["deposit_default_tier"];
+                    let unknown: serde_json::Map<String, serde_json::Value> = wiki_val
+                        .iter()
+                        .filter(|(k, _)| !known_wiki_keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    cfg.preserved_wiki = if unknown.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(unknown))
+                    };
+                }
+
                 // On the typed-success path, the typed fields are authoritative.
                 // Only the lenient-fallback path (below) sets `raw_*`, so callers
                 // who mutate `cfg.generation` / `cfg.embedding` / `cfg.privacy`
@@ -446,6 +477,21 @@ impl BrainConfig {
             };
         }
 
+        // Extract nested unknown keys from wiki block
+        if let Some(wiki_val) = obj.get("wiki").and_then(|v| v.as_object()) {
+            let known_wiki_keys = ["deposit_default_tier"];
+            let unknown: serde_json::Map<String, serde_json::Value> = wiki_val
+                .iter()
+                .filter(|(k, _)| !known_wiki_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            report.config.preserved_wiki = if unknown.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(unknown))
+            };
+        }
+
         // vault_path: hard error if present but not a string
         if let Some(vp) = obj.get("vault_path") {
             match vp.as_str() {
@@ -538,6 +584,22 @@ impl BrainConfig {
                         .diagnostics
                         .push(format!("ontology block unparseable: {}", e));
                     report.ontology_unparseable = true;
+                }
+            }
+        }
+
+        // wiki: lenient. `wiki` is in `known_keys`, so it is excluded from
+        // `preserved_keys` — without this branch a config that falls through
+        // from the strict path (e.g. an unknown `generation.provider` variant)
+        // would silently lose `deposit_default_tier` and every deposit would
+        // be classified at the shipped default instead of the configured one.
+        if let Some(w) = obj.get("wiki") {
+            match serde_json::from_value::<WikiConfig>(w.clone()) {
+                Ok(cfg) => report.config.wiki = cfg,
+                Err(e) => {
+                    report
+                        .diagnostics
+                        .push(format!("wiki block unparseable: {}", e));
                 }
             }
         }
@@ -670,7 +732,17 @@ impl BrainConfig {
         obj.insert("embedding".to_string(), emb_value);
         obj.insert("privacy".to_string(), priv_value);
         obj.insert("ontology".to_string(), ont_value);
-        obj.insert("wiki".to_string(), serde_json::to_value(&self.wiki)?);
+        let mut wiki_value = serde_json::to_value(&self.wiki)?;
+        if let Some(ref preserved) = self.preserved_wiki {
+            if let (Some(wiki_obj), Some(preserved_obj)) =
+                (wiki_value.as_object_mut(), preserved.as_object())
+            {
+                for (k, v) in preserved_obj {
+                    wiki_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        obj.insert("wiki".to_string(), wiki_value);
         obj.insert(
             "trusted_links".to_string(),
             serde_json::to_value(&self.trusted_links)?,
@@ -713,6 +785,25 @@ impl BrainConfig {
         Ok(())
     }
 
+    /// The configured deposit tier, read from the brain config on disk.
+    ///
+    /// Convenience for commit-path callers, which have a `Connection` but no
+    /// `BrainConfig`. Any load failure degrades to the shipped default rather
+    /// than failing the commit — a deposit landing at the default tier is a
+    /// working state, a dropped proposal is not.
+    pub fn deposit_default_tier_on_disk() -> String {
+        let paths = crate::retrieval::resolve_brain_paths();
+        match BrainConfig::load_lenient(&paths) {
+            Ok(report) => report.config.deposit_default_tier().to_string(),
+            Err(e) => {
+                eprintln!(
+                    "config: could not read wiki.deposit_default_tier ({e}); using {DEFAULT_DEPOSIT_TIER:?}"
+                );
+                DEFAULT_DEPOSIT_TIER.to_string()
+            }
+        }
+    }
+
     /// The tier stamped on deposit-ingested entries (spec §3.2).
     ///
     /// Defaults to `"wisdom"`: deposits are agent-written and revisable, and
@@ -721,15 +812,22 @@ impl BrainConfig {
     /// DB and tripping the V16 CHECK — config is hand-editable.
     pub fn deposit_default_tier(&self) -> &str {
         match self.wiki.deposit_default_tier.as_deref() {
-            Some("fact") => "fact",
-            Some("wisdom") => "wisdom",
+            Some(t) if crate::db::schema::is_valid_tier(t) => {
+                // Reborrow from the field so the returned lifetime is `&self`,
+                // not the temporary `as_deref` binding.
+                self.wiki
+                    .deposit_default_tier
+                    .as_deref()
+                    .unwrap_or(DEFAULT_DEPOSIT_TIER)
+            }
             Some(other) => {
                 eprintln!(
-                    "config: wiki.deposit_default_tier {other:?} is not \"fact\" or \"wisdom\"; using \"wisdom\""
+                    "config: wiki.deposit_default_tier {other:?} is not one of {:?}; using {DEFAULT_DEPOSIT_TIER:?}",
+                    crate::db::schema::VALID_TIERS
                 );
-                "wisdom"
+                DEFAULT_DEPOSIT_TIER
             }
-            None => "wisdom",
+            None => DEFAULT_DEPOSIT_TIER,
         }
     }
 }
@@ -738,28 +836,59 @@ impl BrainConfig {
 mod tests {
     use super::*;
 
+    /// A config carrying only a wiki block. Built from `Default` rather than
+    /// `from_str("{}")` on purpose: `BrainConfig`'s typed blocks deliberately
+    /// have no `#[serde(default)]`, because that is the gate routing an
+    /// incomplete config to `load_lenient` instead of silently accepting it.
+    fn cfg_with_deposit_tier(tier: Option<&str>) -> BrainConfig {
+        BrainConfig {
+            wiki: WikiConfig {
+                deposit_default_tier: tier.map(str::to_string),
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn deposit_default_tier_defaults_to_wisdom() {
         // Deposits are agent-written notes under active revision. 'fact' would
         // invoke the librarian's "do not propose modifications" framing and
         // freeze exactly the content agents keep correcting (spec §3.2).
-        let cfg: BrainConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.deposit_default_tier(), "wisdom");
+        assert_eq!(cfg_with_deposit_tier(None).deposit_default_tier(), "wisdom");
     }
 
     #[test]
     fn deposit_default_tier_can_be_set_to_fact() {
-        let cfg: BrainConfig =
-            serde_json::from_str(r#"{"wiki":{"deposit_default_tier":"fact"}}"#).unwrap();
-        assert_eq!(cfg.deposit_default_tier(), "fact");
+        assert_eq!(
+            cfg_with_deposit_tier(Some("fact")).deposit_default_tier(),
+            "fact"
+        );
     }
 
     #[test]
     fn invalid_deposit_default_tier_falls_back_to_wisdom() {
         // Config is hand-editable; an out-of-vocabulary value must not reach
         // the DB and trip the V16 CHECK.
-        let cfg: BrainConfig =
-            serde_json::from_str(r#"{"wiki":{"deposit_default_tier":"anchor"}}"#).unwrap();
-        assert_eq!(cfg.deposit_default_tier(), "wisdom");
+        assert_eq!(
+            cfg_with_deposit_tier(Some("anchor")).deposit_default_tier(),
+            "wisdom"
+        );
+    }
+
+    /// The regression guard for the strict-vs-lenient asymmetry. A config
+    /// missing a typed block must NOT deserialize strictly — that failure is
+    /// what routes `load()` into `load_lenient`, which records a diagnostic
+    /// and flags the block as missing instead of silently forgetting it.
+    #[test]
+    fn strict_deserialize_rejects_a_config_missing_typed_blocks() {
+        assert!(
+            serde_json::from_str::<BrainConfig>("{}").is_err(),
+            "an empty config must fail strict deserialize, not default silently"
+        );
+        assert!(
+            serde_json::from_str::<BrainConfig>(r#"{"wiki":{"deposit_default_tier":"fact"}}"#)
+                .is_err(),
+            "a config with only a wiki block is still missing generation/embedding/privacy"
+        );
     }
 }

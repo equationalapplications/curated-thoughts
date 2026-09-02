@@ -20,7 +20,7 @@ let _workspaceIdInflight: Promise<void> | null = null;
 
 /**
  * Empty manifest for selections without a fixed schema (`off`, `emergent`).
- * core-llm-wiki 6.2.0 requires a non-null `OntologyManifest` on
+ * core-llm-wiki 6.3.0 requires a non-null `OntologyManifest` on
  * `setOntologyManifest`; an empty manifest signals "no typed schema" rather
  * than "schema mismatch".
  */
@@ -32,10 +32,37 @@ const EMPTY_MANIFEST = { node_types: [] as never[], edge_types: [] as never[] };
  * duplicating the list.
  */
 export function seededOntologyEntityIds(): string[] {
-  return ["tier_fact", "tier_wisdom", getWorkspaceId()];
+  return [...STABLE_ONTOLOGY_ENTITY_IDS, getWorkspaceId()];
 }
 
-// core-llm-wiki 6.2.0 defaults `config.tablePrefix` to `llm_wiki_`; the app
+/**
+ * The tiers whose entity ids are compile-time constants, so they are correct
+ * before `initWorkspaceId` has resolved. The workspace tier is deliberately
+ * excluded: its id is derived from the vault path at runtime and is
+ * `tier_working::default` until then (see `seedWorkspaceOntologyManifest`).
+ */
+const STABLE_ONTOLOGY_ENTITY_IDS = ["tier_fact", "tier_wisdom"] as const;
+
+/**
+ * Seed manifests for `entityIds`, logging a health warning on failure.
+ *
+ * Never throws: a failed seed leaves mode `off`, which is a working state, and
+ * must not block ingest or wiki tools (PR #78 graceful-degradation contract).
+ */
+async function seedOntologyManifests(entityIds: string[]): Promise<void> {
+  const outcome = await seedManifestsIfAbsent(
+    wiki as never,
+    _ontologySelection,
+    entityIds,
+  );
+  if (outcome.failed) {
+    console.warn(
+      `[wiki] ontology seed failed for ${entityIds.join(", ")}, continuing at mode off: ${outcome.reason}`,
+    );
+  }
+}
+
+// core-llm-wiki 6.3.0 defaults `config.tablePrefix` to `llm_wiki_`; the app
 // never overrides it (see `makeWikiOptions` below — no `tablePrefix` key).
 // `setOntologyManifest`/`runOntologyBackfill` have no "clear existing
 // classifications" API — `runOntologyBackfill` only fills `okf_type IS
@@ -168,9 +195,13 @@ export async function initWorkspaceId(vaultPath: string): Promise<void> {
   const requestId = ++_workspaceIdRequest;
   const promise = (async () => {
     const id = await invoke<string>('get_workspace_id', { path: vaultPath });
-    if (requestId === _workspaceIdRequest) {
-      _workspaceId = id;
-    }
+    if (requestId !== _workspaceIdRequest) return;
+    _workspaceId = id;
+    // The workspace tier could not be seeded during `setupWiki` because its id
+    // was not known yet. Seed it here, now that it is. `seedManifestsIfAbsent`
+    // is once-per-DB, so a vault reopened against the same workspace is a
+    // no-op rather than a rewrite.
+    await seedOntologyManifests([id]);
   })();
   _workspaceIdInflight = promise;
   try {
@@ -311,16 +342,14 @@ export async function setupWiki() {
   // Seed the manifest for a brain whose selection was recorded before the
   // seed path existed (spec G1). Once-per-DB and non-blocking: a failure
   // leaves mode off and raises a health warning rather than stopping setup.
-  const seedOutcome = await seedManifestsIfAbsent(
-    wiki as never,
-    _ontologySelection,
-    seededOntologyEntityIds(),
-  );
-  if (seedOutcome.failed) {
-    console.warn(
-      `[setupWiki] ontology seed failed, continuing at mode off: ${seedOutcome.reason}`,
-    );
-  }
+  //
+  // Only the stable tiers are seeded here. `main.tsx` awaits `setupWiki()`
+  // before rendering, and `initWorkspaceId` runs from an `App` effect — so at
+  // this point `getWorkspaceId()` is still the `tier_working::default`
+  // placeholder. Seeding it would write a manifest for an entity no data ever
+  // lands in and leave the real workspace tier untyped. The workspace tier is
+  // seeded by `initWorkspaceId` once its id is known.
+  await seedOntologyManifests([...STABLE_ONTOLOGY_ENTITY_IDS]);
 
   // Store unlisten if you need cleanup; for now the listeners live for the session.
   void startedUnlisten;

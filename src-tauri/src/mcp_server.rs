@@ -70,6 +70,24 @@ impl VaultMcpServer {
     }
 
     #[tool(
+        name = "wiki_context",
+        description = "One call: semantic search over wiki facts PLUS the graph neighborhood around what it finds. Returns {facts, entities, edges, provenance, truncated}. Prefer this over wiki_search + wiki_traverse_graph — it needs no entity-id or namespace knowledge. Params: query (required); maxFacts (default 5) seed facts; depth (default 1, clamped to 3); optional tier filter \"fact\" or \"wisdom\". An unlinked corpus returns edges: [] rather than an error."
+    )]
+    async fn wiki_context(
+        &self,
+        args: Parameters<tool_dispatch::WikiContextParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "wiki_context", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
         name = "wiki_get_ontology",
         description = "Return the ontology manifest (node_types, edge_types) for a wiki entity tier."
     )]
