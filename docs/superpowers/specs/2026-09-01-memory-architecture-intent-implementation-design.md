@@ -193,8 +193,9 @@ NULL. Print a table, require `--yes` (PR #131 Part C pattern).
   transaction as the tier UPDATEs**. The value is JSON, not a boolean:
 
   ```json
-  {"version": 1, "applied_at": <unix>, "deposit_default_used": "wisdom",
-   "rows_classified": <n>, "schema_version": <n>}
+  {"version": 1, "first_applied_at": <unix>, "last_applied_at": <unix>,
+   "runs": <n>, "deposit_default_used": "wisdom",
+   "rows_classified": <cumulative n>, "schema_version": <n>}
   ```
 
   A later apply does **not** exit on finding the marker. It runs, and takes
@@ -203,6 +204,37 @@ NULL. Print a table, require `--yes` (PR #131 Part C pattern).
   below, this is idempotent by construction: already-classified rows are out of
   scope, and a row whose deposit provenance only became visible after run 1
   joins the cohort at the cohort's tier rather than splitting it.
+
+  **Marker update on rerun.** A rerun that classifies ≥1 row rewrites the marker
+  in the same transaction as those UPDATEs, so the ledger stays accurate rather
+  than frozen at run 1. Fields split into two classes:
+
+  | Field | On rerun |
+  |---|---|
+  | `deposit_default_used` | **Write-once — never rewritten.** |
+  | `version`, `first_applied_at` | Write-once. |
+  | `rows_classified` | Accumulates (`old + newly classified`). |
+  | `runs` | Increments. |
+  | `last_applied_at`, `schema_version` | Overwritten with the current run's. |
+
+  `deposit_default_used` being write-once is load-bearing, not bookkeeping: if a
+  rerun refreshed it from current config, the cohort value would follow config
+  drift and the marker would decay into exactly the current-config behavior it
+  exists to prevent. `first_applied_at` is kept because a single overwritten
+  `applied_at` cannot answer when the cohort was established, only when it was
+  last touched — the ledger needs both.
+
+  A rerun that classifies **zero** rows writes nothing at all: no marker
+  rewrite, no transaction, consistent with the dry-run-default posture that a
+  run which changes no data leaves no trace. `last_applied_at` therefore means
+  "last run that wrote rows", not "last run attempted".
+
+  If the marker is absent but rows are already classified (an operator deleted
+  it), a rerun writes a fresh marker whose `rows_classified` counts only the
+  rows *that run* classified. The count is then a floor, not a total. This is
+  accepted: reconstructing the true total would require re-deriving provenance
+  for every non-NULL row, and the field is a ledger for operators, never an
+  input to any decision.
 
   **This is what removes the dangerous crash direction.** A gate that refuses on
   sight of a marker has an unrecoverable failure: a marker present without its
@@ -236,9 +268,12 @@ Tests: apply without `--yes` mutates nothing and exits non-zero; apply, then
 flip `wiki.deposit_default_tier`, then re-apply → every previously written tier
 is unchanged; a row whose deposit provenance appears only after run 1 is
 classified on re-apply at `deposit_default_used`, **not** at the flipped config
-value; a transaction aborted after the UPDATEs but before commit leaves both
-the tiers NULL and the marker absent; and — the recovery property — deleting
-the marker and re-applying is a no-op on all previously classified rows.
+value; that same rerun leaves `deposit_default_used` and `first_applied_at`
+unchanged while `rows_classified` accumulates and `runs` increments; a rerun
+classifying zero rows leaves the marker byte-identical; a transaction aborted
+after the UPDATEs but before commit leaves both the tiers NULL and the marker
+absent; and — the recovery property — deleting the marker and re-applying is a
+no-op on all previously classified rows.
 
 ### B.4 Reader surface — tier is a filter, not a namespace
 
@@ -395,6 +430,7 @@ all closing crash/platform-determinism windows rather than altering design:
 | 13 | §2.4 glob resolution given a total order (specificity, then lexicographic) so matching never depends on JSON key order or `preserved_keys` round-tripping | Review — rev 2's "first match on tie" leaned on parser-dependent iteration order |
 | 14 | §3.3 marker store settled on `llm_wiki_meta`, committed in the same transaction as the tier UPDATEs; config-file marker rejected as non-atomic; Q closed in §6 | Review flagged the transactional requirement; the same-DB KV table makes it resolvable now rather than at plan time |
 | 15 | §3.3 marker changed from a boolean **gate** to a JSON **parameter** (`deposit_default_used` et al); reruns are permitted and pin the cohort's original tier | Review asked whether the crash window could be made less dangerous. It can be made harmless: gating is what created the unrecoverable direction, so the gate was removed rather than further guarded |
+| 16 | §3.3 marker rewrite-on-rerun specified: `rows_classified` accumulates and `runs`/`last_applied_at` advance, while `deposit_default_used`/`first_applied_at` are write-once; zero-row reruns write nothing | Review — rev 3 left rerun marker handling undefined. Aggregation adopted as proposed; the write-once split is the correction that keeps the cohort value from decaying under config drift |
 
 **Rev 2 (2026-09-01)** — review response. Changes:
 
