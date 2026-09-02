@@ -574,8 +574,8 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             // with no path-shape check, so a hand-edited config can put an
             // absolute path there (tracked as #140). CodeQL
             // rust/cleartext-logging flags this anyway (it does not model
-            // `redact_home` as a sanitiser); alert #2 dismissed as a false
-            // positive citing this sanitiser. Inline `// codeql[...]`
+            // `redact_home` as a sanitiser); the persisted alert dismissed as
+            // a false positive citing this sanitiser. Inline `// codeql[...]`
             // suppression does NOT work for Rust — do not re-add it.
             println!(
                 "{} -> {}",

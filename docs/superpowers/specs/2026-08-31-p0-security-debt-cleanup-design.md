@@ -12,9 +12,12 @@ two P0 items on main:
 1. `tools/src/lock.rs` opens the `ct watch` lockfile with `truncate(true)`,
    reintroducing the symlink-truncation hazard that `6c1113e` fixed in the
    duplicate `fs_watcher.rs` implementation.
-2. CodeQL alert #2 (HIGH, `rust/cleartext-logging`, `tools/src/bin/ct.rs:575`)
-   is still open. The inline `// codeql[...]` suppression written to silence
-   it has never worked — Rust has no inline suppression support.
+2. CodeQL `rust/cleartext-logging` HIGH alert on `tools/src/bin/ct.rs:575`
+   is still open. (CodeQL alert numbers rotate each time the flagged
+   statement changes, so the durable identifier is the **rule** and the
+   **location**, not the number — see Item 2 for the rotation behaviour.)
+   The inline `// codeql[...]` suppression written to silence it has never
+   worked — Rust has no inline suppression support.
 
 Both are small, independent, and touch code already reviewed under #124. One
 PR clears both.
@@ -123,7 +126,17 @@ test of its own. Porting this canary test to the desktop crate is tracked as
 issue #141, not part of this PR — the active hazard is in `lock.rs`, and the
 scoping keeps this change reviewable.
 
-## Item 2 — CodeQL alert #2 (`rust/cleartext-logging`)
+## Item 2 — CodeQL `rust/cleartext-logging` alert
+
+> **Note on alert numbering.** CodeQL does not fingerprint the same query
+> finding across a statement change — when this PR rewrites the flagged
+> line, the prior alert closes itself and a new one opens at the new
+> statement with a fresh number. Throughout this section "alert #2" means
+> "the alert that the prior statement produced against
+> `ct.rs:575`"; "the persisted alert" / "the post-merge alert" means
+> whatever number lands on `main` after this PR merges. Both the spec
+> and the in-source comment under the print site avoid pinning the new
+> number, because that is exactly the bit that rotates.
 
 ### Problem
 
@@ -159,8 +172,10 @@ has to rest on the print site, not on the load contract.
 CodeQL's `rust/cleartext-logging` query does not model `redact_home` as a
 sanitiser, so it flags the call anyway. The `// codeql[rust/cleartext-logging]`
 comment added above it is inert — inline suppression comments work for some
-CodeQL languages but **not** for Rust, so alert `#2` has stayed open since #124
-while appearing, to a reader, to be handled.
+CodeQL languages but **not** for Rust, so the alert against this prior
+statement (numbered `#2` at the time of #124, and now historical — see the
+rotation note at the top of Item 2) has stayed open since #124 while
+appearing, to a reader, to be handled.
 
 ### Decision: false positive after defense-in-depth fix, dismissed upstream
 
@@ -199,9 +214,9 @@ Three changes in `ct.rs`:
 2. Wrap `target_display` in `redact_home` at `ct.rs:634` and `ct.rs:646`.
    Both print a raw `std::fs::canonicalize()` result — an absolute path,
    commonly under `$HOME` — from the same `ct trust` command. CodeQL did
-   not flag them, but they are the same leak class as alert #2, and a
-   dismissal that says "`ct trust` sanitises its printed paths" is not
-   true while they stand. Two one-line changes.
+   not flag them, but they are the same leak class as the alert on the
+   `--list` statement, and a dismissal that says "`ct trust` sanitises its
+   printed paths" is not true while they stand. Two one-line changes.
 3. Delete the inert suppression comment and replace it with a plain comment
    that records the sanitiser, the verdict, and a warning against re-adding
    the suppression:
@@ -211,17 +226,18 @@ Three changes in `ct.rs`:
 // printing: the `$HOME` prefix is collapsed to `~`, so the values
 // this statement writes cannot contain an absolute path under the home
 // (e.g. `~/.ssh/keys`). CodeQL rust/cleartext-logging flags this
-// anyway (it does not model `redact_home` as a sanitiser); alert #2
-// dismissed as a false positive citing this sanitiser. Inline
-// `// codeql[...]` suppression does NOT work for Rust — do not
+// anyway (it does not model `redact_home` as a sanitiser); the
+// persisted alert dismissed as a false positive citing this sanitiser.
+// Inline `// codeql[...]` suppression does NOT work for Rust — do not
 // re-add it.
 println!("{} -> {}", redact_home(&entry.link), redact_home(&entry.target));
 ```
 
-Alert `#2` is then dismissed in the GitHub Security UI as a false positive,
-citing that justification. **This is a manual maintainer step** — it cannot
-be done from the PR, and the CodeQL run on this PR will still report alert #2
-until it is performed. The PR body will call this out.
+The post-merge alert is then dismissed in the GitHub Security UI as a false
+positive, citing that justification. **This is a manual maintainer step** —
+it cannot be done from the PR, and the CodeQL run on this PR will still
+report a `rust/cleartext-logging` finding on the post-merge statement until
+it is performed. The PR body will call this out.
 
 ### Why no CodeQL config file
 
@@ -243,13 +259,16 @@ correctly earns its own alert to triage.
   CI does not gate clippy today, so a warning introduced here would not
   fail the PR.
 - CI green on the PR.
-- CodeQL green **except** alert #2, which persists until manually dismissed.
+- CodeQL green **except** the persisted `rust/cleartext-logging` alert on
+  the post-merge statement, which persists until manually dismissed (see
+  Item 2's rotation note).
 
 ## Risks
 
 - **Dismissal is manual and off-repo.** If the maintainer does not dismiss
-  alert #2, the HIGH alert stays open and this PR only removes a misleading
-  comment. Mitigated by calling the step out explicitly in the PR body.
+  the post-merge alert, the HIGH alert stays open and this PR only removes
+  a misleading comment. Mitigated by calling the step out explicitly in
+  the PR body.
 - **The duplication remains.** `lock.rs` and `fs_watcher.rs` must stay in
   sync by hand until the phase-3 workspace migration collapses them. Both
   module headers already document this; the divergence this PR fixes was
