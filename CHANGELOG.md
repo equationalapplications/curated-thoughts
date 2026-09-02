@@ -1,3 +1,23 @@
+## [1.42.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.41.0...v1.42.0) (2026-09-02)
+
+### Features
+
+* **config:** add wiki.deposit_default_tier, shipped default wisdom ([ee40e85](https://github.com/equationalapplications/curated-thoughts/commit/ee40e8508c53375766305bbe9a931b824e7b1c38))
+* **memory:** ontology activation, entry tier dimension, wiki_context ([0adbcff](https://github.com/equationalapplications/curated-thoughts/commit/0adbcff30d3318f06050038ad35a32737f9345df))
+* **ontology:** deterministic folder to node-type resolution ([650bedf](https://github.com/equationalapplications/curated-thoughts/commit/650bedff623908d71760ca3fc41c1d8b092222c7))
+* **ontology:** seed manifests atomically when a recorded selection has none ([f615b03](https://github.com/equationalapplications/curated-thoughts/commit/f615b034214b9105c3fc6104690e1733a57d55f6)), closes [#78](https://github.com/equationalapplications/curated-thoughts/issues/78)
+* **schema:** V16 adds llm_wiki_entries.tier with a CHECK constraint ([6dd8979](https://github.com/equationalapplications/curated-thoughts/commit/6dd897956498b9a61fffb083d72aa143861ba93b))
+* **tools:** tier_backfill with a parameterizing marker ([61e7af8](https://github.com/equationalapplications/curated-thoughts/commit/61e7af8da6331bb3510dc646b64e66f888c9217a))
+* **wiki:** expose stored tier on search hits and as an optional filter ([f1812dc](https://github.com/equationalapplications/curated-thoughts/commit/f1812dcd3f990a3a5fc12cc02375723a0d275418)), closes [#133](https://github.com/equationalapplications/curated-thoughts/issues/133)
+
+### Bug Fixes
+
+* **config:** B3 I-1 write() persists wiki block; I-2 narrow serde(default) to per-field ([42cf45f](https://github.com/equationalapplications/curated-thoughts/commit/42cf45f75efd9e8a9862f34be04adefce278b450))
+* **memory-architecture:** align spec status with shipped coverage ([a016d9e](https://github.com/equationalapplications/curated-thoughts/commit/a016d9e3c348cccc654e7ed8c189ff798fe59fb5))
+* **memory-architecture:** review follow-up across spec + impl ([fadfb25](https://github.com/equationalapplications/curated-thoughts/commit/fadfb25700088737d79be9001dd8560d2adbc748)), closes [#28](https://github.com/equationalapplications/curated-thoughts/issues/28)
+* **tier_backfill:** add json_valid guard on JSON source_ref branch ([cd50006](https://github.com/equationalapplications/curated-thoughts/commit/cd5000672e27d52287ae7dd6d5cb3ec97480fb2b))
+* **tools/tier_backfill:** classify both source_ref forms via join ([babe415](https://github.com/equationalapplications/curated-thoughts/commit/babe4158c97237fa58b05b24847e7af3bda9bd72))
+
 ## [1.41.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.40.1...v1.41.0) (2026-09-02)
 
 ### Features
