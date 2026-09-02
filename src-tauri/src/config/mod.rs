@@ -45,8 +45,17 @@ fn root_kind(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Wiki-layer settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WikiConfig {
+    /// Tier stamped on deposit-ingested entries. Shipped default `"wisdom"`.
+    #[serde(default)]
+    pub deposit_default_tier: Option<String>,
+}
+
 /// Unified configuration for a brain directory.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct BrainConfig {
     /// User's vault root path (e.g., ~/Curated-Thoughts).
     pub vault_path: Option<String>,
@@ -63,6 +72,9 @@ pub struct BrainConfig {
     /// User's ontology selection (which schema the wiki engine is seeded with).
     #[serde(default)]
     pub ontology: OntologyConfigBlock,
+    /// Wiki-layer settings (deposit tier default).
+    #[serde(default)]
+    pub wiki: WikiConfig,
     /// Approved symlink `(link, target)` pairs. Written only by the approval
     /// flows (`ct trust`, the Desktop review prompt) — never hand-edited.
     #[serde(default)]
@@ -158,6 +170,7 @@ impl BrainConfig {
             "embedding",
             "privacy",
             "ontology",
+            "wiki",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -344,6 +357,7 @@ impl BrainConfig {
             "embedding",
             "privacy",
             "ontology",
+            "wiki",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -693,5 +707,55 @@ impl BrainConfig {
         fs::rename(&tmp_path, &paths.config_path)?;
 
         Ok(())
+    }
+
+    /// The tier stamped on deposit-ingested entries (spec §3.2).
+    ///
+    /// Defaults to `"wisdom"`: deposits are agent-written and revisable, and
+    /// `"fact"` invokes anchor-truth freeze semantics on agents that routinely
+    /// revise. An out-of-vocabulary value falls back rather than reaching the
+    /// DB and tripping the V16 CHECK — config is hand-editable.
+    pub fn deposit_default_tier(&self) -> &str {
+        match self.wiki.deposit_default_tier.as_deref() {
+            Some("fact") => "fact",
+            Some("wisdom") => "wisdom",
+            Some(other) => {
+                eprintln!(
+                    "config: wiki.deposit_default_tier {other:?} is not \"fact\" or \"wisdom\"; using \"wisdom\""
+                );
+                "wisdom"
+            }
+            None => "wisdom",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deposit_default_tier_defaults_to_wisdom() {
+        // Deposits are agent-written notes under active revision. 'fact' would
+        // invoke the librarian's "do not propose modifications" framing and
+        // freeze exactly the content agents keep correcting (spec §3.2).
+        let cfg: BrainConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.deposit_default_tier(), "wisdom");
+    }
+
+    #[test]
+    fn deposit_default_tier_can_be_set_to_fact() {
+        let cfg: BrainConfig =
+            serde_json::from_str(r#"{"wiki":{"deposit_default_tier":"fact"}}"#).unwrap();
+        assert_eq!(cfg.deposit_default_tier(), "fact");
+    }
+
+    #[test]
+    fn invalid_deposit_default_tier_falls_back_to_wisdom() {
+        // Config is hand-editable; an out-of-vocabulary value must not reach
+        // the DB and trip the V16 CHECK.
+        let cfg: BrainConfig =
+            serde_json::from_str(r#"{"wiki":{"deposit_default_tier":"anchor"}}"#).unwrap();
+        assert_eq!(cfg.deposit_default_tier(), "wisdom");
     }
 }
