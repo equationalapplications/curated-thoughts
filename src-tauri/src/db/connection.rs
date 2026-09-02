@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
-    MIGRATION_V9,
+    MIGRATION_V15, MIGRATION_V16, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5,
+    MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -116,6 +116,9 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         // constant manages its own statement sequence.
         conn.execute_batch(MIGRATION_V15)?;
     }
+    if version < 16 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V16))?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -217,7 +220,7 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 15);
+        assert_eq!(max_version, 16);
     }
 
     /// V15 widens the `documents.status` CHECK so the deferred-reindex
@@ -883,6 +886,46 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pipeline_heartbeat", [], |r| r.get(0))
             .unwrap();
         assert_eq!(hb, 1);
+    }
+
+    #[test]
+    fn v16_adds_tier_column_with_check_constraint() {
+        let conn = open_in_memory().unwrap();
+
+        // Column exists and accepts the three legal states.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, tier)
+             VALUES ('a', 'ent_1', 'A', '', 0, 0, 'fact'),
+                    ('b', 'ent_1', 'B', '', 0, 0, 'wisdom'),
+                    ('c', 'ent_1', 'C', '', 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // The CHECK is the floor: an out-of-vocabulary tier carries no prompt
+        // semantics and matches no filter, so the database refuses it.
+        let bad = conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, tier)
+             VALUES ('d', 'ent_1', 'D', '', 0, 0, 'anchor')",
+            [],
+        );
+        assert!(bad.is_err(), "CHECK must reject a tier outside fact/wisdom/NULL");
+    }
+
+    #[test]
+    fn v16_admits_existing_rows_unchanged() {
+        // Every pre-migration row is NULL, so the CHECK needs no data pass.
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('a', 'ent_1', 'A', '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tier, None);
     }
 
     #[test]
