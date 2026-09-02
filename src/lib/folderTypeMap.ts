@@ -8,11 +8,11 @@
  * never tie and the selected type is identical on every platform and parser.
  */
 
-/** Non-wildcard path segments, then negative total literal length. */
+/** Non-wildcard path segments, then total literal (non-metacharacter) length. */
 function specificity(glob: string): [number, number] {
   const segments = glob.split('/').filter((s) => s.length > 0 && !s.includes('*') && !s.includes('?'));
   const literalLength = glob.replace(/[*?[\]]/g, '').length;
-  return [segments.length, -literalLength];
+  return [segments.length, literalLength];
 }
 
 /** Total order: descending specificity, then ascending lexicographic. */
@@ -21,6 +21,9 @@ export function orderGlobs(map: Record<string, string>): string[] {
     const [aSeg, aLen] = specificity(a);
     const [bSeg, bLen] = specificity(b);
     if (aSeg !== bSeg) return bSeg - aSeg;
+    // Within the same fixed-segment count, the more **specific** glob — the
+    // one with the longer total literal (less wildcard) — wins. Sorting
+    // descending on literal length picks it first.
     if (aLen !== bLen) return bLen - aLen;
     return a < b ? -1 : a > b ? 1 : 0;
   });

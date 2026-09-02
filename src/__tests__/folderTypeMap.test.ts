@@ -5,7 +5,10 @@ import { resolveFolderType, orderGlobs } from '../lib/folderTypeMap';
 describe('orderGlobs', () => {
   it('orders by descending literal specificity, then ascending lexicographic', () => {
     const map = { 'people/**': 'Person', 'people/execs/**': 'Executive', 'a/**': 'A' };
-    expect(orderGlobs(map)).toEqual(['people/execs/**', 'a/**', 'people/**']);
+    // 'people/execs/**' has 2 fixed segments and 14 literal chars — first.
+    // 'people/**' (1 segment, 7 literal) beats 'a/**' (1 segment, 2 literal)
+    // because the more specific (longer literal) glob wins the tie-break.
+    expect(orderGlobs(map)).toEqual(['people/execs/**', 'people/**', 'a/**']);
   });
 
   it('is independent of key insertion order', () => {

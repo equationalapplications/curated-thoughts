@@ -31,11 +31,17 @@ const DEPOSIT_EVIDENCE_PREFIX: &str = "immutable-source-files/agents/";
 /// vault-relative path. An anchored `LIKE 'immutable-source-files/agents/%'`
 /// therefore matched nothing on a real brain while every relative-path unit
 /// test passed — so the anchored form is deliberately paired with a
-/// `'%/' || prefix` form here. Mirrors `safe_path::is_deposit_path`.
+/// `'%/' || prefix` form here. Windows separators are normalized to `/` so a
+/// `C:\Vault\immutable-source-files\agents\note.md` still matches, mirroring
+/// `safe_path::is_deposit_path`.
 ///
 /// `{col}` is interpolated, never user input; the prefix stays a bound `?1`.
 fn deposit_path_predicate(col: &str) -> String {
-    format!("({col} LIKE ?1 || '%' OR {col} LIKE '%/' || ?1 || '%')")
+    format!(
+        "({col} LIKE ?1 || '%' OR {col} LIKE '%/' || ?1 || '%' OR \
+         REPLACE({col}, '\\', '/') LIKE ?1 || '%' OR \
+         REPLACE({col}, '\\', '/') LIKE '%/' || ?1 || '%')"
+    )
 }
 
 /// The shared `WHERE` body naming rows eligible for classification: a live,
@@ -98,6 +104,25 @@ pub fn read_marker(conn: &Connection) -> Result<Option<BackfillMarker>> {
     }
 }
 
+/// Marker read over a `Transaction`. Used by `apply_backfill` so the read
+/// happens inside the same IMMEDIATE transaction that may write the marker —
+/// a read on the outer connection would race a concurrent apply.
+fn read_marker_tx(tx: &rusqlite::Transaction<'_>) -> Result<Option<BackfillMarker>> {
+    let raw: Option<String> = tx
+        .query_row(
+            "SELECT value FROM llm_wiki_meta WHERE key = ?1",
+            [MARKER_KEY],
+            |r| r.get(0),
+        )
+        .ok();
+    match raw {
+        Some(s) => Ok(Some(
+            serde_json::from_str(&s).context("parse tier_backfill_v1 marker")?,
+        )),
+        None => Ok(None),
+    }
+}
+
 /// The `(entry_id, tier)` pairs an apply would write. Read-only.
 ///
 /// `source_ref` is polymorphic (see `src-tauri/src/db/commit.rs:136-180`):
@@ -135,14 +160,27 @@ fn now_unix() -> i64 {
 ///
 /// `config_default` is used only when no marker exists. Once a cohort exists,
 /// its recorded `deposit_default_used` wins, so a config flip cannot split it.
+///
+/// The transaction is opened with `IMMEDIATE` semantics **before** the marker
+/// is read. A deferred transaction plus an out-of-transaction read lets two
+/// concurrent applies both observe "no marker", then race to write one; the
+/// second writer would clobber the first's cohort record with its own
+/// `config_default`, so later eligible rows join the cohort at the wrong tier.
+/// `IMMEDIATE` acquires the reserved lock at BEGIN, so the second apply blocks
+/// until the first commits, then sees the new marker and reuses its
+/// `deposit_default_used` (the write-once field) instead of refreshing it
+/// from the loser's view of config.
 pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<BackfillMarker> {
-    let existing = read_marker(conn)?;
+    use rusqlite::TransactionBehavior;
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing = read_marker_tx(&tx)?;
     let tier = existing
         .as_ref()
         .map(|m| m.deposit_default_used.clone())
         .unwrap_or_else(|| config_default.to_string());
 
-    let schema_version: i64 = conn
+    let schema_version: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
@@ -150,7 +188,6 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
         )
         .unwrap_or(0);
 
-    let tx = conn.transaction()?;
     // The predicate binds the prefix as ?1, so the tier value takes ?2 and the
     // parameter order is (prefix, tier) — the reverse of the reading order.
     let update_sql = format!(
@@ -164,6 +201,9 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
 
     // A run that changes no data leaves no trace, matching the dry-run-default
     // posture. `last_applied_at` therefore means "last run that wrote rows".
+    // The recovery direction (marker was deleted, possibly with no new rows
+    // to classify) still writes a fresh ledger so an operator never loses the
+    // floor they relied on — see spec §3.3.
     if changed == 0 {
         if let Some(marker) = existing {
             tx.commit()?;
@@ -187,6 +227,10 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
             first_applied_at: now,
             last_applied_at: now,
             runs: 1,
+            // Recovery direction: no prior cohort, so the marker's
+            // `deposit_default_used` is the **current** config default
+            // (the prior cohort is gone — there is no write-once value to
+            // preserve). Spec §3.3 zero-row recovery.
             deposit_default_used: tier,
             rows_classified: changed,
             schema_version,
@@ -509,6 +553,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sib, None, "sibling directory must stay NULL");
+    }
+
+    #[test]
+    fn windows_separator_paths_classify_via_normalized_branch() {
+        // `documents.path` on a Windows host looks like
+        // `C:\Vault\immutable-source-files\agents\note.md` — backslashes
+        // throughout, no forward slash before the deposit prefix. The SQL
+        // predicate normalizes backslashes to forward slashes so this
+        // shape classifies too, mirroring `safe_path::is_deposit_path`.
+        let mut conn = seeded_conn();
+        conn.execute_batch(
+            r#"INSERT INTO documents (id, path) VALUES
+                   ('doc_win','C:\Vault\immutable-source-files\agents\note.md'),
+                   ('doc_win_sib','C:\Vault\immutable-source-files\agents-but-not-really\note.md');
+               INSERT INTO chunks (content_hash, doc_id) VALUES
+                   ('h_win','doc_win'),
+                   ('h_win_sib','doc_win_sib');
+               INSERT INTO llm_wiki_entries (id, entity_id, title, source_ref) VALUES
+                   ('j_win','ent_1','JWin','{"proposal_id":"p_win","evidence":[{"content_hash":"h_win"}]}'),
+                   ('j_win_sib','ent_1','JWinSib','{"proposal_id":"p_win_sib","evidence":[{"content_hash":"h_win_sib"}]}');"#,
+        )
+        .unwrap();
+
+        let plan = plan_backfill(&conn, "wisdom").unwrap();
+        let ids: Vec<&str> = plan.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(
+            ids.contains(&"j_win"),
+            "Windows-shaped absolute path must classify via the JSON branch, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"j_win_sib"),
+            "Windows-shaped sibling directory must still be rejected, got {ids:?}"
+        );
+
+        apply_backfill(&mut conn, "wisdom").unwrap();
+        let tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j_win'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(tier.as_deref(), Some("wisdom"));
+    }
+
+    #[test]
+    fn deleted_marker_is_recreated_by_a_zero_row_rerun() {
+        // Spec §3.3 zero-row recovery: when the marker is absent, a rerun
+        // writes a fresh ledger regardless of `changed`, so an operator
+        // never loses the floor they relied on. The fresh marker's
+        // `deposit_default_used` is the current config default (the prior
+        // cohort is gone), `first_applied_at` is the run's wall clock, and
+        // `rows_classified` is the count of rows that run newly classified.
+        let mut conn = seeded_conn();
+        apply_backfill(&mut conn, "wisdom").unwrap();
+        // All four deposit-origin rows are already tiered.
+        conn.execute("DELETE FROM llm_wiki_meta WHERE key = ?1", [MARKER_KEY])
+            .unwrap();
+        let marker = apply_backfill(&mut conn, "fact").unwrap();
+        assert_eq!(
+            marker.rows_classified, 0,
+            "zero-row recovery: nothing newly classified"
+        );
+        assert_eq!(
+            marker.deposit_default_used, "fact",
+            "recovery direction uses current config, not the deleted cohort's"
+        );
+        assert_eq!(marker.runs, 1, "fresh marker, not an increment");
+        // Already-classified rows stay classified (NULL-only scope is unchanged).
+        let d1: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(d1.as_deref(), Some("wisdom"));
     }
 
     #[test]

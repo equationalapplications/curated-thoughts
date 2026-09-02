@@ -403,6 +403,16 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         ResolveOptions {
             auto_approve: true,
             embed_profile,
+            // Honour the on-disk `wiki.deposit_default_tier` setting. The CLI
+            // is the only way to approve proposals on a headless deployment,
+            // so a deposit approved through `--approve` must stamp the same
+            // tier as one approved through the Tauri command (which already
+            // plumbs this). Falling back to the constant default would
+            // silently stamp every CLI-approved deposit 'wisdom' even when
+            // the operator has set `wiki.deposit_default_tier: 'fact'`.
+            deposit_default_tier: Some(
+                tauri_app_lib::config::BrainConfig::deposit_default_tier_on_disk(),
+            ),
             ..Default::default()
         },
     )?;

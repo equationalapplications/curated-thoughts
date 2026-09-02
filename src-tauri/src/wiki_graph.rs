@@ -160,11 +160,18 @@ pub struct WikiTraverseNode {
     pub entity_id: String,
 }
 
+/// One traversed edge. `entity_id` is the partition the edge lives in — two
+/// seeded partitions (e.g. `tier_fact` and `tier_wisdom`) can hold the same
+/// `(source_id, target_id, edge_type)`, and consumers must be able to tell
+/// which partition a returned edge belongs to. The field is set on
+/// construction (see `CompositeWalk::edge_keys`) so no caller can produce a
+/// `WikiTraverseEdge` without a partition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WikiTraverseEdge {
     pub source_id: String,
     pub target_id: String,
     pub edge_type: String,
+    pub entity_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -513,6 +520,7 @@ fn fetch_outbound_neighbors(
             source_id: row.get(0)?,
             target_id: row.get(1)?,
             edge_type: row.get(2)?,
+            entity_id: entity_id.to_string(),
         };
         let neighbor_id: String = row.get(3)?;
         out.push((edge, neighbor_id));
@@ -550,6 +558,7 @@ fn fetch_inbound_neighbors(
             source_id: row.get(0)?,
             target_id: row.get(1)?,
             edge_type: row.get(2)?,
+            entity_id: entity_id.to_string(),
         };
         let neighbor_id: String = row.get(3)?;
         out.push((edge, neighbor_id));
@@ -596,6 +605,7 @@ fn fetch_entity_neighbors(
             source_id: row.get(0)?,
             target_id: row.get(1)?,
             edge_type: row.get(2)?,
+            entity_id: entity_id.to_string(),
         };
         let neighbor_id: String = row.get(3)?;
         out.push((edge, neighbor_id));
@@ -816,12 +826,15 @@ pub struct WikiContextResult {
 /// Nodes and the visited set are keyed by `(entity_id, node_id)`. Seeds can sit
 /// in different partitions, and the same id may legitimately exist in more than
 /// one — keying by id alone would let the first partition's node mask the
-/// other's.
+/// other's. The edge deduplication key carries `entity_id` for the same
+/// reason: an edge is owned by the partition it was written under, and two
+/// partitions can hold the same `(source_id, target_id, edge_type)` without
+/// the two being the same edge.
 #[derive(Default)]
 struct CompositeWalk {
     nodes: HashMap<(String, String), WikiTraverseNode>,
     edges: Vec<WikiTraverseEdge>,
-    edge_keys: HashSet<(String, String, String)>,
+    edge_keys: HashSet<(String, String, String, String)>,
     visited: HashSet<(String, String)>,
     truncated: bool,
 }
@@ -875,13 +888,23 @@ impl CompositeWalk {
                     self.truncated = true;
                     return Ok(());
                 }
+                // Edge partition is part of the key: two seeded partitions
+                // can hold the same (source_id, target_id, edge_type) and
+                // they are different edges. The entity_id also lands on the
+                // returned WikiTraverseEdge so consumers can route it back
+                // to its partition.
+                let edge_with_partition = WikiTraverseEdge {
+                    entity_id: entity_id.to_string(),
+                    ..edge
+                };
                 let key = (
-                    edge.source_id.clone(),
-                    edge.target_id.clone(),
-                    edge.edge_type.clone(),
+                    edge_with_partition.source_id.clone(),
+                    edge_with_partition.target_id.clone(),
+                    edge_with_partition.edge_type.clone(),
+                    edge_with_partition.entity_id.clone(),
                 );
                 if self.edge_keys.insert(key) {
-                    self.edges.push(edge);
+                    self.edges.push(edge_with_partition);
                 }
                 if is_new_neighbor {
                     // Resolve in the walk's own space, never across it — the
@@ -962,9 +985,15 @@ pub fn wiki_context(
     let facts = wiki_search(conn, query_vec, None, tier, max_facts)?;
 
     let mut walk = CompositeWalk {
-        // A clamped depth means the caller asked for a wider neighborhood than
-        // was walked, which is exactly what `truncated` reports.
-        truncated: clamped_depth != depth,
+        // `truncated` means the walk is **narrower** than the caller asked
+        // for, so the neighborhood may be incomplete. A clamped depth that
+        // is *wider* than the caller asked for (e.g. `depth: 0` clamps to
+        // 1) is not truncation — the walk returned more than requested, and
+        // the caller does not have a partial-neighbourhood hazard to
+        // reason about. Report truncation only when the cap shrank the
+        // walk, which happens inside `walk_seed` once the node budget is
+        // exhausted.
+        truncated: clamped_depth < depth,
         ..Default::default()
     };
 

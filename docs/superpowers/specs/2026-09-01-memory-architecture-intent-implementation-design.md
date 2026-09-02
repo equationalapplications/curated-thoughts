@@ -1,11 +1,24 @@
 # Spec: Ontology Activation, Entry Tier Dimension, Composite Context Primitive
 
-**Status:** Implemented — branch `spec/memory-architecture-intent-implementation`
-(A1 ontology seed, A2 folderTypeMap, B1 V16 tier column, B2 tier filter,
-B3 deposit default config + writer, B4 tier_backfill, C1 `wiki_context`).
+**Status:** Implemented in this PR on branch
+`spec/memory-architecture-intent-implementation` (A1 ontology seed, A2
+folderTypeMap mechanism, B1 V16 tier column, B2 tier filter, B3 deposit
+default config + writer, B4 tier_backfill, C1 `wiki_context`). The PR
+description framing ("spec-only for remote implementation") is the
+spec-vs-impl pattern PR #124/#131 used; this PR both spec'd and implemented
+the change in one branch, and the §3.2 writer + §2.3 edge gate + §4.1
+composite tool are real, not just described.
 Manual AC6 (fresh-session ergonomics check) is still deferred to PR review;
 AC1/AC2 remain covered only at the unit seam (see Known gaps below).
 Workspace: `.superpowers/sdd/2026-09-01-memory-architecture-intent-implementation/`.
+
+**A2 wiring note:** `src/lib/folderTypeMap.ts`'s `resolveFolderType` and
+`orderGlobs` are unit-tested and the spec describes the mechanism, but the
+`ingest.folder_type_map` config key is not yet wired into the Rust ingest
+path — the resolver is not called from any production code. A future change
+adds the `BrainConfig` field, the call site, and the manifest-membership
+validation. This PR ships the deterministic resolution + glob matching; the
+config plumbing is a follow-up.
 
 **Known gaps at time of writing** — carried openly rather than closed silently:
 
@@ -93,10 +106,15 @@ Non-goals: no librarian model changes; no re-embedding; no UI work.
 On desktop-app startup (or first wiki tool use), when the entity manifest is
 empty/absent AND a concrete `ontology.schema` selection is recorded: the TS
 engine seeds the manifest from the selected npm schema package **pinned to the
-version recorded at adoption** (`schema-software-org` → 6.3.0) via the existing
+version recorded at adoption** (`schema-software-org` → 6.2.0) via the existing
 `createWiki` path, and sets ontology mode to `strict` (package manifest
 authoritative, per the adoption spec's decision table). No re-onboarding
 wizard; the recorded selection is the trigger.
+
+(`core-llm-wiki` itself is at 6.3.0 — only that engine upgrade is required
+for the `setOntologyManifests(entries, { ifAbsent })` API §2.2 relies on.
+The two schema packages are still 6.2.0 because the manifest content did
+not change.)
 
 ### A.2 Idempotence, atomicity, and failure isolation
 
@@ -278,6 +296,21 @@ Classify existing entries only where provenance is certain: entries whose
 evidence shows deposit origin → the configured deposit default; all others stay
 NULL. Print a table, require `--yes` (PR #131 Part C pattern).
 
+**Authoritative provenance predicate.** The backfill classifies a row as
+deposit-origin when **any** of its evidence chunks resolves to a document
+under the agent-deposit directory. The single, load-bearing rule lives in
+`tools/src/tier_backfill.rs` (`eligible_rows_predicate` + the two
+`deposit_path_predicate` forms) and the matching `safe_path::is_deposit_path`
+helper (`src-tauri/src/vault/safe_path.rs`); the writer and the tool must
+never drift, and any change to one is a change to the other. The predicate
+matches both path shapes the database actually holds (absolute and
+vault-relative), normalizes Windows separators, and uses a trailing `/` so
+`agents-but-not-really/` is a sibling directory, not a deposit. Missing or
+ambiguous evidence (a `chunk_id` lookup that returns no row, an empty
+`content_hash`, a `source_ref` that is neither a recognised legacy path nor
+a valid JSON blob) leaves the row out of the plan; the row stays NULL and
+the run is not failed by it.
+
 **Deposit provenance is tested in both path shapes.** `documents.path` is
 written by the ingest walker, which canonicalizes to an **absolute** path, while
 the legacy `source_ref` producer and every fixture store a **vault-relative**
@@ -327,16 +360,22 @@ prefix, so `agents-but-not-really/` is not a deposit.
   `applied_at` cannot answer when the cohort was established, only when it was
   last touched — the ledger needs both.
 
-  A rerun that classifies **zero** rows writes nothing at all: no marker
-  rewrite, no transaction, consistent with the dry-run-default posture that a
-  run which changes no data leaves no trace. `last_applied_at` therefore means
-  "last run that wrote rows", not "last run attempted".
+  A rerun that classifies **zero** rows **and finds the existing marker
+  present** writes nothing at all: no marker rewrite, no transaction,
+  consistent with the dry-run-default posture that a run which changes no
+  data leaves no trace. `last_applied_at` therefore means "last run that
+  wrote rows", not "last run attempted".
 
-  If the marker is absent but rows are already classified (an operator deleted
-  it), a rerun writes a fresh marker whose `rows_classified` counts only the
-  rows *that run* classified. The count is then a floor, not a total. This is
-  accepted: reconstructing the true total would require re-deriving provenance
-  for every non-NULL row, and the field is a ledger for operators, never an
+  If the marker is absent (an operator deleted it), the rerun writes a fresh
+  marker regardless of `changed` — the recovery direction must always leave a
+  ledger behind. The new marker's `deposit_default_used` is the current
+  config default (the prior cohort is gone, so a write-once copy of it is
+  impossible), `first_applied_at` is the run's wall clock, and
+  `rows_classified` is the count of rows *that run* newly classified
+  (zero if everything was already tier != NULL — the floor is then 0, not
+  a total). The count is then a floor, not a total. This is accepted:
+  reconstructing the true total would require re-deriving provenance for
+  every non-NULL row, and the field is a ledger for operators, never an
   input to any decision.
 
   **This is what removes the dangerous crash direction.** A gate that refuses on
@@ -412,7 +451,17 @@ The corrected design **decouples tier from `entity_id` entirely**:
   status: live ranking-weight keys, honored per-row wherever such rows exist,
   never written by this spec.
 - Librarian prompt assembly derives labels from stored entry tier when
-  present, chunk heuristics otherwise (fallback, unchanged).
+  present, chunk heuristics otherwise (fallback, unchanged). **Status: the
+  stored `llm_wiki_entries.tier` column is written by the deposit path and
+  the backfill, but the librarian prompt assembly does not yet read it.**
+  `assemble_librarian_context` (`src-tauri/src/librarian/mod.rs:26-43`)
+  still labels input from `chunk.entity_id` and `documents.tier` —
+  unchanged from the pre-V16 behaviour — so a stored `'fact'` does not yet
+  surface as "ANCHOR TRUTH" in the prompt. The bridge is a separate
+  follow-up: prompt semantics for the curated `'fact'`/`'wisdom'` labels
+  ride a later PR that wires `entries.tier` into the synthesis path.
+  Until then, the column is storage-truth only and the prompt keeps the
+  chunk-heuristics fallback unchanged.
 
 This is strictly better than the namespace overload even setting the migration
 aside: tier and partition are orthogonal, so a brain can have both a real
@@ -488,8 +537,14 @@ deliberate deep work.
    documentation) answers a corpus question correctly from the tool output.
 7. **AC7** Default `wiki_search` still returns all live entries (#133 contract
    green); the explicit `tier` filter returns exactly the matching entries;
-   `entityIds` behavior is byte-identical to v1.40.1 (no namespace was added or
-   migrated); `mode: off` configs still function unchanged (graceful).
+   `entityIds` **filtering and selection** behavior is byte-identical to
+   v1.40.1 (no namespace was added or migrated); `mode: off` configs still
+   function unchanged (graceful). The full response is *not* byte-identical
+   to v1.40.1 — B.4 adds a `tier` field to every `wiki_search` result, so a
+   raw JSON diff picks up the additive field. "Byte-identical" here means
+   the **set of returned entries and the per-row `entityIds` matching**
+   are unchanged, which is the only behaviour the #133 contract asserts;
+   the new `tier` field is exercised by a separate assertion in AC3.
 8. **AC8** `wiki_context` with `depth: 9` clamps to 3; a walk exceeding
    `MAX_TRAVERSAL_NODES` across all seeds returns `truncated: true` with at
    most 50 nodes.
@@ -554,11 +609,11 @@ Two review findings were **not** adopted, on the evidence:
   correct; only the diagnostic would differ, and #133's explicit-empty contract
   is worth more than the message.
 
-**Rev 4 (2026-09-02)** — upstream dependency landed. One change:
+**Rev 5 (2026-09-02)** — upstream dependency landed. One change:
 
 | # | Change | Source |
 |---|---|---|
-| 17 | §2.2's atomicity gap closed: `core-llm-wiki` 6.3.0 ships `setOntologyManifests(entries, { ifAbsent })`, so the read-then-write loop and its compensating rollback are deleted. Restated as **two** atomic calls, since the workspace tier's id does not exist during `setupWiki` | The gap was carried openly in rev 3; the fix was specced upstream (`expo-llm-wiki`, `2026-09-02-atomic-multi-entity-manifest-seed-design.md`) and released as 6.3.0 |
+| 28 | §2.2's atomicity gap closed: `core-llm-wiki` 6.3.0 ships `setOntologyManifests(entries, { ifAbsent })`, so the read-then-write loop and its compensating rollback are deleted. Restated as **two** atomic calls, since the workspace tier's id does not exist during `setupWiki` | The gap was carried openly in rev 3; the fix was specced upstream (`expo-llm-wiki`, `2026-09-02-atomic-multi-entity-manifest-seed-design.md`) and released as 6.3.0 |
 
 **Rev 3 (2026-09-01)** — implementation-hardening review (Kurt). Three changes,
 all closing crash/platform-determinism windows rather than altering design:

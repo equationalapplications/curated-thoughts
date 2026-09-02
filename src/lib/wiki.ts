@@ -266,10 +266,15 @@ function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): W
     config: {
       hybridWeight: 0.7,
       preFilterLimit: 50,
+      // Seed only the stable tiers here. `setupWiki()` runs before
+      // `initWorkspaceId` resolves, so `getWorkspaceId()` is still the
+      // `tier_working::default` placeholder — passing it to
+      // `ontologyConfigFor` would write a manifest for an entity no data
+      // ever lands in. The real workspace tier is seeded by
+      // `initWorkspaceId` once its id is known (see comment above).
       ontology: ontologyConfigFor(selection, [
         'tier_fact',
         'tier_wisdom',
-        getWorkspaceId(),
       ]),
       ...(enableOutbox && { enableOutbox: true }),
     },

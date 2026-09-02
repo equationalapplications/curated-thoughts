@@ -139,6 +139,16 @@ struct CommitContext {
 ///   severe and very hard-to-diagnose failure. Logged, and deliberately the
 ///   most permissive reading — a reviewer who disagrees should flip this one
 ///   branch, not the whole gate.
+///
+/// The proposal's `entity_id` is a **curated** id (`ent_<hash>`), not a
+/// partition id (`tier_fact`, `tier_wisdom`, `tier_working::*`); manifests
+/// are seeded against partitions, so a direct lookup against a curated id
+/// always misses and would silently disable the gate on every production
+/// proposal. The curated entity's manifest is the partition's manifest, so
+/// `wiki_get_ontology` is called against `tier_fact` — the canonical
+/// seeded partition — and only as a fallback when the curated-id lookup
+/// does find a manifest. Tests that install a manifest for a specific
+/// curated id (e.g. `ent-1`) are unaffected: the direct hit is preferred.
 fn resolve_strict_edge_vocabulary(
     conn: &Connection,
     entity_id: &str,
@@ -146,33 +156,40 @@ fn resolve_strict_edge_vocabulary(
     if entity_id.is_empty() {
         return None;
     }
-    let ontology = match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!(
-                "[commit] ontology unreadable for entity {entity_id} ({e}); \
-                 edge types are not gated for this commit"
-            );
-            return None;
+    let lookup_ids: [&str; 2] = [entity_id, "tier_fact"];
+    let mut last_err: Option<String> = None;
+    for lookup in lookup_ids {
+        match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+            Ok(o) if o.mode == "strict" => {
+                let manifest = o.manifest?;
+                let vocabulary: std::collections::HashSet<String> = manifest
+                    .edge_type_names()
+                    .into_iter()
+                    .map(|n| n.trim().to_lowercase())
+                    .collect();
+                if vocabulary.is_empty() {
+                    eprintln!(
+                        "[commit] entity {entity_id} (via {lookup}) is ontology mode 'strict' but \
+                         its manifest declares no edge types; edge types are not gated for this commit"
+                    );
+                    return None;
+                }
+                return Some(vocabulary);
+            }
+            Ok(_) => return None,
+            Err(e) => {
+                last_err = Some(format!("{lookup}: {e}"));
+                continue;
+            }
         }
-    };
-    if ontology.mode != "strict" {
-        return None;
     }
-    let manifest = ontology.manifest?;
-    let vocabulary: std::collections::HashSet<String> = manifest
-        .edge_type_names()
-        .into_iter()
-        .map(|n| n.trim().to_lowercase())
-        .collect();
-    if vocabulary.is_empty() {
+    if let Some(e) = last_err {
         eprintln!(
-            "[commit] entity {entity_id} is ontology mode 'strict' but its manifest \
-             declares no edge types; edge types are not gated for this commit"
+            "[commit] ontology unreadable for entity {entity_id} (fallback {lookup_ids:?}, last error: {e}); \
+             edge types are not gated for this commit"
         );
-        return None;
     }
-    Some(vocabulary)
+    None
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
@@ -477,30 +494,33 @@ pub(crate) fn fact_title_from_body(body: &str) -> String {
 /// deposit-origin when any evidence chunk resolves to a document under the
 /// agent deposit directory. Anything else stays NULL rather than guessing.
 ///
-/// Evidence resolves by `chunk_id` when present and by `content_hash`
+/// Evidence resolves by `content_hash` when present and by `chunk_id`
 /// otherwise, mirroring `evidence_json_with_hashes`'s own precedence — a
-/// post-migration write may carry only the hash.
+/// post-migration write may carry only the hash, and a `chunk_id` surviving
+/// a rechunk can be stale while the content_hash is what the source_ref
+/// actually persists. Hash-first keeps write-time classification consistent
+/// with the persisted provenance.
 fn deposit_origin_tier(
     conn: &Connection,
     evidence: &[StoredEvidenceChunk],
     deposit_tier: &str,
 ) -> Result<Option<String>> {
     for e in evidence {
-        let path: Option<String> = if let Some(cid) = e.chunk_id {
-            conn.query_row(
-                "SELECT d.path FROM chunks c
-                   JOIN documents d ON d.id = c.doc_id
-                  WHERE c.id = ?1",
-                [cid],
-                |r| r.get(0),
-            )
-            .optional()?
-        } else if !e.content_hash.is_empty() {
+        let path: Option<String> = if !e.content_hash.is_empty() {
             conn.query_row(
                 "SELECT d.path FROM chunks c
                    JOIN documents d ON d.id = c.doc_id
                   WHERE c.content_hash = ?1",
                 [&e.content_hash],
+                |r| r.get(0),
+            )
+            .optional()?
+        } else if let Some(cid) = e.chunk_id {
+            conn.query_row(
+                "SELECT d.path FROM chunks c
+                   JOIN documents d ON d.id = c.doc_id
+                  WHERE c.id = ?1",
+                [cid],
                 |r| r.get(0),
             )
             .optional()?
