@@ -1,7 +1,7 @@
 # Dependabot GHSA-cp6q-959q-f8rh — Tiptap `mergeAttributes()` Prototype-Pollution Class Vulnerability — Design
 
 **Date:** 2026-09-02
-**Status:** Reviewed & revised 2026-09-02 (target version changed 3.30.4 → 3.30.6, see §2.1; CodeRabbit findings on PR #139 incorporated)
+**Status:** Implemented 2026-09-02 (PR #139) — target 3.30.6 per §2.1; CodeRabbit findings incorporated
 **Branch:** `spec/tiptap-mergeattributes-dependabot`
 **Priority:** P2 (medium severity; desktop-only attack surface, exploit requires attacker-controlled JSON flowing into editor schema attributes)
 
@@ -205,8 +205,14 @@ entries (`@tiptap/core@3.30.2(@tiptap/pm@3.30.2)` → `...3.30.6(...)`).
    affected" — so the two are consistent.)
 5. `pnpm typecheck` passes — proves the full-suite pin kept tiptap/BlockNote
    types aligned.
-6. `pnpm test` passes — the editor suite (`src/__tests__/`, including
-   `axe-core.test.ts`) exercises the BlockNote editor on the new tiptap.
+6. `pnpm test` passes — the only BlockNote-touching tests in the suite
+   (`EditorPane.test.tsx:77-81`, `EntitySummarySection.test.tsx:19-29`) call
+   `vi.mock("@blocknote/react")` and `vi.mock("@blocknote/mantine")`, so
+   nothing in the automated suite loads real tiptap. A green run therefore
+   proves no regression elsewhere, not that the editor works on the new
+   tiptap. Real coverage lives in `src/__tests__/tiptapMergeAttributes.test.ts`
+   (asserts the `mergeAttributes` security property directly) and in the
+   criterion-9 manual smoke — both are required, not optional.
 7. `pnpm lint` passes.
 8. Dependabot alert #50 auto-resolves to *fixed* after merge to main
    (manifest+lockfile change on default branch re-scans). Verify the next day.

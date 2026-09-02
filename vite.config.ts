@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,9 +8,13 @@ import { fileURLToPath } from "node:url";
 // hoist them to node_modules/@tiptap/, so vite's node-style resolver cannot
 // find them. The security regression test imports @tiptap/core directly, so
 // we alias each @tiptap/* specifier to the real package directory inside
-// pnpm's content-addressed store. The lookup reads the directory listing at
-// config-load time, so it survives the 3.30.2 → 3.30.6 override change.
+// pnpm's content-addressed store. The target version is read from
+// package.json's pnpm.overrides block so the alias tracks any future bump
+// without code edits here.
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const overrides = JSON.parse(
+  readFileSync(resolve(__dirname, "package.json"), "utf8"),
+).pnpm.overrides as Record<string, string>;
 const tiptapPackages = [
   "core",
   "extension-bold",
@@ -27,13 +31,19 @@ const tiptapPackages = [
 ];
 
 function tiptapAlias(name: string): string {
-  const prefix = `@tiptap+${name}@`;
+  const target = overrides[`@tiptap/${name}`];
+  if (!target) {
+    throw new Error(
+      `vite.config.ts expected @tiptap/${name} override in package.json`,
+    );
+  }
+  const prefix = `@tiptap+${name}@${target}`;
   const match = readdirSync(resolve(__dirname, "node_modules/.pnpm")).find(
     (entry) => entry.startsWith(prefix),
   );
   if (!match) {
     throw new Error(
-      `@tiptap/${name} not found in node_modules/.pnpm — run \`pnpm install\``,
+      `@tiptap/${name}@${target} not found in node_modules/.pnpm — run \`pnpm install\``,
     );
   }
   return resolve(
