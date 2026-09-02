@@ -1,3 +1,11 @@
+## [1.42.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.0...v1.42.1) (2026-09-02)
+
+### Bug Fixes
+
+* **build:** make tiptapTestAliases() lazy via getter ([98eb181](https://github.com/equationalapplications/curated-thoughts/commit/98eb181866db039c0cc641cf4927ebfeeda48b46))
+* **build:** scope the [@tiptap](https://github.com/tiptap) aliases to vitest, and stop throwing at config load ([d8a997a](https://github.com/equationalapplications/curated-thoughts/commit/d8a997a358cd9bc8c7d6029d21dd1282f299903d))
+* **deps:** bump @tiptap/* 3.30.2 -> 3.30.6 (GHSA-cp6q-959q-f8rh, Dependabot [#50](https://github.com/equationalapplications/curated-thoughts/issues/50)) ([21e5d6a](https://github.com/equationalapplications/curated-thoughts/commit/21e5d6ab6d56ae9b552f4b8d48c51c303bf648b5))
+
 ## [1.42.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.41.0...v1.42.0) (2026-09-02)
 
 ### Features
