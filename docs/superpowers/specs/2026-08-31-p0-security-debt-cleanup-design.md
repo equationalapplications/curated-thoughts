@@ -185,9 +185,17 @@ Three changes in `ct.rs`:
    collapses a `$HOME` prefix to `~` and leaves other strings untouched, so
    the typical `documents/specs` ledger entry prints unchanged. A
    misconfigured `~/.ssh/keys` entry would print as `~/.ssh/keys` (no
-   leak), and any other absolute path simply prints as-is — never as
-   `$HOME/whatever` — which is the only invariant CodeQL's
-   `rust/cleartext-logging` query is checking for.
+   leak). Note what this does **not** buy: `redact_home` is a prefix
+   collapse, not validation. A non-home absolute path (`/var/tmp/x`, a
+   network share) still prints in full, and `rust/cleartext-logging` models
+   no sanitiser at all — it flags the sink regardless. So the dismissal
+   rests on the narrow claim that **no `$HOME`-rooted path reaches stdout
+   from this statement**, not on a claim that every sensitive value has
+   been removed from the output. Constraining what `entry.link` can hold in
+   the first place is the load-boundary fix tracked as issue #140; until
+   that lands, this print site is defense in depth over an unvalidated
+   field, which is exactly why the dismissal justification must cite the
+   sanitiser rather than the field's documented shape.
 2. Wrap `target_display` in `redact_home` at `ct.rs:634` and `ct.rs:646`.
    Both print a raw `std::fs::canonicalize()` result — an absolute path,
    commonly under `$HOME` — from the same `ct trust` command. CodeQL did
@@ -227,8 +235,13 @@ correctly earns its own alert to triage.
 - `cargo test --manifest-path tools/Cargo.toml` — new symlink canary test
   plus existing lock tests. (The package is `curated-thoughts-tools` and
   there is no root workspace, so `-p tools` does not resolve.)
-- `cargo clippy` — clean. **Run locally**: CI does not gate clippy today,
-  so a warning introduced here would not fail the PR.
+- `cargo clippy --manifest-path tools/Cargo.toml --all-targets` — **run
+  locally on 2026-09-02**; the only output is the pre-existing
+  `variant \`Delete\` is never constructed` dead-code warning from the
+  `curated-thoughts` lib (baseline, unrelated to this change). No new
+  warnings attributable to `lock.rs` or `ct.rs`. This must be run locally:
+  CI does not gate clippy today, so a warning introduced here would not
+  fail the PR.
 - CI green on the PR.
 - CodeQL green **except** alert #2, which persists until manually dismissed.
 
