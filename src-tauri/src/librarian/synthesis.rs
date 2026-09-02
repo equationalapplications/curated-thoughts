@@ -932,6 +932,10 @@ fn auto_approve_proposal(conn: &mut Connection, proposal_id: &str) -> Result<()>
         ResolveOptions {
             auto_approve: true,
             embed_profile,
+            // Deposit-origin entries minted by auto-approved synthesis carry
+            // the configured tier too — the librarian is exactly the writer
+            // spec §3.2 names.
+            deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
             ..Default::default()
         },
     )?;

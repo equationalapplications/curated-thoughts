@@ -326,3 +326,43 @@ PRAGMA foreign_keys = ON;
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (15);
 ";
+
+/// Tier as a stored dimension on wiki entries.
+///
+/// `'fact'` is anchor truth (the librarian must not propose modifications),
+/// `'wisdom'` is curated and proposal-updatable, NULL is working/unclassified
+/// — the posture of every entry that exists at migration time.
+///
+/// The CHECK is the invariant's floor. A bare `TEXT NULL` accepts any string,
+/// and an entry with an out-of-vocabulary tier would carry no prompt semantics
+/// and match no filter. Write boundaries validate the same set so callers get
+/// a diagnostic instead of a constraint violation, but the database is the
+/// authority. Every existing row is NULL, so no data pass is needed.
+///
+/// Spec: `2026-09-01-memory-architecture-intent-implementation-design.md` §3.1.
+pub const MIGRATION_V16: &str = "
+ALTER TABLE llm_wiki_entries
+    ADD COLUMN tier TEXT NULL
+    CHECK (tier IN ('fact', 'wisdom') OR tier IS NULL);
+
+CREATE INDEX IF NOT EXISTS idx_llm_wiki_entries_tier
+    ON llm_wiki_entries(tier) WHERE tier IS NOT NULL;
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (16);
+";
+
+/// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
+///
+/// The V16 CHECK is the database-level floor; this is the same set expressed
+/// once for every write boundary above it, so a caller gets a diagnostic
+/// instead of a constraint violation. Adding a tier means editing the CHECK in
+/// [`MIGRATION_V16`] and this slice together — nothing else hard-codes the set.
+pub const VALID_TIERS: &[&str] = &["fact", "wisdom"];
+
+/// Whether `tier` is a value the V16 CHECK will admit as non-NULL.
+///
+/// NULL (working/unclassified) is represented by `Option::None` at every
+/// boundary rather than by a string, so it is deliberately not a member here.
+pub fn is_valid_tier(tier: &str) -> bool {
+    VALID_TIERS.contains(&tier)
+}

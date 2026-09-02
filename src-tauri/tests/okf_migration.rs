@@ -210,5 +210,8 @@ fn test_app_open_runs_v7_schema() {
     // Bumped from 14 to 15 by MIGRATION_V15, which rebuilds `documents` to
     // widen the status CHECK so the deferred-reindex staging writes
     // ('pending_reindex') are actually accepted.
-    assert_eq!(max_version, 15);
+    //
+    // Bumped from 15 to 16 by MIGRATION_V16, which adds `llm_wiki_entries.tier`
+    // with a CHECK restricting values to fact/wisdom/NULL (spec §3.1).
+    assert_eq!(max_version, 16);
 }

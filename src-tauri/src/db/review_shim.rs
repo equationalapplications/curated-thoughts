@@ -201,6 +201,12 @@ pub fn approve_proposal_shim(
         ResolveOptions {
             auto_approve: false,
             embed_profile: embed_profile.cloned(),
+            // Honour the on-disk `wiki.deposit_default_tier` setting. The
+            // shim is reached from the legacy review desk (a Tauri
+            // command), so a deposit approved through it must stamp the
+            // same tier as one approved through the native
+            // `resolve_proposal_cmd` (which already plumbs this).
+            deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
             ..Default::default()
         },
     )

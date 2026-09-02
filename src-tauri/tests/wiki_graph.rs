@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use rusqlite::Connection;
 use tauri_app_lib::wiki_graph::{
     f32_vec_to_blob, wiki_get_ontology, wiki_search, wiki_traverse_graph, TraverseDirection,
-    WikiManifest, WikiOntologyResult, MAX_TRAVERSAL_NODES,
+    WikiEdgeType, WikiManifest, WikiNodeType, WikiOntologyResult, MAX_TRAVERSAL_NODES,
 };
 
 fn open_wiki_db() -> Connection {
@@ -20,8 +20,51 @@ fn open_wiki_db() -> Connection {
     conn
 }
 
+/// The shape `core-llm-wiki` actually persists: `JSON.stringify(manifest)`,
+/// whose entries are objects. Typed as `Vec<String>`, this reader could not
+/// deserialize a real seeded manifest at all — `wiki_get_ontology` returned an
+/// error on every strict brain, which a caller cannot tell apart from a brain
+/// that has no ontology.
 #[test]
-fn wiki_get_ontology_returns_parsed_manifest() {
+fn wiki_get_ontology_parses_the_engine_manifest_shape() {
+    let conn = open_wiki_db();
+    conn.execute(
+        "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json) VALUES (?1, ?2, ?3)",
+        (
+            "tier_fact",
+            "strict",
+            r#"{"node_types":[{"type":"person","description":"A person"},
+                              {"type":"engineer","description":"An engineer","parent_type":"person"}],
+                "edge_types":[{"type":"knows","source_type":"person","target_type":"person","description":"Knows"}]}"#,
+        ),
+    )
+    .unwrap();
+
+    let got = wiki_get_ontology(&conn, "tier_fact").unwrap();
+    assert_eq!(got.mode, "strict");
+    let manifest = got.manifest.expect("a real manifest must parse");
+    assert_eq!(manifest.node_types.len(), 2);
+    assert_eq!(manifest.node_types[0].type_name, "person");
+    assert_eq!(
+        manifest.node_types[1].parent_type.as_deref(),
+        Some("person"),
+        "one-level inheritance survives the round trip"
+    );
+    assert_eq!(manifest.edge_types.len(), 1);
+    assert_eq!(manifest.edge_types[0].type_name, "knows");
+    assert_eq!(manifest.edge_types[0].source_type, "person");
+    assert!(manifest.declares_edge_type("knows"));
+    assert!(
+        manifest.declares_edge_type("KNOWS"),
+        "membership is case-insensitive, matching the engine's resolveEdgeDefinitions"
+    );
+    assert!(!manifest.declares_edge_type("invented_by_the_llm"));
+}
+
+/// A legacy or hand-written row storing bare strings degrades to name-only
+/// entries rather than failing the read.
+#[test]
+fn wiki_get_ontology_tolerates_bare_string_manifest_entries() {
     let conn = open_wiki_db();
     conn.execute(
         "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json) VALUES (?1, ?2, ?3)",
@@ -39,8 +82,14 @@ fn wiki_get_ontology_returns_parsed_manifest() {
         WikiOntologyResult {
             mode: "active".into(),
             manifest: Some(WikiManifest {
-                node_types: vec!["Fact".into()],
-                edge_types: vec!["supports".into()],
+                node_types: vec![WikiNodeType {
+                    type_name: "Fact".into(),
+                    ..Default::default()
+                }],
+                edge_types: vec![WikiEdgeType {
+                    type_name: "supports".into(),
+                    ..Default::default()
+                }],
             }),
         }
     );
@@ -66,6 +115,7 @@ fn open_entries_db() -> Connection {
             id TEXT PRIMARY KEY,
             entity_id TEXT NOT NULL,
             title TEXT NOT NULL,
+            tier TEXT NULL,
             deleted_at INTEGER,
             embedding_blob BLOB
         );",
@@ -83,8 +133,8 @@ fn insert_entry(
     deleted_at: Option<i64>,
 ) {
     conn.execute(
-        "INSERT INTO llm_wiki_entries (id, entity_id, title, deleted_at, embedding_blob)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, tier, deleted_at, embedding_blob)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
         rusqlite::params![id, entity_id, title, deleted_at, blob],
     )
     .unwrap();
@@ -107,7 +157,7 @@ fn wiki_search_applies_tier_weight_before_sort() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact", "tier_wisdom"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact", "tier_wisdom"]), None, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "f1");
     assert!((hits[0].score - 1.5).abs() < 1e-5);
@@ -120,7 +170,7 @@ fn wiki_search_skips_extra_trailing_bytes_without_error() {
     let mut bad = f32_vec_to_blob(&[1.0, 0.0]);
     bad.extend_from_slice(&[0_u8, 1]); // dim*4 + 2 bytes
     insert_entry(&conn, "bad", "tier_fact", "Bad trailing", Some(&bad), None);
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -130,7 +180,7 @@ fn wiki_search_skips_dimension_mismatch_without_error() {
     let q = vec![1.0_f32, 0.0];
     let bad = f32_vec_to_blob(&[1.0, 0.0, 0.0]); // 3-dim blob, query is 2-dim
     insert_entry(&conn, "bad", "tier_fact", "Bad dim", Some(&bad), None);
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -148,7 +198,7 @@ fn wiki_search_skips_null_embedding_blob_without_error() {
         Some(&blob),
         None,
     );
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "good");
 }
@@ -159,7 +209,7 @@ fn wiki_search_respects_entity_ids_in_list() {
     let q = vec![1.0_f32, 0.0];
     let blob = f32_vec_to_blob(&[1.0, 0.0]);
     insert_entry(&conn, "w1", "tier_wisdom", "Wisdom", Some(&blob), None);
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -186,7 +236,7 @@ fn wiki_search_none_entity_ids_searches_all_live_entries() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, None, 10).unwrap();
+    let hits = wiki_search(&conn, &q, None, None, 10).unwrap();
 
     assert_eq!(
         hits.len(),
@@ -211,7 +261,7 @@ fn wiki_search_explicit_empty_entity_ids_returns_empty() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, Some(&[]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&[]), None, 10).unwrap();
 
     assert!(
         hits.is_empty(),
@@ -235,7 +285,7 @@ fn wiki_search_none_still_applies_tier_weight_bonus() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, None, 10).unwrap();
+    let hits = wiki_search(&conn, &q, None, None, 10).unwrap();
 
     assert_eq!(hits.len(), 2);
     assert_eq!(
@@ -262,7 +312,7 @@ fn wiki_search_none_excludes_deleted_and_unembedded_rows() {
     );
     insert_entry(&conn, "raw", "ent_448a", "No embedding", None, None);
 
-    let hits = wiki_search(&conn, &q, None, 10).unwrap();
+    let hits = wiki_search(&conn, &q, None, None, 10).unwrap();
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "live");
@@ -274,7 +324,7 @@ fn wiki_search_excludes_soft_deleted_rows() {
     let q = vec![1.0_f32, 0.0];
     let blob = f32_vec_to_blob(&[1.0, 0.0]);
     insert_entry(&conn, "gone", "tier_fact", "Deleted", Some(&blob), Some(1));
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -293,7 +343,7 @@ fn wiki_search_clamps_limit() {
             None,
         );
     }
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 25).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 25).unwrap();
     assert_eq!(hits.len(), 25);
 }
 
@@ -740,4 +790,232 @@ fn wiki_traverse_graph_entry_space_neighbor_unaffected_by_id_collision() {
         .find(|n| n.id == "dup")
         .expect("the colliding neighbor is reachable");
     assert_eq!(dup.title, "Entry Neighbor");
+}
+
+// ---------------------------------------------------------------------------
+// wiki_context — spec §4 acceptance (AC5, AC8)
+// ---------------------------------------------------------------------------
+
+use tauri_app_lib::wiki_graph::wiki_context;
+
+/// A brain with the tables `wiki_context` touches: entries (searchable),
+/// edges, and curated_entities (the space a fact's `entity_id` resolves in).
+fn open_context_db() -> Connection {
+    let conn = open_graph_db_with_entities();
+    conn.execute_batch(
+        "ALTER TABLE llm_wiki_entries ADD COLUMN tier TEXT NULL;
+         ALTER TABLE llm_wiki_entries ADD COLUMN embedding_blob BLOB;
+         ALTER TABLE llm_wiki_entries ADD COLUMN source_ref TEXT;",
+    )
+    .unwrap();
+    conn
+}
+
+fn insert_searchable_fact(
+    conn: &Connection,
+    id: &str,
+    entity_id: &str,
+    title: &str,
+    tier: Option<&str>,
+) {
+    let blob = f32_vec_to_blob(&[1.0, 0.0]);
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, deleted_at, tier, embedding_blob)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+        rusqlite::params![id, entity_id, title, tier, blob],
+    )
+    .unwrap();
+}
+
+/// AC5: over a fixture that is **linked by construction**, one call with zero
+/// namespace parameters returns at least one fact AND at least one edge.
+#[test]
+fn wiki_context_returns_facts_and_edges_with_no_namespace_parameters() {
+    let conn = open_context_db();
+    // The bridge under test: the fact's entity_id is also a curated_entities
+    // id, so it seeds the walk without the caller knowing that.
+    insert_curated_entity(&conn, "ent_448a", "Ingest Watchdog", false);
+    insert_curated_entity(&conn, "ent_neighbor", "Drain Stall", false);
+    insert_edge(
+        &conn,
+        "edge_1",
+        "ent_448a",
+        "ent_448a",
+        "ent_neighbor",
+        "related_to",
+    );
+    insert_searchable_fact(&conn, "fact_1", "ent_448a", "Watchdog fact", None);
+
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 1, 5).unwrap();
+
+    assert!(!got.facts.is_empty(), "the query must match a fact");
+    assert!(
+        !got.edges.is_empty(),
+        "a linked fixture must yield at least one edge with zero namespace params"
+    );
+    let entity_ids: HashSet<&str> = got.entities.iter().map(|n| n.id.as_str()).collect();
+    assert!(
+        entity_ids.contains("ent_448a") && entity_ids.contains("ent_neighbor"),
+        "both endpoints must surface, got {entity_ids:?}"
+    );
+    assert!(!got.truncated);
+}
+
+/// The §4.1 graceful-degradation contract: an unlinked corpus is not an error.
+#[test]
+fn wiki_context_on_an_unlinked_corpus_returns_facts_and_no_edges() {
+    let conn = open_context_db();
+    insert_searchable_fact(&conn, "fact_1", "ent_orphan", "Lonely fact", None);
+
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 1, 5).unwrap();
+
+    assert_eq!(got.facts.len(), 1);
+    assert!(got.edges.is_empty(), "no edges, but never an error");
+    assert!(got.entities.is_empty());
+    assert!(!got.truncated);
+}
+
+/// A query matching nothing returns empty legs rather than failing.
+#[test]
+fn wiki_context_with_no_matches_returns_empty_legs() {
+    let conn = open_context_db();
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 1, 5).unwrap();
+    assert!(got.facts.is_empty() && got.edges.is_empty() && got.entities.is_empty());
+    assert!(got.provenance.is_empty());
+    assert!(!got.truncated);
+}
+
+/// AC8, first half: `depth: 9` is clamped to the traversal ceiling rather than
+/// rejected, and the clamp is reported as truncation.
+#[test]
+fn wiki_context_clamps_an_oversized_depth_and_reports_truncation() {
+    let conn = open_context_db();
+    // A chain long enough that depth 3 and depth 9 would differ if unclamped.
+    insert_curated_entity(&conn, "ent_a", "A", false);
+    for (i, name) in ["B", "C", "D", "E", "F"].iter().enumerate() {
+        insert_curated_entity(&conn, &format!("ent_{name}"), name, false);
+        let prev = if i == 0 {
+            "ent_a".to_string()
+        } else {
+            format!("ent_{}", ["B", "C", "D", "E"][i - 1])
+        };
+        insert_edge(
+            &conn,
+            &format!("edge_{i}"),
+            "ent_a",
+            &prev,
+            &format!("ent_{name}"),
+            "related_to",
+        );
+    }
+    insert_searchable_fact(&conn, "fact_1", "ent_a", "Chain head", None);
+
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 9, 5).unwrap();
+
+    assert!(
+        got.truncated,
+        "an oversized depth is clamped, and the clamp is reported"
+    );
+    // Depth clamps to 3, so the walk reaches A -> B -> C -> D and stops.
+    let ids: HashSet<&str> = got.entities.iter().map(|n| n.id.as_str()).collect();
+    assert!(ids.contains("ent_D"), "three hops must be reached");
+    assert!(
+        !ids.contains("ent_F"),
+        "five hops must NOT be reached — depth was clamped to 3, got {ids:?}"
+    );
+}
+
+/// AC8, second half: the node cap applies across the **whole** composite walk,
+/// not per seed. With several seeds a per-seed cap would allow
+/// `max_facts × MAX_TRAVERSAL_NODES` nodes.
+#[test]
+fn wiki_context_applies_the_node_cap_across_all_seeds() {
+    let conn = open_context_db();
+    // Three separate hubs, each with enough spokes to blow the cap on its own.
+    for hub in ["ent_h1", "ent_h2", "ent_h3"] {
+        insert_curated_entity(&conn, hub, hub, false);
+        for i in 0..MAX_TRAVERSAL_NODES {
+            let spoke = format!("{hub}_s{i}");
+            insert_curated_entity(&conn, &spoke, &spoke, false);
+            insert_edge(
+                &conn,
+                &format!("edge_{hub}_{i}"),
+                hub,
+                hub,
+                &spoke,
+                "related_to",
+            );
+        }
+        insert_searchable_fact(&conn, &format!("fact_{hub}"), hub, "Hub fact", None);
+    }
+
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 1, 5).unwrap();
+
+    assert!(
+        got.truncated,
+        "an oversized composite walk reports truncation"
+    );
+    assert!(
+        got.entities.len() <= MAX_TRAVERSAL_NODES,
+        "the cap spans the whole walk: expected <= {MAX_TRAVERSAL_NODES}, got {}",
+        got.entities.len()
+    );
+}
+
+/// The tier filter is forwarded to the search leg; omitting it preserves the
+/// #133 all-live-entries contract.
+#[test]
+fn wiki_context_forwards_the_tier_filter_to_the_search_leg() {
+    let conn = open_context_db();
+    insert_searchable_fact(&conn, "f_fact", "ent_1", "Anchor", Some("fact"));
+    insert_searchable_fact(&conn, "f_wisdom", "ent_2", "Curated", Some("wisdom"));
+    insert_searchable_fact(&conn, "f_null", "ent_3", "Working", None);
+
+    let all = wiki_context(&conn, &[1.0, 0.0], None, 1, 25).unwrap();
+    assert_eq!(all.facts.len(), 3, "omitting tier must not narrow anything");
+
+    let wisdom = wiki_context(&conn, &[1.0, 0.0], Some("wisdom"), 1, 25).unwrap();
+    assert_eq!(wisdom.facts.len(), 1);
+    assert_eq!(wisdom.facts[0].id, "f_wisdom");
+}
+
+/// Several facts sharing one entity seed the walk once, so the shared node
+/// budget is not spent re-walking the same neighborhood.
+#[test]
+fn wiki_context_deduplicates_seeds_that_share_an_entity() {
+    let conn = open_context_db();
+    insert_curated_entity(&conn, "ent_shared", "Shared", false);
+    insert_curated_entity(&conn, "ent_leaf", "Leaf", false);
+    insert_edge(
+        &conn,
+        "edge_1",
+        "ent_shared",
+        "ent_shared",
+        "ent_leaf",
+        "related_to",
+    );
+    insert_searchable_fact(&conn, "fact_a", "ent_shared", "A", None);
+    insert_searchable_fact(&conn, "fact_b", "ent_shared", "B", None);
+
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 1, 5).unwrap();
+
+    assert_eq!(got.facts.len(), 2, "both facts are returned");
+    assert_eq!(got.entities.len(), 2, "the shared entity is walked once");
+    assert_eq!(got.edges.len(), 1, "the edge is not duplicated");
+}
+
+/// Provenance carries one record per fact, in the same order.
+#[test]
+fn wiki_context_returns_provenance_per_fact() {
+    let conn = open_context_db();
+    insert_searchable_fact(&conn, "fact_1", "ent_1", "A fact", Some("wisdom"));
+
+    let got = wiki_context(&conn, &[1.0, 0.0], None, 1, 5).unwrap();
+
+    assert_eq!(got.provenance.len(), got.facts.len());
+    let p = &got.provenance[0];
+    assert_eq!(p.fact_id, "fact_1");
+    assert_eq!(p.entity_id, "ent_1");
+    assert_eq!(p.tier.as_deref(), Some("wisdom"));
+    assert!(p.score > 0.0, "the selecting score is carried");
 }

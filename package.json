@@ -11,7 +11,7 @@
       "postcss": "8.5.26",
       "brace-expansion@1": "1.1.18",
       "brace-expansion@5": "5.0.9",
-      "@equationalapplications/core-llm-wiki": "6.2.0",
+      "@equationalapplications/core-llm-wiki": "6.3.0",
       "@equationalapplications/core-okf": "6.1.0"
     }
   },
@@ -31,7 +31,7 @@
     "@blocknote/core": "0.54.0",
     "@blocknote/mantine": "0.54.0",
     "@blocknote/react": "0.54.0",
-    "@equationalapplications/core-llm-wiki": "6.2.0",
+    "@equationalapplications/core-llm-wiki": "6.3.0",
     "@equationalapplications/react-llm-wiki": "6.1.0",
     "@equationalapplications/schema-org-llm-wiki": "6.2.0",
     "@equationalapplications/schema-software-org": "6.2.0",
