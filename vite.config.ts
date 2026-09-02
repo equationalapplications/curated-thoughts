@@ -90,7 +90,11 @@ export default defineConfig({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
-    alias: tiptapTestAliases(),
+    // Lazy: only vitest reads `test.alias`, so the FS scan and pnpm store
+    // walk stay out of `vite build` / `vite dev` / `vite preview` entirely.
+    get alias() {
+      return tiptapTestAliases();
+    },
     exclude: ["**/node_modules/**", "**/dist/**", ".worktree/**", ".worktrees/**"],
   },
 });
