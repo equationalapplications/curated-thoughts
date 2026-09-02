@@ -12,7 +12,19 @@
       "brace-expansion@1": "1.1.18",
       "brace-expansion@5": "5.0.9",
       "@equationalapplications/core-llm-wiki": "6.2.0",
-      "@equationalapplications/core-okf": "6.1.0"
+      "@equationalapplications/core-okf": "6.1.0",
+      "@tiptap/core": "3.30.6",
+      "@tiptap/extension-bold": "3.30.6",
+      "@tiptap/extension-bubble-menu": "3.30.6",
+      "@tiptap/extension-code": "3.30.6",
+      "@tiptap/extension-floating-menu": "3.30.6",
+      "@tiptap/extension-italic": "3.30.6",
+      "@tiptap/extension-strike": "3.30.6",
+      "@tiptap/extension-text": "3.30.6",
+      "@tiptap/extension-underline": "3.30.6",
+      "@tiptap/extensions": "3.30.6",
+      "@tiptap/pm": "3.30.6",
+      "@tiptap/react": "3.30.6"
     }
   },
   "type": "module",
