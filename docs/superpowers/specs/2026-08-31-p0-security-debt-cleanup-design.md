@@ -1,7 +1,7 @@
 # P0 Security Debt Cleanup
 
 **Date:** 2026-08-31
-**Status:** proposed
+**Status:** Implemented 2026-09-02 (PR #129)
 **Baseline:** main @ v1.38.1
 
 ## Summary
@@ -224,7 +224,9 @@ correctly earns its own alert to triage.
 
 ## Verification
 
-- `cargo test -p tools` — new symlink canary test plus existing lock tests.
+- `cargo test --manifest-path tools/Cargo.toml` — new symlink canary test
+  plus existing lock tests. (The package is `curated-thoughts-tools` and
+  there is no root workspace, so `-p tools` does not resolve.)
 - `cargo clippy` — clean. **Run locally**: CI does not gate clippy today,
   so a warning introduced here would not fail the PR.
 - CI green on the PR.
