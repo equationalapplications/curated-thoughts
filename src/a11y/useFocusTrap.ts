@@ -15,18 +15,44 @@ const FOCUSABLE = [
 ].join(",");
 
 /**
- * Sequential-tab candidates for wrap-around. Mirrors the CSS list but adds
- * the rule CSS can't express across branches: an explicit tabindex="-1" is
- * OUT of sequential tab order even when the element matches a tag branch
- * (e.g. <button tabindex="-1">, or an editable host carrying tabindex="-1").
- * (CodeRabbit round-4.)
+ * An element is an editing host when its contenteditable attribute is one of
+ * the valid enabling states ("" / "true" / "plaintext-only", case-insensitive).
  */
-function isTabCandidate(el: HTMLElement): boolean {
-  return el.getAttribute("tabindex") !== "-1";
+function isEditableHost(el: Element): boolean {
+  const ce = el.getAttribute("contenteditable");
+  if (ce === null) return false;
+  const v = ce.toLowerCase();
+  return ce === "" || v === "true" || v === "plaintext-only";
+}
+
+/**
+ * Sequential-tab candidates for wrap-around. Mirrors the CSS list but adds
+ * the rules CSS can't express across branches:
+ *  - an explicit tabindex="-1" is OUT of sequential tab order even when the
+ *    element matches a tag branch (e.g. <button tabindex="-1">, or an
+ *    editable host carrying tabindex="-1"). (CodeRabbit round-4.)
+ *  - an editable host WITHOUT a tabindex is out of sequential tab order when
+ *    it is nested inside another editing host: only the outermost editing
+ *    host is a tab stop unless the inner one carries a non-negative tabindex
+ *    (HTML sequential navigation; CodeRabbit round-6).
+ */
+function isTabCandidate(el: HTMLElement, container: ParentNode): boolean {
+  const tabindex = el.getAttribute("tabindex");
+  if (tabindex === "-1") return false;
+  if (tabindex !== null) return true; // explicit non-negative tabindex opts in
+  if (!isEditableHost(el)) return true;
+  let ancestor = el.parentElement;
+  while (ancestor && ancestor !== container) {
+    if (isEditableHost(ancestor)) return false;
+    ancestor = ancestor.parentElement;
+  }
+  return true;
 }
 
 function tabCandidates(root: ParentNode): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isTabCandidate);
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) =>
+    isTabCandidate(el, root),
+  );
 }
 
 export interface FocusTrapOptions {

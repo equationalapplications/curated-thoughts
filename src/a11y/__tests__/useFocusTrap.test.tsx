@@ -11,6 +11,7 @@ function TrapFixture({
   yieldTo,
   withContenteditable = false,
   variant = "buttons",
+  children,
 }: {
   active: boolean;
   onEscape?: () => void;
@@ -18,6 +19,7 @@ function TrapFixture({
   withContenteditable?: boolean;
   /** "firstHidden": first button carries tabindex="-1" BEFORE activation. */
   variant?: TrapVariant;
+  children?: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useFocusTrap(ref, { active, onEscape, yieldTo });
@@ -27,7 +29,9 @@ function TrapFixture({
       <button>Middle</button>
       <button>Last</button>
       {withContenteditable && (
-        <div contentEditable suppressContentEditableWarning data-testid="editor" />
+        <div contentEditable suppressContentEditableWarning data-testid="editor">
+          {children}
+        </div>
       )}
     </div>
   );
@@ -210,5 +214,47 @@ describe("useFocusTrap", () => {
       new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
     );
     expect(buttons()[0]).toBe(document.activeElement);
+  });
+
+  // Nested editable hosts WITHOUT a non-negative tabindex are out of
+  // sequential tab order per HTML/MDN: only the outermost editing host is a
+  // tab stop unless the inner one carries tabindex="0" (CodeRabbit round-6).
+  it("excludes a nested editable host without tabindex from sequential candidates", () => {
+    mountWithPriorFocus(
+      <TrapFixture active withContenteditable>
+        <div contentEditable suppressContentEditableWarning data-testid="nested-editor" />
+      </TrapFixture>,
+    );
+    // With the nested host excluded, the TOP-LEVEL editor is the last
+    // sequential candidate, so Tab from it must wrap to the FIRST button.
+    // If the nested host is still counted, lastEl is the nested host and the
+    // wrap never fires.
+    const editor = document.querySelector('[data-testid="editor"]') as HTMLElement;
+    editor.focus();
+    editor.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+    );
+    expect(buttons()[0]).toBe(document.activeElement);
+  });
+
+  it("keeps a nested editable host with tabindex=0 in sequential candidates", () => {
+    mountWithPriorFocus(
+      <TrapFixture active withContenteditable>
+        <div contentEditable suppressContentEditableWarning data-testid="nested-editor" />
+      </TrapFixture>,
+    );
+    // tabindex="0" (set imperatively to match the fixture style above and
+    // keep jsx-a11y/no-noninteractive-tabindex clean) opts the nested host
+    // INTO sequential order as the LAST candidate, so Shift+Tab from the
+    // first button must wrap to it — the trap drives the focus, so this
+    // fails if the fix over-excludes.
+    const nested = document.querySelector('[data-testid="nested-editor"]') as HTMLElement;
+    nested.setAttribute("tabindex", "0");
+    const first = buttons()[0]!;
+    first.focus();
+    first.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true, shiftKey: true }),
+    );
+    expect(nested).toBe(document.activeElement);
   });
 });
