@@ -33,7 +33,6 @@ export function WizardStep({
   return (
     <section
       className="wizard-step"
-      role="region"
       aria-labelledby={titleId}
       data-testid="setup-mode-wizard"
     >

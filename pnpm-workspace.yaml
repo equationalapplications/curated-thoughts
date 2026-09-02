@@ -1,3 +1,51 @@
 minimumReleaseAge: 20160          # 14 days in minutes
 minimumReleaseAgeExclude:
   - '@equationalapplications/*'   # first-party: published and consumed same-day
+  # Grandfathered status-quo versions already pinned in pnpm-lock.yaml at 37c7db9 (vite@8.2.1 toolchain); adds no new unmatured versions; ages out of relevance.
+  # Exact-freeze entries only (wildcard-with-version is invalid pnpm syntax). Every package below is
+  # byte-identical to HEAD's lockfile: this list changes NO resolved version, it only lets `pnpm` pass
+  # release-age re-checks during lockfile regen (frozen installs were never affected). Entries age out
+  # of relevance as each package passes the 14-day window.
+  # --- vite@8.2.1 toolchain (rolldown native bindings) ---
+  - rolldown@1.2.5
+  - '@rolldown/binding-android-arm-eabi@1.2.5'
+  - '@rolldown/binding-android-arm64@1.2.5'
+  - '@rolldown/binding-darwin-arm64@1.2.5'
+  - '@rolldown/binding-darwin-x64@1.2.5'
+  - '@rolldown/binding-freebsd-x64@1.2.5'
+  - '@rolldown/binding-linux-arm-gnueabihf@1.2.5'
+  - '@rolldown/binding-linux-arm64-gnu@1.2.5'
+  - '@rolldown/binding-linux-arm64-musl@1.2.5'
+  - '@rolldown/binding-linux-ppc64-gnu@1.2.5'
+  - '@rolldown/binding-linux-s390x-gnu@1.2.5'
+  - '@rolldown/binding-linux-x64-gnu@1.2.5'
+  - '@rolldown/binding-linux-x64-musl@1.2.5'
+  - '@rolldown/binding-openharmony-arm64@1.2.5'
+  - '@rolldown/binding-win32-arm64-msvc@1.2.5'
+  - '@rolldown/binding-win32-x64-msvc@1.2.5'
+  # --- @blocknote/react@0.54.0 editor stack (all @tiptap at 3.30.2) ---
+  - '@tiptap/core@3.30.2'
+  - '@tiptap/extension-bold@3.30.2'
+  - '@tiptap/extension-bubble-menu@3.30.2'
+  - '@tiptap/extension-code@3.30.2'
+  - '@tiptap/extension-floating-menu@3.30.2'
+  - '@tiptap/extension-italic@3.30.2'
+  - '@tiptap/extension-strike@3.30.2'
+  - '@tiptap/extension-text@3.30.2'
+  - '@tiptap/extension-underline@3.30.2'
+  - '@tiptap/extensions@3.30.2'
+  - '@tiptap/pm@3.30.2'
+  - '@tiptap/react@3.30.2'
+  # --- test runner (vitest 4.1.11 + internal @vitest/* packages) ---
+  - vitest@4.1.11
+  - '@vitest/expect@4.1.11'
+  - '@vitest/mocker@4.1.11'
+  - '@vitest/pretty-format@4.1.11'
+  - '@vitest/runner@4.1.11'
+  - '@vitest/snapshot@4.1.11'
+  - '@vitest/spy@4.1.11'
+  - '@vitest/utils@4.1.11'
+  # --- transitive singles (verified already locked at 37c7db9) ---
+  - '@octokit/request@10.0.14'
+  - '@oxc-project/types@0.146.0'
+  - '@testing-library/user-event@14.6.5'

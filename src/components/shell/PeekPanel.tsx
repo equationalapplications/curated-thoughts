@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchChunkContent } from "../../lib/tauri";
+import { applyInertGuard, useFocusTrap } from "../../a11y";
 
 export type PeekTarget = { path: string; hash: string };
 
@@ -22,19 +23,29 @@ function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? path;
 }
 
-function focusableWithin(root: HTMLElement): HTMLElement[] {
-  return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])',
-    ),
-  );
-}
-
 function PeekPanelBody({ target, onDismiss, onPromote }: BodyProps) {
   const [status, setStatus] = useState<BodyStatus>("loading");
   const [text, setText] = useState<string | null>(null);
+  // Guard BEFORE trap (spec §3 ref-first API): React runs unmount cleanups
+  // in declaration order, so the guard releases inert BEFORE the trap
+  // restores focus to the opener. Reversed, the restore targets an inert
+  // (unfocusable) opener and silently no-ops in every real WebView — focus
+  // drops to <body> (WCAG 2.4.3 regression; invisible to jsdom, which does
+  // not implement inert). Requires the ref-first useFocusTrap signature —
+  // with a hook-created ref the trap is always registered first.
   const panelRef = useRef<HTMLElement>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!panelRef.current) return;
+    return applyInertGuard(panelRef.current, document.body, {
+      allow: (el) => el.classList.contains("peek-backdrop"),
+    });
+  }, []);
+
+  useFocusTrap(panelRef, {
+    active: true,
+    onEscape: onDismiss,
+  });
 
   // Body state: fetch the chunk slice for the current target.
   useEffect(() => {
@@ -58,50 +69,6 @@ function PeekPanelBody({ target, onDismiss, onPromote }: BodyProps) {
       cancelled = true;
     };
   }, [target.path, target.hash]);
-
-  // Focus: capture the opener before moving focus into the dialog; restore
-  // it on unmount (guarded by isConnected — the opener may be gone by then).
-  useEffect(() => {
-    const active = document.activeElement;
-    if (active instanceof HTMLElement) {
-      openerRef.current = active;
-    }
-    panelRef.current
-      ?.querySelector<HTMLElement>(".peek-open-btn")
-      ?.focus();
-    return () => {
-      const opener = openerRef.current;
-      if (opener?.isConnected) {
-        opener.focus();
-      }
-    };
-  }, []);
-
-  // One window keydown listener routes Esc and the focus trap.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        onDismiss();
-        return;
-      }
-      if (e.key !== "Tab" || !panelRef.current) return;
-      const focusables = focusableWithin(panelRef.current);
-      if (focusables.length === 0) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-      const inside = active instanceof Node && panelRef.current.contains(active);
-      if (e.shiftKey && (active === first || !inside)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && (active === last || !inside)) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onDismiss]);
 
   return (
     <>

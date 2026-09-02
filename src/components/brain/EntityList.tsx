@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { EntitySort, EntitySummary } from "../../lib/tauri";
 
 interface Props {
@@ -16,6 +16,14 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onS
   const [filter, setFilter] = useState("");
   const [creating, setCreating] = useState(false);
   const [draftName, setDraftName] = useState("");
+  const createInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the new-entity input when the create form opens. Programmatic focus
+  // from a user-initiated action (button click) rather than autoFocus: same
+  // convenience, none of the focus-steal pitfalls (jsx-a11y/no-autofocus).
+  useEffect(() => {
+    if (creating) createInputRef.current?.focus();
+  }, [creating]);
 
   const groups = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -67,7 +75,7 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onS
           }}
         >
           <input
-            autoFocus
+            ref={createInputRef}
             aria-label="New entity name"
             placeholder="Entity name"
             value={draftName}

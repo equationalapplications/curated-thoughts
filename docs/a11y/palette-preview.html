@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curated Thoughts — Palette Preview (a11y review harness)</title>
+<!-- Static snapshot of src/index.css, committed alongside this page.
+     Regenerate at implementation time: cp src/index.css docs/a11y/index.css -->
+<link rel="stylesheet" href="./index.css">
+<style>
+  /* Demo-local layout + component classes built ONLY from real design tokens
+     (src/index.css has app-specific class names; this harness mirrors the
+     representative patterns: button primary/secondary, input, cards, text). */
+  .pv-page { display: flex; min-height: 100vh; }
+  .pv-theme { flex: 1; padding: 20px 24px; }
+  .pv-theme.light { background: var(--bg); color: var(--on-surface); }
+  .pv-theme.dark  { background: var(--bg); color: var(--on-surface); }
+  .pv-theme[data-theme="dark"] { background: var(--bg); }
+  .pv-heading { font-family: var(--font-display); font-size: 18px; margin-bottom: 4px; }
+  .pv-sub { font-size: 12px; color: var(--on-surface-var); margin-bottom: 16px; }
+  .pv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; align-items: start; }
+  .pv-group { margin-bottom: 16px; }
+  .pv-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+              color: var(--on-surface-var); margin-bottom: 6px; }
+  .pv-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  /* Buttons — primary + secondary (token-driven, mirrors app button pattern) */
+  .pv-btn { font-family: var(--font-body); font-size: 13px; font-weight: 600;
+            padding: 8px 16px; border-radius: var(--r-pill); border: none; cursor: pointer; }
+  .pv-btn--primary { background: var(--primary); color: var(--on-primary); }
+  .pv-btn--secondary { background: var(--secondary-cont); color: var(--on-primary-cont);
+                       border: 1px solid var(--outline-var); }
+
+  /* Input */
+  .pv-input { font-family: var(--font-body); font-size: 13px; padding: 8px 12px;
+              border: 1.5px solid var(--outline-var); border-radius: var(--r-md);
+              background: var(--elev-2); color: var(--on-surface); width: 100%; }
+  .pv-input::placeholder { color: var(--outline); }
+
+  /* Cards at elev-1/2/3 */
+  .pv-card { padding: 14px 16px; border-radius: var(--r-md); }
+  .pv-card h3 { font-family: var(--font-display); font-size: 14px; margin-bottom: 4px; }
+  .pv-card p { font-size: 12px; color: var(--on-surface-var); }
+  .pv-card--1 { background: var(--elev-1); box-shadow: var(--shadow-sm); }
+  .pv-card--2 { background: var(--elev-2); box-shadow: var(--shadow-md); }
+  .pv-card--3 { background: var(--elev-3); box-shadow: var(--shadow-lg); }
+
+  /* Text variants */
+  .pv-text-on-surface { color: var(--on-surface); font-size: 13px; }
+  .pv-text-on-surface-var { color: var(--on-surface-var); font-size: 13px; }
+  .pv-text-outline { color: var(--outline); font-size: 13px; }
+  .pv-text-outline-var { color: var(--outline-var); font-size: 13px; }
+  .pv-text-error { color: var(--error); font-size: 13px; font-weight: 600; }
+
+  /* Focus-state demos: one real :focus-visible (autofocus) + a frozen twin
+     mirroring the exact :focus-visible rule from index.css for the screenshot. */
+  .pv-focus-demo { outline: var(--focus-ring); outline-offset: 2px; }
+  .pv-divider { border-left: 1px solid var(--outline-var); }
+  code { font-family: var(--font-mono); font-size: 11px; color: var(--outline); }
+</style>
+</head>
+<body>
+<div class="pv-page">
+
+  <!-- ── LIGHT ─────────────────────────────────────────────────────────── -->
+  <section class="pv-theme light" data-theme="light">
+    <h1 class="pv-heading">Light theme</h1>
+    <p class="pv-sub">[data-theme="light"] — retuned outline tokens</p>
+
+    <div class="pv-group">
+      <div class="pv-label">Buttons</div>
+      <div class="pv-row">
+        <button class="pv-btn pv-btn--primary">Primary action</button>
+        <button class="pv-btn pv-btn--secondary">Secondary action</button>
+      </div>
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Input</div>
+      <input class="pv-input" type="text" placeholder="Placeholder text…">
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Cards (elevation)</div>
+      <div class="pv-grid">
+        <div class="pv-card pv-card--1"><h3>Card elev-1</h3><p>Surface + shadow-sm</p></div>
+        <div class="pv-card pv-card--2"><h3>Card elev-2</h3><p>Surface + shadow-md</p></div>
+      </div>
+      <div class="pv-card pv-card--3" style="margin-top:12px"><h3>Card elev-3</h3><p>Surface + shadow-lg</p></div>
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Text variants</div>
+      <p class="pv-text-on-surface">on-surface — primary reading text</p>
+      <p class="pv-text-on-surface-var">on-surface-var — secondary text</p>
+      <p class="pv-text-outline">outline — 4.5:1-class text token</p>
+      <p class="pv-text-outline-var">outline-var — component border token (non-text 3:1)</p>
+      <p class="pv-text-error">error — destructive / validation message</p>
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Focus states (:focus-visible, ring = --focus-ring)</div>
+      <div class="pv-row">
+        <button class="pv-btn pv-btn--primary pv-focus-demo">Focused button</button>
+        <input class="pv-input pv-focus-demo" style="max-width:200px" type="text" value="Focused input">
+      </div>
+      <p class="pv-sub" style="margin-top:6px"><code>:focus-visible { outline: var(--focus-ring); outline-offset: 2px }</code> — live example below autofocuses.</p>
+      <input class="pv-input" style="max-width:200px" type="text" value="Autofocused (live)" autofocus>
+    </div>
+  </section>
+
+  <!-- ── DARK ──────────────────────────────────────────────────────────── -->
+  <section class="pv-theme dark pv-divider" data-theme="dark">
+    <h1 class="pv-heading">Dark theme</h1>
+    <p class="pv-sub">[data-theme="dark"] — retuned outline tokens</p>
+
+    <div class="pv-group">
+      <div class="pv-label">Buttons</div>
+      <div class="pv-row">
+        <button class="pv-btn pv-btn--primary">Primary action</button>
+        <button class="pv-btn pv-btn--secondary">Secondary action</button>
+      </div>
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Input</div>
+      <input class="pv-input" type="text" placeholder="Placeholder text…">
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Cards (elevation)</div>
+      <div class="pv-grid">
+        <div class="pv-card pv-card--1"><h3>Card elev-1</h3><p>Surface + shadow-sm</p></div>
+        <div class="pv-card pv-card--2"><h3>Card elev-2</h3><p>Surface + shadow-md</p></div>
+      </div>
+      <div class="pv-card pv-card--3" style="margin-top:12px"><h3>Card elev-3</h3><p>Surface + shadow-lg</p></div>
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Text variants</div>
+      <p class="pv-text-on-surface">on-surface — primary reading text</p>
+      <p class="pv-text-on-surface-var">on-surface-var — secondary text</p>
+      <p class="pv-text-outline">outline — 4.5:1-class text token</p>
+      <p class="pv-text-outline-var">outline-var — component border token (non-text 3:1)</p>
+      <p class="pv-text-error">error — destructive / validation message</p>
+    </div>
+
+    <div class="pv-group">
+      <div class="pv-label">Focus states (:focus-visible, ring = --focus-ring)</div>
+      <div class="pv-row">
+        <button class="pv-btn pv-btn--primary pv-focus-demo">Focused button</button>
+        <input class="pv-input pv-focus-demo" style="max-width:200px" type="text" value="Focused input">
+      </div>
+      <p class="pv-sub" style="margin-top:6px"><code>:focus-visible { outline: var(--focus-ring); outline-offset: 2px }</code> — dark on-primary flips to #2a1800.</p>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

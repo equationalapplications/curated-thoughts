@@ -65,8 +65,16 @@ export function ReviewMode({
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [rejectPrompt, setRejectPrompt] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+  const rejectTextareaRef = useRef<HTMLTextAreaElement>(null);
   const detailRequestSeq = useRef(0);
   const editorRef = useRef<HTMLDivElement>(null);
+
+  // Focus the reject-reason textarea when the inline form opens. Programmatic
+  // focus from a user-initiated action rather than autoFocus: same
+  // convenience, none of the focus-steal pitfalls (jsx-a11y/no-autofocus).
+  useEffect(() => {
+    if (rejectPrompt) rejectTextareaRef.current?.focus();
+  }, [rejectPrompt]);
   const { indexed } = useIndexingStatus(vaultPath);
 
   const sortedQueue = useMemo(() => sortReviewQueue(queue), [queue]);
@@ -263,6 +271,17 @@ export function ReviewMode({
     setRejectReason("");
   }, []);
 
+  // Escape cancels the reject form from any interactive element in it. The
+  // textarea's own keydown is enough for real use (it holds focus when the
+  // form opens), but the buttons carry it too so the original pre-refactor
+  // behavior — Escape cancels regardless of focus position — is preserved.
+  const handleRejectFormEscape = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      handleCancelRejectForm();
+    }
+  }, [handleCancelRejectForm]);
+
   const handleBatchApprove = useCallback(async () => {
     if (checkedIds.size === 0 || busy) return;
     setActionError(null);
@@ -416,24 +435,20 @@ export function ReviewMode({
               <form
                 className="review-reject-form"
                 onSubmit={handleSubmitRejectForm}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    handleCancelRejectForm();
-                  }
-                }}
               >
                 <textarea
+                  ref={rejectTextareaRef}
                   className="review-reject-textarea"
                   value={rejectReason}
                   onChange={(e) => setRejectReason(e.target.value)}
                   placeholder="Optional: add a reason for rejection..."
-                  autoFocus
+                  onKeyDown={handleRejectFormEscape}
                 />
                 <div className="review-reject-buttons">
                   <button
                     type="submit"
                     className="review-btn review-btn--reject-confirm"
+                    onKeyDown={handleRejectFormEscape}
                   >
                     Confirm Reject
                   </button>
@@ -441,6 +456,7 @@ export function ReviewMode({
                     type="button"
                     className="review-btn review-btn--cancel"
                     onClick={handleCancelRejectForm}
+                    onKeyDown={handleRejectFormEscape}
                   >
                     Cancel
                   </button>

@@ -38,7 +38,9 @@ test("renders fetched chunk text", async () => {
 
 test("Escape dismisses the panel", () => {
   const { onDismiss } = renderPanel();
-  fireEvent.keyDown(window, { key: "Escape" });
+  // The focus trap listens on the dialog itself; with the background
+  // inert, Escape can only originate inside the panel.
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
 
@@ -90,7 +92,7 @@ test("not-found renders the source-moved notice and keeps the panel open", async
   const { onDismiss } = renderPanel();
   expect(await screen.findByText(/source may have moved/i)).toBeInTheDocument();
   expect(screen.getByRole("dialog")).toBeInTheDocument();
-  fireEvent.keyDown(window, { key: "Escape" });
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
 
@@ -100,4 +102,56 @@ test("backend failure renders the error alert", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Could not load this passage.",
   );
+});
+
+// jsdom does not implement `inert`, so it cannot observe the guard directly.
+// This pins the DOM witness the guard leaves behind (aria-hidden on the
+// panel's PARENT, distinguishing guard scope from the dialog's own subtree):
+// on unmount, the guard's cleanup must have run BEFORE the trap's
+// restore-focus cleanup — i.e. when focus returns to the opener, the witness
+// must already be gone. Reversed order means the restore targeted an inert
+// (unfocusable) opener and silently no-ops in every real WebView (WCAG 2.4.3).
+test("unmount releases the guard before restoring focus (release-before-restore)", () => {
+  const opener = render(<button type="button">Order opener</button>);
+  const openerBtn = screen.getByRole("button", { name: "Order opener" });
+  openerBtn.focus();
+
+  const panel = render(
+    <PeekPanel
+      target={{ path: "documents/notes.md", hash: "abc123" }}
+      onDismiss={vi.fn()}
+      onPromote={vi.fn()}
+    />,
+  );
+  const panelEl = screen.getByRole("dialog");
+  // The guard aria-hides side branches off the dialog→body path. The opener
+  // lives in its own top-level container (a sibling of the panel's RTL
+  // container), so THAT node is the observable witness of guard state.
+  const panelContainer = panelEl.parentElement;
+  const witness = Array.from(document.body.children).find(
+    (el) => el !== panelContainer && el.contains(openerBtn),
+  )!;
+  expect(witness.getAttribute("aria-hidden")).toBe("true");
+
+  // Record the unmount cleanup order: guard release (aria-hidden removed
+  // from the witness) vs trap restore (focus() called on the opener).
+  const order: string[] = [];
+  const focusSpy = vi
+    .spyOn(openerBtn, "focus")
+    .mockImplementation(() => void order.push("restore"));
+  const origRemove = witness.removeAttribute.bind(witness);
+  witness.removeAttribute = ((name: string) => {
+    if (name === "aria-hidden") order.push("release");
+    return origRemove(name);
+  }) as typeof witness.removeAttribute;
+
+  panel.unmount();
+  // ORDER proof (jsdom-visible, no `inert` needed): record the guard's
+  // attribute release and the trap's restore-focus call into one sequence.
+  expect(order).toEqual(["release", "restore"]);
+  expect(witness.getAttribute("aria-hidden")).toBeNull();
+  // (Actual focus RETURN is asserted by the unspy'd restore test above; the
+  // spy here intentionally swallows the real focus() to observe the order.)
+  focusSpy.mockRestore();
+  opener.unmount();
 });
