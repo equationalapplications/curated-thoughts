@@ -66,6 +66,7 @@ fn open_entries_db() -> Connection {
             id TEXT PRIMARY KEY,
             entity_id TEXT NOT NULL,
             title TEXT NOT NULL,
+            tier TEXT NULL,
             deleted_at INTEGER,
             embedding_blob BLOB
         );",
@@ -83,8 +84,8 @@ fn insert_entry(
     deleted_at: Option<i64>,
 ) {
     conn.execute(
-        "INSERT INTO llm_wiki_entries (id, entity_id, title, deleted_at, embedding_blob)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, tier, deleted_at, embedding_blob)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
         rusqlite::params![id, entity_id, title, deleted_at, blob],
     )
     .unwrap();
@@ -107,7 +108,7 @@ fn wiki_search_applies_tier_weight_before_sort() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact", "tier_wisdom"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact", "tier_wisdom"]), None, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "f1");
     assert!((hits[0].score - 1.5).abs() < 1e-5);
@@ -120,7 +121,7 @@ fn wiki_search_skips_extra_trailing_bytes_without_error() {
     let mut bad = f32_vec_to_blob(&[1.0, 0.0]);
     bad.extend_from_slice(&[0_u8, 1]); // dim*4 + 2 bytes
     insert_entry(&conn, "bad", "tier_fact", "Bad trailing", Some(&bad), None);
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -130,7 +131,7 @@ fn wiki_search_skips_dimension_mismatch_without_error() {
     let q = vec![1.0_f32, 0.0];
     let bad = f32_vec_to_blob(&[1.0, 0.0, 0.0]); // 3-dim blob, query is 2-dim
     insert_entry(&conn, "bad", "tier_fact", "Bad dim", Some(&bad), None);
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -148,7 +149,7 @@ fn wiki_search_skips_null_embedding_blob_without_error() {
         Some(&blob),
         None,
     );
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "good");
 }
@@ -159,7 +160,7 @@ fn wiki_search_respects_entity_ids_in_list() {
     let q = vec![1.0_f32, 0.0];
     let blob = f32_vec_to_blob(&[1.0, 0.0]);
     insert_entry(&conn, "w1", "tier_wisdom", "Wisdom", Some(&blob), None);
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -186,7 +187,7 @@ fn wiki_search_none_entity_ids_searches_all_live_entries() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, None, 10).unwrap();
+    let hits = wiki_search(&conn, &q, None, None, 10).unwrap();
 
     assert_eq!(
         hits.len(),
@@ -211,7 +212,7 @@ fn wiki_search_explicit_empty_entity_ids_returns_empty() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, Some(&[]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&[]), None, 10).unwrap();
 
     assert!(
         hits.is_empty(),
@@ -235,7 +236,7 @@ fn wiki_search_none_still_applies_tier_weight_bonus() {
         None,
     );
 
-    let hits = wiki_search(&conn, &q, None, 10).unwrap();
+    let hits = wiki_search(&conn, &q, None, None, 10).unwrap();
 
     assert_eq!(hits.len(), 2);
     assert_eq!(
@@ -262,7 +263,7 @@ fn wiki_search_none_excludes_deleted_and_unembedded_rows() {
     );
     insert_entry(&conn, "raw", "ent_448a", "No embedding", None, None);
 
-    let hits = wiki_search(&conn, &q, None, 10).unwrap();
+    let hits = wiki_search(&conn, &q, None, None, 10).unwrap();
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "live");
@@ -274,7 +275,7 @@ fn wiki_search_excludes_soft_deleted_rows() {
     let q = vec![1.0_f32, 0.0];
     let blob = f32_vec_to_blob(&[1.0, 0.0]);
     insert_entry(&conn, "gone", "tier_fact", "Deleted", Some(&blob), Some(1));
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 10).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 10).unwrap();
     assert!(hits.is_empty());
 }
 
@@ -293,7 +294,7 @@ fn wiki_search_clamps_limit() {
             None,
         );
     }
-    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), 25).unwrap();
+    let hits = wiki_search(&conn, &q, Some(&["tier_fact"]), None, 25).unwrap();
     assert_eq!(hits.len(), 25);
 }
 

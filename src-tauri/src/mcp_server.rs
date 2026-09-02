@@ -53,7 +53,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "wiki_search",
-        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Returns entry ids for use with wiki_traverse_graph."
+        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Returns entry ids for use with wiki_traverse_graph, each with its stored tier. Optional tier filter: \"fact\" or \"wisdom\"; omit for every live entry."
     )]
     async fn wiki_search(
         &self,

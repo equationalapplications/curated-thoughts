@@ -199,15 +199,23 @@ pub fn dispatch_wiki_search(
     conn: &Connection,
     query_vec: &[f32],
     entity_ids: Option<Vec<String>>,
+    tier: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<WikiSearchHit>> {
+    if let Some(t) = tier.as_deref() {
+        // Validate at the boundary so the caller gets a diagnostic rather than
+        // an empty result set that looks like "no matches" (spec §3.1).
+        if t != "fact" && t != "wisdom" {
+            anyhow::bail!("tier must be \"fact\" or \"wisdom\", got {t:?}");
+        }
+    }
     let limit = limit.unwrap_or(10).clamp(1, 25);
     // Pass the caller's intent through untouched. Substituting a default set
     // here is what made the default call path unable to match any row (#133).
     let refs: Option<Vec<&str>> = entity_ids
         .as_ref()
         .map(|ids| ids.iter().map(|s| s.as_str()).collect());
-    wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), limit)
+    wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), tier.as_deref(), limit)
 }
 
 pub fn dispatch_wiki_get_ontology(
@@ -313,6 +321,9 @@ pub struct WikiSearchParams {
     pub query: String,
     #[serde(default, rename = "entityIds", alias = "entity_ids")]
     pub entity_ids: Option<Vec<String>>,
+    /// Optional stored-tier filter: "fact" or "wisdom". Omit for every entry.
+    #[serde(default)]
+    pub tier: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -431,10 +442,10 @@ pub async fn dispatch_tool_call(
             let p: WikiSearchParams = serde_json::from_value(params)?;
             let query_vec = embed_query(&ctx.profile, p.query).await?;
             let conn = ctx.conn.clone();
-            let (entity_ids, limit) = (p.entity_ids, p.limit);
+            let (entity_ids, tier, limit) = (p.entity_ids, p.tier, p.limit);
             let hits = tokio::task::spawn_blocking(move || {
                 let conn_guard = lock_conn(&conn)?;
-                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, limit)
+                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, tier, limit)
             })
             .await??;
             Ok(serde_json::to_value(hits)?)
@@ -559,22 +570,98 @@ mod dispatch_tests {
         assert!(hits.is_empty());
     }
 
+    /// In-memory connection with the schema the tier-filter tests need.
+    /// Mirrors the inline pattern of `wiki_search_with_no_entity_ids_searches_every_live_entry`
+    /// but adds the `tier` column introduced by V16.
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
+                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Builds three live embedded entries: one 'fact', one 'wisdom', one NULL.
+    fn seed_tiered_entries(conn: &Connection) {
+        let blob = 1.0f32.to_le_bytes().to_vec();
+        for (id, tier) in [("f1", Some("fact")), ("w1", Some("wisdom")), ("n1", None)] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, tier, embedding_blob)
+                 VALUES (?1, 'ent_1', ?1, ?2, ?3)",
+                rusqlite::params![id, tier, blob],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn wiki_search_returns_tier_on_every_hit() {
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        let mut got: Vec<_> = hits.iter().map(|h| (h.id.as_str(), h.tier.as_deref())).collect();
+        got.sort();
+        assert_eq!(got, vec![("f1", Some("fact")), ("n1", None), ("w1", Some("wisdom"))]);
+    }
+
+    #[test]
+    fn wiki_search_tier_filter_returns_only_matching_entries() {
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, Some("wisdom".into()), None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "w1");
+    }
+
+    #[test]
+    fn wiki_search_without_tier_filter_still_returns_every_live_entry() {
+        // The #133 contract: omitting the filter must not narrow anything.
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn wiki_search_tier_filter_is_independent_of_entity_ids() {
+        // Tier and partition are orthogonal — neither substitutes for the other.
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits =
+            dispatch_wiki_search(&conn, &[1.0], Some(vec!["ent_1".into()]), Some("fact".into()), None)
+                .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "f1");
+
+        let none = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            Some(vec!["ent_absent".into()]),
+            Some("fact".into()),
+            None,
+        )
+        .unwrap();
+        assert!(none.is_empty());
+    }
+
     #[test]
     fn wiki_search_with_no_entity_ids_searches_every_live_entry() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
-                embedding_blob BLOB, deleted_at INTEGER);",
+                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER);",
         )
         .unwrap();
         let blob = crate::wiki_graph::f32_vec_to_blob(&[1.0]);
         conn.execute(
-            "INSERT INTO llm_wiki_entries VALUES ('e1', 'ent_448a', 'Entity One', ?1, NULL)",
+            "INSERT INTO llm_wiki_entries VALUES ('e1', 'ent_448a', 'Entity One', NULL, ?1, NULL)",
             rusqlite::params![blob],
         )
         .unwrap();
 
-        let hits = dispatch_wiki_search(&conn, &[1.0], None, None).unwrap();
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
 
         assert_eq!(hits.len(), 1, "the default path must reach ent_* rows");
         assert_eq!(hits[0].entity_id, "ent_448a");

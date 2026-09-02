@@ -17,6 +17,9 @@ pub struct WikiSearchHit {
     pub entity_id: String,
     pub title: String,
     pub score: f32,
+    /// Stored entry tier: `fact`, `wisdom`, or None for an ordinary live entry.
+    /// Independent of `entity_id` — tier is not a namespace (spec §3.4).
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,12 +124,22 @@ pub fn wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntol
 /// - `Some(&[])` — match nothing, preserving the prior explicit-empty contract.
 /// - `Some(ids)` — filter to those entity ids.
 ///
+/// `tier` is a second, independent filter (spec §3.4):
+/// - `None` — no tier narrowing. This is the default and preserves the #133
+///   all-live-entries contract exactly.
+/// - `Some("fact" | "wisdom")` — only entries stored at that tier.
+///
+/// Tier is deliberately NOT an `entity_id` namespace. `tier_fact`/`tier_wisdom`
+/// have no production writer, and making them one would require the writer
+/// migration PR #135 rejected as the only change that can corrupt data.
+///
 /// Ranking is unaffected: `tier_weight` is applied per row either way, so a
 /// `tier_fact` entry keeps its 1.5x bonus wherever tier namespaces exist.
 pub fn wiki_search(
     conn: &Connection,
     query_vec: &[f32],
     entity_ids: Option<&[&str]>,
+    tier: Option<&str>,
     limit: usize,
 ) -> Result<Vec<WikiSearchHit>> {
     if entity_ids.is_some_and(|ids| ids.is_empty()) {
@@ -141,22 +154,26 @@ pub fn wiki_search(
         }
         None => String::new(),
     };
+    let tier_filter = if tier.is_some() { "tier = ? AND " } else { "" };
     let sql = format!(
-        "SELECT id, entity_id, title, embedding_blob
+        "SELECT id, entity_id, title, embedding_blob, tier
          FROM llm_wiki_entries
-         WHERE {entity_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL"
+         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = match entity_ids {
-        Some(ids) => stmt.query(rusqlite::params_from_iter(ids.iter()))?,
-        None => stmt.query([])?,
-    };
+    // Bind order matches the clause order built above: entity ids, then tier.
+    let mut binds: Vec<&str> = entity_ids.map(|ids| ids.to_vec()).unwrap_or_default();
+    if let Some(t) = tier {
+        binds.push(t);
+    }
+    let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter()))?;
     let mut scored: Vec<WikiSearchHit> = Vec::new();
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let entity_id: String = row.get(1)?;
         let title: String = row.get(2)?;
         let bytes: Option<Vec<u8>> = row.get(3)?;
+        let tier_value: Option<String> = row.get(4)?;
         let Some(bytes) = bytes else {
             continue;
         };
@@ -174,6 +191,7 @@ pub fn wiki_search(
             entity_id,
             title,
             score,
+            tier: tier_value,
         });
     }
     scored.sort_by(|a, b| {
