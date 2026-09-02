@@ -56,13 +56,37 @@ pub fn read_marker(conn: &Connection) -> Result<Option<BackfillMarker>> {
 }
 
 /// The `(entry_id, tier)` pairs an apply would write. Read-only.
+///
+/// `source_ref` is polymorphic (see `src-tauri/src/db/commit.rs:136-180`):
+///   * **Legacy**: a bare vault-relative path (pre-c30f141 producer).
+///   * **Current**: a JSON blob `{"proposal_id":..., "evidence":[{"content_hash":...}]}`
+///     where the path lives on `documents.path` joined through `chunks.content_hash`.
+///
+/// The predicate matches either form so a fresh / recently-rebuilt brain (which
+/// contains only the JSON form) classifies correctly. See also
+/// `source_docs_from_ref` at `src-tauri/src/db/entities.rs:195-238` for the same
+/// join shape used at read time.
 pub fn plan_backfill(conn: &Connection, tier: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT id FROM llm_wiki_entries
-          WHERE tier IS NULL
-            AND deleted_at IS NULL
-            AND evidence LIKE ?1 || '%'
-          ORDER BY id",
+        "SELECT id FROM llm_wiki_entries e
+          WHERE e.tier IS NULL
+            AND e.deleted_at IS NULL
+            AND (
+              -- Legacy form: source_ref is a plain vault-relative path
+              (e.source_ref NOT LIKE '{%' AND e.source_ref LIKE ?1 || '%')
+              OR
+              -- Current form: source_ref is the JSON blob; the deposit path is
+              -- recovered via chunks.content_hash -> documents.path. Gate on
+              -- leading-byte '{' so legacy rows never hit json_extract (which
+              -- raises on non-JSON input).
+              (substr(e.source_ref, 1, 1) = '{' AND EXISTS (
+                SELECT 1 FROM json_each(json_extract(e.source_ref, '$.evidence')) AS ev
+                JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
+                JOIN documents d ON d.id = c.doc_id
+                WHERE d.path LIKE ?1 || '%'
+              ))
+            )
+          ORDER BY e.id",
     )?;
     let rows = stmt.query_map([DEPOSIT_EVIDENCE_PREFIX], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
@@ -101,7 +125,15 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
             SET tier = ?1
           WHERE tier IS NULL
             AND deleted_at IS NULL
-            AND evidence LIKE ?2 || '%'",
+            AND (
+              (source_ref NOT LIKE '{%' AND source_ref LIKE ?2 || '%')
+              OR (substr(source_ref, 1, 1) = '{' AND EXISTS (
+                SELECT 1 FROM json_each(json_extract(source_ref, '$.evidence')) AS ev
+                JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
+                JOIN documents d ON d.id = c.doc_id
+                WHERE d.path LIKE ?2 || '%'
+              ))
+            )",
         rusqlite::params![tier, DEPOSIT_EVIDENCE_PREFIX],
     )? as i64;
 
@@ -150,22 +182,56 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    /// A brain with the tables this backfill touches and two deposit-origin
-    /// entries plus one non-deposit entry.
+    /// A brain mirroring the live V16 shape: `source_ref` is polymorphic (legacy
+    /// plain-path vs. current JSON blob), and the deposit-origin path lives on
+    /// `documents.path` joined through `chunks.content_hash`.
+    ///
+    /// Coverage:
+    ///   * `d1`, `d2` — legacy plain-path deposit-origin entries (match the
+    ///     `(source_ref NOT LIKE '{%' AND source_ref LIKE 'immutable-source-files/agents/%')` branch)
+    ///   * `j1`, `j2` — current JSON-blob deposit-origin entries (match the
+    ///     `EXISTS (... json_each -> chunks -> documents.path LIKE ...)` branch)
+    ///   * `x1`, `jx1` — non-deposit-origin entries (spec origin); must NOT classify
+    ///   * `dsoft` — path *almost* matches the prefix (`agents-but-not-really/...`);
+    ///     the `LIKE 'prefix/%'` check must reject it
+    ///   * `j3` — NULL source_ref; must NOT classify (purely ungrounded)
     fn seeded_conn() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE llm_wiki_entries (
+        conn.execute_batch(r#"CREATE TABLE llm_wiki_entries (
                  id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT,
-                 evidence TEXT, deleted_at INTEGER,
+                 source_ref TEXT, deleted_at INTEGER,
                  tier TEXT NULL CHECK (tier IN ('fact','wisdom') OR tier IS NULL));
              CREATE TABLE llm_wiki_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             CREATE TABLE documents (
+                 id TEXT PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE chunks (
+                 content_hash TEXT PRIMARY KEY, doc_id TEXT NOT NULL);
              INSERT INTO schema_version (version) VALUES (16);
-             INSERT INTO llm_wiki_entries (id, entity_id, title, evidence) VALUES
+             INSERT INTO documents (id, path) VALUES
+                 ('doc_d1','immutable-source-files/agents/note.md'),
+                 ('doc_d2','immutable-source-files/agents/other.md'),
+                 ('doc_x1','immutable-source-files/spec.md'),
+                 ('doc_d3','immutable-source-files/agents/late.md'),
+                 ('doc_dsoft','immutable-source-files/agents-but-not-really/note.md');
+             INSERT INTO chunks (content_hash, doc_id) VALUES
+                 ('h_d1','doc_d1'),
+                 ('h_d2','doc_d2'),
+                 ('h_x1','doc_x1'),
+                 ('h_d3','doc_d3'),
+                 ('h_dsoft','doc_dsoft');
+             -- Legacy plain-path source_ref (pre-c30f141 form)
+             INSERT INTO llm_wiki_entries (id, entity_id, title, source_ref) VALUES
                  ('d1','ent_1','D1','immutable-source-files/agents/note.md'),
                  ('d2','ent_1','D2','immutable-source-files/agents/other.md'),
-                 ('x1','ent_1','X1','immutable-source-files/spec.md');",
+                 ('x1','ent_1','X1','immutable-source-files/spec.md'),
+                 ('dsoft','ent_1','Dsoft','immutable-source-files/agents-but-not-really/note.md');
+             -- Current JSON-blob source_ref (c30f141+ producer contract)
+             INSERT INTO llm_wiki_entries (id, entity_id, title, source_ref) VALUES
+                 ('j1','ent_1','J1','{"proposal_id":"p1","evidence":[{"content_hash":"h_d1"}]}'),
+                 ('j2','ent_1','J2','{"proposal_id":"p2","evidence":[{"content_hash":"h_d2"}]}'),
+                 ('jx1','ent_1','JX1','{"proposal_id":"p3","evidence":[{"content_hash":"h_x1"}]}'),
+                 ('j3','ent_1','J3',NULL);"#,
         )
         .unwrap();
         let _ = &mut conn;
@@ -177,7 +243,10 @@ mod tests {
         let conn = seeded_conn();
         let plan = plan_backfill(&conn, "wisdom").unwrap();
         let ids: Vec<&str> = plan.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(ids, vec!["d1", "d2"]);
+        // Both forms: legacy plain-path (d1, d2) and current JSON blob (j1, j2).
+        // Excluded: x1, jx1 (spec origin), dsoft (prefix-but-not-segment),
+        // j3 (NULL source_ref, purely ungrounded).
+        assert_eq!(ids, vec!["d1", "d2", "j1", "j2"]);
         assert!(plan.iter().all(|(_, t)| t == "wisdom"));
     }
 
@@ -196,18 +265,37 @@ mod tests {
     fn apply_classifies_and_writes_the_marker() {
         let mut conn = seeded_conn();
         let marker = apply_backfill(&mut conn, "wisdom").unwrap();
-        assert_eq!(marker.rows_classified, 2);
+        assert_eq!(marker.rows_classified, 4, "d1, d2, j1, j2");
         assert_eq!(marker.runs, 1);
         assert_eq!(marker.deposit_default_used, "wisdom");
 
-        let tier: Option<String> = conn
+        // Sample one of each form to confirm both branches wrote.
+        let legacy_tier: Option<String> = conn
             .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tier.as_deref(), Some("wisdom"));
-        let untouched: Option<String> = conn
+        assert_eq!(legacy_tier.as_deref(), Some("wisdom"));
+        let json_tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(json_tier.as_deref(), Some("wisdom"));
+
+        // Non-deposit-origin entries stay NULL.
+        let untouched_spec: Option<String> = conn
             .query_row("SELECT tier FROM llm_wiki_entries WHERE id='x1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(untouched, None);
+        assert_eq!(untouched_spec, None, "spec-origin legacy row must stay NULL");
+        let untouched_json_spec: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='jx1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(untouched_json_spec, None, "spec-origin JSON row must stay NULL");
+        let untouched_soft: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='dsoft'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(untouched_soft, None, "prefix-but-not-segment must stay NULL");
+        let untouched_null: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j3'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(untouched_null, None, "NULL source_ref must stay NULL");
     }
 
     #[test]
@@ -215,10 +303,13 @@ mod tests {
         let mut conn = seeded_conn();
         apply_backfill(&mut conn, "wisdom").unwrap();
 
-        // A deposit whose provenance only became visible after run 1.
+        // A late deposit-origin entry whose provenance only became visible after
+        // run 1 — exercises the JSON-blob branch on rerun (rather than the
+        // already-covered legacy plain-path branch).
         conn.execute(
-            "INSERT INTO llm_wiki_entries (id, entity_id, title, evidence)
-             VALUES ('d3','ent_1','D3','immutable-source-files/agents/late.md')",
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, source_ref)
+             VALUES ('j3_late','ent_1','J3Late',
+                     '{\"proposal_id\":\"p_late\",\"evidence\":[{\"content_hash\":\"h_d3\"}]}')",
             [],
         )
         .unwrap();
@@ -226,12 +317,12 @@ mod tests {
         // Config flipped since run 1 — the cohort must not split.
         let marker = apply_backfill(&mut conn, "fact").unwrap();
         let tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d3'", [], |r| r.get(0))
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j3_late'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tier.as_deref(), Some("wisdom"), "rerun must use deposit_default_used, not current config");
 
         assert_eq!(marker.deposit_default_used, "wisdom", "write-once");
-        assert_eq!(marker.rows_classified, 3, "accumulates");
+        assert_eq!(marker.rows_classified, 5, "accumulates (4 + 1 late JSON)");
         assert_eq!(marker.runs, 2, "increments");
     }
 
@@ -240,10 +331,15 @@ mod tests {
         let mut conn = seeded_conn();
         apply_backfill(&mut conn, "wisdom").unwrap();
         apply_backfill(&mut conn, "fact").unwrap();
-        let tier: Option<String> = conn
+        // Sample one legacy and one JSON-blob row to lock both branches.
+        let legacy_tier: Option<String> = conn
             .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tier.as_deref(), Some("wisdom"));
+        assert_eq!(legacy_tier.as_deref(), Some("wisdom"));
+        let json_tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(json_tier.as_deref(), Some("wisdom"));
     }
 
     #[test]
