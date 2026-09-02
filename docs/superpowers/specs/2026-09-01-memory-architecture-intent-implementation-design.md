@@ -187,34 +187,58 @@ NULL. Print a table, require `--yes` (PR #131 Part C pattern).
 
 "One-shot" is enforced, not assumed:
 
-- **Completion marker, committed with the data.** On successful apply, record
-  `tier_backfill_v1` in **`llm_wiki_meta`** (`key TEXT PRIMARY KEY, value TEXT
-  NOT NULL`, `db/okf_ddl.rs:124`) — **in the same SQLite transaction as the tier
-  UPDATEs**. A subsequent apply reads the marker and exits as a no-op,
-  reporting that it already ran.
+- **The marker parameterizes the run; it does not gate it.** On successful
+  apply, record `tier_backfill_v1` in **`llm_wiki_meta`** (`key TEXT PRIMARY
+  KEY, value TEXT NOT NULL`, `db/okf_ddl.rs:124`) — **in the same SQLite
+  transaction as the tier UPDATEs**. The value is JSON, not a boolean:
 
-  The store choice is forced by that requirement, not incidental. A crash
-  between the updates and the marker write must not be able to leave a
-  false-positive marker — a marker recorded while the UPDATEs were lost would
-  permanently suppress a backfill that never happened, and the NULL-only scope
-  below cannot repair it because the rows are still NULL and now unreachable.
-  `llm_wiki_meta` lives in the same database as `llm_wiki_entries`, so one
-  transaction covers both and the pair is all-or-nothing. **A config-file
-  marker is therefore rejected**: two stores with no shared commit cannot be
-  made atomic, and the crash window is exactly the dangerous direction.
+  ```json
+  {"version": 1, "applied_at": <unix>, "deposit_default_used": "wisdom",
+   "rows_classified": <n>, "schema_version": <n>}
+  ```
+
+  A later apply does **not** exit on finding the marker. It runs, and takes
+  `deposit_default_used` — the cohort's original value — in place of current
+  config for any row it newly classifies. Combined with the NULL-only scope
+  below, this is idempotent by construction: already-classified rows are out of
+  scope, and a row whose deposit provenance only became visible after run 1
+  joins the cohort at the cohort's tier rather than splitting it.
+
+  **This is what removes the dangerous crash direction.** A gate that refuses on
+  sight of a marker has an unrecoverable failure: a marker present without its
+  UPDATEs permanently suppresses a backfill that never ran, and the NULL-only
+  scope cannot repair it because those rows are still NULL and now unreachable.
+  With a parameterizing marker, neither direction is harmful — a **lost** marker
+  degrades to current-config behavior (and cannot retier anything, per NULL-only),
+  and a **spurious** marker merely supplies a default to whatever rows are
+  eligible. There is no state from which the operator cannot recover.
+
+  Same-transaction commit is retained anyway, as defense in depth and because it
+  keeps `rows_classified` truthful. It also forces the store choice: `llm_wiki_meta`
+  is in the same database as `llm_wiki_entries`, so one transaction covers both.
+  **A config-file marker is rejected** — two stores with no shared commit cannot
+  be made atomic.
+
+  `version` is what a future classifier change reads: a `v1` marker seen by a
+  `v2` classifier is reported and left alone rather than silently reclassifying
+  under new rules.
 - **NULL-only updates.** Even absent the marker, the UPDATE is scoped to
   `WHERE tier IS NULL`. An entry classified by a writer, by a human, or by an
   earlier run is never reclassified.
-- **Config drift is inert.** These two together mean changing
-  `wiki.deposit_default_tier` after a backfill cannot retier already-backfilled
-  rows — it governs only new deposits from that point on. This is the intended
-  semantics: the config is a writer default, not a retroactive policy.
+- **Config drift is inert, in both directions.** These two together mean
+  changing `wiki.deposit_default_tier` after a backfill cannot retier
+  already-backfilled rows (NULL-only excludes them) *and* cannot split the
+  cohort on a later run (the marker supplies the original value). The config
+  governs only new deposits from that point on. This is the intended semantics:
+  it is a writer default, not a retroactive policy.
 
-Tests: apply without `--yes` mutates nothing and exits non-zero; apply,
-then flip `wiki.deposit_default_tier`, then re-apply → second run is a no-op
-and every previously written tier is unchanged; a transaction aborted after the
-UPDATEs but before commit leaves **both** the tiers NULL and the marker absent,
-so the next apply still runs.
+Tests: apply without `--yes` mutates nothing and exits non-zero; apply, then
+flip `wiki.deposit_default_tier`, then re-apply → every previously written tier
+is unchanged; a row whose deposit provenance appears only after run 1 is
+classified on re-apply at `deposit_default_used`, **not** at the flipped config
+value; a transaction aborted after the UPDATEs but before commit leaves both
+the tiers NULL and the marker absent; and — the recovery property — deleting
+the marker and re-applying is a no-op on all previously classified rows.
 
 ### B.4 Reader surface — tier is a filter, not a namespace
 
@@ -363,13 +387,14 @@ settled in rev 3 (§3.3): `llm_wiki_meta`, committed in the data transaction.
 
 ## 8. Revision history
 
-**Rev 3 (2026-09-01)** — implementation-hardening review (Kurt). Two changes,
-both closing crash/platform-determinism windows rather than altering design:
+**Rev 3 (2026-09-01)** — implementation-hardening review (Kurt). Three changes,
+all closing crash/platform-determinism windows rather than altering design:
 
 | # | Change | Source |
 |---|---|---|
 | 13 | §2.4 glob resolution given a total order (specificity, then lexicographic) so matching never depends on JSON key order or `preserved_keys` round-tripping | Review — rev 2's "first match on tie" leaned on parser-dependent iteration order |
 | 14 | §3.3 marker store settled on `llm_wiki_meta`, committed in the same transaction as the tier UPDATEs; config-file marker rejected as non-atomic; Q closed in §6 | Review flagged the transactional requirement; the same-DB KV table makes it resolvable now rather than at plan time |
+| 15 | §3.3 marker changed from a boolean **gate** to a JSON **parameter** (`deposit_default_used` et al); reruns are permitted and pin the cohort's original tier | Review asked whether the crash window could be made less dangerous. It can be made harmless: gating is what created the unrecoverable direction, so the gate was removed rather than further guarded |
 
 **Rev 2 (2026-09-01)** — review response. Changes:
 
