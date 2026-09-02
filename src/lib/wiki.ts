@@ -7,6 +7,7 @@ import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
 import { getOntologySelection, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
 import { manifestFor, modeFor, ontologyConfigFor } from "./ontology";
+import { seedManifestsIfAbsent } from "./ontologySeed";
 
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
@@ -305,6 +306,20 @@ export async function setupWiki() {
   }
   if (wikiUpdateGeneration === 0) {
     wiki = newWiki;
+  }
+
+  // Seed the manifest for a brain whose selection was recorded before the
+  // seed path existed (spec G1). Once-per-DB and non-blocking: a failure
+  // leaves mode off and raises a health warning rather than stopping setup.
+  const seedOutcome = await seedManifestsIfAbsent(
+    wiki as never,
+    _ontologySelection,
+    seededOntologyEntityIds(),
+  );
+  if (seedOutcome.failed) {
+    console.warn(
+      `[setupWiki] ontology seed failed, continuing at mode off: ${seedOutcome.reason}`,
+    );
   }
 
   // Store unlisten if you need cleanup; for now the listeners live for the session.
