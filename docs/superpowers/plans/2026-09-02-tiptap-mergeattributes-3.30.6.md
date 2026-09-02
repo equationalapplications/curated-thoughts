@@ -18,7 +18,7 @@
 - **`--frozen-lockfile` does not evaluate `minimumReleaseAge`.** Only `pnpm install --lockfile-only` (or a plain `pnpm install` that resolves) exercises the release-age gate. CI uses `--frozen-lockfile` in all five workflow steps, so CI *cannot* validate the exclude-list edits. Local verification is the only gate.
 - **Branch:** `fix/tiptap-mergeattributes-3.30.6`, cut from `main`.
 - **Commit trailers** (every commit in this plan):
-  ```
+  ```text
   Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01X5FgsxGFNXes4GBioSch1W
   ```
@@ -390,7 +390,7 @@ git push -u origin fix/tiptap-mergeattributes-3.30.6
 
 Then open the PR with a body covering: the 3.30.6-over-3.30.4 rationale (spec §2.1), the three resolution greps from Task 2 Step 5 with their actual output, the gate results from Task 3, and an explicit statement of the Task 3 Step 5 manual smoke result. Link the spec. End the body with:
 
-```
+```text
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
 https://claude.ai/code/session_01X5FgsxGFNXes4GBioSch1W
@@ -431,7 +431,7 @@ Also worth a line in the issue tracker: the override is a hard pin. Once BlockNo
 
 **Spec coverage.** §3.1 → Task 2 Step 1. §3.2 → Task 2 Step 2. §3.3 → Task 2 Steps 3–4. §4 criteria 1–2 → Task 2 Step 5; 3 → Task 2 Step 3; 4 → Task 3 Step 1; 5 → Step 2; 6 → Step 3; 7 → Step 4; 8 → Task 4 Step 3; 9 → Task 3 Step 5. §5 removal reminder → Task 2 Step 1 comment and Task 4 Step 4. §6 plan → Tasks 2–4.
 
-**One deliberate addition beyond the spec:** Task 1's regression test. The spec assumed `pnpm test` would exercise the upgraded editor; inspection of `EditorPane.test.tsx:77-81` and `EntitySummarySection.test.tsx:19-29` shows every BlockNote test mocks the library, so nothing in the suite loaded real tiptap. Without Task 1 the pin would have had no automated verification at all, and its later removal would be silent. The spec should be amended to match — its criterion 6 rationale is currently inaccurate.
+**One deliberate addition beyond the spec:** Task 1's regression test. The spec assumed `pnpm test` would exercise the upgraded editor; inspection of `EditorPane.test.tsx:77-81` and `EntitySummarySection.test.tsx:19-29` shows every BlockNote test mocks the library, so nothing in the suite loaded real tiptap. Without Task 1 the pin would have had no automated verification at all, and its later removal would be silent. The spec has since been amended to match: its criterion 6 rationale now records that the BlockNote tests mock the library, and points at this regression test plus the criterion 9 manual smoke as the real coverage.
 
 **Two environment facts the spec did not know**, both surfaced while writing this plan and both capable of invalidating local verification: `node_modules` holds 3.22.5 against a lockfile saying 3.30.2 (Task 1 Step 1 resynchronises), and `--lockfile-only` leaves `node_modules` untouched so a plain `pnpm install` is required before the test can be believed (Task 2 Step 4).
 
