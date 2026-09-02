@@ -565,14 +565,23 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
 
     if list {
         for entry in &cfg.trusted_links {
-            // Substitute `$HOME` with `~` so the ledger listing does not
-            // log a sensitive absolute path (e.g. ~/.ssh) when stdout is
-            // captured into CI logs or system journals.
-            // codeql[rust/cleartext-logging]: `entry.target` is sanitised by
-            // `redact_home` above before reaching stdout — the value printed
-            // either has the `$HOME` prefix collapsed to `~` or is the
-            // original path (no other prefixes are considered sensitive).
-            println!("{} -> {}", entry.link, redact_home(&entry.target));
+            // Both fields on this line are sanitised by `redact_home` before
+            // printing: the `$HOME` prefix is collapsed to `~`, so the values
+            // this statement writes cannot contain an absolute path under the
+            // home (e.g. `~/.ssh/keys`). `entry.link` is sanitised too, not
+            // just `entry.target`: `TrustedLink::link` is *documented* as
+            // vault-relative, but `BrainConfig::load_lenient` deserialises it
+            // with no path-shape check, so a hand-edited config can put an
+            // absolute path there (tracked as #140). CodeQL
+            // rust/cleartext-logging flags this anyway (it does not model
+            // `redact_home` as a sanitiser); alert #2 dismissed as a false
+            // positive citing this sanitiser. Inline `// codeql[...]`
+            // suppression does NOT work for Rust — do not re-add it.
+            println!(
+                "{} -> {}",
+                redact_home(&entry.link),
+                redact_home(&entry.target)
+            );
         }
         return Ok(0);
     }
@@ -631,7 +640,11 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             let target_display = std::fs::canonicalize(&link_path)
                 .map(|t| t.display().to_string())
                 .unwrap_or_else(|_| link_path.display().to_string());
-            eprintln!("refused: {link} -> {target_display} ({})", reason.message());
+            eprintln!(
+                "refused: {link} -> {} ({})",
+                redact_home(&target_display),
+                reason.message()
+            );
             Ok(1)
         }
         Ok(LinkVerdict::Trusted) => {
@@ -643,7 +656,7 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             let target_display = std::fs::canonicalize(&link_path)
                 .map(|t| t.display().to_string())
                 .unwrap_or_else(|_| link_path.display().to_string());
-            println!("trusted {link} -> {target_display}");
+            println!("trusted {link} -> {}", redact_home(&target_display));
             Ok(0)
         }
         Err(e) => {
