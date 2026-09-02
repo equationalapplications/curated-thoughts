@@ -14,7 +14,9 @@ rev 1 proposed making `tier_fact`/`tier_wisdom` real `entityIds` namespaces,
 which silently required the writer migration PR #135's spec explicitly rejected.
 Tier is now a first-class filter, fully decoupled from `entity_id`. Remaining
 revisions close write-boundary, idempotence, and acceptance-criteria gaps; all
-three open questions are resolved. See §8 for the full changelog.
+three open questions are resolved. **Rev 3** hardens two implementation details
+(deterministic glob resolution; a transactionally-committed backfill marker).
+See §8 for the full changelog.
 
 ## 1. Executive Summary & Problem Context
 
@@ -107,11 +109,28 @@ unaffected by mode.
 ### A.4 Optional folder → node-type mapping (mechanism)
 
 An optional, user-configurable mapping — config key `ingest.folder_type_map`,
-a **flat glob→type map** (`{ "<folder-glob>": "<manifest node type>" }`;
-resolved most-specific-glob-wins, first match on tie) — that classifies
-ingested documents as additive metadata at ingest time. Flat over nested: the
+a **flat glob→type map** (`{ "<folder-glob>": "<manifest node type>" }`) — that
+classifies ingested documents as additive metadata at ingest time. Flat over
+nested: the
 value is a single scalar, so nesting would buy only grouping at the cost of a
-deeper schema and a merge rule. Never a validation gate; an unmatched document
+deeper schema and a merge rule.
+
+**Resolution order is parser-independent.** Map iteration order must never be
+load-bearing: JSON object key order is not guaranteed, and the config round-trips
+through `preserved_keys` (`config/mod.rs:70`) as raw `serde_json::Value`, whose
+ordering depends on build features. The implementation therefore sorts the glob
+set into a total order before matching, and the *first* glob in that order that
+matches wins:
+
+1. Descending literal specificity — count of non-wildcard path segments, then
+   total literal (non-metacharacter) length.
+2. Ascending lexicographic on the glob string, as the final tie-break.
+
+Two globs can then never be tied, so the selected type is identical on every
+platform and parser. A test asserts the same map given in two different key
+orders produces identical classifications.
+
+Never a validation gate; an unmatched document
 ingests unclassified, and a glob naming a type absent from the manifest logs a
 warning and is skipped rather than failing ingest. A source archive with
 semantically organized folders (people/, products/, decisions/, …) can thus
@@ -168,9 +187,21 @@ NULL. Print a table, require `--yes` (PR #131 Part C pattern).
 
 "One-shot" is enforced, not assumed:
 
-- **Completion marker.** On successful apply, record a backfill marker
-  (`tier_backfill_v1`) in the brain's migration/marker state. A subsequent
-  apply reads the marker and exits as a no-op, reporting that it already ran.
+- **Completion marker, committed with the data.** On successful apply, record
+  `tier_backfill_v1` in **`llm_wiki_meta`** (`key TEXT PRIMARY KEY, value TEXT
+  NOT NULL`, `db/okf_ddl.rs:124`) — **in the same SQLite transaction as the tier
+  UPDATEs**. A subsequent apply reads the marker and exits as a no-op,
+  reporting that it already ran.
+
+  The store choice is forced by that requirement, not incidental. A crash
+  between the updates and the marker write must not be able to leave a
+  false-positive marker — a marker recorded while the UPDATEs were lost would
+  permanently suppress a backfill that never happened, and the NULL-only scope
+  below cannot repair it because the rows are still NULL and now unreachable.
+  `llm_wiki_meta` lives in the same database as `llm_wiki_entries`, so one
+  transaction covers both and the pair is all-or-nothing. **A config-file
+  marker is therefore rejected**: two stores with no shared commit cannot be
+  made atomic, and the crash window is exactly the dangerous direction.
 - **NULL-only updates.** Even absent the marker, the UPDATE is scoped to
   `WHERE tier IS NULL`. An entry classified by a writer, by a human, or by an
   earlier run is never reclassified.
@@ -181,7 +212,9 @@ NULL. Print a table, require `--yes` (PR #131 Part C pattern).
 
 Tests: apply without `--yes` mutates nothing and exits non-zero; apply,
 then flip `wiki.deposit_default_tier`, then re-apply → second run is a no-op
-and every previously written tier is unchanged.
+and every previously written tier is unchanged; a transaction aborted after the
+UPDATEs but before commit leaves **both** the tiers NULL and the marker absent,
+so the next apply still runs.
 
 ### B.4 Reader surface — tier is a filter, not a namespace
 
@@ -309,9 +342,10 @@ flat glob→type (§2.4); manifest edge typing covers `llm_wiki_edges` only, wit
 `wiki_context` (§4.1). The deposit default is likewise settled at `'wisdom'`
 (§3.2).
 
-Deferred to plan time (implementation detail, not design risk): the exact
-marker store for `tier_backfill_v1`, and whether the strict-mode edge rejection
-surfaces as a tool error or a skipped-with-warning proposal.
+Deferred to plan time (implementation detail, not design risk): whether the
+strict-mode edge rejection surfaces as a tool error or a skipped-with-warning
+proposal. The `tier_backfill_v1` marker store was deferred in rev 2 and is
+settled in rev 3 (§3.3): `llm_wiki_meta`, committed in the data transaction.
 
 ## 7. Non-Goals
 
@@ -328,6 +362,14 @@ surfaces as a tool error or a skipped-with-warning proposal.
   corrupt data, and nothing here reopens it.
 
 ## 8. Revision history
+
+**Rev 3 (2026-09-01)** — implementation-hardening review (Kurt). Two changes,
+both closing crash/platform-determinism windows rather than altering design:
+
+| # | Change | Source |
+|---|---|---|
+| 13 | §2.4 glob resolution given a total order (specificity, then lexicographic) so matching never depends on JSON key order or `preserved_keys` round-tripping | Review — rev 2's "first match on tie" leaned on parser-dependent iteration order |
+| 14 | §3.3 marker store settled on `llm_wiki_meta`, committed in the same transaction as the tier UPDATEs; config-file marker rejected as non-atomic; Q closed in §6 | Review flagged the transactional requirement; the same-DB KV table makes it resolvable now rather than at plan time |
 
 **Rev 2 (2026-09-01)** — review response. Changes:
 
