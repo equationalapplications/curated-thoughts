@@ -32,7 +32,7 @@ Full alert inventory via the Dependabot API, `repos/.../dependabot/alerts`:
 |---|---|---|
 | open | **1** | #50 `@tiptap/core` GHSA-cp6q-959q-f8rh (this spec) |
 | fixed | 43 | historical; undici, vite, tar, sqlx, openssl, glib, tauri, cmov, brace-expansion, js-yaml, postcss, nanoid |
-| dismissed | 2 | #1/#3 `glib` (GHSA-wrw7-89jp-8q8g) — `tolerable_risk`, rationale: "Transitive Linux-only dep via tauri→gtk→glib. Cannot upgrade without upstream tauri gtk-rs bindings update. No runtime impact on macOS." |
+| dismissed | 2 | #1 `glib` (GHSA-wrw7-89jp-8q8g) — `tolerable_risk`, rationale: "Transitive Linux-only dep via tauri→gtk→glib. Cannot upgrade without upstream tauri gtk-rs bindings update. No runtime impact on macOS." #3 same advisory — `no_bandwidth` |
 
 No action is needed for dismissed or fixed alerts. Single-alert scope.
 
@@ -44,7 +44,7 @@ No action is needed for dismissed or fixed alerts. Single-alert scope.
   latest published release is still 0.54.0 with `^3.29.2` — **no BlockNote
   release ships tiptap ≥ 3.30.4 yet**, so a dependency bump cannot fix this
   today.
-- `pnpm-lock.yaml` resolves all 13 `@tiptap/*` packages at **3.30.2**
+- `pnpm-lock.yaml` resolves all 12 `@tiptap/*` packages at **3.30.2**
   (`@tiptap/core@3.30.2` and peers), which is inside the vulnerable range.
 - `pnpm-workspace.yaml` sets `minimumReleaseAge: 20160` (14 days) to gate
   supply-chain risk, with an explicit `minimumReleaseAgeExclude` list that
@@ -111,9 +111,12 @@ Replace the `@tiptap/*@3.30.2` exclude entries (12 lines, listed under the
 `@blocknote/react@0.54.0 editor stack` comment) with the `@3.30.4` equivalents.
 Comment in that file documents the convention: entries are "grandfathered
 status-quo versions... ages out of relevance as each package passes the 14-day
-window." 3.30.4 crosses the window on **2026-09-09**; the exclude entries can
+window. 3.30.4 crosses the window on **2026-09-09**; the exclude entries can
 be dropped in a follow-up chore after that date (or left until the next
-lockfile regen, per existing practice).
+lockfile regen, per existing practice). Also update the stale section comment
+at `pnpm-workspace.yaml:26` — `# --- @blocknote/react@0.54.0 editor stack
+(all @tiptap at 3.30.2) ---` — to read 3.30.4 so no `3.30.2` reference survives
+the change anywhere in the file.
 
 ### 3.3 `pnpm-lock.yaml`
 
