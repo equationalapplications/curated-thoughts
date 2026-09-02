@@ -44,6 +44,59 @@ pub const PROPOSED_SUBDIRS: &[&str] = &[WIKI_DIR, ".brain/proposed"];
 /// Subdirectories allowed for note write operations (wiki + agents)
 pub const NOTE_WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR, AGENTS_DEPOSIT_DIR];
 
+/// The `AGENTS_DEPOSIT_DIR` prefix with its trailing separator, so a prefix
+/// test cannot match a sibling directory (`.../agents-but-not-really/`).
+pub const AGENTS_DEPOSIT_PREFIX: &str = "immutable-source-files/agents/";
+
+/// Whether `path` names a file under the agent deposit directory.
+///
+/// Accepts both shapes the database actually holds. `documents.path` is
+/// written from the ingest walker, which canonicalizes to an **absolute** path
+/// (`lib.rs` reconcile), while the legacy `llm_wiki_entries.source_ref`
+/// producer and most fixtures store a **vault-relative** path. A prefix test
+/// that assumed either shape alone would silently classify nothing on the
+/// other. Separators are normalized so a Windows-shaped path still matches.
+///
+/// Kept in sync with the SQL predicate in `tools/src/tier_backfill.rs`, which
+/// makes the same two-shape test in `LIKE` form.
+pub fn is_deposit_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with(AGENTS_DEPOSIT_PREFIX)
+        || normalized.contains(&format!("/{AGENTS_DEPOSIT_PREFIX}"))
+}
+
+#[cfg(test)]
+mod deposit_path_tests {
+    use super::*;
+
+    #[test]
+    fn matches_vault_relative_and_absolute_shapes() {
+        assert!(is_deposit_path("immutable-source-files/agents/note.md"));
+        assert!(is_deposit_path(
+            "/Users/x/Vault/immutable-source-files/agents/note.md"
+        ));
+    }
+
+    #[test]
+    fn rejects_a_sibling_directory_sharing_the_prefix() {
+        // The trailing separator is what makes this a segment test rather than
+        // a string-prefix test.
+        assert!(!is_deposit_path(
+            "immutable-source-files/agents-but-not-really/note.md"
+        ));
+        assert!(!is_deposit_path(
+            "/Users/x/Vault/immutable-source-files/agents-but-not-really/note.md"
+        ));
+    }
+
+    #[test]
+    fn rejects_non_deposit_paths() {
+        assert!(!is_deposit_path("immutable-source-files/spec.md"));
+        assert!(!is_deposit_path("/Users/x/Vault/wiki/page.md"));
+        assert!(!is_deposit_path(""));
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum PathMode {
     /// The target must already exist and resolve (via `canonicalize`) to a regular file

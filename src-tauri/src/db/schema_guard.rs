@@ -43,6 +43,7 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "okf_sources",
             "okf_verified",
             "okf_usage_window",
+            "tier",
         ],
     },
     TableExpectation {

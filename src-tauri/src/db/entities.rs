@@ -192,7 +192,13 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
     serde_json::from_str(raw).ok()
 }
 
-fn source_docs_from_ref(
+/// Resolve an entry's `source_ref` evidence to `(document path, content hash)`
+/// pairs, deduplicated by path.
+///
+/// `pub(crate)` so `wiki_graph::wiki_context` can build its provenance list
+/// from the same resolution the entity reader uses — two implementations of
+/// "where did this fact come from" would be free to disagree.
+pub(crate) fn source_docs_from_ref(
     conn: &Connection,
     source_ref: Option<&str>,
 ) -> Vec<(String, Option<String>)> {

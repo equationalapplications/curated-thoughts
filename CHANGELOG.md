@@ -1,3 +1,47 @@
+## [1.42.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.41.0...v1.42.0) (2026-09-02)
+
+### Features
+
+* **config:** add wiki.deposit_default_tier, shipped default wisdom ([ee40e85](https://github.com/equationalapplications/curated-thoughts/commit/ee40e8508c53375766305bbe9a931b824e7b1c38))
+* **memory:** ontology activation, entry tier dimension, wiki_context ([0adbcff](https://github.com/equationalapplications/curated-thoughts/commit/0adbcff30d3318f06050038ad35a32737f9345df))
+* **ontology:** deterministic folder to node-type resolution ([650bedf](https://github.com/equationalapplications/curated-thoughts/commit/650bedff623908d71760ca3fc41c1d8b092222c7))
+* **ontology:** seed manifests atomically when a recorded selection has none ([f615b03](https://github.com/equationalapplications/curated-thoughts/commit/f615b034214b9105c3fc6104690e1733a57d55f6)), closes [#78](https://github.com/equationalapplications/curated-thoughts/issues/78)
+* **schema:** V16 adds llm_wiki_entries.tier with a CHECK constraint ([6dd8979](https://github.com/equationalapplications/curated-thoughts/commit/6dd897956498b9a61fffb083d72aa143861ba93b))
+* **tools:** tier_backfill with a parameterizing marker ([61e7af8](https://github.com/equationalapplications/curated-thoughts/commit/61e7af8da6331bb3510dc646b64e66f888c9217a))
+* **wiki:** expose stored tier on search hits and as an optional filter ([f1812dc](https://github.com/equationalapplications/curated-thoughts/commit/f1812dcd3f990a3a5fc12cc02375723a0d275418)), closes [#133](https://github.com/equationalapplications/curated-thoughts/issues/133)
+
+### Bug Fixes
+
+* **config:** B3 I-1 write() persists wiki block; I-2 narrow serde(default) to per-field ([42cf45f](https://github.com/equationalapplications/curated-thoughts/commit/42cf45f75efd9e8a9862f34be04adefce278b450))
+* **memory-architecture:** align spec status with shipped coverage ([a016d9e](https://github.com/equationalapplications/curated-thoughts/commit/a016d9e3c348cccc654e7ed8c189ff798fe59fb5))
+* **memory-architecture:** review follow-up across spec + impl ([fadfb25](https://github.com/equationalapplications/curated-thoughts/commit/fadfb25700088737d79be9001dd8560d2adbc748)), closes [#28](https://github.com/equationalapplications/curated-thoughts/issues/28)
+* **tier_backfill:** add json_valid guard on JSON source_ref branch ([cd50006](https://github.com/equationalapplications/curated-thoughts/commit/cd5000672e27d52287ae7dd6d5cb3ec97480fb2b))
+* **tools/tier_backfill:** classify both source_ref forms via join ([babe415](https://github.com/equationalapplications/curated-thoughts/commit/babe4158c97237fa58b05b24847e7af3bda9bd72))
+
+## [1.41.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.40.1...v1.41.0) (2026-09-02)
+
+### Features
+
+* **a11y:** add a11y primitives (focus trap, roving tabindex, announcer, skip link, visually hidden) ([5e17f57](https://github.com/equationalapplications/curated-thoughts/commit/5e17f57a8a62df190982e4748630b2ce9897539b))
+* **a11y:** add jsx-a11y lint enforcement + axe smoke test ([d4fe4a6](https://github.com/equationalapplications/curated-thoughts/commit/d4fe4a6a7027f218c58f93359e0b0e4626df836d))
+* **a11y:** axe unit tests, CI a11y gate, mark spec implemented ([37e5a4d](https://github.com/equationalapplications/curated-thoughts/commit/37e5a4d68224b1c42ea67988ed3ad6eb87dc494a))
+* **a11y:** retune palette to WCAG AA, add focus ring + reduced-motion ([a22ab39](https://github.com/equationalapplications/curated-thoughts/commit/a22ab39044b7764b35c7c323e7d9203e2af6504f))
+* **a11y:** wire skip link + announcer; trap PeekPanel with inert guard ([eb0ec08](https://github.com/equationalapplications/curated-thoughts/commit/eb0ec0835a7dd9ab8656773afae682a108884f68)), closes [#main-content](https://github.com/equationalapplications/curated-thoughts/issues/main-content)
+
+### Bug Fixes
+
+* **a11y:** actually regenerate docs/a11y/index.css snapshot (Task 3 primitives block was missing; header claimed byte-identity it didn't have) ([c3bee09](https://github.com/equationalapplications/curated-thoughts/commit/c3bee094b1720a34b4914a1d4bf86dca384f2bde))
+* **a11y:** address CodeRabbit review (TasksMode headings, focusable contenteditable) ([1d3dab8](https://github.com/equationalapplications/curated-thoughts/commit/1d3dab8ea2ccb13df2b15f17452b4a7eb178dc4c))
+* **a11y:** address CodeRabbit round-2 review (13 findings) ([3df4dcd](https://github.com/equationalapplications/curated-thoughts/commit/3df4dcdba751e9fbc48d0af54161540a41f1e37b)), closes [#main-content](https://github.com/equationalapplications/curated-thoughts/issues/main-content)
+* **a11y:** address CodeRabbit round-3 (3 findings) ([4317c63](https://github.com/equationalapplications/curated-thoughts/commit/4317c6323901befb70ede6c54df746d19a114d3a)), closes [#rrggbb](https://github.com/equationalapplications/curated-thoughts/issues/rrggbb)
+* **a11y:** address CodeRabbit round-5 nitpicks ([3d9db26](https://github.com/equationalapplications/curated-thoughts/commit/3d9db26d0e68258e0e3dc568439fb3e04aec3800))
+* **a11y:** address pre-push fix loop (9 review nitpicks + 2 controller items) ([e636438](https://github.com/equationalapplications/curated-thoughts/commit/e636438d25df1030c7feb55f087d080800c9177a))
+* **a11y:** exclude colocated a11y tests from build type-check ([8f9cb2e](https://github.com/equationalapplications/curated-thoughts/commit/8f9cb2edbd74278ff385a1410ae4a8301a178b55))
+* **a11y:** exclude nested editable hosts without tabindex from tab candidates ([4da80ca](https://github.com/equationalapplications/curated-thoughts/commit/4da80cad51e2a5ec2b745940001af645ba1bd500))
+* **a11y:** focus trap excludes tabindex=-1 elements from sequential candidates (CodeRabbit round-4) ([cb4cb65](https://github.com/equationalapplications/curated-thoughts/commit/cb4cb6526b3c749491f08a30ad5081800f7f8b69))
+* **a11y:** implement spec'd sequential announcer drain; audit follow-ups ([19e3530](https://github.com/equationalapplications/curated-thoughts/commit/19e3530dbd261581a8c92c9c3ec2541cd38e0db7))
+* **a11y:** release inert guard before focus restore (self-review-2 B1); ref-first useFocusTrap ([b2eee81](https://github.com/equationalapplications/curated-thoughts/commit/b2eee81a6e523a4469ba00c9b15860a5f07acbe7))
+
 ## [1.40.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.40.0...v1.40.1) (2026-09-01)
 
 ### Bug Fixes

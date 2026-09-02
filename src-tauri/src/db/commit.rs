@@ -25,6 +25,12 @@ pub struct ResolveOptions {
     /// "no embedding available" — the entry inserts with NULL and the sweep
     /// fills it later, matching the internal-compute contract.
     pub entry_embeddings: Option<EntryEmbeddings>,
+    /// Tier stamped on entries whose evidence is certainly deposit-origin
+    /// (spec §3.2). `None` falls back to the shipped default rather than
+    /// skipping classification: a caller that forgets to plumb config through
+    /// still gets spec-correct behaviour, and only an explicit
+    /// `wiki.deposit_default_tier` changes the value.
+    pub deposit_default_tier: Option<String>,
 }
 
 /// A precomputed entry embedding together with the exact text it was derived
@@ -106,6 +112,84 @@ struct CommitContext {
     /// `embed_text` no longer matches the text being written is treated the
     /// same way; see [`PrecomputedEmbedding`].
     entry_embeddings: EntryEmbeddings,
+    /// The tier a deposit-origin entry is stamped with in this commit. Already
+    /// resolved against the shipped default, so it is never empty.
+    deposit_default_tier: String,
+    /// Lowercased manifest edge-type vocabulary to gate edge writes against
+    /// (spec §2.3), or `None` when this entity's ontology does not gate.
+    /// Resolved once per commit: the entity is fixed for the whole proposal, so
+    /// re-reading and re-parsing the manifest per edge item would be pure waste.
+    strict_edge_types: Option<std::collections::HashSet<String>>,
+}
+
+/// The manifest edge-type vocabulary to gate writes against, or `None` when
+/// writes are not gated for this entity.
+///
+/// Returns `None` — no gate — in three cases, each deliberate:
+///
+/// * **Mode is not `strict`.** `emergent` and `off` admit any edge type by
+///   definition.
+/// * **The ontology could not be read.** A manifest that fails to load is a
+///   degraded brain, not a licence to reject the librarian's whole output; PR
+///   #78's graceful-degradation contract says the wiki keeps working. Logged.
+/// * **Strict mode declares zero edge types.** A gate needs a vocabulary to be
+///   a gate. Mode `strict` with an empty `edge_types` is far more likely a
+///   half-finished seed than a deliberate "no edges permitted" policy, and
+///   silently dropping every edge of every proposal on such a brain would be a
+///   severe and very hard-to-diagnose failure. Logged, and deliberately the
+///   most permissive reading — a reviewer who disagrees should flip this one
+///   branch, not the whole gate.
+///
+/// The proposal's `entity_id` is a **curated** id (`ent_<hash>`), not a
+/// partition id (`tier_fact`, `tier_wisdom`, `tier_working::*`); manifests
+/// are seeded against partitions, so a direct lookup against a curated id
+/// always misses and would silently disable the gate on every production
+/// proposal. The curated entity's manifest is the partition's manifest, so
+/// `wiki_get_ontology` is called against `tier_fact` — the canonical
+/// seeded partition — and only as a fallback when the curated-id lookup
+/// does find a manifest. Tests that install a manifest for a specific
+/// curated id (e.g. `ent-1`) are unaffected: the direct hit is preferred.
+fn resolve_strict_edge_vocabulary(
+    conn: &Connection,
+    entity_id: &str,
+) -> Option<std::collections::HashSet<String>> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    let lookup_ids: [&str; 2] = [entity_id, "tier_fact"];
+    let mut last_err: Option<String> = None;
+    for lookup in lookup_ids {
+        match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+            Ok(o) if o.mode == "strict" => {
+                let manifest = o.manifest?;
+                let vocabulary: std::collections::HashSet<String> = manifest
+                    .edge_type_names()
+                    .into_iter()
+                    .map(|n| n.trim().to_lowercase())
+                    .collect();
+                if vocabulary.is_empty() {
+                    eprintln!(
+                        "[commit] entity {entity_id} (via {lookup}) is ontology mode 'strict' but \
+                         its manifest declares no edge types; edge types are not gated for this commit"
+                    );
+                    return None;
+                }
+                return Some(vocabulary);
+            }
+            Ok(_) => return None,
+            Err(e) => {
+                last_err = Some(format!("{lookup}: {e}"));
+                continue;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        eprintln!(
+            "[commit] ontology unreadable for entity {entity_id} (fallback {lookup_ids:?}, last error: {e}); \
+             edge types are not gated for this commit"
+        );
+    }
+    None
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
@@ -402,6 +486,57 @@ pub(crate) fn fact_title_from_body(body: &str) -> String {
 /// lookup propagate as `Err` rather than being silently swallowed — a
 /// poisoned connection or schema drift should fail the commit, not write
 /// an empty hash into `source_ref`.
+/// The tier to stamp on an entry with this evidence, or `None` to leave it
+/// unclassified (the working-entry posture).
+///
+/// Deposit provenance is the only classification a writer can make with
+/// certainty, matching the backfill's scope (spec §3.3): an entry is
+/// deposit-origin when any evidence chunk resolves to a document under the
+/// agent deposit directory. Anything else stays NULL rather than guessing.
+///
+/// Evidence resolves by `content_hash` when present and by `chunk_id`
+/// otherwise, mirroring `evidence_json_with_hashes`'s own precedence — a
+/// post-migration write may carry only the hash, and a `chunk_id` surviving
+/// a rechunk can be stale while the content_hash is what the source_ref
+/// actually persists. Hash-first keeps write-time classification consistent
+/// with the persisted provenance.
+fn deposit_origin_tier(
+    conn: &Connection,
+    evidence: &[StoredEvidenceChunk],
+    deposit_tier: &str,
+) -> Result<Option<String>> {
+    for e in evidence {
+        let path: Option<String> = if !e.content_hash.is_empty() {
+            conn.query_row(
+                "SELECT d.path FROM chunks c
+                   JOIN documents d ON d.id = c.doc_id
+                  WHERE c.content_hash = ?1",
+                [&e.content_hash],
+                |r| r.get(0),
+            )
+            .optional()?
+        } else if let Some(cid) = e.chunk_id {
+            conn.query_row(
+                "SELECT d.path FROM chunks c
+                   JOIN documents d ON d.id = c.doc_id
+                  WHERE c.id = ?1",
+                [cid],
+                |r| r.get(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        if path
+            .as_deref()
+            .is_some_and(crate::vault::safe_path::is_deposit_path)
+        {
+            return Ok(Some(deposit_tier.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn evidence_json_with_hashes(
     conn: &Connection,
     proposal_id: &str,
@@ -712,12 +847,18 @@ fn commit_fact_add(
         .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
         .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
 
+    // Stored tier (spec §3.2). Deposit-origin evidence takes the configured
+    // deposit default; everything else stays NULL, which is the
+    // working/unclassified posture the librarian falls back to chunk
+    // heuristics for.
+    let tier = deposit_origin_tier(conn, &item.evidence, &ctx.deposit_default_tier)?;
+
     conn.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
-            access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, NULL)",
+            access_count, deleted_at, embedding_blob, embedding, tier
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, NULL, ?11)",
         params![
             fact_id,
             ctx.entity_id,
@@ -729,6 +870,7 @@ fn commit_fact_add(
             source_ref,
             ctx.now_ms,
             embedding_blob,
+            tier,
         ],
     )?;
 
@@ -1150,6 +1292,33 @@ fn commit_edge_add(
         }
     };
 
+    // Strict-mode write boundary (spec §2.3). `llm_wiki_edges` is the semantic
+    // knowledge graph, so in strict mode an `edge_type` absent from the
+    // manifest is not written.
+    //
+    // Dropped rather than raised, matching the unresolvable-endpoint branches
+    // above: an off-manifest edge type is one bad item in an otherwise good
+    // proposal, and failing the commit would make a single hallucinated type
+    // discard a batch of good facts. The item is marked rejected and reported
+    // in `dropped_edges`, so the drop is visible rather than silent.
+    //
+    // Reads stay untyped-tolerant: this is a write-time gate only, and rows
+    // written before the manifest existed remain readable and traversable.
+    if let Some(vocabulary) = &ctx.strict_edge_types {
+        if !vocabulary.contains(&edge_type.trim().to_lowercase()) {
+            let mut declared: Vec<&str> = vocabulary.iter().map(String::as_str).collect();
+            declared.sort_unstable();
+            eprintln!(
+                "[commit] edge_type {edge_type:?} is not declared by the ontology manifest \
+                 for entity {entity}; dropping edge item {item}. Declared types: {declared:?}",
+                entity = ctx.entity_id,
+                item = item.id,
+            );
+            ctx.dropped_edges.push(item.id.clone());
+            return Ok(());
+        }
+    }
+
     let edge_id = generate_llm_id("edge_");
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -1427,6 +1596,14 @@ pub fn resolve_proposal(
         tasks_added: 0,
         facts_duplicated: 0,
         entry_embeddings,
+        deposit_default_tier: options
+            .deposit_default_tier
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_DEPOSIT_TIER.to_string()),
+        strict_edge_types: resolve_strict_edge_vocabulary(
+            &tx,
+            entity_id.as_deref().unwrap_or_default(),
+        ),
     };
 
     if let Some(eid) = entity_id.as_deref() {
@@ -1618,6 +1795,8 @@ mod tests {
     /// directly, without going through a whole proposal.
     fn test_ctx(entity_id: &str) -> CommitContext {
         CommitContext {
+            deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
+            strict_edge_types: None,
             proposal_id: "prop-test".into(),
             proposal_created_at: 100,
             entity_id: entity_id.to_string(),
@@ -2095,6 +2274,153 @@ mod tests {
         assert_eq!(accepted, "accepted");
     }
 
+    /// Spec §3.2 writer contract: an entry whose evidence is deposit-origin is
+    /// stamped with the configured deposit tier at write time. Before this,
+    /// `wiki.deposit_default_tier` had no writer at all — every INSERT left
+    /// `tier` NULL and the setting was inert until the offline backfill ran.
+    #[test]
+    fn deposit_origin_fact_add_is_stamped_with_the_configured_tier() {
+        for configured in ["wisdom", "fact"] {
+            let mut conn = open_in_memory().unwrap();
+            // Absolute path — the shape the ingest walker actually writes.
+            let doc_id = seed_document(
+                &conn,
+                "/Users/x/Vault/immutable-source-files/agents/deposit.md",
+            );
+            let chunk_id = seed_chunk(&conn, doc_id);
+            seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+            insert_test_proposal(
+                &conn,
+                "prop-deposit",
+                ProposalKind::UpdateEntity,
+                Some("ent-1"),
+                vec![fact_item("item-a", chunk_id, "A deposited note.")],
+                doc_id,
+            );
+
+            resolve_proposal(
+                &mut conn,
+                "prop-deposit",
+                &[ItemDecision {
+                    item_id: "item-a".into(),
+                    decision: ItemDecisionKind::Accept,
+                    edited_payload: None,
+                }],
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    embed_profile: None,
+                    deposit_default_tier: Some(configured.to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let tier: Option<String> = conn
+                .query_row("SELECT tier FROM llm_wiki_entries LIMIT 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                tier.as_deref(),
+                Some(configured),
+                "a deposit-origin entry must carry the configured tier"
+            );
+        }
+    }
+
+    /// The other half of the contract: provenance that is not certainly a
+    /// deposit stays NULL rather than being guessed at.
+    #[test]
+    fn non_deposit_fact_add_stays_unclassified() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/Users/x/Vault/immutable-source-files/spec.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        insert_test_proposal(
+            &conn,
+            "prop-spec",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("item-a", chunk_id, "A spec fact.")],
+            doc_id,
+        );
+
+        resolve_proposal(
+            &mut conn,
+            "prop-spec",
+            &[ItemDecision {
+                item_id: "item-a".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                embed_profile: None,
+                deposit_default_tier: Some("fact".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(tier, None, "non-deposit provenance must stay NULL");
+    }
+
+    /// A sibling directory sharing the deposit prefix must not be treated as a
+    /// deposit — the separator is what makes the test a segment test.
+    #[test]
+    fn prefix_sibling_directory_is_not_deposit_origin() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(
+            &conn,
+            "/Users/x/Vault/immutable-source-files/agents-but-not-really/note.md",
+        );
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+        insert_test_proposal(
+            &conn,
+            "prop-sib",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![fact_item("item-a", chunk_id, "Not a deposit.")],
+            doc_id,
+        );
+
+        resolve_proposal(
+            &mut conn,
+            "prop-sib",
+            &[ItemDecision {
+                item_id: "item-a".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                embed_profile: None,
+                deposit_default_tier: Some("wisdom".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            tier, None,
+            "a prefix sibling must not classify as a deposit"
+        );
+    }
+
     #[test]
     fn edited_payload_wins_over_stored_payload() {
         let mut conn = open_in_memory().unwrap();
@@ -2283,6 +2609,358 @@ mod tests {
             )
             .unwrap();
         assert_eq!(summary, "Old summary");
+    }
+
+    /// Install an ontology manifest for `entity_id`. `edge_types` are given as
+    /// `(type, source_type, target_type)` triples — the shape core-llm-wiki
+    /// persists.
+    fn seed_manifest(
+        conn: &Connection,
+        entity_id: &str,
+        mode: &str,
+        node_types: &[&str],
+        edge_types: &[(&str, &str, &str)],
+    ) {
+        let nodes: Vec<serde_json::Value> = node_types
+            .iter()
+            .map(|t| serde_json::json!({ "type": t, "description": "" }))
+            .collect();
+        let edges: Vec<serde_json::Value> = edge_types
+            .iter()
+            .map(|(t, s, d)| {
+                serde_json::json!({
+                    "type": t, "source_type": s, "target_type": d, "description": ""
+                })
+            })
+            .collect();
+        let manifest = serde_json::json!({ "node_types": nodes, "edge_types": edges }).to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, ?2, ?3, 0)",
+            params![entity_id, mode, manifest],
+        )
+        .unwrap();
+    }
+
+    /// Build a one-edge proposal between two existing facts.
+    fn insert_edge_proposal(
+        conn: &Connection,
+        proposal_id: &str,
+        entity_id: &str,
+        edge_type: &str,
+        target_fact_id: &str,
+        doc_id: i64,
+        chunk_id: i64,
+    ) {
+        insert_test_proposal(
+            conn,
+            proposal_id,
+            ProposalKind::UpdateEntity,
+            Some(entity_id),
+            vec![NewProposalItem {
+                id: "edge-1".into(),
+                item_type: "edge_add".into(),
+                target_id: None,
+                payload: serde_json::json!({
+                    "source": "self",
+                    "target": { "existing_id": target_fact_id },
+                    "edge_type": edge_type
+                }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
+                    quote: "x".into(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    source_kind: None,
+                }],
+            }],
+            doc_id,
+        );
+    }
+
+    fn accept_edge(conn: &mut Connection, proposal_id: &str) -> CommitResult {
+        resolve_proposal(
+            conn,
+            proposal_id,
+            &[ItemDecision {
+                item_id: "edge-1".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// Scaffolding for the §2.3 gate tests: an entity with two facts that an
+    /// edge can legitimately connect.
+    fn seed_linkable_entity(conn: &Connection) -> (i64, i64) {
+        let doc_id = seed_document(conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(conn, doc_id);
+        seed_entity(conn, "ent-1", "Existing", "Summary", 100);
+        for (id, title) in [("fact-src", "Existing"), ("fact-dst", "Target Fact")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     created_at, updated_at)
+                 VALUES (?1, 'ent-1', ?2, 'body', '[]', 'inferred',
+                         'librarian_inferred', 100, 100)",
+                params![id, title],
+            )
+            .unwrap();
+        }
+        (doc_id, chunk_id)
+    }
+
+    /// Spec §2.3: in strict mode a manifest-defined `edge_type` writes.
+    #[test]
+    fn strict_mode_admits_a_manifest_defined_edge_type() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_manifest(
+            &conn,
+            "ent-1",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+        insert_edge_proposal(
+            &conn, "prop-ok", "ent-1", "supports", "fact-dst", doc_id, chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-ok");
+
+        assert!(
+            result.dropped_edges.is_empty(),
+            "a declared edge type must not be dropped"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE edge_type = 'supports'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// Spec §2.3: an off-manifest type is refused. It is dropped rather than
+    /// raised — one hallucinated edge type must not discard a batch of good
+    /// facts — and reported in `dropped_edges` so the drop is not silent.
+    #[test]
+    fn strict_mode_drops_an_edge_type_absent_from_the_manifest() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_manifest(
+            &conn,
+            "ent-1",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+        insert_edge_proposal(
+            &conn,
+            "prop-bad",
+            "ent-1",
+            "invented_by_the_llm",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-bad");
+
+        assert_eq!(result.dropped_edges, vec!["edge-1".to_string()]);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "an undeclared edge type must not be written");
+    }
+
+    /// Membership is case-insensitive, matching the engine's own
+    /// `resolveEdgeDefinitions`. A guard stricter than the producer would
+    /// reject types the librarian was told were legal.
+    #[test]
+    fn strict_mode_matches_edge_types_case_insensitively() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_manifest(
+            &conn,
+            "ent-1",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+        insert_edge_proposal(
+            &conn,
+            "prop-case",
+            "ent-1",
+            "SUPPORTS",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-case");
+        assert!(
+            result.dropped_edges.is_empty(),
+            "casing must not decide legality"
+        );
+    }
+
+    /// Non-strict modes admit any edge type: `emergent` grows its vocabulary
+    /// from the corpus, and `off` has none to enforce.
+    #[test]
+    fn non_strict_modes_do_not_gate_edge_types() {
+        for mode in ["emergent", "off"] {
+            let mut conn = open_in_memory().unwrap();
+            let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+            seed_manifest(
+                &conn,
+                "ent-1",
+                mode,
+                &["thing"],
+                &[("supports", "thing", "thing")],
+            );
+            insert_edge_proposal(
+                &conn,
+                "prop-loose",
+                "ent-1",
+                "anything_goes",
+                "fact-dst",
+                doc_id,
+                chunk_id,
+            );
+
+            let result = accept_edge(&mut conn, "prop-loose");
+            assert!(
+                result.dropped_edges.is_empty(),
+                "mode {mode} must not gate edge types"
+            );
+        }
+    }
+
+    /// A brain with no manifest at all is ungated — the overwhelmingly common
+    /// case, and the one PR #78's graceful-degradation contract covers.
+    #[test]
+    fn a_brain_with_no_manifest_is_not_gated() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        insert_edge_proposal(
+            &conn,
+            "prop-none",
+            "ent-1",
+            "whatever",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-none");
+        assert!(result.dropped_edges.is_empty());
+    }
+
+    /// Strict mode with an empty edge vocabulary does not gate. A gate needs a
+    /// vocabulary to be a gate, and this state is far more likely a
+    /// half-finished seed than a deliberate "no edges permitted" policy —
+    /// dropping every edge of every proposal would be severe and hard to
+    /// diagnose. Deliberately the most permissive reading of an ambiguous
+    /// state; pinned so flipping it is a conscious decision.
+    #[test]
+    fn strict_mode_with_no_declared_edge_types_does_not_gate() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_manifest(&conn, "ent-1", "strict", &["thing"], &[]);
+        insert_edge_proposal(
+            &conn,
+            "prop-empty",
+            "ent-1",
+            "anything",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-empty");
+        assert!(result.dropped_edges.is_empty());
+    }
+
+    /// Reads stay untyped-tolerant: the gate is write-time only, so a row
+    /// written before the manifest existed is still readable and traversable.
+    #[test]
+    fn strict_mode_grandfathers_edges_written_before_the_manifest() {
+        let conn = open_in_memory().unwrap();
+        seed_linkable_entity(&conn);
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_old', 'ent-1', 'fact-src', 'fact-dst', 'legacy_type', 100)",
+            [],
+        )
+        .unwrap();
+        seed_manifest(
+            &conn,
+            "ent-1",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+
+        let walked = crate::wiki_graph::wiki_traverse_graph(
+            &conn,
+            "ent-1",
+            "fact-src",
+            2,
+            crate::wiki_graph::TraverseDirection::Both,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            walked.edges.len(),
+            1,
+            "a grandfathered off-manifest edge must still traverse"
+        );
+        assert_eq!(walked.edges[0].edge_type, "legacy_type");
+    }
+
+    /// `curated_relationships` is the AST symbol-linker graph, written
+    /// mechanically from code with structural rel_types. It is explicitly out
+    /// of scope for the manifest gate (§2.3) — gating it would break code
+    /// indexing on every strict brain.
+    #[test]
+    fn curated_relationships_writes_are_unaffected_by_strict_mode() {
+        let conn = open_in_memory().unwrap();
+        let (doc_id, _) = seed_linkable_entity(&conn);
+        seed_manifest(
+            &conn,
+            "ent-1",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+        let a = seed_chunk(&conn, doc_id);
+        let b = seed_chunk(&conn, doc_id);
+
+        conn.execute(
+            "INSERT INTO curated_relationships (from_id, to_id, rel_type, symbol, entity_id)
+             VALUES (?1, ?2, 'CALLS', 'my_fn', 'ent-1')",
+            params![a, b],
+        )
+        .expect("the AST linker graph is not gated by the ontology manifest");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_relationships WHERE rel_type = 'CALLS'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -3066,6 +3744,7 @@ mod tests {
                     auto_approve: false,
                     embed_profile: Some(EmbedProfile::default()),
                     entry_embeddings: None,
+                    ..Default::default()
                 },
             );
 

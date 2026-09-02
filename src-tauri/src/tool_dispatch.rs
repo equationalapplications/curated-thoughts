@@ -13,8 +13,8 @@ use serde_json::Value;
 use crate::embedder::EmbedProfile;
 use crate::search::SearchResult;
 use crate::wiki_graph::{
-    self, TraverseDirection, WikiOntologyResult, WikiSearchHit, WikiTraverseResult,
-    DEFAULT_MAX_DEPTH,
+    self, TraverseDirection, WikiContextResult, WikiOntologyResult, WikiSearchHit,
+    WikiTraverseResult, DEFAULT_CONTEXT_DEPTH, DEFAULT_CONTEXT_MAX_FACTS, DEFAULT_MAX_DEPTH,
 };
 
 /// Typed error for unknown tool names so callers can classify without string matching.
@@ -199,15 +199,58 @@ pub fn dispatch_wiki_search(
     conn: &Connection,
     query_vec: &[f32],
     entity_ids: Option<Vec<String>>,
+    tier: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<WikiSearchHit>> {
+    if let Some(t) = tier.as_deref() {
+        // Validate at the boundary so the caller gets a diagnostic rather than
+        // an empty result set that looks like "no matches" (spec §3.1). The
+        // vocabulary lives next to the V16 CHECK that enforces it, so the
+        // boundary and the database can never drift apart.
+        if !crate::db::schema::is_valid_tier(t) {
+            anyhow::bail!(
+                "tier must be one of {:?}, got {t:?}",
+                crate::db::schema::VALID_TIERS
+            );
+        }
+    }
     let limit = limit.unwrap_or(10).clamp(1, 25);
     // Pass the caller's intent through untouched. Substituting a default set
     // here is what made the default call path unable to match any row (#133).
     let refs: Option<Vec<&str>> = entity_ids
         .as_ref()
         .map(|ids| ids.iter().map(|s| s.as_str()).collect());
-    wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), limit)
+    wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), tier.as_deref(), limit)
+}
+
+/// One-call retrieval: search plus the neighborhood around what was found.
+///
+/// Validates `tier` at the boundary exactly as `dispatch_wiki_search` does, so
+/// the two tools cannot disagree about the vocabulary. `depth` is clamped, not
+/// rejected — an out-of-range depth reports `truncated: true` instead of
+/// failing the call (spec §4.1).
+pub fn dispatch_wiki_context(
+    conn: &Connection,
+    query_vec: &[f32],
+    tier: Option<String>,
+    depth: Option<usize>,
+    max_facts: Option<usize>,
+) -> Result<WikiContextResult> {
+    if let Some(t) = tier.as_deref() {
+        if !crate::db::schema::is_valid_tier(t) {
+            anyhow::bail!(
+                "tier must be one of {:?}, got {t:?}",
+                crate::db::schema::VALID_TIERS
+            );
+        }
+    }
+    wiki_graph::wiki_context(
+        conn,
+        query_vec,
+        tier.as_deref(),
+        depth.unwrap_or(DEFAULT_CONTEXT_DEPTH),
+        max_facts.unwrap_or(DEFAULT_CONTEXT_MAX_FACTS),
+    )
 }
 
 pub fn dispatch_wiki_get_ontology(
@@ -313,8 +356,26 @@ pub struct WikiSearchParams {
     pub query: String,
     #[serde(default, rename = "entityIds", alias = "entity_ids")]
     pub entity_ids: Option<Vec<String>>,
+    /// Optional stored-tier filter: "fact" or "wisdom". Omit for every entry.
+    #[serde(default)]
+    pub tier: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct WikiContextParams {
+    pub query: String,
+    /// Traversal depth around each fact. Clamped to 1..=3.
+    #[serde(default)]
+    pub depth: Option<usize>,
+    /// How many scored facts to seed the walk with.
+    #[serde(default, rename = "maxFacts", alias = "max_facts")]
+    pub max_facts: Option<usize>,
+    /// Optional stored-tier filter: "fact" or "wisdom". Omit for every entry.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,13 +492,25 @@ pub async fn dispatch_tool_call(
             let p: WikiSearchParams = serde_json::from_value(params)?;
             let query_vec = embed_query(&ctx.profile, p.query).await?;
             let conn = ctx.conn.clone();
-            let (entity_ids, limit) = (p.entity_ids, p.limit);
+            let (entity_ids, tier, limit) = (p.entity_ids, p.tier, p.limit);
             let hits = tokio::task::spawn_blocking(move || {
                 let conn_guard = lock_conn(&conn)?;
-                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, limit)
+                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, tier, limit)
             })
             .await??;
             Ok(serde_json::to_value(hits)?)
+        }
+        "wiki_context" => {
+            let p: WikiContextParams = serde_json::from_value(params)?;
+            let query_vec = embed_query(&ctx.profile, p.query).await?;
+            let conn = ctx.conn.clone();
+            let (tier, depth, max_facts) = (p.tier, p.depth, p.max_facts);
+            let result = tokio::task::spawn_blocking(move || {
+                let conn_guard = lock_conn(&conn)?;
+                dispatch_wiki_context(&conn_guard, &query_vec, tier, depth, max_facts)
+            })
+            .await??;
+            Ok(serde_json::to_value(result)?)
         }
         "wiki_get_ontology" => {
             let p: WikiGetOntologyParams = serde_json::from_value(params)?;
@@ -559,22 +632,123 @@ mod dispatch_tests {
         assert!(hits.is_empty());
     }
 
+    /// In-memory connection with the schema the tier-filter tests need.
+    /// Mirrors the inline pattern of `wiki_search_with_no_entity_ids_searches_every_live_entry`
+    /// but adds the `tier` column introduced by V16.
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
+                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Builds three live embedded entries: one 'fact', one 'wisdom', one NULL.
+    fn seed_tiered_entries(conn: &Connection) {
+        let blob = 1.0f32.to_le_bytes().to_vec();
+        for (id, tier) in [("f1", Some("fact")), ("w1", Some("wisdom")), ("n1", None)] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, tier, embedding_blob)
+                 VALUES (?1, 'ent_1', ?1, ?2, ?3)",
+                rusqlite::params![id, tier, blob],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn wiki_search_returns_tier_on_every_hit() {
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        let mut got: Vec<_> = hits
+            .iter()
+            .map(|h| (h.id.as_str(), h.tier.as_deref()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("f1", Some("fact")), ("n1", None), ("w1", Some("wisdom"))]
+        );
+    }
+
+    #[test]
+    fn wiki_search_tier_filter_returns_only_matching_entries() {
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, Some("wisdom".into()), None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "w1");
+    }
+
+    #[test]
+    fn wiki_search_without_tier_filter_still_returns_every_live_entry() {
+        // The #133 contract: omitting the filter must not narrow anything.
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn wiki_context_rejects_an_out_of_vocabulary_tier() {
+        // Same vocabulary as wiki_search — both boundaries read the set that
+        // the V16 CHECK enforces, so they cannot drift apart.
+        let conn = test_conn();
+        let err = dispatch_wiki_context(&conn, &[1.0], Some("anchor".into()), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("anchor"),
+            "the diagnostic names the bad value: {err}"
+        );
+    }
+
+    #[test]
+    fn wiki_search_tier_filter_is_independent_of_entity_ids() {
+        // Tier and partition are orthogonal — neither substitutes for the other.
+        let conn = test_conn();
+        seed_tiered_entries(&conn);
+        let hits = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            Some(vec!["ent_1".into()]),
+            Some("fact".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "f1");
+
+        let none = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            Some(vec!["ent_absent".into()]),
+            Some("fact".into()),
+            None,
+        )
+        .unwrap();
+        assert!(none.is_empty());
+    }
+
     #[test]
     fn wiki_search_with_no_entity_ids_searches_every_live_entry() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
-                embedding_blob BLOB, deleted_at INTEGER);",
+                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER);",
         )
         .unwrap();
         let blob = crate::wiki_graph::f32_vec_to_blob(&[1.0]);
         conn.execute(
-            "INSERT INTO llm_wiki_entries VALUES ('e1', 'ent_448a', 'Entity One', ?1, NULL)",
+            "INSERT INTO llm_wiki_entries VALUES ('e1', 'ent_448a', 'Entity One', NULL, ?1, NULL)",
             rusqlite::params![blob],
         )
         .unwrap();
 
-        let hits = dispatch_wiki_search(&conn, &[1.0], None, None).unwrap();
+        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
 
         assert_eq!(hits.len(), 1, "the default path must reach ent_* rows");
         assert_eq!(hits[0].entity_id, "ent_448a");
@@ -745,6 +919,22 @@ mod dispatch_tool_call_tests {
             .await
             .unwrap();
         assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+    }
+
+    /// `wiki_context` must be reachable through the shared dispatcher — the
+    /// tool shipped in the spec but not in the `match`, so every call returned
+    /// "unknown tool".
+    #[tokio::test]
+    async fn wiki_context_is_a_known_tool() {
+        let ctx = seeded_ctx();
+        let err = dispatch_tool_call(&ctx, "wiki_context", serde_json::json!({ "query": "x" }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("unknown tool"),
+            "wiki_context must be registered; got: {err}"
+        );
     }
 
     #[tokio::test]

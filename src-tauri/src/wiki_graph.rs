@@ -2,7 +2,7 @@
 //! llm_wiki_entity_manifests). Used by MCP tools; no mutation paths.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -17,6 +17,9 @@ pub struct WikiSearchHit {
     pub entity_id: String,
     pub title: String,
     pub score: f32,
+    /// Stored entry tier: `fact`, `wisdom`, or None for an ordinary live entry.
+    /// Independent of `entity_id` — tier is not a namespace (spec §3.4).
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,10 +28,129 @@ pub struct WikiOntologyResult {
     pub manifest: Option<WikiManifest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// One declared node type. Mirrors `core-llm-wiki`'s `OntologyNodeType`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WikiNodeType {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// One-level parent slug, when the manifest declares inheritance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_type: Option<String>,
+}
+
+/// One declared edge type. Mirrors `core-llm-wiki`'s `OntologyEdgeType`.
+///
+/// A manifest may declare the same `type` several times with different
+/// endpoints, so a name is a *set* of triples — membership by name is what the
+/// strict write gate tests (spec §2.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WikiEdgeType {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[serde(default)]
+    pub source_type: String,
+    #[serde(default)]
+    pub target_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct WikiManifest {
-    pub node_types: Vec<String>,
-    pub edge_types: Vec<String>,
+    pub node_types: Vec<WikiNodeType>,
+    pub edge_types: Vec<WikiEdgeType>,
+}
+
+impl WikiManifest {
+    /// Whether `edge_type` is declared, compared case-insensitively.
+    ///
+    /// Case-insensitive to match the engine's own `resolveEdgeDefinitions`,
+    /// which lowercases both sides. A guard stricter than the producer would
+    /// reject edge types the librarian was told were legal.
+    pub fn declares_edge_type(&self, edge_type: &str) -> bool {
+        let needle = edge_type.trim().to_lowercase();
+        self.edge_types
+            .iter()
+            .any(|e| e.type_name.trim().to_lowercase() == needle)
+    }
+
+    /// Declared edge-type names in manifest order, deduplicated — the
+    /// vocabulary a rejection diagnostic names.
+    pub fn edge_type_names(&self) -> Vec<&str> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        for e in &self.edge_types {
+            if seen.insert(e.type_name.trim().to_lowercase()) {
+                out.push(e.type_name.as_str());
+            }
+        }
+        out
+    }
+}
+
+/// Parse a stored `manifest_json` blob.
+///
+/// Tolerates both shapes an `llm_wiki_entity_manifests` row can hold. The
+/// engine writes `JSON.stringify(manifest)`, whose entries are **objects**
+/// (`{type, description, ...}`) — the shape this reader was originally typed
+/// against as `Vec<String>`, which could not deserialize a real seeded manifest
+/// at all. Bare strings are still accepted so a hand-written or legacy row
+/// degrades to a name-only entry rather than failing the whole read: a
+/// `wiki_get_ontology` that errors is indistinguishable to a caller from a
+/// brain with no ontology, which is exactly the confusion §2.1 exists to end.
+fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
+    fn entries(value: Option<&serde_json::Value>) -> Vec<&serde_json::Value> {
+        value
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().collect())
+            .unwrap_or_default()
+    }
+    fn field(v: &serde_json::Value, key: &str) -> Option<String> {
+        v.get(key)
+            .and_then(|f| f.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
+
+    let node_types = entries(root.get("node_types"))
+        .into_iter()
+        .filter_map(|v| match v {
+            serde_json::Value::String(name) => Some(WikiNodeType {
+                type_name: name.clone(),
+                ..Default::default()
+            }),
+            _ => field(v, "type").map(|type_name| WikiNodeType {
+                type_name,
+                description: field(v, "description"),
+                parent_type: field(v, "parent_type"),
+            }),
+        })
+        .collect();
+
+    let edge_types = entries(root.get("edge_types"))
+        .into_iter()
+        .filter_map(|v| match v {
+            serde_json::Value::String(name) => Some(WikiEdgeType {
+                type_name: name.clone(),
+                ..Default::default()
+            }),
+            _ => field(v, "type").map(|type_name| WikiEdgeType {
+                type_name,
+                source_type: field(v, "source_type").unwrap_or_default(),
+                target_type: field(v, "target_type").unwrap_or_default(),
+                description: field(v, "description"),
+            }),
+        })
+        .collect();
+
+    Ok(WikiManifest {
+        node_types,
+        edge_types,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,11 +160,18 @@ pub struct WikiTraverseNode {
     pub entity_id: String,
 }
 
+/// One traversed edge. `entity_id` is the partition the edge lives in — two
+/// seeded partitions (e.g. `tier_fact` and `tier_wisdom`) can hold the same
+/// `(source_id, target_id, edge_type)`, and consumers must be able to tell
+/// which partition a returned edge belongs to. The field is set on
+/// construction (see `CompositeWalk::edge_keys`) so no caller can produce a
+/// `WikiTraverseEdge` without a partition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WikiTraverseEdge {
     pub source_id: String,
     pub target_id: String,
     pub edge_type: String,
+    pub entity_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -104,7 +233,7 @@ pub fn wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntol
     };
     let mode: String = row.get(0)?;
     let manifest_json: String = row.get(1)?;
-    let parsed: WikiManifest = serde_json::from_str(&manifest_json)?;
+    let parsed = parse_manifest(&manifest_json)?;
     Ok(WikiOntologyResult {
         mode,
         manifest: Some(parsed),
@@ -121,12 +250,22 @@ pub fn wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntol
 /// - `Some(&[])` — match nothing, preserving the prior explicit-empty contract.
 /// - `Some(ids)` — filter to those entity ids.
 ///
+/// `tier` is a second, independent filter (spec §3.4):
+/// - `None` — no tier narrowing. This is the default and preserves the #133
+///   all-live-entries contract exactly.
+/// - `Some("fact" | "wisdom")` — only entries stored at that tier.
+///
+/// Tier is deliberately NOT an `entity_id` namespace. `tier_fact`/`tier_wisdom`
+/// have no production writer, and making them one would require the writer
+/// migration PR #135 rejected as the only change that can corrupt data.
+///
 /// Ranking is unaffected: `tier_weight` is applied per row either way, so a
 /// `tier_fact` entry keeps its 1.5x bonus wherever tier namespaces exist.
 pub fn wiki_search(
     conn: &Connection,
     query_vec: &[f32],
     entity_ids: Option<&[&str]>,
+    tier: Option<&str>,
     limit: usize,
 ) -> Result<Vec<WikiSearchHit>> {
     if entity_ids.is_some_and(|ids| ids.is_empty()) {
@@ -141,22 +280,26 @@ pub fn wiki_search(
         }
         None => String::new(),
     };
+    let tier_filter = if tier.is_some() { "tier = ? AND " } else { "" };
     let sql = format!(
-        "SELECT id, entity_id, title, embedding_blob
+        "SELECT id, entity_id, title, embedding_blob, tier
          FROM llm_wiki_entries
-         WHERE {entity_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL"
+         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = match entity_ids {
-        Some(ids) => stmt.query(rusqlite::params_from_iter(ids.iter()))?,
-        None => stmt.query([])?,
-    };
+    // Bind order matches the clause order built above: entity ids, then tier.
+    let mut binds: Vec<&str> = entity_ids.map(|ids| ids.to_vec()).unwrap_or_default();
+    if let Some(t) = tier {
+        binds.push(t);
+    }
+    let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter()))?;
     let mut scored: Vec<WikiSearchHit> = Vec::new();
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let entity_id: String = row.get(1)?;
         let title: String = row.get(2)?;
         let bytes: Option<Vec<u8>> = row.get(3)?;
+        let tier_value: Option<String> = row.get(4)?;
         let Some(bytes) = bytes else {
             continue;
         };
@@ -174,6 +317,7 @@ pub fn wiki_search(
             entity_id,
             title,
             score,
+            tier: tier_value,
         });
     }
     scored.sort_by(|a, b| {
@@ -376,6 +520,7 @@ fn fetch_outbound_neighbors(
             source_id: row.get(0)?,
             target_id: row.get(1)?,
             edge_type: row.get(2)?,
+            entity_id: entity_id.to_string(),
         };
         let neighbor_id: String = row.get(3)?;
         out.push((edge, neighbor_id));
@@ -413,6 +558,7 @@ fn fetch_inbound_neighbors(
             source_id: row.get(0)?,
             target_id: row.get(1)?,
             edge_type: row.get(2)?,
+            entity_id: entity_id.to_string(),
         };
         let neighbor_id: String = row.get(3)?;
         out.push((edge, neighbor_id));
@@ -459,6 +605,7 @@ fn fetch_entity_neighbors(
             source_id: row.get(0)?,
             target_id: row.get(1)?,
             edge_type: row.get(2)?,
+            entity_id: entity_id.to_string(),
         };
         let neighbor_id: String = row.get(3)?;
         out.push((edge, neighbor_id));
@@ -627,4 +774,259 @@ mod unit_tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"manifest\":null"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// wiki_context — the composite context primitive (spec §4)
+// ---------------------------------------------------------------------------
+
+/// Facts returned when the caller does not say otherwise (spec §4.1).
+pub const DEFAULT_CONTEXT_MAX_FACTS: usize = 5;
+/// Traversal depth when the caller does not say otherwise (spec §4.1).
+pub const DEFAULT_CONTEXT_DEPTH: usize = 1;
+/// Upper bound on `max_facts`. Each fact is a traversal seed, so this bounds
+/// seed fan-out; the node cap still bounds the walk itself.
+pub const MAX_CONTEXT_FACTS: usize = 25;
+
+/// Where one fact came from: the document and chunk backing it, plus the score
+/// that selected it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WikiContextProvenance {
+    pub fact_id: String,
+    pub entity_id: String,
+    pub score: f32,
+    pub tier: Option<String>,
+    pub sources: Vec<WikiContextSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WikiContextSource {
+    pub doc_path: String,
+    pub content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WikiContextResult {
+    pub facts: Vec<WikiSearchHit>,
+    pub entities: Vec<WikiTraverseNode>,
+    pub edges: Vec<WikiTraverseEdge>,
+    pub provenance: Vec<WikiContextProvenance>,
+    /// True when the node cap or the depth clamp cut the walk short, so a
+    /// caller can tell a complete neighborhood from a partial one.
+    pub truncated: bool,
+}
+
+/// BFS state shared across every seed of one `wiki_context` call.
+///
+/// The node cap is deliberately applied across the **whole** composite walk
+/// rather than per seed: a call fans out from up to `max_facts` seeds, so a
+/// per-seed cap would put the effective ceiling at `max_facts × 50` (spec
+/// §4.1).
+///
+/// Nodes and the visited set are keyed by `(entity_id, node_id)`. Seeds can sit
+/// in different partitions, and the same id may legitimately exist in more than
+/// one — keying by id alone would let the first partition's node mask the
+/// other's. The edge deduplication key carries `entity_id` for the same
+/// reason: an edge is owned by the partition it was written under, and two
+/// partitions can hold the same `(source_id, target_id, edge_type)` without
+/// the two being the same edge.
+#[derive(Default)]
+struct CompositeWalk {
+    nodes: HashMap<(String, String), WikiTraverseNode>,
+    edges: Vec<WikiTraverseEdge>,
+    edge_keys: HashSet<(String, String, String, String)>,
+    visited: HashSet<(String, String)>,
+    truncated: bool,
+}
+
+impl CompositeWalk {
+    fn at_capacity(&self) -> bool {
+        self.nodes.len() >= MAX_TRAVERSAL_NODES
+    }
+
+    /// Walk outward from one seed, folding results into the shared state.
+    ///
+    /// A seed that resolves in neither endpoint space is skipped rather than
+    /// treated as an error: an entity-less fact legitimately contributes no
+    /// edges, and the call still returns its facts (PR #78 graceful
+    /// degradation, spec §4.1).
+    fn walk_seed(
+        &mut self,
+        conn: &Connection,
+        entity_id: &str,
+        source_id: &str,
+        max_depth: usize,
+        direction: TraverseDirection,
+        edge_types: &[&str],
+    ) -> Result<()> {
+        if self.at_capacity() {
+            self.truncated = true;
+            return Ok(());
+        }
+        let Some((seed, space)) = load_live_node(conn, entity_id, source_id)? else {
+            return Ok(());
+        };
+
+        let seed_key = (entity_id.to_string(), seed.id.clone());
+        if self.visited.insert(seed_key.clone()) {
+            self.nodes.insert(seed_key, seed);
+        }
+
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        queue.push_back((source_id.to_string(), 0));
+
+        while let Some((current_id, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let pairs =
+                fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
+            for (edge, neighbor_id) in pairs {
+                let neighbor_key = (entity_id.to_string(), neighbor_id.clone());
+                let is_new_neighbor = !self.visited.contains(&neighbor_key);
+                if is_new_neighbor && self.at_capacity() {
+                    self.truncated = true;
+                    return Ok(());
+                }
+                // Edge partition is part of the key: two seeded partitions
+                // can hold the same (source_id, target_id, edge_type) and
+                // they are different edges. The entity_id also lands on the
+                // returned WikiTraverseEdge so consumers can route it back
+                // to its partition.
+                let edge_with_partition = WikiTraverseEdge {
+                    entity_id: entity_id.to_string(),
+                    ..edge
+                };
+                let key = (
+                    edge_with_partition.source_id.clone(),
+                    edge_with_partition.target_id.clone(),
+                    edge_with_partition.edge_type.clone(),
+                    edge_with_partition.entity_id.clone(),
+                );
+                if self.edge_keys.insert(key) {
+                    self.edges.push(edge_with_partition);
+                }
+                if is_new_neighbor {
+                    // Resolve in the walk's own space, never across it — the
+                    // #134 neighbor-boundary contract.
+                    let resolved = match space {
+                        NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
+                        NodeSpace::Entity => {
+                            load_live_curated_entity(conn, entity_id, &neighbor_id)?
+                        }
+                    };
+                    if let Some(node) = resolved {
+                        self.visited.insert(neighbor_key.clone());
+                        self.nodes.insert(neighbor_key, node);
+                        queue.push_back((neighbor_id, depth + 1));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The provenance record for one search hit.
+fn provenance_for(conn: &Connection, hit: &WikiSearchHit) -> Result<WikiContextProvenance> {
+    let source_ref: Option<String> = conn
+        .query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+            [&hit.id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let sources = crate::db::entities::source_docs_from_ref(conn, source_ref.as_deref())
+        .into_iter()
+        .map(|(doc_path, content_hash)| WikiContextSource {
+            doc_path,
+            content_hash,
+        })
+        .collect();
+    Ok(WikiContextProvenance {
+        fact_id: hit.id.clone(),
+        entity_id: hit.entity_id.clone(),
+        score: hit.score,
+        tier: hit.tier.clone(),
+        sources,
+    })
+}
+
+/// One-call retrieval: search, then walk the neighborhood around what was
+/// found (spec §4.1).
+///
+/// The caller needs zero namespace knowledge — no id-prefix distinction, no
+/// entry-vs-entity seeding decision, no bridge mechanics. `wiki_search`
+/// returns each fact's `entity_id`, which is also a `curated_entities` id, so
+/// it serves as both the edge partition and the traversal seed; resolution
+/// order is #134's (entry space first, then entity space).
+///
+/// This is a **composition over existing primitives, not a new contract**: the
+/// traversal limits are `clamp_max_depth` (1..3), `MAX_TRAVERSAL_NODES`, the
+/// BFS visited set and edge-key deduplication, all inherited verbatim. A
+/// `depth` above the ceiling is clamped, never rejected.
+///
+/// Every leg degrades gracefully. A query matching nothing returns empty lists;
+/// facts whose entities carry no live relationships return `edges: []`. Neither
+/// is an error, and neither falls back to prose.
+pub fn wiki_context(
+    conn: &Connection,
+    query_vec: &[f32],
+    tier: Option<&str>,
+    depth: usize,
+    max_facts: usize,
+) -> Result<WikiContextResult> {
+    let max_facts = max_facts.clamp(1, MAX_CONTEXT_FACTS);
+    let clamped_depth = clamp_max_depth(depth);
+
+    // The default all-live-entries contract from #133 is preserved: entity_ids
+    // stays `None`, and `tier` narrows only when the caller asked it to.
+    let facts = wiki_search(conn, query_vec, None, tier, max_facts)?;
+
+    let mut walk = CompositeWalk {
+        // `truncated` means the walk is **narrower** than the caller asked
+        // for, so the neighborhood may be incomplete. A clamped depth that
+        // is *wider* than the caller asked for (e.g. `depth: 0` clamps to
+        // 1) is not truncation — the walk returned more than requested, and
+        // the caller does not have a partial-neighbourhood hazard to
+        // reason about. Report truncation only when the cap shrank the
+        // walk, which happens inside `walk_seed` once the node budget is
+        // exhausted.
+        truncated: clamped_depth < depth,
+        ..Default::default()
+    };
+
+    // Seeds are deduplicated: several facts commonly share one entity, and
+    // re-walking it would spend the shared node budget on work already done.
+    let mut seen_seeds: HashSet<&str> = HashSet::new();
+    for fact in &facts {
+        if !seen_seeds.insert(fact.entity_id.as_str()) {
+            continue;
+        }
+        walk.walk_seed(
+            conn,
+            &fact.entity_id,
+            &fact.entity_id,
+            clamped_depth,
+            TraverseDirection::Both,
+            &[],
+        )?;
+    }
+
+    let mut entities: Vec<WikiTraverseNode> = walk.nodes.into_values().collect();
+    entities.sort_by(|a, b| a.entity_id.cmp(&b.entity_id).then(a.id.cmp(&b.id)));
+
+    let provenance = facts
+        .iter()
+        .map(|hit| provenance_for(conn, hit))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(WikiContextResult {
+        facts,
+        entities,
+        edges: walk.edges,
+        provenance,
+        truncated: walk.truncated,
+    })
 }
