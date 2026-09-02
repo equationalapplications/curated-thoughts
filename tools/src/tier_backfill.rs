@@ -79,7 +79,7 @@ pub fn plan_backfill(conn: &Connection, tier: &str) -> Result<Vec<(String, Strin
               -- recovered via chunks.content_hash -> documents.path. Gate on
               -- leading-byte '{' so legacy rows never hit json_extract (which
               -- raises on non-JSON input).
-              (substr(e.source_ref, 1, 1) = '{' AND EXISTS (
+              (substr(e.source_ref, 1, 1) = '{' AND json_valid(e.source_ref) AND EXISTS (
                 SELECT 1 FROM json_each(json_extract(e.source_ref, '$.evidence')) AS ev
                 JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
                 JOIN documents d ON d.id = c.doc_id
@@ -127,7 +127,7 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
             AND deleted_at IS NULL
             AND (
               (source_ref NOT LIKE '{%' AND source_ref LIKE ?2 || '%')
-              OR (substr(source_ref, 1, 1) = '{' AND EXISTS (
+              OR (substr(source_ref, 1, 1) = '{' AND json_valid(source_ref) AND EXISTS (
                 SELECT 1 FROM json_each(json_extract(source_ref, '$.evidence')) AS ev
                 JOIN chunks c ON c.content_hash = json_extract(ev.value, '$.content_hash')
                 JOIN documents d ON d.id = c.doc_id
@@ -368,5 +368,34 @@ mod tests {
             .query_row("SELECT tier FROM llm_wiki_entries WHERE id='d1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tier.as_deref(), Some("wisdom"), "NULL-only scope protects classified rows");
+    }
+
+    #[test]
+    fn malformed_json_source_ref_is_excluded() {
+        // A source_ref that starts with '{' but is not valid JSON must not cause
+        // json_extract to raise "malformed JSON" — it must be silently excluded.
+        let mut conn = seeded_conn();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, source_ref)
+             VALUES ('bad_json','ent_1','BadJson','{not valid json')",
+            [],
+        )
+        .unwrap();
+
+        // plan_backfill must not raise.
+        let plan = plan_backfill(&conn, "wisdom").unwrap();
+        let ids: Vec<&str> = plan.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(
+            !ids.contains(&"bad_json"),
+            "malformed-JSON source_ref must not appear in plan"
+        );
+
+        // apply_backfill must not raise.
+        let marker = apply_backfill(&mut conn, "wisdom").unwrap();
+        assert_eq!(marker.rows_classified, 4, "malformed-JSON row is not counted");
+        let tier: Option<String> = conn
+            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='bad_json'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tier, None, "malformed-JSON source_ref stays NULL");
     }
 }
