@@ -9,7 +9,10 @@ spec-vs-impl pattern PR #124/#131 used; this PR both spec'd and implemented
 the change in one branch, and the §3.2 writer + §2.3 edge gate + §4.1
 composite tool are real, not just described.
 Manual AC6 (fresh-session ergonomics check) is still deferred to PR review;
-AC1/AC2 remain covered only at the unit seam (see Known gaps below).
+AC1 remains covered only at the unit seam (no end-to-end test), but AC2 is
+now covered end-to-end — full manifest content snapshotted against a
+persisting store and compared equal across two restarts (see Known gaps
+below and `src/__tests__/ontologySeed.test.ts`).
 Workspace: `.superpowers/sdd/2026-09-01-memory-architecture-intent-implementation/`.
 
 **A2 wiring note:** `src/lib/folderTypeMap.ts`'s `resolveFolderType` and
@@ -361,10 +364,21 @@ prefix, so `agents-but-not-really/` is not a deposit.
   last touched — the ledger needs both.
 
   A rerun that classifies **zero** rows **and finds the existing marker
-  present** writes nothing at all: no marker rewrite, no transaction,
-  consistent with the dry-run-default posture that a run which changes no
-  data leaves no trace. `last_applied_at` therefore means "last run that
-  wrote rows", not "last run attempted".
+  present** writes nothing at all to the cohort: no marker rewrite and no
+  data update — consistent with the dry-run-default posture that a run
+  which changes no data leaves no trace. `last_applied_at` therefore means
+  "last run that wrote rows", not "last run attempted".
+
+  Note: the existing-marker zero-row path **still opens and commits an
+  `IMMEDIATE` SQLite transaction** (`tools/src/tier_backfill.rs:176` and
+  `:209`). The transaction is empty of writes, but it is opened before the
+  marker is read so a concurrent apply cannot slip past the "no marker"
+  check and clobber the cohort record with its own `config_default`
+  (see the `IMMEDIATE`-semantics rationale at
+  `tools/src/tier_backfill.rs:163-172`). An operator-visible consequence:
+  a no-op rerun still acquires the reserved write lock for the duration of
+  the run, so two no-op reruns launched in parallel will serialize rather
+  than run concurrently.
 
   If the marker is absent (an operator deleted it), the rerun writes a fresh
   marker regardless of `changed` — the recovery direction must always leave a
@@ -450,17 +464,19 @@ The corrected design **decouples tier from `entity_id` entirely**:
   populated, or migrated to. `tier_fact`/`tier_wisdom` keep their current
   status: live ranking-weight keys, honored per-row wherever such rows exist,
   never written by this spec.
-- Librarian prompt assembly derives labels from stored entry tier when
-  present, chunk heuristics otherwise (fallback, unchanged). **Status: the
-  stored `llm_wiki_entries.tier` column is written by the deposit path and
-  the backfill, but the librarian prompt assembly does not yet read it.**
-  `assemble_librarian_context` (`src-tauri/src/librarian/mod.rs:26-43`)
-  still labels input from `chunk.entity_id` and `documents.tier` —
-  unchanged from the pre-V16 behaviour — so a stored `'fact'` does not yet
-  surface as "ANCHOR TRUTH" in the prompt. The bridge is a separate
-  follow-up: prompt semantics for the curated `'fact'`/`'wisdom'` labels
-  ride a later PR that wires `entries.tier` into the synthesis path.
-  Until then, the column is storage-truth only and the prompt keeps the
+- **Librarian prompt assembly (current / shipped behaviour).** Labels are
+  derived from the existing chunk/document heuristic: an empty
+  `chunk.entity_id` with `documents.tier == 'user_doc'` becomes
+  `tier_fact`; a non-empty `chunk.entity_id` becomes `tier_wisdom` via the
+  `entity_id` label key. `assemble_librarian_context`
+  (`src-tauri/src/librarian/mod.rs:26-43`) reads `chunk.entity_id` and
+  `documents.tier` — unchanged from the pre-V16 behaviour.
+- **Reading `llm_wiki_entries.tier` into the prompt (follow-up).** The
+  V16 column is written by the deposit path and the backfill, but
+  `assemble_librarian_context` does not yet read it, so a stored `'fact'`
+  does not yet surface as "ANCHOR TRUTH" in the prompt. Wiring
+  `entries.tier` into the synthesis path is a separate follow-up PR; until
+  then, the column is storage-truth only and the prompt keeps the
   chunk-heuristics fallback unchanged.
 
 This is strictly better than the namespace overload even setting the migration
