@@ -194,7 +194,7 @@ bundling it here would re-open PR #124's review surface.
 
 ### Fix
 
-Three changes in `ct.rs`:
+Four changes in `ct.rs`:
 
 1. Pass `entry.link` through `redact_home` at the print site. `redact_home`
    collapses a `$HOME` prefix to `~` and leaves other strings untouched, so
@@ -211,12 +211,49 @@ Three changes in `ct.rs`:
    that lands, this print site is defense in depth over an unvalidated
    field, which is exactly why the dismissal justification must cite the
    sanitiser rather than the field's documented shape.
-2. Wrap `target_display` in `redact_home` at `ct.rs:634` and `ct.rs:646`.
-   Both print a raw `std::fs::canonicalize()` result — an absolute path,
-   commonly under `$HOME` — from the same `ct trust` command. CodeQL did
-   not flag them, but they are the same leak class as the alert on the
-   `--list` statement, and a dismissal that says "`ct trust` sanitises its
-   printed paths" is not true while they stand. Two one-line changes.
+
+   **The narrow claim is only as good as the prefix match, and that match
+   was platform-dependent.** `redact_home` compares `Path::components()`
+   against `dirs::home_dir()`, but on Windows — a platform `build.yml`
+   ships (`windows-latest`) — `std::fs::canonicalize` returns
+   extended-length paths (`\\?\C:\Users\me\.ssh`) whose first component is
+   `Prefix::VerbatimDisk`, while `dirs::home_dir` yields `Prefix::Disk`.
+   Those are distinct enum values, so the home prefix did not match and a
+   `$HOME`-rooted absolute path printed **verbatim** — precisely the leak
+   the claim denies. A `prefix_eq` helper now normalizes the verbatim/plain
+   pair (and compares drive letters and UNC share names
+   ASCII-case-insensitively), and `component_eq` compares the remaining
+   components case-insensitively on Windows only, matching NTFS while
+   leaving Unix's exact comparison — and its genuinely distinct
+   `/Users/Me` vs `/users/me` — alone. `std::path::Prefix` is constructible
+   on every platform, so `prefix_eq` is unit-tested on Unix hosts too;
+   `redact_home_collapses_actual_canonicalize_output_for_home` additionally
+   asserts the invariant against real `canonicalize` output rather than a
+   hand-written string (it skips when `$HOME` itself traverses a symlink,
+   where the two paths name the same directory by genuinely different
+   components — the macOS `/var` → `/private/var` class, handled at the call
+   site by canonicalizing `vault_root`, not here). CodeRabbit, PR #129.
+2. Wrap **every** path the `ct trust` arms print in `redact_home` — not just
+   the `--list` statement. Sites are named rather than numbered because
+   line numbers drift (same reason the alert numbers were de-hardcoded
+   above):
+   - the `Denied` and `Pending` arms' `target_display`, each a raw
+     `std::fs::canonicalize()` result and so an absolute path, commonly
+     under `$HOME`;
+   - the `{link}` echo in the `Denied`, `Trusted`, and `Pending` arms, plus
+     the `no such link` / `not a symlink` guards;
+   - the `--revoke` arm's `revoked <link>` and `is not in the ledger`
+     messages. This is the one `link` print path with a *live* leak after
+     change 4 below: `--revoke` matches against the on-disk ledger, so the
+     unvalidated `TrustedLink::link` of issue #140 reaches it without
+     passing through the CLI's own guard.
+
+   CodeQL flagged none of these, but they are the same leak class as the
+   alert on the `--list` statement, from the same command, and a dismissal
+   that says "`ct trust` sanitises its printed paths" is not true while any
+   of them stand. Naming all of them also makes the invariant
+   grep-checkable: no `{link}`-style bare interpolation of a path survives
+   in `trust_cmd`.
 3. Delete the inert suppression comment and replace it with a plain comment
    that records the sanitiser, the verdict, and a warning against re-adding
    the suppression:
@@ -232,6 +269,40 @@ Three changes in `ct.rs`:
 // re-add it.
 println!("{} -> {}", redact_home(&entry.link), redact_home(&entry.target));
 ```
+
+4. **Reject a `<link>` argument that is not vault-relative, before any
+   join.** This one is not a logging fix; the review surfaced it while
+   arguing about the print sites, and it is the more serious of the two.
+   `trust_cmd` did `vault_root.join(&link)`, and `approve_into`
+   (`src-tauri/src/trusted_links.rs`) independently does the same — but
+   `Path::join` **replaces** its base when the argument is absolute, or on
+   Windows merely carries a prefix (`C:foo`) or a root (`\foo`). So
+   `ct trust /Users/me/.ssh` did not resolve inside the vault at all: it
+   escaped to the absolute path, had `classify_link` judge a path the vault
+   does not contain, and on a `Pending` verdict **persisted that absolute
+   string into the ledger** as `TrustedLink::link`. That reaches the issue
+   #140 gap through the CLI rather than only by hand-editing
+   `config.json` — the CLI was the one writer the spec above credits with
+   being "structurally vault-relative", and it was not.
+
+   The guard rejects any `link` whose first component is
+   `Component::Prefix(_)` or `Component::RootDir`, which covers Unix
+   absolute (`/x`), Windows absolute (`C:\x`), Windows root-relative
+   (`\x`), and Windows drive-relative (`C:x`) — the last of these is not
+   `is_absolute()` yet still replaces the prefix on join, so
+   `is_absolute()` alone would have been the wrong test. It runs before
+   both joins, so it also makes every `{link}` echo in the arms below
+   structurally incapable of carrying a `$HOME`-rooted absolute path;
+   change 2's redaction of those echoes is then defense in depth rather
+   than the only barrier. Covered by
+   `trust_refuses_an_absolute_link_and_leaves_the_ledger_empty`, which
+   asserts both the exit code and that the ledger stays empty.
+
+   Traversal escapes (`../../etc`) are deliberately **not** rejected here:
+   they stay vault-relative as strings, `classify_link`'s existing
+   `vault_root` containment rules are what govern them, and widening this
+   guard into a path-traversal policy is the load-boundary discussion
+   tracked as #140. CodeRabbit, PR #129.
 
 The post-merge alert is then dismissed in the GitHub Security UI as a false
 positive, citing that justification. **This is a manual maintainer step** —

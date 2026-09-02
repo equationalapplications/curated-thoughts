@@ -83,6 +83,39 @@ fn trust_refuses_a_non_approvable_target_and_names_the_rule() {
     );
 }
 
+/// An absolute `<link>` must be refused before any join. `Path::join`
+/// *replaces* the base when its argument is absolute, so without this guard
+/// `ct trust /abs/path` escapes the vault entirely, classifies a path the
+/// vault does not contain, and persists that absolute string into the ledger
+/// as `TrustedLink::link` — a field every consumer documents as
+/// vault-relative (CodeRabbit, PR #129; load-boundary gap is #140).
+#[test]
+fn trust_refuses_an_absolute_link_and_leaves_the_ledger_empty() {
+    let (_tmp, brain, _vault) = seed_env();
+    let outside = _tmp.path().join("repo-docs");
+    fs::create_dir_all(&outside).unwrap();
+    let abs_link = _tmp.path().join("abs-link");
+    symlink(&outside, &abs_link).unwrap();
+    assert!(abs_link.is_absolute());
+
+    let out = run_ct(&brain, &["trust", abs_link.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("vault-relative"),
+        "must refuse a non-vault-relative link, got: {stderr}"
+    );
+
+    let cfg: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(brain.join("config.json")).unwrap()).unwrap();
+    let links = cfg["trusted_links"].as_array();
+    assert!(
+        links.is_none_or(|l| l.is_empty()),
+        "an absolute link must never be persisted, got: {:?}",
+        cfg["trusted_links"]
+    );
+}
+
 #[test]
 fn trust_on_an_unknown_link_exits_1() {
     let (_tmp, brain, vault) = seed_env();

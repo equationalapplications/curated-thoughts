@@ -155,8 +155,7 @@ mod tests {
         let contents = "do not truncate me";
         fs::write(&canary, contents).unwrap();
 
-        std::os::unix::fs::symlink(&canary, tmp.path().join(".curated_thoughts.lock"))
-            .unwrap();
+        std::os::unix::fs::symlink(&canary, tmp.path().join(".curated_thoughts.lock")).unwrap();
 
         {
             // Deliberately NOT `.expect(...)`: if a later hardening pass
