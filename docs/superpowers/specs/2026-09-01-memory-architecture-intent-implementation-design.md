@@ -1,5 +1,7 @@
 # Spec: Ontology Activation, Entry Tier Dimension, Composite Context Primitive
 
+**Status:** Implemented — branch `spec/memory-architecture-intent-implementation` (10 commits: A1 ontology seed, A2 folderTypeMap, B1 V16 tier column, B2 tier filter, B3 deposit default config, B4 tier_backfill, C1 wiki_context; manual AC1/AC2/AC6 deferred to PR review). Workspace: `.superpowers/sdd/2026-09-01-memory-architecture-intent-implementation/`.
+
 Baseline: v1.40.1 (`d31c208`, main). Scope: **Curated Thoughts codebase only** —
 general-purpose features for any deployment using an immutable source archive +
 curated-wisdom memory workflow. The motivating deployment (Equational Applications'
