@@ -120,7 +120,7 @@ restriction for future maintainers.
 
 `fs_watcher.rs` carries the correct `truncate(false)` but has no regression
 test of its own. Porting this canary test to the desktop crate is tracked as
-a follow-up, not part of this PR — the active hazard is in `lock.rs`, and the
+issue #141, not part of this PR — the active hazard is in `lock.rs`, and the
 scoping keeps this change reviewable.
 
 ## Item 2 — CodeQL alert #2 (`rust/cleartext-logging`)
@@ -172,11 +172,10 @@ at the print site so the printable form is constrained regardless of what
 the JSON on disk contains.
 
 The load-boundary check (`BrainConfig::load` validating `entry.link` is
-vault-relative, or rejecting it outright) is a **separate, tracked
-follow-up** and is **not** part of this PR's dismissal rationale. That
-follow-up is correct hardening but needs a vault_root-at-load-time
-discussion and its own spec; bundling it here would re-open PR #124's
-review surface.
+vault-relative, or rejecting it outright) is tracked as **issue #140** and
+is **not** part of this PR's dismissal rationale. That follow-up is correct
+hardening but needs a vault_root-at-load-time discussion and its own spec;
+bundling it here would re-open PR #124's review surface.
 
 ### Fix
 
@@ -244,8 +243,8 @@ correctly earns its own alert to triage.
   cleartext-logging print path via `redact_home` on both fields. The
   underlying gap — `BrainConfig::load_lenient` accepting any
   `TrustedLink` shape without validating `entry.link` as vault-relative
-  — is a separate hardening item (could be a validation that rejects
-  non-vault-relative entries, or a normalisation step that converts
-  absolute paths to vault-relative). That work needs a vault_root-at-load
-  discussion and its own spec; it is not a release-blocker for the
-  `redact_home` print-site fix.
+  — is a separate hardening item tracked as **issue #140** (could be a
+  validation that rejects non-vault-relative entries, or a normalisation
+  step that converts absolute paths to vault-relative). That work needs a
+  vault_root-at-load discussion and its own spec; it is not a
+  release-blocker for the `redact_home` print-site fix.
