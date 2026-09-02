@@ -1,3 +1,12 @@
+## [1.42.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.1...v1.42.2) (2026-09-02)
+
+### Bug Fixes
+
+* **ct:** redact home paths at all three ct trust print sites ([88e79ce](https://github.com/equationalapplications/curated-thoughts/commit/88e79cebcbb99f88c1a7ec38c8f37dc5df806343)), closes [#2](https://github.com/equationalapplications/curated-thoughts/issues/2) [#124](https://github.com/equationalapplications/curated-thoughts/issues/124) [#140](https://github.com/equationalapplications/curated-thoughts/issues/140) [#2](https://github.com/equationalapplications/curated-thoughts/issues/2) [#140](https://github.com/equationalapplications/curated-thoughts/issues/140)
+* **lock:** do not truncate a symlinked vault lockfile ([66b3392](https://github.com/equationalapplications/curated-thoughts/commit/66b3392a4c93adefe8761fa610909c323ebb00d0)), closes [#141](https://github.com/equationalapplications/curated-thoughts/issues/141)
+* **spec,tools:** de-hardcode CodeQL alert numbers ([26f5b7c](https://github.com/equationalapplications/curated-thoughts/commit/26f5b7cc15104fa9d676ea537ed86e85fb38dc8f)), closes [#2](https://github.com/equationalapplications/curated-thoughts/issues/2) [#2](https://github.com/equationalapplications/curated-thoughts/issues/2) [#2](https://github.com/equationalapplications/curated-thoughts/issues/2)
+* **tools:** normalize Windows path prefixes in redact_home; refuse absolute trust links ([6a2539e](https://github.com/equationalapplications/curated-thoughts/commit/6a2539e1fc60aa5f3ad0a75973fe695d2a56ac36)), closes [#129](https://github.com/equationalapplications/curated-thoughts/issues/129) [#140](https://github.com/equationalapplications/curated-thoughts/issues/140)
+
 ## [1.42.1](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.0...v1.42.1) (2026-09-02)
 
 ### Bug Fixes
