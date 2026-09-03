@@ -36,10 +36,14 @@ classifies the resolved target. With an absolute `link`:
 3. `approve_into`'s resolution-failure error embeds the raw `link`
    (`"{link} could not be resolved: {e}"`). When the CLI prints that error
    (`tools/src/bin/ct.rs`, the `Err(e)` arm: `eprintln!("error: {e}")`) a
-   `$HOME`-rooted absolute path is echoed **unredacted** — the exact leak
-   class PR #129's `redact_home` work exists to prevent.
+   `$HOME`-rooted absolute path would be echoed **unredacted**. Today the
+   CLI's own guard (ct.rs:669) fires before `approve_into` is reached with
+   an absolute link, so this is not a live leak — but once the helper owns
+   the guard, its new "… is not vault-relative" error embeds the raw link
+   and reaches this print arm, so the echo must route through `redact_home`
+   (defense-in-depth, per issue #142's own note).
 
-### 1.2 Current-state evidence (verified 2026-09-03, main @ 00abde9)
+### 1.2 Current-state evidence (verified 2026-09-03, main @ 00abde9, branch @ 6cb4ccf)
 
 - `src-tauri/src/trusted_links.rs:106-118` — `approve_into` joins and
   canonicalizes with no prefix check.
@@ -123,8 +127,8 @@ the CLI change is verified by compile + existing `ct_trust` tests locally.
 ## 5. Out of scope / open questions
 
 - **#140 (load-boundary validation of stored `TrustedLink::link`)** —
-  separate task; this spec fixes the write path only. Possibly folded into
-  this PR's follow-up if the night allows; do NOT bundle.
+  separate task; this spec fixes the write path only. Do NOT bundle into
+  this PR.
 - **#125 TOCTOU in `create_parents_no_symlink`** — unrelated, separate.
 - **Open question for Kurt (non-blocking):** should the Tauri
   `approve_link` command surface a friendlier message than the raw helper
