@@ -74,3 +74,116 @@ fn leniency_missing_vault_path_marked() {
     let report = BrainConfig::load_lenient(&paths).unwrap();
     assert!(report.vault_path_missing);
 }
+
+// ---------------------------------------------------------------------------
+// Load-boundary validation of TrustedLink::link (issue #140).
+// The predicate `is_vault_relative_link` is shared with the approval write
+// path (PR #144); here it is applied to every ledger entry as it is read
+// back from config.json, so a hand-edited ledger cannot smuggle an absolute,
+// rooted, or `..`-traversal link past the walker.
+// ---------------------------------------------------------------------------
+
+/// One well-formed entry plus one entry with a bad `link` value; returns the
+/// JSON for it. Used to prove lenient drop-one-keep-the-rest semantics.
+fn trusted_links_json(entries: &[serde_json::Value]) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "vault_path".to_string(),
+        serde_json::Value::String("~/v".to_string()),
+    );
+    obj.insert("generation".to_string(), serde_json::json!({}));
+    obj.insert("embedding".to_string(), serde_json::json!({}));
+    obj.insert("privacy".to_string(), serde_json::json!({}));
+    obj.insert(
+        "trusted_links".to_string(),
+        serde_json::Value::Array(entries.to_vec()),
+    );
+    serde_json::Value::Object(obj).to_string()
+}
+
+fn wellformed_entry(link: &str) -> serde_json::Value {
+    serde_json::json!({
+        "link": link,
+        "target": "/tmp/somewhere",
+        "approved_at": 1_700_000_000i64,
+    })
+}
+
+#[test]
+fn load_lenient_rejects_absolute_trusted_link() {
+    let json = trusted_links_json(&[
+        wellformed_entry("documents/specs"),
+        wellformed_entry("/etc/outside-link"),
+    ]);
+    let (_temp, paths) = temp_paths(&json);
+
+    let report = BrainConfig::load_lenient(&paths).unwrap();
+    let links: Vec<&str> = report
+        .config
+        .trusted_links
+        .iter()
+        .map(|e| e.link.as_str())
+        .collect();
+    assert_eq!(links, vec!["documents/specs"]);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("not vault-relative") && d.contains("/etc/outside-link")),
+        "expected a 'not vault-relative' diagnostic echoing the link, got: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn load_lenient_rejects_parentdir_trusted_link() {
+    let json = trusted_links_json(&[
+        wellformed_entry("../outside-link"),
+        wellformed_entry("documents/../secrets"),
+        wellformed_entry("documents/specs"),
+    ]);
+    let (_temp, paths) = temp_paths(&json);
+
+    let report = BrainConfig::load_lenient(&paths).unwrap();
+    let links: Vec<&str> = report
+        .config
+        .trusted_links
+        .iter()
+        .map(|e| e.link.as_str())
+        .collect();
+    assert_eq!(links, vec!["documents/specs"]);
+    let rejections = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.contains("not vault-relative"))
+        .count();
+    assert_eq!(rejections, 2, "both ParentDir links must be rejected");
+}
+
+#[test]
+fn load_lenient_accepts_wellformed_trusted_links() {
+    // The empty string passes `is_vault_relative_link` by design: the
+    // predicate is purely component-lexical and empty has no offending
+    // components. Tightening empty-link handling is issue #143's scope and
+    // must stay consistent across both boundaries — do not change it here.
+    let json = trusted_links_json(&[wellformed_entry("documents/specs"), wellformed_entry("")]);
+    let (_temp, paths) = temp_paths(&json);
+
+    let report = BrainConfig::load_lenient(&paths).unwrap();
+    let mut links: Vec<&str> = report
+        .config
+        .trusted_links
+        .iter()
+        .map(|e| e.link.as_str())
+        .collect();
+    links.sort_unstable();
+    assert_eq!(links, vec!["", "documents/specs"]);
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("not vault-relative")),
+        "well-formed links must not be rejected, got: {:?}",
+        report.diagnostics
+    );
+}
