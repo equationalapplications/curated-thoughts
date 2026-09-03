@@ -53,7 +53,9 @@ Outcomes:
 
 ## 4. Shared pins → `[workspace.dependencies]`
 
-Dependencies currently duplicated across both members move to `[workspace.dependencies]`, with members referencing them as `dep.workspace = true`: `serde`, `serde_json`, `anyhow`, `tokio`, `rusqlite`, `notify`, `sha2`, `dirs`.
+All fifteen dependencies currently duplicated across both members move to `[workspace.dependencies]`, with members referencing them as `dep.workspace = true`: `serde`, `serde_json`, `anyhow`, `tokio`, `rusqlite`, `notify`, `sha2`, `dirs`, `flate2`, `fs4`, `walkdir`, `rmcp`, `schemars`, `tempfile`, `temp-env`.
+
+The objective is to eliminate manual version synchronization across every shared dependency, so the set is defined by what is actually duplicated, not by what was most visible.
 
 **Member feature sets differ and must not be flattened.** Known divergences:
 
@@ -61,8 +63,19 @@ Dependencies currently duplicated across both members move to `[workspace.depend
 |------------|-------------|---------|
 | `tokio` | `["full", "test-util"]` | `["rt", "macros", "signal"]` |
 | `rusqlite` | `["bundled", "backup"]` | `["bundled"]` |
+| `rmcp` | `["macros", "transport-io", "schemars"]`, `optional`; **and** `["client", "transport-child-process"]` as a dev-dependency | `["macros", "transport-io", "schemars"]` |
+| `schemars` | `["derive"]`, `optional` | `["derive"]` |
 
-The workspace entry declares the version and the features common to both; each member re-adds its own extras alongside `workspace = true`. Collapsing these into a single union would silently widen the shipped application's feature surface. Any dependency whose feature sets cannot be expressed this way stays a per-member dependency — deduplication is not worth a behavioral change.
+Two rules govern how each pin is written:
+
+1. **Where every site shares one feature set,** the workspace entry carries the version and those features, and members inherit with a bare `dep.workspace = true`.
+2. **Where feature sets diverge across sites,** the workspace entry pins the **version only**, and each site declares its own features alongside `workspace = true`. This applies to `tokio`, `rusqlite`, and `rmcp`.
+
+`rmcp` is the case that forces rule 2. It appears at three sites: an optional dependency in src-tauri gated behind the `mcp-server` feature, a dev-dependency in src-tauri with a completely different feature set, and a required dependency in tools. If the workspace entry carried features, src-tauri's dev-dependency would silently acquire `macros`, `transport-io`, and `schemars` in test builds that do not enable `mcp-server`. A version-only pin preserves all three sites exactly.
+
+`optional = true` is a member-level attribute and is preserved by writing `{ workspace = true, optional = true }`; it does not move to the workspace entry. This matters for `rmcp` and `schemars`, both of which `mcp-server` activates via `dep:`.
+
+Collapsing feature sets into a single union would silently widen the shipped application's feature surface. Any dependency whose feature sets cannot be expressed by these two rules stays a per-member dependency — deduplication is not worth a behavioral change.
 
 `tools`-only and `src-tauri`-only dependencies stay in their member manifests. This section is about the shared set, not about centralizing everything.
 
@@ -119,4 +132,5 @@ Explicit non-goals, deliberately excluded to keep this change revertible and rev
 - No resolved dependency version changes without written justification.
 - `ci.yml` test commands pass, and a `--release` build produces a correctly staged sidecar.
 - `build.yml` contains no hardcoded target path.
-- Shared pins are enforced by Cargo, and the "must match the pins in src-tauri" comments in `tools/Cargo.toml` are deleted as obsolete.
+- All fifteen shared pins are enforced by Cargo, and the "must match the pins in src-tauri" comments in `tools/Cargo.toml` are deleted as obsolete.
+- No member's resolved feature set changes; `rmcp`'s three declaration sites keep their distinct features.
