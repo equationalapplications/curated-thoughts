@@ -18,9 +18,17 @@
 //! API note on `try_lock_exclusive` below. Keeping the lock-file path
 //! and semantics identical ensures the two lockers see each other
 //! across a desktop/CLI hand-off.
+//!
+//! The error-mapping helper `map_try_lock_err` (which distinguishes
+//! `TryLockError::WouldBlock` contention from real I/O failures —
+//! issue #146) is part of that same intentional duplication and must
+//! stay in sync across both copies.
 
 use anyhow::{anyhow, Result};
-use fs4::FileExt;
+// Note: `fs4::FileExt` is intentionally NOT imported — on Rust >= 1.89
+// std's inherent `File::try_lock`/`unlock` shadow the trait methods, so
+// the fs4 trait method is called via UFCS in `try_lock_exclusive` below.
+use fs4::TryLockError;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -70,7 +78,7 @@ impl VaultLock {
     }
 
     /// Platform-native `try_lock` (fs4 1.x; was `try_lock_exclusive` in
-    /// 0.7) with a single, descriptive error message on contention.
+    /// 0.7) with descriptive, cause-appropriate error messages.
     ///
     /// **API note:** in `fs4` 1.x, `FileExt::try_lock` returns
     /// `Result<(), TryLockError>` (contention surfaces as
@@ -83,8 +91,10 @@ impl VaultLock {
     /// the actual semantics here. Mirrors
     /// `src-tauri/src/watcher/fs_watcher.rs` (PR #110 migrated that copy).
     fn try_lock_exclusive(file: &fs::File) -> Result<()> {
-        file.try_lock()
-            .map_err(|e| anyhow!("vault is already locked by another watcher instance: {e}"))
+        // UFCS (not `file.try_lock()`): on Rust >= 1.89 the inherent
+        // `std::fs::File::try_lock` shadows fs4's trait method; call
+        // fs4's explicitly so the error type is `fs4::TryLockError`.
+        fs4::FileExt::try_lock(file).map_err(map_try_lock_err)
     }
 
     /// Return the on-disk path of the lock file (for diagnostics).
@@ -99,6 +109,25 @@ impl Drop for VaultLock {
         // the handle. Unlock failure here is non-fatal (the file is
         // being closed anyway), so we swallow the error.
         let _ = self._file.unlock();
+    }
+}
+
+/// Distinguish pure lock contention (`TryLockError::WouldBlock`) from a
+/// real lock-acquisition failure (`TryLockError::Error(io::Error)`, e.g.
+/// permission denied). Reporting a permission error as "another watcher
+/// holds the lock" sends the user hunting for a phantom second process
+/// (issue #146, a CodeRabbit finding on PR #144).
+///
+/// fs4's `From<io::Error>` impl collapses any `io::Error` of kind
+/// `WouldBlock` into `TryLockError::WouldBlock`, so variant matching is
+/// reliable. **Deliberately duplicated** in
+/// `src-tauri/src/watcher/fs_watcher.rs` — keep both copies in sync.
+fn map_try_lock_err(e: TryLockError) -> anyhow::Error {
+    match e {
+        TryLockError::WouldBlock => {
+            anyhow!("vault is already locked by another watcher instance")
+        }
+        TryLockError::Error(err) => anyhow!("failed to acquire vault lock: {err}"),
     }
 }
 
@@ -121,6 +150,46 @@ mod tests {
         assert!(
             msg.contains("locked") || msg.contains("lock"),
             "error message should mention lock contention, got: {msg}"
+        );
+    }
+
+    /// Issue #146: a `TryLockError::WouldBlock` (pure contention) must map
+    /// to the contention message, NOT to an acquire-failure message that
+    /// would send the user hunting for a phantom I/O problem.
+    #[test]
+    fn wouldblock_maps_to_contention_message() {
+        let err = map_try_lock_err(fs4::TryLockError::WouldBlock);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already locked"),
+            "contention message should say 'already locked', got: {msg}"
+        );
+        assert!(
+            !msg.contains("failed to acquire"),
+            "contention message must NOT use the I/O-failure wording, got: {msg}"
+        );
+    }
+
+    /// Issue #146: a real lock-acquisition failure (e.g. permission denied)
+    /// must map to the acquire-failure message embedding the underlying
+    /// error, NOT the contention message that blames another watcher.
+    #[test]
+    fn io_error_maps_to_acquire_failure_message() {
+        let err = map_try_lock_err(fs4::TryLockError::Error(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("failed to acquire vault lock"),
+            "I/O-failure message should start with 'failed to acquire vault lock', got: {msg}"
+        );
+        assert!(
+            msg.contains("permission denied"),
+            "I/O-failure message should embed the underlying error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("already locked"),
+            "I/O-failure message must NOT use the contention wording, got: {msg}"
         );
     }
 
