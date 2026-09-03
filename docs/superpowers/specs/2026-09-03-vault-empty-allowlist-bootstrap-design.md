@@ -1,7 +1,7 @@
 # Empty-Allowlist Bootstrap in `safe_vault_path` (`vault_write_note`) — Design
 
 **Date:** 2026-09-03
-**Status:** Proposed
+**Status:** Implemented
 **Branch:** `fix/vault-empty-allowlist-bootstrap`
 **Priority:** P2 (correctness; unblocks first-write on fresh vaults; closes issue #119)
 
@@ -160,6 +160,22 @@ In `src-tauri/src/vault/safe_path.rs` (inline `mod tests`):
   exists as an escaping symlink → `Outside`. Proves falling through did not
   open the escape hole.
 
+### Which entry point the fixtures must drive (found during implementation)
+
+The AD fixtures must call `okf::write::write_note` **directly**, not the
+`vault_write_note` Tauri command. `set_vault_path` (`lib.rs:591-594`)
+eagerly `create_dir_all`s `wiki/`, `immutable-source-files/` **and**
+`immutable-source-files/agents/` before any write, so on the Tauri path the
+allowlist is never empty and #119 is structurally unreachable. A fixture
+routed through `TestApp::invoke("vault_write_note", ..)` passes with the fix
+reverted — it proves nothing.
+
+The reported exposure is the MCP sidecar (v1.34.0, 2026-08-28):
+`mcp_server::vault_write_note` (`mcp_server.rs:130`) →
+`dispatch_vault_write_note` (`tool_dispatch.rs:287`) →
+`okf::write::write_note` (`tool_dispatch.rs:296`), with no `set_vault_path`
+and therefore no eager bootstrap. That is the path the fixtures exercise.
+
 In `src-tauri/tests/mcp_write_integration.rs` (the AD fixture variant the
 issue asks for):
 
@@ -178,10 +194,20 @@ issue asks for):
   (2) fires before any `create_dir` and that a rejected write leaves no
   residue.
 
-**Sabotage check:** revert the `matches!(mode, PathMode::MustExist)` gate →
-both `may_create_*` unit tests and both integration bootstrap tests fail.
-Remove the `under_any` check at `write.rs:240` →
-`bootstrap_refuses_sibling_prefix_dir` fails.
+**Sabotage check (run, with observed results).** Reverting the
+`matches!(mode, PathMode::MustExist)` gate fails exactly three tests:
+`may_create_reports_not_found_when_no_allowed_subdir_exists`,
+`first_deposit_succeeds_on_vault_with_neither_wiki_nor_agents` and
+`first_write_succeeds_on_vault_with_no_subdirs_at_all`.
+
+The other two new tests correctly keep passing under sabotage, and this is
+not a gap: `must_exist_still_outside_..` and
+`may_create_still_outside_when_sole_allowed_subdir_is_symlink_escape` both
+assert `Outside`, which the reverted code also returns. They are
+*containment* guards proving the fix opens no hole, not *fix* tests —
+different job, so a sabotage that only removes the fix should leave them
+green. `bootstrap_refuses_sibling_prefix_dir` is likewise a guard test
+(removing the `under_any` check at `write.rs:240` is what fails it).
 
 **Gate:**
 

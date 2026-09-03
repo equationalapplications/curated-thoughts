@@ -803,3 +803,116 @@ fn e3_upsert_index_outside_vault_fails() {
 
     assert!(result.is_err(), "upsert outside the vault must fail");
 }
+
+// ============================================================================
+// Issue #119 - Lazy bootstrap on vaults with no writable subdir yet
+// ============================================================================
+//
+// These drive `okf::write::write_note` directly rather than the
+// `vault_write_note` Tauri command. That is deliberate and load-bearing: the
+// command is preceded by `set_vault_path`, which eagerly creates `wiki/`,
+// `immutable-source-files/` and `agents/` (lib.rs), so the allowlist is never
+// empty on that path and #119 is unreachable through it. The MCP sidecar --
+// where #119 was actually reported (v1.34.0, 2026-08-28) -- runs
+// mcp_server::vault_write_note -> dispatch_vault_write_note ->
+// okf::write::write_note with no such bootstrap, which is the path exercised
+// here.
+
+use tauri_app_lib::okf::write::write_note;
+
+/// The live repro from issue #119: a wiki-shaped vault carrying
+/// `immutable-source-files/` but neither `wiki/` nor `agents/`. Both allowed
+/// subdirs are absent, so `safe_vault_path`'s allowlist is empty; before the
+/// fix that returned `Outside` ("Path is outside vault root") before
+/// `write_note` could bootstrap the parents and retry.
+#[test]
+fn first_deposit_succeeds_on_vault_with_neither_wiki_nor_agents() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault_root = tmp.path().join("vault");
+    // Only the deposit GRANDparent exists — no wiki/, no agents/.
+    std::fs::create_dir_all(vault_root.join("immutable-source-files")).unwrap();
+
+    let note_path = "immutable-source-files/agents/ct-119-deposit.md";
+    let res = write_note(
+        &vault_root,
+        note_path,
+        &create_test_frontmatter("Deposit On Bare Vault"),
+        "Deposited without a manual mkdir -p.",
+        None,
+    )
+    .expect("deposit should succeed on a vault with no writable subdir yet");
+    assert!(!res.sha256.is_empty(), "sha256 should be populated");
+
+    let full_path = vault_root.join(note_path);
+    assert!(full_path.exists(), "note should exist at {full_path:?}");
+    assert!(
+        vault_root.join("immutable-source-files/agents").is_dir(),
+        "bootstrap should have created the agents/ deposit dir"
+    );
+    assert_eq!(
+        parse_frontmatter_from_file(&full_path).title,
+        "Deposit On Bare Vault"
+    );
+}
+
+/// Same bootstrap, but the vault root is completely empty — covers the `wiki/`
+/// side and proves a multi-level parent chain is created, not just one level.
+#[test]
+fn first_write_succeeds_on_vault_with_no_subdirs_at_all() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault_root = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault_root).unwrap();
+
+    let deposit = "immutable-source-files/agents/nested/deep.md";
+    write_note(
+        &vault_root,
+        deposit,
+        &create_test_frontmatter("Deep Deposit"),
+        "Two levels of parents bootstrapped.",
+        None,
+    )
+    .expect("nested deposit should succeed");
+    assert!(
+        vault_root.join(deposit).exists(),
+        "nested note should exist"
+    );
+
+    let wiki_note = "wiki/first-page.md";
+    write_note(
+        &vault_root,
+        wiki_note,
+        &create_test_frontmatter("First Page"),
+        "wiki/ bootstrapped too.",
+        None,
+    )
+    .expect("wiki write should succeed");
+    assert!(
+        vault_root.join(wiki_note).exists(),
+        "wiki note should exist"
+    );
+}
+
+/// The bootstrap is fenced by a LEXICAL allowlist check (`under_any`) that runs
+/// before any `create_dir`, so a sibling-prefix directory is refused AND left
+/// uncreated — a rejected write must leave no residue on disk.
+#[test]
+fn bootstrap_refuses_sibling_prefix_dir() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault_root = tmp.path().join("vault");
+    std::fs::create_dir_all(vault_root.join("immutable-source-files")).unwrap();
+
+    let err = write_note(
+        &vault_root,
+        "immutable-source-files/agents-evil/x.md",
+        &create_test_frontmatter("Sibling Prefix"),
+        "should never land",
+        None,
+    );
+    assert!(err.is_err(), "sibling-prefix path must be rejected");
+    assert!(
+        !vault_root
+            .join("immutable-source-files/agents-evil")
+            .exists(),
+        "a rejected write must not create its parent directory"
+    );
+}
