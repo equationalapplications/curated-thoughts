@@ -1,7 +1,7 @@
 # Port lock symlink-truncation canary to `fs_watcher.rs` — Design
 
 **Date:** 2026-09-03
-**Status:** Draft
+**Status:** Implemented 2026-09-03 — light-tier review Approved (GLM 5.3: SPEC COMPLIANT yes, 0C/0I/3m cosmetic). Bite-check verified: test FAILS under temporary truncate(true), passes restored.
 **Branch:** `test/fs-watcher-canary-port`
 **Priority:** P2 (test-only regression gate; closes issue #141)
 
