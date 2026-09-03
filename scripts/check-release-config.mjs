@@ -76,6 +76,37 @@ function context(commits) {
  * `null` means "no release" (the rule sets `release: false`).
  */
 const VERSION_MATRIX = [
+  // A breaking change outranks the type-based rules below. Configured rules
+  // are consulted instead of the built-in defaults whenever any of them
+  // matches, so without an explicit `breaking` rule a `feat!` commit matches
+  // only `{ type: 'feat' }` and releases as minor (issue #160).
+  //
+  // Do NOT turn this into an ordering assertion: the analyzer takes the
+  // highest release type among ALL matching rules, so the breaking rule works
+  // from any position in the array.
+  {
+    name: 'feat! -> major',
+    message: 'feat(api)!: drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
+    expected: 'major',
+  },
+  {
+    name: 'fix! -> major',
+    message: 'fix(api)!: drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
+    expected: 'major',
+  },
+  // Same behavior without the `!` marker — breaking changes can be
+  // expressed either via the subject `!` or via a `BREAKING CHANGE:`
+  // footer in the body. The `{ breaking: true }` rule matches both.
+  {
+    name: 'feat w/ footer -> major',
+    message: 'feat(api): drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
+    expected: 'major',
+  },
+  {
+    name: 'fix w/ footer -> major',
+    message: 'fix(api): drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
+    expected: 'major',
+  },
   { name: 'feat -> minor', message: 'feat(vault): add bootstrap', expected: 'minor' },
   { name: 'fix -> patch', message: 'fix(vault): correct allowlist gate', expected: 'patch' },
   { name: 'perf -> no release', message: 'perf(embed): speed up embedding', expected: null },
