@@ -2,38 +2,39 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close issue #142 — refuse non-vault-relative `link` arguments inside the shared `approve_into` helper (both entry points inherit the guard) and redact the one CLI error echo that can carry an absolute path.
+**Goal:** Close issue #142 — refuse non-vault-relative `link` arguments inside the shared `approve_into` helper (both entry points inherit the guard), make the CLI use that same shared predicate (one definition, not two), and keep every CLI echo of a link redacted.
 
-**Architecture:** A new public predicate `is_vault_relative_link` in `trusted_links.rs` becomes the single definition of "vault-relative"; `approve_into` fails closed with an error before any join when the predicate rejects. The CLI keeps its earlier, friendlier diagnostic (defense-in-depth) and redacts helper errors via `redact_home`.
+**Architecture:** A new public predicate `is_vault_relative_link` in `trusted_links.rs` becomes the single definition of "vault-relative"; `approve_into` fails closed with an error before any join when the predicate rejects. The CLI's pre-join guard is converted to call the same predicate (keeping its friendlier message), and the helper-error print site routes through `redact_home` as defense-in-depth (reachable only if the CLI guard is ever removed — spec §1.1 point 3 as amended).
 
-**Tech Stack:** Rust (src-tauri lib crate + tools CLI crate), `std::path`, integration tests with `tempfile`.
+**Tech Stack:** Rust (src-tauri lib crate + tools CLI crate; tools already depends on `tauri_app_lib`), `std::path`, integration tests with `tempfile`.
 
 **Spec:** `docs/superpowers/specs/2026-09-03-approve-into-absolute-link-guard-design.md`
 
 ## Global Constraints
 
 - Guard must fire BEFORE `vault_root.join(link)` — no filesystem access on a refused link (spec §2).
-- Predicate = first `Path` component is `Prefix(_)` or `RootDir` → NOT vault-relative. Exactly one definition, shared by helper and CLI (spec §2.1).
+- Predicate = first `Path` component is `Prefix(_)` or `RootDir` → NOT vault-relative. Exactly one definition: `is_vault_relative_link` in `src-tauri/src/trusted_links.rs`; the CLI MUST call it, not keep its inline `matches!` copy (spec §2; GLM 5.3 plan-review Important 1).
 - No behavior change for relative links: empty string and normal relative paths still reach canonicalize (spec §3).
-- Only files touched: `src-tauri/src/trusted_links.rs`, `src-tauri/tests/trusted_links.rs`, `tools/src/bin/ct.rs` (one line).
+- Only files touched: `src-tauri/src/trusted_links.rs`, `src-tauri/tests/trusted_links.rs`, `tools/src/bin/ct.rs`, `tools/tests/ct_trust.rs`.
 - Do NOT touch issue #140 (load-boundary validation) or #125 (TOCTOU) — out of scope (spec §5).
-- Build flags: never bare `cargo test` for the lib test profile; the integration test target used here compiles without feature gates.
+- Build flags: never bare `cargo test` for the lib test profile; the integration test target used here compiles without feature gates. Format with `cargo fmt --manifest-path <crate>/Cargo.toml` (there is no workspace Cargo.toml at the repo root; no package named `tauri-app` exists).
+- Honest coverage note (plan-review Important 2): the helper's `Err` arm cannot receive an absolute link through the CLI (the CLI guard fires first), so its `redact_home` change is verified by compile + code review only; the behaviorally-tested redaction path is the CLI guard message, via a controlled-HOME test modeled on `trust_list_redacts_home_prefix_in_target`.
 
 ---
 
 ### Task 1: Guard predicate + `approve_into` fail-closed check (src-tauri)
 
 **Files:**
-- Modify: `src-tauri/src/trusted_links.rs` (insert predicate after `is_within`, guard at top of `approve_into` ~line 106)
+- Modify: `src-tauri/src/trusted_links.rs` (insert predicate near `is_within`; guard at top of `approve_into` body, ~line 106)
 - Test: `src-tauri/tests/trusted_links.rs`
 
 **Interfaces:**
 - Consumes: existing `approve_into(ledger: &mut Vec<TrustedLink>, link: &str, vault_root: &Path, home: Option<&Path>) -> Result<LinkVerdict, String>` (unchanged signature).
-- Produces: `pub fn is_vault_relative_link(link: &str) -> bool` — exported from `tauri_app_lib::trusted_links`; later tasks and the existing CLI comment reference it.
+- Produces: `pub fn is_vault_relative_link(link: &str) -> bool`, exported from `tauri_app_lib::trusted_links`. Task 2 imports this exact name in `tools/src/bin/ct.rs`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `src-tauri/tests/trusted_links.rs` (keep the existing imports; ADD `approve_into` and `is_vault_relative_link` to the `use tauri_app_lib::trusted_links::{...}` list):
+Append to `src-tauri/tests/trusted_links.rs` (extend the existing `use tauri_app_lib::trusted_links::{...}` with `approve_into` and `is_vault_relative_link`):
 
 ```rust
 // ---------------------------------------------------------------------------
@@ -116,11 +117,11 @@ fn approve_into_still_reports_resolution_errors_for_relative_links() {
 - [ ] **Step 2: Run tests to verify they fail to compile**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test trusted_links 2>&1 | tail -5`
-Expected: FAIL — `is_vault_relative_link` and `approve_into` not found in `tauri_app_lib::trusted_links` (E0432/E0425).
+Expected: FAIL — `is_vault_relative_link` not found in `tauri_app_lib::trusted_links` (E0432).
 
 - [ ] **Step 3: Implement the predicate and the guard**
 
-In `src-tauri/src/trusted_links.rs`, after the existing `is_within` function, add (keep the file's existing imports — `Path` and `Component` are already in scope; if `Component` is not, add it to the `std::path` use):
+In `src-tauri/src/trusted_links.rs`, after the existing `is_within` function, add (keep the file's existing imports — `Path` and `Component` are already in scope, verified at line 9):
 
 ```rust
 /// True when `link` can safely be joined onto `vault_root` as a
@@ -168,32 +169,115 @@ Expected: PASS — all pre-existing tests plus the 4 new Unix tests (5th compile
 - [ ] **Step 5: Format and commit**
 
 ```bash
-cargo fmt -p tauri-app
+cargo fmt --manifest-path src-tauri/Cargo.toml
 git add src-tauri/src/trusted_links.rs src-tauri/tests/trusted_links.rs
 git commit -m "fix(vault): refuse non-vault-relative links in approve_into (issue #142)"
 ```
 
-### Task 2: Redact the CLI helper-error echo (tools crate)
+### Task 2: CLI uses the shared predicate; redact the helper-error echo (tools crate)
 
 **Files:**
-- Modify: `tools/src/bin/ct.rs` (the `Err(e)` arm of the `trust` match, ~line 734)
+- Modify: `tools/src/bin/ct.rs` (inline guard ~line 669-682 → call `is_vault_relative_link`; `Err(e)` arm ~line 734 → `redact_home`)
+- Test: `tools/tests/ct_trust.rs` (new controlled-HOME redaction test)
 
 **Interfaces:**
-- Consumes: `approve_into`'s new error path from Task 1 (its string may embed the raw `link`).
-- Produces: no API change; one-line print fix.
+- Consumes: `is_vault_relative_link(&str) -> bool` and `approve_into`'s new error path from Task 1. `tauri_app_lib::trusted_links` is already importable from the tools crate (ct.rs line 594 already imports from it in its test module; `tools/Cargo.toml` depends on `tauri_app_lib`).
+- Produces: no API change.
 
-- [ ] **Step 1: Make the edit**
+- [ ] **Step 1: Write the failing redaction test FIRST (new test, modeled on `trust_list_redacts_home_prefix_in_target` at tools/tests/ct_trust.rs:200)**
 
-In `tools/src/bin/ct.rs`, change:
+Add to `tools/tests/ct_trust.rs`:
 
 ```rust
-        Err(e) => {
-            eprintln!("error: {e}");
-            Ok(1)
-        }
+/// An absolute link UNDER a controlled $HOME must be refused by the vault-
+/// relative guard with the home prefix REDACTED (`~/...`), never the
+/// absolute path. Modeled on trust_list_redacts_home_prefix_in_target:
+/// HOME is controlled and canonicalized so `redact_home`'s component
+/// comparison sees the same canonical form the guard's message embeds.
+/// This is the behaviorally-reachable redaction path — the helper's Err arm
+/// cannot receive an absolute link through the CLI (this guard fires first),
+/// so the in-helper redaction added alongside is compile-verified only.
+#[test]
+fn trust_redacts_home_prefix_when_refusing_absolute_link() {
+    use std::process::Command;
+
+    let (tmp, brain, _vault) = seed_env();
+
+    let controlled_home = tmp.path().join("home");
+    fs::create_dir_all(&controlled_home).unwrap();
+    let controlled_home = fs::canonicalize(&controlled_home).unwrap();
+    let controlled_home_str = controlled_home.display().to_string();
+
+    let absolute_link = controlled_home.join("repo-docs"); // under HOME, absolute
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ct"))
+        .env("CURATED_BRAIN_DIR", &brain)
+        .env("HOME", &controlled_home_str)
+        .env_remove("CURATED_BRAIN_DB")
+        .env_remove("CURATED_BRAIN_CONFIG")
+        .args(["trust", absolute_link.to_str().unwrap()])
+        .output()
+        .expect("spawn ct (absolute in-home link)");
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("vault-relative"),
+        "must name the rule, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&controlled_home_str),
+        "stderr must not contain the absolute home prefix, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("~"),
+        "expected the redacted ~/... form, got: {stderr}"
+    );
+}
 ```
 
-to:
+Run: `cargo test --manifest-path tools/Cargo.toml --test ct_trust 2>&1 | tail -5`
+Expected: this test PASSES already? No — verify explicitly: it passes iff the guard message already routes through `redact_home` (it does since PR #129: `error: link must be vault-relative, got {}` uses `redact_home`). Record the observed result; the test is regression coverage. If it FAILS, stop and report — the plan's reachability analysis is wrong.
+
+- [ ] **Step 2: Convert the CLI guard to the shared predicate (one definition)**
+
+In `tools/src/bin/ct.rs`, add `is_vault_relative_link` to the existing `use tauri_app_lib::trusted_links::{approve_into, LinkVerdict};` import (line ~594, test module) — and to the main source, add the same import at the top of the file's trust command region if not already imported (check what line 594's module structure requires; the predicate call site is `cmd_trust`'s body).
+
+Replace the inline predicate (~line 669-682):
+
+```rust
+    let first_component = std::path::Path::new(&link).components().next();
+    if matches!(
+        first_component,
+        Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)
+    ) {
+        eprintln!(
+            "error: link must be vault-relative, got {}",
+            redact_home(&link)
+        );
+        return Ok(1);
+    }
+```
+
+with:
+
+```rust
+    // Same definition as approve_into's own guard (issue #142): one
+    // predicate, shared. The CLI keeps its friendlier message.
+    if !is_vault_relative_link(&link) {
+        eprintln!(
+            "error: link must be vault-relative, got {}",
+            redact_home(&link)
+        );
+        return Ok(1);
+    }
+```
+
+(Update the surrounding long comment to note the predicate now lives in `tauri_app_lib::trusted_links::is_vault_relative_link`; keep the join-hazard explanation.)
+
+- [ ] **Step 3: Redact the helper-error echo**
+
+In `tools/src/bin/ct.rs`, change the `Err(e)` arm of the trust `match` (~line 734):
 
 ```rust
         Err(e) => {
@@ -202,38 +286,20 @@ to:
         }
 ```
 
-(`redact_home` is already in scope in that function — the other arms use it.)
+(`redact_home` is already in scope in that function — the other arms use it. Defense-in-depth: reachable only if the CLI guard above is ever removed.)
 
-- [ ] **Step 1b: Assert the redaction in the existing test (GLM 5.3 spec-review M3)**
-
-In `tools/tests/ct_trust.rs`, inside `trust_on_an_unknown_link_exits_1` (~line 120), extend the stderr assertion so the redaction at the print site is covered:
-
-```rust
-    // The resolution error embeds the raw link; the print site must route
-    // through redact_home so no absolute $HOME path reaches stderr.
-    assert!(
-        !stderr.contains(&home.path().display().to_string()),
-        "stderr must not leak the absolute home prefix, got: {stderr}"
-    );
-```
-
-(Use the same string-variable names the test already binds for its output; if it does not currently capture stderr, bind it first: `let stderr = String::from_utf8_lossy(&out.stderr).to_string();`)
-
-- [ ] **Step 2: Compile the tools crate**
+- [ ] **Step 4: Compile and run the tools trust tests**
 
 Run: `cargo check --manifest-path tools/Cargo.toml 2>&1 | tail -3`
-Expected: success, no warnings from the changed line.
-
-- [ ] **Step 3: Run the existing CLI trust tests**
-
+Expected: success.
 Run: `cargo test --manifest-path tools/Cargo.toml --test ct_trust 2>&1 | tail -8`
-Expected: PASS — including `trust_refuses_an_absolute_link_and_leaves_the_ledger_empty` (now exercises the helper guard + redaction end-to-end on Unix; the CLI's own earlier guard still fires first, so stderr still contains "vault-relative").
+Expected: PASS — including `trust_refuses_an_absolute_link_and_leaves_the_ledger_empty` (CLI guard still fires first via the shared predicate now) and the new `trust_redacts_home_prefix_when_refusing_absolute_link`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tools/src/bin/ct.rs
-git commit -m "fix(tools): redact home prefix in ct trust helper errors (issue #142)"
+git add tools/src/bin/ct.rs tools/tests/ct_trust.rs
+git commit -m "fix(tools): ct trust uses shared vault-relative predicate; redact helper errors (issue #142)"
 ```
 
 ### Task 3: Full gate + PR
@@ -258,3 +324,7 @@ gh pr create --repo equationalapplications/curated-thoughts \
 - [ ] **Step 3: Hand off to the PR review loop**
 
 Controller (Tessera) runs the risk-tiered dual review on the diff (security-class → full dual track), watches CI to green, adjudicates CodeRabbit findings. Merge policy: REGULAR merge commit, never squash.
+
+## Plan review history
+
+- GLM 5.3 plan review #1 (session 20260903_010633_0a2631): Changes requested — I1 (CLI must call the shared predicate) → Task 2 Step 2 added; I2 (Step 1b test vacuous/uncompilable) → replaced with controlled-HOME test modeled on `trust_list_redacts_home_prefix_in_target`, honest reachability note added to Global Constraints; M1 (`cargo fmt -p tauri-app` nonexistent) → `--manifest-path` form; M2 (ct_trust.rs missing from `git add`) → fixed in Task 2 Step 5.
