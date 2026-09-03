@@ -162,9 +162,14 @@ pub struct MissingBlocks {
 
 /// Truncate an offending config value for a diagnostic line so a
 /// hand-edited giant string cannot flood the log. Char-boundary safe.
+/// Cost is O(MAX + 1) chars, not O(n): we only iterate up to `MAX + 1`
+/// characters to decide whether truncation is needed (Copilot follow-up
+/// on PR #147 — the earlier `chars().count()` pass walked the whole
+/// string, defeating the flood-mitigation intent for huge values).
 fn truncate_for_diag(value: &str) -> String {
     const MAX: usize = 120;
-    if value.chars().count() <= MAX {
+    let over_limit = value.chars().take(MAX + 1).count() > MAX;
+    if !over_limit {
         value.to_string()
     } else {
         let mut cut: String = value.chars().take(MAX).collect();
