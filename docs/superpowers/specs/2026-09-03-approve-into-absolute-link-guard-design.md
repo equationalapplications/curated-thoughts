@@ -87,7 +87,11 @@ not in scope.
 - **Predicate semantics:** `Path::new(link).components().next()` is
   `Some(Prefix(_) | RootDir)` → not vault-relative. Empty string and normal
   relative paths pass the predicate (empty then fails later at
-  canonicalize, unchanged behavior).
+  canonicalize, unchanged behavior; the resulting error string simply
+  begins with the empty `{link}` interpolation — cosmetic, pre-existing).
+  ct.rs's inline check is REPLACED by a call to `is_vault_relative_link`
+  (its diagnostic message and early-return position are unchanged) — one
+  definition, not two.
 - **Error contract:** `approve_into`'s new error string embeds the raw
   `link` (useful in the Tauri `Err(String)` channel, where the frontend
   controls display). The CLI — the only place that prints to a terminal —
@@ -104,7 +108,9 @@ not in scope.
 ## 4. Testing
 
 New tests in `src-tauri/tests/trusted_links.rs` (integration, same file as
-the existing `classify_link` suite):
+the existing `classify_link` suite). `tempfile` is already a src-tauri
+dev-dependency (Cargo.toml `[dev-dependencies]`), so the temp-vault tests
+need no dependency change:
 
 - `vault_relative_predicate_rejects_absolute_links` — `/etc/passwd`, `/`.
 - `vault_relative_predicate_accepts_relative_links` — `documents/specs`,
