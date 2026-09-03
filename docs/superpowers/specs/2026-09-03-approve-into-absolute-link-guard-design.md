@@ -84,9 +84,12 @@ not in scope.
 
 ## 3. Design details
 
-- **Predicate semantics:** `Path::new(link).components().next()` is
-  `Some(Prefix(_) | RootDir)` → not vault-relative. Empty string and normal
-  relative paths pass the predicate. Empty-link note (review finding I1):
+- **Predicate semantics:** any `Path` component of `link` being
+  `Prefix(_)`, `RootDir`, or `ParentDir` → not vault-relative (AMENDED in
+  PR review: CodeRabbit showed `join` preserves `..`, so ParentDir inputs
+  canonicalize outside the vault — same ledger-contract violation as the
+  absolute case). Empty string and normal relative paths pass the
+  predicate. Empty-link note (review finding I1):
   the empty link is NOT stopped by canonicalize — `vault_root.join("")`
   yields the vault root, which canonicalizes successfully — so it proceeds
   into `classify_link` (pre-existing main behavior; follow-up filed, not
