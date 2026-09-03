@@ -13,6 +13,10 @@ use std::path::{Component, Path};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedLink {
     /// Vault-relative path of the symlink itself, e.g. `documents/specs`.
+    /// Enforced at BOTH boundaries: the approval write path
+    /// (`is_vault_relative_link` in `approve_into`) and the config load
+    /// boundary (`BrainConfig::load_lenient` drops non-conforming entries
+    /// with a diagnostic).
     pub link: String,
     /// Canonicalized target at the time of approval.
     pub target: String,

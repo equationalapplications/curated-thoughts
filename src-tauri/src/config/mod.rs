@@ -160,6 +160,19 @@ pub struct MissingBlocks {
     pub privacy: bool,
 }
 
+/// Truncate an offending config value for a diagnostic line so a
+/// hand-edited giant string cannot flood the log. Char-boundary safe.
+fn truncate_for_diag(value: &str) -> String {
+    const MAX: usize = 120;
+    if value.chars().count() <= MAX {
+        value.to_string()
+    } else {
+        let mut cut: String = value.chars().take(MAX).collect();
+        cut.push('…');
+        cut
+    }
+}
+
 impl BrainConfig {
     /// Load config from disk with no leniency. Malformed top-level JSON is fatal.
     /// Missing or unparseable vault_path is fatal (never masked).
@@ -607,11 +620,30 @@ impl BrainConfig {
         // trusted_links: lenient — an unparseable entry is dropped, the rest
         // survive. This is the only mutable-from-config surface for the
         // ledger; a corruption in one entry must not nuke the whole list.
+        //
+        // Beyond JSON validity, each entry's `link` must be vault-relative
+        // (issue #140). `TrustedLink::link` feeds the walker's
+        // `vault_root.join(link)`, and `Path::join` replaces the base on an
+        // absolute/rooted argument, so a hand-edited ledger must not smuggle
+        // one past the approval write path's guard (PR #144). Same predicate
+        // as the write path — one rule, two boundaries. Non-conforming
+        // entries are dropped with a diagnostic (fail-closed: the symlink
+        // reverts to `Pending` and is never followed), matching the block's
+        // existing drop-one-keep-the-rest semantics.
         if let Some(tl) = obj.get("trusted_links").and_then(|v| v.as_array()) {
             let mut kept = Vec::with_capacity(tl.len());
             for entry in tl {
                 match serde_json::from_value::<TrustedLink>(entry.clone()) {
-                    Ok(e) => kept.push(e),
+                    Ok(e) => {
+                        if crate::trusted_links::is_vault_relative_link(&e.link) {
+                            kept.push(e);
+                        } else {
+                            report.diagnostics.push(format!(
+                                "trusted_links entry rejected: link {:?} is not vault-relative (absolute, rooted, or contains `..`)",
+                                truncate_for_diag(&e.link)
+                            ));
+                        }
+                    }
                     Err(err) => report
                         .diagnostics
                         .push(format!("trusted_links entry unparseable: {}", err)),
