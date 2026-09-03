@@ -45,7 +45,7 @@ export default [
     },
   },
   {
-    files: ["scripts/**/*.{js,cjs}"],
+    files: ["scripts/**/*.{js,cjs,mjs}"],
     languageOptions: {
       globals: {
         require: "readonly",
