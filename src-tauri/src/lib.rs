@@ -5107,7 +5107,7 @@ mod maintenance_command_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-utils"))]
 mod ingest_document_command_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
