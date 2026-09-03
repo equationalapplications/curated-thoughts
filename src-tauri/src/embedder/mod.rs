@@ -224,7 +224,7 @@ impl Embedder {
         Ok(Embedder { model })
     }
 
-    pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+    pub fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         self.model.embed(texts, None).map_err(anyhow::Error::from)
     }
 
