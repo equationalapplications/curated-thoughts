@@ -266,7 +266,17 @@ pub fn safe_vault_path(
         .filter_map(|sub| root_canonical.join(sub).canonicalize().ok())
         .filter(|canonical_sub| canonical_sub.starts_with(&root_canonical))
         .collect();
-    if allowed_canonical.is_empty() {
+    // An empty allowlist is only decisive in MustExist mode. In MayCreate the
+    // allowed subdir may legitimately not exist YET: the caller's bootstrap
+    // (`okf::write::write_note`) creates it and retries. Returning Outside here
+    // pre-empts that retry — the recovery would be gated behind a precondition
+    // that the very failure it recovers from destroys (issue #119).
+    //
+    // Falling through admits nothing: both arms below gate on
+    // `allowed_canonical.iter().any(..)`, and `any` over an empty list is
+    // false, so every path is still denied — just one step later, after the
+    // `NotFound("parent directory not found")` that write_note matches on.
+    if allowed_canonical.is_empty() && matches!(mode, PathMode::MustExist) {
         return Err(SafePathError::Outside);
     }
 
@@ -396,6 +406,60 @@ mod tests {
 
     fn allowed() -> &'static [&'static str] {
         &["documents", "wiki", ".brain/proposed"]
+    }
+
+    /// A vault root with NO allowed subdirs on disk — the issue #119 shape.
+    fn bare_vault() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        (dir, root)
+    }
+
+    /// Issue #119: with no allowed subdir present the allowlist is empty, but
+    /// MayCreate must still report the missing PARENT rather than Outside —
+    /// `write_note` matches on that exact message to bootstrap and retry.
+    #[test]
+    fn may_create_reports_not_found_when_no_allowed_subdir_exists() {
+        let (_g, root) = bare_vault();
+        let err =
+            safe_vault_path(&root, "wiki/new.md", allowed(), PathMode::MayCreate).unwrap_err();
+        match err {
+            SafePathError::NotFound(ref msg) => assert!(
+                msg.contains("parent directory not found"),
+                "write_note keys on this substring; got {msg:?}"
+            ),
+            other => panic!("expected NotFound(parent directory not found), got {other:?}"),
+        }
+    }
+
+    /// The gate: MustExist keeps the fast Outside path on an empty allowlist.
+    #[test]
+    fn must_exist_still_outside_when_no_allowed_subdir_exists() {
+        let (_g, root) = bare_vault();
+        let err =
+            safe_vault_path(&root, "wiki/new.md", allowed(), PathMode::MustExist).unwrap_err();
+        assert!(matches!(err, SafePathError::Outside), "got {err:?}");
+    }
+
+    /// An allowed subdir that EXISTS but symlinks out of the vault is dropped by
+    /// the `starts_with(root)` filter, emptying the allowlist just like #119 —
+    /// but here the parent resolves, so falling through must still deny.
+    /// Guards against the #119 fix opening an escape hole in MayCreate.
+    #[test]
+    #[cfg(unix)]
+    fn may_create_still_outside_when_sole_allowed_subdir_is_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let (_g, root) = bare_vault();
+        let outside = TempDir::new().unwrap();
+        symlink(outside.path(), root.join("wiki")).unwrap();
+
+        let err =
+            safe_vault_path(&root, "wiki/pwned.md", &["wiki"], PathMode::MayCreate).unwrap_err();
+        assert!(matches!(err, SafePathError::Outside), "got {err:?}");
+        assert!(
+            !outside.path().join("pwned.md").exists(),
+            "nothing may be written outside the vault"
+        );
     }
 
     #[test]
