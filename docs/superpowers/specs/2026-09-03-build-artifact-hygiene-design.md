@@ -99,6 +99,15 @@ Existing `--manifest-path src-tauri/Cargo.toml` invocations in `ci.yml` (lines 8
 
 ## 6. Verification and rollback
 
+**The two lockfiles were already drifted before this change.** Measured on 2026-09-03, `src-tauri/Cargo.lock` and `tools/Cargo.lock` disagreed on **56 packages** — `tools` resolved `tauri` 2.11.1, `regex` 1.12.3, `uuid` 1.23.1 and `tray-icon` 0.23.1 where the application resolved 2.11.5, 1.13.1, 1.25.0 and 0.24.2. The comment-enforced pinning described in §1 had already failed in practice: the headless CLI was compiling against a different Tauri than the application it links into.
+
+This makes "no version changes" unsatisfiable by construction. A single lockfile holds one version per crate, so unification must choose. The rule is therefore directional:
+
+- **Seed the root lockfile from `src-tauri/Cargo.lock`** (`cp src-tauri/Cargo.lock Cargo.lock`), then let Cargo resolve only what is missing. This holds the shipped application's graph fixed and moves `tools` onto its pins.
+- **Never run `cargo generate-lockfile` to create the root lockfile.** It re-resolves the entire graph to latest-compatible and discards existing pins, producing hundreds of unrelated version changes that are trivially mistaken for a merge artifact.
+
+Convergence in the other direction — pinning the application backward to the CLI's older versions — is rejected: it regresses the product to satisfy a development tool.
+
 The lockfile merge is the only step that can change resolved dependency versions, so it gates everything downstream. Ordered:
 
 1. Create the workspace manifest and merge lockfiles locally.
@@ -129,7 +138,8 @@ Explicit non-goals, deliberately excluded to keep this change revertible and rev
 
 - One `target/` directory and one `Cargo.lock` at the repo root.
 - `tools/target/` and `src-tauri/target/` no longer created by any build.
-- No resolved dependency version changes without written justification.
+- The **shipped application's** resolved dependency graph is unchanged: zero version changes in `curated-thoughts`. Additions are permitted only where they are `tools`-only subtrees entering the shared lock.
+- `tools` converging onto the application's pins is expected and required, not a violation — see §6.
 - `ci.yml` test commands pass, and a `--release` build produces a correctly staged sidecar.
 - `build.yml` contains no hardcoded target path.
 - All fifteen shared pins are enforced by Cargo, and the "must match the pins in src-tauri" comments in `tools/Cargo.toml` are deleted as obsolete.
