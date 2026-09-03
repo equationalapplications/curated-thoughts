@@ -93,7 +93,7 @@ where
 ///
 /// Used by desktop-mode vault reconciliation to ensure only one watcher
 /// holds the vault open at a time. The lock is implemented via
-/// `fs4::FileExt::try_lock_exclusive`, which works on Linux (flock), macOS
+/// `fs4::FileExt::try_lock`, which works on Linux (flock), macOS
 /// (fcntl), and Windows (LockFileEx). Holding the lock keeps the file
 /// alive via `_file`; releasing it happens implicitly when the struct
 /// drops and `fs::File` closes.
@@ -103,14 +103,15 @@ where
 /// fail when another holder exists — `fs4` handles this via its platform
 /// implementation, so callers do not need to set flags themselves.
 ///
-/// **API note:** in `fs4` 0.7, `FileExt::try_lock_exclusive` returns
-/// `std::io::Result<()>` (it surfaces contention via
-/// `Err(io::ErrorKind::AlreadyLocked)` / `Err(io::ErrorKind::WouldBlock)`
-/// rather than `Ok(false)`). The previous `map_err`-only path was
-/// therefore correct in behavior; the CodeRabbit review on PR #96
-/// mistook the API for one returning `Result<bool, _>` (that's POSIX
-/// `flock(LOCK_EX | LOCK_NB)`, not `fs4`). We keep the simple `?`-map
-/// and only document the actual semantics.
+/// **API note:** in `fs4` 1.x, `FileExt::try_lock` returns
+/// `Result<(), TryLockError>` (it surfaces contention via
+/// `Err(TryLockError)` rather than `Ok(false)`; fs4 0.7 named the same
+/// operation `try_lock_exclusive` and returned `std::io::Result<()>`).
+/// The previous `map_err`-only path was correct in behavior; the
+/// CodeRabbit review on PR #96 mistook the API for one returning
+/// `Result<bool, _>` (that's POSIX `flock(LOCK_EX | LOCK_NB)`, not
+/// `fs4`). We keep the simple `?`-map and only document the actual
+/// semantics.
 #[derive(Debug)]
 pub struct VaultLock {
     /// Keep the lock file handle alive for the lifetime of the guard;
@@ -133,7 +134,7 @@ impl VaultLock {
         // follow the link and truncate its target — opening any file in a
         // location a principal can race into would let starting the watcher
         // destroy content the application didn't otherwise touch. The OS
-        // lock (try_lock_exclusive) holds without modifying the file's
+        // lock (try_lock) holds without modifying the file's
         // contents, so truncate is unnecessary.
         let file = fs::OpenOptions::new()
             .create(true)
@@ -147,11 +148,10 @@ impl VaultLock {
                     lock_path.display()
                 )
             })?;
-        // `fs4::FileExt::try_lock_exclusive` returns `Result<()>`. Contention
-        // surfaces as `Err(AlreadyLocked)` / `Err(WouldBlock)` — see
-        // `fs4-0.7.0/src/{unix,windows}.rs` for the platform impl. The
-        // `?`-propagation below is sufficient; no `Ok(false)` case
-        // exists in this version of `fs4`.
+        // `fs4::FileExt::try_lock` (1.x; was `try_lock_exclusive` in 0.7)
+        // returns `Result<(), TryLockError>`. Contention surfaces as
+        // `Err(TryLockError)` — the `?`-propagation below is sufficient;
+        // no `Ok(false)` case exists in either version of `fs4`.
         Self::try_lock_exclusive(&file)?;
         Ok(Self {
             _file: file,
@@ -159,10 +159,10 @@ impl VaultLock {
         })
     }
 
-    /// Platform-native `try_lock_exclusive` with a single, descriptive
+    /// Platform-native exclusive try-lock with a single, descriptive
     /// error message on contention.
     fn try_lock_exclusive(file: &fs::File) -> Result<()> {
-        file.try_lock_exclusive()
+        file.try_lock()
             .map_err(|e| anyhow!("vault is already locked by another watcher instance: {e}"))
     }
 
