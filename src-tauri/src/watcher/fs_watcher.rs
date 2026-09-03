@@ -289,4 +289,41 @@ mod tests {
             second
         );
     }
+
+    /// A symlinked lock path must not have its target truncated by
+    /// `acquire`. The lock is advisory and held on the open handle —
+    /// the file's bytes are never read or written — so opening with
+    /// `truncate(true)` would destroy an attacker- or accident-planted
+    /// symlink target for no benefit. Ported from `tools/src/lock.rs`
+    /// (PR #129) per issue #141; this copy runs in CI on every PR.
+    ///
+    /// Unix-only: `std::os::windows::fs::symlink_file` requires
+    /// Developer Mode or `SeCreateSymbolicLinkPrivilege`, which we
+    /// cannot rely on in a developer environment. `#[cfg(unix)]` is on
+    /// this test alone so the sibling tests still run on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn vault_lock_does_not_truncate_symlink_target() {
+        let tmp = TempDir::new().unwrap();
+        let canary = tmp.path().join("canary.txt");
+        let contents = "do not truncate me";
+        fs::write(&canary, contents).unwrap();
+
+        std::os::unix::fs::symlink(&canary, tmp.path().join(".curated_thoughts.lock")).unwrap();
+
+        {
+            // Deliberately NOT `.expect(...)`: if a later hardening pass
+            // makes `acquire` reject a symlinked lock path outright, it
+            // returns `Err`, the canary is still intact, and this test
+            // must keep passing unmodified. The only assertion that
+            // matters is the canary's contents below.
+            let _guard = VaultLock::acquire(tmp.path());
+        }
+
+        assert_eq!(
+            fs::read_to_string(&canary).unwrap(),
+            contents,
+            "acquire must not truncate the symlink's target"
+        );
+    }
 }
