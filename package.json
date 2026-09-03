@@ -1,7 +1,7 @@
 {
   "name": "curated-thoughts",
   "private": true,
-  "version": "1.42.6",
+  "version": "1.42.7",
   "packageManager": "pnpm@10.33.2",
   "pnpm": {
     "overrides": {

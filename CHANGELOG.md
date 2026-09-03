@@ -1,3 +1,9 @@
+## [1.42.7](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.6...v1.42.7) (2026-09-03)
+
+### Bug Fixes
+
+* **test:** gate ingest_document_command_tests behind test-utils feature ([099a74b](https://github.com/equationalapplications/curated-thoughts/commit/099a74bcdb00d5563fddb7e970563496a8301f23))
+
 ## [1.42.6](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.5...v1.42.6) (2026-09-03)
 
 ### Bug Fixes
