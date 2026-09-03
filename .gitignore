@@ -37,5 +37,5 @@ docs/superpowers/plans/
 # Precomputed recall-bench embeddings under src-tauri/tests/fixtures/**/*.json.gz must stay
 # tracked (gzip JSON archives, not ephemeral build output). Do not ignore them.
 dist/
-tools/target/
+/target/
 .aider*
