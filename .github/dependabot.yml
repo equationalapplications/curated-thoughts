@@ -21,6 +21,18 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 14
+    ignore:
+      # fastembed 6.x pulls ort 2.0.0-rc.13, whose prebuilt ONNX Runtime for
+      # linux-x64 links against glibc >= 2.38 and a newer libstdc++. CI
+      # (ci.yml) and release (build.yml) both build on ubuntu-22.04
+      # (glibc 2.35), so the link fails with undefined `__isoc23_strtoll`.
+      # The floor is imposed by the onnxruntime shared object at *runtime*,
+      # not just at build time, so moving to ubuntu-24.04 would not remove it
+      # -- it would break Ubuntu 22.04 (2.35) and Debian 12 (2.36) users.
+      # Revisit when ort ships a prebuilt with a lower glibc floor, or as a
+      # deliberate decision to drop those distros. See closed PR #138.
+      - dependency-name: "fastembed"
+        update-types: ["version-update:semver-major"]
     groups:
       minor-and-patch:
         update-types:
