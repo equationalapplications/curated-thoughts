@@ -247,6 +247,18 @@ fn vault_relative_predicate_rejects_absolute_links() {
     assert!(!is_vault_relative_link("/"));
 }
 
+/// ParentDir (`..`) components must be refused wherever they appear
+/// (CodeRabbit, PR #144): `join` preserves them, so the joined path
+/// canonicalizes OUTSIDE the vault and a Pending verdict would persist a
+/// traversal string as `TrustedLink::link`. Leading and interior `..` are
+/// both traversals.
+#[test]
+fn vault_relative_predicate_rejects_parent_dir_traversals() {
+    assert!(!is_vault_relative_link("../outside-link"));
+    assert!(!is_vault_relative_link("a/../../outside-link"));
+    assert!(!is_vault_relative_link("documents/../secrets"));
+}
+
 /// A plain vault-relative link is accepted by the predicate, including the
 /// empty link. NOTE: the empty link is NOT stopped by canonicalize —
 /// `vault_root.join("")` yields the vault root, which canonicalizes fine —

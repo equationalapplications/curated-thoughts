@@ -75,15 +75,20 @@ pub fn is_within(candidate: &Path, ancestor: &Path) -> bool {
 /// is absolute — or, on Windows, merely carries a drive prefix (`C:foo`) or a
 /// root (`\foo`) — so an unvalidated `link` would make both this function's
 /// own `vault_root.join(link)` and the classification below operate on a path
-/// outside the vault entirely (issue #142). Both entry points into
+/// outside the vault entirely (issue #142). ParentDir (`..`) components are
+/// also refused (CodeRabbit, PR #144): `join` preserves them lexically, so
+/// `../outside-link` canonicalizes OUTSIDE the vault and can persist a
+/// traversal string as `TrustedLink::link`. Both entry points into
 /// `approve_into` (the Tauri `approve_link` command and the CLI `ct trust`
 /// subcommand) feed it raw user input, so the guard lives here, at the join,
 /// not at one caller.
 pub fn is_vault_relative_link(link: &str) -> bool {
-    !matches!(
-        Path::new(link).components().next(),
-        Some(Component::Prefix(_) | Component::RootDir)
-    )
+    !Path::new(link).components().any(|c| {
+        matches!(
+            c,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    })
 }
 
 /// Normalize away `.` and `..` lexically so `/vault/..` compares correctly.

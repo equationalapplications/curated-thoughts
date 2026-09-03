@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Guard must fire BEFORE `vault_root.join(link)` — no filesystem access on a refused link (spec §2).
+- Guard must fire BEFORE `vault_root.join(link)` — no filesystem access on a refused link (spec §2). REFUSES: absolute, Windows prefix/root, AND any ParentDir (`..`) traversal component (CodeRabbit PR #144 — `join` preserves `..`, so the joined path canonicalizes outside the vault).
 - Predicate = first `Path` component is `Prefix(_)` or `RootDir` → NOT vault-relative. Exactly one definition: `is_vault_relative_link` in `src-tauri/src/trusted_links.rs`; the CLI MUST call it, not keep its inline `matches!` copy (spec §2; GLM 5.3 plan-review Important 1).
 - No behavior change for relative links: empty string and normal relative paths still reach canonicalize (spec §3).
 - Only files touched: `src-tauri/src/trusted_links.rs`, `src-tauri/tests/trusted_links.rs`, `tools/src/bin/ct.rs`, `tools/tests/ct_trust.rs`. AMENDED during execution (implementation review I2): `tools/src/lock.rs` also migrated fs4 0.7→1.x (`try_lock_exclusive`→`try_lock`) — a compile fix for the PR #110 unification regression (tools crate failed E0599; CI does not compile the tools crate). Declared explicitly in the PR body.
