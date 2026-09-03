@@ -91,6 +91,10 @@ cargo metadata --format-version 1 | jq -r .target_directory
 
 This makes the release pipeline immune to any future target-directory change, and is the guardrail that prevents recurrence of this class of breakage.
 
+**A literal search for `src-tauri/target` is not sufficient to find every reference.** Three `Swatinem/rust-cache` steps — one in `build.yml`, two in `ci.yml` — configure the cache with an arrow syntax, `workspaces: ./src-tauri -> target`, that such a search does not match. These must be repointed to `. -> target`. They are the more dangerous class of stale reference precisely because they do not fail: a wrong `workspaces` value silently misses the cache and turns every CI run in both workflows into a cold Tauri compile, which reads as general CI slowness rather than as a regression from this change.
+
+`cargo metadata` cannot help here — the action needs a literal path in YAML, not a shell-derived one — so this reference remains hardcoded and must be updated by hand if the layout changes again.
+
 **This is release-only code.** PR CI does not exercise the sidecar staging or the universal-binary lipo step, so a regression here surfaces at release time, not in review. It therefore requires the explicit `--release` verification in §6.
 
 **Do not repoint the sidecar build at `tools/`.** `tools/Cargo.toml` declares a `[[bin]] name = "curated-thoughts-mcp"`, which makes it look like the natural source of the sidecar. It is not the one CI ships. `build.yml` builds src-tauri's `curated-thoughts` binary with `--features mcp-server` and copies that artifact into `src-tauri/binaries/` under the sidecar's name. The placeholder `touch` immediately above the build exists only to satisfy `tauri-build`'s `externalBin` check during that same cargo invocation. Changing which crate produces the sidecar is out of scope here and would be a behavioral change, not a path fix.
