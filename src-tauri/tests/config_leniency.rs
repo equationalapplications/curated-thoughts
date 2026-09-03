@@ -83,8 +83,10 @@ fn leniency_missing_vault_path_marked() {
 // rooted, or `..`-traversal link past the walker.
 // ---------------------------------------------------------------------------
 
-/// One well-formed entry plus one entry with a bad `link` value; returns the
-/// JSON for it. Used to prove lenient drop-one-keep-the-rest semantics.
+/// Serialize `entries` as a config.json body with the `trusted_links`
+/// array set to the given slice. Accepts any mix of entries — callers
+/// below use it with one well-formed entry plus one (or more) bad `link`
+/// values to prove lenient drop-the-bad-keep-the-rest semantics.
 fn trusted_links_json(entries: &[serde_json::Value]) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert(

@@ -201,7 +201,12 @@ fn map_try_lock_err(e: TryLockError) -> anyhow::Error {
         TryLockError::WouldBlock => {
             anyhow!("vault is already locked by another watcher instance")
         }
-        TryLockError::Error(err) => anyhow!("failed to acquire vault lock: {err}"),
+        TryLockError::Error(err) => {
+            // Preserve the io::Error as the anyhow SOURCE (not stringified
+            // into the message) so callers/logging can inspect the cause
+            // chain (Copilot follow-up on PR #148).
+            anyhow::Error::new(err).context("failed to acquire vault lock")
+        }
     }
 }
 
@@ -316,9 +321,11 @@ mod tests {
         );
     }
 
-    /// Issue #146: a real lock-acquisition failure (e.g. permission denied)
-    /// must map to the acquire-failure message embedding the underlying
-    /// error, NOT the contention message that blames another watcher.
+    /// Issue #146 + Copilot follow-up on PR #148: a real lock-acquisition
+    /// failure (e.g. permission denied) must map to the acquire-failure
+    /// message with the underlying `io::Error` preserved as the anyhow
+    /// SOURCE (inspectable via the cause chain), NOT the contention
+    /// message that blames another watcher.
     #[test]
     fn io_error_maps_to_acquire_failure_message() {
         let err = map_try_lock_err(fs4::TryLockError::Error(std::io::Error::from(
@@ -330,12 +337,21 @@ mod tests {
             "I/O-failure message should start with 'failed to acquire vault lock', got: {msg}"
         );
         assert!(
-            msg.contains("permission denied"),
-            "I/O-failure message should embed the underlying error, got: {msg}"
-        );
-        assert!(
             !msg.contains("already locked"),
             "I/O-failure message must NOT use the contention wording, got: {msg}"
+        );
+        // The io::Error must ride the anyhow source chain, not be
+        // stringified into the outer message (Copilot follow-up on PR #148).
+        let src = err
+            .source()
+            .expect("acquire-failure error must have an io::Error source");
+        let io_src = src
+            .downcast_ref::<std::io::Error>()
+            .expect("source must be the underlying std::io::Error");
+        assert_eq!(
+            io_src.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "source io::Error must preserve the original error kind"
         );
     }
 
