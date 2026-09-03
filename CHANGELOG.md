@@ -1,3 +1,20 @@
+## [2.0.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.8...v2.0.0) (2026-09-03)
+
+### ⚠ BREAKING CHANGES
+
+* **spec:** rule fix split out as issue #160: it changes
+version-numbering behavior for every release. Spec's matrix omits
+breaking rows so CI stays green until that lands atomically.
+
+Refs #160.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Pbep1BCTiwwpfnpcQfYR9T
+
+### Documentation
+
+* **spec:** release-toolchain guard (CI smoke test + dependabot grouping) ([aed4b9c](https://github.com/equationalapplications/curated-thoughts/commit/aed4b9ccdc6823c759abcf5687007c5a17c81b23)), closes [#155](https://github.com/equationalapplications/curated-thoughts/issues/155)
+
 ## [1.42.8](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.7...v1.42.8) (2026-09-03)
 
 ### Bug Fixes
