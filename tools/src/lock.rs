@@ -10,10 +10,11 @@
 //! duplication so `ct watch` can lock the vault when no desktop is
 //! running.
 //!
-//! Both implementations use the **non-blocking**
-//! `fs4::FileExt::try_lock_exclusive`, which works on Linux (flock),
+//! Both implementations use the **non-blocking** exclusive file lock
+//! (`fs4::FileExt::try_lock` in fs4 1.x — named `try_lock_exclusive` in
+//! 0.7), which works on Linux (flock),
 //! macOS (fcntl), and Windows (LockFileEx). Contention surfaces as
-//! `Err(AlreadyLocked)` / `Err(WouldBlock)`, not `Ok(false)` — see the
+//! `Err(TryLockError)`, not `Ok(false)` — see the
 //! API note on `try_lock_exclusive` below. Keeping the lock-file path
 //! and semantics identical ensures the two lockers see each other
 //! across a desktop/CLI hand-off.
@@ -68,19 +69,21 @@ impl VaultLock {
         })
     }
 
-    /// Platform-native `try_lock_exclusive` with a single, descriptive
-    /// error message on contention.
+    /// Platform-native `try_lock` (fs4 1.x; was `try_lock_exclusive` in
+    /// 0.7) with a single, descriptive error message on contention.
     ///
-    /// **API note:** in `fs4` 0.7, `FileExt::try_lock_exclusive` returns
-    /// `std::io::Result<()>` (contention surfaces as
-    /// `Err(AlreadyLocked)` / `Err(WouldBlock)`, NOT `Ok(false)`). The
-    /// previous `map_err`-only path was therefore correct in behavior;
-    /// the CodeRabbit review on PR #96 mistook it for a
-    /// `Result<bool, _>` API (that's POSIX `flock(LOCK_EX | LOCK_NB)`,
+    /// **API note:** in `fs4` 1.x, `FileExt::try_lock` returns
+    /// `Result<(), TryLockError>` (contention surfaces as
+    /// `Err(TryLockError)`; fs4 0.7 named the same operation
+    /// `try_lock_exclusive` and returned `std::io::Result<()>` with
+    /// `Err(AlreadyLocked)` / `Err(WouldBlock)`). In either version there
+    /// is NO `Ok(false)` case (the CodeRabbit review on PR #96 mistook it
+    /// for a `Result<bool, _>` API — that's POSIX `flock(LOCK_EX | LOCK_NB)`,
     /// not `fs4`). We keep the simple `?`-propagation and only document
-    /// the actual semantics here.
+    /// the actual semantics here. Mirrors
+    /// `src-tauri/src/watcher/fs_watcher.rs` (PR #110 migrated that copy).
     fn try_lock_exclusive(file: &fs::File) -> Result<()> {
-        file.try_lock_exclusive()
+        file.try_lock()
             .map_err(|e| anyhow!("vault is already locked by another watcher instance: {e}"))
     }
 
