@@ -94,6 +94,19 @@ const VERSION_MATRIX = [
     message: 'fix(api)!: drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
     expected: 'major',
   },
+  // Same behavior without the `!` marker — breaking changes can be
+  // expressed either via the subject `!` or via a `BREAKING CHANGE:`
+  // footer in the body. The `{ breaking: true }` rule matches both.
+  {
+    name: 'feat w/ footer -> major',
+    message: 'feat(api): drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
+    expected: 'major',
+  },
+  {
+    name: 'fix w/ footer -> major',
+    message: 'fix(api): drop legacy path\n\nBREAKING CHANGE: removed the v1 path.',
+    expected: 'major',
+  },
   { name: 'feat -> minor', message: 'feat(vault): add bootstrap', expected: 'minor' },
   { name: 'fix -> patch', message: 'fix(vault): correct allowlist gate', expected: 'patch' },
   { name: 'perf -> no release', message: 'perf(embed): speed up embedding', expected: null },
