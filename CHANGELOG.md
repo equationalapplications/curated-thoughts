@@ -1,3 +1,12 @@
+## [1.42.4](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.3...v1.42.4) (2026-09-03)
+
+### Bug Fixes
+
+* **tools:** ct trust uses shared vault-relative predicate; redact helper errors (issue [#142](https://github.com/equationalapplications/curated-thoughts/issues/142)) ([61404e3](https://github.com/equationalapplications/curated-thoughts/commit/61404e3dac94412b632878982d32e40fb6d1e701))
+* **tools:** migrate VaultLock to fs4 1.x try_lock API (unification regression from PR [#110](https://github.com/equationalapplications/curated-thoughts/issues/110)) ([f5e6dc6](https://github.com/equationalapplications/curated-thoughts/commit/f5e6dc661987437bc1c191f16a9acf1ea294be51))
+* **vault:** refuse non-vault-relative links in approve_into (issue [#142](https://github.com/equationalapplications/curated-thoughts/issues/142)) ([9326496](https://github.com/equationalapplications/curated-thoughts/commit/9326496aee575df78b5c33c4fbd4dfae0d99cbbb))
+* **vault:** reject ParentDir traversal in is_vault_relative_link (CodeRabbit, PR [#144](https://github.com/equationalapplications/curated-thoughts/issues/144)) ([0ed629b](https://github.com/equationalapplications/curated-thoughts/commit/0ed629b7571636f8e011fc13f676985c98658116))
+
 ## [1.42.3](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.2...v1.42.3) (2026-09-03)
 
 ### Bug Fixes
