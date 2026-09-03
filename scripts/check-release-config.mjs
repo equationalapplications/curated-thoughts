@@ -4,9 +4,12 @@
  *
  * `release.yml` runs on `workflow_run` AFTER a merge to main, so no PR check
  * exercises the release pipeline. A broken `.releaserc.json` or an
- * incompatible changelog-preset bump therefore reaches main unnoticed and
- * fails mid-release, after `@semantic-release/git` has already committed
- * CHANGELOG.md and the version files.
+ * incompatible changelog-preset bump therefore reaches main unnoticed.
+ * The preset/writer incompatibility this script catches throws inside
+ * `generateNotes` — semantic-release v25 invokes that phase before
+ * `prepare`, where `@semantic-release/git` would commit `CHANGELOG.md`
+ * and the version files — so the release fails before any side effects
+ * begin.
  *
  * This script closes that gap. It loads the REAL `.releaserc.json` (never a
  * fixture — a fixture drifts from the config it is meant to protect) and
