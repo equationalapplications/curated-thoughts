@@ -225,7 +225,7 @@ impl Embedder {
     }
 
     pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        self.model.embed(texts, None)
+        self.model.embed(texts, None).map_err(anyhow::Error::from)
     }
 
     pub fn dimensions() -> usize {
