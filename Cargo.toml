@@ -7,3 +7,29 @@ resolver = "2"
 # a worktree finds this manifest and refuses to build a package that is
 # neither a member nor excluded, breaking every worktree.
 exclude = [".worktrees"]
+
+[workspace.dependencies]
+# --- identical feature sets at every site: features live here ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+notify = "8"
+sha2 = "0.11"
+dirs = "6"
+flate2 = "1"
+fs4 = "1.1"
+walkdir = "2"
+tempfile = "3"
+temp-env = "0.3"
+schemars = { version = "1", features = ["derive"] }
+
+# --- divergent feature sets: version pinned here, features at each site ---
+# src-tauri needs ["full", "test-util"]; tools needs ["rt", "macros", "signal"].
+tokio = { version = "1" }
+# "backup" is src-tauri-only.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Three sites, two feature sets: src-tauri's optional dependency and tools both
+# use ["macros", "transport-io", "schemars"], but src-tauri's dev-dependency
+# uses ["client", "transport-child-process"]. Carrying features here would
+# silently add the former to test builds that do not enable mcp-server.
+rmcp = { version = "3.1" }

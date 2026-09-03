@@ -6,31 +6,28 @@ description = "Developer and maintenance tools for Curated Thoughts (not bundled
 
 [dependencies]
 tauri_app_lib = { path = "../src-tauri", package = "curated-thoughts" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-flate2 = "1"
-fs4 = "1.1"
-anyhow = "1"
-tokio = { version = "1", features = ["rt", "macros", "signal"] }
-rmcp = { version = "3.1", features = ["macros", "transport-io", "schemars"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
-schemars = { version = "1", features = ["derive"] }
-walkdir = "2"
+serde.workspace = true
+serde_json.workspace = true
+flate2.workspace = true
+fs4.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "signal"] }
+rmcp = { workspace = true, features = ["macros", "transport-io", "schemars"] }
+rusqlite.workspace = true
+schemars.workspace = true
+walkdir.workspace = true
 clap = { version = "4", features = ["derive"] }
-# notify v6 + sha2: direct deps so `cmds.rs` can use them without relying on
-# transitive resolution through `tauri_app_lib`. Both versions match the
-# pins in `src-tauri/Cargo.toml` to keep the workspace on a single
-# notification backend and a single SHA-2 implementation.
-notify = "8"
-sha2 = "0.11"
-# Home-dir resolution for the trusted-links ledger. Matches the version
-# pinned in src-tauri/Cargo.toml so behavior is identical between the
-# app and the headless CLI.
-dirs = "6"
+# notify + sha2: direct deps so `cmds.rs` can use them without relying on
+# transitive resolution through `tauri_app_lib`. Versions are enforced by
+# [workspace.dependencies].
+notify.workspace = true
+sha2.workspace = true
+# Home-dir resolution for the trusted-links ledger.
+dirs.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-temp-env = "0.3"
+tempfile.workspace = true
+temp-env.workspace = true
 
 [[bin]]
 name = "embed_scifact"
