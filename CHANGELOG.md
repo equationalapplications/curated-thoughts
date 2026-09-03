@@ -1,3 +1,11 @@
+## [1.42.6](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.5...v1.42.6) (2026-09-03)
+
+### Bug Fixes
+
+* **test:** use nonexistent vault in empty-link regression; fix MD018 in spec (CodeRabbit, PR [#150](https://github.com/equationalapplications/curated-thoughts/issues/150)) ([4d51cfd](https://github.com/equationalapplications/curated-thoughts/commit/4d51cfd78f5c7ee9d48a96199bbd487dbed465c1))
+* **tools,config:** preserve lock error sources and bound diagnostic truncation cost (Copilot follow-ups on [#147](https://github.com/equationalapplications/curated-thoughts/issues/147)/[#148](https://github.com/equationalapplications/curated-thoughts/issues/148)) ([587a6dd](https://github.com/equationalapplications/curated-thoughts/commit/587a6dd9fce731c67805ebd5ac6e93be7cc35960))
+* **vault:** reject empty and whitespace-only links at classify and predicate boundaries (issue [#143](https://github.com/equationalapplications/curated-thoughts/issues/143)) ([db3cc49](https://github.com/equationalapplications/curated-thoughts/commit/db3cc493bcd0c5e56537d66fb31ab03ccc7a2373))
+
 ## [1.42.5](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.4...v1.42.5) (2026-09-03)
 
 ### Bug Fixes
