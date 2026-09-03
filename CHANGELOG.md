@@ -1,3 +1,9 @@
+## [1.42.3](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.2...v1.42.3) (2026-09-03)
+
+### Bug Fixes
+
+* **watcher:** migrate to fs4 1.x try_lock for the vault lock ([390d6e7](https://github.com/equationalapplications/curated-thoughts/commit/390d6e7be4a5319955cacd0cf533417d6cfda921)), closes [#96](https://github.com/equationalapplications/curated-thoughts/issues/96)
+
 ## [1.42.2](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.1...v1.42.2) (2026-09-02)
 
 ### Bug Fixes
