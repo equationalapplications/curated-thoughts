@@ -70,6 +70,22 @@ pub fn is_within(candidate: &Path, ancestor: &Path) -> bool {
     true
 }
 
+/// True when `link` can safely be joined onto `vault_root` as a
+/// vault-relative path. `Path::join` **replaces** the base when its argument
+/// is absolute — or, on Windows, merely carries a drive prefix (`C:foo`) or a
+/// root (`\foo`) — so an unvalidated `link` would make both this function's
+/// own `vault_root.join(link)` and the classification below operate on a path
+/// outside the vault entirely (issue #142). Both entry points into
+/// `approve_into` (the Tauri `approve_link` command and the CLI `ct trust`
+/// subcommand) feed it raw user input, so the guard lives here, at the join,
+/// not at one caller.
+pub fn is_vault_relative_link(link: &str) -> bool {
+    !matches!(
+        Path::new(link).components().next(),
+        Some(Component::Prefix(_) | Component::RootDir)
+    )
+}
+
 /// Normalize away `.` and `..` lexically so `/vault/..` compares correctly.
 /// Callers pass canonicalized paths where possible; this covers the rest.
 fn lexical_normalize(p: &Path) -> std::path::PathBuf {
@@ -97,12 +113,22 @@ fn lexical_normalize(p: &Path) -> std::path::PathBuf {
 /// auto-trusted because nothing leaves the vault boundary" rule.
 ///
 /// `vault_root` should be canonicalized by the caller.
+///
+/// Errors when `link` is not vault-relative. This must fire BEFORE the
+/// canonicalize/join so an absolute `link` never touches the filesystem as a
+/// joined path and never reaches the ledger (`TrustedLink::link` is
+/// vault-relative by contract; see issue #140 for the load-boundary half of
+/// that contract). Echos of `link` in the error string are the caller's to
+/// redact.
 pub fn approve_into(
     ledger: &mut Vec<TrustedLink>,
     link: &str,
     vault_root: &Path,
     home: Option<&Path>,
 ) -> Result<LinkVerdict, String> {
+    if !is_vault_relative_link(link) {
+        return Err(format!("{link} is not vault-relative"));
+    }
     let target = std::fs::canonicalize(vault_root.join(link))
         .map_err(|e| format!("{link} could not be resolved: {e}"))?;
     let verdict = classify_link(link, &target, vault_root, home, ledger);
