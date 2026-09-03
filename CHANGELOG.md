@@ -1,3 +1,10 @@
+## [1.42.5](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.4...v1.42.5) (2026-09-03)
+
+### Bug Fixes
+
+* **config:** reject non-vault-relative TrustedLink::link at the load boundary (issue [#140](https://github.com/equationalapplications/curated-thoughts/issues/140)) ([2b8aee3](https://github.com/equationalapplications/curated-thoughts/commit/2b8aee378fad05e24f3c2d3f413f7469b33477eb)), closes [#144](https://github.com/equationalapplications/curated-thoughts/issues/144)
+* **lock:** distinguish WouldBlock from real I/O errors in vault lock diagnostics (issue [#146](https://github.com/equationalapplications/curated-thoughts/issues/146)) ([7f79f0e](https://github.com/equationalapplications/curated-thoughts/commit/7f79f0ecf1d49f435df079b317125e394e8864fd))
+
 ## [1.42.4](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.3...v1.42.4) (2026-09-03)
 
 ### Bug Fixes
