@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use tauri_app_lib::trusted_links::{
-    classify_link, is_within, DenyReason, LinkVerdict, TrustedLink,
+    approve_into, classify_link, is_vault_relative_link, is_within, DenyReason, LinkVerdict,
+    TrustedLink,
 };
 
 fn ledger(link: &str, target: &str) -> Vec<TrustedLink> {
@@ -230,4 +231,96 @@ fn a_symlinked_home_directory_is_still_denied() {
         "a target resolving to the real (symlinked) home directory must be denied, got {:?}",
         verdict
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #142: the absolute-link guard must live in the SHARED helper, not
+// only in the CLI. `Path::join` replaces the base when its argument is
+// absolute, so an unvalidated `link` escapes the vault before classification.
+// ---------------------------------------------------------------------------
+
+/// A `link` whose first component is RootDir (absolute) must be refused by
+/// the predicate — on every platform.
+#[test]
+fn vault_relative_predicate_rejects_absolute_links() {
+    assert!(!is_vault_relative_link("/etc/passwd"));
+    assert!(!is_vault_relative_link("/"));
+}
+
+/// ParentDir (`..`) components must be refused wherever they appear
+/// (CodeRabbit, PR #144): `join` preserves them, so the joined path
+/// canonicalizes OUTSIDE the vault and a Pending verdict would persist a
+/// traversal string as `TrustedLink::link`. Leading and interior `..` are
+/// both traversals.
+#[test]
+fn vault_relative_predicate_rejects_parent_dir_traversals() {
+    assert!(!is_vault_relative_link("../outside-link"));
+    assert!(!is_vault_relative_link("a/../../outside-link"));
+    assert!(!is_vault_relative_link("documents/../secrets"));
+}
+
+/// A plain vault-relative link is accepted by the predicate, including the
+/// empty link. NOTE: the empty link is NOT stopped by canonicalize —
+/// `vault_root.join("")` yields the vault root, which canonicalizes fine —
+/// so it flows into `classify_link` (pre-existing main behavior, tracked
+/// as a follow-up adjacent to #140; the prefix guard is not the right place
+/// to change it).
+#[test]
+fn vault_relative_predicate_accepts_relative_links() {
+    assert!(is_vault_relative_link("documents/specs"));
+    assert!(is_vault_relative_link("a"));
+    assert!(is_vault_relative_link(""));
+}
+
+/// Windows drive prefixes and rooted paths must also be refused. `Path`
+/// parsing of these forms is Windows-only, so the assertions only compile
+/// there; on Unix the same strings are just odd relative names.
+#[cfg(windows)]
+#[test]
+fn vault_relative_predicate_rejects_windows_prefixes_and_roots() {
+    assert!(!is_vault_relative_link("C:foo"));
+    assert!(!is_vault_relative_link("C:\\foo"));
+    assert!(!is_vault_relative_link("\\foo"));
+}
+
+/// The guard must fire BEFORE any filesystem access: an absolute link is
+/// rejected with the vault-relative error even when nothing exists at the
+/// joined path, and the ledger is left untouched (no Pending path ran, so
+/// nothing could have been appended).
+#[test]
+fn approve_into_refuses_absolute_link_before_any_join() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+
+    let mut l = ledger("documents/specs", "/home/me/code/proj/docs");
+    let before = l.clone();
+
+    let err = approve_into(&mut l, "/etc/passwd", &vault, Some(Path::new(HOME)))
+        .expect_err("an absolute link must be an error, not a verdict");
+    assert!(
+        err.contains("not vault-relative"),
+        "error must name the vault-relative rule, got: {err}"
+    );
+    assert_eq!(l, before, "the ledger must be untouched by a refused link");
+}
+
+/// The guard is fail-closed on nonexistent relative links too: a RELATIVE
+/// link that doesn't exist still produces the resolution error (not the
+/// vault-relative one), proving the guard only rewrites the absolute case
+/// and did not change relative-link behavior.
+#[test]
+fn approve_into_still_reports_resolution_errors_for_relative_links() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+
+    let mut l = Vec::new();
+    let err = approve_into(&mut l, "documents/missing", &vault, Some(Path::new(HOME)))
+        .expect_err("a missing link must still fail to resolve");
+    assert!(
+        err.contains("could not be resolved"),
+        "relative links keep the resolution error, got: {err}"
+    );
+    assert!(l.is_empty(), "nothing may be appended on failure");
 }

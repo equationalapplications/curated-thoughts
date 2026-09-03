@@ -292,3 +292,49 @@ fn trust_list_redacts_home_prefix_in_target() {
         "outside-of-home target should appear verbatim, got stdout: {stdout}"
     );
 }
+
+/// An absolute link UNDER a controlled $HOME must be refused by the vault-
+/// relative guard with the home prefix REDACTED (`~/...`), never the
+/// absolute path. Modeled on trust_list_redacts_home_prefix_in_target:
+/// HOME is controlled and canonicalized so `redact_home`'s component
+/// comparison sees the same canonical form the guard's message embeds.
+/// This is the behaviorally-reachable redaction path — the helper's Err arm
+/// cannot receive an absolute link through the CLI (this guard fires first),
+/// so the in-helper redaction added alongside is compile-verified only.
+#[test]
+fn trust_redacts_home_prefix_when_refusing_absolute_link() {
+    use std::process::Command;
+
+    let (tmp, brain, _vault) = seed_env();
+
+    let controlled_home = tmp.path().join("home");
+    fs::create_dir_all(&controlled_home).unwrap();
+    let controlled_home = fs::canonicalize(&controlled_home).unwrap();
+    let controlled_home_str = controlled_home.display().to_string();
+
+    let absolute_link = controlled_home.join("repo-docs"); // under HOME, absolute
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ct"))
+        .env("CURATED_BRAIN_DIR", &brain)
+        .env("HOME", &controlled_home_str)
+        .env_remove("CURATED_BRAIN_DB")
+        .env_remove("CURATED_BRAIN_CONFIG")
+        .args(["trust", absolute_link.to_str().unwrap()])
+        .output()
+        .expect("spawn ct (absolute in-home link)");
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("vault-relative"),
+        "must name the rule, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&controlled_home_str),
+        "stderr must not contain the absolute home prefix, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("~"),
+        "expected the redacted ~/... form, got: {stderr}"
+    );
+}

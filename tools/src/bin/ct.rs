@@ -591,7 +591,7 @@ fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {
 /// and revokes exit 0.
 fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result<i32> {
     use tauri_app_lib::config::BrainConfig;
-    use tauri_app_lib::trusted_links::{approve_into, LinkVerdict};
+    use tauri_app_lib::trusted_links::{approve_into, is_vault_relative_link, LinkVerdict};
 
     // Exactly one of `<link>`, `--list`, or `--revoke <link>` must be present.
     // Otherwise `ct trust --list --revoke documents/specs` would silently
@@ -655,22 +655,22 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         Some(v) => std::path::PathBuf::from(v),
         None => bail!("no vault configured; run `curated-thoughts --onboard` first"),
     };
-    // Refuse a `link` that is not vault-relative, *before* any join. Both
-    // `vault_root.join(&link)` below and `approve_into`'s own
-    // `vault_root.join(link)` (src-tauri/src/trusted_links.rs) **replace** the
-    // base when the argument is absolute — or, on Windows, merely carries a
-    // prefix (`C:foo`) or a root (`\foo`). So `ct trust /Users/me/.ssh` would
-    // escape the vault entirely, classify a path the vault does not contain,
-    // and on a `Pending` verdict persist that absolute string into the ledger
-    // as `TrustedLink::link`, which every consumer documents as vault-relative
-    // — reaching the #140 gap from the CLI instead of only by hand-editing.
-    // Rejecting here also keeps every `{link}` echo below structurally
-    // incapable of carrying a `$HOME`-rooted absolute path.
-    let first_component = std::path::Path::new(&link).components().next();
-    if matches!(
-        first_component,
-        Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)
-    ) {
+    // Refuse a `link` that is not vault-relative, *before* any join. The
+    // predicate lives in the shared crate (`is_vault_relative_link`,
+    // src-tauri/src/trusted_links.rs) so this CLI check and `approve_into`'s
+    // own guard are ONE definition, not two. The hazard it guards:
+    // `vault_root.join(&link)` — here and inside `approve_into` —
+    // **replaces** the base when the argument is absolute — or, on Windows,
+    // merely carries a prefix (`C:foo`) or a root (`\foo`). So
+    // `ct trust /Users/me/.ssh` would escape the vault entirely, classify a
+    // path the vault does not contain, and on a `Pending` verdict persist
+    // that absolute string into the ledger as `TrustedLink::link`, which
+    // every consumer documents as vault-relative — reaching the #140 gap
+    // from the CLI instead of only by hand-editing. This early check keeps
+    // every `{link}` echo below structurally incapable of carrying a
+    // `$HOME`-rooted absolute path (the helper's own error is redacted at
+    // the print site below).
+    if !is_vault_relative_link(&link) {
         eprintln!(
             "error: link must be vault-relative, got {}",
             redact_home(&link)
@@ -732,7 +732,7 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             Ok(0)
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", redact_home(&e));
             Ok(1)
         }
     }
