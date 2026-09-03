@@ -141,6 +141,36 @@ fn a_target_inside_the_vault_needs_no_ledger_entry() {
     assert_eq!(verdict, LinkVerdict::Trusted);
 }
 
+/// Belt-and-suspenders (issue #143): `classify_link` is a public API also
+/// called from `walk_vault.rs` with links read straight from the filesystem,
+/// so it must be fail-closed on an empty link independently of the
+/// `approve_into` predicate. Denial must outrank the in-vault auto-trust
+/// branch — pre-#143 this returned Trusted because `target == vault_root`
+/// skipped the ContainsVault check and `is_within(vault, vault)` held.
+#[test]
+fn classify_link_denies_empty_link() {
+    let verdict = classify_link("", Path::new(VAULT), Path::new(VAULT), None, &[]);
+    assert_eq!(
+        verdict,
+        LinkVerdict::Denied(DenyReason::EmptyLink),
+        "an empty link must be Denied(EmptyLink) when the predicate is bypassed, got {:?}",
+        verdict
+    );
+    let ws = classify_link("\t  ", Path::new(VAULT), Path::new(VAULT), None, &[]);
+    assert_eq!(
+        ws,
+        LinkVerdict::Denied(DenyReason::EmptyLink),
+        "a whitespace-only link must also be Denied(EmptyLink), got {:?}",
+        ws
+    );
+}
+
+/// Keeps the `message()` match exhaustive and pins the user-facing text.
+#[test]
+fn empty_link_deny_reason_message() {
+    assert_eq!(DenyReason::EmptyLink.message(), "link is empty");
+}
+
 /// `approve_link` must canonicalize the vault root before classification,
 /// otherwise a vault reached through a symlink lets a link to its physical
 /// parent pass as Pending. With a non-canonical vault root (`/var/...` vs the
@@ -259,17 +289,49 @@ fn vault_relative_predicate_rejects_parent_dir_traversals() {
     assert!(!is_vault_relative_link("documents/../secrets"));
 }
 
-/// A plain vault-relative link is accepted by the predicate, including the
-/// empty link. NOTE: the empty link is NOT stopped by canonicalize —
-/// `vault_root.join("")` yields the vault root, which canonicalizes fine —
-/// so it flows into `classify_link` (pre-existing main behavior, tracked
-/// as a follow-up adjacent to #140; the prefix guard is not the right place
-/// to change it).
+/// A plain vault-relative link is accepted by the predicate. The empty link
+/// is NOT: as of issue #143 the predicate refuses empty and whitespace-only
+/// input up front (the pre-#143 behavior let `""` through because an empty
+/// string has no offending components; the flip to `false` IS the fix).
 #[test]
 fn vault_relative_predicate_accepts_relative_links() {
     assert!(is_vault_relative_link("documents/specs"));
     assert!(is_vault_relative_link("a"));
-    assert!(is_vault_relative_link(""));
+    assert!(!is_vault_relative_link(""));
+}
+
+/// Empty and whitespace-only strings must be refused by the predicate
+/// (issue #143): `vault_root.join("")` yields the vault root and
+/// `Path::new(" ")` yields a `Normal(" ")` component, so without this guard
+/// nonsense input flows into canonicalize/classify.
+#[test]
+fn vault_relative_predicate_rejects_empty_and_whitespace() {
+    assert!(!is_vault_relative_link(""));
+    assert!(!is_vault_relative_link("   "));
+    assert!(!is_vault_relative_link("\t\n"));
+    assert!(!is_vault_relative_link("\t  "));
+}
+
+/// The guard must fire BEFORE any filesystem access: an empty link is
+/// rejected with the vault-relative error even though
+/// `vault_root.join("")` canonicalizes fine, and the ledger is left
+/// untouched (no Pending path ran, so nothing could have been appended).
+#[test]
+fn approve_into_refuses_empty_link_before_any_join() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+
+    let mut l = ledger("documents/specs", "/home/me/code/proj/docs");
+    let before = l.clone();
+
+    let err = approve_into(&mut l, "", &vault, Some(Path::new(HOME)))
+        .expect_err("an empty link must be an error, not a verdict");
+    assert!(
+        err.contains("not vault-relative"),
+        "error must name the vault-relative rule, got: {err}"
+    );
+    assert_eq!(l, before, "the ledger must be untouched by a refused link");
 }
 
 /// Windows drive prefixes and rooted paths must also be refused. `Path`

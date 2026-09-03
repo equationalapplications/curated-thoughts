@@ -161,23 +161,51 @@ fn load_lenient_rejects_parentdir_trusted_link() {
 }
 
 #[test]
-fn load_lenient_accepts_wellformed_trusted_links() {
-    // The empty string passes `is_vault_relative_link` by design: the
-    // predicate is purely component-lexical and empty has no offending
-    // components. Tightening empty-link handling is issue #143's scope and
-    // must stay consistent across both boundaries — do not change it here.
+fn load_lenient_rejects_empty_trusted_link() {
+    // The empty string now FAILS `is_vault_relative_link`: issue #143
+    // tightened the predicate to refuse empty and whitespace-only input at
+    // both boundaries, so a hand-edited ledger entry with `link: ""` is
+    // dropped with a diagnostic at load instead of being pinned through
+    // (the previous behavior here asserted `""` was accepted; the flip is
+    // the fix — see the predicate tests in tests/trusted_links.rs).
     let json = trusted_links_json(&[wellformed_entry("documents/specs"), wellformed_entry("")]);
     let (_temp, paths) = temp_paths(&json);
 
     let report = BrainConfig::load_lenient(&paths).unwrap();
-    let mut links: Vec<&str> = report
+    let links: Vec<&str> = report
         .config
         .trusted_links
         .iter()
         .map(|e| e.link.as_str())
         .collect();
-    links.sort_unstable();
-    assert_eq!(links, vec!["", "documents/specs"]);
+    assert_eq!(
+        links,
+        vec!["documents/specs"],
+        "the empty link must be dropped at the load boundary"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("not vault-relative")),
+        "expected a 'not vault-relative' diagnostic for the empty link, got: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn load_lenient_accepts_wellformed_trusted_links() {
+    let json = trusted_links_json(&[wellformed_entry("documents/specs")]);
+    let (_temp, paths) = temp_paths(&json);
+
+    let report = BrainConfig::load_lenient(&paths).unwrap();
+    let links: Vec<&str> = report
+        .config
+        .trusted_links
+        .iter()
+        .map(|e| e.link.as_str())
+        .collect();
+    assert_eq!(links, vec!["documents/specs"]);
     assert!(
         !report
             .diagnostics

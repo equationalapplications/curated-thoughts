@@ -36,6 +36,10 @@ pub enum DenyReason {
     ContainsVault,
     /// The target is an ancestor of a target already in the ledger.
     AncestorOfTrusted,
+    /// The link string itself is empty or whitespace-only (issue #143):
+    /// fail-closed on nonsense input even when the `approve_into` predicate
+    /// is bypassed (e.g. links read from the filesystem in `walk_vault`).
+    EmptyLink,
 }
 
 impl DenyReason {
@@ -46,6 +50,7 @@ impl DenyReason {
             DenyReason::VaultAncestor => "target is an ancestor of the vault root",
             DenyReason::ContainsVault => "target contains the vault root",
             DenyReason::AncestorOfTrusted => "target is an ancestor of an already-trusted target",
+            DenyReason::EmptyLink => "link is empty",
         }
     }
 }
@@ -87,6 +92,15 @@ pub fn is_within(candidate: &Path, ancestor: &Path) -> bool {
 /// subcommand) feed it raw user input, so the guard lives here, at the join,
 /// not at one caller.
 pub fn is_vault_relative_link(link: &str) -> bool {
+    // Issue #143: empty and whitespace-only input is refused up front.
+    // `vault_root.join("")` yields the vault root (canonicalizes fine on any
+    // configured vault) and `Path::new(" ")` yields a `Normal(" ")`
+    // component, so without this guard nonsense input flows into
+    // canonicalize/classify — one rule, enforced at both the approval write
+    // path and the config load boundary, which share this predicate.
+    if link.trim().is_empty() {
+        return false;
+    }
     !Path::new(link).components().any(|c| {
         matches!(
             c,
@@ -164,6 +178,16 @@ pub fn classify_link(
     home: Option<&Path>,
     ledger: &[TrustedLink],
 ) -> LinkVerdict {
+    // Belt-and-suspenders (issue #143): this is a public API also called
+    // directly from `walk_vault.rs` with links read from the filesystem, so
+    // it must not rely on the `approve_into` config boundary for emptiness.
+    // `Denied` — not `Pending` — because a Pending verdict would make
+    // approve-like callers PERSIST `TrustedLink { link: "" }`, exactly the
+    // outcome the issue warns about; denials outrank ledger entries by
+    // construction, so this cannot be un-done by a stale ledger row.
+    if link_rel.trim().is_empty() {
+        return LinkVerdict::Denied(DenyReason::EmptyLink);
+    }
     let target = lexical_normalize(target);
     let vault_root = lexical_normalize(vault_root);
 
