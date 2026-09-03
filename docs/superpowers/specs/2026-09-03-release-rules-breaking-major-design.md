@@ -77,8 +77,12 @@ signal that an interface changed.
 
 ## 2. Approach
 
-Prepend an explicit breaking-change rule so it is matched before the
-type-based rules.
+Add an explicit breaking-change rule. Position is not load-bearing —
+the analyzer takes the highest release type among all matching
+configured rules, so the rule works from any position in the array;
+its *presence* is what restores `major`. The change below happens to
+list it first because that matches the existing convention of
+listing the most-impactful rule first, not because order matters.
 
 **File:** `.releaserc.json`, inside the `@semantic-release/commit-analyzer`
 plugin options.
