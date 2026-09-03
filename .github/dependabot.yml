@@ -10,6 +10,21 @@ updates:
       # include packages published <14 days ago. This is a known limitation.
       default-days: 14
     groups:
+      # The release toolchain must move as a unit. conventional-changelog-writer
+      # is a TRANSITIVE dep (pulled by release-notes-generator), so Dependabot
+      # never bumps it alone -- which let PR #155 raise the conventionalcommits
+      # preset to v10 while the writer that renders it stayed on v8, breaking
+      # the release. major is included deliberately: majors are exactly what
+      # minor-and-patch fails to cover.
+      release-toolchain:
+        patterns:
+          - "semantic-release"
+          - "@semantic-release/*"
+          - "conventional-changelog-*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
       minor-and-patch:
         update-types:
           - "minor"

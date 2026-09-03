@@ -162,3 +162,23 @@ jobs:
           # docs/a11y/index.css carries a 6-line GENERATED header; the payload
           # after it must be byte-identical to src/index.css.
           diff <(tail -n +7 docs/a11y/index.css) src/index.css
+
+  release-config:
+    # release.yml runs on workflow_run AFTER merge to main, so nothing else in
+    # CI exercises the release pipeline. This job is the only pre-merge check
+    # that a broken .releaserc.json or an incompatible changelog-preset bump
+    # would trip. Node-only: no Rust toolchain, no system packages, no secrets.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-node-pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Release config smoke test
+        run: node scripts/check-release-config.mjs
