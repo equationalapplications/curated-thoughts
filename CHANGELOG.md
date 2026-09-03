@@ -1,3 +1,9 @@
+## [1.42.8](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.7...v1.42.8) (2026-09-03)
+
+### Bug Fixes
+
+* **vault:** bootstrap writable subdirs when allowlist is empty ([#119](https://github.com/equationalapplications/curated-thoughts/issues/119)) ([cbcf39c](https://github.com/equationalapplications/curated-thoughts/commit/cbcf39c87ffd62cd1009efe8523932742757c51e))
+
 ## [1.42.7](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.6...v1.42.7) (2026-09-03)
 
 ### Bug Fixes
