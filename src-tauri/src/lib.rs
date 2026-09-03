@@ -2235,7 +2235,7 @@ fn wiki_get_first(
 #[tauri::command]
 fn embed_text(text: String) -> Result<Vec<f32>, String> {
     crate::embedder::get_or_init_local_embedder()
-        .and_then(|guard| guard.as_ref().unwrap().embed(vec![text]))
+        .and_then(|mut guard| guard.as_mut().unwrap().embed(vec![text]))
         .map(|mut v| v.pop().unwrap_or_default())
         .map_err(|e| e.to_string())
 }
