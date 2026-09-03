@@ -1,3 +1,9 @@
+## [2.0.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.0...v2.0.1) (2026-09-03)
+
+### Bug Fixes
+
+* **release:** release major on breaking changes ([ca0279e](https://github.com/equationalapplications/curated-thoughts/commit/ca0279e8cd1fabb5f2cc1e276c1901dfdccb6a93)), closes [#160](https://github.com/equationalapplications/curated-thoughts/issues/160)
+
 ## [2.0.0](https://github.com/equationalapplications/curated-thoughts/compare/v1.42.8...v2.0.0) (2026-09-03)
 
 ### ⚠ BREAKING CHANGES
