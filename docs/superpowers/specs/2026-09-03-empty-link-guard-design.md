@@ -77,7 +77,7 @@ Two layers, both fail-closed:
 `src-tauri/tests/trusted_links.rs:272` currently asserts
 `is_vault_relative_link("") == true`. This PR flips that assertion to
 `false` — the flip IS the fix, and the test comment should say so (referencing
-#143). No other existing test feeds an empty link (`walk_vault` only
+issue `#143`). No other existing test feeds an empty link (`walk_vault` only
 produces real path strings).
 
 ## 3. Testing

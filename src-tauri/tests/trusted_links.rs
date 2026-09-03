@@ -319,8 +319,11 @@ fn vault_relative_predicate_rejects_empty_and_whitespace() {
 #[test]
 fn approve_into_refuses_empty_link_before_any_join() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let vault = tmp.path().join("vault");
-    std::fs::create_dir_all(&vault).unwrap();
+    // Nonexistent vault (CodeRabbit, PR #150): if validation ever moves
+    // after filesystem access, canonicalize fails with a resolution error
+    // instead of the guard's "not vault-relative" — this test then fails,
+    // which is the point.
+    let vault = tmp.path().join("vault-does-not-exist");
 
     let mut l = ledger("documents/specs", "/home/me/code/proj/docs");
     let before = l.clone();
