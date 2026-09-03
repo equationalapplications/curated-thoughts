@@ -184,10 +184,13 @@ stands today.
 ## 4. Out of scope
 
 - **Issue #160 — `releaseRules` shadow the default breaking-change rule.**
-  Custom `releaseRules` are evaluated before the defaults and short-circuit
-  on first match, so `{ "type": "feat" }` claims a `feat!` commit and a
-  major release is unreachable (`feat!` → minor, `fix!` → patch; the same
-  commits yield `major` under default rules). Found while building this
+  Configured `releaseRules` are consulted instead of the built-in defaults
+  whenever any of them matches; without an explicit `breaking` rule, a
+  `feat!` commit matches only `{ "type": "feat" }` and releases as minor
+  (`fix!` → patch; the same commits yield `major` under default rules).
+  The analyzer does take the highest release type among all matching
+  configured rules — so the breaking rule works from any position — but
+  its *presence* is what restores `major`. Found while building this
   guard's matrix. Split out because it **changes version-numbering
   behavior for every future release** and deserves its own review and
   release note.
