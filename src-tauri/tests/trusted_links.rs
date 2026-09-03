@@ -248,7 +248,11 @@ fn vault_relative_predicate_rejects_absolute_links() {
 }
 
 /// A plain vault-relative link is accepted by the predicate, including the
-/// empty link (rejected later by canonicalize, not by the prefix guard).
+/// empty link. NOTE: the empty link is NOT stopped by canonicalize —
+/// `vault_root.join("")` yields the vault root, which canonicalizes fine —
+/// so it flows into `classify_link` (pre-existing main behavior, tracked
+/// as a follow-up adjacent to #140; the prefix guard is not the right place
+/// to change it).
 #[test]
 fn vault_relative_predicate_accepts_relative_links() {
     assert!(is_vault_relative_link("documents/specs"));

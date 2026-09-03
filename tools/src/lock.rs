@@ -48,7 +48,7 @@ impl VaultLock {
         // follow the link and truncate its target — opening any file in a
         // location a principal can race into would let starting the watcher
         // destroy content the application didn't otherwise touch. The OS
-        // lock (try_lock_exclusive) holds without modifying the file's
+        // lock (try_lock) holds without modifying the file's
         // contents, so truncate is unnecessary.
         let file = fs::OpenOptions::new()
             .create(true)

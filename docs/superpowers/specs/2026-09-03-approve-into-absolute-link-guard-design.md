@@ -1,7 +1,7 @@
 # Absolute-Link Guard in `approve_into` — Design
 
 **Date:** 2026-09-03
-**Status:** Draft
+**Status:** Implemented 2026-09-03 — dual-track implementation review APPROVED (GLM 5.3: SPEC COMPLIANT yes / Approved, 0C/2I/5m, findings folded in; default-model reviewer: SPEC COMPLIANT yes / Approved, 0C/0I/3m). Follow-up empty-link issue filed as #143.
 **Branch:** `fix/approve-into-absolute-link-guard`
 **Priority:** P1 (security-class robustness gap; closes issue #142, found in the PR #129 review)
 
@@ -86,9 +86,11 @@ not in scope.
 
 - **Predicate semantics:** `Path::new(link).components().next()` is
   `Some(Prefix(_) | RootDir)` → not vault-relative. Empty string and normal
-  relative paths pass the predicate (empty then fails later at
-  canonicalize, unchanged behavior; the resulting error string simply
-  begins with the empty `{link}` interpolation — cosmetic, pre-existing).
+  relative paths pass the predicate. Empty-link note (review finding I1):
+  the empty link is NOT stopped by canonicalize — `vault_root.join("")`
+  yields the vault root, which canonicalizes successfully — so it proceeds
+  into `classify_link` (pre-existing main behavior; follow-up filed, not
+  a regression of this change).
   ct.rs's inline check is REPLACED by a call to `is_vault_relative_link`
   (its diagnostic message and early-return position are unchanged) — one
   definition, not two.
