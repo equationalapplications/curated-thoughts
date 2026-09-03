@@ -1,0 +1,9 @@
+[workspace]
+members = ["src-tauri", "tools"]
+resolver = "2"
+
+# Git worktrees under .worktrees/ are full checkouts containing their own
+# src-tauri/ and tools/ packages. Without this exclude, Cargo walking up from
+# a worktree finds this manifest and refuses to build a package that is
+# neither a member nor excluded, breaking every worktree.
+exclude = [".worktrees"]
