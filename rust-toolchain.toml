@@ -1,0 +1,13 @@
+# Local/CI parity for TOOL COMPONENTS, not for the compiler version.
+#
+# The channel is deliberately the rolling `stable`, matching the workflows
+# (.github/workflows/ci.yml, build.yml), which carry the comment
+# "intentional rolling stable". Do not replace this with a fixed version
+# number -- that would silently override that decision in three places.
+#
+# What this file is actually for: guaranteeing that `cargo clippy` and
+# `cargo fmt` exist on a contributor's machine, so the checks CI runs can be
+# run locally before pushing.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]

@@ -1,0 +1,9 @@
+# Clippy configuration.
+#
+# Deliberately minimal. Thresholds and allow-lists get added when a real
+# finding justifies one -- pre-tuning limits nobody has hit yet just encodes
+# guesses as policy.
+#
+# Lints are currently WARN-ONLY in CI (see .github/workflows/ci.yml). Flipping
+# that to `-D warnings` is tracked separately and requires triaging the
+# existing backlog first.
