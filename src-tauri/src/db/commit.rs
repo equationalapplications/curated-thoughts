@@ -149,7 +149,7 @@ struct CommitContext {
 /// seeded partition — and only as a fallback when the curated-id lookup
 /// does find a manifest. Tests that install a manifest for a specific
 /// curated id (e.g. `ent-1`) are unaffected: the direct hit is preferred.
-fn resolve_strict_edge_vocabulary(
+pub(crate) fn resolve_strict_edge_vocabulary(
     conn: &Connection,
     entity_id: &str,
 ) -> Option<std::collections::HashSet<String>> {
