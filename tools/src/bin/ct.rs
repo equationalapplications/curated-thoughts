@@ -162,6 +162,21 @@ enum WikiCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Hard-delete wiki entries by source_ref (incident cleanup).
+    Forget {
+        /// Exact source_ref to delete. Repeatable.
+        #[arg(long = "ref", value_name = "REF", action = clap::ArgAction::Append)]
+        refs: Vec<String>,
+        /// Anchored prefix; resolved to exact refs before deleting.
+        #[arg(long, value_name = "PREFIX")]
+        like: Option<String>,
+        /// Print what would be deleted without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm the destructive write.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -232,6 +247,12 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Wiki { cmd } => match cmd {
             WikiCmd::List { json } => cli_common::wiki_list_cmd(json),
             WikiCmd::Get { entity_id, json } => cli_common::wiki_get_cmd(&entity_id, json),
+            WikiCmd::Forget {
+                refs,
+                like,
+                dry_run,
+                yes,
+            } => cli_common::wiki_forget_cmd(refs, like, dry_run, yes),
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
