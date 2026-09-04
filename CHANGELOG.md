@@ -1,3 +1,9 @@
+## [2.4.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.1...v2.4.2) (2026-09-04)
+
+### Bug Fixes
+
+* **config:** config setters never clobber a config that fails strict load ([97de7e7](https://github.com/equationalapplications/curated-thoughts/commit/97de7e710e0eae8aa80fdfe854c3d345ab0f035c)), closes [#178](https://github.com/equationalapplications/curated-thoughts/issues/178) [#172](https://github.com/equationalapplications/curated-thoughts/issues/172) [#178](https://github.com/equationalapplications/curated-thoughts/issues/178)
+
 ## [2.4.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.0...v2.4.1) (2026-09-04)
 
 ### Bug Fixes
