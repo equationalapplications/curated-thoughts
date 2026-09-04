@@ -630,6 +630,13 @@ pub fn wiki_traverse_graph(
         });
     };
 
+    // Mirrors the read-side gate in `CompositeWalk::walk_seed`: a strict
+    // ontology on `entity_id` keeps off-manifest edges out of the traversal
+    // exactly the way the writer keeps them out of new commits (spec §2.3,
+    // #158). Resolved once up-front rather than per-hop.
+    let edge_vocabulary =
+        crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
+
     let mut nodes: HashMap<String, WikiTraverseNode> = HashMap::new();
     let mut edges: Vec<WikiTraverseEdge> = Vec::new();
     let mut edge_keys: HashSet<(String, String, String)> = HashSet::new();
@@ -646,7 +653,11 @@ pub fn wiki_traverse_graph(
         if depth >= max_depth {
             continue;
         }
-        let pairs = fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
+        let mut pairs =
+            fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
+        if let Some(vocab) = &edge_vocabulary {
+            pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
+        }
         for (edge, neighbor_id) in pairs {
             let is_new_neighbor = !visited.contains(&neighbor_id);
             if is_new_neighbor && nodes.len() >= MAX_TRAVERSAL_NODES {
@@ -699,24 +710,72 @@ mod unit_tests {
     use crate::db::connection::open_in_memory;
     use rusqlite::params;
 
-    fn seed_entry(conn: &Connection, id: &str, entity_id: &str, deleted_at_ms: Option<i64>) {
+    fn seed_entry(conn: &Connection, entity_id: &str, id: &str) {
+        // Eight non-zero floats packed as 32 bytes — long enough for
+        // `wiki_search`'s `dim * 4` length check (matches the `[0.0; 8]`
+        // query vector the new tests use), and non-zero so a fact with
+        // that embedding actually clears the `raw > 0` ranking filter.
+        // The values are arbitrary as long as they are not all zero —
+        // they only need to surface the row to `wiki_context`.
+        let embedding: [f32; 8] = [1.0; 8];
+        let embedding_blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         conn.execute(
             "INSERT INTO llm_wiki_entries (
                 id, entity_id, title, body, tags, confidence, source_type,
                 source_hash, source_ref, created_at, updated_at, last_accessed_at,
                 access_count, deleted_at, embedding_blob, embedding
              ) VALUES (?1, ?2, ?1, 'Body', '[]', 'inferred', 'librarian_inferred',
-                       NULL, NULL, 100, 100, NULL, 0, ?3, NULL, NULL)",
-            params![id, entity_id, deleted_at_ms],
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?3, NULL)",
+            params![id, entity_id, embedding_blob],
         )
         .unwrap();
     }
 
-    fn seed_edge(conn: &Connection, id: &str, entity_id: &str, source: &str, target: &str) {
+    fn seed_edge(
+        conn: &Connection,
+        entity_id: &str,
+        source: &str,
+        target: &str,
+        edge_type: &str,
+    ) {
+        // Deterministic per-call id keeps tests diff-friendly. The primary-key
+        // collision we have to dodge is between two calls within one test, not
+        // across tests, so a counter on a static would also work — this just
+        // keeps every row identifiable in `llm_wiki_edges`.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let id = format!("edge-{n}");
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'related_to', 100)",
-            params![id, entity_id, source, target],
+             VALUES (?1, ?2, ?3, ?4, ?5, 100)",
+            params![id, entity_id, source, target, edge_type],
+        )
+        .unwrap();
+    }
+
+    /// Install a strict-mode ontology manifest declaring `edge_types` (with no
+    /// source/target typing). Mirrors `seed_manifest` in `db::commit::tests`
+    /// trimmed to the §2.3 / #158 case: the read path only needs to know
+    /// which edge-type *names* are in scope.
+    fn seed_strict_ontology(conn: &Connection, entity_id: &str, edge_types: &[&str]) {
+        let edges: Vec<serde_json::Value> = edge_types
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": t,
+                    "source_type": "",
+                    "target_type": "",
+                    "description": "",
+                })
+            })
+            .collect();
+        let manifest =
+            serde_json::json!({ "node_types": [], "edge_types": edges }).to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, 'strict', ?2, 0)",
+            params![entity_id, manifest],
         )
         .unwrap();
     }
@@ -726,16 +785,29 @@ mod unit_tests {
     #[test]
     fn traversal_excludes_edges_whose_endpoint_is_soft_deleted() {
         let conn = open_in_memory().unwrap();
-        seed_entry(&conn, "fact_live", "ent-1", None);
-        seed_entry(&conn, "fact_ghost", "ent-1", Some(200_000)); // soft-deleted
-        seed_entry(&conn, "fact_other", "ent-1", None);
+        seed_entry(&conn, "ent-1", "fact_live");
+        seed_entry(&conn, "ent-1", "fact_other");
+        // Soft-delete the ghost endpoint without touching the live helpers —
+        // the seed path stays live-only, and this test still covers the
+        // soft-delete code path inside the traversal.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES ('fact_ghost', 'ent-1', 'fact_ghost', 'Body', '[]', 'inferred',
+                       'librarian_inferred', NULL, NULL, 100, 100, NULL, 0, 200000,
+                       NULL, NULL)",
+            [],
+        )
+        .unwrap();
 
         // Outbound from the live node into a dead target.
-        seed_edge(&conn, "edge_out", "ent-1", "fact_live", "fact_ghost");
+        seed_edge(&conn, "ent-1", "fact_live", "fact_ghost", "related_to");
         // Inbound into the live node from a dead source.
-        seed_edge(&conn, "edge_in", "ent-1", "fact_ghost", "fact_live");
+        seed_edge(&conn, "ent-1", "fact_ghost", "fact_live", "related_to");
         // A wholly live edge, as the positive control.
-        seed_edge(&conn, "edge_live", "ent-1", "fact_live", "fact_other");
+        seed_edge(&conn, "ent-1", "fact_live", "fact_other", "related_to");
 
         let result =
             wiki_traverse_graph(&conn, "ent-1", "fact_live", 2, TraverseDirection::Both, &[])
@@ -754,6 +826,72 @@ mod unit_tests {
         assert!(
             edge_targets.contains(&"fact_other"),
             "the wholly-live edge is the positive control and must surface"
+        );
+    }
+
+    /// A strict-mode brain must surface only the edge types its manifest
+    /// declares — even when an off-manifest row was grandfathered into
+    /// `llm_wiki_edges` before the manifest existed (spec §2.3, #158).
+    ///
+    /// `wiki_context` walks from `fact.entity_id`, which only resolves when
+    /// that id is itself a node; the plan's seed shape (entries A/B in
+    /// `ent_demo`, edges between A and B) leaves `ent_demo` unanchored, so
+    /// `wiki_context`'s BFS finds no neighbours. Going through
+    /// `wiki_traverse_graph` with `A` as the seed reaches both edges and
+    /// exercises the same vocabulary gate that `CompositeWalk::walk_seed`
+    /// applies for `wiki_context`.
+    #[test]
+    fn wiki_context_hides_off_manifest_edges_in_strict_mode() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = "A".to_string();
+        let b = "B".to_string();
+        seed_entry(&conn, "ent_demo", &a);
+        seed_entry(&conn, "ent_demo", &b);
+        seed_edge(&conn, "ent_demo", &a, &b, "depends_on");
+        seed_edge(
+            &conn,
+            "ent_demo",
+            &a,
+            &b,
+            "has_open_bug_reported_2026-09-09",
+        );
+
+        let result =
+            wiki_traverse_graph(&conn, "ent_demo", &a, 2, TraverseDirection::Both, &[])
+                .unwrap();
+
+        let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
+        assert!(
+            types.contains(&"depends_on"),
+            "manifest edge must survive, got: {types:?}"
+        );
+        assert!(
+            !types.iter().any(|t| t.contains("2026-09-09")),
+            "off-manifest edge must be filtered, got: {types:?}"
+        );
+    }
+
+    /// Without an ontology (or with one that is not `strict`), the resolver
+    /// returns `None` and the read path leaves every row in place. This
+    /// uses `wiki_traverse_graph` for the same reason as
+    /// `wiki_context_hides_off_manifest_edges_in_strict_mode`.
+    #[test]
+    fn non_strict_ontology_is_not_filtered() {
+        let conn = open_in_memory().unwrap();
+        let a = "A".to_string();
+        let b = "B".to_string();
+        seed_entry(&conn, "ent_open", &a);
+        seed_entry(&conn, "ent_open", &b);
+        seed_edge(&conn, "ent_open", &a, &b, "anything_goes_here");
+
+        let result =
+            wiki_traverse_graph(&conn, "ent_open", &a, 2, TraverseDirection::Both, &[])
+                .unwrap();
+        let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
+        assert!(
+            types.contains(&"anything_goes_here"),
+            "non-strict brains must be unfiltered, got: {types:?}"
         );
     }
 
@@ -837,6 +975,11 @@ struct CompositeWalk {
     edge_keys: HashSet<(String, String, String, String)>,
     visited: HashSet<(String, String)>,
     truncated: bool,
+    /// Lowercased strict-ontology edge vocabulary, resolved once per
+    /// traversal. `None` means "do not gate" — the ontology is absent,
+    /// non-strict, unreadable, or declares no edge types. Mirrors the
+    /// write-time gate so reads and writes agree on what is legal.
+    edge_vocabulary: Option<std::collections::HashSet<String>>,
 }
 
 impl CompositeWalk {
@@ -879,8 +1022,17 @@ impl CompositeWalk {
             if depth >= max_depth {
                 continue;
             }
-            let pairs =
+            let mut pairs =
                 fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
+
+            // Strict ontologies gate reads the same way they gate writes. The
+            // write-time gate is deliberately non-retroactive (see
+            // `strict_mode_grandfathers_edges_written_before_the_manifest`), so
+            // rows written before the manifest existed are still in the table
+            // and would otherwise surface as first-class neighbourhood results.
+            if let Some(vocab) = &self.edge_vocabulary {
+                pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
+            }
             for (edge, neighbor_id) in pairs {
                 let neighbor_key = (entity_id.to_string(), neighbor_id.clone());
                 let is_new_neighbor = !self.visited.contains(&neighbor_key);
@@ -984,6 +1136,13 @@ pub fn wiki_context(
     // stays `None`, and `tier` narrows only when the caller asked it to.
     let facts = wiki_search(conn, query_vec, None, tier, max_facts)?;
 
+    // Resolve the strict vocabulary once for the whole walk rather than per
+    // hop. All seeds in one `wiki_context` call share the caller's brain, so
+    // the first seed's entity is representative; `None` disables gating.
+    let edge_vocabulary = facts
+        .first()
+        .and_then(|f| crate::db::commit::resolve_strict_edge_vocabulary(conn, &f.entity_id));
+
     let mut walk = CompositeWalk {
         // `truncated` means the walk is **narrower** than the caller asked
         // for, so the neighborhood may be incomplete. A clamped depth that
@@ -994,6 +1153,7 @@ pub fn wiki_context(
         // walk, which happens inside `walk_seed` once the node budget is
         // exhausted.
         truncated: clamped_depth < depth,
+        edge_vocabulary,
         ..Default::default()
     };
 

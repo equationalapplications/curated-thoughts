@@ -2891,8 +2891,12 @@ mod tests {
         assert!(result.dropped_edges.is_empty());
     }
 
-    /// Reads stay untyped-tolerant: the gate is write-time only, so a row
-    /// written before the manifest existed is still readable and traversable.
+    /// Writes stay non-retroactive (the gate never rewrites history): a row
+    /// written before the manifest existed stays in `llm_wiki_edges`. Reads,
+    /// on the other hand, now intersect against the manifest vocabulary
+    /// (Gap B fix, spec §1.1 / PR 1 of #158): traversal must not surface the
+    /// off-manifest row as a first-class neighbour, even though the row
+    /// itself is grandfathered at the storage layer.
     #[test]
     fn strict_mode_grandfathers_edges_written_before_the_manifest() {
         let conn = open_in_memory().unwrap();
@@ -2911,6 +2915,18 @@ mod tests {
             &[("supports", "thing", "thing")],
         );
 
+        // Storage is grandfathered: the row is still in the table.
+        let stored: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE id = 'edge_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 1, "a row written before the manifest stays in the table");
+
+        // Reads are filtered: the off-manifest edge is not surfaced as a
+        // first-class neighbour.
         let walked = crate::wiki_graph::wiki_traverse_graph(
             &conn,
             "ent-1",
@@ -2920,12 +2936,10 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(
-            walked.edges.len(),
-            1,
-            "a grandfathered off-manifest edge must still traverse"
+        assert!(
+            walked.edges.is_empty(),
+            "an off-manifest edge must not surface in traversal, got: {walked:?}"
         );
-        assert_eq!(walked.edges[0].edge_type, "legacy_type");
     }
 
     /// `curated_relationships` is the AST symbol-linker graph, written
