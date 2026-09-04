@@ -201,8 +201,11 @@ pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
 /// has no strict ontology — an unreadable or non-strict ontology must never be
 /// read as "everything is illegal".
 ///
-/// Takes `&Connection` and opens an unchecked transaction so it composes inside
-/// a caller's transaction as the rest of this module does.
+/// Takes `&Connection` and, for standalone callers, opens its own unchecked
+/// transaction and commits it. It does NOT compose inside an existing caller
+/// transaction — `unchecked_transaction` issues a real `BEGIN`, which SQLite
+/// rejects mid-transaction. Callers already inside a transaction should call
+/// [`purge_off_manifest_edges_in_tx`] directly.
 pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str, now_ms: i64) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
     let removed = purge_off_manifest_edges_in_tx(&tx, entity_id, now_ms)?;

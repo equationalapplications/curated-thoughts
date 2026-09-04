@@ -1099,14 +1099,15 @@ impl CompositeWalk {
             // can seed from several partitions, and each partition's manifest
             // gates only its own edges. `None` (no strict ontology for this
             // entity) never means "everything illegal".
-            let edge_vocabulary = self
+            // Borrow the cached vocabulary instead of cloning it: the cache
+            // exists precisely so repeated hops don't pay O(|vocab|) copies.
+            let edge_vocabulary: &Option<std::collections::HashSet<String>> = self
                 .edge_vocabularies
                 .entry(entity_id.to_string())
                 .or_insert_with(|| {
                     crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id)
-                })
-                .clone();
-            if let Some(vocab) = &edge_vocabulary {
+                });
+            if let Some(vocab) = edge_vocabulary {
                 pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
             }
             for (edge, neighbor_id) in pairs {
