@@ -1,3 +1,10 @@
+## [2.3.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.2.1...v2.3.0) (2026-09-04)
+
+### Features
+
+* **ct:** reconcile the vault before ingesting ([939d925](https://github.com/equationalapplications/curated-thoughts/commit/939d9250ff9611b9fd79897262c010ffd42dd305)), closes [#159](https://github.com/equationalapplications/curated-thoughts/issues/159)
+* **reconcile:** diff documents against the vault walk ([8e2d4d4](https://github.com/equationalapplications/curated-thoughts/commit/8e2d4d4cd84ca7386d3f75e44906c4b09d0ebd21)), closes [#159](https://github.com/equationalapplications/curated-thoughts/issues/159)
+
 ## [2.2.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.2.0...v2.2.1) (2026-09-04)
 
 ### Bug Fixes
