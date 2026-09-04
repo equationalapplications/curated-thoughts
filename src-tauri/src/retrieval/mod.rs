@@ -55,10 +55,65 @@ pub fn resolve_brain_paths() -> BrainPaths {
         brain_dir.join("config.json")
     };
 
-    BrainPaths {
+    let paths = BrainPaths {
         brain_dir,
         config_path,
         db_path,
+    };
+
+    // Test-build guard (issue #178): a test that resolves the LIVE
+    // `~/.brain` and writes through it rewrites the user's real
+    // config.json — this fired twice in production (2026-09-03/04). In
+    // test builds, make that resolution a loud, named failure instead.
+    // Tests redirect via CURATED_BRAIN_DIR / CURATED_BRAIN_CONFIG /
+    // CURATED_BRAIN_DB under temp_env::with_vars; tests that exist
+    // specifically to pin the default resolution set CT_ALLOW_LIVE_BRAIN=1.
+    #[cfg(any(test, feature = "test-utils"))]
+    guard_against_live_brain(&paths);
+
+    paths
+}
+
+/// See `resolve_brain_paths` — test-build-only guard, no production code
+/// path compiles this.
+///
+/// Trips only when the resolved config or db path IS the live one — that is
+/// where test writes damage the user's installation (issue #178). A test may
+/// legitimately leave `CURATED_BRAIN_DIR` unset (e.g. pinning DB-only
+/// precedence) while both config and db redirect elsewhere.
+#[cfg(any(test, feature = "test-utils"))]
+fn guard_against_live_brain(paths: &BrainPaths) {
+    // Only a truthy value opts out. `is_some()` would let
+    // `CT_ALLOW_LIVE_BRAIN=0` (or an empty value inherited from a shell
+    // export) silently disable the guard.
+    match std::env::var("CT_ALLOW_LIVE_BRAIN") {
+        Ok(v) if !matches!(v.trim(), "" | "0" | "false") => return,
+        _ => {}
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let live_config = home.join(".brain").join("config.json");
+    let live_db = home.join(".brain").join("brain.db");
+    if paths.config_path == live_config || paths.db_path == live_db {
+        panic!(
+            "TEST BUG: resolve_brain_paths() resolved the LIVE {} at {}. \
+             Writing through these paths would rewrite the user's real \
+             configuration/database (issue #178). Set CURATED_BRAIN_DIR \
+             (or CURATED_BRAIN_CONFIG / CURATED_BRAIN_DB) via \
+             temp_env::with_vars in the test, or, if the test exists to \
+             pin default resolution itself, set CT_ALLOW_LIVE_BRAIN=1.",
+            if paths.config_path == live_config {
+                "config.json"
+            } else {
+                "brain.db"
+            },
+            if paths.config_path == live_config {
+                live_config.display()
+            } else {
+                live_db.display()
+            }
+        );
     }
 }
 

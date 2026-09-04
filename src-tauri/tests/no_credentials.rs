@@ -54,10 +54,17 @@ fn onboard_never_writes_api_key_to_config() {
         ontology: tauri_app_lib::ontology_config::OntologySelection::Off,
     };
 
-    // Point CURATED_BRAIN_CONFIG at our temp file via temp_env.
-    temp_env::with_var(
-        "CURATED_BRAIN_CONFIG",
-        Some(config_path.to_string_lossy().as_ref()),
+    // Point CURATED_BRAIN_CONFIG at our temp file via temp_env. Also redirect
+    // the brain dir: `create_layout_and_onboard` resolves via
+    // `resolve_brain_paths()` and WRITES config there — without this it would
+    // rewrite the live ~/.brain/config.json (issue #178).
+    let brain_dir = config_path.parent().unwrap().to_string_lossy().into_owned();
+    let config_str = config_path.to_string_lossy().into_owned();
+    temp_env::with_vars(
+        [
+            ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
+            ("CURATED_BRAIN_CONFIG", Some(config_str.as_str())),
+        ],
         || {
             create_layout_and_onboard(cfg).expect("onboard succeeds");
         },
@@ -76,7 +83,7 @@ fn onboard_never_writes_api_key_to_config() {
 
 #[test]
 fn doctor_never_echoes_api_key() {
-    use temp_env::with_var;
+    use temp_env::with_vars;
 
     let temp = TempDir::new().unwrap();
     let config_path = temp.path().join("config.json");
@@ -86,34 +93,39 @@ fn doctor_never_echoes_api_key() {
     )
     .unwrap();
 
-    with_var("GENERATION_API_KEY", Some("super-secret-key-99999"), || {
-        with_var(
-            "CURATED_BRAIN_CONFIG",
-            Some(config_path.to_string_lossy().as_ref()),
-            || {
-                // Capture the full doctor report so the redaction contract
-                // is actually asserted, not just the exit code.
-                let mut out: Vec<u8> = Vec::new();
-                let exit_code = tauri_app_lib::doctor::run_doctor_to(&mut out).unwrap();
-                assert_eq!(exit_code, 0);
-                let report = String::from_utf8(out).unwrap();
-                assert!(
-                    !report.contains("super-secret-key-99999"),
-                    "secret should never be echoed by --doctor; got:\n{report}"
-                );
-                assert!(
-                    report.contains("NOTE: generation API key in environment"),
-                    "doctor should acknowledge the env key without echoing it; got:\n{report}"
-                );
-                // config.json on disk must not gain the secret either.
-                let content = fs::read_to_string(&config_path).unwrap();
-                assert!(
-                    !content.contains("super-secret-key-99999"),
-                    "secret should never be written to config.json"
-                );
-            },
-        );
-    });
+    // Redirect the brain dir too: without it the resolved db_path is the LIVE
+    // ~/.brain/brain.db (issue #178) -- doctor reads it.
+    let brain_dir = config_path.parent().unwrap().to_string_lossy().into_owned();
+    let config_str = config_path.to_string_lossy().into_owned();
+    with_vars(
+        [
+            ("GENERATION_API_KEY", Some("super-secret-key-99999")),
+            ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
+            ("CURATED_BRAIN_CONFIG", Some(config_str.as_str())),
+        ],
+        || {
+            // Capture the full doctor report so the redaction contract is
+            // actually asserted, not just the exit code.
+            let mut out: Vec<u8> = Vec::new();
+            let exit_code = tauri_app_lib::doctor::run_doctor_to(&mut out).unwrap();
+            assert_eq!(exit_code, 0);
+            let report = String::from_utf8(out).unwrap();
+            assert!(
+                !report.contains("super-secret-key-99999"),
+                "secret should never be echoed by --doctor; got:\n{report}"
+            );
+            assert!(
+                report.contains("NOTE: generation API key in environment"),
+                "doctor should acknowledge the env key without echoing it; got:\n{report}"
+            );
+            // config.json on disk must not gain the secret either.
+            let content = fs::read_to_string(&config_path).unwrap();
+            assert!(
+                !content.contains("super-secret-key-99999"),
+                "secret should never be written to config.json"
+            );
+        },
+    );
 }
 
 #[test]

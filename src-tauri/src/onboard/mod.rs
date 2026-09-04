@@ -272,39 +272,67 @@ mod tests {
 
     #[test]
     fn create_layout_and_onboard_creates_directories() {
-        let temp = TempDir::new().unwrap();
-        let vault = temp.path().join("vault");
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+            let temp = TempDir::new().unwrap();
+            let vault = temp.path().join("vault");
 
-        let cfg = OnboardConfig {
-            vault_root: vault.clone(),
-            force: false,
-            embed_profile: EmbedProfile::Local {
-                model: "nomic-embed-code".to_string(),
-            },
-            generation: GenerationConfig::default(),
-            ontology: OntologySelection::CLI_DEFAULT,
-        };
+            let cfg = OnboardConfig {
+                vault_root: vault.clone(),
+                force: false,
+                embed_profile: EmbedProfile::Local {
+                    model: "nomic-embed-code".to_string(),
+                },
+                generation: GenerationConfig::default(),
+                ontology: OntologySelection::CLI_DEFAULT,
+            };
 
-        create_layout_and_onboard(cfg).expect("onboard should succeed");
+            create_layout_and_onboard(cfg).expect("onboard should succeed");
 
-        assert!(vault.join("immutable-source-files").is_dir());
-        assert!(vault.join("wiki").is_dir());
-        assert!(vault.join("immutable-source-files/agents").is_dir());
-        assert!(vault.join(".brain/converted").is_dir());
+            assert!(vault.join("immutable-source-files").is_dir());
+            assert!(vault.join("wiki").is_dir());
+            assert!(vault.join("immutable-source-files/agents").is_dir());
+            assert!(vault.join(".brain/converted").is_dir());
+        });
     }
 
     #[test]
     fn create_layout_and_onboard_is_idempotent() {
-        let temp = TempDir::new().unwrap();
-        let vault = temp.path().join("vault");
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+            let temp = TempDir::new().unwrap();
+            let vault = temp.path().join("vault");
 
-        let cfg = OnboardConfig {
-            vault_root: vault.clone(),
-            force: false,
-            ..Default::default()
-        };
+            let cfg = OnboardConfig {
+                vault_root: vault.clone(),
+                force: false,
+                ..Default::default()
+            };
 
-        create_layout_and_onboard(cfg.clone()).expect("first");
-        create_layout_and_onboard(cfg).expect("second (idempotent)");
+            create_layout_and_onboard(cfg.clone()).expect("first");
+            create_layout_and_onboard(cfg).expect("second (idempotent)");
+        });
     }
 }
