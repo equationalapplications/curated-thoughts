@@ -1,3 +1,9 @@
+## [2.4.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.0...v2.4.1) (2026-09-04)
+
+### Bug Fixes
+
+* **ci:** run the clippy step after the placeholder sidecar step ([dbebd7d](https://github.com/equationalapplications/curated-thoughts/commit/dbebd7d541c388c62b1acaff06a59f55f908daa4))
+
 ## [2.4.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.3.0...v2.4.0) (2026-09-04)
 
 ### Features
