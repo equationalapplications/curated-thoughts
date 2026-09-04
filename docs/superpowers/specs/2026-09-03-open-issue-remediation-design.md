@@ -48,6 +48,8 @@ PRs are independent and may be parallelised, except that PR 4's canary is most u
 
 **No outbox `Delete` rows for the sweep.** Edges are not replicated today: `commit_edge_add` writes no edge outbox rows (`edge_purge.rs` module docs), so delete-only CDC on edges would make prisma-outbox replicas *diverge* — they never held the inserts, so replaying the deletes has nothing to target. Emitting `Delete` rows is meaningful only as part of a change that also replicates edge inserts; that is separate scope (same CDC boundary as #132, but for edges) and deliberately not required here. The per-edge warning log is the audit trail until then.
 
+**Audit timing (review-resolved, PR #171):** the per-edge warnings are emitted only *after* the owning transaction commits. The transaction-scoped helper returns the doomed `(edge_id, edge_type)` pairs and never logs; a rolled-back purge therefore leaves no warnings claiming deletions that never survived.
+
 ### Explicitly out of scope
 
 Full post-extraction span/date verification (the issue's mitigation 2) is **L** and deferred. Adding `evidence: Vec<String>` to `LlmEdge` is the enabling step and touches the golden JSON fixtures at `synthesis.rs:1393/1474/1606/1721`; do it in a follow-up so this PR stays reviewable.

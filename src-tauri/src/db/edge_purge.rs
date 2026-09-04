@@ -206,11 +206,18 @@ pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
 /// transaction — `unchecked_transaction` issues a real `BEGIN`, which SQLite
 /// rejects mid-transaction. Callers already inside a transaction should call
 /// [`purge_off_manifest_edges_in_tx`] directly.
+///
+/// Audit semantics: the per-edge "purged" warnings are emitted by THIS
+/// wrapper only AFTER the transaction commits, so every warning describes a
+/// deletion that actually survived. The transaction-scoped helper never logs.
 pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str, now_ms: i64) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    let removed = purge_off_manifest_edges_in_tx(&tx, entity_id, now_ms)?;
+    let doomed = purge_off_manifest_edges_in_tx(&tx, entity_id, now_ms)?;
     tx.commit()?;
-    Ok(removed)
+    for (id, edge_type) in &doomed {
+        warn_purged_off_manifest_edge(entity_id, id, edge_type);
+    }
+    Ok(doomed.len())
 }
 
 /// Transaction-scoped body of [`purge_off_manifest_edges`]: performs the purge
@@ -220,20 +227,26 @@ pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str, now_ms: i64)
 /// keep the purge atomic with their own writes. The public wrapper owns the
 /// transaction for everyone else.
 ///
-/// Count semantics match the wrapper: returns `Ok(0)` and deletes nothing when
-/// the entity has no strict ontology or no off-manifest edges.
+/// Returns the `(edge_id, edge_type)` pairs deleted, so the wrapper can emit
+/// committed-deletion audit warnings only after `COMMIT`. This helper NEVER
+/// logs: inside a caller-managed transaction a later rollback revives every
+/// deleted row, and a pre-commit warning would claim purges that never
+/// survived (CodeRabbit review, PR #171).
+///
+/// Count semantics match the wrapper: returns an empty list and deletes
+/// nothing when the entity has no strict ontology or no off-manifest edges.
 fn purge_off_manifest_edges_in_tx(
     conn: &Connection,
     entity_id: &str,
     now_ms: i64,
-) -> Result<usize> {
+) -> Result<Vec<(String, String)>> {
     let Some(vocab) = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id) else {
-        return Ok(0);
+        return Ok(Vec::new());
     };
 
-    // Collect first so each doomed edge can be logged (and, once edges gain
-    // CDC, get its own outbox Delete row) rather than vanishing inside one
-    // set-based DELETE.
+    // Collect first so the wrapper can audit each edge AFTER commit (and,
+    // once edges gain CDC, get its own outbox Delete row) rather than
+    // vanishing inside one set-based DELETE.
     let doomed: Vec<(String, String)> = {
         let mut stmt =
             conn.prepare("SELECT id, edge_type FROM llm_wiki_edges WHERE entity_id = ?1")?;
@@ -250,40 +263,41 @@ fn purge_off_manifest_edges_in_tx(
     };
 
     if doomed.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    for (id, edge_type) in &doomed {
-        warn_purging_off_manifest_edge(entity_id, id, edge_type);
+    for (id, _) in &doomed {
         conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [id])?;
     }
 
     // Reserved for outbox wiring: edges carry no CDC rows today (see the module
     // docs), so there is no helper to call here.
     let _ = now_ms;
-    Ok(doomed.len())
+    Ok(doomed)
 }
 
 /// Every purged edge is announced individually — a retroactive delete is
 /// destructive and an operator must be able to see exactly what went. Same
 /// two-variant pattern as `db::commit`: `tracing` where a subscriber exists,
-/// `eprintln!` in the Tauri build where none does.
+/// `eprintln!` in the Tauri build where none does. Called only AFTER the
+/// owning transaction commits: a rolled-back purge must not leave warnings
+/// claiming deletions that never survived.
 #[cfg(feature = "mcp-server")]
-fn warn_purging_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
+fn warn_purged_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
     tracing::warn!(
         target: "ct::edge_purge",
         entity_id = %entity_id,
         edge_id = %edge_id,
         edge_type = %edge_type,
-        "purging off-manifest edge"
+        "purged off-manifest edge (committed)"
     );
 }
 
 #[cfg(not(feature = "mcp-server"))]
-fn warn_purging_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
+fn warn_purged_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
     eprintln!(
-        "[ct::edge_purge WARN] purging off-manifest edge: entity_id={entity_id:?} \
-         edge_id={edge_id:?} edge_type={edge_type:?}"
+        "[ct::edge_purge WARN] purged off-manifest edge (committed): \
+         entity_id={entity_id:?} edge_id={edge_id:?} edge_type={edge_type:?}"
     );
 }
 
@@ -745,9 +759,14 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
 
         // The helper must run against the open caller transaction without
-        // attempting a nested BEGIN.
-        let removed = purge_off_manifest_edges_in_tx(&tx, "ent_demo", 1_725_000_000_000).unwrap();
-        assert_eq!(removed, 1, "exactly the off-manifest edge is purged in-tx");
+        // attempting a nested BEGIN. It returns the doomed pairs (the
+        // wrapper audits them post-commit); it must NOT log inside the tx.
+        let doomed = purge_off_manifest_edges_in_tx(&tx, "ent_demo", 1_725_000_000_000).unwrap();
+        assert_eq!(
+            doomed.len(),
+            1,
+            "exactly the off-manifest edge is purged in-tx"
+        );
 
         // The purge is visible inside the transaction.
         assert_eq!(
