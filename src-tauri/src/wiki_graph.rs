@@ -885,6 +885,79 @@ mod unit_tests {
         );
     }
 
+    /// A mixed-seed `wiki_context` call — one strict entity plus one ungated
+    /// entity — must gate each partition by its **own** manifest. The shared
+    /// single-vocabulary resolution this replaced would either leak the
+    /// ungated entity's off-manifest edges (when the first fact was ungated)
+    /// or wrongly drop the ungated entity's legal edges (when the first fact
+    /// was strict). Spec §2.3 / #158.
+    #[test]
+    fn wiki_context_gates_each_entity_by_its_own_vocabulary() {
+        let conn = open_in_memory().unwrap();
+
+        // Strict partition: only `depends_on` is on-manifest. The seed id
+        // (the fact's `entity_id`) must itself resolve as a live node for
+        // `wiki_context`'s BFS to leave it, so an anchor entry carries the
+        // partition's id and the edges hang off it.
+        seed_strict_ontology(&conn, "ent_strict", &["depends_on"]);
+        seed_entry(&conn, "ent_strict", "ent_strict");
+        seed_entry(&conn, "ent_strict", "fact_sa");
+        // On-manifest: survives. Grandfathered off-manifest row: hidden.
+        seed_edge(&conn, "ent_strict", "ent_strict", "fact_sa", "depends_on");
+        seed_edge(
+            &conn,
+            "ent_strict",
+            "ent_strict",
+            "fact_sa",
+            "legacy_off_manifest",
+        );
+
+        // Ungated partition: no manifest, every edge type is legal here —
+        // including one that would be illegal under ent_strict's vocabulary.
+        seed_entry(&conn, "ent_open", "ent_open");
+        seed_entry(&conn, "ent_open", "fact_oa");
+        seed_edge(&conn, "ent_open", "ent_open", "fact_oa", "depends_on");
+        seed_edge(
+            &conn,
+            "ent_open",
+            "ent_open",
+            "fact_oa",
+            "off_manifest_elsewhere",
+        );
+
+        // Both fixtures embed [1.0; 8], so this query scores 1.0 against
+        // every row and the search surfaces facts from BOTH entity_ids.
+        let query_vec = [1.0f32; 8];
+        let result = wiki_context(&conn, &query_vec, None, 2, 10).unwrap();
+
+        let mut strict_types: Vec<&str> = result
+            .edges
+            .iter()
+            .filter(|e| e.entity_id == "ent_strict")
+            .map(|e| e.edge_type.as_str())
+            .collect();
+        strict_types.sort_unstable();
+        assert_eq!(
+            strict_types,
+            vec!["depends_on"],
+            "ent_strict must be gated by its own manifest only"
+        );
+
+        let mut open_types: Vec<&str> = result
+            .edges
+            .iter()
+            .filter(|e| e.entity_id == "ent_open")
+            .map(|e| e.edge_type.as_str())
+            .collect();
+        open_types.sort_unstable();
+        assert_eq!(
+            open_types,
+            vec!["depends_on", "off_manifest_elsewhere"],
+            "ent_open is ungated: both of its edge types must survive, \
+             even the one ent_strict's manifest would reject"
+        );
+    }
+
     #[test]
     fn tier_weight_matches_tiered_read() {
         assert_eq!(tier_weight("tier_fact"), 1.5);
@@ -965,11 +1038,13 @@ struct CompositeWalk {
     edge_keys: HashSet<(String, String, String, String)>,
     visited: HashSet<(String, String)>,
     truncated: bool,
-    /// Lowercased strict-ontology edge vocabulary, resolved once per
-    /// traversal. `None` means "do not gate" — the ontology is absent,
-    /// non-strict, unreadable, or declares no edge types. Mirrors the
-    /// write-time gate so reads and writes agree on what is legal.
-    edge_vocabulary: Option<std::collections::HashSet<String>>,
+    /// Per-seed strict-ontology edge vocabularies, resolved on first use and
+    /// cached by `entity_id`. A value of `None` means "do not gate" for that
+    /// entity — the ontology is absent, non-strict, unreadable, or declares
+    /// no edge types. Mirrors the write-time gate so reads and writes agree
+    /// on what is legal. Resolved per entity because one `wiki_context` call
+    /// can seed from several partitions, each with its own manifest.
+    edge_vocabularies: HashMap<String, Option<std::collections::HashSet<String>>>,
 }
 
 impl CompositeWalk {
@@ -1020,7 +1095,18 @@ impl CompositeWalk {
             // `strict_mode_grandfathers_edges_written_before_the_manifest`), so
             // rows written before the manifest existed are still in the table
             // and would otherwise surface as first-class neighbourhood results.
-            if let Some(vocab) = &self.edge_vocabulary {
+            // The vocabulary is resolved per `entity_id`: one composite walk
+            // can seed from several partitions, and each partition's manifest
+            // gates only its own edges. `None` (no strict ontology for this
+            // entity) never means "everything illegal".
+            let edge_vocabulary = self
+                .edge_vocabularies
+                .entry(entity_id.to_string())
+                .or_insert_with(|| {
+                    crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id)
+                })
+                .clone();
+            if let Some(vocab) = &edge_vocabulary {
                 pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
             }
             for (edge, neighbor_id) in pairs {
@@ -1126,13 +1212,6 @@ pub fn wiki_context(
     // stays `None`, and `tier` narrows only when the caller asked it to.
     let facts = wiki_search(conn, query_vec, None, tier, max_facts)?;
 
-    // Resolve the strict vocabulary once for the whole walk rather than per
-    // hop. All seeds in one `wiki_context` call share the caller's brain, so
-    // the first seed's entity is representative; `None` disables gating.
-    let edge_vocabulary = facts
-        .first()
-        .and_then(|f| crate::db::commit::resolve_strict_edge_vocabulary(conn, &f.entity_id));
-
     let mut walk = CompositeWalk {
         // `truncated` means the walk is **narrower** than the caller asked
         // for, so the neighborhood may be incomplete. A clamped depth that
@@ -1143,7 +1222,9 @@ pub fn wiki_context(
         // walk, which happens inside `walk_seed` once the node budget is
         // exhausted.
         truncated: clamped_depth < depth,
-        edge_vocabulary,
+        // Edge vocabularies are resolved inside `walk_seed`, per seed
+        // entity: `wiki_search` can return facts from several entity_ids,
+        // and each partition's strict manifest gates only its own edges.
         ..Default::default()
     };
 
