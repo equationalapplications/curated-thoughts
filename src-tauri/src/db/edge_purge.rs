@@ -192,6 +192,163 @@ pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
     Ok(removed)
 }
 
+/// Delete edges whose `edge_type` is absent from the entity's strict ontology
+/// manifest.
+///
+/// The write-time gate in `db::commit` is non-retroactive by design, so a brain
+/// that went strict *after* edges were written still holds ungated rows. This is
+/// the retroactive counterpart. Returns 0 and touches nothing when the entity
+/// has no strict ontology — an unreadable or non-strict ontology must never be
+/// read as "everything is illegal".
+///
+/// Takes `&Connection` and, for standalone callers, opens its own unchecked
+/// transaction and commits it. It does NOT compose inside an existing caller
+/// transaction — `unchecked_transaction` issues a real `BEGIN`, which SQLite
+/// rejects mid-transaction. Callers already inside a transaction should call
+/// [`purge_off_manifest_edges_in_tx`] directly.
+///
+/// Audit semantics: the per-edge "purged" warnings are emitted by THIS
+/// wrapper only AFTER the transaction commits, so every warning describes a
+/// deletion that actually survived. The transaction-scoped helper never logs.
+pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let doomed = purge_off_manifest_edges_in_tx(&tx, entity_id)?;
+    tx.commit()?;
+    for (id, edge_type) in &doomed {
+        warn_purged_off_manifest_edge(entity_id, id, edge_type);
+    }
+    Ok(doomed.len())
+}
+
+/// Transaction-scoped body of [`purge_off_manifest_edges`]: performs the purge
+/// with plain statements and NO transaction management, so callers that are
+/// already inside an open transaction (`unchecked_transaction` executes a real
+/// `BEGIN`, which SQLite rejects mid-transaction) can call this directly and
+/// keep the purge atomic with their own writes. The public wrapper owns the
+/// transaction for everyone else.
+///
+/// Returns the `(edge_id, edge_type)` pairs deleted, so the wrapper can emit
+/// committed-deletion audit warnings only after `COMMIT`. This helper NEVER
+/// logs: inside a caller-managed transaction a later rollback revives every
+/// deleted row, and a pre-commit warning would claim purges that never
+/// survived (CodeRabbit review, PR #171).
+///
+/// Count semantics match the wrapper: returns an empty list and deletes
+/// nothing when the entity has no strict ontology or no off-manifest edges.
+fn purge_off_manifest_edges_in_tx(
+    conn: &Connection,
+    entity_id: &str,
+) -> Result<Vec<(String, String)>> {
+    let Some(vocab) = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id) else {
+        return Ok(Vec::new());
+    };
+
+    // Collect first so the wrapper can audit each edge AFTER commit rather
+    // than vanishing inside one set-based DELETE.
+    let doomed: Vec<(String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, edge_type FROM llm_wiki_edges WHERE entity_id = ?1")?;
+        let mut rows = stmt.query([entity_id])?;
+        let mut v = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let edge_type: String = row.get(1)?;
+            if !vocab.contains(&edge_type.trim().to_lowercase()) {
+                v.push((id, edge_type));
+            }
+        }
+        v
+    };
+
+    if doomed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for (id, _) in &doomed {
+        conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [id])?;
+    }
+
+    Ok(doomed)
+}
+
+/// Sweep every off-manifest edge across every entity partition with edges.
+///
+/// The retroactive gate ([`purge_off_manifest_edges`]) takes one entity id at a
+/// time, and `llm_wiki_edges.entity_id` holds curated `ent_<hash>` ids — never
+/// tier ids (tier ids exist only as manifest anchors and the wiki_graph doc
+/// comment at `wiki_graph.rs:258` records this directly). So
+/// `purge_off_manifest_edges(conn, "tier_fact", …)` matches zero rows and the
+/// whole sweep is a silent no-op when invoked per tier. This helper
+/// enumerates `SELECT DISTINCT entity_id FROM llm_wiki_edges` and runs the
+/// per-id body for each, letting each curated id resolve its own vocabulary
+/// through the existing `tier_fact` fallback in
+/// `db::commit::resolve_strict_edge_vocabulary`.
+///
+/// One transaction wraps the whole sweep so the audit count and the row
+/// state agree — a crash mid-sweep either keeps every deletion (commit) or
+/// revives every deletion (rollback). Per-edge warnings are emitted only
+/// after `COMMIT`, so a rolled-back sweep never leaves warnings claiming
+/// deletions that did not survive.
+pub fn purge_off_manifest_edges_all(conn: &Connection) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Enumerate the curated `entity_id` partitions actually carrying edges.
+    // Tiers (`tier_fact`/`tier_wisdom`/`tier_working::*`) are not in this
+    // list — see the doc comment above — so iterating them would be a
+    // silent no-op that hides the sweep behind zero rows touched.
+    let entity_ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT DISTINCT entity_id FROM llm_wiki_edges")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut total = 0;
+    // Track per-entity doomed pairs so the wrapper can emit committed-deletion
+    // warnings only after `COMMIT`. The transaction-scoped helper never logs
+    // by contract; the wrapper owns the audit trail.
+    let mut all_doomed: Vec<(String, String, String)> = Vec::new();
+    for entity_id in &entity_ids {
+        let doomed = purge_off_manifest_edges_in_tx(&tx, entity_id)?;
+        total += doomed.len();
+        for (id, edge_type) in doomed {
+            all_doomed.push((entity_id.clone(), id, edge_type));
+        }
+    }
+
+    tx.commit()?;
+
+    for (entity_id, id, edge_type) in &all_doomed {
+        warn_purged_off_manifest_edge(entity_id, id, edge_type);
+    }
+
+    Ok(total)
+}
+
+/// Every purged edge is announced individually — a retroactive delete is
+/// destructive and an operator must be able to see exactly what went. Same
+/// two-variant pattern as `db::commit`: `tracing` where a subscriber exists,
+/// `eprintln!` in the Tauri build where none does. Called only AFTER the
+/// owning transaction commits: a rolled-back purge must not leave warnings
+/// claiming deletions that never survived.
+#[cfg(feature = "mcp-server")]
+fn warn_purged_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
+    tracing::warn!(
+        target: "ct::edge_purge",
+        entity_id = %entity_id,
+        edge_id = %edge_id,
+        edge_type = %edge_type,
+        "purged off-manifest edge (committed)"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_purged_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
+    eprintln!(
+        "[ct::edge_purge WARN] purged off-manifest edge (committed): \
+         entity_id={entity_id:?} edge_id={edge_id:?} edge_type={edge_type:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +394,59 @@ mod tests {
             params![id, entity_id, source, target],
         )
         .unwrap();
+    }
+
+    /// Install a **strict** ontology manifest declaring `edge_types` for
+    /// `entity_id`. Mirrors `db::commit::tests::seed_manifest`, narrowed to the
+    /// only shape the off-manifest sweep cares about.
+    fn seed_strict_ontology(conn: &Connection, entity_id: &str, edge_types: &[&str]) {
+        let edges: Vec<serde_json::Value> = edge_types
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": t, "source_type": "fact", "target_type": "fact", "description": ""
+                })
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "node_types": [{ "type": "fact", "description": "" }],
+            "edge_types": edges,
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, 'strict', ?2, 0)",
+            params![entity_id, manifest],
+        )
+        .unwrap();
+    }
+
+    /// Live entry with a generated id, for the sweep tests. The older
+    /// `seed_entry` takes an explicit id and is used by 10+ pre-existing tests;
+    /// this is an additive sibling rather than a migration of all of them.
+    fn seed_live_entry(conn: &Connection, entity_id: &str, label: &str) -> String {
+        let id = format!("fact_{entity_id}_{label}");
+        seed_entry(conn, &id, entity_id);
+        id
+    }
+
+    /// Live edge with an explicit `edge_type` (the older `seed_edge` hardcodes
+    /// `related_to`).
+    fn seed_live_edge(
+        conn: &Connection,
+        entity_id: &str,
+        source: &str,
+        target: &str,
+        edge_type: &str,
+    ) -> String {
+        let id = format!("edge_{entity_id}_{edge_type}");
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 100)",
+            params![id, entity_id, source, target, edge_type],
+        )
+        .unwrap();
+        id
     }
 
     fn edge_ids(conn: &Connection) -> Vec<String> {
@@ -539,5 +749,296 @@ mod tests {
         assert_eq!(removed, 1, "only the edge with two dead endpoints goes");
         assert_eq!(edge_ids(&conn).len(), 3);
         assert!(!edge_ids(&conn).contains(&"edge_dead_both".to_string()));
+    }
+
+    #[test]
+    fn purge_off_manifest_edges_removes_only_undeclared_types() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = seed_live_entry(&conn, "ent_demo", "A");
+        let b = seed_live_entry(&conn, "ent_demo", "B");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "depends_on");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "fabricated_2026-09-09");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_demo").unwrap();
+        assert_eq!(removed, 1, "exactly the off-manifest edge must be purged");
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT edge_type FROM llm_wiki_edges WHERE entity_id = 'ent_demo'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining, vec!["depends_on".to_string()]);
+    }
+
+    #[test]
+    fn purge_off_manifest_edges_is_a_noop_without_a_strict_ontology() {
+        let conn = open_in_memory().unwrap();
+        let a = seed_live_entry(&conn, "ent_open", "A");
+        let b = seed_live_entry(&conn, "ent_open", "B");
+        seed_live_edge(&conn, "ent_open", &a, &b, "anything");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_open").unwrap();
+        assert_eq!(removed, 0, "non-strict brains must never be swept");
+        assert_eq!(edge_ids(&conn).len(), 1);
+    }
+
+    /// Regression test for the transaction-composition bug: the old
+    /// `purge_off_manifest_edges` called `unchecked_transaction()` in its own
+    /// body, and `unchecked_transaction` executes a real `BEGIN` — which SQLite
+    /// rejects inside an already-open caller transaction, so the documented
+    /// "composes inside a caller's transaction" contract was broken. The
+    /// transaction-scoped helper `purge_off_manifest_edges_in_tx` must work
+    /// inside an open caller transaction, be visible within it, and roll back
+    /// with it.
+    #[test]
+    fn purge_off_manifest_helper_composes_inside_a_caller_transaction() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = seed_live_entry(&conn, "ent_demo", "A");
+        let b = seed_live_entry(&conn, "ent_demo", "B");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "depends_on");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "fabricated_2026-09-09");
+
+        // Caller opens its own transaction (a real BEGIN is active on the
+        // connection from here on).
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // The helper must run against the open caller transaction without
+        // attempting a nested BEGIN. It returns the doomed pairs (the
+        // wrapper audits them post-commit); it must NOT log inside the tx.
+        let doomed = purge_off_manifest_edges_in_tx(&tx, "ent_demo").unwrap();
+        assert_eq!(
+            doomed.len(),
+            1,
+            "exactly the off-manifest edge is purged in-tx"
+        );
+
+        // The purge is visible inside the transaction.
+        assert_eq!(
+            edge_ids(&tx),
+            vec!["edge_ent_demo_depends_on".to_string()],
+            "the off-manifest edge must be gone inside the open transaction"
+        );
+
+        // ...and rolls back together with the caller transaction.
+        tx.rollback().unwrap();
+        assert_eq!(
+            edge_ids(&conn).len(),
+            2,
+            "a rolled-back caller transaction must restore the purged edge"
+        );
+    }
+
+    /// The public wrapper must still work when NO caller transaction is open,
+    /// and its empty-doomed-set path must return 0 without committing anything
+    /// harmful (count semantics unchanged).
+    #[test]
+    fn purge_off_manifest_edges_wrapper_still_commits_on_standalone_use() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = seed_live_entry(&conn, "ent_demo", "A");
+        let b = seed_live_entry(&conn, "ent_demo", "B");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "fabricated_2026-09-09");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_demo").unwrap();
+        assert_eq!(removed, 1, "wrapper still purges and commits standalone");
+        assert!(
+            edge_ids(&conn).is_empty(),
+            "wrapper commit must persist the purge (the only seeded edge was off-manifest)"
+        );
+    }
+
+    /// Regression test for the curated-entity anchoring trap: the per-id
+    /// purge is a no-op when an entry-only fixture is used (because the
+    /// confirmed corruption lives on edges whose endpoints are
+    /// `curated_entities` ids, not `llm_wiki_entries` ids). An entry-only
+    /// fixture can pass while the real corruption survives — the test for
+    /// the `sweep_off_manifest_edges` family must anchor edges on curated
+    /// entities, the way the live corruption is anchored.
+    #[test]
+    fn purge_off_manifest_edges_removes_curated_entity_anchored_rows() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        // Endpoints are live curated_entities, not llm_wiki_entries.
+        seed_entity(&conn, "ce_a");
+        seed_entity(&conn, "ce_b");
+        // In-manifest edge and an off-manifest edge, both anchored on
+        // curated entity ids.
+        seed_live_edge(&conn, "ent_demo", "ce_a", "ce_b", "depends_on");
+        seed_live_edge(
+            &conn,
+            "ent_demo",
+            "ce_a",
+            "ce_b",
+            "fabricated_2026-09-09",
+        );
+
+        let removed = purge_off_manifest_edges(&conn, "ent_demo").unwrap();
+        assert_eq!(
+            removed, 1,
+            "curated-entity anchored off-manifest edge must be purged"
+        );
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT edge_type FROM llm_wiki_edges WHERE entity_id = 'ent_demo'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec!["depends_on".to_string()],
+            "the in-manifest curated-entity edge must survive"
+        );
+    }
+
+    /// Regression test for the operator-sweep helper: it must enumerate the
+    /// curated `entity_id` partitions actually carrying edges
+    /// (`SELECT DISTINCT entity_id FROM llm_wiki_edges`), not the seeded
+    /// tier ids. Iterating tier ids matches zero rows and silently hides the
+    /// sweep — that was the trap the per-id `purge_off_manifest_edges`
+    /// alone falls into without a caller that knows about the
+    /// entity-vs-tier distinction.
+    #[test]
+    fn purge_off_manifest_edges_all_iterates_curated_entity_ids_not_tiers() {
+        let conn = open_in_memory().unwrap();
+        // A real curated entity carrying an off-manifest edge.
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        seed_entity(&conn, "ce_a");
+        seed_entity(&conn, "ce_b");
+        seed_live_edge(&conn, "ent_demo", "ce_a", "ce_b", "fabricated");
+        seed_live_edge(&conn, "ent_demo", "ce_a", "ce_b", "depends_on");
+
+        // A brain partition that is only an anchor for manifests, never the
+        // `entity_id` of an edge — the seeded tier ids must NOT appear in
+        // the SELECT DISTINCT enumeration.
+        seed_strict_ontology(&conn, "tier_fact", &["depends_on"]);
+
+        let removed = purge_off_manifest_edges_all(&conn).unwrap();
+        assert_eq!(
+            removed, 1,
+            "only the curated-entity anchored off-manifest edge is purged"
+        );
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT edge_type FROM llm_wiki_edges ORDER BY edge_type")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec!["depends_on".to_string()],
+            "the in-manifest edge must survive across both anchors"
+        );
+    }
+
+    /// The sweep-all helper must also handle a brain whose edges are split
+    /// across multiple curated-entity partitions, each with its own strict
+    /// manifest. A per-tier iteration would have missed this entire case.
+    #[test]
+    fn purge_off_manifest_edges_all_handles_multiple_curated_entities() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_a", &["depends_on"]);
+        seed_strict_ontology(&conn, "ent_b", &["related_to"]);
+
+        // ent_a partition
+        seed_entity(&conn, "cea_1");
+        seed_entity(&conn, "cea_2");
+        seed_live_edge(&conn, "ent_a", "cea_1", "cea_2", "depends_on");
+        seed_live_edge(&conn, "ent_a", "cea_1", "cea_2", "off_manifest_a");
+
+        // ent_b partition
+        seed_entity(&conn, "ceb_1");
+        seed_entity(&conn, "ceb_2");
+        seed_live_edge(&conn, "ent_b", "ceb_1", "ceb_2", "related_to");
+        seed_live_edge(&conn, "ent_b", "ceb_1", "ceb_2", "off_manifest_b");
+
+        let removed = purge_off_manifest_edges_all(&conn).unwrap();
+        assert_eq!(
+            removed, 2,
+            "one off-manifest edge per curated-entity partition is purged"
+        );
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT entity_id || ':' || edge_type FROM llm_wiki_edges ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                "ent_a:depends_on".to_string(),
+                "ent_b:related_to".to_string(),
+            ],
+            "exactly the in-manifest edges survive in each partition"
+        );
+    }
+
+    /// No strict manifests anywhere → sweep-all is a no-op, even when edges
+    /// exist. An unreadable or non-strict ontology must never be read as
+    /// "everything is illegal".
+    #[test]
+    fn purge_off_manifest_edges_all_is_a_noop_without_any_strict_manifest() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ce_a");
+        seed_entity(&conn, "ce_b");
+        seed_live_edge(&conn, "ent_open", "ce_a", "ce_b", "anything");
+
+        let removed = purge_off_manifest_edges_all(&conn).unwrap();
+        assert_eq!(
+            removed, 0,
+            "no strict ontology means no retroactive gate is applied"
+        );
+        assert_eq!(edge_ids(&conn).len(), 1);
+    }
+
+    /// The sweep-all helper must NOT delete edges that are valid against
+    /// their curated-entity partition's strict manifest, even when a
+    /// different partition declares a different vocabulary. Each entity
+    /// resolves its vocabulary through its own row (no shared gating).
+    #[test]
+    fn purge_off_manifest_edges_all_does_not_cross_partition_vocabularies() {
+        let conn = open_in_memory().unwrap();
+        // ent_a declares only `depends_on`; ent_b declares only `related_to`.
+        seed_strict_ontology(&conn, "ent_a", &["depends_on"]);
+        seed_strict_ontology(&conn, "ent_b", &["related_to"]);
+        // Edge in ent_a with type `related_to` is off-manifest FOR ent_a and
+        // must be purged. Edge in ent_b with the same type is in-manifest
+        // FOR ent_b and must survive — the per-entity vocabulary resolution
+        // is what guarantees this.
+        seed_entity(&conn, "ce_a1");
+        seed_entity(&conn, "ce_a2");
+        seed_entity(&conn, "ce_b1");
+        seed_entity(&conn, "ce_b2");
+        seed_live_edge(&conn, "ent_a", "ce_a1", "ce_a2", "related_to");
+        seed_live_edge(&conn, "ent_b", "ce_b1", "ce_b2", "related_to");
+
+        let removed = purge_off_manifest_edges_all(&conn).unwrap();
+        assert_eq!(
+            removed, 1,
+            "only the off-manifest edge for its OWN partition is purged"
+        );
+        let remaining: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT entity_id, edge_type FROM llm_wiki_edges ORDER BY entity_id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![("ent_b".to_string(), "related_to".to_string())],
+            "the ent_b edge stays — its partition declares `related_to`"
+        );
     }
 }

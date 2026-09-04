@@ -30,7 +30,7 @@ use tauri_app_lib::search::{bytes_to_f32, cosine_similarity};
 // Items that stay in cli_common (write-side concerns, Brain, EXIT_NO_RESULTS).
 // We import them here so the command fns can refer to them by short name.
 use crate::paths::print_json;
-use crate::write::{open_ro, resolve, EXIT_NO_RESULTS};
+use crate::write::{open_ro, open_rw, resolve, EXIT_NO_RESULTS};
 
 // ---------------------------------------------------------------------------
 // Shared types / constants re-homed from cli_common.
@@ -660,6 +660,31 @@ pub fn wiki_get_cmd(entity_id: &str, json_mode: bool) -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(w).expect("serialize"));
         }
     }
+    Ok(0)
+}
+
+/// `ct wiki sweep`: retroactive sweep of edges whose `edge_type` is not in
+/// the entity's strict ontology manifest (issue #158). Requires `--yes` so a
+/// mistyped intent never silently deletes live rows — mirrors the refusal
+/// pattern at `bin/ct.rs::librarian_run_cmd`. Spec §4 trigger (c): operator
+/// surface for the same sweep that `applyOntologyChange` runs automatically.
+pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
+    if !yes {
+        let brain = resolve()?;
+        let conn = open_ro(&brain)?;
+        let edges_total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))?;
+        eprintln!(
+            "refusing: `ct wiki sweep` would scan {edges_total} edge(s) in {} \
+             (a write). Pass --yes to proceed.",
+            brain.paths.db_path.display()
+        );
+        return Ok(1);
+    }
+    let brain = resolve()?;
+    let conn = open_rw(&brain)?;
+    let removed = tauri_app_lib::db::edge_purge::purge_off_manifest_edges_all(&conn)?;
+    println!("purged {removed} off-manifest edge(s)");
     Ok(0)
 }
 

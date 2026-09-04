@@ -74,6 +74,40 @@ describe('seedManifestsIfAbsent', () => {
     expect(out).toEqual({ seeded: [], skipped: ['tier_fact'], failed: false });
     expect(wiki.setOntologyManifests).not.toHaveBeenCalled();
   });
+
+  /**
+   * LATENT reachability pin (issue #158 audit, 2026-09-04). The single
+   * `manifestFor(selection)` and `modeFor(selection)` result is reused for
+   * every entity id in one batch — `seedManifestsIfAbsent` does not allow
+   * per-id divergence. This is what makes
+   * `db::commit::resolve_strict_edge_vocabulary`'s `Ok(_) if !is_last =>
+   * continue` branch and the hardcoded `[entity_id, "tier_fact"]` lookup
+   * order unreachable today: every partition sees the same effective
+   * manifest, so any "absent" lookup result is functionally equivalent to
+   * "non-strict", and the tier_fact fallback only matters as the canonical
+   * seeded partition. The test below pins the shape — if a future change
+   * adds per-id manifests here, it MUST also revisit the resolver.
+   */
+  it('passes the same manifest and mode to every entity id in one batch', async () => {
+    const wiki = fakeWiki();
+    await seedManifestsIfAbsent(wiki as never, 'schema-software-org', [
+      'tier_fact',
+      'tier_wisdom',
+      'tier_working::late',
+    ]);
+    const call = vi.mocked(wiki.setOntologyManifests).mock.calls[0]!;
+    const [entries, opts] = call as [Entry[], { ifAbsent?: boolean }];
+    expect(opts?.ifAbsent).toBe(true);
+    // Every entry points at the same object — structural identity, not
+    // just deep equality. Per-id divergence is not expressible through
+    // this surface today.
+    const firstManifest = entries[0]!.manifest;
+    const firstMode = entries[0]!.mode;
+    for (const e of entries) {
+      expect(e.manifest).toBe(firstManifest);
+      expect(e.mode).toBe(firstMode);
+    }
+  });
 });
 
 

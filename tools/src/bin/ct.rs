@@ -177,6 +177,14 @@ enum WikiCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Sweep edges whose `edge_type` is not declared by the entity's strict
+    /// ontology manifest (spec §4 trigger (c)). Refuses without `--yes` so a
+    /// mistyped intent never silently deletes live rows.
+    Sweep {
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,6 +261,7 @@ fn run(cmd: Cmd) -> Result<i32> {
                 dry_run,
                 yes,
             } => cli_common::wiki_forget_cmd(refs, like, dry_run, yes),
+            WikiCmd::Sweep { yes } => cli_common::wiki_sweep_cmd(yes),
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),

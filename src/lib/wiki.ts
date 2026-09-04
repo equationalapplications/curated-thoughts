@@ -185,6 +185,30 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
     }
     throw err;
   }
+
+  // Spec §4 trigger (a): retroactive sweep of off-manifest edges.
+  // Placement is intentional — outside the try/catch so a sweep failure
+  // cannot trigger the rollback path above. The rollback path re-runs
+  // backfill and has no undo, and a hard delete inside that window is
+  // unrecoverable: a later tier's failure would restore manifests while
+  // the swept edges are gone forever. The new manifest is already
+  // committed at this point — we are cleaning grandfathered rows that
+  // the retroactive gate at `db::commit` does not write today. On
+  // sweep failure we surface the error but do not roll the ontology
+  // change back: the user has already committed to `next`.
+  try {
+    const purged = await invoke<number>("purge_off_manifest_edges_cmd");
+    if (purged > 0) {
+      console.info(
+        `[applyOntologyChange] swept ${purged} off-manifest edge(s) for new manifest`,
+      );
+    }
+  } catch (sweepErr) {
+    console.error(
+      "[applyOntologyChange] off-manifest edge sweep failed:",
+      sweepErr,
+    );
+  }
 }
 
 export async function initWorkspaceId(vaultPath: string): Promise<void> {

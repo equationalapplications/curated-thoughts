@@ -612,9 +612,11 @@ mod tests {
 
         apply_backfill(&mut conn, "wisdom").unwrap();
         let tier: Option<String> = conn
-            .query_row("SELECT tier FROM llm_wiki_entries WHERE id='j_win'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT tier FROM llm_wiki_entries WHERE id='j_win'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(tier.as_deref(), Some("wisdom"));
     }

@@ -117,12 +117,28 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<WikiTask>> {
 }
 
 fn load_edges(conn: &Connection, entity_id: &str) -> Result<Vec<(String, String, String)>> {
+    // Read-side manifest filter (issue #158). Bundle export was the second
+    // user-visible surface Brain Connections missed: an exported bundle
+    // carried the off-manifest edge into another vault. Apply the same gate
+    // `wiki_graph::fetch_neighbors` uses on the traversal path.
+    let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
     let mut stmt = conn.prepare(
         "SELECT source_id, target_id, edge_type FROM llm_wiki_edges
          WHERE entity_id = ?1 ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([entity_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut out = Vec::new();
+    for row in rows {
+        let (source_id, target_id, edge_type): (String, String, String) = row?;
+        let keep = match &vocab {
+            Some(v) => v.contains(&edge_type.trim().to_lowercase()),
+            None => true,
+        };
+        if keep {
+            out.push((source_id, target_id, edge_type));
+        }
+    }
+    Ok(out)
 }
 
 fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<ExportEvent>> {
@@ -211,5 +227,42 @@ mod tests {
         seed(&conn);
         let none = load_export_entities(&conn, Some(&["ent_missing".to_string()])).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// Regression test for issue #158 on the bundle-export read path.
+    /// `load_edges` is private — the public caller `load_export_entities`
+    /// is exercised here, asserting that an exported bundle does not carry
+    /// off-manifest edges out of a strict brain.
+    #[test]
+    fn load_edges_filters_off_manifest_types_when_ontology_is_strict() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn);
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent_a', 'strict',
+                     '{\"node_types\":[{\"type\":\"fact\",\"description\":\"\"}],\
+                      \"edge_types\":[{\"type\":\"blocks\",\"source_type\":\"fact\",\
+                      \"target_type\":\"task\",\"description\":\"\"}]}', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_off', 'ent_a', 'fact_1', 'task_1', 'fabricated_2026-09-09', 101)",
+            [],
+        )
+        .unwrap();
+
+        let exported = load_export_entities(&conn, None).unwrap();
+        let edge_types: Vec<&str> = exported[0]
+            .edges
+            .iter()
+            .map(|(_, _, t)| t.as_str())
+            .collect();
+        assert_eq!(
+            edge_types,
+            vec!["blocks"],
+            "an exported bundle must not leak off-manifest edges"
+        );
     }
 }

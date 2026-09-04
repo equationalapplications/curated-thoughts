@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 const MAX_CANDIDATES: usize = 8;
@@ -571,9 +571,7 @@ fn assemble_numbered_context(chunks: &[ChunkRow], numbered: &[NumberedChunk]) ->
     body
 }
 
-fn build_system_prompt(mode: SynthesisMode) -> &'static str {
-    match mode {
-        SynthesisMode::Summarize => {
+const SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE: &str =
             "You are a knowledge librarian. Analyze the document and emit structured JSON proposals for entity summary updates only. \
              Output ONLY valid JSON matching the schema — no markdown fences, no commentary.\n\n\
              Schema:\n\
@@ -584,9 +582,9 @@ fn build_system_prompt(mode: SynthesisMode) -> &'static str {
              - For updates/archives, target_id must be a fact_id from CANDIDATE ENTITIES.\n\
              - existing_id must be from CANDIDATE ENTITIES.\n\
              - In summarize mode: only summary_update — leave facts, edges, tasks as empty arrays.\n\
-             - Contradictions with existing facts: propose fact_update or fact_archive+fact_add with reasoning (not in summarize mode)."
-        }
-        SynthesisMode::Synthesize => {
+             - Contradictions with existing facts: propose fact_update or fact_archive+fact_add with reasoning (not in summarize mode).";
+
+const SYNTHESIS_SYSTEM_PROMPT_BASE_SYNTHESIZE: &str =
             "You are a knowledge librarian. Analyze the document and emit structured JSON proposals for facts, edges, tasks, and optional summary updates. \
              Output ONLY valid JSON matching the schema — no markdown fences, no commentary.\n\n\
              Schema:\n\
@@ -600,9 +598,119 @@ fn build_system_prompt(mode: SynthesisMode) -> &'static str {
              - For fact update/archive, target_id must be a fact_id from CANDIDATE ENTITIES.\n\
              - existing_id must be from CANDIDATE ENTITIES.\n\
              - Edge endpoints: \"self\" = this proposal's target entity; new_name refs sibling proposals in the same run.\n\
-             - Do not modify ANCHOR TRUTH chunks; contradictions become fact_update or fact_archive proposals with reasoning."
+             - Do not modify ANCHOR TRUTH chunks; contradictions become fact_update or fact_archive proposals with reasoning.";
+
+/// Build the synthesis system prompt for `mode`.
+///
+/// When `edge_vocabulary` is non-empty the prompt names the closed set of
+/// legal `edge_type` values. Without this the model invents plausible-looking
+/// snake_case types (issue #158 observed `has_open_bug_..._2026-09-09`, a
+/// future date that appears nowhere in the corpus). Constraining generation
+/// is cheaper than quarantining afterwards.
+///
+/// `edge_vocabulary` is the batch-wide default (the `tier_fact` partition
+/// fallback; also the whole constraint when the run has no candidate
+/// entities). `edge_vocabulary_by_target` carries per-candidate overrides
+/// keyed by the entity id the proposal will target: a document that proposes
+/// updates to several CandidateEntities must show each target its own
+/// manifest vocabulary, because a single shared clause resolved from
+/// `source_chunks.first()` lets edges aimed at other targets name types that
+/// `commit::resolve_strict_edge_vocabulary` then rejects at commit time.
+/// Per-target clauses are emitted as `For <id>: ...`; the model is told to
+/// match the clause of the entity it targets.
+///
+/// The clause is appended verbatim to whichever mode's base text applies; the
+/// caller decides whether a vocabulary is relevant at all (summarize mode
+/// emits no edges, so it passes `&[]` and an empty map).
+fn build_system_prompt(
+    mode: SynthesisMode,
+    edge_vocabulary: &[&str],
+    edge_vocabulary_by_target: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let mut prompt = String::from(match mode {
+        SynthesisMode::Summarize => SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE,
+        SynthesisMode::Synthesize => SYNTHESIS_SYSTEM_PROMPT_BASE_SYNTHESIZE,
+    });
+    if edge_vocabulary_by_target.is_empty() {
+        if !edge_vocabulary.is_empty() {
+            prompt.push_str(&format!(
+                "\n\nUse ONLY the following edge_type values, exactly as written: {}. \
+                 If no listed edge_type fits a relationship, omit the edge entirely \
+                 rather than inventing a new type.",
+                edge_vocabulary.join(", ")
+            ));
+        }
+        return prompt;
+    }
+    prompt.push_str(
+        "\n\nEach candidate entity declares its own edge_type vocabulary. \
+         For a proposal targeting existing_id X, use ONLY the edge_type values \
+         listed for X (fall back to the shared list when X has none). \
+         If no listed edge_type fits a relationship, omit the edge entirely \
+         rather than inventing a new type.",
+    );
+    if !edge_vocabulary.is_empty() {
+        prompt.push_str(&format!(
+            "\nShared edge_type values (any target): {}.",
+            edge_vocabulary.join(", ")
+        ));
+    }
+    for (target, types) in edge_vocabulary_by_target {
+        prompt.push_str(&format!(
+            "\nFor {target}: use ONLY these edge_type values, exactly as written: {}.",
+            types.join(", ")
+        ));
+    }
+    prompt
+}
+
+/// Resolve the strict edge vocabulary for one entity id, mirroring the
+/// lookup order of the pre-fix call site: the entity id itself first, then
+/// the `tier_fact` partition (manifests are seeded against partitions, so
+/// new targets — whose entity id only exists after commit — always resolve
+/// through the fallback).
+///
+/// Strict-only: in `emergent`/`off` mode the writer accepts undeclared
+/// types, so telling the model the vocabulary is closed over-constrains it.
+/// Anything else — no manifest, an empty vocabulary, a read error — returns
+/// an empty vector, i.e. no constraint for this target.
+fn resolve_entity_edge_vocabulary(conn: &Connection, entity_id: &str) -> Vec<String> {
+    if entity_id.is_empty() {
+        return Vec::new();
+    }
+    for lookup in [entity_id, "tier_fact"] {
+        if lookup.is_empty() {
+            continue;
+        }
+        match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+            Ok(o) if o.mode == "strict" => {
+                return o
+                    .manifest
+                    .map(|m| {
+                        // Mirror `db::commit::resolve_strict_edge_vocabulary`
+                        // (commit.rs:154): lowercase + trim so a prompt
+                        // looser or tighter than the gate that judges its
+                        // output never lets the model propose types the
+                        // writer will silently drop. Without this, mixed-case
+                        // or padded manifest entries are prompted verbatim
+                        // but matched against the trimmed/lowercased gate.
+                        m.edge_type_names()
+                            .into_iter()
+                            .map(|n| n.trim().to_lowercase())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "[synthesis] ontology read failed for {lookup}: {e:#}; \
+                     edge vocabulary is not constrained for this target"
+                );
+            }
         }
     }
+    Vec::new()
 }
 
 fn truncate_context(text: &str) -> String {
@@ -1037,10 +1145,52 @@ pub(crate) fn run_synthesis_with_completer(
     };
     let truncated = truncate_context(&full_context);
 
-    let system = build_system_prompt(mode);
+    // Constrain edge extraction to each target's declared vocabulary (#158).
+    // Summarize mode emits no edges, so it never carries a vocabulary.
+    //
+    // The lookup mirrors the intent of `db::commit::resolve_strict_edge_vocabulary`
+    // on both axes, because a prompt looser or tighter than the gate that judges
+    // its output is worse than no prompt constraint at all:
+    //   - Per candidate. A document can propose updates to several
+    //     CandidateEntities with different manifests; resolving one shared
+    //     vocabulary from `source_chunks.first()` gave every proposal the
+    //     first entity's vocabulary, so edges for other targets named types
+    //     the commit gate then rejected. Each candidate's id is known
+    //     pre-prompt, so resolve per id. `new` targets have no id until
+    //     commit, so they ride the shared `tier_fact` fallback below.
+    //   - Two-id order, direct hit preferred. Chunks carry curated ids, but
+    //     manifests are seeded against partitions, so a direct lookup on the
+    //     curated id normally misses; `tier_fact` is the canonical seeded
+    //     partition.
+    //   - Strict-only. In `emergent`/`off` mode the writer accepts undeclared
+    //     types, so telling the model the vocabulary is closed over-constrains it.
+    // Anything else — no manifest, non-strict mode, an empty vocabulary, a read
+    // error — degrades to today's unconstrained prompt, byte-identical.
+    let mut vocab_by_target: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let vocab_owned: Vec<String> = match mode {
+        SynthesisMode::Summarize => Vec::new(),
+        SynthesisMode::Synthesize => {
+            let shared = resolve_entity_edge_vocabulary(
+                conn,
+                source_chunks
+                    .first()
+                    .map(|c| c.entity_id.as_str())
+                    .unwrap_or(""),
+            );
+            for candidate in &candidates {
+                let resolved = resolve_entity_edge_vocabulary(conn, &candidate.id);
+                if !resolved.is_empty() {
+                    vocab_by_target.insert(candidate.id.clone(), resolved);
+                }
+            }
+            shared
+        }
+    };
+    let vocab: Vec<&str> = vocab_owned.iter().map(String::as_str).collect();
+    let system = build_system_prompt(mode, &vocab, &vocab_by_target);
     let user = format!("Document to analyze:\n\n{truncated}");
 
-    let raw = match call_llm_with_retry(completer, system, &user) {
+    let raw = match call_llm_with_retry(completer, &system, &user) {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("synthesis JSON failure for {source_path}: {e:#}");
@@ -1110,6 +1260,9 @@ mod tests {
     struct MockCompleter {
         responses: Vec<String>,
         call: std::sync::atomic::AtomicUsize,
+        /// System prompts as actually sent, in call order — the only way to
+        /// assert on prompt construction through the real call path.
+        systems: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockCompleter {
@@ -1117,12 +1270,23 @@ mod tests {
             Self {
                 responses,
                 call: std::sync::atomic::AtomicUsize::new(0),
+                systems: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn last_system(&self) -> String {
+            self.systems
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("completer was never called")
         }
     }
 
     impl LlmCompleter for MockCompleter {
-        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+        fn complete(&self, system: &str, _user: &str) -> Result<String> {
+            self.systems.lock().unwrap().push(system.to_string());
             let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.responses
                 .get(idx)
@@ -1866,6 +2030,223 @@ mod tests {
             mock.call.load(Ordering::SeqCst),
             0,
             "gate must be stable against the configured-model watermark"
+        );
+    }
+
+    #[test]
+    fn system_prompt_lists_the_declared_edge_vocabulary() {
+        let prompt = build_system_prompt(
+            SynthesisMode::Synthesize,
+            &["depends_on", "owned_by"],
+            &BTreeMap::new(),
+        );
+        assert!(
+            prompt.contains("depends_on") && prompt.contains("owned_by"),
+            "prompt must name the legal edge types, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("ONLY"),
+            "prompt must state the vocabulary is closed"
+        );
+    }
+
+    #[test]
+    fn system_prompt_without_vocabulary_is_unchanged_shape() {
+        let prompt = build_system_prompt(SynthesisMode::Synthesize, &[], &BTreeMap::new());
+        assert!(
+            !prompt.contains("ONLY the following edge_type"),
+            "an empty vocabulary must not emit a closed-vocabulary clause"
+        );
+    }
+
+    /// Manifests are seeded against **partitions**, not curated ids, so the
+    /// prompt-side lookup must fall back to `tier_fact` exactly as the
+    /// commit-side gate intends to. Without the fallback the vocabulary clause
+    /// never fires in production while the gate still rejects the edges the
+    /// unconstrained prompt produced (#158).
+    #[test]
+    fn synthesis_prompt_resolves_strict_manifest_via_partition_fallback() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Alpha project details here",
+        );
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+
+        // Strict ontology seeded at the partition, NOT at the chunk's entity id.
+        let manifest = serde_json::json!({
+            "node_types": [],
+            "edge_types": [{ "type": "depends_on" }, { "type": "owned_by" }],
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 0)",
+            params![manifest],
+        )
+        .unwrap();
+
+        let json = serde_json::json!({ "proposals": [] }).to_string();
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            "test-model",
+            false,
+        )
+        .unwrap();
+
+        let system = mock.last_system();
+        // Per-candidate mode: the tier_fact fallback becomes the SHARED list,
+        // and candidates without their own manifest ride it via the shared
+        // clause (ent-alpha has no direct manifest here).
+        assert!(
+            system.contains("Each candidate entity declares its own edge_type vocabulary"),
+            "per-candidate mode must be announced, got: {system}"
+        );
+        assert!(
+            system.contains("Shared edge_type values (any target): depends_on, owned_by."),
+            "the tier_fact fallback must become the shared clause, got: {system}"
+        );
+        assert!(
+            system.contains("For ent-alpha:") && system.contains("depends_on, owned_by."),
+            "a strict partition manifest must close the edge vocabulary, got: {system}"
+        );
+        assert!(
+            !system.contains("beta_only_rel"),
+            "no unrelated vocabulary may leak, got: {system}"
+        );
+    }
+
+    /// Regression: a batch that proposes updates to multiple CandidateEntities
+    /// must give each target its OWN manifest vocabulary in the prompt. The
+    /// pre-fix code resolved one shared vocabulary from
+    /// `source_chunks.first().entity_id` and stamped it onto every proposal, so
+    /// edges aimed at the second entity (with a disjoint manifest) named types
+    /// the commit gate `resolve_strict_edge_vocabulary` then rejected and
+    /// `commit_edge_add` silently dropped.
+    #[test]
+    fn synthesis_prompt_carries_per_candidate_vocabulary_clauses() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Alpha and Beta project details here",
+        );
+
+        // Two candidate entities with disjoint strict manifests, both hit by
+        // name match (their names appear in the chunk text).
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-a");
+        seed_entity_with_fact(&conn, "ent-beta", "Beta", "fact-b");
+        let manifest_alpha = serde_json::json!({
+            "node_types": [],
+            "edge_types": [{ "type": "alpha_only_rel" }, { "type": "depends_on" }],
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent-alpha', 'strict', ?1, 0)",
+            params![manifest_alpha],
+        )
+        .unwrap();
+        let manifest_beta = serde_json::json!({
+            "node_types": [],
+            "edge_types": [{ "type": "beta_only_rel" }],
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent-beta', 'strict', ?1, 0)",
+            params![manifest_beta],
+        )
+        .unwrap();
+
+        // The source chunk's entity id has NO manifest of its own: under the
+        // old code the batch-wide lookup fell through to `tier_fact` (empty
+        // here), so the prompt carried no constraint at all — and had the
+        // fallback been seeded, BOTH candidates would have received its
+        // vocabulary instead of their own.
+        let json = serde_json::json!({ "proposals": [] }).to_string();
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "ent-source".into(),
+            text: "Alpha and Beta project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            "test-model",
+            false,
+        )
+        .unwrap();
+
+        let system = mock.last_system();
+        assert!(
+            system.contains("Each candidate entity declares its own edge_type vocabulary"),
+            "per-candidate mode must be announced, got: {system}"
+        );
+        assert!(
+            system.contains("For ent-alpha:") && system.contains("alpha_only_rel"),
+            "ent-alpha's clause must carry its own manifest types, got: {system}"
+        );
+        assert!(
+            system.contains("For ent-beta:") && system.contains("beta_only_rel"),
+            "ent-beta's clause must carry its own manifest types, got: {system}"
+        );
+        // Disjointness: ent-alpha's clause must NOT name ent-beta's types and
+        // vice versa — the per-candidate isolation that was the bug.
+        let alpha_clause = system
+            .split("For ent-alpha: ")
+            .nth(1)
+            .unwrap()
+            .split('\n')
+            .next()
+            .unwrap();
+        let beta_clause = system
+            .split("For ent-beta: ")
+            .nth(1)
+            .unwrap()
+            .split('\n')
+            .next()
+            .unwrap();
+        assert!(
+            !alpha_clause.contains("beta_only_rel"),
+            "ent-alpha's clause leaked ent-beta's vocabulary: {alpha_clause}"
+        );
+        assert!(
+            !beta_clause.contains("alpha_only_rel") && !beta_clause.contains("depends_on"),
+            "ent-beta's clause leaked ent-alpha's vocabulary: {beta_clause}"
         );
     }
 }

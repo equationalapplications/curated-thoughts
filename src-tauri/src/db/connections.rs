@@ -111,6 +111,15 @@ fn escape_like(input: &str) -> String {
 
 /// Outgoing edges (endpoint labels resolved) + name-based wikilink backlinks.
 pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<EntityConnections> {
+    // Read-side manifest filter (issue #158). Mirrors the gate
+    // `wiki_graph::fetch_neighbors` applies on the traversal path: when the
+    // entity has a strict ontology, off-manifest edges are grandfathered
+    // pre-v1.42.0 rows the write-time gate never retroactively deletes, and
+    // Brain Connections is exactly the surface a stale row is most visible.
+    // Without a strict ontology, every edge is admitted (the gate is
+    // closed, so the filter is a no-op).
+    let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
+
     let mut outgoing = Vec::new();
     {
         let mut stmt = conn.prepare(
@@ -122,7 +131,15 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
             .query_map([entity_id], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|(_, _, _, edge_type): &(String, String, String, String)| {
+                match &vocab {
+                    Some(v) => v.contains(&edge_type.trim().to_lowercase()),
+                    None => true,
+                }
+            })
+            .collect();
 
         // Collect all endpoint IDs for batch-loading (deduplicated)
         let mut dedup_ids = std::collections::HashSet::new();
@@ -288,5 +305,91 @@ mod tests {
             .map(|b| b.name.as_str())
             .collect();
         assert_eq!(names, vec!["Exact Referrer"]);
+    }
+
+    /// Regression test for issue #158 on the Brain Connections read path.
+    /// With a strict ontology, only in-manifest edges are surfaced; without
+    /// one, every edge is admitted (the gate is closed, so the filter is a
+    /// no-op).
+    ///
+    /// The off-manifest fixture row is anchored on `curated_entities` ids
+    /// (`ce_src`/`ce_tgt`), the way the live corruption is anchored. An
+    /// entry-only fixture would let this pass while real corruption
+    /// survives.
+    #[test]
+    fn outgoing_edges_filter_off_manifest_types_when_ontology_is_strict() {
+        let conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn, "Strict", "");
+        // Endpoints anchored on curated entities (not entries) — the live
+        // corruption shape.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at, deleted_at)
+             VALUES ('ce_src', 'src', 'concept', '', 1, 1, NULL),
+                    ('ce_tgt', 'tgt', 'concept', '', 1, 1, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, 'strict',
+                     '{\"node_types\":[{\"type\":\"concept\",\"description\":\"\"}],\
+                      \"edge_types\":[{\"type\":\"depends_on\",\"source_type\":\"concept\",\
+                      \"target_type\":\"concept\",\"description\":\"\"}]}', 0)",
+            params![&entity_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_ok', ?1, 'ce_src', 'ce_tgt', 'depends_on', 100),
+                    ('edge_off', ?1, 'ce_src', 'ce_tgt', 'fabricated_2026-09-09', 100)",
+            params![&entity_id],
+        )
+        .unwrap();
+
+        let connections = get_entity_connections(&conn, &entity_id).unwrap();
+        let edge_types: Vec<&str> = connections
+            .outgoing
+            .iter()
+            .map(|e| e.edge_type.as_str())
+            .collect();
+        assert_eq!(
+            edge_types,
+            vec!["depends_on"],
+            "off-manifest edges must not reach the Brain Connections panel"
+        );
+    }
+
+    /// Non-strict ontology: no filter. Every edge admitted.
+    #[test]
+    fn outgoing_edges_admit_every_edge_when_ontology_is_not_strict() {
+        let conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn, "Open", "");
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at, deleted_at)
+             VALUES ('ce_src', 'src', 'concept', '', 1, 1, NULL),
+                    ('ce_tgt', 'tgt', 'concept', '', 1, 1, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_a', ?1, 'ce_src', 'ce_tgt', 'depends_on', 100),
+                    ('edge_b', ?1, 'ce_src', 'ce_tgt', 'fabricated', 100)",
+            params![&entity_id],
+        )
+        .unwrap();
+
+        let connections = get_entity_connections(&conn, &entity_id).unwrap();
+        let mut edge_types: Vec<&str> = connections
+            .outgoing
+            .iter()
+            .map(|e| e.edge_type.as_str())
+            .collect();
+        edge_types.sort();
+        assert_eq!(
+            edge_types,
+            vec!["depends_on", "fabricated"],
+            "non-strict brains must not be filtered"
+        );
     }
 }
