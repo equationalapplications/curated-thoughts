@@ -3244,9 +3244,22 @@ pub fn run() {
         .map(|p| p.to_string_lossy().into_owned());
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
-    let embed_profile = config
-        .get_embed_profile()
-        .unwrap_or_else(|_| crate::embedder::EmbedProfile::default());
+    // A config we cannot read must not become an Ollama profile. Embedding
+    // new content with a different model than the existing corpus silently
+    // corrupts similarity across the whole index -- there is no error, just
+    // degraded recall forever. Refuse to start instead.
+    let embed_profile = match config.get_embed_profile() {
+        Ok(profile) => profile,
+        Err(e) => {
+            eprintln!("[fatal] embed profile could not be read: {e}");
+            eprintln!(
+                "        Refusing to start rather than embedding with a \
+                 fallback model, which would corrupt the existing index."
+            );
+            eprintln!("        Fix or remove config.json, then relaunch.");
+            std::process::exit(1);
+        }
+    };
 
     tauri::Builder::default()
         .manage(OutboxWorkerState(Mutex::new(None)))
