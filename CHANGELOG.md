@@ -1,3 +1,10 @@
+## [2.0.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.1...v2.0.2) (2026-09-04)
+
+### Bug Fixes
+
+* **release:** pin changelog preset to v9 to match writer@8 ([9ef9698](https://github.com/equationalapplications/curated-thoughts/commit/9ef9698fee4af194bb85d751e6c9656741c567c9)), closes [#155](https://github.com/equationalapplications/curated-thoughts/issues/155)
+* **release:** repoint version tooling and docs at the workspace root ([14a26eb](https://github.com/equationalapplications/curated-thoughts/commit/14a26eb7cb51422eb9f11cfa08736359c9d076a4))
+
 ## [2.0.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.0...v2.0.1) (2026-09-03)
 
 ### Bug Fixes
