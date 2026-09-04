@@ -148,3 +148,196 @@ pub fn reconcile_vault(conn: &Connection, walked: &[WalkedFile]) -> Result<Recon
 
     Ok(outcome)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::walk_vault::WalkedFile;
+    use std::path::PathBuf;
+
+    /// A document row plus `n` chunks hanging off it.
+    fn seed_doc(conn: &Connection, path: &str, hash: &str, tier: &str, chunks: usize) -> i64 {
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES (?1, ?2, ?3, 'indexed')",
+            rusqlite::params![path, hash, tier],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        for i in 0..chunks {
+            conn.execute(
+                "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, ?2, ?3)",
+                rusqlite::params![doc_id, format!("chunk {i}"), i as i64],
+            )
+            .unwrap();
+        }
+        doc_id
+    }
+
+    fn chunk_count(conn: &Connection, doc_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE doc_id = ?1",
+            [doc_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn path_of(conn: &Connection, doc_id: i64) -> String {
+        conn.query_row("SELECT path FROM documents WHERE id = ?1", [doc_id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    /// Write `content` to `dir/name` and return it as a WalkedFile.
+    fn walked(dir: &std::path::Path, name: &str, content: &[u8]) -> WalkedFile {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, content).unwrap();
+        WalkedFile {
+            virtual_path: p.clone(),
+            read_path: p,
+        }
+    }
+
+    fn hash_of(content: &[u8]) -> String {
+        crate::db::queue::sha256_hex(content)
+    }
+
+    fn s(p: &PathBuf) -> String {
+        p.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn rename_repoints_row_and_preserves_chunks() {
+        // AC1 + AC2: a 100% rename keeps every chunk and reports the new path.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let content = b"# moved note";
+
+        let new = walked(tmp.path(), "procedures/note.md", content);
+        let old_path = s(&tmp.path().join("note.md"));
+        let doc_id = seed_doc(&conn, &old_path, &hash_of(content), "user_doc", 12);
+
+        let out = reconcile_vault(&conn, &[new.clone()]).unwrap();
+
+        assert_eq!(out.repointed, vec![(old_path, s(&new.virtual_path))]);
+        assert!(out.deleted.is_empty());
+        assert!(out.ambiguous.is_empty());
+        assert_eq!(chunk_count(&conn, doc_id), 12, "chunks must ride along");
+        assert_eq!(path_of(&conn, doc_id), s(&new.virtual_path));
+    }
+
+    #[test]
+    fn vanished_file_is_deleted_and_chunks_cascade() {
+        // AC3.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+
+        let survivor = walked(tmp.path(), "kept.md", b"# kept");
+        let gone_path = s(&tmp.path().join("gone.md"));
+        let gone_id = seed_doc(&conn, &gone_path, &hash_of(b"# gone"), "user_doc", 5);
+
+        let out = reconcile_vault(&conn, &[survivor]).unwrap();
+
+        assert_eq!(out.deleted, vec![gone_path]);
+        assert!(out.repointed.is_empty());
+        assert_eq!(chunk_count(&conn, gone_id), 0, "chunks must cascade");
+    }
+
+    #[test]
+    fn ambiguous_identical_content_is_left_alone() {
+        // AC4: two vanished rows and two new paths all share one hash.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let content = b"identical";
+        let h = hash_of(content);
+
+        let a = walked(tmp.path(), "new/a.md", content);
+        let b = walked(tmp.path(), "new/b.md", content);
+        let old_a = s(&tmp.path().join("old-a.md"));
+        let old_b = s(&tmp.path().join("old-b.md"));
+        let id_a = seed_doc(&conn, &old_a, &h, "user_doc", 3);
+        let id_b = seed_doc(&conn, &old_b, &h, "user_doc", 3);
+
+        let out = reconcile_vault(&conn, &[a, b]).unwrap();
+
+        assert!(out.repointed.is_empty(), "must not guess a rename");
+        assert!(out.deleted.is_empty(), "must not delete what it cannot match");
+        assert_eq!(out.ambiguous.len(), 2);
+        assert_eq!(path_of(&conn, id_a), old_a);
+        assert_eq!(path_of(&conn, id_b), old_b);
+        assert_eq!(chunk_count(&conn, id_a), 3);
+        assert_eq!(chunk_count(&conn, id_b), 3);
+    }
+
+    #[test]
+    fn rename_onto_an_existing_row_deletes_rather_than_colliding() {
+        // AC5: documents.path is NOT NULL UNIQUE. The target already has a
+        // row, so it is not an "unknown" candidate and the vanished row falls
+        // through to delete -- no constraint violation.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let content = b"dup content";
+        let h = hash_of(content);
+
+        let existing = walked(tmp.path(), "existing.md", content);
+        seed_doc(&conn, &s(&existing.virtual_path), &h, "user_doc", 4);
+        let gone_path = s(&tmp.path().join("gone.md"));
+        let gone_id = seed_doc(&conn, &gone_path, &h, "user_doc", 4);
+
+        let out = reconcile_vault(&conn, &[existing]).expect("must not violate UNIQUE");
+
+        assert_eq!(out.deleted, vec![gone_path]);
+        assert_eq!(chunk_count(&conn, gone_id), 0);
+    }
+
+    #[test]
+    fn wiki_tier_rows_are_never_touched() {
+        // AC6.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+
+        let survivor = walked(tmp.path(), "kept.md", b"# kept");
+        let wiki_path = "/not/on/disk/page.md".to_string();
+        let wiki_id = seed_doc(&conn, &wiki_path, "deadbeef", "wiki", 7);
+
+        let out = reconcile_vault(&conn, &[survivor]).unwrap();
+
+        assert!(out.deleted.is_empty());
+        assert!(out.repointed.is_empty());
+        assert_eq!(path_of(&conn, wiki_id), wiki_path);
+        assert_eq!(chunk_count(&conn, wiki_id), 7);
+    }
+
+    #[test]
+    fn empty_walk_changes_nothing() {
+        // AC7: a transient mount failure must not delete the whole index.
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let doc_id = seed_doc(&conn, "/vault/a.md", "aaa", "user_doc", 9);
+
+        let out = reconcile_vault(&conn, &[]).unwrap();
+
+        assert_eq!(out, ReconcileOutcome::default());
+        assert_eq!(chunk_count(&conn, doc_id), 9);
+        assert_eq!(path_of(&conn, doc_id), "/vault/a.md");
+    }
+
+    #[test]
+    fn modified_in_place_file_is_untouched() {
+        // AC9: same path, different hash. Not vanished, so not our business.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+
+        let f = walked(tmp.path(), "note.md", b"# new content");
+        let doc_id = seed_doc(&conn, &s(&f.virtual_path), "stale-hash", "user_doc", 6);
+
+        let out = reconcile_vault(&conn, &[f.clone()]).unwrap();
+
+        assert_eq!(out, ReconcileOutcome::default());
+        assert_eq!(path_of(&conn, doc_id), s(&f.virtual_path));
+        assert_eq!(chunk_count(&conn, doc_id), 6);
+    }
+}
