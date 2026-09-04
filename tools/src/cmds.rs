@@ -182,6 +182,43 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
     files.sort_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
     files.dedup_by(|a, b| a.virtual_path == b.virtual_path);
 
+    // Heal offline moves before ingesting. A file that was `git mv`'d while
+    // the app was closed otherwise leaves its old row -- and every chunk
+    // hanging off it -- pointing at a path that no longer exists, so
+    // provenance in search results cites a dead file (issue #159).
+    //
+    // This must run BEFORE the ingest loop: a re-pointed row is already at
+    // its new path when the loop reaches that file, so the unchanged-hash
+    // check short-circuits instead of duplicating work.
+    match tauri_app_lib::reconcile::reconcile_vault(conn, &files) {
+        Ok(rec) => {
+            for (old, new) in &rec.repointed {
+                println!("reconcile: moved {old} -> {new}");
+            }
+            for p in &rec.deleted {
+                println!("reconcile: removed {p} (file is gone)");
+            }
+            for p in &rec.ambiguous {
+                eprintln!(
+                    "reconcile: {p} vanished but its content matches several \
+                     files; left unchanged"
+                );
+            }
+            if !rec.repointed.is_empty() || !rec.deleted.is_empty() {
+                println!(
+                    "reconcile: {} moved, {} removed",
+                    rec.repointed.len(),
+                    rec.deleted.len()
+                );
+            }
+        }
+        Err(e) => {
+            // Reconciliation is a healing pass, not a precondition for
+            // ingesting. Report and continue.
+            eprintln!("warn: reconciliation failed: {e}");
+        }
+    }
+
     let mut failed = outcome.errors.len() + outcome.pending.len() + outcome.denied.len();
     println!(
         "ingesting {} file(s) from {}",
