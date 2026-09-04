@@ -53,21 +53,25 @@ pub fn enqueue_vault_event(
         }
     }
 
-    // The walker has always filtered these; the watcher never did. An editor
-    // scratch file that exists for milliseconds would get a `documents` row
-    // that outlives it, and the supervisor sweep then re-enqueues that row on
-    // every pass, forever (spec §3).
-    if crate::walk_vault::is_excluded_file(&canonical) {
-        return Ok(());
-    }
-
     let path_str = canonical.to_string_lossy().into_owned();
 
+    // Deletes must run BEFORE the exclusion check: a `documents` row staged
+    // by pre-filter code (or another tool) must still be deletable when the
+    // scratch file's Remove event arrives. Exclusion only gates STAGING new
+    // rows, not healing old ones.
     if matches!(event_kind, EventKind::Remove(_)) {
         conn.execute(
             "DELETE FROM documents WHERE path = ?1",
             rusqlite::params![&path_str],
         )?;
+        return Ok(());
+    }
+
+    // The walker has always filtered these; the watcher never did. An editor
+    // scratch file that exists for milliseconds would get a `documents` row
+    // that outlives it, and the supervisor sweep then re-enqueues that row on
+    // every pass, forever (spec §3).
+    if crate::walk_vault::is_excluded_file(&canonical) {
         return Ok(());
     }
 
@@ -477,6 +481,39 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "editor temp files must never be staged");
+        let _ = dir.path();
+    }
+
+    #[test]
+    fn remove_event_deletes_even_excluded_named_rows() {
+        // A row staged for a temp-named file by pre-filter code (or another
+        // tool) must still be healable: when the scratch file's Remove event
+        // arrives, the exclusion check must not swallow the delete. Deleting
+        // is always safe regardless of naming; exclusion only gates staging.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut conn = open_seeded_conn();
+        let p = dir.path().join("note.md~");
+        std::fs::write(&p, b"scratch").unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'h', 'user_doc', 'pending')",
+            rusqlite::params![p.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Remove(notify::event::RemoveKind::File),
+                &p,
+            )
+            .expect("Remove for an excluded-named path must still delete");
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "legacy ghost rows must be deletable via Remove");
         let _ = dir.path();
     }
 
