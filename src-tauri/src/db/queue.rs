@@ -53,6 +53,14 @@ pub fn enqueue_vault_event(
         }
     }
 
+    // The walker has always filtered these; the watcher never did. An editor
+    // scratch file that exists for milliseconds would get a `documents` row
+    // that outlives it, and the supervisor sweep then re-enqueues that row on
+    // every pass, forever (spec §3).
+    if crate::walk_vault::is_excluded_file(&canonical) {
+        return Ok(());
+    }
+
     let path_str = canonical.to_string_lossy().into_owned();
 
     if matches!(event_kind, EventKind::Remove(_)) {
@@ -429,5 +437,53 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "in-vault event must insert a row");
         let _ = vault.path();
+    }
+
+    #[test]
+    fn excluded_temp_paths_are_not_staged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut conn = open_seeded_conn();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
+            for name in ["note.md~", "note.md.tmp", ".#note.md", "4913"] {
+                let p = dir.path().join(name);
+                std::fs::write(&p, b"scratch").unwrap();
+                enqueue_vault_event(
+                    &mut conn,
+                    notify::EventKind::Create(notify::event::CreateKind::File),
+                    &p,
+                )
+                .unwrap();
+            }
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "editor temp files must never be staged");
+        let _ = dir.path();
+    }
+
+    #[test]
+    fn ordinary_markdown_is_still_staged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut conn = open_seeded_conn();
+        let p = dir.path().join("real-note.md");
+        std::fs::write(&p, b"# real").unwrap();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::File),
+                &p,
+            )
+            .unwrap();
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the filter must not swallow real content");
+        let _ = dir.path();
     }
 }

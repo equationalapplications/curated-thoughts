@@ -69,7 +69,7 @@ const EXCLUDED_FILE_SUFFIXES: &[&str] = &["~", ".tmp", ".swp", ".swx"];
 const EXCLUDED_FILE_PREFIXES: &[&str] = &[".#", "#"];
 const EXCLUDED_FILE_EXACT_TEMP: &[&str] = &["4913"];
 
-fn is_excluded_file(path: &Path) -> bool {
+pub(crate) fn is_excluded_file(path: &Path) -> bool {
     if let Some(name) = path.file_name() {
         let name = name.to_string_lossy();
         if EXCLUDED_FILE_NAMES.contains(&name.as_ref()) {
