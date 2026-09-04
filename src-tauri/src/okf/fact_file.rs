@@ -1260,4 +1260,107 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             Some("human:multi\nline\twith\rcarriage"),
         );
     }
+    /// Minimal fact used by the `source_ref` round-trip guards.
+    ///
+    /// Every other test in this file sets `source_ref: None`, which is exactly
+    /// why the JSON round-trip went uncovered until issue #162.
+    fn fact_for_source_ref_probe() -> WikiFact {
+        WikiFact {
+            id: "fact_x".into(),
+            entity_id: "ent_demo".into(),
+            title: "Title".into(),
+            body: "Body".into(),
+            tags: vec![],
+            confidence: "certain".into(),
+            source_type: "librarian_inferred".into(),
+            source_hash: None,
+            source_ref: None,
+            created_at: 1719835200000,
+            updated_at: 1719835200000,
+            last_accessed_at: None,
+            access_count: 0,
+            deleted_at: None,
+            okf_type: None,
+            lifecycle_status: "stable".into(),
+            stale_after: None,
+            generated_by: None,
+            okf_sources: None,
+            okf_verified: None,
+            okf_usage_window: None,
+            last_verified_at: None,
+            last_verified_by: None,
+        }
+    }
+
+    #[test]
+    fn json_source_ref_survives_the_okf_round_trip() {
+        // Shaped exactly like `evidence_json_with_hashes` output: compact
+        // separators and alphabetical (BTreeMap) key order — `evidence` sorts
+        // before `proposal_id`.
+        let original = serde_json::json!({
+            "evidence": [{
+                "chunk_id": 3261,
+                "content_hash": "e1f1c4518a586ba36a1196dc4216c455",
+                "quote": " CT v1.39.0 install\n\nPR 130 watchdog",
+                "start_line": 1,
+                "end_line": 19,
+                "source_kind": serde_json::Value::Null,
+            }],
+            "proposal_id": "prop_b72e4a93",
+        })
+        .to_string();
+        assert!(serde_json::from_str::<serde_json::Value>(&original).is_ok());
+
+        let mut fact = fact_for_source_ref_probe();
+        fact.source_ref = Some(original.clone());
+
+        let rendered = build_fact_file(&fact, &[], "okf/v0.2");
+        let parsed = parse_fact_file(&rendered).expect("parse must succeed");
+        let got = parsed.fact.source_ref.clone().unwrap_or_default();
+
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&got).is_ok(),
+            "source_ref must still be valid JSON after the round trip, got: {got}"
+        );
+        assert_eq!(
+            got, original,
+            "source_ref must survive the OKF round trip losslessly"
+        );
+    }
+
+    #[test]
+    fn json_source_ref_survives_adversarial_quote_content() {
+        let cases: Vec<(&str, String)> = vec![
+            ("plain", " CT v1.39.0 install".to_string()),
+            ("brace_in_quote", "config {\"a\": 1} shipped".to_string()),
+            ("nested_braces", "deep {{a}} nested".to_string()),
+            ("hash_comment", "see #130 for detail".to_string()),
+            ("colon_space", "note: this is it".to_string()),
+            ("close_brace", "trailing } brace".to_string()),
+            ("backslash", "path C:\\\\tmp\\\\x".to_string()),
+            ("quote_char", "he said \"hi\" loudly".to_string()),
+        ];
+
+        let mut failures: Vec<&str> = Vec::new();
+        for (name, quote) in cases {
+            let original = serde_json::json!({
+                "evidence": [{ "chunk_id": 3261, "quote": quote }],
+                "proposal_id": "prop_x",
+            })
+            .to_string();
+
+            let mut fact = fact_for_source_ref_probe();
+            fact.source_ref = Some(original.clone());
+
+            let rendered = build_fact_file(&fact, &[], "okf/v0.2");
+            let parsed = parse_fact_file(&rendered).expect("parse must succeed");
+            let got = parsed.fact.source_ref.clone().unwrap_or_default();
+
+            if serde_json::from_str::<serde_json::Value>(&got).is_err() || got != original {
+                eprintln!("case {name} broke:\n  orig: {original}\n  got : {got}");
+                failures.push(name);
+            }
+        }
+        assert!(failures.is_empty(), "OKF round trip broke for: {failures:?}");
+    }
 }
