@@ -1,7 +1,7 @@
 # Spec: open-issue remediation sweep (#158, #159, #163, #162, #125)
 
 **Repo:** curated-thoughts · **Type:** remediation sweep · **Priority:** P1 (PR 1) → P4 (PR 5)
-**Status:** Draft
+**Status:** Implemented (PR-1 merged as #171 → `4a5f17b`, released 2.2.0; PR-3 merged as #170; PR-4 merged as #169)
 **Builds on:** `0adbcff` (ontology activation / strict edge gate, v1.42.0), PR #132 (outbox `Delete` on forget), PR #99 (`source_ref` consumer contract)
 **Context:** Five issues are open. Four were filed from the 2026-09-03 production-brain session; #125 predates it. This spec sequences all five into five independent PRs, ordered by *live blast radius* rather than filing order.
 
