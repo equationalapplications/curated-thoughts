@@ -119,44 +119,58 @@ fn approve_wiki_page_commits_proposal_and_clears_queue() {
     // Without the stub this test reads the developer's ~/.brain/config.json and
     // may make live Ollama calls — passing either way, but slow and machine-
     // dependent. `embed_batch` checks this var before the profile.
-    temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-        let app = TestApp::new();
-        let rowid = seed_pending_proposal(&app, "prop-approve", "page.md", "Approved fact body.");
-        let content = "# Ignored markdown\n\nShim ignores content param.";
+    let brain = tempfile::TempDir::new()
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .into_owned();
+    temp_env::with_vars(
+        [
+            ("CURATED_EMBED_STUB", Some("constant8")),
+            // Issue #178: the post-commit sweep resolves config from
+            // CURATED_BRAIN_*; keep it off the live ~/.brain.
+            ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+        ],
+        || {
+            let app = TestApp::new();
+            let rowid =
+                seed_pending_proposal(&app, "prop-approve", "page.md", "Approved fact body.");
+            let content = "# Ignored markdown\n\nShim ignores content param.";
 
-        app.invoke::<()>(
-            "approve_wiki_page",
-            json!({
-                "id": rowid,
-                "content": content
-            }),
-        );
+            app.invoke::<()>(
+                "approve_wiki_page",
+                json!({
+                    "id": rowid,
+                    "content": content
+                }),
+            );
 
-        let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
-        assert!(queue.is_empty(), "proposal still in queue after approve");
+            let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
+            assert!(queue.is_empty(), "proposal still in queue after approve");
 
-        let conn = app.open_db();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "approved");
+            let conn = app.open_db();
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "approved");
 
-        let fact_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fact_count, 1);
+            let fact_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(fact_count, 1);
 
-        let body: String = conn
-            .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(body, "Approved fact body.");
-    });
+            let body: String = conn
+                .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(body, "Approved fact body.");
+        },
+    );
 }
 
 #[test]
@@ -167,53 +181,80 @@ fn approve_wiki_page_ignores_content_parameter() {
     // Without the stub this test reads the developer's ~/.brain/config.json and
     // may make live Ollama calls — passing either way, but slow and machine-
     // dependent. `embed_batch` checks this var before the profile.
-    temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-        let app = TestApp::new();
-        let rowid =
-            seed_pending_proposal(&app, "prop-ignore", "wiki/bs-approved.md", "Stored fact.");
+    let brain = tempfile::TempDir::new()
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .into_owned();
+    temp_env::with_vars(
+        [
+            ("CURATED_EMBED_STUB", Some("constant8")),
+            // Issue #178: the post-commit sweep resolves config from
+            // CURATED_BRAIN_*; keep it off the live ~/.brain.
+            ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+        ],
+        || {
+            let app = TestApp::new();
+            let rowid =
+                seed_pending_proposal(&app, "prop-ignore", "wiki/bs-approved.md", "Stored fact.");
 
-        app.invoke::<()>(
-            "approve_wiki_page",
-            json!({
-                "id": rowid,
-                "content": "# Different content that must be ignored"
-            }),
-        );
+            app.invoke::<()>(
+                "approve_wiki_page",
+                json!({
+                    "id": rowid,
+                    "content": "# Different content that must be ignored"
+                }),
+            );
 
-        let conn = app.open_db();
-        let body: String = conn
-            .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(body, "Stored fact.");
-    });
+            let conn = app.open_db();
+            let body: String = conn
+                .query_row("SELECT body FROM llm_wiki_entries LIMIT 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(body, "Stored fact.");
+        },
+    );
 }
 
 #[test]
 fn reject_wiki_page_marks_proposal_rejected() {
-    let app = TestApp::new();
-    let rowid = seed_pending_proposal(&app, "prop-reject", "reject.md", "Draft fact");
+    let brain = tempfile::TempDir::new()
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .into_owned();
+    temp_env::with_vars(
+        [
+            // Issue #178: the post-commit sweep resolves config from
+            // CURATED_BRAIN_*; keep it off the live ~/.brain.
+            ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+        ],
+        || {
+            let app = TestApp::new();
+            let rowid = seed_pending_proposal(&app, "prop-reject", "reject.md", "Draft fact");
 
-    app.invoke::<()>("reject_wiki_page", json!({ "id": rowid }));
+            app.invoke::<()>("reject_wiki_page", json!({ "id": rowid }));
 
-    let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
-    assert!(queue.is_empty(), "proposal still in queue after reject");
+            let queue: Vec<serde_json::Value> = app.invoke("get_review_queue", json!({}));
+            assert!(queue.is_empty(), "proposal still in queue after reject");
 
-    let conn = app.open_db();
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM curated_proposals WHERE id = 'prop-reject'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "rejected");
+            let conn = app.open_db();
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM curated_proposals WHERE id = 'prop-reject'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "rejected");
 
-    let fact_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(fact_count, 0);
+            let fact_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(fact_count, 0);
+        },
+    );
 }
 
 #[test]
@@ -235,29 +276,41 @@ fn resolve_proposal_cmd_partial_approval() {
     // Without the stub this test reads the developer's ~/.brain/config.json and
     // may make live Ollama calls — passing either way, but slow and machine-
     // dependent. `embed_batch` checks this var before the profile.
-    temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-        let app = TestApp::new();
-        let conn = app.open_db();
-        conn.execute(
+    let brain = tempfile::TempDir::new()
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .into_owned();
+    temp_env::with_vars(
+        [
+            ("CURATED_EMBED_STUB", Some("constant8")),
+            // Issue #178: the post-commit sweep resolves config from
+            // CURATED_BRAIN_*; keep it off the live ~/.brain.
+            ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+        ],
+        || {
+            let app = TestApp::new();
+            let conn = app.open_db();
+            conn.execute(
             "INSERT INTO documents (path, hash, tier, status) VALUES ('/vault/documents/a.pdf', 'h', 'user_doc', 'indexed')",
             [],
         )
         .unwrap();
-        let doc_id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, 'x', 0)",
-            [doc_id],
-        )
-        .unwrap();
-        let chunk_id = conn.last_insert_rowid();
-        conn.execute(
+            let doc_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, 'x', 0)",
+                [doc_id],
+            )
+            .unwrap();
+            let chunk_id = conn.last_insert_rowid();
+            conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
              VALUES ('ent-1', 'Existing', 'concept', 'Sum', 100, 100)",
             [],
         )
         .unwrap();
 
-        insert_proposal(
+            insert_proposal(
             &conn,
             &NewProposal {
                 id: "prop-partial".into(),
@@ -305,21 +358,22 @@ fn resolve_proposal_cmd_partial_approval() {
         )
         .unwrap();
 
-        let result: serde_json::Value = app.invoke(
-            "resolve_proposal_cmd",
-            json!({
-                "proposalId": "prop-partial",
-                "decisions": [
-                    { "item_id": "item-a", "decision": "accept" },
-                    { "item_id": "item-b", "decision": "reject" }
-                ]
-            }),
-        );
-        assert_eq!(result["proposal_status"], "partial");
+            let result: serde_json::Value = app.invoke(
+                "resolve_proposal_cmd",
+                json!({
+                    "proposalId": "prop-partial",
+                    "decisions": [
+                        { "item_id": "item-a", "decision": "accept" },
+                        { "item_id": "item-b", "decision": "reject" }
+                    ]
+                }),
+            );
+            assert_eq!(result["proposal_status"], "partial");
 
-        let fact_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fact_count, 1);
-    });
+            let fact_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(fact_count, 1);
+        },
+    );
 }

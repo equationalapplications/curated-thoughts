@@ -76,24 +76,40 @@ pub fn resolve_brain_paths() -> BrainPaths {
 
 /// See `resolve_brain_paths` — test-build-only guard, no production code
 /// path compiles this.
+///
+/// Trips only when the resolved config or db path IS the live one — that is
+/// where test writes damage the user's installation (issue #178). A test may
+/// legitimately leave `CURATED_BRAIN_DIR` unset (e.g. pinning DB-only
+/// precedence) while both config and db redirect elsewhere.
 #[cfg(any(test, feature = "test-utils"))]
 fn guard_against_live_brain(paths: &BrainPaths) {
     if std::env::var_os("CT_ALLOW_LIVE_BRAIN").is_some() {
         return;
     }
-    if let Some(home) = dirs::home_dir() {
-        let live = home.join(".brain");
-        if paths.brain_dir == live {
-            panic!(
-                "TEST BUG: resolve_brain_paths() resolved the LIVE brain dir at {}. \
-                 Writing through these paths would rewrite the user's real \
-                 config.json and brain.db (issue #178). Set CURATED_BRAIN_DIR \
-                 (or CURATED_BRAIN_CONFIG / CURATED_BRAIN_DB) via \
-                 temp_env::with_vars in the test, or, if the test exists to \
-                 pin default resolution itself, set CT_ALLOW_LIVE_BRAIN=1.",
-                live.display()
-            );
-        }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let live_config = home.join(".brain").join("config.json");
+    let live_db = home.join(".brain").join("brain.db");
+    if paths.config_path == live_config || paths.db_path == live_db {
+        panic!(
+            "TEST BUG: resolve_brain_paths() resolved the LIVE {} at {}. \
+             Writing through these paths would rewrite the user's real \
+             configuration/database (issue #178). Set CURATED_BRAIN_DIR \
+             (or CURATED_BRAIN_CONFIG / CURATED_BRAIN_DB) via \
+             temp_env::with_vars in the test, or, if the test exists to \
+             pin default resolution itself, set CT_ALLOW_LIVE_BRAIN=1.",
+            if paths.config_path == live_config {
+                "config.json"
+            } else {
+                "brain.db"
+            },
+            if paths.config_path == live_config {
+                live_config.display()
+            } else {
+                live_db.display()
+            }
+        );
     }
 }
 

@@ -88,6 +88,10 @@ fn resolve_config_only() {
             ("CURATED_BRAIN_DIR", None::<&str>),
             ("CURATED_BRAIN_DB", None::<&str>),
             ("CURATED_BRAIN_CONFIG", Some(config_path.as_str())),
+            // Pins CONFIG-only precedence: the db path deriving to
+            // ~/.brain/brain.db is the expected outcome under test, so it
+            // opts out of the live-brain guard (issue #178).
+            ("CT_ALLOW_LIVE_BRAIN", Some("1")),
         ],
         || {
             let paths = resolve_brain_paths();
