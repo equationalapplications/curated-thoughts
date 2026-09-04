@@ -1,3 +1,10 @@
+## [2.2.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.2.0...v2.2.1) (2026-09-04)
+
+### Bug Fixes
+
+* **embed:** fail startup rather than falling back to a local profile ([2c945a1](https://github.com/equationalapplications/curated-thoughts/commit/2c945a123263a3885205a8c1c65dea8e957622fb))
+* **embed:** resolve embed profile before vault recovery rewrites config ([9c66cfa](https://github.com/equationalapplications/curated-thoughts/commit/9c66cfaf0c914b8116efa82b1cb3f8006a978371))
+
 ## [2.2.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.1.0...v2.2.0) (2026-09-04)
 
 ### Features
