@@ -58,10 +58,33 @@ const EXCLUDED_FILE_NAMES: &[&str] = &[
 /// machine output rather than authored knowledge.
 const EXCLUDED_PATH_SEGMENTS: &[&str] = &["drizzle/meta/", "gen/schemas/"];
 
-fn is_excluded_file(path: &Path) -> bool {
+/// Editor scratch files. These exist for milliseconds; the walker rarely
+/// catches one, but the filesystem watcher sees every single one and used to
+/// stage a `documents` row for it. The row then outlives the file forever
+/// (see spec §3).
+const EXCLUDED_FILE_SUFFIXES: &[&str] = &["~", ".tmp", ".swp", ".swx"];
+
+/// Emacs lock (`.#name`) and autosave (`#name#`) prefixes, plus vim's numeric
+/// writability probe file, which is literally named `4913`.
+const EXCLUDED_FILE_PREFIXES: &[&str] = &[".#", "#"];
+const EXCLUDED_FILE_EXACT_TEMP: &[&str] = &["4913"];
+
+pub(crate) fn is_excluded_file(path: &Path) -> bool {
     if let Some(name) = path.file_name() {
         let name = name.to_string_lossy();
         if EXCLUDED_FILE_NAMES.contains(&name.as_ref()) {
+            return true;
+        }
+        if EXCLUDED_FILE_EXACT_TEMP.contains(&name.as_ref()) {
+            return true;
+        }
+        if EXCLUDED_FILE_SUFFIXES.iter().any(|suf| name.ends_with(suf)) {
+            return true;
+        }
+        if EXCLUDED_FILE_PREFIXES
+            .iter()
+            .any(|pre| name.starts_with(pre))
+        {
             return true;
         }
     }
@@ -274,4 +297,44 @@ pub fn entity_ids_for(files: &[WalkedFile], vault_root: &Path) -> HashSet<String
         .iter()
         .map(|f| entity_id_for_virtual_path(f.virtual_path.to_str().unwrap_or(""), Some(root)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn editor_temp_files_are_excluded() {
+        use std::path::Path;
+        for name in [
+            "note.md~",
+            "note.md.tmp",
+            ".note.md.swp",
+            ".note.md.swx",
+            ".#note.md",
+            "#note.md#",
+            "4913",
+        ] {
+            assert!(
+                super::is_excluded_file(Path::new(name)),
+                "{name} must be excluded"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_notes_are_not_excluded() {
+        use std::path::Path;
+        // The filter must not over-match. These are real vault content.
+        for name in [
+            "note.md",
+            "tmp.md",
+            "swap-notes.md",
+            "meeting~notes.md",
+            "49130.md",
+        ] {
+            assert!(
+                !super::is_excluded_file(Path::new(name)),
+                "{name} must NOT be excluded"
+            );
+        }
+    }
 }

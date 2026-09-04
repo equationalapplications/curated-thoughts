@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use notify::EventKind;
 use rusqlite::Connection;
 
@@ -55,6 +55,10 @@ pub fn enqueue_vault_event(
 
     let path_str = canonical.to_string_lossy().into_owned();
 
+    // Deletes must run BEFORE the exclusion check: a `documents` row staged
+    // by pre-filter code (or another tool) must still be deletable when the
+    // scratch file's Remove event arrives. Exclusion only gates STAGING new
+    // rows, not healing old ones.
     if matches!(event_kind, EventKind::Remove(_)) {
         conn.execute(
             "DELETE FROM documents WHERE path = ?1",
@@ -63,9 +67,33 @@ pub fn enqueue_vault_event(
         return Ok(());
     }
 
+    // The walker has always filtered these; the watcher never did. An editor
+    // scratch file that exists for milliseconds would get a `documents` row
+    // that outlives it, and the supervisor sweep then re-enqueues that row on
+    // every pass, forever (spec §3).
+    if crate::walk_vault::is_excluded_file(&canonical) {
+        return Ok(());
+    }
+
     // Add / Modify: hash, upsert.
-    let bytes =
-        std::fs::read(&canonical).with_context(|| format!("read {}", canonical.display()))?;
+    //
+    // A file that vanished between the event firing and this read is not an
+    // error -- it is a delete that arrived out of order. Propagating an error
+    // here left the staged row in place with nothing behind it. Every other
+    // IO error still propagates (spec §3).
+    let bytes = match std::fs::read(&canonical) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            conn.execute(
+                "DELETE FROM documents WHERE path = ?1",
+                rusqlite::params![&path_str],
+            )?;
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}", canonical.display())));
+        }
+    };
     let hash = sha256_hex(&bytes);
 
     conn.execute(
@@ -429,5 +457,141 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "in-vault event must insert a row");
         let _ = vault.path();
+    }
+
+    #[test]
+    fn excluded_temp_paths_are_not_staged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut conn = open_seeded_conn();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
+            for name in ["note.md~", "note.md.tmp", ".#note.md", "4913"] {
+                let p = dir.path().join(name);
+                std::fs::write(&p, b"scratch").unwrap();
+                enqueue_vault_event(
+                    &mut conn,
+                    notify::EventKind::Create(notify::event::CreateKind::File),
+                    &p,
+                )
+                .unwrap();
+            }
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "editor temp files must never be staged");
+        let _ = dir.path();
+    }
+
+    #[test]
+    fn remove_event_deletes_even_excluded_named_rows() {
+        // A row staged for a temp-named file by pre-filter code (or another
+        // tool) must still be healable: when the scratch file's Remove event
+        // arrives, the exclusion check must not swallow the delete. Deleting
+        // is always safe regardless of naming; exclusion only gates staging.
+        let dir = tempfile::TempDir::new().unwrap();
+        // Seed with the CANONICAL path: enqueue_vault_event canonicalizes the
+        // event path (macOS /var -> /private/var), and the seeded row must use
+        // the same spelling for the DELETE to match.
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let mut conn = open_seeded_conn();
+        let p = base.join("note.md~");
+        std::fs::write(&p, b"scratch").unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'h', 'user_doc', 'pending')",
+            rusqlite::params![p.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Remove(notify::event::RemoveKind::File),
+                &p,
+            )
+            .expect("Remove for an excluded-named path must still delete");
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "legacy ghost rows must be deletable via Remove");
+        let _ = dir.path();
+    }
+
+    #[test]
+    fn ordinary_markdown_is_still_staged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut conn = open_seeded_conn();
+        let p = dir.path().join("real-note.md");
+        std::fs::write(&p, b"# real").unwrap();
+
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::File),
+                &p,
+            )
+            .unwrap();
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the filter must not swallow real content");
+        let _ = dir.path();
+    }
+
+    #[test]
+    fn vanished_file_is_treated_as_a_delete() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // TempDir paths come back through /var, a symlink to /private/var.
+        // Canonicalize the root so the containment check matches the
+        // canonical path of a LIVE file; for the vanished file canonicalize
+        // falls back to the non-canonical absolute path, and a /var root
+        // would then reject it as out-of-vault before the read is attempted.
+        let vault_root = dir.path().canonicalize().unwrap();
+        let mut conn = open_seeded_conn();
+        // Build the path under the canonicalized root: once the file is gone
+        // canonicalize() falls back to the raw absolute path, and that must
+        // still pass the containment check for the read (and thus the
+        // NotFound branch) to be reached at all.
+        let p = vault_root.join("racy.md");
+
+        // Stage it while it exists.
+        std::fs::write(&p, b"# here").unwrap();
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(&vault_root), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::File),
+                &p,
+            )
+            .unwrap();
+        });
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // Now it disappears, and a Modify event arrives for the dead path.
+        std::fs::remove_file(&p).unwrap();
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(&vault_root), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )),
+                &p,
+            )
+            .expect("a vanished file is a delete, not an error");
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "the row must not outlive the file");
+        let _ = dir.path();
     }
 }
