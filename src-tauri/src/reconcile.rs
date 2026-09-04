@@ -60,9 +60,7 @@ pub fn reconcile_vault(conn: &Connection, walked: &[WalkedFile]) -> Result<Recon
 
     let db_rows: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT path, hash FROM documents WHERE tier = 'user_doc'")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
 
@@ -101,7 +99,10 @@ pub fn reconcile_vault(conn: &Connection, walked: &[WalkedFile]) -> Result<Recon
             Err(e) => {
                 // Unreadable candidates simply cannot participate in rename
                 // detection. Not fatal -- the ingest loop will report it.
-                eprintln!("[reconcile] skipping unreadable {}: {e}", f.read_path.display());
+                eprintln!(
+                    "[reconcile] skipping unreadable {}: {e}",
+                    f.read_path.display()
+                );
                 continue;
             }
         };
@@ -265,7 +266,10 @@ mod tests {
         let out = reconcile_vault(&conn, &[a, b]).unwrap();
 
         assert!(out.repointed.is_empty(), "must not guess a rename");
-        assert!(out.deleted.is_empty(), "must not delete what it cannot match");
+        assert!(
+            out.deleted.is_empty(),
+            "must not delete what it cannot match"
+        );
         assert_eq!(out.ambiguous.len(), 2);
         assert_eq!(path_of(&conn, id_a), old_a);
         assert_eq!(path_of(&conn, id_b), old_b);
