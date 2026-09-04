@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use notify::EventKind;
 use rusqlite::Connection;
 
@@ -72,8 +72,24 @@ pub fn enqueue_vault_event(
     }
 
     // Add / Modify: hash, upsert.
-    let bytes =
-        std::fs::read(&canonical).with_context(|| format!("read {}", canonical.display()))?;
+    //
+    // A file that vanished between the event firing and this read is not an
+    // error -- it is a delete that arrived out of order. Propagating an error
+    // here left the staged row in place with nothing behind it. Every other
+    // IO error still propagates (spec §3).
+    let bytes = match std::fs::read(&canonical) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            conn.execute(
+                "DELETE FROM documents WHERE path = ?1",
+                rusqlite::params![&path_str],
+            )?;
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("read {}", canonical.display())));
+        }
+    };
     let hash = sha256_hex(&bytes);
 
     conn.execute(
@@ -484,6 +500,57 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "the filter must not swallow real content");
+        let _ = dir.path();
+    }
+
+    #[test]
+    fn vanished_file_is_treated_as_a_delete() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // TempDir paths come back through /var, a symlink to /private/var.
+        // Canonicalize the root so the containment check matches the
+        // canonical path of a LIVE file; for the vanished file canonicalize
+        // falls back to the non-canonical absolute path, and a /var root
+        // would then reject it as out-of-vault before the read is attempted.
+        let vault_root = dir.path().canonicalize().unwrap();
+        let mut conn = open_seeded_conn();
+        // Build the path under the canonicalized root: once the file is gone
+        // canonicalize() falls back to the raw absolute path, and that must
+        // still pass the containment check for the read (and thus the
+        // NotFound branch) to be reached at all.
+        let p = vault_root.join("racy.md");
+
+        // Stage it while it exists.
+        std::fs::write(&p, b"# here").unwrap();
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(&vault_root), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::File),
+                &p,
+            )
+            .unwrap();
+        });
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // Now it disappears, and a Modify event arrives for the dead path.
+        std::fs::remove_file(&p).unwrap();
+        temp_env::with_var("CURATED_VAULT_ROOT", Some(&vault_root), || {
+            enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )),
+                &p,
+            )
+            .expect("a vanished file is a delete, not an error");
+        });
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "the row must not outlive the file");
         let _ = dir.path();
     }
 }

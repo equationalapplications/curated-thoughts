@@ -78,10 +78,7 @@ pub(crate) fn is_excluded_file(path: &Path) -> bool {
         if EXCLUDED_FILE_EXACT_TEMP.contains(&name.as_ref()) {
             return true;
         }
-        if EXCLUDED_FILE_SUFFIXES
-            .iter()
-            .any(|suf| name.ends_with(suf))
-        {
+        if EXCLUDED_FILE_SUFFIXES.iter().any(|suf| name.ends_with(suf)) {
             return true;
         }
         if EXCLUDED_FILE_PREFIXES
