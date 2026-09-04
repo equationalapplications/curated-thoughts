@@ -9,6 +9,21 @@ updates:
       # Transitive dependencies updated via lockfile regeneration may still
       # include packages published <14 days ago. This is a known limitation.
       default-days: 14
+    ignore:
+      # conventional-changelog-conventionalcommits@10 requires
+      # conventional-changelog-writer@9 or newer. The writer is a TRANSITIVE
+      # dep of @semantic-release/release-notes-generator, whose latest stable
+      # (14.x) pins conventional-changelog-writer@^8. The writer@9 chain ships
+      # only in prereleases -- release-notes-generator@15.0.0-beta.2 and
+      # semantic-release@26.0.0-beta.1 -- so there is no stable upgrade path
+      # today. Grouping alone does NOT protect this: the group can only move
+      # packages Dependabot bumps directly, and it never bumps the transitive
+      # writer, which is exactly how PR #155 landed the v10 preset against
+      # writer@8 and left `release-config` failing on main.
+      # Revisit when release-notes-generator ships a stable v15; at that point
+      # drop this ignore AND the pnpm.overrides pin in package.json together.
+      - dependency-name: "conventional-changelog-conventionalcommits"
+        update-types: ["version-update:semver-major"]
     groups:
       # The release toolchain must move as a unit. conventional-changelog-writer
       # is a TRANSITIVE dep (pulled by release-notes-generator), so Dependabot
