@@ -181,6 +181,18 @@ pub(crate) fn resolve_strict_edge_vocabulary(
             // against partitions, not curated ids) must NOT short-circuit —
             // fall through to the partition fallback. Only the LAST lookup
             // returning `Ok(_)` means "no strict manifest anywhere".
+            //
+            // LATENT ambiguity (issue #158 audit, 2026-09-04): today this
+            // branch cannot distinguish "the curated-id row is missing" from
+            // "the curated-id row exists with `mode: off/emergent`", because
+            // `seedManifestsIfAbsent` (`src/lib/ontologySeed.ts`) stamps one
+            // `manifestFor(selection)` + `modeFor(selection)` across every
+            // entity id — there is no per-curated-id divergence reachable
+            // from production. The branch is kept so a future per-entity
+            // explicit-mode surface lands here as the right answer rather
+            // than a regression. The TS-side regression test
+            // `seedManifestsIfAbsent passes the same manifest and mode to
+            // every entity id in one batch` pins this contract.
             Ok(_) if !is_last => continue,
             Ok(_) => return None,
             Err(e) => {
@@ -2864,15 +2876,28 @@ mod tests {
     }
 
     /// Non-strict modes admit any edge type: `emergent` grows its vocabulary
-    /// from the corpus, and `off` has none to enforce.
+    /// from the corpus, and `off` has none to enforce. The fixture seeds
+    /// both `ent-1` AND `tier_fact` with the same non-strict mode so the
+    /// gate is actually exercised through every code path the resolver
+    /// would reach — without a `tier_fact` row the gate passes only because
+    /// the partition fallback is empty, not because the modes are honored.
     #[test]
     fn non_strict_modes_do_not_gate_edge_types() {
         for mode in ["emergent", "off"] {
             let mut conn = open_in_memory().unwrap();
             let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+            // Both lookups in `resolve_strict_edge_vocabulary` see the same
+            // non-strict mode, so the test really pins mode behavior.
             seed_manifest(
                 &conn,
                 "ent-1",
+                mode,
+                &["thing"],
+                &[("supports", "thing", "thing")],
+            );
+            seed_manifest(
+                &conn,
+                "tier_fact",
                 mode,
                 &["thing"],
                 &[("supports", "thing", "thing")],

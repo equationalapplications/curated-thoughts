@@ -2291,6 +2291,24 @@ fn pull_model(model_id: String, app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+// ── Off-manifest edge sweep (#158) ────────────────────────────────────────────
+//
+// Triggered by:
+//   - `applyOntologyChange` in `src/lib/wiki.ts` after the new manifest is
+//     committed (spec §4 trigger (a)).
+//   - `ct wiki sweep` for operator-initiated cleanup (spec §4 trigger (c)).
+//
+// Both surfaces share `db::edge_purge::purge_off_manifest_edges_all`, which
+// enumerates curated `entity_id` partitions actually carrying edges (the
+// tier ids are not in `llm_wiki_edges.entity_id`, see the helper's doc
+// comment) and runs the per-id purge inside one transaction.
+
+#[tauri::command]
+fn purge_off_manifest_edges_cmd(db_state: State<DbState>) -> Result<usize, String> {
+    let guard = db_state.0.lock().unwrap();
+    crate::db::edge_purge::purge_off_manifest_edges_all(&guard.0).map_err(|e| e.to_string())
+}
+
 // ── Search commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -3099,6 +3117,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             list_pending_links,
             approve_link,
             revoke_link,
+            purge_off_manifest_edges_cmd,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
@@ -3536,6 +3555,7 @@ pub fn run() {
             wiki_run,
             wiki_get_all,
             wiki_get_first,
+            purge_off_manifest_edges_cmd,
             embed_text,
             generate_text,
             update_provider,

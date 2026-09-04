@@ -687,9 +687,16 @@ fn resolve_entity_edge_vocabulary(conn: &Connection, entity_id: &str) -> Vec<Str
                 return o
                     .manifest
                     .map(|m| {
+                        // Mirror `db::commit::resolve_strict_edge_vocabulary`
+                        // (commit.rs:154): lowercase + trim so a prompt
+                        // looser or tighter than the gate that judges its
+                        // output never lets the model propose types the
+                        // writer will silently drop. Without this, mixed-case
+                        // or padded manifest entries are prompted verbatim
+                        // but matched against the trimmed/lowercased gate.
                         m.edge_type_names()
                             .into_iter()
-                            .map(str::to_string)
+                            .map(|n| n.trim().to_lowercase())
                             .collect()
                     })
                     .unwrap_or_default();

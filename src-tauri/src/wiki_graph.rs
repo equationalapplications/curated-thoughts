@@ -421,6 +421,7 @@ fn fetch_neighbors(
     direction: TraverseDirection,
     edge_types: &[&str],
     space: NodeSpace,
+    edge_vocabulary: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<(WikiTraverseEdge, String)>> {
     let edge_filter = if edge_types.is_empty() {
         String::new()
@@ -486,6 +487,16 @@ fn fetch_neighbors(
                 )?;
             }
         }
+    }
+    // Read-side manifest filter (issue #158). Both callers — the standalone
+    // `walk_seed` traversal and `CompositeWalk::walk_seed` — pass the same
+    // `Option<&HashSet<String>>` vocabulary they resolved for `entity_id`,
+    // so the off-manifest retention lives in exactly one place. A `None`
+    // vocab means "no strict ontology" → every edge is admitted; a strict
+    // vocab keeps edges whose lowercased, trimmed `edge_type` is not in
+    // the declared set out of the traversal entirely.
+    if let Some(vocab) = edge_vocabulary {
+        out.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
     }
     Ok(out)
 }
@@ -652,11 +663,15 @@ pub fn wiki_traverse_graph(
         if depth >= max_depth {
             continue;
         }
-        let mut pairs =
-            fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
-        if let Some(vocab) = &edge_vocabulary {
-            pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
-        }
+        let pairs = fetch_neighbors(
+            conn,
+            entity_id,
+            &current_id,
+            direction,
+            edge_types,
+            space,
+            edge_vocabulary.as_ref(),
+        )?;
         for (edge, neighbor_id) in pairs {
             let is_new_neighbor = !visited.contains(&neighbor_id);
             if is_new_neighbor && nodes.len() >= MAX_TRAVERSAL_NODES {
@@ -1087,29 +1102,26 @@ impl CompositeWalk {
             if depth >= max_depth {
                 continue;
             }
-            let mut pairs =
-                fetch_neighbors(conn, entity_id, &current_id, direction, edge_types, space)?;
-
-            // Strict ontologies gate reads the same way they gate writes. The
-            // write-time gate is deliberately non-retroactive (see
-            // `strict_mode_grandfathers_edges_written_before_the_manifest`), so
-            // rows written before the manifest existed are still in the table
-            // and would otherwise surface as first-class neighbourhood results.
-            // The vocabulary is resolved per `entity_id`: one composite walk
-            // can seed from several partitions, and each partition's manifest
-            // gates only its own edges. `None` (no strict ontology for this
-            // entity) never means "everything illegal".
             // Borrow the cached vocabulary instead of cloning it: the cache
             // exists precisely so repeated hops don't pay O(|vocab|) copies.
+            // `fetch_neighbors` applies the read-side manifest filter
+            // (issue #158) — only its own `entity_id`'s edges are admitted
+            // when that partition has a strict ontology.
             let edge_vocabulary: &Option<std::collections::HashSet<String>> = self
                 .edge_vocabularies
                 .entry(entity_id.to_string())
                 .or_insert_with(|| {
                     crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id)
                 });
-            if let Some(vocab) = edge_vocabulary {
-                pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
-            }
+            let pairs = fetch_neighbors(
+                conn,
+                entity_id,
+                &current_id,
+                direction,
+                edge_types,
+                space,
+                edge_vocabulary.as_ref(),
+            )?;
             for (edge, neighbor_id) in pairs {
                 let neighbor_key = (entity_id.to_string(), neighbor_id.clone());
                 let is_new_neighbor = !self.visited.contains(&neighbor_key);
