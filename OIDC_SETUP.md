@@ -42,8 +42,8 @@ Your release and build workflows already handle GitHub authentication:
 - uses: softprops/action-gh-release@v3
   with:
     files: ${{ matrix.artifact_path }}
-    # macOS: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-    # Linux: src-tauri/target/release/bundle/appimage/*.AppImage
+    # macOS: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    # Linux: target/release/bundle/appimage/*.AppImage
 ```
 
 Both use the default auto-provided `secrets.GITHUB_TOKEN` — no OIDC setup needed. This token works fine for creating releases and uploading artifacts within the GitHub repository.

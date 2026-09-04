@@ -24,24 +24,24 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
-notify = "8"
-tokio = { version = "1", features = ["full", "test-util"] }
-anyhow = "1"
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
+notify.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+anyhow.workspace = true
 thiserror = "2"
-dirs = "6"
+dirs.workspace = true
 reqwest = { version = "0.13", features = ["blocking", "json"] }
-sha2 = "0.11"
+sha2.workspace = true
 hex = "0.4"
 regex = "1"
 serde_yaml = "0.9"
 portpicker = "0.1"
 fastembed = "4"
-flate2 = "1"
-fs4 = "1.1"
-walkdir = "2"
+flate2.workspace = true
+fs4.workspace = true
+walkdir.workspace = true
 pdf-extract = "0.12.0"
 zip = "8.6.0"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-native-tls", "json"] }
@@ -51,8 +51,8 @@ tree-sitter-typescript = { version = "0.23.2", default-features = false }
 tree-sitter-javascript = { version = "0.25.0", default-features = false }
 tree-sitter-python = { version = "0.25.0", default-features = false }
 tree-sitter-go = { version = "0.25.0", default-features = false }
-rmcp = { version = "3.1", features = ["macros", "transport-io", "schemars"], optional = true }
-schemars = { version = "1", features = ["derive"], optional = true }
+rmcp = { workspace = true, features = ["macros", "transport-io", "schemars"], optional = true }
+schemars = { workspace = true, optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
@@ -68,11 +68,11 @@ uuid = { version = "1.6", features = ["v4", "fast-rng"] }
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 mockito = "1"
-temp-env = "0.3"
-anyhow = "1"
-rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
+temp-env.workspace = true
+anyhow.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 uuid = { version = "1", features = ["v4"] }
 
 [features]

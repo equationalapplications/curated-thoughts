@@ -65,7 +65,7 @@ jobs:
 
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: ./src-tauri -> target
+          workspaces: . -> target
 
       # Phase 4 regression tests run here:
       #   graph_integration.rs  — recursive impact radius (5-hop CTE via Tauri command)
@@ -118,7 +118,7 @@ jobs:
 
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: ./src-tauri -> target
+          workspaces: . -> target
 
       # Placeholders satisfy tauri-build's externalBin check (see build.yml).
       - name: Pre-create placeholder sidecar binaries

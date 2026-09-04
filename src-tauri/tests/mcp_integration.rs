@@ -1,5 +1,5 @@
 //! Spawns **`curated-thoughts`** over stdio with `--mcp` and exercises MCP tool calls (**`rmcp`** client).
-//! Build the binary first: `cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml`
+//! Build the binary first: `cargo build --workspace --features mcp-server --bin curated-thoughts`
 //! Then run: `CURATED_MCP_INTEGRATION_TESTS=1 cargo test --manifest-path src-tauri/Cargo.toml --test mcp_integration`
 //!
 //! Skipped unless `CURATED_MCP_INTEGRATION_TESTS=1` is set (binary not available in default CI).
@@ -28,12 +28,19 @@ use tauri_app_lib::wiki_graph::{
 fn mcp_exe() -> PathBuf {
     // After the unified-binary refactor, the main binary runs as an MCP server
     // when invoked with --mcp. Build it with --features mcp-server.
-    // Cargo replaces hyphens with underscores in CARGO_BIN_EXE_* env var names.
-    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_curated_thoughts") {
+    // Cargo preserves hyphens in CARGO_BIN_EXE_<bin-name> env var names (does NOT
+    // replace them with underscores, despite what older docs / comments claim).
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_curated-thoughts") {
         return PathBuf::from(p);
     }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    // Under the unified Cargo workspace, build artifacts live at
+    // <workspace_root>/target/<profile>/, not <manifest_dir>/target/<profile>/.
+    // src-tauri/ is always a direct child of the workspace root in this repo,
+    // so the workspace root is CARGO_MANIFEST_DIR's parent directory.
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri has a parent (workspace root)")
         .join("target")
         .join(profile)
         .join(if cfg!(windows) {
@@ -164,7 +171,7 @@ async fn mcp_lists_search_tools_and_semantic_returns_json_hits() {
 
     assert!(
         mcp_exe().exists(),
-        "MCP binary missing: {:?}\nbuild with:\n  cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml",
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --workspace --features mcp-server --bin curated-thoughts",
         mcp_exe()
     );
 
@@ -251,7 +258,7 @@ async fn mcp_lists_wiki_tools_and_returns_json() {
 
     assert!(
         mcp_exe().exists(),
-        "MCP binary missing: {:?}\nbuild with:\n  cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml",
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --workspace --features mcp-server --bin curated-thoughts",
         mcp_exe()
     );
 
@@ -347,7 +354,7 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
 
     assert!(
         mcp_exe().exists(),
-        "MCP binary missing: {:?}\nbuild with:\n  cargo build --features mcp-server --manifest-path src-tauri/Cargo.toml",
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --workspace --features mcp-server --bin curated-thoughts",
         mcp_exe()
     );
 

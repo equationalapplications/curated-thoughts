@@ -90,7 +90,7 @@ cargo build --manifest-path src-tauri/Cargo.toml -p curated-thoughts --features 
 
 ```
 
-*The resulting binary will be located at `src-tauri/target/debug/curated-thoughts-mcp`.*
+*The resulting binary will be located at `target/debug/curated-thoughts-mcp`.*
 
 ### Cursor / VS Code `mcpServers` snippet
 
@@ -100,7 +100,7 @@ Adjust the `command` path to your clone and build output to give your IDE access
 {
   "mcpServers": {
     "curated-thoughts": {
-      "command": "/path/to/curated-thoughts/src-tauri/target/debug/curated-thoughts-mcp",
+      "command": "/path/to/curated-thoughts/target/debug/curated-thoughts-mcp",
       "env": {
         "CURATED_BRAIN_DIR": "/path/to/your/brain"
       }

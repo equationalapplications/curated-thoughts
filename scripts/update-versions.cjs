@@ -39,24 +39,18 @@ try {
   fs.writeFileSync(cargoPath, updated);
   console.log(`Updated Cargo.toml to ${version}`);
 
-  // Update Cargo.lock to reflect new package version (without upgrading dependencies)
-  // Using cargo metadata instead of cargo update to avoid semver dependency upgrades
-  const cargoDir = path.join(__dirname, '..', 'src-tauri');
-  const cargoLockPath = path.join(cargoDir, 'Cargo.lock');
+  // Update the workspace Cargo.lock to reflect the new package version (without upgrading
+  // dependencies). Using cargo metadata instead of cargo update to avoid semver dependency
+  // upgrades. src-tauri and tools are members of one workspace, so there is a single root
+  // lockfile and the tools path dependency stays in sync automatically.
+  const workspaceDir = path.join(__dirname, '..');
+  const cargoLockPath = path.join(workspaceDir, 'Cargo.lock');
 
-  execSync('cargo metadata --format-version 1', { cwd: cargoDir, stdio: ['ignore', 'ignore', 'inherit'] });
+  execSync('cargo metadata --format-version 1', { cwd: workspaceDir, stdio: ['ignore', 'ignore', 'inherit'] });
 
-  // Verify src-tauri/Cargo.lock was updated with the new version.
-  verifyLockVersion(cargoLockPath, version, 'src-tauri/Cargo.lock');
+  verifyLockVersion(cargoLockPath, version, 'Cargo.lock');
 
   console.log(`Updated and verified Cargo.lock package version to ${version}`);
-
-  // Refresh tools/Cargo.lock to keep path dependency version in sync (without upgrading dependencies).
-  const toolsDir = path.join(__dirname, '..', 'tools');
-  const toolsCargoLockPath = path.join(toolsDir, 'Cargo.lock');
-  execSync('cargo metadata --format-version 1', { cwd: toolsDir, stdio: ['ignore', 'ignore', 'inherit'] });
-  verifyLockVersion(toolsCargoLockPath, version, 'tools/Cargo.lock');
-  console.log(`Updated and verified tools/Cargo.lock package version to ${version}`);
 
   // Update tauri.conf.json
   const tauriConfPath = path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json');

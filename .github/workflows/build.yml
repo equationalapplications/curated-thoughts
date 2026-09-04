@@ -65,7 +65,7 @@ jobs:
 
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: ". -> target"
 
       - name: Build MCP sidecar
         if: matrix.platform != 'macos-latest'
@@ -83,13 +83,14 @@ jobs:
           esac
           cargo build --release --manifest-path src-tauri/Cargo.toml \
             --features mcp-server --bin curated-thoughts
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           case "${{ matrix.platform }}" in
             ubuntu-*)
-              SRC=src-tauri/target/release/curated-thoughts
+              SRC="$TARGET_DIR/release/curated-thoughts"
               DEST=src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
               ;;
             windows-*)
-              SRC=src-tauri/target/release/curated-thoughts.exe
+              SRC="$TARGET_DIR/release/curated-thoughts.exe"
               DEST=src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe
               ;;
             *)
@@ -128,9 +129,10 @@ jobs:
               --features mcp-server --bin curated-thoughts --target $T
           done
           mkdir -p src-tauri/binaries
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           lipo -create \
-            src-tauri/target/aarch64-apple-darwin/release/curated-thoughts \
-            src-tauri/target/x86_64-apple-darwin/release/curated-thoughts \
+            "$TARGET_DIR/aarch64-apple-darwin/release/curated-thoughts" \
+            "$TARGET_DIR/x86_64-apple-darwin/release/curated-thoughts" \
             -output src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
           lipo -info src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
 

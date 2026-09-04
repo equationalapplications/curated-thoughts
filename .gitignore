@@ -36,6 +36,9 @@ docs/superpowers/plans/
 
 # Precomputed recall-bench embeddings under src-tauri/tests/fixtures/**/*.json.gz must stay
 # tracked (gzip JSON archives, not ephemeral build output). Do not ignore them.
- dist/
-tools/target/
+dist/
+# Non-anchored: matches the workspace target/ at the repo root and any stray
+# target/ a tool creates under a member crate. rust-analyzer's flycheck writes
+# src-tauri/target/flycheck0 regardless of the workspace layout.
+target/
 .aider*
