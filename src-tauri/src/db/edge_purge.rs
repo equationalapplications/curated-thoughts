@@ -192,6 +192,81 @@ pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
     Ok(removed)
 }
 
+/// Delete edges whose `edge_type` is absent from the entity's strict ontology
+/// manifest.
+///
+/// The write-time gate in `db::commit` is non-retroactive by design, so a brain
+/// that went strict *after* edges were written still holds ungated rows. This is
+/// the retroactive counterpart. Returns 0 and touches nothing when the entity
+/// has no strict ontology — an unreadable or non-strict ontology must never be
+/// read as "everything is illegal".
+///
+/// Takes `&Connection` and opens an unchecked transaction so it composes inside
+/// a caller's transaction as the rest of this module does.
+pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str, now_ms: i64) -> Result<usize> {
+    let Some(vocab) = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id) else {
+        return Ok(0);
+    };
+
+    let tx = conn.unchecked_transaction()?;
+
+    // Collect first so each doomed edge can be logged (and, once edges gain
+    // CDC, get its own outbox Delete row) rather than vanishing inside one
+    // set-based DELETE.
+    let doomed: Vec<(String, String)> = {
+        let mut stmt =
+            tx.prepare("SELECT id, edge_type FROM llm_wiki_edges WHERE entity_id = ?1")?;
+        let mut rows = stmt.query([entity_id])?;
+        let mut v = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let edge_type: String = row.get(1)?;
+            if !vocab.contains(&edge_type.trim().to_lowercase()) {
+                v.push((id, edge_type));
+            }
+        }
+        v
+    };
+
+    if doomed.is_empty() {
+        return Ok(0);
+    }
+
+    for (id, edge_type) in &doomed {
+        warn_purging_off_manifest_edge(entity_id, id, edge_type);
+        tx.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [id])?;
+    }
+
+    tx.commit()?;
+    // Reserved for outbox wiring: edges carry no CDC rows today (see the module
+    // docs), so there is no helper to call here.
+    let _ = now_ms;
+    Ok(doomed.len())
+}
+
+/// Every purged edge is announced individually — a retroactive delete is
+/// destructive and an operator must be able to see exactly what went. Same
+/// two-variant pattern as `db::commit`: `tracing` where a subscriber exists,
+/// `eprintln!` in the Tauri build where none does.
+#[cfg(feature = "mcp-server")]
+fn warn_purging_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
+    tracing::warn!(
+        target: "ct::edge_purge",
+        entity_id = %entity_id,
+        edge_id = %edge_id,
+        edge_type = %edge_type,
+        "purging off-manifest edge"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_purging_off_manifest_edge(entity_id: &str, edge_id: &str, edge_type: &str) {
+    eprintln!(
+        "[ct::edge_purge WARN] purging off-manifest edge: entity_id={entity_id:?} \
+         edge_id={edge_id:?} edge_type={edge_type:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +312,59 @@ mod tests {
             params![id, entity_id, source, target],
         )
         .unwrap();
+    }
+
+    /// Install a **strict** ontology manifest declaring `edge_types` for
+    /// `entity_id`. Mirrors `db::commit::tests::seed_manifest`, narrowed to the
+    /// only shape the off-manifest sweep cares about.
+    fn seed_strict_ontology(conn: &Connection, entity_id: &str, edge_types: &[&str]) {
+        let edges: Vec<serde_json::Value> = edge_types
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": t, "source_type": "fact", "target_type": "fact", "description": ""
+                })
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "node_types": [{ "type": "fact", "description": "" }],
+            "edge_types": edges,
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, 'strict', ?2, 0)",
+            params![entity_id, manifest],
+        )
+        .unwrap();
+    }
+
+    /// Live entry with a generated id, for the sweep tests. The older
+    /// `seed_entry` takes an explicit id and is used by 10+ pre-existing tests;
+    /// this is an additive sibling rather than a migration of all of them.
+    fn seed_live_entry(conn: &Connection, entity_id: &str, label: &str) -> String {
+        let id = format!("fact_{entity_id}_{label}");
+        seed_entry(conn, &id, entity_id);
+        id
+    }
+
+    /// Live edge with an explicit `edge_type` (the older `seed_edge` hardcodes
+    /// `related_to`).
+    fn seed_live_edge(
+        conn: &Connection,
+        entity_id: &str,
+        source: &str,
+        target: &str,
+        edge_type: &str,
+    ) -> String {
+        let id = format!("edge_{entity_id}_{edge_type}");
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 100)",
+            params![id, entity_id, source, target, edge_type],
+        )
+        .unwrap();
+        id
     }
 
     fn edge_ids(conn: &Connection) -> Vec<String> {
@@ -539,5 +667,39 @@ mod tests {
         assert_eq!(removed, 1, "only the edge with two dead endpoints goes");
         assert_eq!(edge_ids(&conn).len(), 3);
         assert!(!edge_ids(&conn).contains(&"edge_dead_both".to_string()));
+    }
+
+    #[test]
+    fn purge_off_manifest_edges_removes_only_undeclared_types() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = seed_live_entry(&conn, "ent_demo", "A");
+        let b = seed_live_entry(&conn, "ent_demo", "B");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "depends_on");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "fabricated_2026-09-09");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_demo", 1_725_000_000_000).unwrap();
+        assert_eq!(removed, 1, "exactly the off-manifest edge must be purged");
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT edge_type FROM llm_wiki_edges WHERE entity_id = 'ent_demo'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining, vec!["depends_on".to_string()]);
+    }
+
+    #[test]
+    fn purge_off_manifest_edges_is_a_noop_without_a_strict_ontology() {
+        let conn = open_in_memory().unwrap();
+        let a = seed_live_entry(&conn, "ent_open", "A");
+        let b = seed_live_entry(&conn, "ent_open", "B");
+        seed_live_edge(&conn, "ent_open", &a, &b, "anything");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_open", 1_725_000_000_000).unwrap();
+        assert_eq!(removed, 0, "non-strict brains must never be swept");
+        assert_eq!(edge_ids(&conn).len(), 1);
     }
 }

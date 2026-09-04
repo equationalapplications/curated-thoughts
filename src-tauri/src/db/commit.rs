@@ -171,10 +171,7 @@ pub(crate) fn resolve_strict_edge_vocabulary(
                     .map(|n| n.trim().to_lowercase())
                     .collect();
                 if vocabulary.is_empty() {
-                    eprintln!(
-                        "[commit] entity {entity_id} (via {lookup}) is ontology mode 'strict' but \
-                         its manifest declares no edge types; edge types are not gated for this commit"
-                    );
+                    warn_strict_manifest_declares_no_edge_types(entity_id, lookup);
                     return None;
                 }
                 return Some(vocabulary);
@@ -196,12 +193,52 @@ pub(crate) fn resolve_strict_edge_vocabulary(
         }
     }
     if let Some(e) = last_err {
-        eprintln!(
-            "[commit] ontology unreadable for entity {entity_id} (fallback {lookup_ids:?}, last error: {e}); \
-             edge types are not gated for this commit"
-        );
+        warn_ontology_unreadable(entity_id, &lookup_ids, &e);
     }
     None
+}
+
+/// Strict mode with an empty vocabulary disables the gate. Both variants below
+/// keep the message text identical; the repo pattern is a `tracing` event under
+/// the `mcp-server` feature (where a subscriber exists) and `eprintln!` in the
+/// Tauri build, which has none — see `warn_source_ref_parse_error`.
+#[cfg(feature = "mcp-server")]
+fn warn_strict_manifest_declares_no_edge_types(entity_id: &str, lookup: &str) {
+    tracing::warn!(
+        target: "ct::commit",
+        entity_id = %entity_id,
+        via = %lookup,
+        "ontology mode is 'strict' but the manifest declares no edge types; \
+         edge types are not gated for this commit"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_strict_manifest_declares_no_edge_types(entity_id: &str, lookup: &str) {
+    eprintln!(
+        "[ct::commit WARN] entity {entity_id} (via {lookup}) is ontology mode 'strict' but \
+         its manifest declares no edge types; edge types are not gated for this commit"
+    );
+}
+
+/// An unreadable ontology also disables the gate (PR #78 graceful degradation).
+#[cfg(feature = "mcp-server")]
+fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &str) {
+    tracing::warn!(
+        target: "ct::commit",
+        entity_id = %entity_id,
+        fallback = ?lookup_ids,
+        last_error = %last_error,
+        "ontology unreadable; edge types are not gated for this commit"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &str) {
+    eprintln!(
+        "[ct::commit WARN] ontology unreadable for entity {entity_id} (fallback {lookup_ids:?}, \
+         last error: {last_error}); edge types are not gated for this commit"
+    );
 }
 
 pub(crate) fn generate_llm_id(prefix: &str) -> String {
