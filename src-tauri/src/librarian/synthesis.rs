@@ -1060,8 +1060,19 @@ pub(crate) fn run_synthesis_with_completer(
     let truncated = truncate_context(&full_context);
 
     // Constrain edge extraction to the entity's declared vocabulary (#158).
-    // Summarize mode emits no edges, so it never carries a vocabulary. A
-    // missing/unreadable manifest degrades to today's unconstrained prompt.
+    // Summarize mode emits no edges, so it never carries a vocabulary.
+    //
+    // The lookup mirrors the intent of `db::commit::resolve_strict_edge_vocabulary`
+    // on both axes, because a prompt looser or tighter than the gate that judges
+    // its output is worse than no prompt constraint at all:
+    //   - Two-id order, direct hit preferred. Chunks carry curated ids, but
+    //     manifests are seeded against partitions, so a direct lookup on the
+    //     curated id normally misses; `tier_fact` is the canonical seeded
+    //     partition.
+    //   - Strict-only. In `emergent`/`off` mode the writer accepts undeclared
+    //     types, so telling the model the vocabulary is closed over-constrains it.
+    // Anything else — no manifest, non-strict mode, an empty vocabulary, a read
+    // error — degrades to today's unconstrained prompt, byte-identical.
     let vocab_owned: Vec<String> = match mode {
         SynthesisMode::Summarize => Vec::new(),
         SynthesisMode::Synthesize => {
@@ -1069,16 +1080,34 @@ pub(crate) fn run_synthesis_with_completer(
                 .first()
                 .map(|c| c.entity_id.as_str())
                 .unwrap_or("");
-            crate::wiki_graph::wiki_get_ontology(conn, entity_id)
-                .ok()
-                .and_then(|r| r.manifest)
-                .map(|m| {
-                    m.edge_type_names()
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default()
+            let mut resolved: Vec<String> = Vec::new();
+            for lookup in [entity_id, "tier_fact"] {
+                if lookup.is_empty() {
+                    continue;
+                }
+                match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+                    Ok(o) if o.mode == "strict" => {
+                        resolved = o
+                            .manifest
+                            .map(|m| {
+                                m.edge_type_names()
+                                    .into_iter()
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!(
+                            "[synthesis] ontology read failed for {lookup}: {e:#}; \
+                             edge vocabulary is not constrained for this run"
+                        );
+                    }
+                }
+            }
+            resolved
         }
     };
     let vocab: Vec<&str> = vocab_owned.iter().map(String::as_str).collect();
@@ -1155,6 +1184,9 @@ mod tests {
     struct MockCompleter {
         responses: Vec<String>,
         call: std::sync::atomic::AtomicUsize,
+        /// System prompts as actually sent, in call order — the only way to
+        /// assert on prompt construction through the real call path.
+        systems: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockCompleter {
@@ -1162,12 +1194,23 @@ mod tests {
             Self {
                 responses,
                 call: std::sync::atomic::AtomicUsize::new(0),
+                systems: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn last_system(&self) -> String {
+            self.systems
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("completer was never called")
         }
     }
 
     impl LlmCompleter for MockCompleter {
-        fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+        fn complete(&self, system: &str, _user: &str) -> Result<String> {
+            self.systems.lock().unwrap().push(system.to_string());
             let idx = self.call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.responses
                 .get(idx)
@@ -1933,6 +1976,72 @@ mod tests {
         assert!(
             !prompt.contains("ONLY the following edge_type"),
             "an empty vocabulary must not emit a closed-vocabulary clause"
+        );
+    }
+
+    /// Manifests are seeded against **partitions**, not curated ids, so the
+    /// prompt-side lookup must fall back to `tier_fact` exactly as the
+    /// commit-side gate intends to. Without the fallback the vocabulary clause
+    /// never fires in production while the gate still rejects the edges the
+    /// unconstrained prompt produced (#158).
+    #[test]
+    fn synthesis_prompt_resolves_strict_manifest_via_partition_fallback() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/documents/note.md",
+            "Alpha project details here",
+        );
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+
+        // Strict ontology seeded at the partition, NOT at the chunk's entity id.
+        let manifest = serde_json::json!({
+            "node_types": [],
+            "edge_types": [{ "type": "depends_on" }, { "type": "owned_by" }],
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 0)",
+            params![manifest],
+        )
+        .unwrap();
+
+        let json = serde_json::json!({ "proposals": [] }).to_string();
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/documents/note.md".into(),
+        }];
+
+        run_synthesis_with_completer(
+            &mut conn,
+            "/vault/documents/note.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            "test-model",
+            false,
+        )
+        .unwrap();
+
+        let system = mock.last_system();
+        assert!(
+            system.contains("ONLY the following edge_type"),
+            "a strict partition manifest must close the edge vocabulary, got: {system}"
+        );
+        assert!(
+            system.contains("depends_on") && system.contains("owned_by"),
+            "the prompt must name the declared types, got: {system}"
         );
     }
 }
