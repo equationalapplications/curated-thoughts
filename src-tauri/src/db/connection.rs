@@ -182,6 +182,10 @@ pub(crate) fn warn_on_malformed_source_refs(conn: &Connection) -> usize {
     match result {
         Ok(0) => 0,
         Ok(n) => {
+            // Surface in EVERY build: in mcp-server builds tracing routes to
+            // the structured log; elsewhere eprintln! guarantees the canary
+            // is at least visible on stderr instead of silently doing nothing
+            // (a silent canary defeated its purpose during the #162 incident).
             #[cfg(feature = "mcp-server")]
             tracing::warn!(
                 malformed_source_refs = n,
@@ -189,11 +193,19 @@ pub(crate) fn warn_on_malformed_source_refs(conn: &Connection) -> usize {
                  evidence provenance is unrecoverable for these rows and heal will \
                  silently skip them (see issue #162)"
             );
+            #[cfg(not(feature = "mcp-server"))]
+            eprintln!(
+                "[curated-thoughts] WARNING: {n} source_ref value(s) look like JSON \
+                 but will not parse; evidence provenance is unrecoverable for these \
+                 rows and heal will silently skip them (see issue #162)"
+            );
             n as usize
         }
         Err(e) => {
             #[cfg(feature = "mcp-server")]
             tracing::warn!(error = %e, "source_ref canary query failed; skipping the check");
+            #[cfg(not(feature = "mcp-server"))]
+            eprintln!("[curated-thoughts] WARNING: source_ref canary query failed ({e}); skipping the check");
             0
         }
     }

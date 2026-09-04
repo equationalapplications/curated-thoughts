@@ -196,15 +196,18 @@ pub fn apply_backfill(conn: &mut Connection, config_default: &str) -> Result<Bac
             "SELECT COUNT(*) FROM llm_wiki_entries
               WHERE source_ref IS NOT NULL
                 AND substr(source_ref, 1, 1) = '{'
-                AND NOT json_valid(source_ref)",
+                AND NOT json_valid(source_ref)
+                AND deleted_at IS NULL
+                AND tier IS NULL",
             [],
             |r| r.get(0),
         )
         .unwrap_or(0);
     if excluded > 0 {
         eprintln!(
-            "[tier_backfill] skipping {excluded} row(s) with malformed JSON source_ref \
-             (deposit-origin tier cannot be classified for these; see issue #162)"
+            "[tier_backfill] skipping {excluded} row(s) this run could classify: \
+             malformed JSON source_ref (deposit-origin tier cannot be classified \
+             for these; see issue #162)"
         );
     }
 
