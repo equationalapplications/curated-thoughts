@@ -571,9 +571,7 @@ fn assemble_numbered_context(chunks: &[ChunkRow], numbered: &[NumberedChunk]) ->
     body
 }
 
-fn build_system_prompt(mode: SynthesisMode) -> &'static str {
-    match mode {
-        SynthesisMode::Summarize => {
+const SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE: &str =
             "You are a knowledge librarian. Analyze the document and emit structured JSON proposals for entity summary updates only. \
              Output ONLY valid JSON matching the schema — no markdown fences, no commentary.\n\n\
              Schema:\n\
@@ -584,9 +582,9 @@ fn build_system_prompt(mode: SynthesisMode) -> &'static str {
              - For updates/archives, target_id must be a fact_id from CANDIDATE ENTITIES.\n\
              - existing_id must be from CANDIDATE ENTITIES.\n\
              - In summarize mode: only summary_update — leave facts, edges, tasks as empty arrays.\n\
-             - Contradictions with existing facts: propose fact_update or fact_archive+fact_add with reasoning (not in summarize mode)."
-        }
-        SynthesisMode::Synthesize => {
+             - Contradictions with existing facts: propose fact_update or fact_archive+fact_add with reasoning (not in summarize mode).";
+
+const SYNTHESIS_SYSTEM_PROMPT_BASE_SYNTHESIZE: &str =
             "You are a knowledge librarian. Analyze the document and emit structured JSON proposals for facts, edges, tasks, and optional summary updates. \
              Output ONLY valid JSON matching the schema — no markdown fences, no commentary.\n\n\
              Schema:\n\
@@ -600,9 +598,33 @@ fn build_system_prompt(mode: SynthesisMode) -> &'static str {
              - For fact update/archive, target_id must be a fact_id from CANDIDATE ENTITIES.\n\
              - existing_id must be from CANDIDATE ENTITIES.\n\
              - Edge endpoints: \"self\" = this proposal's target entity; new_name refs sibling proposals in the same run.\n\
-             - Do not modify ANCHOR TRUTH chunks; contradictions become fact_update or fact_archive proposals with reasoning."
-        }
+             - Do not modify ANCHOR TRUTH chunks; contradictions become fact_update or fact_archive proposals with reasoning.";
+
+/// Build the synthesis system prompt for `mode`.
+///
+/// When `edge_vocabulary` is non-empty the prompt names the closed set of
+/// legal `edge_type` values. Without this the model invents plausible-looking
+/// snake_case types (issue #158 observed `has_open_bug_..._2026-09-09`, a
+/// future date that appears nowhere in the corpus). Constraining generation
+/// is cheaper than quarantining afterwards.
+///
+/// The clause is appended verbatim to whichever mode's base text applies; the
+/// caller decides whether a vocabulary is relevant at all (summarize mode
+/// emits no edges, so it passes `&[]`).
+fn build_system_prompt(mode: SynthesisMode, edge_vocabulary: &[&str]) -> String {
+    let mut prompt = String::from(match mode {
+        SynthesisMode::Summarize => SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE,
+        SynthesisMode::Synthesize => SYNTHESIS_SYSTEM_PROMPT_BASE_SYNTHESIZE,
+    });
+    if !edge_vocabulary.is_empty() {
+        prompt.push_str(&format!(
+            "\n\nUse ONLY the following edge_type values, exactly as written: {}. \
+             If no listed edge_type fits a relationship, omit the edge entirely \
+             rather than inventing a new type.",
+            edge_vocabulary.join(", ")
+        ));
     }
+    prompt
 }
 
 fn truncate_context(text: &str) -> String {
@@ -1037,10 +1059,33 @@ pub(crate) fn run_synthesis_with_completer(
     };
     let truncated = truncate_context(&full_context);
 
-    let system = build_system_prompt(mode);
+    // Constrain edge extraction to the entity's declared vocabulary (#158).
+    // Summarize mode emits no edges, so it never carries a vocabulary. A
+    // missing/unreadable manifest degrades to today's unconstrained prompt.
+    let vocab_owned: Vec<String> = match mode {
+        SynthesisMode::Summarize => Vec::new(),
+        SynthesisMode::Synthesize => {
+            let entity_id = source_chunks
+                .first()
+                .map(|c| c.entity_id.as_str())
+                .unwrap_or("");
+            crate::wiki_graph::wiki_get_ontology(conn, entity_id)
+                .ok()
+                .and_then(|r| r.manifest)
+                .map(|m| {
+                    m.edge_type_names()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
+    let vocab: Vec<&str> = vocab_owned.iter().map(String::as_str).collect();
+    let system = build_system_prompt(mode, &vocab);
     let user = format!("Document to analyze:\n\n{truncated}");
 
-    let raw = match call_llm_with_retry(completer, system, &user) {
+    let raw = match call_llm_with_retry(completer, &system, &user) {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("synthesis JSON failure for {source_path}: {e:#}");
@@ -1866,6 +1911,28 @@ mod tests {
             mock.call.load(Ordering::SeqCst),
             0,
             "gate must be stable against the configured-model watermark"
+        );
+    }
+
+    #[test]
+    fn system_prompt_lists_the_declared_edge_vocabulary() {
+        let prompt = build_system_prompt(SynthesisMode::Synthesize, &["depends_on", "owned_by"]);
+        assert!(
+            prompt.contains("depends_on") && prompt.contains("owned_by"),
+            "prompt must name the legal edge types, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("ONLY"),
+            "prompt must state the vocabulary is closed"
+        );
+    }
+
+    #[test]
+    fn system_prompt_without_vocabulary_is_unchanged_shape() {
+        let prompt = build_system_prompt(SynthesisMode::Synthesize, &[]);
+        assert!(
+            !prompt.contains("ONLY the following edge_type"),
+            "an empty vocabulary must not emit a closed-vocabulary clause"
         );
     }
 }
