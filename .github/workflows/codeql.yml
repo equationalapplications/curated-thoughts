@@ -44,7 +44,7 @@ jobs:
             update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf pkg-config libssl-dev
 
-      - uses: github/codeql-action/init@42947a340483f03ba47bb1a039b2c519aab3df85 # v3
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v3
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
