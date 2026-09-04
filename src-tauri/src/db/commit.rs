@@ -2923,7 +2923,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stored, 1, "a row written before the manifest stays in the table");
+        assert_eq!(
+            stored, 1,
+            "a row written before the manifest stays in the table"
+        );
 
         // Reads are filtered: the off-manifest edge is not surfaced as a
         // first-class neighbour.

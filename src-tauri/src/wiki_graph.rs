@@ -634,8 +634,7 @@ pub fn wiki_traverse_graph(
     // ontology on `entity_id` keeps off-manifest edges out of the traversal
     // exactly the way the writer keeps them out of new commits (spec §2.3,
     // #158). Resolved once up-front rather than per-hop.
-    let edge_vocabulary =
-        crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
+    let edge_vocabulary = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
 
     let mut nodes: HashMap<String, WikiTraverseNode> = HashMap::new();
     let mut edges: Vec<WikiTraverseEdge> = Vec::new();
@@ -731,13 +730,7 @@ mod unit_tests {
         .unwrap();
     }
 
-    fn seed_edge(
-        conn: &Connection,
-        entity_id: &str,
-        source: &str,
-        target: &str,
-        edge_type: &str,
-    ) {
+    fn seed_edge(conn: &Connection, entity_id: &str, source: &str, target: &str, edge_type: &str) {
         // Deterministic per-call id keeps tests diff-friendly. The primary-key
         // collision we have to dodge is between two calls within one test, not
         // across tests, so a counter on a static would also work — this just
@@ -770,8 +763,7 @@ mod unit_tests {
                 })
             })
             .collect();
-        let manifest =
-            serde_json::json!({ "node_types": [], "edge_types": edges }).to_string();
+        let manifest = serde_json::json!({ "node_types": [], "edge_types": edges }).to_string();
         conn.execute(
             "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
              VALUES (?1, 'strict', ?2, 0)",
@@ -858,8 +850,7 @@ mod unit_tests {
         );
 
         let result =
-            wiki_traverse_graph(&conn, "ent_demo", &a, 2, TraverseDirection::Both, &[])
-                .unwrap();
+            wiki_traverse_graph(&conn, "ent_demo", &a, 2, TraverseDirection::Both, &[]).unwrap();
 
         let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
         assert!(
@@ -886,8 +877,7 @@ mod unit_tests {
         seed_edge(&conn, "ent_open", &a, &b, "anything_goes_here");
 
         let result =
-            wiki_traverse_graph(&conn, "ent_open", &a, 2, TraverseDirection::Both, &[])
-                .unwrap();
+            wiki_traverse_graph(&conn, "ent_open", &a, 2, TraverseDirection::Both, &[]).unwrap();
         let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
         assert!(
             types.contains(&"anything_goes_here"),
