@@ -269,6 +269,24 @@ mod tests {
     }
 
     #[test]
+    fn load_failure_never_yields_local_profile() {
+        // A config that cannot be parsed must surface as an error. Silently
+        // reinterpreting it as the Local/Ollama default would embed new
+        // content with a different model than the existing corpus, which
+        // corrupts similarity scores across the whole index with no error.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{ not json at all").unwrap();
+        let cfg = VaultConfig::new(path);
+
+        let result = cfg.get_embed_profile();
+        assert!(
+            result.is_err(),
+            "malformed config must error, got {result:?}"
+        );
+    }
+
+    #[test]
     fn embed_profile_defaults_when_absent() {
         let cfg = make_config(&TempDir::new().unwrap());
         assert_eq!(cfg.get_embed_profile().unwrap(), EmbedProfile::default());
