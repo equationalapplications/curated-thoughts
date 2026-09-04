@@ -3157,6 +3157,32 @@ pub fn run() {
     }
 
     let config = VaultConfig::new(config_path.clone());
+
+    // Resolve the embed profile BEFORE any vault-recovery path can run.
+    // `set_vault_path()` rewrites an unreadable config.json as a default
+    // (vault_path only, no embed_profile), so resolving after recovery would
+    // see an absent key and silently default to Local -- exactly the
+    // corruption this startup gate exists to prevent. Failing here also
+    // preserves the user's on-disk config for diagnosis instead of
+    // overwriting it.
+    //
+    // A config we cannot read must not become an Ollama profile. Embedding
+    // new content with a different model than the existing corpus silently
+    // corrupts similarity across the whole index -- there is no error, just
+    // degraded recall forever. Refuse to start instead.
+    let embed_profile = match config.get_embed_profile() {
+        Ok(profile) => profile,
+        Err(e) => {
+            eprintln!("[fatal] embed profile could not be read: {e}");
+            eprintln!(
+                "        Refusing to start rather than embedding with a \
+                 fallback model, which would corrupt the existing index."
+            );
+            eprintln!("        Fix or remove config.json, then relaunch.");
+            std::process::exit(1);
+        }
+    };
+
     let vault_path_for_migration = config.get_vault_path().ok().flatten();
     let vault_migration_needed = !config.has_migrated_to_v2().unwrap_or(false);
 
@@ -3244,9 +3270,9 @@ pub fn run() {
         .map(|p| p.to_string_lossy().into_owned());
     let pipeline = start_pipeline(db_path.clone(), initial_vault_root);
 
-    let embed_profile = config
-        .get_embed_profile()
-        .unwrap_or_else(|_| crate::embedder::EmbedProfile::default());
+    // `embed_profile` was resolved above, before vault recovery could
+    // rewrite an unreadable config.json -- see the comment at the top of
+    // this function's config handling.
 
     tauri::Builder::default()
         .manage(OutboxWorkerState(Mutex::new(None)))

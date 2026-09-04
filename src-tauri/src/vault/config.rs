@@ -82,7 +82,24 @@ impl VaultConfig {
         let paths = self.brain_paths();
         let report = BrainConfig::load_lenient(&paths)
             .map_err(|e| anyhow::anyhow!("config.json failed to load: {e}"))?;
-        Ok(report.config.embed_profile.unwrap_or_default())
+        // An ABSENT key is a fresh install and legitimately defaults. A LOAD
+        // FAILURE is not: it propagates via `?` above and must never reach
+        // here. Keeping these two cases visibly distinct is the whole point
+        // of this branch -- `unwrap_or_default()` collapsed them.
+        match report.config.embed_profile {
+            Some(profile) => Ok(profile),
+            None => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                let fallback = EmbedProfile::default();
+                WARNED.call_once(|| {
+                    eprintln!(
+                        "[embed] no embed_profile configured; defaulting to {fallback:?}. \
+                         Set one in config.json to embed with a different model."
+                    );
+                });
+                Ok(fallback)
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -235,6 +252,38 @@ mod tests {
         std::fs::write(&path, r#"{"vault_path": 42}"#).unwrap();
         let cfg = VaultConfig::new(path);
         assert!(cfg.get_vault_path().is_err());
+    }
+
+    #[test]
+    fn absent_embed_profile_defaults_to_local_and_is_explicit() {
+        // A fresh install has no embed_profile key. Defaulting is correct
+        // behavior; what must not happen is defaulting on a LOAD FAILURE
+        // (see load_failure_never_yields_local_profile).
+        let cfg = make_config(&TempDir::new().unwrap());
+        let prof = cfg.get_embed_profile().expect("absent key must not error");
+        assert_eq!(prof, EmbedProfile::default());
+        assert!(
+            matches!(prof, EmbedProfile::Local { .. }),
+            "default must still be the documented Local profile"
+        );
+    }
+
+    #[test]
+    fn load_failure_never_yields_local_profile() {
+        // A config that cannot be parsed must surface as an error. Silently
+        // reinterpreting it as the Local/Ollama default would embed new
+        // content with a different model than the existing corpus, which
+        // corrupts similarity scores across the whole index with no error.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{ not json at all").unwrap();
+        let cfg = VaultConfig::new(path);
+
+        let result = cfg.get_embed_profile();
+        assert!(
+            result.is_err(),
+            "malformed config must error, got {result:?}"
+        );
     }
 
     #[test]
