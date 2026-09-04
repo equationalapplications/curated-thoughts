@@ -67,18 +67,6 @@ jobs:
         with:
           workspaces: . -> target
 
-      # Warn-only on purpose. Turning on `-D warnings` in the same change that
-      # introduces clippy would block the pipeline on an untriaged backlog of
-      # lints unrelated to whatever PR happens to be open. This makes the
-      # backlog visible; flipping it to blocking is tracked separately.
-      #
-      # No `--features mcp-server` here: that feature makes tauri-build
-      # validate externalBin paths, which needs the placeholder sidecar step
-      # below to have run first.
-      - name: Clippy (warn-only)
-        continue-on-error: true
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils
-
       # Phase 4 regression tests run here:
       #   graph_integration.rs  — recursive impact radius (5-hop CTE via Tauri command)
       #   wiki_maintenance.rs   — DB-level prune/heal SQL contract
@@ -95,6 +83,21 @@ jobs:
           set -euxo pipefail
           mkdir -p src-tauri/binaries
           touch src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
+
+      # Warn-only on purpose. Turning on `-D warnings` in the same change that
+      # introduces clippy would block the pipeline on an untriaged backlog of
+      # lints unrelated to whatever PR happens to be open. This makes the
+      # backlog visible; flipping it to blocking is tracked separately.
+      #
+      # Must run after the placeholder step above: tauri-build validates the
+      # externalBin paths unconditionally (not just under mcp-server), so the
+      # placeholder file has to exist for the build script to pass. No
+      # --features mcp-server though — clippy does not need the sidecar itself.
+      # --features test-utils: the integration tests under --all-targets import
+      # items gated behind that feature.
+      - name: Clippy (warn-only)
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils
 
       - name: Tests + MCP integration
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
