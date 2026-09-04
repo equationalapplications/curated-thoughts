@@ -1,89 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use curated_thoughts_tools::cli_common::{self, print_json};
+use curated_thoughts_tools::cli_common::{self, print_json, redact_home};
 use serde_json::json;
-
-/// Compare two path prefixes, treating the verbatim (`\\?\`) forms that
-/// `std::fs::canonicalize` emits on Windows as equal to the plain forms
-/// `dirs::home_dir` returns. Without this, a canonicalized
-/// `\\?\C:\Users\me\.ssh` fails to match a `C:\Users\me` home prefix —
-/// `Prefix::VerbatimDisk(b'C')` and `Prefix::Disk(b'C')` are distinct values —
-/// so the absolute path would print verbatim, which is the exact leak
-/// `redact_home` exists to prevent. Drive letters and share names compare
-/// ASCII-case-insensitively, matching Windows' own path semantics.
-///
-/// `std::path::Prefix` is available on every platform even though
-/// `Path::components` only ever yields one on Windows, so this stays compiled
-/// and unit-testable on Unix (see `prefix_eq_*` tests).
-fn prefix_eq(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
-    use std::path::Prefix::{Disk, VerbatimDisk, VerbatimUNC, UNC};
-    match (a, b) {
-        (Disk(x) | VerbatimDisk(x), Disk(y) | VerbatimDisk(y)) => x.eq_ignore_ascii_case(&y),
-        (
-            UNC(server_a, share_a) | VerbatimUNC(server_a, share_a),
-            UNC(server_b, share_b) | VerbatimUNC(server_b, share_b),
-        ) => server_a.eq_ignore_ascii_case(server_b) && share_a.eq_ignore_ascii_case(share_b),
-        _ => a == b,
-    }
-}
-
-/// Compare one component of the home prefix. `Prefix` components go through
-/// [`prefix_eq`] so path *representation* differences do not defeat the match.
-/// On Windows the remaining components compare ASCII-case-insensitively,
-/// because `canonicalize` returns the on-disk casing while `dirs::home_dir`
-/// returns `%USERPROFILE%`'s and NTFS treats the two as the same directory; on
-/// Unix they keep exact comparison, so `/Users/Me` and `/users/me` stay the
-/// distinct directories they really are.
-fn component_eq(a: &std::path::Component<'_>, b: &std::path::Component<'_>) -> bool {
-    use std::path::Component;
-    match (a, b) {
-        (Component::Prefix(a), Component::Prefix(b)) => prefix_eq(a.kind(), b.kind()),
-        _ if cfg!(windows) => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
-        _ => a == b,
-    }
-}
-
-/// Substitute the user's home directory with `~` so absolute paths that
-/// include it (e.g. `/Users/me/.ssh`) do not get logged verbatim when stdout
-/// is captured (CI logs, system journals). Component-aware so it accepts
-/// native Windows path separators (`\` on Windows, `/` on Unix) and the
-/// verbatim prefixes `canonicalize` produces there, without a `#[cfg]` branch
-/// in this crate. No-op outside the home directory.
-fn redact_home(target: &str) -> String {
-    let Some(home) = dirs::home_dir() else {
-        return target.to_string();
-    };
-    // Component-wise comparison: walk the home prefix and require every
-    // component to match in order. `Path::components` handles both `/` and
-    // `\` separators, and `component_eq` absorbs the Windows verbatim-prefix
-    // and casing differences, so this works on Windows and Unix without a #cfg.
-    let home_components: Vec<_> = home.components().collect();
-    let target_path = std::path::Path::new(target);
-    let target_components: Vec<_> = target_path.components().collect();
-    if target_components.len() < home_components.len()
-        || !home_components
-            .iter()
-            .zip(&target_components)
-            .all(|(h, t)| component_eq(h, t))
-    {
-        return target.to_string();
-    }
-    // Re-join the tail using the target's OS path semantics so the
-    // displayed separator matches what the caller gave us (no slash
-    // normalization mid-output).
-    let mut tail = std::path::PathBuf::new();
-    for comp in target_path.components().skip(home_components.len()) {
-        tail.push(comp.as_os_str());
-    }
-    if tail.as_os_str().is_empty() {
-        "~".to_string()
-    } else {
-        // Prefix with the platform's preferred separator so the rendered
-        // string always parses on the host that produced it.
-        let sep = std::path::MAIN_SEPARATOR;
-        format!("~{sep}{}", tail.display())
-    }
-}
 
 /// `ct` — headless CLI for Curated Thoughts brains.
 #[derive(Parser)]
@@ -244,6 +162,21 @@ enum WikiCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Hard-delete wiki entries by source_ref (incident cleanup).
+    Forget {
+        /// Exact source_ref to delete. Repeatable.
+        #[arg(long = "ref", value_name = "REF", action = clap::ArgAction::Append)]
+        refs: Vec<String>,
+        /// Anchored prefix; resolved to exact refs before deleting.
+        #[arg(long, value_name = "PREFIX")]
+        like: Option<String>,
+        /// Print what would be deleted without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm the destructive write.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Sweep edges whose `edge_type` is not declared by the entity's strict
     /// ontology manifest (spec §4 trigger (c)). Refuses without `--yes` so a
     /// mistyped intent never silently deletes live rows.
@@ -322,6 +255,12 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Wiki { cmd } => match cmd {
             WikiCmd::List { json } => cli_common::wiki_list_cmd(json),
             WikiCmd::Get { entity_id, json } => cli_common::wiki_get_cmd(&entity_id, json),
+            WikiCmd::Forget {
+                refs,
+                like,
+                dry_run,
+                yes,
+            } => cli_common::wiki_forget_cmd(refs, like, dry_run, yes),
             WikiCmd::Sweep { yes } => cli_common::wiki_sweep_cmd(yes),
         },
         Cmd::Proposals { cmd } => match cmd {
@@ -744,132 +683,5 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
             eprintln!("error: {}", redact_home(&e));
             Ok(1)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{prefix_eq, redact_home};
-
-    /// Exact match on the home directory itself collapses to `~`.
-    #[test]
-    fn redact_home_collapses_exact_match() {
-        let home = "/Users/example-home";
-        temp_env::with_var("HOME", Some(home), || {
-            assert_eq!(redact_home(home), "~");
-        });
-    }
-
-    /// A path outside the home directory is left verbatim.
-    #[test]
-    fn redact_home_leaves_non_home_paths_untouched() {
-        temp_env::with_var("HOME", Some("/Users/example-home"), || {
-            let outside = "/var/tmp/repo-docs";
-            assert_eq!(redact_home(outside), outside);
-        });
-    }
-
-    /// A child path under home redacts to `~<sep><rest>` using the
-    /// platform's native separator — `Path::components()` is
-    /// separator-aware, so on Windows a target using `\` still matches the
-    /// home prefix and redacts, whereas the previous `str::strip_prefix` +
-    /// `starts_with('/')` implementation only recognized `/` and would
-    /// leave a `\`-separated Windows target printed verbatim (CodeRabbit
-    /// review on PR #124).
-    #[test]
-    fn redact_home_redacts_child_path_using_platform_separator() {
-        let sep = std::path::MAIN_SEPARATOR;
-        let home = format!("{sep}Users{sep}example-home");
-        temp_env::with_var("HOME", Some(home.as_str()), || {
-            let target = format!("{home}{sep}.ssh{sep}id_ed25519");
-            assert_eq!(redact_home(&target), format!("~{sep}.ssh{sep}id_ed25519"));
-        });
-    }
-
-    /// A sibling directory that merely shares the home dir as a string
-    /// prefix (e.g. `/Users/example-home-secrets`) must NOT be redacted —
-    /// component-wise comparison must not treat it as "inside home".
-    #[test]
-    fn redact_home_does_not_match_a_string_prefix_sibling() {
-        temp_env::with_var("HOME", Some("/Users/example-home"), || {
-            let sibling = "/Users/example-home-secrets/file.txt";
-            assert_eq!(redact_home(sibling), sibling);
-        });
-    }
-
-    /// `std::fs::canonicalize` returns extended-length (`\\?\C:\...`) paths on
-    /// Windows, whose leading component is `Prefix::VerbatimDisk`, while
-    /// `dirs::home_dir` returns a plain `Prefix::Disk` path. Before
-    /// `prefix_eq`, those compared unequal and a canonicalized home path
-    /// printed verbatim — the leak `redact_home` exists to prevent, on a
-    /// platform `build.yml` ships (`windows-latest`). `std::path::Prefix` is
-    /// constructible on every platform, so this asserts the normalization
-    /// itself on the dev's and CI's Unix hosts too (CodeRabbit, PR #129).
-    #[test]
-    fn prefix_eq_treats_a_verbatim_disk_as_the_plain_disk() {
-        use std::path::Prefix::{Disk, VerbatimDisk};
-        assert!(prefix_eq(VerbatimDisk(b'C'), Disk(b'C')));
-        // Drive letters are case-insensitive on Windows.
-        assert!(prefix_eq(VerbatimDisk(b'C'), Disk(b'c')));
-        assert!(prefix_eq(Disk(b'c'), VerbatimDisk(b'C')));
-        // Different drives must still be different roots.
-        assert!(!prefix_eq(VerbatimDisk(b'C'), Disk(b'D')));
-    }
-
-    /// The UNC pair normalizes the same way, case-insensitively per share.
-    #[test]
-    fn prefix_eq_treats_a_verbatim_unc_as_the_plain_unc() {
-        use std::ffi::OsStr;
-        use std::path::Prefix::{VerbatimUNC, UNC};
-        assert!(prefix_eq(
-            VerbatimUNC(OsStr::new("server"), OsStr::new("share")),
-            UNC(OsStr::new("SERVER"), OsStr::new("Share")),
-        ));
-        assert!(!prefix_eq(
-            VerbatimUNC(OsStr::new("server"), OsStr::new("share")),
-            UNC(OsStr::new("server"), OsStr::new("other")),
-        ));
-    }
-
-    /// End-to-end over *actual* `canonicalize` output for the real home dir,
-    /// rather than a hand-written string: on Windows this is the
-    /// `\\?\`-prefixed form, which must still collapse to `~`.
-    ///
-    /// Skipped when `canonicalize` resolved a symlink somewhere in `$HOME`
-    /// (the two paths then name the same directory by genuinely different
-    /// components, which no prefix normalization can bridge — that is the
-    /// macOS `/var` → `/private/var` class of problem, handled at the call
-    /// site by canonicalizing `vault_root`, not here).
-    #[test]
-    fn redact_home_collapses_actual_canonicalize_output_for_home() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let Ok(canonical) = std::fs::canonicalize(&home) else {
-            return;
-        };
-        // Everything below the prefix/root must name the same components; only
-        // the *representation* of the root may differ for this to be a fair
-        // test of `component_eq`.
-        let tail = |p: &std::path::Path| {
-            p.components()
-                .filter(|c| {
-                    !matches!(
-                        c,
-                        std::path::Component::Prefix(_) | std::path::Component::RootDir
-                    )
-                })
-                .map(|c| c.as_os_str().to_owned())
-                .collect::<Vec<_>>()
-        };
-        if tail(&canonical) != tail(&home) {
-            return;
-        }
-        assert_eq!(
-            redact_home(&canonical.display().to_string()),
-            "~",
-            "canonicalize output for the home dir must redact to `~`; got {}",
-            canonical.display()
-        );
     }
 }

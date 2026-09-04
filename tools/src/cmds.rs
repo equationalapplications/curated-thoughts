@@ -658,6 +658,223 @@ pub fn format_event(kind: &str, path: &str, ts_ms: i64) -> String {
     .to_string()
 }
 
+/// Resolve an anchored `source_ref` prefix to the exact refs it matches.
+///
+/// The prefix is bound as `prefix%`, never interpolated. `%` and `_` are
+/// rejected outright so the selector stays a literal anchored prefix and
+/// cannot silently widen into a substring scan — an incident tool that
+/// deletes more than the operator typed is worse than one that refuses.
+pub fn resolve_refs_by_prefix(conn: &Connection, prefix: &str) -> Result<Vec<String>> {
+    if prefix.is_empty() {
+        anyhow::bail!(
+            "--like must not be empty: an empty prefix matches every non-NULL \
+             source_ref via LIKE '%'. Use repeated --ref for an explicit set."
+        );
+    }
+    if prefix.contains('%') || prefix.contains('_') {
+        anyhow::bail!(
+            "--like must be a literal anchored prefix; `%` and `_` are not allowed \
+             (got {prefix:?}). Use repeated --ref for an explicit set."
+        );
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT source_ref FROM llm_wiki_entries
+          WHERE source_ref IS NOT NULL AND source_ref LIKE ?1",
+    )?;
+    let mut rows = stmt.query([format!("{prefix}%")])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get::<_, String>(0)?);
+    }
+    Ok(out)
+}
+
+/// `ct wiki forget` — hard-delete wiki entries by `source_ref`.
+///
+/// Delegates to `forget_entries_by_source_refs`, which owns a single
+/// transaction that: selects the doomed `(id, entity_id)` pairs *before*
+/// deleting so each outbox row carries the right entity partition; pushes one
+/// `OutboxOperation::Delete` per entry (PR #132); hard-deletes; then calls
+/// `purge_edges_for_hard_deleted`. Rollback is automatic. The caller adds
+/// selection and confirmation only.
+///
+/// Note: the production function does NOT filter on `deleted_at`, so this
+/// hard-deletes live *and* already-soft-deleted matches. That is intended for
+/// incident cleanup.
+pub fn wiki_forget_cmd(
+    refs: Vec<String>,
+    like: Option<String>,
+    dry_run: bool,
+    yes: bool,
+) -> Result<i32> {
+    // Exactly one selector. Supporting both at once invites a union whose
+    // semantics nobody agrees on under incident pressure.
+    match (refs.is_empty(), like.is_none()) {
+        (true, true) => {
+            eprintln!("error: pass --ref <REF> (repeatable) or --like <PREFIX>");
+            return Ok(1);
+        }
+        (false, false) => {
+            eprintln!("error: --ref and --like are mutually exclusive");
+            return Ok(1);
+        }
+        _ => {}
+    }
+
+    let brain = crate::write::resolve()?;
+
+    let resolved: Vec<String> = if let Some(prefix) = like {
+        let ro = crate::write::open_ro(&brain)?;
+        resolve_refs_by_prefix(&ro, &prefix)?
+    } else {
+        let mut r = refs;
+        r.sort();
+        r.dedup();
+        r
+    };
+
+    if resolved.is_empty() {
+        eprintln!("no entries matched");
+        return Ok(crate::write::EXIT_NO_RESULTS);
+    }
+
+    // Count before acting so dry-run and the refusal message agree.
+    let doomed: i64 = {
+        let ro = crate::write::open_ro(&brain)?;
+        let ph: String = std::iter::repeat_n("?", resolved.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT COUNT(*) FROM llm_wiki_entries WHERE source_ref IN ({ph})");
+        let params: Vec<&dyn rusqlite::types::ToSql> = resolved
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        ro.query_row(&sql, params.as_slice(), |r| r.get(0))?
+    };
+
+    if dry_run {
+        println!(
+            "dry-run: {doomed} entr(ies) across {} distinct ref(s):",
+            resolved.len()
+        );
+        for r in &resolved {
+            println!("  {}", redact_home(r));
+        }
+        println!("dry-run: no changes written");
+        return Ok(0);
+    }
+
+    if !yes {
+        eprintln!(
+            "refusing: `ct wiki forget` would hard-delete {doomed} entr(ies) across {} ref(s) \
+             in {} and replicate the deletion to outbox consumers. \
+             Pass --yes to proceed, or --dry-run to preview.",
+            resolved.len(),
+            brain.paths.db_path.display()
+        );
+        return Ok(1);
+    }
+
+    let conn = crate::write::open_rw(&brain)?;
+    let removed =
+        tauri_app_lib::db::wiki_forget::forget_entries_by_source_refs(&conn, &resolved, now_ms())?;
+    println!("forgot: {removed}");
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// redact_home — home-directory path redaction
+//
+// Moved here from `tools/src/bin/ct.rs` so `cmds::wiki_forget_cmd` (and any
+// other `cmds` body that echoes home-rooted input) can re-use it via
+// `crate::cli_common::redact_home` without the `ct` binary needing to also
+// define it. The previous public-test surface (tests in ct.rs's `mod tests`)
+// moved with the implementation. PR #163.
+// ---------------------------------------------------------------------------
+
+/// Compare two path prefixes, treating the verbatim (`\\?\`) forms that
+/// `std::fs::canonicalize` emits on Windows as equal to the plain forms
+/// `dirs::home_dir` returns. Without this, a canonicalized
+/// `\\?\C:\Users\me\.ssh` fails to match a `C:\Users\me` home prefix —
+/// `Prefix::VerbatimDisk(b'C')` and `Prefix::Disk(b'C')` are distinct values —
+/// so the absolute path would print verbatim, which is the exact leak
+/// `redact_home` exists to prevent. Drive letters and share names compare
+/// ASCII-case-insensitively, matching Windows' own path semantics.
+///
+/// `std::path::Prefix` is available on every platform even though
+/// `Path::components` only ever yields one on Windows, so this stays compiled
+/// and unit-testable on Unix (see `prefix_eq_*` tests).
+fn prefix_eq(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
+    use std::path::Prefix::{Disk, VerbatimDisk, VerbatimUNC, UNC};
+    match (a, b) {
+        (Disk(x) | VerbatimDisk(x), Disk(y) | VerbatimDisk(y)) => x.eq_ignore_ascii_case(&y),
+        (
+            UNC(server_a, share_a) | VerbatimUNC(server_a, share_a),
+            UNC(server_b, share_b) | VerbatimUNC(server_b, share_b),
+        ) => server_a.eq_ignore_ascii_case(server_b) && share_a.eq_ignore_ascii_case(share_b),
+        _ => a == b,
+    }
+}
+
+/// Compare one component of the home prefix. `Prefix` components go through
+/// [`prefix_eq`] so path *representation* differences do not defeat the match.
+/// On Windows the remaining components compare ASCII-case-insensitively,
+/// because `canonicalize` returns the on-disk casing while `dirs::home_dir`
+/// returns `%USERPROFILE%`'s and NTFS treats the two as the same directory; on
+/// Unix they keep exact comparison, so `/Users/Me` and `/users/me` stay the
+/// distinct directories they really are.
+fn component_eq(a: &std::path::Component<'_>, b: &std::path::Component<'_>) -> bool {
+    use std::path::Component;
+    match (a, b) {
+        (Component::Prefix(a), Component::Prefix(b)) => prefix_eq(a.kind(), b.kind()),
+        _ if cfg!(windows) => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
+        _ => a == b,
+    }
+}
+
+/// Substitute the user's home directory with `~` so absolute paths that
+/// include it (e.g. `/Users/me/.ssh`) do not get logged verbatim when stdout
+/// is captured (CI logs, system journals). Component-aware so it accepts
+/// native Windows path separators (`\` on Windows, `/` on Unix) and the
+/// verbatim prefixes `canonicalize` produces there, without a `#[cfg]` branch
+/// in this crate. No-op outside the home directory.
+pub fn redact_home(target: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return target.to_string();
+    };
+    // Component-wise comparison: walk the home prefix and require every
+    // component to match in order. `Path::components` handles both `/` and
+    // `\` separators, and `component_eq` absorbs the Windows verbatim-prefix
+    // and casing differences, so this works on Windows and Unix without a #cfg.
+    let home_components: Vec<_> = home.components().collect();
+    let target_path = std::path::Path::new(target);
+    let target_components: Vec<_> = target_path.components().collect();
+    if target_components.len() < home_components.len()
+        || !home_components
+            .iter()
+            .zip(&target_components)
+            .all(|(h, t)| component_eq(h, t))
+    {
+        return target.to_string();
+    }
+    // Re-join the tail using the target's OS path semantics so the
+    // displayed separator matches what the caller gave us (no slash
+    // normalization mid-output).
+    let mut tail = std::path::PathBuf::new();
+    for comp in target_path.components().skip(home_components.len()) {
+        tail.push(comp.as_os_str());
+    }
+    if tail.as_os_str().is_empty() {
+        "~".to_string()
+    } else {
+        // Prefix with the platform's preferred separator so the rendered
+        // string always parses on the host that produced it.
+        let sep = std::path::MAIN_SEPARATOR;
+        format!("~{sep}{}", tail.display())
+    }
+}
+
 /// Current wall-clock time in unix milliseconds.
 ///
 /// Uses `std::time::SystemTime` (no `chrono` dep — keeping the dependency
@@ -1555,6 +1772,188 @@ mod tests {
                 },
             );
         });
+    }
+
+    // ---- `ct wiki forget` source_ref resolver (PR #163) ----
+
+    /// Open a fresh, fully-migrated in-memory brain connection. We use the
+    /// lib's `open_in_memory` (not `AppDb::open_with_config`) because the
+    /// `--like` selector only needs the schema, not the vault_root wiring.
+    fn open_in_memory_brain() -> Connection {
+        tauri_app_lib::db::connection::open_in_memory().expect("open in-memory brain")
+    }
+
+    /// Seed one `llm_wiki_entries` row with the given id and source_ref.
+    /// Mirrors the column list in `wiki_forget`'s unit tests so it lines up
+    /// with what the production migration produces.
+    fn seed_entry_with_source_ref(conn: &Connection, id: &str, source_ref: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, 'ent_forget_test', 'T', 'B', '[]', 'inferred', 'librarian_inferred',
+                       NULL, ?2, 100, 100, NULL, 0, NULL, NULL, NULL)",
+            rusqlite::params![id, source_ref],
+        )
+        .expect("seed entry");
+    }
+
+    #[test]
+    fn resolve_refs_by_prefix_is_anchored_and_distinct() {
+        let conn = open_in_memory_brain();
+        seed_entry_with_source_ref(&conn, "e1", "evidence-alpha");
+        seed_entry_with_source_ref(&conn, "e2", "evidence-alpha"); // duplicate ref
+        seed_entry_with_source_ref(&conn, "e3", "evidence-beta");
+        seed_entry_with_source_ref(&conn, "e4", "not-evidence-gamma"); // must NOT match
+
+        let mut got = resolve_refs_by_prefix(&conn, "evidence-").unwrap();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["evidence-alpha".to_string(), "evidence-beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_refs_by_prefix_rejects_wildcards() {
+        let conn = open_in_memory_brain();
+        let err = resolve_refs_by_prefix(&conn, "evid%nce");
+        assert!(
+            err.is_err(),
+            "a `%` must be rejected, not treated as a wildcard"
+        );
+
+        let err2 = resolve_refs_by_prefix(&conn, "evid_nce");
+        assert!(
+            err2.is_err(),
+            "an `_` must be rejected, not treated as a wildcard"
+        );
+    }
+
+    // ---- redact_home (moved from `bin/ct.rs` so wiki_forget_cmd can use it
+    //      and tests live with the implementation; PR #163) ----
+
+    /// Exact match on the home directory itself collapses to `~`.
+    #[test]
+    fn redact_home_collapses_exact_match() {
+        let home = "/Users/example-home";
+        temp_env::with_var("HOME", Some(home), || {
+            assert_eq!(redact_home(home), "~");
+        });
+    }
+
+    /// A path outside the home directory is left verbatim.
+    #[test]
+    fn redact_home_leaves_non_home_paths_untouched() {
+        temp_env::with_var("HOME", Some("/Users/example-home"), || {
+            let outside = "/var/tmp/repo-docs";
+            assert_eq!(redact_home(outside), outside);
+        });
+    }
+
+    /// A child path under home redacts to `~<sep><rest>` using the
+    /// platform's native separator — `Path::components()` is
+    /// separator-aware, so on Windows a target using `\` still matches the
+    /// home prefix and redacts, whereas the previous `str::strip_prefix` +
+    /// `starts_with('/')` implementation only recognized `/` and would
+    /// leave a `\`-separated Windows target printed verbatim (CodeRabbit
+    /// review on PR #124).
+    #[test]
+    fn redact_home_redacts_child_path_using_platform_separator() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let home = format!("{sep}Users{sep}example-home");
+        temp_env::with_var("HOME", Some(home.as_str()), || {
+            let target = format!("{home}{sep}.ssh{sep}id_ed25519");
+            assert_eq!(redact_home(&target), format!("~{sep}.ssh{sep}id_ed25519"));
+        });
+    }
+
+    /// A sibling directory that merely shares the home dir as a string
+    /// prefix (e.g. `/Users/example-home-secrets`) must NOT be redacted —
+    /// component-wise comparison must not treat it as "inside home".
+    #[test]
+    fn redact_home_does_not_match_a_string_prefix_sibling() {
+        temp_env::with_var("HOME", Some("/Users/example-home"), || {
+            let sibling = "/Users/example-home-secrets/file.txt";
+            assert_eq!(redact_home(sibling), sibling);
+        });
+    }
+
+    /// `std::fs::canonicalize` returns extended-length (`\\?\C:\...`) paths on
+    /// Windows, whose leading component is `Prefix::VerbatimDisk`, while
+    /// `dirs::home_dir` returns a plain `Prefix::Disk` path. Before
+    /// `prefix_eq`, those compared unequal and a canonicalized home path
+    /// printed verbatim — the leak `redact_home` exists to prevent, on a
+    /// platform `build.yml` ships (`windows-latest`). `std::path::Prefix` is
+    /// constructible on every platform, so this asserts the normalization
+    /// itself on the dev's and CI's Unix hosts too (CodeRabbit, PR #129).
+    #[test]
+    fn prefix_eq_treats_a_verbatim_disk_as_the_plain_disk() {
+        use std::path::Prefix::{Disk, VerbatimDisk};
+        assert!(prefix_eq(VerbatimDisk(b'C'), Disk(b'C')));
+        // Drive letters are case-insensitive on Windows.
+        assert!(prefix_eq(VerbatimDisk(b'C'), Disk(b'c')));
+        assert!(prefix_eq(Disk(b'c'), VerbatimDisk(b'C')));
+        // Different drives must still be different roots.
+        assert!(!prefix_eq(VerbatimDisk(b'C'), Disk(b'D')));
+    }
+
+    /// The UNC pair normalizes the same way, case-insensitively per share.
+    #[test]
+    fn prefix_eq_treats_a_verbatim_unc_as_the_plain_unc() {
+        use std::ffi::OsStr;
+        use std::path::Prefix::{VerbatimUNC, UNC};
+        assert!(prefix_eq(
+            VerbatimUNC(OsStr::new("server"), OsStr::new("share")),
+            UNC(OsStr::new("SERVER"), OsStr::new("Share")),
+        ));
+        assert!(!prefix_eq(
+            VerbatimUNC(OsStr::new("server"), OsStr::new("share")),
+            UNC(OsStr::new("server"), OsStr::new("other")),
+        ));
+    }
+
+    /// End-to-end over *actual* `canonicalize` output for the real home dir,
+    /// rather than a hand-written string: on Windows this is the
+    /// `\\?\`-prefixed form, which must still collapse to `~`.
+    ///
+    /// Skipped when `canonicalize` resolved a symlink somewhere in `$HOME`
+    /// (the two paths then name the same directory by genuinely different
+    /// components, which no prefix normalization can bridge — that is the
+    /// macOS `/var` → `/private/var` class of problem, handled at the call
+    /// site by canonicalizing `vault_root`, not here).
+    #[test]
+    fn redact_home_collapses_actual_canonicalize_output_for_home() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let Ok(canonical) = std::fs::canonicalize(&home) else {
+            return;
+        };
+        // Everything below the prefix/root must name the same components; only
+        // the *representation* of the root may differ for this to be a fair
+        // test of `component_eq`.
+        let tail = |p: &std::path::Path| {
+            p.components()
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        std::path::Component::Prefix(_) | std::path::Component::RootDir
+                    )
+                })
+                .map(|c| c.as_os_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        if tail(&canonical) != tail(&home) {
+            return;
+        }
+        assert_eq!(
+            redact_home(&canonical.display().to_string()),
+            "~",
+            "canonicalize output for the home dir must redact to `~`; got {}",
+            canonical.display()
+        );
     }
 }
 

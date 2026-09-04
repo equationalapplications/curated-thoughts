@@ -1,3 +1,20 @@
+## [2.1.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.2...v2.1.0) (2026-09-04)
+
+### Features
+
+* **ct:** add anchored source_ref prefix resolver ([#163](https://github.com/equationalapplications/curated-thoughts/issues/163)) ([3e18612](https://github.com/equationalapplications/curated-thoughts/commit/3e186120ca81e5074094c14a0ace7c1411bbc13a))
+* **ct:** add wiki_forget_cmd delegating to forget_entries_by_source_refs ([#163](https://github.com/equationalapplications/curated-thoughts/issues/163)) ([f49633e](https://github.com/equationalapplications/curated-thoughts/commit/f49633e0b0c6d65af40098c087909d62405b1b64))
+* **ct:** wire wiki forget subcommand ([#163](https://github.com/equationalapplications/curated-thoughts/issues/163)) ([7a99969](https://github.com/equationalapplications/curated-thoughts/commit/7a999696e030a9bb385ab837f83153112a868861)), closes [r#ref](https://github.com/equationalapplications/r/issues/ref)
+* **db:** warn at startup on JSON-shaped malformed source_refs ([#162](https://github.com/equationalapplications/curated-thoughts/issues/162)) ([5aeb6d9](https://github.com/equationalapplications/curated-thoughts/commit/5aeb6d90ca11567b8c97a1b973c391db8a266753)), closes [#99](https://github.com/equationalapplications/curated-thoughts/issues/99)
+* **tier_backfill:** report rows skipped for malformed source_ref ([#162](https://github.com/equationalapplications/curated-thoughts/issues/162)) ([e7b0b1f](https://github.com/equationalapplications/curated-thoughts/commit/e7b0b1f02428cb9edb62127b9ad556656ce043cb))
+
+## [2.0.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.1...v2.0.2) (2026-09-04)
+
+### Bug Fixes
+
+* **release:** pin changelog preset to v9 to match writer@8 ([9ef9698](https://github.com/equationalapplications/curated-thoughts/commit/9ef9698fee4af194bb85d751e6c9656741c567c9)), closes [#155](https://github.com/equationalapplications/curated-thoughts/issues/155)
+* **release:** repoint version tooling and docs at the workspace root ([14a26eb](https://github.com/equationalapplications/curated-thoughts/commit/14a26eb7cb51422eb9f11cfa08736359c9d076a4))
+
 ## [2.0.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.0...v2.0.1) (2026-09-03)
 
 ### Bug Fixes

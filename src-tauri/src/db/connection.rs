@@ -149,7 +149,66 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
 
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
+    // Startup canary: report JSON-shaped but unparseable `source_ref` values.
+    // See `warn_on_malformed_source_refs` and issue #162.
+    let _ = warn_on_malformed_source_refs(conn);
+
     Ok(())
+}
+
+/// Report `source_ref` values that look like JSON but will not parse.
+///
+/// Issue #162: every evidence blob written on one brain between 2026-08-29
+/// and 2026-09-01 was stored with JSON punctuation stripped. Nothing caught
+/// it at write time — `source_ref_is_still_grounded` treats an unparseable
+/// ref as "still grounded" by design (PR #99), so heal silently no-oped, and
+/// `tier_backfill`'s `json_valid` guard silently skipped the rows.
+///
+/// The leading-`{` test keeps legitimate plain-path refs out of the count;
+/// only a ref that claims to be JSON and is not is a defect.
+///
+/// Returns the count so callers and tests can assert on it. Never fails the
+/// connection — a diagnostic must not be able to prevent startup.
+pub(crate) fn warn_on_malformed_source_refs(conn: &Connection) -> usize {
+    let result: rusqlite::Result<i64> = conn.query_row(
+        "SELECT COUNT(*) FROM llm_wiki_entries
+          WHERE source_ref IS NOT NULL
+            AND substr(source_ref, 1, 1) = '{'
+            AND NOT json_valid(source_ref)",
+        [],
+        |r| r.get(0),
+    );
+
+    match result {
+        Ok(0) => 0,
+        Ok(n) => {
+            // Surface in EVERY build: in mcp-server builds tracing routes to
+            // the structured log; elsewhere eprintln! guarantees the canary
+            // is at least visible on stderr instead of silently doing nothing
+            // (a silent canary defeated its purpose during the #162 incident).
+            #[cfg(feature = "mcp-server")]
+            tracing::warn!(
+                malformed_source_refs = n,
+                "found entries whose source_ref looks like JSON but will not parse; \
+                 evidence provenance is unrecoverable for these rows and heal will \
+                 silently skip them (see issue #162)"
+            );
+            #[cfg(not(feature = "mcp-server"))]
+            eprintln!(
+                "[curated-thoughts] WARNING: {n} source_ref value(s) look like JSON \
+                 but will not parse; evidence provenance is unrecoverable for these \
+                 rows and heal will silently skip them (see issue #162)"
+            );
+            n as usize
+        }
+        Err(e) => {
+            #[cfg(feature = "mcp-server")]
+            tracing::warn!(error = %e, "source_ref canary query failed; skipping the check");
+            #[cfg(not(feature = "mcp-server"))]
+            eprintln!("[curated-thoughts] WARNING: source_ref canary query failed ({e}); skipping the check");
+            0
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -998,5 +1057,56 @@ mod tests {
             post_version >= 9,
             "schema_version must reach >= 9 after migrate(), got {post_version}"
         );
+    }
+
+    /// Seed an `llm_wiki_entries` row with an explicit `source_ref`.
+    /// Mirrors the V12 test's minimal column set (without `deleted_at`) so the
+    /// canary tests can mix valid, malformed, and missing refs without
+    /// touching every column.
+    fn seed_entry_with_source_ref(conn: &Connection, id: &str, source_ref: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES (?1, 'e', 't', 'b', '[]', 'inferred', 'librarian_inferred',
+                     ?2, 1, 1)",
+            rusqlite::params![id, source_ref],
+        )
+        .unwrap();
+    }
+
+    fn seed_entry_with_source_ref_null(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES (?1, 'e', 't', 'b', '[]', 'inferred', 'librarian_inferred',
+                     NULL, 1, 1)",
+            [id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn canary_counts_only_json_shaped_malformed_refs() {
+        let conn = open_in_memory().unwrap();
+
+        // Valid JSON — must not be counted.
+        seed_entry_with_source_ref(&conn, "e1", r#"{"proposal_id":null,"evidence":[]}"#);
+        // Legitimate plain path — must not be counted (does not start with `{`).
+        seed_entry_with_source_ref(&conn, "e2", "documents/notes.md");
+        // NULL — must not be counted.
+        seed_entry_with_source_ref_null(&conn, "e3");
+        // JSON-shaped but unparseable — the #162 corruption signature.
+        seed_entry_with_source_ref(&conn, "e4", "{evidencechunk_id3261quote hi");
+
+        assert_eq!(warn_on_malformed_source_refs(&conn), 1);
+    }
+
+    #[test]
+    fn canary_is_zero_on_a_clean_brain() {
+        let conn = open_in_memory().unwrap();
+        seed_entry_with_source_ref(&conn, "e1", r#"{"proposal_id":null,"evidence":[]}"#);
+        assert_eq!(warn_on_malformed_source_refs(&conn), 0);
     }
 }
