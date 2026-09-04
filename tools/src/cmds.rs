@@ -800,7 +800,7 @@ pub fn wiki_forget_cmd(
 /// `Path::components` only ever yields one on Windows, so this stays compiled
 /// and unit-testable on Unix (see `prefix_eq_*` tests).
 fn prefix_eq(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
-    use std::path::Prefix::{Disk, UNC, VerbatimDisk, VerbatimUNC};
+    use std::path::Prefix::{Disk, VerbatimDisk, VerbatimUNC, UNC};
     match (a, b) {
         (Disk(x) | VerbatimDisk(x), Disk(y) | VerbatimDisk(y)) => x.eq_ignore_ascii_case(&y),
         (
@@ -1813,10 +1813,16 @@ mod tests {
     fn resolve_refs_by_prefix_rejects_wildcards() {
         let conn = open_in_memory_brain();
         let err = resolve_refs_by_prefix(&conn, "evid%nce");
-        assert!(err.is_err(), "a `%` must be rejected, not treated as a wildcard");
+        assert!(
+            err.is_err(),
+            "a `%` must be rejected, not treated as a wildcard"
+        );
 
         let err2 = resolve_refs_by_prefix(&conn, "evid_nce");
-        assert!(err2.is_err(), "an `_` must be rejected, not treated as a wildcard");
+        assert!(
+            err2.is_err(),
+            "an `_` must be rejected, not treated as a wildcard"
+        );
     }
 
     // ---- redact_home (moved from `bin/ct.rs` so wiki_forget_cmd can use it
