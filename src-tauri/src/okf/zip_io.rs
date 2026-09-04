@@ -129,15 +129,21 @@ mod tests {
 
     #[test]
     fn rejects_zip_with_too_many_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let zip_path = dir.path().join("bomb.zip");
-        let many: Vec<OkfFile> = (0..=MAX_ZIP_ENTRIES)
-            .map(|i| OkfFile {
-                path: format!("entities/e/facts/f{i}.md"),
-                content: "x".into(),
-            })
-            .collect();
-        write_bundle_zip(&zip_path, &many).unwrap();
-        assert!(read_bundle_source(&zip_path).is_err());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let dir = tempfile::tempdir().unwrap();
+            let zip_path = dir.path().join("bomb.zip");
+            let many: Vec<OkfFile> = (0..=MAX_ZIP_ENTRIES)
+                .map(|i| OkfFile {
+                    path: format!("entities/e/facts/f{i}.md"),
+                    content: "x".into(),
+                })
+                .collect();
+            write_bundle_zip(&zip_path, &many).unwrap();
+            assert!(read_bundle_source(&zip_path).is_err());
+        });
     }
 }

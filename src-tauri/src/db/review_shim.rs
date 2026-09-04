@@ -346,18 +346,24 @@ mod tests {
 
     #[test]
     fn approve_shim_commits_and_clears_queue() {
-        let mut conn = open_in_memory().unwrap();
-        let rowid = seed_proposal(&conn, "prop-approve", "Beta");
-        approve_proposal_shim(&mut conn, rowid, None).unwrap();
-        assert!(list_pending_review_pages(&conn).unwrap().is_empty());
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "approved");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let mut conn = open_in_memory().unwrap();
+            let rowid = seed_proposal(&conn, "prop-approve", "Beta");
+            approve_proposal_shim(&mut conn, rowid, None).unwrap();
+            assert!(list_pending_review_pages(&conn).unwrap().is_empty());
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "approved");
+        });
     }
 
     #[test]

@@ -55,10 +55,45 @@ pub fn resolve_brain_paths() -> BrainPaths {
         brain_dir.join("config.json")
     };
 
-    BrainPaths {
+    let paths = BrainPaths {
         brain_dir,
         config_path,
         db_path,
+    };
+
+    // Test-build guard (issue #178): a test that resolves the LIVE
+    // `~/.brain` and writes through it rewrites the user's real
+    // config.json — this fired twice in production (2026-09-03/04). In
+    // test builds, make that resolution a loud, named failure instead.
+    // Tests redirect via CURATED_BRAIN_DIR / CURATED_BRAIN_CONFIG /
+    // CURATED_BRAIN_DB under temp_env::with_vars; tests that exist
+    // specifically to pin the default resolution set CT_ALLOW_LIVE_BRAIN=1.
+    #[cfg(any(test, feature = "test-utils"))]
+    guard_against_live_brain(&paths);
+
+    paths
+}
+
+/// See `resolve_brain_paths` — test-build-only guard, no production code
+/// path compiles this.
+#[cfg(any(test, feature = "test-utils"))]
+fn guard_against_live_brain(paths: &BrainPaths) {
+    if std::env::var_os("CT_ALLOW_LIVE_BRAIN").is_some() {
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let live = home.join(".brain");
+        if paths.brain_dir == live {
+            panic!(
+                "TEST BUG: resolve_brain_paths() resolved the LIVE brain dir at {}. \
+                 Writing through these paths would rewrite the user's real \
+                 config.json and brain.db (issue #178). Set CURATED_BRAIN_DIR \
+                 (or CURATED_BRAIN_CONFIG / CURATED_BRAIN_DB) via \
+                 temp_env::with_vars in the test, or, if the test exists to \
+                 pin default resolution itself, set CT_ALLOW_LIVE_BRAIN=1.",
+                live.display()
+            );
+        }
     }
 }
 

@@ -1046,76 +1046,88 @@ mod watchdog_integration_tests {
     #[test]
     fn worker_returns_to_idle_after_draining() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let db_path = tmp.path().join("brain.db");
-        crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db_path = tmp.path().join("brain.db");
+            crate::db::connection::open_app_db(&db_path, None).unwrap();
 
-        let (tx, rx) = sync_channel::<PipelineJob>(8);
-        let heartbeat = Arc::new(Heartbeat::new());
-        let pending = Arc::new(AtomicUsize::new(0));
-        let (status_tx, _status_rx) = mpsc::channel();
+            let (tx, rx) = sync_channel::<PipelineJob>(8);
+            let heartbeat = Arc::new(Heartbeat::new());
+            let pending = Arc::new(AtomicUsize::new(0));
+            let (status_tx, _status_rx) = mpsc::channel();
 
-        let worker = PipelineWorker::new_with_vault(
-            db_path,
-            rx,
-            pending,
-            None,
-            status_tx,
-            heartbeat.clone(),
-        );
-        let join = std::thread::spawn(move || worker.run());
+            let worker = PipelineWorker::new_with_vault(
+                db_path,
+                rx,
+                pending,
+                None,
+                status_tx,
+                heartbeat.clone(),
+            );
+            let join = std::thread::spawn(move || worker.run());
 
-        drop(tx); // no jobs; worker should exit cleanly from Idle
-        join.join().unwrap();
+            drop(tx); // no jobs; worker should exit cleanly from Idle
+            join.join().unwrap();
 
-        assert_eq!(heartbeat.snapshot().stage, Stage::Idle);
+            assert_eq!(heartbeat.snapshot().stage, Stage::Idle);
+        });
     }
 
     #[test]
     fn superseded_worker_exits_without_touching_the_pending_counter() {
-        // A worker whose epoch is stale must not decrement `pending`,
-        // send status, or write chunks (spec §4.1).
         let tmp = tempfile::TempDir::new().unwrap();
-        let db_path = tmp.path().join("brain.db");
-        crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            // A worker whose epoch is stale must not decrement `pending`,
+            // send status, or write chunks (spec §4.1).
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db_path = tmp.path().join("brain.db");
+            crate::db::connection::open_app_db(&db_path, None).unwrap();
 
-        let doc = tmp.path().join("documents").join("a.md");
-        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
-        std::fs::write(&doc, "hello world").unwrap();
+            let doc = tmp.path().join("documents").join("a.md");
+            std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+            std::fs::write(&doc, "hello world").unwrap();
 
-        let (tx, rx) = sync_channel::<PipelineJob>(8);
-        let heartbeat = Arc::new(Heartbeat::new());
-        let pending = Arc::new(AtomicUsize::new(0));
-        let (status_tx, status_rx) = mpsc::channel();
+            let (tx, rx) = sync_channel::<PipelineJob>(8);
+            let heartbeat = Arc::new(Heartbeat::new());
+            let pending = Arc::new(AtomicUsize::new(0));
+            let (status_tx, status_rx) = mpsc::channel();
 
-        let worker = PipelineWorker::new_with_vault(
-            db_path,
-            rx,
-            pending.clone(),
-            None,
-            status_tx,
-            heartbeat.clone(),
-        );
+            let worker = PipelineWorker::new_with_vault(
+                db_path,
+                rx,
+                pending.clone(),
+                None,
+                status_tx,
+                heartbeat.clone(),
+            );
 
-        // Supersede BEFORE the worker starts, so its first epoch check fails.
-        heartbeat.bump_epoch();
+            // Supersede BEFORE the worker starts, so its first epoch check fails.
+            heartbeat.bump_epoch();
 
-        tx.send(PipelineJob::ingest_counted(
-            doc.to_string_lossy().to_string(),
-        ))
-        .unwrap();
-        drop(tx);
+            tx.send(PipelineJob::ingest_counted(
+                doc.to_string_lossy().to_string(),
+            ))
+            .unwrap();
+            drop(tx);
 
-        let join = std::thread::spawn(move || worker.run());
-        join.join().unwrap();
+            let join = std::thread::spawn(move || worker.run());
+            join.join().unwrap();
 
-        assert_eq!(
-            pending.load(Ordering::SeqCst),
-            0,
-            "superseded worker must not touch the pending counter"
-        );
-        assert!(
-            status_rx.try_recv().is_err(),
-            "superseded worker must not emit status events"
-        );
+            assert_eq!(
+                pending.load(Ordering::SeqCst),
+                0,
+                "superseded worker must not touch the pending counter"
+            );
+            assert!(
+                status_rx.try_recv().is_err(),
+                "superseded worker must not emit status events"
+            );
+        });
     }
 }

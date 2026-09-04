@@ -12,6 +12,9 @@ fn resolve_none_defaults_to_home_brain() {
             ("CURATED_BRAIN_DIR", None::<&str>),
             ("CURATED_BRAIN_DB", None::<&str>),
             ("CURATED_BRAIN_CONFIG", None::<&str>),
+            // This test EXISTS to pin the default resolution ($HOME/.brain),
+            // so it opts out of the live-brain test guard (issue #178).
+            ("CT_ALLOW_LIVE_BRAIN", Some("1")),
         ],
         || {
             let paths = resolve_brain_paths();

@@ -4122,60 +4122,66 @@ mod heal_invalid_sources_tests {
 
     #[test]
     fn missing_vault_sources_are_marked_deleted() {
-        let tmp = TempDir::new().unwrap();
-        let vault_root = tmp.path().join("vault");
-        std::fs::create_dir_all(vault_root.join("documents")).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let tmp = TempDir::new().unwrap();
+            let vault_root = tmp.path().join("vault");
+            std::fs::create_dir_all(vault_root.join("documents")).unwrap();
 
-        let config = VaultConfig::new(tmp.path().join("config.json"));
-        config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
+            let config = VaultConfig::new(tmp.path().join("config.json"));
+            config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
-        let db_path = tmp.path().join("brain.db");
-        let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json")).unwrap();
-        let db_state = DbState(Mutex::new(db));
-        let vault_state = VaultConfigState(Mutex::new(config));
+            let db_path = tmp.path().join("brain.db");
+            let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json")).unwrap();
+            let db_state = DbState(Mutex::new(db));
+            let vault_state = VaultConfigState(Mutex::new(config));
 
-        {
-            let guard = db_state.0.lock().unwrap();
-            let conn = &guard.0;
-            conn.execute(
-                "INSERT INTO llm_wiki_entries (
-                    id, entity_id, title, body, tags, confidence, source_type, source_ref,
-                    created_at, updated_at, deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', ?5, 1, 1, NULL)",
-                params![
-                    "entry-missing",
-                    "tier_fact",
-                    "Missing",
-                    "body",
-                    "documents/missing.md"
-                ],
-            )
-            .unwrap();
+            {
+                let guard = db_state.0.lock().unwrap();
+                let conn = &guard.0;
+                conn.execute(
+                    "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type, source_ref,
+                created_at, updated_at, deleted_at
+             ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', ?5, 1, 1, NULL)",
+                    params![
+                        "entry-missing",
+                        "tier_fact",
+                        "Missing",
+                        "body",
+                        "documents/missing.md"
+                    ],
+                )
+                .unwrap();
 
-            let before: Option<i64> = conn
+                let before: Option<i64> = conn
+                    .query_row(
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(before.is_none());
+            }
+
+            heal_invalid_sources(&db_state, &vault_state).unwrap();
+
+            let after: Option<i64> = db_state
+                .0
+                .lock()
+                .unwrap()
+                .0
                 .query_row(
                     "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
                     [],
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert!(before.is_none());
-        }
-
-        heal_invalid_sources(&db_state, &vault_state).unwrap();
-
-        let after: Option<i64> = db_state
-            .0
-            .lock()
-            .unwrap()
-            .0
-            .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(after.is_some());
+            assert!(after.is_some());
+        });
     }
 }
 
@@ -4591,89 +4597,95 @@ mod maintenance_command_tests {
     #[test]
     fn e3_heal_invalid_sources_is_scoped_to_librarian_inferred() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let vault_root = tmp.path();
-        std::fs::create_dir_all(vault_root.join("documents")).unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let vault_root = tmp.path();
+            std::fs::create_dir_all(vault_root.join("documents")).unwrap();
 
-        // Build a DbState backed by a file DB and seed three rows: one
-        // librarian_inferred (must be soft-deleted), one user_stated
-        // (must NOT be touched), one immutable_document (must NOT be
-        // touched). The heal function takes &DbState directly so we seed
-        // against the AppDb's connection rather than an in-memory one.
-        let db_path = tmp.path().join("test.db");
-        let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
-            .expect("open test db");
-        let manual = r#"{"proposal_id":null,"evidence":[]}"#;
-        // Three rows: one librarian_inferred (must be touched), one
-        // user_stated with the MANUAL sentinel (must NOT be touched), one
-        // immutable_document with a missing path (must NOT be touched).
-        db.0.execute(
-            "INSERT INTO llm_wiki_entries
-                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-                 created_at, updated_at, deleted_at)
-             VALUES (?1, 'tier_fact', 'Title lost-inferred', 'body', '[]',
-                     'inferred', 'librarian_inferred', 'documents/gone.md', 1, 1, NULL)",
-            rusqlite::params!["lost-inferred"],
-        )
-        .expect("insert librarian_inferred");
-        db.0.execute(
-            "INSERT INTO llm_wiki_entries
-                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-                 created_at, updated_at, deleted_at)
-             VALUES (?1, 'tier_fact', 'Title user-stated', 'body', '[]',
-                     'confirmed', 'user_stated', ?2, 1, 1, NULL)",
-            rusqlite::params!["user-stated", manual],
-        )
-        .expect("insert user_stated");
-        db.0.execute(
-            "INSERT INTO llm_wiki_entries
-                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-                 created_at, updated_at, deleted_at)
-             VALUES (?1, 'tier_fact', 'Title immutable', 'body', '[]',
-                     'inferred', 'immutable_document', 'documents/gone.md', 1, 1, NULL)",
-            rusqlite::params!["immutable"],
-        )
-        .expect("insert immutable_document");
-
-        let cfg = crate::vault::VaultConfig::new(tmp.path().join("config.json"));
-        cfg.set_vault_path(&vault_root.to_string_lossy())
-            .expect("set vault");
-        let db_state = DbState(std::sync::Mutex::new(db));
-        let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
-
-        heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
-
-        let deleted_at_lost: Option<i64> = db_state
-            .0
-            .lock()
-            .unwrap()
-            .0
-            .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'lost-inferred'",
-                [],
-                |row| row.get(0),
+            // Build a DbState backed by a file DB and seed three rows: one
+            // librarian_inferred (must be soft-deleted), one user_stated
+            // (must NOT be touched), one immutable_document (must NOT be
+            // touched). The heal function takes &DbState directly so we seed
+            // against the AppDb's connection rather than an in-memory one.
+            let db_path = tmp.path().join("test.db");
+            let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
+                .expect("open test db");
+            let manual = r#"{"proposal_id":null,"evidence":[]}"#;
+            // Three rows: one librarian_inferred (must be touched), one
+            // user_stated with the MANUAL sentinel (must NOT be touched), one
+            // immutable_document with a missing path (must NOT be touched).
+            db.0.execute(
+                "INSERT INTO llm_wiki_entries
+            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+             created_at, updated_at, deleted_at)
+         VALUES (?1, 'tier_fact', 'Title lost-inferred', 'body', '[]',
+                 'inferred', 'librarian_inferred', 'documents/gone.md', 1, 1, NULL)",
+                rusqlite::params!["lost-inferred"],
             )
-            .unwrap();
-        assert!(
-            deleted_at_lost.is_some(),
-            "lost-inferred (librarian_inferred) must be soft-deleted by heal_invalid_sources"
-        );
-        for id in ["user-stated", "immutable"] {
-            let deleted_at: Option<i64> = db_state
+            .expect("insert librarian_inferred");
+            db.0.execute(
+                "INSERT INTO llm_wiki_entries
+            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+             created_at, updated_at, deleted_at)
+         VALUES (?1, 'tier_fact', 'Title user-stated', 'body', '[]',
+                 'confirmed', 'user_stated', ?2, 1, 1, NULL)",
+                rusqlite::params!["user-stated", manual],
+            )
+            .expect("insert user_stated");
+            db.0.execute(
+                "INSERT INTO llm_wiki_entries
+            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+             created_at, updated_at, deleted_at)
+         VALUES (?1, 'tier_fact', 'Title immutable', 'body', '[]',
+                 'inferred', 'immutable_document', 'documents/gone.md', 1, 1, NULL)",
+                rusqlite::params!["immutable"],
+            )
+            .expect("insert immutable_document");
+
+            let cfg = crate::vault::VaultConfig::new(tmp.path().join("config.json"));
+            cfg.set_vault_path(&vault_root.to_string_lossy())
+                .expect("set vault");
+            let db_state = DbState(std::sync::Mutex::new(db));
+            let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
+
+            heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
+
+            let deleted_at_lost: Option<i64> = db_state
                 .0
                 .lock()
                 .unwrap()
                 .0
                 .query_row(
-                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = ?1",
-                    [id],
+                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'lost-inferred'",
+                    [],
                     |row| row.get(0),
                 )
                 .unwrap();
             assert!(
-                deleted_at.is_none(),
-                "{id} (non-librarian_inferred) must NOT be touched by heal_invalid_sources"
+                deleted_at_lost.is_some(),
+                "lost-inferred (librarian_inferred) must be soft-deleted by heal_invalid_sources"
             );
-        }
+            for id in ["user-stated", "immutable"] {
+                let deleted_at: Option<i64> = db_state
+                    .0
+                    .lock()
+                    .unwrap()
+                    .0
+                    .query_row(
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(
+                    deleted_at.is_none(),
+                    "{id} (non-librarian_inferred) must NOT be touched by heal_invalid_sources"
+                );
+            }
+        });
     }
 
     /// E4 — Both heal writers write `deleted_at` in milliseconds (post-fix).
@@ -4682,66 +4694,73 @@ mod maintenance_command_tests {
     /// regressed seconds-valued writer (≈1.7e9) would fail loudly.
     #[test]
     fn e4_heal_writers_set_deleted_at_in_milliseconds() {
-        use crate::db::schema::SEC_VS_MS_THRESHOLD;
-
-        // (a) heal_lost_librarian_inferred
-        let conn = open_in_memory().unwrap();
-        insert_wiki_entry(
-            &conn,
-            "target-lost",
-            "librarian_inferred",
-            "documents/missing.md",
-            None,
-        );
         let tmp = tempfile::TempDir::new().unwrap();
-        heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
-        let deleted_at_lost: i64 = conn
-            .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-lost'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            deleted_at_lost >= SEC_VS_MS_THRESHOLD,
-            "heal_lost_librarian_inferred wrote seconds (deleted_at={deleted_at_lost})"
-        );
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            use crate::db::schema::SEC_VS_MS_THRESHOLD;
 
-        // (b) heal_invalid_sources
-        let db_path = tmp.path().join("e4.db");
-        let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("e4-config.json"))
-            .expect("open test db");
-        db.0.execute(
-            "INSERT INTO llm_wiki_entries
-                (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-                 created_at, updated_at, deleted_at)
-             VALUES ('target-invalid', 'tier_fact', 'Title target-invalid', 'body',
-                     '[]', 'inferred', 'librarian_inferred', 'documents/missing.md',
-                     1, 1, NULL)",
-            [],
-        )
-        .expect("insert target-invalid");
-        let cfg = crate::vault::VaultConfig::new(tmp.path().join("e4-config.json"));
-        cfg.set_vault_path(&tmp.path().to_string_lossy())
-            .expect("set vault");
-        let db_state = DbState(std::sync::Mutex::new(db));
-        let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
-        heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
-        let deleted_at_invalid: Option<i64> = db_state
-            .0
-            .lock()
-            .unwrap()
-            .0
-            .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-invalid'",
+            // (a) heal_lost_librarian_inferred
+            let conn = open_in_memory().unwrap();
+            insert_wiki_entry(
+                &conn,
+                "target-lost",
+                "librarian_inferred",
+                "documents/missing.md",
+                None,
+            );
+            let tmp = tempfile::TempDir::new().unwrap();
+            heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+            let deleted_at_lost: i64 = conn
+                .query_row(
+                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-lost'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                deleted_at_lost >= SEC_VS_MS_THRESHOLD,
+                "heal_lost_librarian_inferred wrote seconds (deleted_at={deleted_at_lost})"
+            );
+
+            // (b) heal_invalid_sources
+            let db_path = tmp.path().join("e4.db");
+            let db =
+                crate::db::AppDb::open_with_config(&db_path, tmp.path().join("e4-config.json"))
+                    .expect("open test db");
+            db.0.execute(
+                "INSERT INTO llm_wiki_entries
+            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+             created_at, updated_at, deleted_at)
+         VALUES ('target-invalid', 'tier_fact', 'Title target-invalid', 'body',
+                 '[]', 'inferred', 'librarian_inferred', 'documents/missing.md',
+                 1, 1, NULL)",
                 [],
-                |row| row.get(0),
             )
-            .expect("query target-invalid");
-        assert!(
-            deleted_at_invalid.is_some_and(|v| v >= SEC_VS_MS_THRESHOLD),
-            "heal_invalid_sources wrote seconds or NULL (deleted_at={deleted_at_invalid:?})"
-        );
+            .expect("insert target-invalid");
+            let cfg = crate::vault::VaultConfig::new(tmp.path().join("e4-config.json"));
+            cfg.set_vault_path(&tmp.path().to_string_lossy())
+                .expect("set vault");
+            let db_state = DbState(std::sync::Mutex::new(db));
+            let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
+            heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
+            let deleted_at_invalid: Option<i64> = db_state
+                .0
+                .lock()
+                .unwrap()
+                .0
+                .query_row(
+                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-invalid'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("query target-invalid");
+            assert!(
+                deleted_at_invalid.is_some_and(|v| v >= SEC_VS_MS_THRESHOLD),
+                "heal_invalid_sources wrote seconds or NULL (deleted_at={deleted_at_invalid:?})"
+            );
+        });
     }
 
     /// E5 — MIGRATION_V12 mix-and-idempotency: a row whose `deleted_at` is
@@ -5103,54 +5122,60 @@ mod maintenance_command_tests {
 
     #[test]
     fn run_embedding_sweep_fills_null_blobs_against_the_live_connection() {
-        let (db_state, tmp) = build_test_db_state_with_brain_paths();
-        let brain_dir = tmp.path().to_str().unwrap().to_string();
-        let config_path = tmp.path().join("config.json");
-        let db_path = tmp.path().join("brain.db");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let (db_state, tmp) = build_test_db_state_with_brain_paths();
+            let brain_dir = tmp.path().to_str().unwrap().to_string();
+            let config_path = tmp.path().join("config.json");
+            let db_path = tmp.path().join("brain.db");
 
-        temp_env::with_vars(
-            [
-                ("CURATED_EMBED_STUB", Some("constant8")),
-                ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
-                ("CURATED_BRAIN_CONFIG", Some(config_path.to_str().unwrap())),
-                ("CURATED_BRAIN_DB", Some(db_path.to_str().unwrap())),
-            ],
-            || {
-                {
+            temp_env::with_vars(
+                [
+                    ("CURATED_EMBED_STUB", Some("constant8")),
+                    ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
+                    ("CURATED_BRAIN_CONFIG", Some(config_path.to_str().unwrap())),
+                    ("CURATED_BRAIN_DB", Some(db_path.to_str().unwrap())),
+                ],
+                || {
+                    {
+                        let guard = db_state.0.lock().unwrap();
+                        insert_wiki_entry_ms(
+                            &guard.0,
+                            "fact_a",
+                            "librarian_inferred",
+                            "documents/a.md",
+                            None,
+                        );
+                        insert_wiki_entry_ms(
+                            &guard.0,
+                            "fact_b",
+                            "librarian_inferred",
+                            "documents/b.md",
+                            None,
+                        );
+                    }
+
+                    let report = run_embedding_sweep(&db_state).unwrap();
+
+                    assert_eq!(report.filled, 2);
+                    assert_eq!(report.remaining_null, 0);
+
                     let guard = db_state.0.lock().unwrap();
-                    insert_wiki_entry_ms(
-                        &guard.0,
-                        "fact_a",
-                        "librarian_inferred",
-                        "documents/a.md",
-                        None,
-                    );
-                    insert_wiki_entry_ms(
-                        &guard.0,
-                        "fact_b",
-                        "librarian_inferred",
-                        "documents/b.md",
-                        None,
-                    );
-                }
-
-                let report = run_embedding_sweep(&db_state).unwrap();
-
-                assert_eq!(report.filled, 2);
-                assert_eq!(report.remaining_null, 0);
-
-                let guard = db_state.0.lock().unwrap();
-                let blob_len: i64 = guard
-                    .0
-                    .query_row(
-                        "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
-            },
-        );
+                    let blob_len: i64 = guard
+                .0
+                .query_row(
+                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+                    assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
+                },
+            );
+        });
     }
 }
 
@@ -5176,112 +5201,118 @@ mod ingest_document_command_tests {
 
     #[test]
     fn ingest_document_command_emits_progress_and_proposal_ready() {
-        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-            let tmp = TempDir::new().expect("tempdir");
-            let db_path = tmp.path().join("brain.db");
-            let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
-                .expect("open test db");
-            let config = vault::VaultConfig::new(tmp.path().join("config.json"));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+                let tmp = TempDir::new().expect("tempdir");
+                let db_path = tmp.path().join("brain.db");
+                let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
+                    .expect("open test db");
+                let config = vault::VaultConfig::new(tmp.path().join("config.json"));
 
-            // Real markdown doc with enough words for chunk_autodetect to produce
-            // at least one chunk — without a chunk, `ingest_document` returns Ok(())
-            // but the embedding leg still runs the same code path so we still emit
-            // both progress events.
-            let doc_path = tmp.path().join("note.md");
-            std::fs::write(
-                &doc_path,
-                "# Test Note\n\n".to_owned() + &"word ".repeat(40),
-            )
-            .expect("write doc");
+                // Real markdown doc with enough words for chunk_autodetect to produce
+                // at least one chunk — without a chunk, `ingest_document` returns Ok(())
+                // but the embedding leg still runs the same code path so we still emit
+                // both progress events.
+                let doc_path = tmp.path().join("note.md");
+                std::fs::write(
+                    &doc_path,
+                    "# Test Note\n\n".to_owned() + &"word ".repeat(40),
+                )
+                .expect("write doc");
 
-            // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
-            // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
-            // already hold works fine and listeners observe the events).
-            let app = tauri::test::mock_builder()
-                .manage(DbState(Mutex::new(db)))
-                .manage(VaultConfigState(Mutex::new(config)))
-                .manage(EmbedProfileState(Mutex::new(
-                    crate::embedder::EmbedProfile::default(),
-                )))
-                .manage(PipelineHolder(Mutex::new(None)))
-                .build(tauri::test::mock_context(tauri::test::noop_assets()))
-                .expect("build mock app");
+                // Real `tauri::App<MockRuntime>` (the limitation in the brief is about
+                // `AppHandle` as a *command argument*; emitting on an `AppHandle` you
+                // already hold works fine and listeners observe the events).
+                let app = tauri::test::mock_builder()
+                    .manage(DbState(Mutex::new(db)))
+                    .manage(VaultConfigState(Mutex::new(config)))
+                    .manage(EmbedProfileState(Mutex::new(
+                        crate::embedder::EmbedProfile::default(),
+                    )))
+                    .manage(PipelineHolder(Mutex::new(None)))
+                    .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                    .expect("build mock app");
 
-            // Capture emitted events into a shared vector. We don't care about the
-            // payload of `ingest-error` here — the happy-path event shapes are what
-            // we lock in.
-            let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+                // Capture emitted events into a shared vector. We don't care about the
+                // payload of `ingest-error` here — the happy-path event shapes are what
+                // we lock in.
+                let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
 
-            let progress_cap = captured.clone();
-            app.listen("ingest-progress", move |event| {
-                progress_cap
-                    .lock()
-                    .unwrap()
-                    .push(("ingest-progress".into(), event.payload().into()));
-            });
+                let progress_cap = captured.clone();
+                app.listen("ingest-progress", move |event| {
+                    progress_cap
+                        .lock()
+                        .unwrap()
+                        .push(("ingest-progress".into(), event.payload().into()));
+                });
 
-            let ready_cap = captured.clone();
-            app.listen("ingest-proposal-ready", move |event| {
-                ready_cap
-                    .lock()
-                    .unwrap()
-                    .push(("ingest-proposal-ready".into(), event.payload().into()));
-            });
+                let ready_cap = captured.clone();
+                app.listen("ingest-proposal-ready", move |event| {
+                    ready_cap
+                        .lock()
+                        .unwrap()
+                        .push(("ingest-proposal-ready".into(), event.payload().into()));
+                });
 
-            // Extract the state via `app.state::<T>()` — the same path the Tauri
-            // command argument extractor uses — and call the helper directly with
-            // the inner locks.
-            let db_state = app.state::<DbState>();
-            let profile_state = app.state::<EmbedProfileState>();
-            run_ingest_with_app(
-                app.handle(),
-                &db_state.0,
-                &profile_state.0,
-                doc_path.to_string_lossy().into_owned(),
-            )
-            .expect("run_ingest_with_app");
+                // Extract the state via `app.state::<T>()` — the same path the Tauri
+                // command argument extractor uses — and call the helper directly with
+                // the inner locks.
+                let db_state = app.state::<DbState>();
+                let profile_state = app.state::<EmbedProfileState>();
+                run_ingest_with_app(
+                    app.handle(),
+                    &db_state.0,
+                    &profile_state.0,
+                    doc_path.to_string_lossy().into_owned(),
+                )
+                .expect("run_ingest_with_app");
 
-            // Allow Tauri's event loop to deliver the listen notifications before
-            // we read the buffer.
-            std::thread::sleep(std::time::Duration::from_millis(100));
+                // Allow Tauri's event loop to deliver the listen notifications before
+                // we read the buffer.
+                std::thread::sleep(std::time::Duration::from_millis(100));
 
-            let events = captured.lock().unwrap();
-            let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
-            assert!(
-                names.contains(&"ingest-progress"),
-                "expected at least one ingest-progress event, got: {events:?}",
-            );
-            assert!(
-                events
+                let events = captured.lock().unwrap();
+                let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+                assert!(
+                    names.contains(&"ingest-progress"),
+                    "expected at least one ingest-progress event, got: {events:?}",
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
+                    "expected ingest-progress with phase=chunking, got: {events:?}",
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
+                    "expected ingest-progress with phase=embedding, got: {events:?}",
+                );
+                assert!(
+                    names.contains(&"ingest-proposal-ready"),
+                    "expected at least one ingest-proposal-ready event, got: {events:?}",
+                );
+                // The test document doesn't produce a pending proposal (synthesis is
+                // async), so `proposalId` must serialize as JSON `null` — not `""`,
+                // which the wizard would otherwise route to as a nonexistent id.
+                let ready_payload = events
                     .iter()
-                    .any(|(n, p)| n == "ingest-progress" && p.contains("\"chunking\"")),
-                "expected ingest-progress with phase=chunking, got: {events:?}",
-            );
-            assert!(
-                events
-                    .iter()
-                    .any(|(n, p)| n == "ingest-progress" && p.contains("\"embedding\"")),
-                "expected ingest-progress with phase=embedding, got: {events:?}",
-            );
-            assert!(
-                names.contains(&"ingest-proposal-ready"),
-                "expected at least one ingest-proposal-ready event, got: {events:?}",
-            );
-            // The test document doesn't produce a pending proposal (synthesis is
-            // async), so `proposalId` must serialize as JSON `null` — not `""`,
-            // which the wizard would otherwise route to as a nonexistent id.
-            let ready_payload = events
-                .iter()
-                .find(|(n, _)| n == "ingest-proposal-ready")
-                .map(|(_, p)| p.clone())
-                .expect("ingest-proposal-ready payload");
-            let payload: serde_json::Value =
-                serde_json::from_str(&ready_payload).expect("parse ingest-proposal-ready payload");
-            assert_eq!(
-                payload.get("proposalId"),
-                Some(&serde_json::Value::Null),
-                "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
-            );
+                    .find(|(n, _)| n == "ingest-proposal-ready")
+                    .map(|(_, p)| p.clone())
+                    .expect("ingest-proposal-ready payload");
+                let payload: serde_json::Value = serde_json::from_str(&ready_payload)
+                    .expect("parse ingest-proposal-ready payload");
+                assert_eq!(
+                    payload.get("proposalId"),
+                    Some(&serde_json::Value::Null),
+                    "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
+                );
+            });
         });
     }
 }

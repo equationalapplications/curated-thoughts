@@ -1618,66 +1618,72 @@ mod tests {
 
     #[test]
     fn auto_approve_commits_proposal() {
-        let mut conn = open_in_memory().unwrap();
-        let (doc_id, chunk_id) =
-            seed_doc_and_chunk(&conn, "/vault/documents/auto.md", "Beta system overview");
-        seed_entity_with_fact(&conn, "ent-beta", "Beta", "fact-b");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: this test resolved the LIVE ~/.brain
+        // without a guard (issue #178).
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+            let mut conn = open_in_memory().unwrap();
+            let (doc_id, chunk_id) =
+                seed_doc_and_chunk(&conn, "/vault/documents/auto.md", "Beta system overview");
+            seed_entity_with_fact(&conn, "ent-beta", "Beta", "fact-b");
 
-        let json = serde_json::json!({
-            "proposals": [{
-                "target": { "existing_id": "ent-beta" },
-                "reasoning": "Auto path.",
-                "summary_update": null,
-                "facts": [{
-                    "op": "add",
-                    "body": "Beta is deployed.",
-                    "tags": [],
-                    "confidence": "inferred",
-                    "evidence": ["C1"]
-                }],
-                "edges": [],
-                "tasks": []
-            }]
-        })
-        .to_string();
+            let json = serde_json::json!({
+                "proposals": [{
+                    "target": { "existing_id": "ent-beta" },
+                    "reasoning": "Auto path.",
+                    "summary_update": null,
+                    "facts": [{
+                        "op": "add",
+                        "body": "Beta is deployed.",
+                        "tags": [],
+                        "confidence": "inferred",
+                        "evidence": ["C1"]
+                    }],
+                    "edges": [],
+                    "tasks": []
+                }]
+            })
+            .to_string();
 
-        let mock = MockCompleter::new(vec![json]);
-        let chunks = vec![ChunkRow {
-            id: chunk_id,
-            entity_id: "tier_working::abc".into(),
-            text: "Beta system overview".into(),
-            symbol_name: None,
-            start_line: 1,
-            end_line: 3,
-            tier: "user_doc".into(),
-            path: "/vault/documents/auto.md".into(),
-        }];
+            let mock = MockCompleter::new(vec![json]);
+            let chunks = vec![ChunkRow {
+                id: chunk_id,
+                entity_id: "tier_working::abc".into(),
+                text: "Beta system overview".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 3,
+                tier: "user_doc".into(),
+                path: "/vault/documents/auto.md".into(),
+            }];
 
-        run_synthesis_with_completer(
-            &mut conn,
-            "/vault/documents/auto.md",
-            &chunks,
-            doc_id,
-            SynthesisMode::Synthesize,
-            true,
-            None,
-            &mock,
-            "test-model",
-            false,
-        )
-        .unwrap();
-
-        let pending = list_proposals(&conn, &ProposalFilter::default()).unwrap();
-        assert!(pending.is_empty());
-
-        let fact_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
-                [],
-                |r| r.get(0),
+            run_synthesis_with_completer(
+                &mut conn,
+                "/vault/documents/auto.md",
+                &chunks,
+                doc_id,
+                SynthesisMode::Synthesize,
+                true,
+                None,
+                &mock,
+                "test-model",
+                false,
             )
             .unwrap();
-        assert_eq!(fact_count, 1);
+
+            let pending = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+            assert!(pending.is_empty());
+
+            let fact_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+            assert_eq!(fact_count, 1);
+        });
     }
 
     fn set_watermark(conn: &Connection, doc_id: i64, synth_hash: &str, synth_model: &str) {
