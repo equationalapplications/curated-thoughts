@@ -51,6 +51,8 @@ Outcomes:
 - `src-tauri/Cargo.lock` and `tools/Cargo.lock` are replaced by one root `Cargo.lock`.
 - `cargo clean` reclaims the 26 GB currently held by `tools/target/`.
 
+**The two removed lockfiles are load-bearing in the release pipeline, not just in builds.** `scripts/update-versions.cjs` (the semantic-release `prepareCmd`) ran `cargo metadata` in `src-tauri/` and `tools/` in turn and read back each member `Cargo.lock` to verify the version bump; after unification both reads are `ENOENT` and every release fails at prepare. `.releaserc.json` likewise lists `src-tauri/Cargo.lock` and `tools/Cargo.lock` as `@semantic-release/git` assets. Both are repointed to the single root `Cargo.lock`, and the script's second `cargo metadata` pass drops entirely — one workspace resolve now keeps the `tools` path dependency in sync by construction. This is the same silent-until-release failure class as the `rust-cache` `workspaces:` entries below, and a literal search for `Cargo.lock` is what finds it.
+
 ## 4. Shared pins → `[workspace.dependencies]`
 
 All fifteen dependencies currently duplicated across both members move to `[workspace.dependencies]`, with members referencing them as `dep.workspace = true`: `serde`, `serde_json`, `anyhow`, `tokio`, `rusqlite`, `notify`, `sha2`, `dirs`, `flate2`, `fs4`, `walkdir`, `rmcp`, `schemars`, `tempfile`, `temp-env`.

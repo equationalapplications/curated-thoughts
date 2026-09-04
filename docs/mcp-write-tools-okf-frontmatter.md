@@ -462,7 +462,7 @@ This implementation **does not back-migrate existing vault files**. Existing fil
 
 ```bash
 # List available MCP tools
-./tools/target/debug/curated_thoughts_mcp --help | grep vault
+./target/debug/curated_thoughts_mcp --help | grep vault
 
 # Should show:
 # vault_write_note
