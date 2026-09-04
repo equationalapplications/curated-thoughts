@@ -10,7 +10,9 @@ use crate::vault::safe_path::IMMUTABLE_DIR;
 /// Migration errors for vault folder structure changes
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MigrationError {
-    #[error("Both 'documents' and 'immutable-source-files' folders exist. Manual intervention required: move files from '{old}' to '{new}', then restart.")]
+    #[error(
+        "Both 'documents' and 'immutable-source-files' folders exist. Manual intervention required: move files from '{old}' to '{new}', then restart."
+    )]
     BothFoldersExist { old: PathBuf, new: PathBuf },
     #[error("IO error during migration: {0}")]
     Io(String),
@@ -29,6 +31,20 @@ pub struct VaultConfig {
 impl VaultConfig {
     pub fn new(config_path: PathBuf) -> Self {
         VaultConfig { config_path }
+    }
+
+    /// Strict load for read-modify-write setters. A MISSING file is a fresh
+    /// install and legitimately starts from defaults; an EXISTING file that
+    /// fails strict load is an error -- falling back to `BrainConfig::default()`
+    /// here would write defaults over every intact section (valid-JSON files
+    /// with a bad field type are the dangerous case: `write()`'s merge guard
+    /// passes and the clobber silently succeeds). Incident #178.
+    fn load_strict_or_fresh(paths: &BrainPaths) -> anyhow::Result<BrainConfig> {
+        if paths.config_path.exists() {
+            BrainConfig::load(paths)
+        } else {
+            Ok(BrainConfig::default())
+        }
     }
 
     pub fn default_vault_path() -> PathBuf {
@@ -68,7 +84,7 @@ impl VaultConfig {
 
     pub fn set_vault_path(&self, path: &str) -> Result<()> {
         let paths = self.brain_paths();
-        let mut config = BrainConfig::load(&paths).unwrap_or_else(|_| BrainConfig::default());
+        let mut config = Self::load_strict_or_fresh(&paths)?;
         config.vault_path = Some(path.to_string());
         config.write(&paths)
     }
@@ -105,7 +121,7 @@ impl VaultConfig {
     #[allow(dead_code)]
     pub fn set_embed_profile(&self, profile: EmbedProfile) -> Result<()> {
         let paths = self.brain_paths();
-        let mut config = BrainConfig::load(&paths).unwrap_or_else(|_| BrainConfig::default());
+        let mut config = Self::load_strict_or_fresh(&paths)?;
         config.embed_profile = Some(profile);
         config.write(&paths)
     }
@@ -119,7 +135,7 @@ impl VaultConfig {
 
     pub fn set_migrated_to_v2(&self) -> Result<()> {
         let paths = self.brain_paths();
-        let mut config = BrainConfig::load(&paths).unwrap_or_else(|_| BrainConfig::default());
+        let mut config = Self::load_strict_or_fresh(&paths)?;
         config.migrated_to_v2 = true;
         config.write(&paths)
     }
@@ -183,7 +199,85 @@ mod tests {
     }
 
     #[test]
-    fn test_set_overwrites_existing_path() {
+    fn set_vault_path_on_missing_config_creates_it() {
+        // Fresh install: no config.json yet. The setter must create it with
+        // defaults plus the requested vault path.
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_config(&tmp);
+        cfg.set_vault_path("/fresh/install").unwrap();
+        assert_eq!(cfg.get_vault_path().unwrap(), Some("/fresh/install".into()));
+    }
+
+    #[test]
+    fn set_vault_path_on_unreadable_config_errors_and_leaves_file_untouched() {
+        // A config that cannot be parsed must never be silently replaced
+        // with defaults: that converts corrupt input into corrupt output --
+        // every modeled section resets while unknown keys survive, producing
+        // a plausible-looking but hollow config (the 2026-09-03/09-04 live
+        // ~/.brain corruption incidents, see issue #178). Fail loudly, leave
+        // the evidence on disk.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{ not json at all").unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let cfg = VaultConfig::new(path.clone());
+        let result = cfg.set_vault_path("/should/not/happen");
+        assert!(
+            result.is_err(),
+            "must error on unreadable config, got {result:?}"
+        );
+
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "file must be untouched on failure");
+    }
+
+    #[test]
+    fn set_migrated_to_v2_on_unreadable_config_errors_and_leaves_file_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "[]").unwrap(); // non-object root: strict load fails
+        let before = std::fs::read(&path).unwrap();
+
+        let cfg = VaultConfig::new(path.clone());
+        assert!(cfg.set_migrated_to_v2().is_err());
+
+        assert_eq!(before, std::fs::read(&path).unwrap());
+    }
+
+    #[test]
+    fn set_vault_path_never_clobbers_when_strict_load_fails_on_existing_file() {
+        // The subtle case: file is VALID JSON (so `write()`'s merge guard
+        // passes) but strict `load()` rejects a field (`vault_path` must be
+        // a string). `unwrap_or_else(BrainConfig::default)` would then write
+        // defaults over every intact modeled section -- the live-corruption
+        // shape from issue #178. The setter must fail instead, touching
+        // nothing.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        let valuable = r#"{
+  "vault_path": 123,
+  "generation": {
+    "provider": "external",
+    "external_url": "https://api.z.ai/api/coding/paas/v4",
+    "model_name": "glm-5.3-flash"
+  }
+}"#;
+        std::fs::write(&path, valuable).unwrap();
+
+        let cfg = VaultConfig::new(path.clone());
+        let result = cfg.set_vault_path("/should/not/happen");
+        assert!(result.is_err(), "must error, got {result:?}");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after, valuable,
+            "config must be byte-identical after failure"
+        );
+    }
+
+    #[test]
+    fn set_vault_path_overwrites_existing_path() {
         let tmp = TempDir::new().unwrap();
         let cfg = make_config(&tmp);
         cfg.set_vault_path("/first").unwrap();
