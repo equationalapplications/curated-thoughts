@@ -1,3 +1,9 @@
+## [2.4.3](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.2...v2.4.3) (2026-09-04)
+
+### Bug Fixes
+
+* **tests:** bind TempDir handles and tighten live-brain guard opt-out ([b8292d2](https://github.com/equationalapplications/curated-thoughts/commit/b8292d22778a9e810ccd801ea68ea14272a732de))
+
 ## [2.4.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.1...v2.4.2) (2026-09-04)
 
 ### Bug Fixes
