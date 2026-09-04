@@ -38,13 +38,15 @@ PRs are independent and may be parallelised, except that PR 4's canary is most u
 
 ### Change
 
-**1. Read-side manifest filter.** In `fetch_outbound_neighbors` / `fetch_inbound_neighbors` / `fetch_entity_neighbors` (`wiki_graph.rs:493` / `:531` / `:572`), when the entity's ontology is strict, intersect the stored `edge_type` against the manifest vocabulary via `declares_edge_type` (`wiki_graph.rs:72`). Resolve the vocabulary **once** per `wiki_context` / `wiki_traverse_graph` call, not per hop.
+**1. Read-side manifest filter.** In `fetch_outbound_neighbors` / `fetch_inbound_neighbors` / `fetch_entity_neighbors` (`wiki_graph.rs:493` / `:531` / `:572`), when the entity's ontology is strict, intersect the stored `edge_type` against the manifest vocabulary via `declares_edge_type` (`wiki_graph.rs:72`). Resolve the vocabulary **per entity**: each seed and each traversed target entity gets its own resolution, applied only when *that* entity's ontology is strict, and cached per `entity_id` so the result is reused across that entity's hops (`CompositeWalk::edge_vocabularies`, `wiki_graph.rs:1047`). A single call-level manifest must not be shared across a mixed strict/ungated request — it would filter legal edges for an ungated entity or admit off-manifest edges for a strict one.
 
-**2. Prompt vocabulary injection.** Pass the manifest's `edge_type_names()` (`wiki_graph.rs:81`) into the synthesis system prompt at `synthesis.rs:590-599`, so the closed vocabulary constrains generation and not just persistence.
+**2. Prompt vocabulary injection.** Pass the manifest's `edge_type_names()` (`wiki_graph.rs:81`) into the synthesis system prompt at `synthesis.rs:590-599`, so the closed vocabulary constrains generation and not just persistence. Resolve per `CandidateEntity.id` (each candidate whose target is already committed gets its own strict vocabulary clause; `new` targets fall back to the shared `tier_fact` vocabulary), not once from the first source chunk.
 
 **3. Fail loud, not open.** `resolve_strict_edge_vocabulary` returns `None` — disabling the gate entirely — when the ontology is unreadable (`commit.rs:180-191`) or when strict mode declares zero edge types (`commit.rs:170-176`). Both paths currently only `eprintln!`. Surface them as real warnings through the app's tracing layer.
 
-**4. Off-manifest sweep.** Add `purge_off_manifest_edges` alongside `purge_dead_edges` (`src-tauri/src/db/edge_purge.rs:183`), emitting proper outbox `Delete` rows. Do **not** route this through `wiki_forget` — that path is entry-keyed and would not match edges anchored on `curated_entities`.
+**4. Off-manifest sweep.** Add `purge_off_manifest_edges` alongside `purge_dead_edges` (`src-tauri/src/db/edge_purge.rs:183`), deleting the rows locally with a per-edge warning log. Do **not** route this through `wiki_forget` — that path is entry-keyed and would not match edges anchored on `curated_entities`.
+
+**No outbox `Delete` rows for the sweep.** Edges are not replicated today: `commit_edge_add` writes no edge outbox rows (`edge_purge.rs` module docs), so delete-only CDC on edges would make prisma-outbox replicas *diverge* — they never held the inserts, so replaying the deletes has nothing to target. Emitting `Delete` rows is meaningful only as part of a change that also replicates edge inserts; that is separate scope (same CDC boundary as #132, but for edges) and deliberately not required here. The per-edge warning log is the audit trail until then.
 
 ### Explicitly out of scope
 
@@ -63,7 +65,7 @@ SELECT COUNT(*) FROM llm_wiki_edges
 Tests. The fixture must be **anchored the way the confirmed corruption is anchored**: the bad rows in the incident are edges on `curated_entities`, not on `llm_wiki_entries`. A fixture built only from entry-anchored edges can pass while the real corruption survives, so it does not count as coverage.
 
 - **Strict-ontology filtering.** Seed a strict brain with one manifest edge and two off-manifest edges anchored on `curated_entities`, one in each traversal direction (entity-as-source and entity-as-target). Assert `wiki_context` returns the manifest edge and excludes *both* off-manifest edges — a filter applied to only one direction must fail this test.
-- **Sweep.** Assert the sweep deletes those same rows *and* emits one outbox `Delete` per deleted edge. Row count alone is not sufficient: a sweep that deletes locally without an outbox row leaves prisma-outbox replicas holding the bad edges forever (the failure mode already recorded for `wiki_forget` in #132).
+- **Sweep.** Assert the sweep deletes those same rows and logs each delete (per-edge warning). Row count alone is not sufficient: an unlogged set-based delete is unauditable. **No outbox rows are asserted** — edges are not replicated (see Change §4), so requiring edge-delete CDC rows here would assert replica divergence, not coverage.
 - **Non-strict regression.** A brain without a strict manifest is unfiltered — all three edges come back.
 
 ---
@@ -80,12 +82,12 @@ The periodic sweep (`src-tauri/src/pipeline/watchdog/sweep.rs:118`) does not con
 
 ### Change
 
-**1. Rename probe at reconcile.** Before dispatching `Remove` for a missing path, look for another `tier='user_doc'` row whose `documents.hash` matches. `documents.hash` is a per-file SHA-256 written by `upsert_document` (`src-tauri/src/db/queries.rs:18`), so a byte-identical `git mv` matches exactly. On a match, `UPDATE documents SET path = ?new WHERE id = ?old` — the `doc_id` FK is preserved, so chunks, embeddings, and curated relationships all survive with no re-embedding. Ambiguous (multi-match) cases fall through to today's `Remove`.
+**1. Rename probe at reconcile.** Before dispatching `Remove` for a missing path, hash the **on-disk candidates**, not the `documents` table. At Remove-dispatch time the table still holds only the *old* path (the new path has not been inserted yet — its `Create` is only discovered later in the same reconcile pass), so a probe by `documents.hash` cannot see it and the flow would always fall through to `Remove` + `Create`, losing `doc_id`. Instead, for each candidate path discovered on disk that is not yet in `documents`, compute SHA-256 over the file bytes (same digest `upsert_document` at `src-tauri/src/db/queries.rs:18` writes) and match that against the doomed row's stored `documents.hash`. Byte-identical `git mv` matches exactly. On a match, `UPDATE documents SET path = ?new WHERE id = ?old` — the `doc_id` FK is preserved, so chunks and embeddings survive with no re-embedding. Ambiguous (multi-match) or unmatched cases fall through to today's `Remove`; the `Create` dispatch for the new path must then be suppressed when the probe already re-anchored the row to that path, so the same file is not inserted twice.
 
 **Content equality is not proof of a rename, and the policy must say so.** A unique `documents.hash` match also occurs when one document is deleted and an *unrelated* document with identical bytes is created at another path — two empty files, two copies of a template, two stub notes with the same one line. At reconcile we see only "path A gone, path B present, same hash"; the two cases are genuinely indistinguishable from disk state alone. The policy is therefore explicit rather than inferred:
 
 - **Adopt the rename** — carry `doc_id`, chunks, and embeddings across. These are derived from content, and the content is identical by hypothesis, so they are correct for the new path either way.
-- **Do not carry curated relationships silently.** Curated edges are *user* assertions about a specific document, not a function of its bytes. On a hash-only match with no corroborating signal, re-anchoring them to what may be an unrelated file fabricates user intent. Corroborate with a cheap, non-content signal first — same parent directory, or same basename — and only carry curated edges when one holds. Otherwise adopt the rename for the derived data and leave the curated edges detached for the existing orphan path to surface.
+- **Do not carry curated relationships silently.** Curated edges are *user* assertions about a specific document, not a function of its bytes. On a hash-only match with no corroborating signal, re-anchoring them to what may be an unrelated file fabricates user intent. Corroborate with a cheap, non-content signal first — same parent directory, or same basename — and only carry curated edges when one holds. Otherwise the adoption must run inside **one transaction** that: (a) updates `documents.path`, and (b) first **quarantines the curated edges** attached to that `doc_id` — the detached edges are not deleted but parked (e.g. a `detached_at` marker or a side table keyed by the old `doc_id` + edge payload) so they can be restored to the original path or offered back to the user, never silently attached to the new file. Crucially, the re-anchored `doc_id` must end the transaction with **no** curated relationships attached, because that same `doc_id` is now the new file's identity; leaving the edges in place and waiting for "the existing orphan path to surface them" is impossible — there is no orphan row to hold them. The log line records which edges were quarantined so a false positive is recoverable.
 - **Record the decision.** Log the probe outcome and which signal corroborated it, so a wrong adoption is diagnosable after the fact rather than invisible.
 
 The cost of being wrong is asymmetric and that is what drives the split: a needless re-embed is seconds of CPU, whereas silently transplanting a user's curated edges onto an unrelated document is unrecoverable without the log line.
@@ -118,7 +120,7 @@ All safety-critical work already exists. `forget_entries_by_source_refs` (`src-t
 
 New `WikiCmd::Forget` variant in `tools/src/bin/ct.rs` (alongside `List`/`Get` at `:236-247`, dispatch at `:314-317`), body in `tools/src/cmds.rs`:
 
-```
+```text
 ct wiki forget --ref <source_ref> [--ref ...] [--dry-run] [--yes]
 ct wiki forget --like <prefix>                [--dry-run] [--yes]
 ```
