@@ -143,12 +143,14 @@ struct CommitContext {
 /// The proposal's `entity_id` is a **curated** id (`ent_<hash>`), not a
 /// partition id (`tier_fact`, `tier_wisdom`, `tier_working::*`); manifests
 /// are seeded against partitions, so a direct lookup against a curated id
-/// always misses and would silently disable the gate on every production
-/// proposal. The curated entity's manifest is the partition's manifest, so
-/// `wiki_get_ontology` is called against `tier_fact` — the canonical
-/// seeded partition — and only as a fallback when the curated-id lookup
-/// does find a manifest. Tests that install a manifest for a specific
-/// curated id (e.g. `ent-1`) are unaffected: the direct hit is preferred.
+/// almost always misses and would silently disable the gate on every
+/// production proposal. The curated entity inherits its manifest from the
+/// partition, so `wiki_get_ontology` is called against `tier_fact` — the
+/// canonical seeded partition — **as the fallback when the curated-id
+/// lookup does NOT find a strict manifest** (the typical production case).
+/// Tests that install a manifest for a specific curated id (e.g. `ent-1`)
+/// are unaffected: the curated-id lookup wins and the partition lookup is
+/// skipped.
 pub(crate) fn resolve_strict_edge_vocabulary(
     conn: &Connection,
     entity_id: &str,
@@ -158,7 +160,8 @@ pub(crate) fn resolve_strict_edge_vocabulary(
     }
     let lookup_ids: [&str; 2] = [entity_id, "tier_fact"];
     let mut last_err: Option<String> = None;
-    for lookup in lookup_ids {
+    for (i, lookup) in lookup_ids.iter().enumerate() {
+        let is_last = i + 1 == lookup_ids.len();
         match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
             Ok(o) if o.mode == "strict" => {
                 let manifest = o.manifest?;
@@ -176,10 +179,19 @@ pub(crate) fn resolve_strict_edge_vocabulary(
                 }
                 return Some(vocabulary);
             }
+            // An earlier lookup that returned a non-strict manifest (e.g. the
+            // curated-id row is `mode: "off"` because manifests are seeded
+            // against partitions, not curated ids) must NOT short-circuit —
+            // fall through to the partition fallback. Only the LAST lookup
+            // returning `Ok(_)` means "no strict manifest anywhere".
+            Ok(_) if !is_last => continue,
             Ok(_) => return None,
             Err(e) => {
                 last_err = Some(format!("{lookup}: {e}"));
-                continue;
+                if !is_last {
+                    continue;
+                }
+                // fall through to the unreadable warning below
             }
         }
     }
@@ -2942,6 +2954,92 @@ mod tests {
         assert!(
             walked.edges.is_empty(),
             "an off-manifest edge must not surface in traversal, got: {walked:?}"
+        );
+    }
+
+    /// Regression: the curated-id lookup misses on production data because
+    /// manifests are seeded against partitions (`tier_fact`, …), not curated
+    /// entity ids. The resolver must therefore fall back to the partition and
+    /// still apply the strict gate. With the bug present the first `Ok(_)`
+    /// returned `None` and the gate never ran — every off-manifest edge on a
+    /// real proposal slipped through.
+    ///
+    /// Two assertions, in two fresh connections: the gate must (a) drop an
+    /// off-manifest edge type and (b) admit a manifest-defined one, both when
+    /// the manifest is seeded at `tier_fact` (not at the curated id).
+    #[test]
+    fn strict_mode_falls_back_to_tier_fact_and_drops_off_manifest_edge() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        // Seed the strict manifest at the partition, NOT at the curated id.
+        seed_manifest(
+            &conn,
+            "tier_fact",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+        // entity_id is "ent-1" (curated, no manifest seeded here) — the
+        // first lookup misses and exercises the partition fallback.
+        insert_edge_proposal(
+            &conn,
+            "prop-curated-bad",
+            "ent-1",
+            "invented_by_the_llm",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-curated-bad");
+
+        assert_eq!(
+            result.dropped_edges,
+            vec!["edge-1".to_string()],
+            "a curated-id proposal whose partition manifest is strict must still drop \
+             an off-manifest edge type; the partition fallback must fire when the \
+             curated-id lookup misses"
+        );
+    }
+
+    #[test]
+    fn strict_mode_falls_back_to_tier_fact_and_admits_manifest_defined_edge() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_manifest(
+            &conn,
+            "tier_fact",
+            "strict",
+            &["thing"],
+            &[("supports", "thing", "thing")],
+        );
+        insert_edge_proposal(
+            &conn,
+            "prop-curated-ok",
+            "ent-1",
+            "supports",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-curated-ok");
+
+        assert!(
+            result.dropped_edges.is_empty(),
+            "a declared edge type must not be dropped via the partition fallback"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE edge_type = 'supports' \
+                 AND entity_id = 'ent-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "a partition-gated edge must land in llm_wiki_edges"
         );
     }
 
