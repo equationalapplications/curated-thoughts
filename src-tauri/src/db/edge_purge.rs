@@ -204,18 +204,36 @@ pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
 /// Takes `&Connection` and opens an unchecked transaction so it composes inside
 /// a caller's transaction as the rest of this module does.
 pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str, now_ms: i64) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let removed = purge_off_manifest_edges_in_tx(&tx, entity_id, now_ms)?;
+    tx.commit()?;
+    Ok(removed)
+}
+
+/// Transaction-scoped body of [`purge_off_manifest_edges`]: performs the purge
+/// with plain statements and NO transaction management, so callers that are
+/// already inside an open transaction (`unchecked_transaction` executes a real
+/// `BEGIN`, which SQLite rejects mid-transaction) can call this directly and
+/// keep the purge atomic with their own writes. The public wrapper owns the
+/// transaction for everyone else.
+///
+/// Count semantics match the wrapper: returns `Ok(0)` and deletes nothing when
+/// the entity has no strict ontology or no off-manifest edges.
+fn purge_off_manifest_edges_in_tx(
+    conn: &Connection,
+    entity_id: &str,
+    now_ms: i64,
+) -> Result<usize> {
     let Some(vocab) = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id) else {
         return Ok(0);
     };
-
-    let tx = conn.unchecked_transaction()?;
 
     // Collect first so each doomed edge can be logged (and, once edges gain
     // CDC, get its own outbox Delete row) rather than vanishing inside one
     // set-based DELETE.
     let doomed: Vec<(String, String)> = {
         let mut stmt =
-            tx.prepare("SELECT id, edge_type FROM llm_wiki_edges WHERE entity_id = ?1")?;
+            conn.prepare("SELECT id, edge_type FROM llm_wiki_edges WHERE entity_id = ?1")?;
         let mut rows = stmt.query([entity_id])?;
         let mut v = Vec::new();
         while let Some(row) = rows.next()? {
@@ -234,10 +252,9 @@ pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str, now_ms: i64)
 
     for (id, edge_type) in &doomed {
         warn_purging_off_manifest_edge(entity_id, id, edge_type);
-        tx.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [id])?;
+        conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [id])?;
     }
 
-    tx.commit()?;
     // Reserved for outbox wiring: edges carry no CDC rows today (see the module
     // docs), so there is no helper to call here.
     let _ = now_ms;
@@ -701,5 +718,66 @@ mod tests {
         let removed = purge_off_manifest_edges(&conn, "ent_open", 1_725_000_000_000).unwrap();
         assert_eq!(removed, 0, "non-strict brains must never be swept");
         assert_eq!(edge_ids(&conn).len(), 1);
+    }
+
+    /// Regression test for the transaction-composition bug: the old
+    /// `purge_off_manifest_edges` called `unchecked_transaction()` in its own
+    /// body, and `unchecked_transaction` executes a real `BEGIN` — which SQLite
+    /// rejects inside an already-open caller transaction, so the documented
+    /// "composes inside a caller's transaction" contract was broken. The
+    /// transaction-scoped helper `purge_off_manifest_edges_in_tx` must work
+    /// inside an open caller transaction, be visible within it, and roll back
+    /// with it.
+    #[test]
+    fn purge_off_manifest_helper_composes_inside_a_caller_transaction() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = seed_live_entry(&conn, "ent_demo", "A");
+        let b = seed_live_entry(&conn, "ent_demo", "B");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "depends_on");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "fabricated_2026-09-09");
+
+        // Caller opens its own transaction (a real BEGIN is active on the
+        // connection from here on).
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // The helper must run against the open caller transaction without
+        // attempting a nested BEGIN.
+        let removed = purge_off_manifest_edges_in_tx(&tx, "ent_demo", 1_725_000_000_000).unwrap();
+        assert_eq!(removed, 1, "exactly the off-manifest edge is purged in-tx");
+
+        // The purge is visible inside the transaction.
+        assert_eq!(
+            edge_ids(&tx),
+            vec!["edge_ent_demo_depends_on".to_string()],
+            "the off-manifest edge must be gone inside the open transaction"
+        );
+
+        // ...and rolls back together with the caller transaction.
+        tx.rollback().unwrap();
+        assert_eq!(
+            edge_ids(&conn).len(),
+            2,
+            "a rolled-back caller transaction must restore the purged edge"
+        );
+    }
+
+    /// The public wrapper must still work when NO caller transaction is open,
+    /// and its empty-doomed-set path must return 0 without committing anything
+    /// harmful (count semantics unchanged).
+    #[test]
+    fn purge_off_manifest_edges_wrapper_still_commits_on_standalone_use() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        let a = seed_live_entry(&conn, "ent_demo", "A");
+        let b = seed_live_entry(&conn, "ent_demo", "B");
+        seed_live_edge(&conn, "ent_demo", &a, &b, "fabricated_2026-09-09");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_demo", 1_725_000_000_000).unwrap();
+        assert_eq!(removed, 1, "wrapper still purges and commits standalone");
+        assert!(
+            edge_ids(&conn).is_empty(),
+            "wrapper commit must persist the purge (the only seeded edge was off-manifest)"
+        );
     }
 }
