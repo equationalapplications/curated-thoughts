@@ -1,3 +1,15 @@
+## [2.4.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.3.0...v2.4.0) (2026-09-04)
+
+### Features
+
+* **walk:** exclude editor temp files ([1fa31fb](https://github.com/equationalapplications/curated-thoughts/commit/1fa31fb7b4ccec188123995e15a27fc3eb017b2e))
+
+### Bug Fixes
+
+* **watch:** apply the walker's exclusion filter in enqueue_vault_event ([ee21b5f](https://github.com/equationalapplications/curated-thoughts/commit/ee21b5f5edb8666f5f5cdf99f43153d60b1935e4))
+* **watch:** run deletes before the temp-file exclusion check ([727fe2e](https://github.com/equationalapplications/curated-thoughts/commit/727fe2e1b5f129fcab7cce5c361b135e8b21d12f))
+* **watch:** treat a vanished file as a delete rather than an error ([b3ac354](https://github.com/equationalapplications/curated-thoughts/commit/b3ac35441328dc825a977afdc056ea9a102836a3))
+
 ## [2.3.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.2.1...v2.3.0) (2026-09-04)
 
 ### Features
