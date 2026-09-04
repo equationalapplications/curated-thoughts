@@ -1618,8 +1618,8 @@ mod tests {
 
     #[test]
     fn auto_approve_commits_proposal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
         temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
@@ -1675,13 +1675,9 @@ mod tests {
             let pending = list_proposals(&conn, &ProposalFilter::default()).unwrap();
             assert!(pending.is_empty());
 
-            let fact_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+            let sql =
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'";
+            let fact_count: i64 = conn.query_row(sql, [], |r| r.get(0)).unwrap();
             assert_eq!(fact_count, 1);
         });
     }

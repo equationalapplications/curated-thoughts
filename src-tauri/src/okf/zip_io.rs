@@ -129,8 +129,8 @@ mod tests {
 
     #[test]
     fn rejects_zip_with_too_many_entries() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
         temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {

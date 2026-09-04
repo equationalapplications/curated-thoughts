@@ -119,11 +119,11 @@ fn approve_wiki_page_commits_proposal_and_clears_queue() {
     // Without the stub this test reads the developer's ~/.brain/config.json and
     // may make live Ollama calls — passing either way, but slow and machine-
     // dependent. `embed_batch` checks this var before the profile.
-    let brain = tempfile::TempDir::new()
-        .unwrap()
-        .path()
-        .to_string_lossy()
-        .into_owned();
+    // Bind the TempDir: `TempDir::new().path()` would drop the handle at the
+    // end of the statement and delete the directory before it is ever used,
+    // leaving CURATED_BRAIN_DIR pointing at a path that does not exist.
+    let brain_tmp = tempfile::TempDir::new().unwrap();
+    let brain = brain_tmp.path().to_string_lossy().into_owned();
     temp_env::with_vars(
         [
             ("CURATED_EMBED_STUB", Some("constant8")),
@@ -181,11 +181,11 @@ fn approve_wiki_page_ignores_content_parameter() {
     // Without the stub this test reads the developer's ~/.brain/config.json and
     // may make live Ollama calls — passing either way, but slow and machine-
     // dependent. `embed_batch` checks this var before the profile.
-    let brain = tempfile::TempDir::new()
-        .unwrap()
-        .path()
-        .to_string_lossy()
-        .into_owned();
+    // Bind the TempDir: `TempDir::new().path()` would drop the handle at the
+    // end of the statement and delete the directory before it is ever used,
+    // leaving CURATED_BRAIN_DIR pointing at a path that does not exist.
+    let brain_tmp = tempfile::TempDir::new().unwrap();
+    let brain = brain_tmp.path().to_string_lossy().into_owned();
     temp_env::with_vars(
         [
             ("CURATED_EMBED_STUB", Some("constant8")),
@@ -219,11 +219,11 @@ fn approve_wiki_page_ignores_content_parameter() {
 
 #[test]
 fn reject_wiki_page_marks_proposal_rejected() {
-    let brain = tempfile::TempDir::new()
-        .unwrap()
-        .path()
-        .to_string_lossy()
-        .into_owned();
+    // Bind the TempDir: `TempDir::new().path()` would drop the handle at the
+    // end of the statement and delete the directory before it is ever used,
+    // leaving CURATED_BRAIN_DIR pointing at a path that does not exist.
+    let brain_tmp = tempfile::TempDir::new().unwrap();
+    let brain = brain_tmp.path().to_string_lossy().into_owned();
     temp_env::with_vars(
         [
             // Issue #178: the post-commit sweep resolves config from
@@ -276,11 +276,11 @@ fn resolve_proposal_cmd_partial_approval() {
     // Without the stub this test reads the developer's ~/.brain/config.json and
     // may make live Ollama calls — passing either way, but slow and machine-
     // dependent. `embed_batch` checks this var before the profile.
-    let brain = tempfile::TempDir::new()
-        .unwrap()
-        .path()
-        .to_string_lossy()
-        .into_owned();
+    // Bind the TempDir: `TempDir::new().path()` would drop the handle at the
+    // end of the statement and delete the directory before it is ever used,
+    // leaving CURATED_BRAIN_DIR pointing at a path that does not exist.
+    let brain_tmp = tempfile::TempDir::new().unwrap();
+    let brain = brain_tmp.path().to_string_lossy().into_owned();
     temp_env::with_vars(
         [
             ("CURATED_EMBED_STUB", Some("constant8")),
@@ -292,10 +292,11 @@ fn resolve_proposal_cmd_partial_approval() {
             let app = TestApp::new();
             let conn = app.open_db();
             conn.execute(
-            "INSERT INTO documents (path, hash, tier, status) VALUES ('/vault/documents/a.pdf', 'h', 'user_doc', 'indexed')",
-            [],
-        )
-        .unwrap();
+                "INSERT INTO documents (path, hash, tier, status)
+                 VALUES ('/vault/documents/a.pdf', 'h', 'user_doc', 'indexed')",
+                [],
+            )
+            .unwrap();
             let doc_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO chunks (doc_id, chunk_text, position) VALUES (?1, 'x', 0)",
@@ -304,59 +305,60 @@ fn resolve_proposal_cmd_partial_approval() {
             .unwrap();
             let chunk_id = conn.last_insert_rowid();
             conn.execute(
-            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
-             VALUES ('ent-1', 'Existing', 'concept', 'Sum', 100, 100)",
-            [],
-        )
-        .unwrap();
+                "INSERT INTO curated_entities
+                    (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES ('ent-1', 'Existing', 'concept', 'Sum', 100, 100)",
+                [],
+            )
+            .unwrap();
 
             insert_proposal(
-            &conn,
-            &NewProposal {
-                id: "prop-partial".into(),
-                kind: ProposalKind::UpdateEntity,
-                entity_id: Some("ent-1".into()),
-                proposed_name: None,
-                proposed_type: None,
-                reasoning: None,
-                model: "test".into(),
-            },
-            &[
-                NewProposalItem {
-                    id: "item-a".into(),
-                    item_type: "fact_add".into(),
-                    target_id: None,
-                    payload: serde_json::json!({ "body": "Keep", "tags": [], "confidence": "inferred" }),
-                    evidence: vec![StoredEvidenceChunk {
-                        chunk_id: Some(chunk_id),
-                        content_hash: String::new(),
-                        quote: "x".into(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                        source_kind: None,
-                    }],
+                &conn,
+                &NewProposal {
+                    id: "prop-partial".into(),
+                    kind: ProposalKind::UpdateEntity,
+                    entity_id: Some("ent-1".into()),
+                    proposed_name: None,
+                    proposed_type: None,
+                    reasoning: None,
+                    model: "test".into(),
                 },
-                NewProposalItem {
-                    id: "item-b".into(),
-                    item_type: "fact_add".into(),
-                    target_id: None,
-                    payload: serde_json::json!({ "body": "Drop", "tags": [], "confidence": "inferred" }),
-                    evidence: vec![StoredEvidenceChunk {
-                        chunk_id: Some(chunk_id),
-                        content_hash: String::new(),
-                        quote: "x".into(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                        source_kind: None,
-                    }],
-                },
-            ],
-            &[NewProposalSource {
-                doc_id,
-                role: ProposalSourceRole::Trigger,
-            }],
-        )
-        .unwrap();
+                &[
+                    NewProposalItem {
+                        id: "item-a".into(),
+                        item_type: "fact_add".into(),
+                        target_id: None,
+                        payload: serde_json::json!({ "body": "Keep", "tags": [], "confidence": "inferred" }),
+                        evidence: vec![StoredEvidenceChunk {
+                            chunk_id: Some(chunk_id),
+                            content_hash: String::new(),
+                            quote: "x".into(),
+                            start_line: Some(1),
+                            end_line: Some(1),
+                            source_kind: None,
+                        }],
+                    },
+                    NewProposalItem {
+                        id: "item-b".into(),
+                        item_type: "fact_add".into(),
+                        target_id: None,
+                        payload: serde_json::json!({ "body": "Drop", "tags": [], "confidence": "inferred" }),
+                        evidence: vec![StoredEvidenceChunk {
+                            chunk_id: Some(chunk_id),
+                            content_hash: String::new(),
+                            quote: "x".into(),
+                            start_line: Some(1),
+                            end_line: Some(1),
+                            source_kind: None,
+                        }],
+                    },
+                ],
+                &[NewProposalSource {
+                    doc_id,
+                    role: ProposalSourceRole::Trigger,
+                }],
+            )
+            .unwrap();
 
             let result: serde_json::Value = app.invoke(
                 "resolve_proposal_cmd",

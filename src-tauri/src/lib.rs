@@ -4122,8 +4122,8 @@ mod heal_invalid_sources_tests {
 
     #[test]
     fn missing_vault_sources_are_marked_deleted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
         temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
@@ -4144,9 +4144,10 @@ mod heal_invalid_sources_tests {
                 let conn = &guard.0;
                 conn.execute(
                     "INSERT INTO llm_wiki_entries (
-                id, entity_id, title, body, tags, confidence, source_type, source_ref,
-                created_at, updated_at, deleted_at
-             ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred', ?5, 1, 1, NULL)",
+                        id, entity_id, title, body, tags, confidence, source_type,
+                        source_ref, created_at, updated_at, deleted_at
+                     ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred',
+                               ?5, 1, 1, NULL)",
                     params![
                         "entry-missing",
                         "tier_fact",
@@ -4596,8 +4597,8 @@ mod maintenance_command_tests {
     /// would also reject) and `immutable_document` rows.
     #[test]
     fn e3_heal_invalid_sources_is_scoped_to_librarian_inferred() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
         temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
@@ -4619,28 +4620,28 @@ mod maintenance_command_tests {
             // immutable_document with a missing path (must NOT be touched).
             db.0.execute(
                 "INSERT INTO llm_wiki_entries
-            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-             created_at, updated_at, deleted_at)
-         VALUES (?1, 'tier_fact', 'Title lost-inferred', 'body', '[]',
-                 'inferred', 'librarian_inferred', 'documents/gone.md', 1, 1, NULL)",
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     source_ref, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'tier_fact', 'Title lost-inferred', 'body', '[]',
+                         'inferred', 'librarian_inferred', 'documents/gone.md', 1, 1, NULL)",
                 rusqlite::params!["lost-inferred"],
             )
             .expect("insert librarian_inferred");
             db.0.execute(
                 "INSERT INTO llm_wiki_entries
-            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-             created_at, updated_at, deleted_at)
-         VALUES (?1, 'tier_fact', 'Title user-stated', 'body', '[]',
-                 'confirmed', 'user_stated', ?2, 1, 1, NULL)",
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     source_ref, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'tier_fact', 'Title user-stated', 'body', '[]',
+                         'confirmed', 'user_stated', ?2, 1, 1, NULL)",
                 rusqlite::params!["user-stated", manual],
             )
             .expect("insert user_stated");
             db.0.execute(
                 "INSERT INTO llm_wiki_entries
-            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-             created_at, updated_at, deleted_at)
-         VALUES (?1, 'tier_fact', 'Title immutable', 'body', '[]',
-                 'inferred', 'immutable_document', 'documents/gone.md', 1, 1, NULL)",
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     source_ref, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'tier_fact', 'Title immutable', 'body', '[]',
+                         'inferred', 'immutable_document', 'documents/gone.md', 1, 1, NULL)",
                 rusqlite::params!["immutable"],
             )
             .expect("insert immutable_document");
@@ -4694,8 +4695,8 @@ mod maintenance_command_tests {
     /// regressed seconds-valued writer (≈1.7e9) would fail loudly.
     #[test]
     fn e4_heal_writers_set_deleted_at_in_milliseconds() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
         temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
@@ -4731,11 +4732,11 @@ mod maintenance_command_tests {
                     .expect("open test db");
             db.0.execute(
                 "INSERT INTO llm_wiki_entries
-            (id, entity_id, title, body, tags, confidence, source_type, source_ref,
-             created_at, updated_at, deleted_at)
-         VALUES ('target-invalid', 'tier_fact', 'Title target-invalid', 'body',
-                 '[]', 'inferred', 'librarian_inferred', 'documents/missing.md',
-                 1, 1, NULL)",
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     source_ref, created_at, updated_at, deleted_at)
+                 VALUES ('target-invalid', 'tier_fact', 'Title target-invalid', 'body',
+                         '[]', 'inferred', 'librarian_inferred',
+                         'documents/missing.md', 1, 1, NULL)",
                 [],
             )
             .expect("insert target-invalid");
@@ -5122,8 +5123,8 @@ mod maintenance_command_tests {
 
     #[test]
     fn run_embedding_sweep_fills_null_blobs_against_the_live_connection() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
         temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
@@ -5164,14 +5165,9 @@ mod maintenance_command_tests {
                     assert_eq!(report.remaining_null, 0);
 
                     let guard = db_state.0.lock().unwrap();
-                    let blob_len: i64 = guard
-                .0
-                .query_row(
-                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
+                    let sql =
+                        "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'";
+                    let blob_len: i64 = guard.0.query_row(sql, [], |r| r.get(0)).unwrap();
                     assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
                 },
             );
@@ -5201,12 +5197,16 @@ mod ingest_document_command_tests {
 
     #[test]
     fn ingest_document_command_emits_progress_and_proposal_ready() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let brain = tmp.path().to_string_lossy().into_owned();
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
-            temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
                 let tmp = TempDir::new().expect("tempdir");
                 let db_path = tmp.path().join("brain.db");
                 let db = db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
@@ -5312,7 +5312,7 @@ mod ingest_document_command_tests {
                     Some(&serde_json::Value::Null),
                     "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
                 );
-            });
-        });
+            },
+        );
     }
 }

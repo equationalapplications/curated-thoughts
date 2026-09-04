@@ -83,8 +83,12 @@ pub fn resolve_brain_paths() -> BrainPaths {
 /// precedence) while both config and db redirect elsewhere.
 #[cfg(any(test, feature = "test-utils"))]
 fn guard_against_live_brain(paths: &BrainPaths) {
-    if std::env::var_os("CT_ALLOW_LIVE_BRAIN").is_some() {
-        return;
+    // Only a truthy value opts out. `is_some()` would let
+    // `CT_ALLOW_LIVE_BRAIN=0` (or an empty value inherited from a shell
+    // export) silently disable the guard.
+    match std::env::var("CT_ALLOW_LIVE_BRAIN") {
+        Ok(v) if !matches!(v.trim(), "" | "0" | "false") => return,
+        _ => {}
     }
     let Some(home) = dirs::home_dir() else {
         return;
