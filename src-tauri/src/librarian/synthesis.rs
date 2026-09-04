@@ -1622,7 +1622,15 @@ mod tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             let mut conn = open_in_memory().unwrap();
             let (doc_id, chunk_id) =
                 seed_doc_and_chunk(&conn, "/vault/documents/auto.md", "Beta system overview");

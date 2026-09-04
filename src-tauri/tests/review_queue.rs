@@ -130,6 +130,10 @@ fn approve_wiki_page_commits_proposal_and_clears_queue() {
             // Issue #178: the post-commit sweep resolves config from
             // CURATED_BRAIN_*; keep it off the live ~/.brain.
             ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+            // Explicitly clear CONFIG/DB: inherited values would override the
+            // redirected brain dir and make the test non-hermetic (#178).
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
         ],
         || {
             let app = TestApp::new();
@@ -192,6 +196,10 @@ fn approve_wiki_page_ignores_content_parameter() {
             // Issue #178: the post-commit sweep resolves config from
             // CURATED_BRAIN_*; keep it off the live ~/.brain.
             ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+            // Explicitly clear CONFIG/DB: inherited values would override the
+            // redirected brain dir and make the test non-hermetic (#178).
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
         ],
         || {
             let app = TestApp::new();
@@ -229,6 +237,10 @@ fn reject_wiki_page_marks_proposal_rejected() {
             // Issue #178: the post-commit sweep resolves config from
             // CURATED_BRAIN_*; keep it off the live ~/.brain.
             ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+            // Explicitly clear CONFIG/DB: inherited values would override the
+            // redirected brain dir and make the test non-hermetic (#178).
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
         ],
         || {
             let app = TestApp::new();
@@ -287,6 +299,10 @@ fn resolve_proposal_cmd_partial_approval() {
             // Issue #178: the post-commit sweep resolves config from
             // CURATED_BRAIN_*; keep it off the live ~/.brain.
             ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+            // Explicitly clear CONFIG/DB: inherited values would override the
+            // redirected brain dir and make the test non-hermetic (#178).
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
         ],
         || {
             let app = TestApp::new();

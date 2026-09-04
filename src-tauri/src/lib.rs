@@ -4126,7 +4126,15 @@ mod heal_invalid_sources_tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             let tmp = TempDir::new().unwrap();
             let vault_root = tmp.path().join("vault");
             std::fs::create_dir_all(vault_root.join("documents")).unwrap();
@@ -4601,7 +4609,15 @@ mod maintenance_command_tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             let tmp = tempfile::TempDir::new().unwrap();
             let vault_root = tmp.path();
             std::fs::create_dir_all(vault_root.join("documents")).unwrap();
@@ -4699,7 +4715,15 @@ mod maintenance_command_tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             use crate::db::schema::SEC_VS_MS_THRESHOLD;
 
             // (a) heal_lost_librarian_inferred
@@ -5127,7 +5151,15 @@ mod maintenance_command_tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             let (db_state, tmp) = build_test_db_state_with_brain_paths();
             let brain_dir = tmp.path().to_str().unwrap().to_string();
             let config_path = tmp.path().join("config.json");
@@ -5204,6 +5236,10 @@ mod ingest_document_command_tests {
         temp_env::with_vars(
             [
                 ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
                 ("CURATED_EMBED_STUB", Some("constant8")),
             ],
             || {

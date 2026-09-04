@@ -276,7 +276,15 @@ mod tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             let temp = TempDir::new().unwrap();
             let vault = temp.path().join("vault");
 
@@ -305,7 +313,15 @@ mod tests {
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         // Redirect the brain dir: this test resolved the LIVE ~/.brain
         // without a guard (issue #178).
-        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain.as_str()))], || {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // Explicitly clear CONFIG: an inherited value would override the
+                // redirected brain dir and make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
             let temp = TempDir::new().unwrap();
             let vault = temp.path().join("vault");
 
