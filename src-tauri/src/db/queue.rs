@@ -491,8 +491,12 @@ mod tests {
         // arrives, the exclusion check must not swallow the delete. Deleting
         // is always safe regardless of naming; exclusion only gates staging.
         let dir = tempfile::TempDir::new().unwrap();
+        // Seed with the CANONICAL path: enqueue_vault_event canonicalizes the
+        // event path (macOS /var -> /private/var), and the seeded row must use
+        // the same spelling for the DELETE to match.
+        let base = std::fs::canonicalize(dir.path()).unwrap();
         let mut conn = open_seeded_conn();
-        let p = dir.path().join("note.md~");
+        let p = base.join("note.md~");
         std::fs::write(&p, b"scratch").unwrap();
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
