@@ -658,6 +658,32 @@ pub fn format_event(kind: &str, path: &str, ts_ms: i64) -> String {
     .to_string()
 }
 
+/// Resolve an anchored `source_ref` prefix to the exact refs it matches.
+///
+/// The prefix is bound as `prefix%`, never interpolated. `%` and `_` are
+/// rejected outright so the selector stays a literal anchored prefix and
+/// cannot silently widen into a substring scan — an incident tool that
+/// deletes more than the operator typed is worse than one that refuses.
+pub fn resolve_refs_by_prefix(conn: &Connection, prefix: &str) -> Result<Vec<String>> {
+    if prefix.contains('%') || prefix.contains('_') {
+        anyhow::bail!(
+            "--like must be a literal anchored prefix; `%` and `_` are not allowed \
+             (got {prefix:?}). Use repeated --ref for an explicit set."
+        );
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT source_ref FROM llm_wiki_entries
+          WHERE source_ref IS NOT NULL AND source_ref LIKE ?1",
+    )?;
+    let mut rows = stmt.query([format!("{prefix}%")])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get::<_, String>(0)?);
+    }
+    Ok(out)
+}
+
 /// Current wall-clock time in unix milliseconds.
 ///
 /// Uses `std::time::SystemTime` (no `chrono` dep — keeping the dependency
@@ -1555,6 +1581,57 @@ mod tests {
                 },
             );
         });
+    }
+
+    // ---- `ct wiki forget` source_ref resolver (PR #163) ----
+
+    /// Open a fresh, fully-migrated in-memory brain connection. We use the
+    /// lib's `open_in_memory` (not `AppDb::open_with_config`) because the
+    /// `--like` selector only needs the schema, not the vault_root wiring.
+    fn open_in_memory_brain() -> Connection {
+        tauri_app_lib::db::connection::open_in_memory().expect("open in-memory brain")
+    }
+
+    /// Seed one `llm_wiki_entries` row with the given id and source_ref.
+    /// Mirrors the column list in `wiki_forget`'s unit tests so it lines up
+    /// with what the production migration produces.
+    fn seed_entry_with_source_ref(conn: &Connection, id: &str, source_ref: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, 'ent_forget_test', 'T', 'B', '[]', 'inferred', 'librarian_inferred',
+                       NULL, ?2, 100, 100, NULL, 0, NULL, NULL, NULL)",
+            rusqlite::params![id, source_ref],
+        )
+        .expect("seed entry");
+    }
+
+    #[test]
+    fn resolve_refs_by_prefix_is_anchored_and_distinct() {
+        let conn = open_in_memory_brain();
+        seed_entry_with_source_ref(&conn, "e1", "evidence-alpha");
+        seed_entry_with_source_ref(&conn, "e2", "evidence-alpha"); // duplicate ref
+        seed_entry_with_source_ref(&conn, "e3", "evidence-beta");
+        seed_entry_with_source_ref(&conn, "e4", "not-evidence-gamma"); // must NOT match
+
+        let mut got = resolve_refs_by_prefix(&conn, "evidence-").unwrap();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["evidence-alpha".to_string(), "evidence-beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_refs_by_prefix_rejects_wildcards() {
+        let conn = open_in_memory_brain();
+        let err = resolve_refs_by_prefix(&conn, "evid%nce");
+        assert!(err.is_err(), "a `%` must be rejected, not treated as a wildcard");
+
+        let err2 = resolve_refs_by_prefix(&conn, "evid_nce");
+        assert!(err2.is_err(), "an `_` must be rejected, not treated as a wildcard");
     }
 }
 
