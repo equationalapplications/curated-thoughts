@@ -1,3 +1,20 @@
+## [2.2.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.1.0...v2.2.0) (2026-09-04)
+
+### Features
+
+* **wiki:** sweep off-manifest edges and surface gate fail-open ([#158](https://github.com/equationalapplications/curated-thoughts/issues/158)) ([a333c7a](https://github.com/equationalapplications/curated-thoughts/commit/a333c7ad2387b5c702e0fca84fb0fc245a3f72ca))
+
+### Bug Fixes
+
+* **commit:** make strict-vocabulary resolver fall back to tier_fact on first miss ([#158](https://github.com/equationalapplications/curated-thoughts/issues/158)) ([b4feb6e](https://github.com/equationalapplications/curated-thoughts/commit/b4feb6e46660ac7ad10c3fed112b49f2a315749b))
+* **db:** compose purge_off_manifest_edges inside a caller transaction ([6df0b88](https://github.com/equationalapplications/curated-thoughts/commit/6df0b889a060cd241251e83b157e0cd67dd3d06c)), closes [#171](https://github.com/equationalapplications/curated-thoughts/issues/171)
+* **librarian:** constrain edge extraction to the declared ontology vocabulary ([#158](https://github.com/equationalapplications/curated-thoughts/issues/158)) ([e2441e6](https://github.com/equationalapplications/curated-thoughts/commit/e2441e6caa4036e909b8ada9ba2c46fe71352d9f))
+* **librarian:** resolve edge vocabulary per synthesis candidate target ([61d5886](https://github.com/equationalapplications/curated-thoughts/commit/61d588699d1fb7d62cd6ff754646184abbe5cb27)), closes [#171](https://github.com/equationalapplications/curated-thoughts/issues/171)
+* **librarian:** resolve ontology manifest via partition fallback in synthesis prompt ([#158](https://github.com/equationalapplications/curated-thoughts/issues/158)) ([5c4e124](https://github.com/equationalapplications/curated-thoughts/commit/5c4e124a7091d2f236d7e95ee0a5a73c483b0b73))
+* **wiki_graph:** gate wiki_context walk per seed entity vocabulary ([926cb04](https://github.com/equationalapplications/curated-thoughts/commit/926cb04917359fb659130c6e165afff0f5b70361)), closes [#171](https://github.com/equationalapplications/curated-thoughts/issues/171)
+* **wiki:** filter off-manifest edges out of strict-ontology traversal ([#158](https://github.com/equationalapplications/curated-thoughts/issues/158)) ([8ea49f7](https://github.com/equationalapplications/curated-thoughts/commit/8ea49f7232ec15c78399117391c4c5b7a355aeb4))
+* **wiki:** wire sweep trigger, gate read paths, and resolve latent ([#158](https://github.com/equationalapplications/curated-thoughts/issues/158)) ([c6c0b0e](https://github.com/equationalapplications/curated-thoughts/commit/c6c0b0e6a3dadc57b43f98a9b098e854dabcaafe)), closes [#171](https://github.com/equationalapplications/curated-thoughts/issues/171)
+
 ## [2.1.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.0.2...v2.1.0) (2026-09-04)
 
 ### Features
