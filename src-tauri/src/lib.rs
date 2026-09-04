@@ -23,6 +23,7 @@ mod pipeline;
 pub mod privacy;
 mod proposals_api;
 pub mod recall_bench_fixture;
+pub mod reconcile;
 pub mod retrieval;
 pub mod scifact_fixture;
 pub mod search;
