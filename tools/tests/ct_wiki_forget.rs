@@ -63,6 +63,13 @@ fn count(sql: &str) -> i64 {
     db.0.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
+/// Open the seeded brain read-only; fetch a single TEXT column.
+fn scalar(sql: &str) -> String {
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    let db = AppDb::open_with_config(&paths.db_path, &paths.config_path).unwrap();
+    db.0.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
 #[test]
 fn forget_by_ref_deletes_entry_edges_and_pushes_outbox() {
     with_forget_brain(|| {
@@ -90,10 +97,25 @@ fn forget_by_ref_deletes_entry_edges_and_pushes_outbox() {
         );
         // `push_entries_outbox` writes one row per doomed entry into
         // `llm_wiki_outbox` with `table_name = 'entries'` and
-        // `operation = 'DELETE'` (PR #132 contract).
-        assert!(
-            count("SELECT COUNT(*) FROM llm_wiki_outbox WHERE table_name = 'entries' AND operation = 'DELETE'") >= 1,
-            "one outbox DELETE row per entry is the PR #132 contract"
+        // `operation = 'DELETE'` (PR #132 contract). This fixture deletes
+        // exactly one entry, so there must be exactly ONE outbox DELETE,
+        // stamped with that entry's record_id — `>= 1` would silently pass
+        // duplicate rows or a DELETE for the wrong record.
+        let outbox_deletes: i64 = count(
+            "SELECT COUNT(*) FROM llm_wiki_outbox
+              WHERE table_name = 'entries' AND operation = 'DELETE'",
+        );
+        assert_eq!(
+            outbox_deletes, 1,
+            "exactly one outbox DELETE row for the single doomed entry"
+        );
+        let deleted_record_id: String = scalar(
+            "SELECT record_id FROM llm_wiki_outbox
+              WHERE table_name = 'entries' AND operation = 'DELETE'",
+        );
+        assert_eq!(
+            deleted_record_id, "wiki-doomed",
+            "the outbox DELETE must carry the doomed entry's record_id"
         );
     });
 }
@@ -147,6 +169,26 @@ fn rejects_wildcard_in_like() {
         assert_eq!(
             count("SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'wiki-doomed'"),
             1
+        );
+    });
+}
+
+#[test]
+fn rejects_empty_like_prefix() {
+    with_forget_brain(|| {
+        // An empty prefix binds LIKE '%' — every non-NULL source_ref. An
+        // incident tool that would hard-delete the whole table off an
+        // empty flag must refuse instead of widening.
+        let out = run_ct(&["wiki", "forget", "--like", "", "--yes"]);
+        assert!(
+            !out.status.success(),
+            "an empty --like prefix must be rejected, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'wiki-doomed'"),
+            1,
+            "nothing may be deleted when --like is empty"
         );
     });
 }

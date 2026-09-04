@@ -665,6 +665,12 @@ pub fn format_event(kind: &str, path: &str, ts_ms: i64) -> String {
 /// cannot silently widen into a substring scan — an incident tool that
 /// deletes more than the operator typed is worse than one that refuses.
 pub fn resolve_refs_by_prefix(conn: &Connection, prefix: &str) -> Result<Vec<String>> {
+    if prefix.is_empty() {
+        anyhow::bail!(
+            "--like must not be empty: an empty prefix matches every non-NULL \
+             source_ref via LIKE '%'. Use repeated --ref for an explicit set."
+        );
+    }
     if prefix.contains('%') || prefix.contains('_') {
         anyhow::bail!(
             "--like must be a literal anchored prefix; `%` and `_` are not allowed \
