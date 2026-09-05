@@ -1,10 +1,12 @@
-# Agent-memory CRUD tools on the main MCP server — design
+# Spec: Agent-memory CRUD tools on the main MCP server
 
-- Date: 2026-09-05
-- Status: Approved for implementation
-- Scope: curated-thoughts `src-tauri` (main `--mcp` server + `tool_dispatch`)
+**Status:** Approved design, not yet implemented.
+**Date:** 2026-09-05
+**Baseline:** `main` @ `2bf1c189` (v2.4.3)
+**Scope:** Curated Thoughts `src-tauri` only (main `--mcp` server +
+`tool_dispatch`). No GUI/CLI behavior changes.
 
-## Problem
+## §1 — Problem
 
 The main binary's MCP server (`/usr/bin/curated-thoughts --mcp`, the one Hermes
 and other agents attach to) exposes only 8 read-mostly vault/wiki tools. The
@@ -14,28 +16,27 @@ rarely have wired up. `curated_add_wisdom` is referenced in its setup
 instructions but was never implemented anywhere. Agents therefore cannot
 persist learned wisdom through the primary MCP surface.
 
-## Goal
-
-Expose a complete memory CRUD surface on the main MCP server:
+## §2 — Tool surface
 
 | Tool | Status | Source |
 |---|---|---|
 | `curated_recall_context` | port | coding server (read: wiki + ast code chunks) |
 | `curated_get_wiki_entry` | port | coding server (read: full entry body) |
 | `curated_search_code` | port | coding server (read: ast code chunks) |
-| `curated_add_wisdom` | new | wraps `db::facts::add_fact_with_profile` |
-| `curated_update_wisdom` | new | wraps `db::facts::update_fact_with_profile` |
+| `curated_add_wisdom` | new | wraps `db::facts::add_fact_with_blob` |
+| `curated_update_wisdom` | new | wraps `db::facts::update_fact_with_blob` |
 | `curated_archive_wisdom` | new | wraps `db::facts::archive_fact` (soft delete) |
 
 Out of scope: `graph_neighbors` (code-graph, separate concern),
 `curated_superpowers_setup` (editor-specific scaffolding).
 
-## Non-goals / invariants
+## §3 — Invariants
 
 - GUI and CLI behavior unchanged; Tauri command surface untouched.
 - All DB writes go through the existing `db::facts` core — same
   `MANUAL_SOURCE_REF` JSON shape (`{"proposal_id":null,"evidence":[]}`),
   `source_type='user_stated'`, ms timestamps, outbox rows, entity touch.
+  NO raw INSERT/UPDATE/DELETE against `llm_wiki_entries` in this work.
 - The readonly connection used by the existing 8 tools stays readonly; writes
   use a separate lazily-opened RW connection.
 - All `#[tool]` handlers remain thin: params struct in `tool_dispatch.rs`,
@@ -44,9 +45,7 @@ Out of scope: `graph_neighbors` (code-graph, separate concern),
 - Embedding calls (blocking network) never run while holding a DB lock —
   `precompute_entry_embedding` exists for exactly this.
 
-## Design
-
-### Read path (ports)
+## §4 — Read path (ports)
 
 The coding server's helpers (`fetch_ranked_chunks`, `rank_wiki_entries`,
 `RECALL_CHUNKS_SQL_BASE`, `RECALL_CHUNKS_AST_FILTER`, row→json mappers) move
@@ -63,7 +62,7 @@ Dispatchers:
 - `dispatch_curated_search_code(ctx, query, limit, symbol?)` →
   `{code_chunks, query, symbol_filter}`
 
-### Write path (new)
+## §5 — Write path (new)
 
 `ToolDispatchContext` gains `db_path: PathBuf` (already known from
 `resolve_brain_paths()` in `mcp_server::async_run`) and a lazy RW connection:
@@ -91,34 +90,31 @@ fn open_rw_if_needed(&self) -> Result<MutexGuard<Connection>> // opens once, cac
 - `dispatch_curated_archive_wisdom(entity_id, fact_id)`: wraps
   `archive_fact`; returns `{archived: true, fact_id}`.
 
-### Identifier collision (`curated_get_wiki_entry`)
+## §6 — Identifier collision (`curated_get_wiki_entry`)
 
 If BOTH `topic` and `entity_id` are supplied, `entity_id` takes precedence and
 `topic` is ignored — matching the PR #137 coding server's existing behavior
 (its `if let Some(entity_id)` branch runs first). This precedence is stated in
 the tool description so agents learn the contract without round-tripping.
 
-### Access logging
+## §7 — Access logging
 
 `log_agent_access` performs an INSERT; the readonly connection cannot service
 it (today's `let _` swallow means read-tool logging is silently a no-op). All
 six curated tools route their access-log write through the lazy RW connection,
-and a failed log write FAILS the tool call — audit logs are never bypassed
-(best-effort is explicitly rejected). Existing non-curated tools are
-unchanged in this PR; their silent-log-failure is a known issue to fix
-separately.
+`client` = `"local-mcp"` (existing ctx), and a failed log write FAILS the tool
+call — audit logs are never bypassed (best-effort is explicitly rejected).
+Existing non-curated tools are unchanged in this PR; their silent-log-failure
+is a known issue to fix separately.
 
-### MCP registration
+## §8 — MCP registration
 
 Six `#[tool]` handlers in `mcp_server.rs`, same error mapping as existing
 (`retrieval::mcp_error_hint`). Descriptions follow the coding server's text,
-plus explicit "writes to the live brain" wording on the three mutators.
+plus explicit "writes to the live brain" wording on the three mutators, plus
+the §6 precedence note on `curated_get_wiki_entry`.
 
-### Access logging
-
-`log_agent_access` rows for each call, `client` = "local-mcp" (existing ctx).
-
-## Testing
+## §9 — Testing
 
 - **Test DB isolation (required):** tool_dispatch unit tests that exercise
   BOTH the RO and RW connections must NOT use bare `Connection::open_in_memory()`
@@ -144,7 +140,7 @@ plus explicit "writes to the live brain" wording on the three mutators.
   audit-log writes are never silently skipped.
 - Guards: existing readonly tools unchanged (their tests keep passing).
 
-## Risks
+## §10 — Risks
 
 - Write access from any MCP client raises the stakes on the brain file —
   mitigated by reusing the audited `db::facts` writers (outbox, ms, source_ref
@@ -152,7 +148,7 @@ plus explicit "writes to the live brain" wording on the three mutators.
 - Local GUI running concurrently: SQLite busy-timeout handles brief lock
   contention; the GUI already tolerates external writers (outbox pattern).
 
-## Docs
+## §11 — Docs
 
-This spec + the plan ride the PR (docs-ride-their-PRs rule). The MCP product
-page section "Tools (vault/wiki graph set)" gains the curated_* list.
+The MCP product page section "Tools (vault/wiki graph set)" gains the
+curated_* list after implementation merges.
