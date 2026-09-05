@@ -6,7 +6,7 @@
 the T420 (CT sidecar already registered).
 **Scope:** How Equational Applications' AI agents connect to, read from, and
 (one PR later) write to Curated Thoughts as their shared memory layer.
-Companion to `specs/curated-thoughts-mcp-coding-spec.md` (the coding-agent
+Companion to `docs/superpowers/specs/curated-thoughts-mcp-coding-spec.md` (the coding-agent
 server spec) — that spec covers Aider/VS Code Copilot; this one covers the
 Hermes-resident agents (Tessera, subagents, cron jobs).
 
@@ -101,6 +101,6 @@ are specified in
 
 After implementation merges: the CT product page's MCP section gains a line
 pointing at this spec as the agent-client contract, and
-`specs/curated-thoughts-mcp-coding-spec.md` gets a cross-reference so the two
+`docs/superpowers/specs/curated-thoughts-mcp-coding-spec.md` gets a cross-reference so the two
 specs explicitly split the client population (Hermes agents vs coding
 agents).

@@ -180,7 +180,7 @@ name to differ from the Cargo package name.)
 Configuration lives in `~/.brain` (override with the `CURATED_BRAIN_DIR` env var).
 The server speaks stdio only — tracing goes to stderr, protocol traffic on stdout.
 
-Tool inventory and client examples: see `specs/curated-thoughts-mcp-coding-spec.md`.
+Tool inventory and client examples: see `docs/superpowers/specs/curated-thoughts-mcp-coding-spec.md`.
 
 Known limitation (Windows): agent-spawned sidecars may briefly flash a console window
 unless the client passes `CREATE_NO_WINDOW`. Standard for MCP servers on Windows.
