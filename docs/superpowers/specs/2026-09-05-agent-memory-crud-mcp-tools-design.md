@@ -41,7 +41,8 @@ Out of scope: `graph_neighbors` (code-graph, separate concern),
   use a separate lazily-opened RW connection.
 - All `#[tool]` handlers remain thin: params struct in `tool_dispatch.rs`,
   dispatch fn in `tool_dispatch.rs`, `#[tool]` wrapper in `mcp_server.rs`
-  (3-location pattern, see skill reference mcp-write-patterns).
+  (3-location pattern — the in-repo precedent is the existing
+  `vault_write_note` wiring across `tool_dispatch.rs` + `mcp_server.rs`).
 - Embedding calls (blocking network) never run while holding a DB lock —
   `precompute_entry_embedding` exists for exactly this.
 
@@ -85,8 +86,11 @@ fn open_rw_if_needed(&self) -> Result<MutexGuard<Connection>> // opens once, cac
 - `dispatch_curated_update_wisdom(entity_id, fact_id, body, profile)`: same
   shape via `facts::update_fact_with_blob(conn, entity_id, fact_id, body, blob)`.
   NOTE: `update_fact_with_blob` returns `Result<()>` — after the update
-  transaction commits, RELOAD the fact (read path by entity_id + fact_id) and
-  return its JSON; never fabricate the response from the request.
+  transaction commits, RELOAD the fact (SELECT by entity_id + fact_id; reuse
+  the coding server's per-entry query shape) and return its JSON; never
+  fabricate the response from the request. Signature note: `facts::*` writers
+  take `&mut Connection`; call sites hold the lazy RW `MutexGuard` and pass
+  `&mut *guard`.
 - `dispatch_curated_archive_wisdom(entity_id, fact_id)`: wraps
   `archive_fact`; returns `{archived: true, fact_id}`.
 
@@ -104,8 +108,19 @@ it (today's `let _` swallow means read-tool logging is silently a no-op). All
 six curated tools route their access-log write through the lazy RW connection,
 `client` = `"local-mcp"` (existing ctx), and a failed log write FAILS the tool
 call — audit logs are never bypassed (best-effort is explicitly rejected).
-Existing non-curated tools are unchanged in this PR; their silent-log-failure
-is a known issue to fix separately.
+
+**SUPERSEDES existing policy — implementers must update the callers, not just
+add new code.** `tool_dispatch.rs` currently documents the OPPOSITE rule in
+two places: `log_agent_access`'s doc comment ("Best-effort audit log … A
+failed log write must never fail the tool call", ~line 435) and the
+`dispatch_tool_call` log block ("best-effort, never fail the tool call",
+~line 578). Both comments AND the shared `log_agent_access` helper must be
+rewritten in this PR so the code no longer contradicts this spec; the shared
+helper becomes fail-closed for the curated tools (its INSERT result is
+checked, not `let _`-swallowed). The existing 8 non-curated tools keep their
+current behavior unchanged in this PR; migrating them to fail-closed logging
+is a separate, explicitly-scoped follow-up so this PR stays
+backward-compatible for existing clients.
 
 ## §8 — MCP registration
 
