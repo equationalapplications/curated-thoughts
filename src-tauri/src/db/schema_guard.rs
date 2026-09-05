@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// Pinned `package.json` dependency — keep in sync with `@equationalapplications/core-llm-wiki`.
-pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "5.5.1";
+pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.1.0";
 
 struct TableExpectation {
     name: &'static str,
@@ -43,6 +43,9 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "okf_sources",
             "okf_verified",
             "okf_usage_window",
+            "embedding_failed_at",
+            "embedding_failure_kind",
+            "embedding_attempts",
             "tier",
         ],
     },
@@ -253,6 +256,31 @@ mod tests {
         assert!(
             err.contains("missing columns"),
             "expected missing-column detail, got: {err}"
+        );
+    }
+
+    /// A database created before core-llm-wiki gained the embedding-failure
+    /// marker columns (package 6.5.0) must be REJECTED by the guard, not
+    /// silently accepted — the guard compares full column sets, so absence
+    /// fails the same way as any other missing column.
+    #[test]
+    fn verify_fails_when_package_embedding_failure_columns_are_missing() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failed_at;
+             ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failure_kind;
+             ALTER TABLE llm_wiki_entries DROP COLUMN embedding_attempts;",
+        )
+        .unwrap();
+
+        let err = verify_llm_wiki_schema(&conn).unwrap_err().to_string();
+        assert!(
+            err.contains("missing columns"),
+            "expected missing-column detail, got: {err}"
+        );
+        assert!(
+            err.contains("embedding_failed_at"),
+            "expected the missing package column to be named, got: {err}"
         );
     }
 }
