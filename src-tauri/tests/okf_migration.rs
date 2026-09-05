@@ -213,5 +213,11 @@ fn test_app_open_runs_v7_schema() {
     //
     // Bumped from 15 to 16 by MIGRATION_V16, which adds `llm_wiki_entries.tier`
     // with a CHECK restricting values to fact/wisdom/NULL (spec §3.1).
-    assert_eq!(max_version, 16);
+    //
+    // Bumped from 16 to 17 by the V17 gate, which adds the core-llm-wiki@7.x
+    // embedding-failure marker columns (`embedding_failed_at`,
+    // `embedding_failure_kind`, `embedding_attempts`) before the startup
+    // schema guard runs — the JS package migration otherwise only runs after
+    // the frontend boots, too late for the guard.
+    assert_eq!(max_version, 17);
 }
