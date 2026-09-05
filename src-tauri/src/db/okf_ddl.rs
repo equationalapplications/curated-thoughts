@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS llm_wiki_entries (
   last_verified_by TEXT,
   okf_sources TEXT,
   okf_verified TEXT,
-  okf_usage_window TEXT
+  okf_usage_window TEXT,
+  embedding_failed_at INTEGER,
+  embedding_failure_kind TEXT,
+  embedding_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_entity_idx ON llm_wiki_entries(entity_id);
