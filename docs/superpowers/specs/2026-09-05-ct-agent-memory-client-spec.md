@@ -29,7 +29,7 @@ the write-path rules that PR #184's implementation will enable.
 
 | Server | Binary | Tools | Intended client |
 |---|---|---|---|
-| Main vault/wiki server | `/usr/bin/curated-thoughts --mcp` | 8 (`vault_*`, `wiki_*`) + the six `curated_*` after PR #184 implements | Hermes-resident agents (Tessera, subagents, cron) |
+| Main vault/wiki server | `/usr/bin/curated-thoughts-mcp --mcp` (normative command; `/usr/bin/curated-thoughts --mcp` is an equivalent packaged entry point with the same tool surface — separate shipped binaries, same server) | 8 (`vault_*`, `wiki_*`) + the six `curated_*` after PR #184 implements | Hermes-resident agents (Tessera, subagents, cron) |
 | Coding-focused server | `curated-thoughts-mcp` (tools crate) | 6 `curated_*`/`vault_*` + `graph_neighbors`, `curated_superpowers_setup` | External coding agents (Aider, VS Code Copilot) |
 
 Rule: Hermes agents use the **main server** (already configured under
@@ -91,8 +91,17 @@ are specified in
 
 ## §5 — Testing / verification
 
-- Sidecar health: an initialize + `tools/list` handshake over stdio returns
-  the §3 tool list (this is how the v2.4.3 install was verified).
+- **Sidecar health (baseline, v2.4.3 — the currently deployed install):** an
+  initialize + `tools/list` handshake over stdio returns the **existing 8
+  tools** (`vault_related_chunks`, `vault_semantic_search`,
+  `vault_upsert_index_entry`, `vault_write_note`, `wiki_context`,
+  `wiki_get_ontology`, `wiki_search`, `wiki_traverse_graph`). This is how the
+  v2.4.3 install was verified. The baseline CANNOT verify the six `curated_*`
+  tools — they do not exist on v2.4.3.
+- **Post-implementation check (after PR #184 ships):** the same handshake must
+  return all **14 tools** — the 8 baseline tools plus the six `curated_*`.
+  Until that lands, a 14-tool expectation is a spec-preview, not a health
+  check; do not fail deployment on it.
 - `curated_*` calls succeed against the live brain only when the brain DB is
   readable; integration coverage is defined in the CRUD spec §9 and shared
   here by reference.
