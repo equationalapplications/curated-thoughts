@@ -23,17 +23,29 @@ persist learned wisdom through the primary MCP surface.
 | `curated_recall_context` | port | coding server (read: wiki + ast code chunks) |
 | `curated_get_wiki_entry` | port | coding server (read: full entry body) |
 | `curated_search_code` | port | coding server (read: ast code chunks) |
-| `curated_add_wisdom` | new | wraps `db::facts::add_fact_with_blob` |
-| `curated_update_wisdom` | new | wraps `db::facts::update_fact_with_blob` |
-| `curated_archive_wisdom` | new | wraps `db::facts::archive_fact` (soft delete) |
+| `curated_add_wisdom` | new | wraps `db::wisdom::add_wisdom_with_blob` |
+| `curated_update_wisdom` | new | wraps `db::wisdom::update_wisdom_with_blob` |
+| `curated_archive_wisdom` | new | wraps `db::wisdom::archive_wisdom` (soft delete) |
 
 Out of scope: `graph_neighbors` (code-graph, separate concern),
 `curated_superpowers_setup` (editor-specific scaffolding).
 
 ## §3 — Invariants
 
+**Terminology alignment (domain architecture):** in EA's domain, **Facts**
+are immutable reference files (the vault documents tier) while **Wisdom** is
+the mutable, LLM-curated graph (the `llm_wiki_entries` layer). The existing
+backend module `db::facts` writes exclusively to that wisdom layer, so its
+name has been a misnomer; the implementation PR RENAMES `db::facts` →
+`db::wisdom` and its functions accordingly (`add_fact_with_blob` →
+`add_wisdom_with_blob`, `update_fact_with_blob` → `update_wisdom_with_blob`,
+`archive_fact` → `archive_wisdom`, `EntityFact` → `EntityWisdom`), with the
+spec's references already using the new nomenclature. This is a mechanical
+rename of module/function identifiers only — table names (`llm_wiki_entries`),
+column names, and the outbox format are unchanged.
+
 - GUI and CLI behavior unchanged; Tauri command surface untouched.
-- All DB writes go through the existing `db::facts` core — same
+- All DB writes go through the existing `db::wisdom` core (renamed from `db::facts` in the implementation PR) — same
   `MANUAL_SOURCE_REF` JSON shape (`{"proposal_id":null,"evidence":[]}`),
   `source_type='user_stated'`, ms timestamps, outbox rows, entity touch.
   NO raw INSERT/UPDATE/DELETE against `llm_wiki_entries` in this work.
@@ -78,21 +90,21 @@ fn open_rw_if_needed(&self) -> Result<MutexGuard<Connection>> // opens once, cac
   the tool returns a clear error (never creates a brain).
 - `dispatch_curated_add_wisdom(entity_id, body, profile)`:
   1. `precompute_entry_embedding(Some(profile), body)` OUTSIDE the lock
-  2. lock RW conn → `facts::add_fact_with_blob(conn, entity_id, body, blob)`
+  2. lock RW conn → `wisdom::add_wisdom_with_blob(conn, entity_id, body, blob)`
      (the `_with_blob` variants are the API — the caller precomputes the
      blob; `*_with_profile` wrappers are for callers holding a profile ref)
-  3. return the new fact JSON (`id`, `entity_id`, `title`, `body`)
+  3. return the new wisdom-entry JSON (`id`, `entity_id`, `title`, `body`)
   - Errors if entity not found/archived (core already bails with a clear msg).
-- `dispatch_curated_update_wisdom(entity_id, fact_id, body, profile)`: same
-  shape via `facts::update_fact_with_blob(conn, entity_id, fact_id, body, blob)`.
-  NOTE: `update_fact_with_blob` returns `Result<()>` — after the update
-  transaction commits, RELOAD the fact (SELECT by entity_id + fact_id; reuse
+- `dispatch_curated_update_wisdom(entity_id, wisdom_id, body, profile)`: same
+  shape via `wisdom::update_wisdom_with_blob(conn, entity_id, wisdom_id, body, blob)`.
+  NOTE: `update_wisdom_with_blob` returns `Result<()>` — after the update
+  transaction commits, RELOAD the wisdom entry (SELECT by entity_id + wisdom_id; reuse
   the coding server's per-entry query shape) and return its JSON; never
-  fabricate the response from the request. Signature note: `facts::*` writers
+  fabricate the response from the request. Signature note: `wisdom::*` writers
   take `&mut Connection`; call sites hold the lazy RW `MutexGuard` and pass
   `&mut *guard`.
-- `dispatch_curated_archive_wisdom(entity_id, fact_id)`: wraps
-  `archive_fact`; returns `{archived: true, fact_id}`.
+- `dispatch_curated_archive_wisdom(entity_id, wisdom_id)`: wraps
+  `archive_wisdom`; returns `{archived: true, wisdom_id}`.
 
 ## §6 — Identifier collision (`curated_get_wiki_entry`)
 
@@ -143,7 +155,7 @@ the §6 precedence note on `curated_get_wiki_entry`.
   Read-only helpers may keep `open_in_memory()` when only one connection is involved.
 - Unit (`tool_dispatch` module): recall/get/search against a seeded shared or
   file-backed DB with wiki entries + ast chunks (port the coding server's
-  fixtures); add/update/archive happy path + entity-missing + fact-missing errors.
+  fixtures); add/update/archive happy path + entity-missing + wisdom-entry-missing errors.
 - Integration (`src-tauri/tests/mcp_integration.rs`, feature-gated as today):
   assert `tools/list` now includes the six `curated_*` names; then seed an
   ACTIVE entity in the temp brain, capture its `entity_id`, and pass it to
@@ -158,7 +170,7 @@ the §6 precedence note on `curated_get_wiki_entry`.
 ## §10 — Risks
 
 - Write access from any MCP client raises the stakes on the brain file —
-  mitigated by reusing the audited `db::facts` writers (outbox, ms, source_ref
+  mitigated by reusing the audited `db::wisdom` writers (outbox, ms, source_ref
   contract) rather than raw SQL.
 - Local GUI running concurrently: SQLite busy-timeout handles brief lock
   contention; the GUI already tolerates external writers (outbox pattern).
