@@ -78,13 +78,35 @@ fn open_rw_if_needed(&self) -> Result<MutexGuard<Connection>> // opens once, cac
   the tool returns a clear error (never creates a brain).
 - `dispatch_curated_add_wisdom(entity_id, body, profile)`:
   1. `precompute_entry_embedding(Some(profile), body)` OUTSIDE the lock
-  2. lock RW conn → `add_fact_with_profile(conn, entity_id, body, blob)`
+  2. lock RW conn → `facts::add_fact_with_blob(conn, entity_id, body, blob)`
+     (the `_with_blob` variants are the API — the caller precomputes the
+     blob; `*_with_profile` wrappers are for callers holding a profile ref)
   3. return the new fact JSON (`id`, `entity_id`, `title`, `body`)
   - Errors if entity not found/archived (core already bails with a clear msg).
 - `dispatch_curated_update_wisdom(entity_id, fact_id, body, profile)`: same
-  shape via `update_fact_with_profile`; returns updated fact.
+  shape via `facts::update_fact_with_blob(conn, entity_id, fact_id, body, blob)`.
+  NOTE: `update_fact_with_blob` returns `Result<()>` — after the update
+  transaction commits, RELOAD the fact (read path by entity_id + fact_id) and
+  return its JSON; never fabricate the response from the request.
 - `dispatch_curated_archive_wisdom(entity_id, fact_id)`: wraps
   `archive_fact`; returns `{archived: true, fact_id}`.
+
+### Identifier collision (`curated_get_wiki_entry`)
+
+If BOTH `topic` and `entity_id` are supplied, `entity_id` takes precedence and
+`topic` is ignored — matching the PR #137 coding server's existing behavior
+(its `if let Some(entity_id)` branch runs first). This precedence is stated in
+the tool description so agents learn the contract without round-tripping.
+
+### Access logging
+
+`log_agent_access` performs an INSERT; the readonly connection cannot service
+it (today's `let _` swallow means read-tool logging is silently a no-op). All
+six curated tools route their access-log write through the lazy RW connection,
+and a failed log write FAILS the tool call — audit logs are never bypassed
+(best-effort is explicitly rejected). Existing non-curated tools are
+unchanged in this PR; their silent-log-failure is a known issue to fix
+separately.
 
 ### MCP registration
 
@@ -98,12 +120,28 @@ plus explicit "writes to the live brain" wording on the three mutators.
 
 ## Testing
 
-- Unit (`tool_dispatch` module): recall/get/search against an in-memory DB
-  seeded with wiki entries + ast chunks (port the coding server's fixtures);
-  add/update/archive happy path + entity-missing + fact-missing errors.
+- **Test DB isolation (required):** tool_dispatch unit tests that exercise
+  BOTH the RO and RW connections must NOT use bare `Connection::open_in_memory()`
+  (each in-memory DB is private to its single connection — the RW connection
+  would see an empty database). Two accepted patterns:
+  1. shared-cache URI opened by both connections:
+     `Connection::open("file::memory:?cache=shared")` with
+     `sqlite_open_flags(SQLITE_OPEN_URI | SQLITE_OPEN_READ_WRITE)`; or
+  2. a `TempDir`-backed file DB (preferred for write-path tests — also
+     exercises the real RW-open-and-cache path).
+  Read-only helpers may keep `open_in_memory()` when only one connection is involved.
+- Unit (`tool_dispatch` module): recall/get/search against a seeded shared or
+  file-backed DB with wiki entries + ast chunks (port the coding server's
+  fixtures); add/update/archive happy path + entity-missing + fact-missing errors.
 - Integration (`src-tauri/tests/mcp_integration.rs`, feature-gated as today):
-  assert `tools/list` now includes the six `curated_*` names; call
-  `curated_add_wisdom` + `curated_get_wiki_entry` round-trip on a temp brain.
+  assert `tools/list` now includes the six `curated_*` names; then seed an
+  ACTIVE entity in the temp brain, capture its `entity_id`, and pass it to
+  `curated_add_wisdom` (the core bails on non-existent/archived entities —
+  never call write tools without a seeded active entity), followed by a
+  `curated_get_wiki_entry` round-trip.
+- Log-failure test: force `curated_agent_log` to be unwritable (e.g. drop the
+  table on the test DB) and assert the curated tool call FAILS, proving
+  audit-log writes are never silently skipped.
 - Guards: existing readonly tools unchanged (their tests keep passing).
 
 ## Risks
