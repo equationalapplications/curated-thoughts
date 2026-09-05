@@ -119,6 +119,41 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     if version < 16 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V16))?;
     }
+    if version < 17 {
+        // core-llm-wiki@7.1.0 schema (columns added in package 6.5.0): the
+        // startup schema guard below demands the full 7.1.0 column set, but
+        // the JS package migration that adds these columns only runs once
+        // the frontend boots — after this guard. Upgrade databases here
+        // instead, mirroring the package's own PRAGMA-guarded migration v11
+        // verbatim. Column names and declared types are hardcoded literals,
+        // so the interpolation is safe; `add_column_if_missing` cannot be
+        // reused because its identifier check rejects the multi-word
+        // `NOT NULL DEFAULT 0` declaration the package DDL requires.
+        let existing: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(llm_wiki_entries)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.filter_map(Result::ok).collect()
+        };
+        const V17_EMBEDDING_FAILURE_COLUMNS: &[(&str, &str)] = &[
+            ("embedding_failed_at", "INTEGER"),
+            ("embedding_failure_kind", "TEXT"),
+            ("embedding_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ];
+        for (column, declared_type) in V17_EMBEDDING_FAILURE_COLUMNS {
+            if !existing.iter().any(|c| c == column) {
+                conn.execute(
+                    &format!(
+                        "ALTER TABLE llm_wiki_entries ADD COLUMN {column} {declared_type}"
+                    ),
+                    [],
+                )?;
+            }
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (17)",
+            [],
+        )?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -279,7 +314,78 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 16);
+        assert_eq!(max_version, 17);
+    }
+
+    /// Upgraded-DB path for the core-llm-wiki@7.1.0 bump: a database created
+    /// before the package gained the embedding-failure marker columns must
+    /// open successfully. The Rust schema guard rejects the old shape, and
+    /// the JS package migration that adds the columns only runs after the
+    /// frontend boots — so the V17 gate has to add them first.
+    #[test]
+    fn migration_v17_adds_package_embedding_failure_columns() {
+        let conn = open_in_memory().unwrap();
+
+        // Rewind to the pre-7.1 shape: drop the three package columns and
+        // remove the V17 stamp so the production gate re-runs. A pre-existing
+        // row proves the added columns backfill their DDL defaults.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('e1', 'ent1', 't', 'b', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failed_at;
+             ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failure_kind;
+             ALTER TABLE llm_wiki_entries DROP COLUMN embedding_attempts;
+             DELETE FROM schema_version WHERE version = 17;",
+        )
+        .unwrap();
+
+        // Precondition: the guard alone would reject this shape.
+        let guard_err = crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect_err("guard must reject a pre-7.1 entries table");
+        assert!(guard_err.to_string().contains("missing columns"));
+
+        migrate(&conn, None).expect("migrate must upgrade a pre-7.1 database");
+
+        let post_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(llm_wiki_entries)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for column in ["embedding_failed_at", "embedding_failure_kind", "embedding_attempts"] {
+            assert!(
+                post_columns.iter().any(|c| c == column),
+                "{column} must exist after migrate()"
+            );
+        }
+
+        // The default backfill matches the package DDL: existing rows read 0,
+        // not NULL.
+        let attempts: Option<i64> = conn
+            .query_row(
+                "SELECT embedding_attempts FROM llm_wiki_entries WHERE id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, Some(0));
+
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("guard must accept the upgraded database");
+
+        let post_version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(post_version >= 17, "schema_version must reach >= 17");
     }
 
     /// V15 widens the `documents.status` CHECK so the deferred-reindex

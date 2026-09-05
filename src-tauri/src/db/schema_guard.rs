@@ -258,4 +258,29 @@ mod tests {
             "expected missing-column detail, got: {err}"
         );
     }
+
+    /// A database created before core-llm-wiki gained the embedding-failure
+    /// marker columns (package 6.5.0) must be REJECTED by the guard, not
+    /// silently accepted — the guard compares full column sets, so absence
+    /// fails the same way as any other missing column.
+    #[test]
+    fn verify_fails_when_package_embedding_failure_columns_are_missing() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failed_at;
+             ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failure_kind;
+             ALTER TABLE llm_wiki_entries DROP COLUMN embedding_attempts;",
+        )
+        .unwrap();
+
+        let err = verify_llm_wiki_schema(&conn).unwrap_err().to_string();
+        assert!(
+            err.contains("missing columns"),
+            "expected missing-column detail, got: {err}"
+        );
+        assert!(
+            err.contains("embedding_failed_at"),
+            "expected the missing package column to be named, got: {err}"
+        );
+    }
 }
