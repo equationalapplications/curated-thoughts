@@ -11,7 +11,7 @@
 use tauri_app_lib::db::connection::open_app_db;
 
 #[test]
-#[ignore = "requires node + installed core-llm-wiki"]
+#[ignore = "requires node >= 22.5 (built-in sqlite) + installed core-llm-wiki"]
 fn installed_engine_setup_does_not_rewrite_ct_source_refs() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("brain.db");

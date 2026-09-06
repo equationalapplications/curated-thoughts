@@ -12,12 +12,18 @@ const dbPath = process.argv[2];
 if (!dbPath) throw new Error('usage: engine-setup-probe.mjs <brain.db>');
 
 // pnpm ls is the reliable version read: the package's exports map does not
-// expose ./package.json, so `require(...package.json)` throws.
-const listed = JSON.parse(
-  execSync('pnpm ls --json @equationalapplications/core-llm-wiki', { encoding: 'utf8' }),
-);
-const version =
-  listed[0]?.dependencies?.['@equationalapplications/core-llm-wiki']?.version ?? 'unknown';
+// expose ./package.json, so `require(...package.json)` throws. pnpm is
+// optional, though — without it the probe degrades to version 'unknown' and
+// setup() still runs.
+let version = 'unknown';
+try {
+  const listed = JSON.parse(
+    execSync('pnpm ls --json @equationalapplications/core-llm-wiki', { encoding: 'utf8' }),
+  );
+  version = listed[0]?.dependencies?.['@equationalapplications/core-llm-wiki']?.version ?? version;
+} catch (err) {
+  console.error(`[probe] pnpm version read failed (${err.message?.split('\n')[0]}); reporting 'unknown'`);
+}
 
 const { createWiki } = await import('@equationalapplications/core-llm-wiki');
 
