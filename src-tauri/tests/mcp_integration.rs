@@ -451,7 +451,6 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
 // ============================================================================
 
 fn seed_curated_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
-    seed_fixture(conn)?;
     // The write path bails unless the target entity exists and is live
     // (curated_entities.deleted_at IS NULL) — seed one ACTIVE entity.
     conn.execute(
@@ -459,7 +458,13 @@ fn seed_curated_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
          VALUES ('ent_curated', 'curated-fixture', 'concept', 'integration fixture', 1000, 1000)",
         [],
     )?;
-    // One ast_* chunk so curated_search_code has a code hit to rank.
+    // One ast_* chunk so curated_search_code has a code hit to rank. The
+    // vector is seeded as a raw 8-dim blob (NOT via embed_one): building a
+    // reqwest::blocking client inside this #[tokio::test] panics when the
+    // Local profile is live, and the child server pins
+    // CURATED_EMBED_STUB=constant8 itself, so nothing here needs the
+    // ambient embed environment to be stubbed.
+    let doc_id = upsert_document(conn, "/fixtures/curated_code.rs", "h_curated")?;
     let chunk = Chunk {
         text: "curated fixture rust symbol body for search".into(),
         start_line: 1,
@@ -468,10 +473,10 @@ fn seed_curated_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         defined_symbol: Some("curated_sym".into()),
         strategy: ChunkStrategyTag::AstSymbolRust,
     };
-    let cid = insert_chunk(conn, 1, &chunk, 0, "ent_curated", "")?;
-    let profile = EmbedProfile::default();
-    let v = embed_one(&profile, chunk.text.clone())?;
+    let cid = insert_chunk(conn, doc_id, &chunk, 0, "ent_curated", "")?;
+    let v = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     insert_embedding(conn, cid, &v)?;
+    mark_document_indexed(conn, doc_id)?;
     Ok(())
 }
 
