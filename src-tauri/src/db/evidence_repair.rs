@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
+use std::path::Path;
 
 /// GLOB matching the normative token shape `^librarian-[0-9a-f]{32}$`
 /// (spec §2.2). SQLite GLOB has no repetition operator, so the 32 hex
@@ -309,6 +310,84 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
     Ok(report)
 }
 
+/// A supported export is **brain-complete**: entries, evidence, chunks and
+/// proposals together. A partial export (entries without chunks) would make
+/// legitimately-anchored facts look like orphans and the deletion path would
+/// destroy good data.
+///
+/// Non-emptiness is required only for `chunks` and `documents`. Embedding
+/// tables are legitimately empty on any brain whose embed sweep has not run —
+/// requiring them would false-positive on healthy databases and block repair
+/// forever in the fail-safe direction. Spec §2.5.4.
+pub fn brain_is_complete(conn: &Connection) -> Result<bool> {
+    for table in [
+        "chunks",
+        "documents",
+        "curated_proposals",
+        "curated_proposal_items",
+    ] {
+        let present: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if present.is_none() {
+            return Ok(false);
+        }
+    }
+    let has_chunk_refs = count(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM llm_wiki_entries
+              WHERE source_type = 'librarian_inferred'
+                AND source_ref IS NOT NULL
+                AND source_ref NOT GLOB '{TOKEN_GLOB}'
+                AND source_ref LIKE '%chunk_id%'"
+        ),
+    )? > 0;
+    if !has_chunk_refs {
+        return Ok(true);
+    }
+    Ok(count(conn, "SELECT COUNT(*) FROM chunks")? > 0
+        && count(conn, "SELECT COUNT(*) FROM documents")? > 0)
+}
+
+/// Back up every damaged row to `<out_dir>/<entry_id>.json` before any
+/// mutation. Spec §2.5.2.
+pub fn export_damaged_rows(conn: &Connection, out_dir: &Path) -> Result<usize> {
+    std::fs::create_dir_all(out_dir)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, entity_id, title, body, source_ref, created_at
+           FROM llm_wiki_entries
+          WHERE source_type = 'librarian_inferred'
+            AND source_ref IS NOT NULL
+            AND source_ref NOT GLOB '{TOKEN_GLOB}'"
+    ))?;
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "entity_id": r.get::<_, String>(1)?,
+                "title": r.get::<_, String>(2)?,
+                "body": r.get::<_, String>(3)?,
+                "source_ref": r.get::<_, String>(4)?,
+                "created_at": r.get::<_, i64>(5)?,
+            }))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+    for row in &rows {
+        let id = row["id"].as_str().unwrap_or("unknown");
+        std::fs::write(
+            out_dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(row)?,
+        )?;
+    }
+    Ok(rows.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +583,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn brain_complete_requires_chunks_and_documents_but_not_embeddings() {
+        let conn = open_in_memory().unwrap();
+        // Empty chunks/documents on a DB with chunk-derived refs => incomplete.
+        seed_entry(
+            &conn,
+            "fact_bc",
+            "librarian_inferred",
+            Some("evidencechunk_id1content_hashaa"),
+        );
+        assert!(!brain_is_complete(&conn).unwrap());
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('d.md','h','user_doc','indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+                 entity_id, content_hash)
+             VALUES (?1,'c',0,1,1,'prose','ent','aa')",
+            [doc_id],
+        )
+        .unwrap();
+
+        // Embeddings stay empty — legitimately so on any brain whose embed
+        // sweep has not run. Requiring them would false-positive. Spec §2.5.4.
+        assert!(brain_is_complete(&conn).unwrap());
+    }
+
+    #[test]
+    fn export_writes_a_file_per_damaged_row_before_mutation() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_e",
+            "librarian_inferred",
+            Some("evidencechunk_id1content_hashaa"),
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let n = export_damaged_rows(&conn, dir.path()).unwrap();
+        assert_eq!(n, 1);
+        let written = std::fs::read_to_string(dir.path().join("fact_e.json")).unwrap();
+        assert!(written.contains("evidencechunk_id1content_hashaa"));
     }
 
     #[test]

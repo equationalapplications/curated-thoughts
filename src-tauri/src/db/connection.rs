@@ -31,7 +31,7 @@ fn canonicalize_workspace_root(path: &str) -> String {
         .unwrap_or_else(|_| normalize_workspace_root(path))
 }
 
-fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
+fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(&format!(
         "BEGIN;\n{}\n{}\n{}\nCOMMIT;",
@@ -154,6 +154,55 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
     }
     if version < 18 {
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V18))?;
+
+        // One-shot repair of the rows the engine already mangled (#186).
+        // Backup-before-mutate; deletion of unresolvable rows is gated on the
+        // brain-complete assertion so a partial import can never be mistaken
+        // for a brain full of orphans. Spec §2.5.
+        if crate::db::evidence_repair::brain_is_complete(conn)? {
+            match db_dir {
+                Some(dir) => {
+                    let export_dir = dir.join("repair-export-186");
+                    let exported =
+                        crate::db::evidence_repair::export_damaged_rows(conn, &export_dir)?;
+                    let report = crate::db::evidence_repair::run_evidence_repair(
+                        conn,
+                        crate::db::commit::ms_now(),
+                    )?;
+                    eprintln!(
+                        "[ct::repair] #186 V18 repair: exported={exported} outbox={} valid_json={} \
+                         proposal_id={} content_hash={} deleted={} ambiguous={}",
+                        report.from_outbox,
+                        report.from_valid_json,
+                        report.from_proposal_id,
+                        report.from_content_hash,
+                        report.deleted,
+                        report.ambiguous
+                    );
+                }
+                None => {
+                    // In-memory / pathless database (tests, ephemeral opens):
+                    // there is no brain directory to back up into, so skip the
+                    // export but still run the repair — failing the migration
+                    // here would defeat the whole one-shot.
+                    eprintln!(
+                        "[ct::repair WARN] #186 V18 repair: no database path available; \
+                         skipping backup export and running repair unbacked"
+                    );
+                    let report = crate::db::evidence_repair::run_evidence_repair(
+                        conn,
+                        crate::db::commit::ms_now(),
+                    )?;
+                    eprintln!("[ct::repair] #186 V18 repair (unbacked): {report:?}");
+                }
+            }
+        } else {
+            eprintln!(
+                "[ct::repair WARN] #186 V18 repair SKIPPED: database is not brain-complete \
+                 (missing or empty chunks/documents while chunk-derived refs exist). \
+                 Repair will run on the next open once the import is complete."
+            );
+        }
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
@@ -275,7 +324,7 @@ impl AppDb {
                 let root_str = root.to_string_lossy().to_string();
                 canonicalize_workspace_root(&root_str)
             });
-        migrate(&conn, vault_root.clone())?;
+        migrate(&conn, vault_root.clone(), path.parent())?;
         if let Some(root) = vault_root.as_deref() {
             let vault_path = std::path::Path::new(root);
             if vault_path.is_dir() {
@@ -288,7 +337,7 @@ impl AppDb {
 
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
-    migrate(&conn, None)?;
+    migrate(&conn, None, None)?;
     Ok(conn)
 }
 
@@ -301,7 +350,7 @@ pub fn open_in_memory() -> Result<Connection> {
 pub fn open_app_db(path: &Path, _config: Option<&Path>) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
-    migrate(&conn, None)?;
+    migrate(&conn, None, path.parent())?;
     Ok(conn)
 }
 
@@ -351,7 +400,7 @@ mod tests {
             .expect_err("guard must reject a pre-7.1 entries table");
         assert!(guard_err.to_string().contains("missing columns"));
 
-        migrate(&conn, None).expect("migrate must upgrade a pre-7.1 database");
+        migrate(&conn, None, None).expect("migrate must upgrade a pre-7.1 database");
 
         let post_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(llm_wiki_entries)")
@@ -647,7 +696,7 @@ mod tests {
             "test precondition: no synth_hash before migrate()"
         );
 
-        migrate(&conn, None).expect("migrate must succeed upgrading a V10 DB");
+        migrate(&conn, None, None).expect("migrate must succeed upgrading a V10 DB");
 
         let post_has_synth_hash: bool = conn
             .prepare("PRAGMA table_info(documents)")
@@ -954,7 +1003,7 @@ mod tests {
         )
         .unwrap();
 
-        migrate(&conn, Some("/vault".to_string())).unwrap();
+        migrate(&conn, Some("/vault".to_string()), None).unwrap();
 
         let entity_id_working: String = conn
             .query_row(
@@ -1144,7 +1193,7 @@ mod tests {
         // Pre-fix bug: gating on `version < 7` skipped the ALTER TABLE,
         // leaving `chunks` without `content_hash`. With the V9 gate the
         // column is added.
-        migrate(&conn, None).expect("migrate must succeed on Phase 5 DB");
+        migrate(&conn, None, None).expect("migrate must succeed on Phase 5 DB");
 
         let has_content_hash: bool = conn
             .prepare("PRAGMA table_info(chunks)")
