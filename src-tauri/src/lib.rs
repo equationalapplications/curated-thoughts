@@ -5421,13 +5421,63 @@ mod cloud_bridge_ctx_tests {
             .await
             .expect_err("curated_add_wisdom must fail closed for bridge sessions");
         let msg = format!("{err:#}");
+        // The capability gate fires BEFORE any connection attempt (PR #187
+        // review: authorization must not depend on filesystem nonexistence).
         assert!(
-            msg.contains("read-write brain open failed"),
-            "expected read-write open failure, got: {msg}"
+            msg.contains("not available to cloud-bridge sessions"),
+            "expected capability-gate denial, got: {msg}"
         );
+    }
+
+    /// Regression (PR #187 review): filesystem nonexistence is NOT the
+    /// authorization boundary. Even when a valid brain DB exists at the
+    /// context's db_path, bridge sessions must be rejected by the explicit
+    /// curated_* capability gate in `dispatch_tool_call` — and the eight
+    /// legacy tools must remain available.
+    #[tokio::test]
+    async fn bridge_curated_tools_denied_even_when_db_exists() {
+        let (dir, mut ctx) = bridge_ctx_in_temp_brain();
+        // Point the context at an EXISTING, schema-valid brain DB — exactly
+        // the scenario CodeRabbit flagged for the sentinel approach.
+        let real_db = dir.path().join("real-brain.db");
+        let db = crate::db::connection::open_app_db(&real_db, None).unwrap();
+        drop(db);
+        assert!(real_db.exists(), "test setup: RW DB now exists");
+        ctx.db_path = real_db;
+
+        for tool in [
+            "curated_recall_context",
+            "curated_get_wiki_entry",
+            "curated_search_code",
+            "curated_add_wisdom",
+            "curated_update_wisdom",
+            "curated_archive_wisdom",
+        ] {
+            let err = dispatch_tool_call(&ctx, tool, serde_json::json!({}))
+                .await
+                .expect_err("curated tool must be denied for bridge sessions");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("not available to cloud-bridge sessions"),
+                "{tool}: expected capability-gate denial, got: {msg}"
+            );
+            assert!(
+                !msg.contains("read-write brain open failed"),
+                "{tool}: must be denied BEFORE any RW open attempt, got: {msg}"
+            );
+        }
+
+        // The capability gate is scoped to curated tools: a legacy tool still
+        // dispatches (this one errors on missing tables in the empty temp
+        // brain, NOT with the capability-denial message).
+        let legacy_err =
+            dispatch_tool_call(&ctx, "wiki_search", serde_json::json!({ "query": "x" }))
+                .await
+                .expect_err("legacy tool error is fine; the denial must not cover it");
+        let legacy_msg = format!("{legacy_err:#}");
         assert!(
-            msg.contains("clanker-bridge-no-curated-tools.db"),
-            "expected sentinel path in error, got: {msg}"
+            !legacy_msg.contains("not available to cloud-bridge sessions"),
+            "capability gate must be scoped to curated_* tools, got: {legacy_msg}"
         );
     }
 }
