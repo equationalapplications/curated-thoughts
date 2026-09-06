@@ -177,6 +177,12 @@ fn configured_database_url() -> Option<String> {
 /// connection via `retrieval::open_brain_readonly`, independent of `DbState`, so a slow
 /// embed/query never contends with the GUI's live read/write connection (mirrors how the
 /// `--mcp` binary opens its own connection in `mcp_server::async_run`).
+///
+/// `db_path` is deliberately pointed at a sentinel that can never exist: remote clanker
+/// sessions must not reach the curated memory write tools (PR #185 follow-up, Kurt's
+/// Option B). `with_rw` never creates the file, and the curated tools' fail-closed audit
+/// INSERT rides the same RW connection, so all six curated tools fail closed for bridge
+/// sessions while the 8 legacy read/vault tools are unaffected.
 fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext> {
     let paths = retrieval::resolve_brain_paths();
     let profile = retrieval::load_embed_profile(&paths.config_path)?;
@@ -192,9 +198,15 @@ fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext
         profile,
         vault_dir,
         client: "clanker-bridge".into(),
-        db_path: paths.db_path.clone(),
+        db_path: bridge_no_curated_tools_db_path(),
         rw_conn: Arc::new(Mutex::new(None)),
     })
+}
+
+/// Sentinel brain path handed to cloud-bridge sessions instead of the real `db_path`.
+/// `PathBuf` has no `const` constructor, so this is a named function rather than a constant.
+fn bridge_no_curated_tools_db_path() -> PathBuf {
+    PathBuf::from("/nonexistent/clanker-bridge-no-curated-tools.db")
 }
 
 async fn start_cloud_bridge_if_configured_unlocked(state: &CloudBridgeState) {
@@ -5356,6 +5368,66 @@ mod ingest_document_command_tests {
                     "expected proposalId to be JSON null for the no-proposal case, got: {payload}",
                 );
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod cloud_bridge_ctx_tests {
+    use super::{bridge_no_curated_tools_db_path, build_cloud_bridge_ctx};
+    use crate::tool_dispatch::dispatch_tool_call;
+    use tempfile::TempDir;
+
+    /// `build_cloud_bridge_ctx` resolves brain paths from the environment; a
+    /// temp `CURATED_BRAIN_DIR` with an empty brain.db (no config.json ->
+    /// default embed profile) keeps the guard against the live `~/.brain`
+    /// happy (issue #178) while exercising the real constructor.
+    fn bridge_ctx_in_temp_brain() -> (TempDir, crate::tool_dispatch::ToolDispatchContext) {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("brain.db"), b"").unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let ctx = temp_env::with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], || {
+            build_cloud_bridge_ctx().expect("build_cloud_bridge_ctx")
+        });
+        (dir, ctx)
+    }
+
+    /// Regression (hotfix for #185): the cloud bridge context must carry the
+    /// sentinel db_path, never the real brain path, so curated memory tools
+    /// cannot lazily open an RW connection from a bridge session.
+    #[test]
+    fn bridge_ctx_db_path_is_sentinel() {
+        let (_dir, ctx) = bridge_ctx_in_temp_brain();
+        assert_eq!(
+            ctx.db_path,
+            bridge_no_curated_tools_db_path(),
+            "bridge ctx must point at the sentinel db_path, got: {}",
+            ctx.db_path.display()
+        );
+        assert!(!ctx.db_path.exists(), "sentinel path must never exist");
+    }
+
+    /// Regression (hotfix for #185): dispatching a curated WRITE tool through
+    /// the bridge context fails closed — `with_rw` cannot open the sentinel
+    /// path (opens never create the file) and the write is rejected.
+    #[tokio::test]
+    async fn curated_write_tool_fails_closed_through_bridge_ctx() {
+        let (_dir, ctx) = bridge_ctx_in_temp_brain();
+        let params = serde_json::json!({
+            "entity_id": "tier_fact",
+            "body": "bridge sessions must not write wisdom",
+        });
+        let err = dispatch_tool_call(&ctx, "curated_add_wisdom", params)
+            .await
+            .expect_err("curated_add_wisdom must fail closed for bridge sessions");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("read-write brain open failed"),
+            "expected read-write open failure, got: {msg}"
+        );
+        assert!(
+            msg.contains("clanker-bridge-no-curated-tools.db"),
+            "expected sentinel path in error, got: {msg}"
         );
     }
 }
