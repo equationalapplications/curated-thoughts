@@ -96,9 +96,15 @@ CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx ON librarian_evidence
 - **FK CASCADE is not relied upon.** SQLite enforces foreign keys only with
   `PRAGMA foreign_keys=ON` per connection, and brain.db has multiple connections
   (Rust `DbState` + engine via `wiki_exec`/`wiki_run`) whose pragma state we cannot
-  guarantee. All deletion paths (forget, heal purge, repair orphan deletion) therefore
-  issue **explicit** `DELETE FROM librarian_evidence WHERE entry_id IN (…)` alongside
-  the entry deletes. The CASCADE clause stays as documentation of intent only.
+  guarantee. All deletion paths therefore issue **explicit**
+  `DELETE FROM librarian_evidence WHERE entry_id IN (…)` alongside the entry deletes.
+  **This explicitly includes existing hard-delete paths that predate this spec**
+  (CodeRabbit/Kurt, Sep 6): `prune_old_librarian_inferred` (src-tauri/src/lib.rs:1752)
+  and every other path that deletes `llm_wiki_entries` rows by
+  `source_type = 'librarian_inferred'` (heal purge, wiki_forget, repair orphan
+  deletion, proposal retraction) must add the paired evidence-row DELETE — audit at
+  implementation time and add wherever missing. The CASCADE clause stays as
+  documentation of intent only.
 - Implementer verifies JSON1 availability (`SELECT json_valid('{}')`) on both the
   bundled Tauri SQLite and via the engine connection once, in the E2E test.
 
@@ -126,7 +132,7 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
 | --- | --- | --- |
 | `source_docs_from_ref` (entities.rs:201-244) | parse JSON from ref | join `librarian_evidence` |
 | `source_ref_is_still_grounded` (commit.rs:294) | parse JSON, find chunks | **branch by row type**: token rows → join `librarian_evidence`, verify chunk ids exist; path-ref document rows → existing behavior unchanged |
-| `wiki_forget::forget_entries_by_source_refs` (wiki_forget.rs:25) | exact-match JSON ref | exact-match token (callers build tokens) |
+| `wiki_forget::forget_entries_by_source_refs` (wiki_forget.rs:25) | exact-match JSON ref | exact-match token. **Token routing (CodeRabbit/Kurt, Sep 6): the token is derived from the entry id, so a caller holding only a `proposal_id` cannot construct it directly.** Retraction must first query `librarian_evidence` by `proposal_id` to resolve the target `entry_id`s, then derive the tokens (hash of entry id) and pass those to the exact-match forget. Implementer sweeps all existing retraction callers for this two-step shape |
 | commit-path dedupe/supersede by `source_ref` (the exact-match consumers the explorer flagged: proposal retraction and ref-keyed dedupe never match a mangled ref) | match JSON ref | match token |
 | `get_chunk_ids_for_wiki_entry` (lib.rs:2528) | path-normalize the JSON blob, returns `[]` | join `librarian_evidence` chunk ids (currently dead for JSON rows — reviving it is the natural fix) |
 | outbox payload (`push_entries_outbox`, commit.rs:938-960) | carries full JSON | unchanged — CT-owned, JSON is fine there. **Verified, not assumed**: implementer confirms no outbox drain path (including the engine's apply side) ever writes the payload's source_ref back into `llm_wiki_entries`; if one exists it joins the migration |
@@ -156,7 +162,13 @@ itself needs a follow-up fix (dangling refs at the source).
 
 1. **Census** (extends `warn_on_malformed_source_refs`): count rows matching the mangled
    shapes (`evidenceproposal_id%` / `evidencechunk_id%` prefixes, plus 255-char length)
-   — the `{`-prefix query alone misses them.
+   — the `{`-prefix query alone misses them. **Census and ALL subsequent mutation are
+   explicitly restricted to `source_type = 'librarian_inferred'`** (CodeRabbit/Kurt,
+   Sep 6): a legitimate document-sourced `source_ref` can itself hit the 255-char cap
+   (long vault paths normalize to exactly 255), so length/prefix heuristics alone
+   could classify valid document entries as damaged and delete good data. Every census
+   query, repair UPDATE, and orphan DELETE in this migration carries the
+   `source_type = 'librarian_inferred'` predicate — no exceptions.
 2. **Backup**: export affected rows (+ their re-derived evidence) to
    `<brain>/repair-export-186/` before any mutation.
 3. **Re-derive**: for each damaged row whose `curated_proposals` row survives, rebuild
@@ -224,7 +236,13 @@ repaired/deleted/exported correctly, idempotent on re-run; plus a
 **brain-complete assertion fixture** — orphan deletion skipped when the chunk schema
 is partial); provenance tests per §2.4 phases (Phase 1: dangling-chunk evidence →
 row written with `unanchored=1`, counted; Phase 2: skipped+logged);
-`json_valid` CHECK rejection test (mangled write to `librarian_evidence` fails loudly).
+`json_valid` CHECK rejection test (mangled write to `librarian_evidence` fails loudly);
+**census-scope test** — a document-sourced row with a 255-char path ref is NOT
+classified as damaged and NOT touched by the repair migration (the CodeRabbit census
+gap made into a pinned regression); **retraction-routing test** — retracting by
+`proposal_id` correctly resolves entry_ids via `librarian_evidence` and forgets by
+derived token; **paired-delete test** — `prune_old_librarian_inferred` and each
+audited hard-delete path leaves zero orphaned `librarian_evidence` rows.
 
 ---
 
