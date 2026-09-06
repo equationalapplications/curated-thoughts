@@ -1,3 +1,29 @@
+## [2.6.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.5.1...v2.6.0) (2026-09-06)
+
+### Features
+
+* **bundle:** carry librarian_evidence through export and apply ([f3e0214](https://github.com/equationalapplications/curated-thoughts/commit/f3e0214e329b589e0b485e6eb28d732f99d614b5))
+* **commit:** write librarian token + evidence row in one transaction ([a1f5fae](https://github.com/equationalapplications/curated-thoughts/commit/a1f5fae938d8458a4c4129d9bf5d659ebac68949))
+* **db:** [#186](https://github.com/equationalapplications/curated-thoughts/issues/186) repair census with token-shape detection ([8d48733](https://github.com/equationalapplications/curated-thoughts/commit/8d48733b4062adf4297b4ea4bee8ddaaf9d29e00))
+* **db:** [#186](https://github.com/equationalapplications/curated-thoughts/issues/186) repair with outbox-first, valid-JSON and two extraction paths ([f149408](https://github.com/equationalapplications/curated-thoughts/commit/f14940817c4ac1ffff53f9e60019ccdfdb48c7e5))
+* **db:** backup export + brain-complete gate, wire repair into V18 ([1943477](https://github.com/equationalapplications/curated-thoughts/commit/1943477928e43dc490f1edbc4357419e43972a89))
+* **db:** librarian source_ref token + evidence-row helpers ([f19a690](https://github.com/equationalapplications/curated-thoughts/commit/f19a690dea885ad3237d801eab9b63a7fc840b9c))
+* **db:** route provenance and grounding through librarian_evidence ([9649f55](https://github.com/equationalapplications/curated-thoughts/commit/9649f55874b50d7cddd3c4e091196f21547836ae))
+* **db:** V18 librarian_evidence table with json_valid guardrail ([7efb48b](https://github.com/equationalapplications/curated-thoughts/commit/7efb48b5866e0725534cb1f8df947368f6b2710a))
+
+### Bug Fixes
+
+* **#186:** CodeRabbit review wave — 8 edge cases across probe, heal, and V18 repair ([fccc707](https://github.com/equationalapplications/curated-thoughts/commit/fccc707fc2980894b5cd6562e9a2cf0ccb1c1d90)), closes [#186](https://github.com/equationalapplications/curated-thoughts/issues/186) [#158](https://github.com/equationalapplications/curated-thoughts/issues/158)
+* **#186:** review round 3 — enforce per-row backup invariant before orphan deletion ([2eb8aa8](https://github.com/equationalapplications/curated-thoughts/commit/2eb8aa8fe269322309bcea419f4dfbd00bb2d376)), closes [#186](https://github.com/equationalapplications/curated-thoughts/issues/186)
+* **#186:** review round 4 — strict token routing at every source_ref branch ([9a3e1e3](https://github.com/equationalapplications/curated-thoughts/commit/9a3e1e3119da7b33d99d4e06ea29635f74e492d2)), closes [#186](https://github.com/equationalapplications/curated-thoughts/issues/186)
+* **#186:** review round 5 — 10-finding fix wave from the deep self-review ([aec3d2e](https://github.com/equationalapplications/curated-thoughts/commit/aec3d2e833b835f5b9ed0eb424d7f39bc890ab15)), closes [#132](https://github.com/equationalapplications/curated-thoughts/issues/132)
+* **db:** final-review fixes — real-shape content_hash extraction, unanchored computation, bundle ref normalization ([5582f2c](https://github.com/equationalapplications/curated-thoughts/commit/5582f2c78f502232cd97a3404f7a7c614242cdfa))
+* **db:** make V18 repair-skip warning honest about non-rerun ([1c4d09e](https://github.com/equationalapplications/curated-thoughts/commit/1c4d09e8f7f282370b434b001258e556cfaa6a17))
+* **db:** pair librarian_evidence deletes with every entry hard-delete ([0c4bc54](https://github.com/equationalapplications/curated-thoughts/commit/0c4bc547e4d9a69e5636dbb68404387e952e4cbf))
+* **db:** pin lib-tier schema watermark tests at 18 (V18 follow-up) ([4ec26a4](https://github.com/equationalapplications/curated-thoughts/commit/4ec26a4ddf5855a5a12421e0e8bd4231d45ebb26))
+* **graph:** revive get_chunk_ids_for_wiki_entry via librarian_evidence ([6d30dfa](https://github.com/equationalapplications/curated-thoughts/commit/6d30dfa6a7a0d87a3c9236efc92c47d01950fda8))
+* **test:** degrade engine probe version read to unknown without pnpm ([94ca593](https://github.com/equationalapplications/curated-thoughts/commit/94ca593166b8fabc1a567f99f64d5f6c8fe9db27))
+
 ## [2.5.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.5.0...v2.5.1) (2026-09-06)
 
 ### Bug Fixes
