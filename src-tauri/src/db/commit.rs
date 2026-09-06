@@ -1014,7 +1014,11 @@ fn commit_fact_add(
 
     let fact_id = generate_llm_id("fact_");
     let title = fact_title_from_body(&body);
-    let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
+    // Evidence is CT-owned and lives in `librarian_evidence`; `source_ref`
+    // carries only a normalizer-idempotent token so the engine's setup-time
+    // rewrite (dist/index.js:7782-7791) is a no-op for our rows. Spec §2.2.
+    let evidence_json = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
+    let source_ref = librarian_source_ref_token(&fact_id);
 
     // Use the precomputed vector only if it describes the text we are about
     // to write — see `PrecomputedEmbedding`. A stale vector is worse than no
@@ -1050,6 +1054,22 @@ fn commit_fact_add(
             embedding_blob,
             tier,
         ],
+    )?;
+
+    // Same transaction as the entry INSERT: if this fails the fact is not
+    // written. Fail-closed, consistent with the json_valid CHECK. Spec §5.
+    //
+    // Phase 1 policy (spec §2.4): a fact whose evidence anchors no surviving
+    // chunk is still written, but flagged, so the supervised re-run can
+    // measure the real drop rate before the permanent skip+log default.
+    let unanchored = !evidence_has_live_chunk(conn, &evidence_json);
+    insert_librarian_evidence(
+        conn,
+        &fact_id,
+        &ctx.proposal_id,
+        &evidence_json,
+        unanchored,
+        ctx.now_ms,
     )?;
 
     push_entries_outbox(
@@ -2132,6 +2152,112 @@ mod tests {
             evidence: Vec::new(),
             edited_payload: None,
         }
+    }
+
+    /// Build the `LoadedItem` a fact_add commit consumes. `evidence` carries the
+    /// chunk anchors; an empty vec is the unanchored case.
+    fn fact_add_item(evidence: Vec<StoredEvidenceChunk>) -> LoadedItem {
+        LoadedItem {
+            id: "item_t".into(),
+            item_type: "fact_add".into(),
+            target_id: None,
+            payload: serde_json::json!({
+                "body": "A fact worth storing.",
+                "tags": [],
+                "confidence": "inferred"
+            }),
+            evidence,
+            edited_payload: None,
+        }
+    }
+
+    #[test]
+    fn commit_fact_add_writes_token_and_evidence_row() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-t", "Test Entity", "summary", 100);
+        let doc_id = seed_document(&conn, "notes.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let mut ctx = test_ctx("ent-t");
+        let item = fact_add_item(vec![StoredEvidenceChunk {
+            chunk_id: Some(chunk_id),
+            content_hash,
+            quote: "evidence".into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            source_kind: None,
+        }]);
+        let outcome = commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        assert!(matches!(outcome, FactAddOutcome::Applied));
+
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
+
+        let source_ref: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(source_ref, librarian_source_ref_token(&entry_id));
+        assert!(!engine_would_rewrite(&source_ref));
+        assert!(
+            !source_ref.contains('{'),
+            "no JSON may remain in source_ref: {source_ref}"
+        );
+
+        let stored = evidence_json_for_entry(&conn, &entry_id).expect("evidence row must exist");
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert!(parsed.get("evidence").and_then(|v| v.as_array()).is_some());
+        assert!(parsed.get("proposal_id").is_some());
+    }
+
+    #[test]
+    fn commit_fact_add_flags_unanchored_evidence() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-u", "Test Entity", "summary", 100);
+        // No document, no chunk: the evidence references a chunk that is not there.
+        let mut ctx = test_ctx("ent-u");
+        let item = fact_add_item(vec![StoredEvidenceChunk {
+            chunk_id: Some(999_999),
+            content_hash: "nosuchhash".into(),
+            quote: "dangling".into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            source_kind: None,
+        }]);
+        commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
+        let unanchored: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Phase 1 is write-with-flag, NOT skip: the fact is still written.
+        assert_eq!(
+            unanchored, 1,
+            "zero live chunk anchors must set unanchored=1"
+        );
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "Phase 1 must not skip the write");
     }
 
     #[test]
@@ -3647,7 +3773,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_proposal_writes_content_hash_in_source_ref() {
+    fn resolve_proposal_writes_content_hash_in_evidence_row() {
         let mut conn = open_in_memory().unwrap();
         let doc_id = seed_document(&conn, "/vault/documents/note.pdf");
         // Pre-seed a chunk with a real content_hash; the commit must
@@ -3700,14 +3826,27 @@ mod tests {
         )
         .unwrap();
 
-        let source_ref: String = conn
+        // Since #186, `source_ref` carries only the librarian token; the
+        // evidence JSON (with the resolved content_hash) lives in
+        // `librarian_evidence`, written in the same transaction.
+        let entry_id: String = conn
             .query_row(
-                "SELECT source_ref FROM llm_wiki_entries ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM llm_wiki_entries ORDER BY id DESC LIMIT 1",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&source_ref).unwrap();
+        let source_ref: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_ref, librarian_source_ref_token(&entry_id));
+
+        let stored = evidence_json_for_entry(&conn, &entry_id).expect("evidence row must exist");
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
         let evidence = parsed.get("evidence").unwrap().as_array().unwrap();
         let entry = evidence[0].as_object().unwrap();
         assert_eq!(
