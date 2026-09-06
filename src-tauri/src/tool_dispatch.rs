@@ -885,11 +885,12 @@ pub fn log_agent_access_checked(
     client: &str,
     tool: &str,
     entity_id: Option<&str>,
+    operation: &str,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
-         VALUES (?1, ?2, 'write', ?3, NULL)",
-        rusqlite::params![client, tool, entity_id],
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        rusqlite::params![client, tool, operation, entity_id],
     )
     .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
     Ok(())
@@ -945,7 +946,13 @@ pub async fn dispatch_curated_add_wisdom(
             let wisdom =
                 crate::db::wisdom::add_wisdom_with_blob(conn, &p.entity_id, &p.body, blob)?;
             // Audit follows the mutation; the mutation itself is not rolled back.
-            log_agent_access_checked(conn, &client, "curated_add_wisdom", Some(&p.entity_id))?;
+            log_agent_access_checked(
+                conn,
+                &client,
+                "curated_add_wisdom",
+                Some(&p.entity_id),
+                "write",
+            )?;
             Ok(wisdom)
         })
         .await?;
@@ -983,6 +990,7 @@ pub async fn dispatch_curated_update_wisdom(
             &client,
             "curated_update_wisdom",
             Some(&p.entity_id),
+            "write",
         )?;
         Ok(reloaded)
     })
@@ -1004,6 +1012,7 @@ pub async fn dispatch_curated_archive_wisdom(
             &client,
             "curated_archive_wisdom",
             Some(&p.entity_id),
+            "write",
         )?;
         Ok(serde_json::json!({
             "archived": true,
@@ -1269,21 +1278,99 @@ pub async fn dispatch_tool_call(
             .await??;
             Ok(serde_json::to_value(result)?)
         }
+        // Curated memory tools (spec: agent-memory CRUD). All six audit
+        // fail-closed through the lazy RW connection inside their dispatchers;
+        // they MUST bypass the best-effort outer log below (spec §7:
+        // SUPERSEDES the best-effort rule for these tools).
+        "curated_recall_context" => {
+            let p: CuratedRecallContextParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_recall_context(ctx, p).await?;
+            log_curated_access_rw(ctx, "curated_recall_context", entity_id.as_deref(), "read")
+                .await?;
+            Ok(result)
+        }
+        "curated_get_wiki_entry" => {
+            let p: CuratedGetWikiEntryParams = serde_json::from_value(params)?;
+            let entity_id_ref = p.entity_id.clone();
+            let result = dispatch_curated_get_wiki_entry(ctx, p).await?;
+            log_curated_access_rw(
+                ctx,
+                "curated_get_wiki_entry",
+                entity_id_ref.as_deref().or(entity_id.as_deref()),
+                "read",
+            )
+            .await?;
+            Ok(result)
+        }
+        "curated_search_code" => {
+            let p: CuratedSearchCodeParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_search_code(ctx, p).await?;
+            log_curated_access_rw(ctx, "curated_search_code", entity_id.as_deref(), "read")
+                .await?;
+            Ok(result)
+        }
+        "curated_add_wisdom" => {
+            let p: CuratedAddWisdomParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_add_wisdom(ctx, p).await?;
+            // The write dispatcher already logged fail-closed (write op).
+            Ok(result)
+        }
+        "curated_update_wisdom" => {
+            let p: CuratedUpdateWisdomParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_update_wisdom(ctx, p).await?;
+            Ok(result)
+        }
+        "curated_archive_wisdom" => {
+            let p: CuratedArchiveWisdomParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_archive_wisdom(ctx, p).await?;
+            Ok(result)
+        }
         other => Err(UnknownToolError(other.to_string()).into()),
     };
 
     // Agent access log: best-effort, never fail the tool call.
     // Log both successful and failed attempts (including unknown tool).
-    let _ = tokio::task::spawn_blocking(move || {
-        let guard = match conn_for_log.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
-    })
-    .await;
+    // Curated tools are excluded: they audit fail-closed via the RW
+    // connection inside their dispatchers (spec §7), and a best-effort
+    // attempt here would either double-log writes or silently swallow
+    // read-audit failures on the readonly connection.
+    if !tool.starts_with("curated_") {
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = match conn_for_log.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
+        })
+        .await;
+    }
 
     result
+}
+
+/// Fail-closed audit for curated READ tools (spec §7): routed through the
+/// lazy RW connection because the readonly connection cannot service
+/// INSERTs; a failed log write fails the tool call.
+async fn log_curated_access_rw(
+    ctx: &ToolDispatchContext,
+    tool: &str,
+    entity_id: Option<&str>,
+    operation: &str,
+) -> Result<()> {
+    let client = ctx.client.clone();
+    let tool = tool.to_string();
+    let entity_id = entity_id.map(str::to_string);
+    let operation = operation.to_string();
+    ctx.with_rw(move |conn| {
+        log_agent_access_checked(
+            conn,
+            &client,
+            &tool,
+            entity_id.as_deref(),
+            &operation,
+        )
+    })
+    .await
 }
 
 #[cfg(test)]

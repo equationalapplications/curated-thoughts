@@ -161,6 +161,114 @@ impl VaultMcpServer {
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
+
+    #[tool(
+        name = "curated_recall_context",
+        description = "Recall prioritized context for a coding task: keyword-ranked wisdom layer entries plus AST-strategy code chunks ranked by embedding similarity. Read-only."
+    )]
+    async fn curated_recall_context(
+        &self,
+        args: Parameters<tool_dispatch::CuratedRecallContextParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_recall_context", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_get_wiki_entry",
+        description = "Fetch the full content of wisdom layer (wiki) entries. Provide entity_id (exact match, wins over topic when both are supplied) or topic (substring match on title/body/tags). Read-only."
+    )]
+    async fn curated_get_wiki_entry(
+        &self,
+        args: Parameters<tool_dispatch::CuratedGetWikiEntryParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_get_wiki_entry", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_search_code",
+        description = "Search AST-strategy code chunks by query embedding, optionally narrowed to a symbol name. Read-only."
+    )]
+    async fn curated_search_code(
+        &self,
+        args: Parameters<tool_dispatch::CuratedSearchCodeParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_search_code", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_add_wisdom",
+        description = "Add a new entry to the wisdom layer of the live brain. WRITES to the live brain: requires an existing active entity and appends a user-stated, confirmed entry."
+    )]
+    async fn curated_add_wisdom(
+        &self,
+        args: Parameters<tool_dispatch::CuratedAddWisdomParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_add_wisdom", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_update_wisdom",
+        description = "Update the body of an existing wisdom layer entry. WRITES to the live brain: the entry is reloaded from the database after the update, so the response reflects stored state, not the request."
+    )]
+    async fn curated_update_wisdom(
+        &self,
+        args: Parameters<tool_dispatch::CuratedUpdateWisdomParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_update_wisdom", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_archive_wisdom",
+        description = "Soft-delete (archive) a wisdom layer entry. WRITES to the live brain: the entry is marked deleted rather than removed."
+    )]
+    async fn curated_archive_wisdom(
+        &self,
+        args: Parameters<tool_dispatch::CuratedArchiveWisdomParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_archive_wisdom", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
 }
 
 /// Blocking entrypoint for `--mcp` mode. Calls into a tokio runtime internally.
