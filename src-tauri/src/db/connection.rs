@@ -168,22 +168,42 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
             match db_dir {
                 Some(dir) => {
                     let export_dir = dir.join("repair-export-186");
+                    let census = crate::db::evidence_repair::repair_census(conn)?;
                     let exported =
                         crate::db::evidence_repair::export_damaged_rows(conn, &export_dir)?;
-                    let report = crate::db::evidence_repair::run_evidence_repair(
-                        conn,
-                        crate::db::commit::ms_now(),
-                    )?;
-                    eprintln!(
-                        "[ct::repair] #186 V18 repair: exported={exported} outbox={} valid_json={} \
-                         proposal_id={} content_hash={} deleted={} ambiguous={}",
-                        report.from_outbox,
-                        report.from_valid_json,
-                        report.from_proposal_id,
-                        report.from_content_hash,
-                        report.deleted,
-                        report.ambiguous
-                    );
+                    if exported as i64 != census.damaged {
+                        // Verifiable backup invariant (spec §2.5.2): orphan
+                        // deletion may only run when every damaged row is
+                        // provably backed up. A table-level completeness
+                        // check alone cannot prove a partial import didn't
+                        // drop a valid fact's anchor, but an export that
+                        // misses even one damaged row is a demonstrated
+                        // incomplete backup — skip the destructive phase.
+                        eprintln!(
+                            "[ct::repair WARN] #186 V18 repair SKIPPED: backup export wrote \
+                             {exported} rows but the census counted {} damaged rows. \
+                             Deletion must not proceed without a complete per-row backup \
+                             (spec §2.5.2); investigate repair-export-186/ and invoke the \
+                             idempotent `run_evidence_repair` manually.",
+                            census.damaged
+                        );
+                    } else {
+                        let report = crate::db::evidence_repair::run_evidence_repair(
+                            conn,
+                            crate::db::commit::ms_now(),
+                        )?;
+                        eprintln!(
+                            "[ct::repair] #186 V18 repair: exported={exported} outbox={} \
+                             valid_json={} proposal_id={} content_hash={} deleted={} \
+                             ambiguous={}",
+                            report.from_outbox,
+                            report.from_valid_json,
+                            report.from_proposal_id,
+                            report.from_content_hash,
+                            report.deleted,
+                            report.ambiguous
+                        );
+                    }
                 }
                 None => {
                     // In-memory / pathless database (tests, ephemeral opens):

@@ -2154,9 +2154,8 @@ mod tests {
         assert!(!evidence_has_live_chunk(&conn, &hash_miss_rowid_live).unwrap());
 
         // Legacy evidence with no usable hash still falls back to chunk_id.
-        let no_hash_rowid_live = format!(
-            r#"{{"evidence":[{{"chunk_id":{chunk_id}}}],"proposal_id":"p"}}"#
-        );
+        let no_hash_rowid_live =
+            format!(r#"{{"evidence":[{{"chunk_id":{chunk_id}}}],"proposal_id":"p"}}"#);
         assert!(evidence_has_live_chunk(&conn, &no_hash_rowid_live).unwrap());
 
         let empty = r#"{"evidence":[],"proposal_id":"p"}"#;

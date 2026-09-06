@@ -300,6 +300,19 @@ itself needs a follow-up fix (dangling refs at the source).
    the assertion cannot be reliably expressed at migration time: introduce an
    `import_pending` state on imported graphs that heal and orphan-deletion respect
    until the import is confirmed brain-complete.
+   **Verifiable backup invariant (Round-3 review, Sep 6)** — the table-level
+   check above cannot prove a *partial import* complete: an import may carry
+   non-empty `chunks`/`documents` while omitting the specific chunk a valid
+   inferred fact anchors to. That distinction is not decidable from the
+   database alone (legitimate chunk deletion and never-imported are
+   indistinguishable), so `import_pending` stays the documented fallback for a
+   future import pipeline. What **is** decidable at migration time — and is
+   therefore enforced — is the backup invariant: the migration compares the
+   export count against the repair census and refuses to enter the destructive
+   phase unless `exported == census.damaged`, i.e. every doomed row is provably
+   on disk in `repair-export-186/` before any deletion. A mismatch skips the
+   repair (fail-safe, same handling as brain-incomplete) with a loud WARN; the
+   data survives damaged rather than dies unbacked.
 6. **Idempotent**: re-running the migration is a no-op (token rows and existing
    `librarian_evidence` rows are left untouched).
 
