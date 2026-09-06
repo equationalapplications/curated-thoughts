@@ -32,11 +32,8 @@ The destruction happens **afterwards, in the JS engine**:
   (`wiki_exec`/`wiki_run` → `src-tauri/src/lib.rs:2190/2207`).
 - **Engine version ground truth (Kurt, Sep 6)**: the pin is **7.1.0** (#183,
   `2bf1c18`; V17 gates opening pre-7.1 DBs). The mangler is intact in the 7.1.0 dist
-  at the anchors above — **the current pin itself mangles**. (Checkout note: this
-  working copy's `node_modules` still resolves 6.0.1 from a stale install predating
-  #183 — run `pnpm install` before implementing; 6.0.1 and 7.1.0 carry the identical
-  mangler, so the diagnosis is unchanged either way. The committed explore report's
-  anchors were taken against 6.0.1; §1.1's anchors here are 7.1.0.)
+  at the anchors above — **the current pin itself mangles**. The committed explore
+  report's anchors were taken against 6.0.1.
 - Fingerprints matching byte-for-byte: 260 live `librarian_inferred` rows are exactly
   **255 chars** (the JS `.slice(0,255)` cap; the Rust writer never truncates), and the
   mangling charset is exactly the normalizer's keep-set.
@@ -221,9 +218,11 @@ itself needs a follow-up fix (dangling refs at the source).
    `<brain>/repair-export-186/` before any mutation.
 3. **Valid-JSON-first branch** (Kurt, Sep 6): if a damaged-scope row's `source_ref`
    still **parses as valid JSON**, migrate it **verbatim** into
-   `librarian_evidence.evidence_json` (using the parsed `proposal_id` field; if the
-   JSON lacks it, fall through to the extraction rule below) and rewrite the ref to
-   the token. Only rows whose ref does **not** parse proceed to re-derivation. This
+   `librarian_evidence.evidence_json` and rewrite the ref to
+   the token. **If the valid JSON lacks a `proposal_id` field → export and delete
+   directly** (same treatment as orphans) — valid JSON is never routed through the
+   mangled-text extraction rule, which only applies to unparseable refs. Only rows
+   whose ref does **not** parse proceed to re-derivation. This
    preserves exact original evidence wherever it survived, and shrinks the
    re-derivation set to the truly mangled rows.
 4. **Re-derive**: for each still-mangled row whose `curated_proposals` row survives,
@@ -233,7 +232,7 @@ itself needs a follow-up fix (dangling refs at the source).
    extract the `proposal_id` from the mangled ref: strip the leading literal
    `proposal_id` key name, then take characters up to the next literal key token
    (`evidence`, `chunk_id`, `content_hash`, `quote`, `start_line`, `end_line`,
-   `source_kind`, `okf_version` — the exact key set emitted by
+   `source_kind` — the exact key set emitted by
    `evidence_json_with_hashes`, verified at implementation time) or end-of-string.
    Validate the extracted value: non-empty, and must match an existing
    `curated_proposals.id` (which are `prop_`-prefixed). **If extraction fails or the
@@ -289,7 +288,7 @@ fixtures:
      anchors is a legitimate, expected write — the old blanket "≥1 chunk present"
      assertion contradicted §2.4);
   3. **engine-simulation pass**: run the **full five-predicate selector** (§2.2:
-     `TRIM != self` OR `INSTR '/'` OR `INSTR ''` OR `INSTR CHAR(0)` OR GLOB —
+     `TRIM != self` OR `INSTR '/'` OR `INSTR(source_ref,'\\')` OR `INSTR CHAR(0)` OR GLOB —
      not the GLOB alone) + normalize + rewrite semantics over the table exactly as
      `setup()` does → **zero rows change**. Supplemental
      fast check — NOT the acceptance gate (see engine-in-the-loop gate below).
@@ -298,10 +297,10 @@ fixtures:
   (`@equationalapplications/core-llm-wiki` as installed — NOT a re-implementation;
   with installed-vs-pinned version skew, only the real engine is authoritative), runs
   its `setup()`, and asserts zero source_ref changes to CT rows. **The gate must read
-  and record the active engine version** (`node -e "console.log(require(
-  '@equationalapplications/core-llm-wiki/package.json').version)"` or equivalent) in
-  its output/assertions, so drift between installed and pinned versions is visible in
-  every test run, never silent (Kurt, Sep 6). Run on main pre-fix
+  and record the active engine version** (`pnpm ls --json
+  @equationalapplications/core-llm-wiki` — the `node -e` package.json read fails due
+  to the package's exports map) in its output/assertions, so drift between installed
+  and pinned versions is visible in every test run, never silent (Kurt, Sep 6). Run on main pre-fix
   (marked `#[ignore]`, demonstrated via `cargo test -- --ignored`) it doubles as the
   real-repro proof that the shipped engine mangles JSON refs; post-fix it is the
   "bug is dead" gate.
