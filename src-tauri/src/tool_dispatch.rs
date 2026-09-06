@@ -339,7 +339,11 @@ pub(crate) struct RankedChunkRow {
     pub end_line: Option<u32>,
     pub symbol_name: Option<String>,
     /// Second strategy-ish column (`c.strategy` in curated_search_code).
+    #[allow(dead_code)] // ported verbatim from tools/src/queries.rs; the
+    // curated_recall_context leg reads strategy only
     pub language: Option<String>,
+    /// Kept for parity with the tools-crate struct; unused on this ported path.
+    #[allow(dead_code)]
     pub entity_id: String,
     pub score: f32,
 }
@@ -591,6 +595,174 @@ pub struct CuratedSearchCodeParams {
     /// Optional symbol name to filter code chunks (e.g., function name)
     #[serde(default)]
     pub symbol: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Curated memory read dispatchers (ported from the coding server sidecar's
+// handler bodies; rmcp::ErrorData -> anyhow).
+// ---------------------------------------------------------------------------
+
+/// Recall prioritized context for a coding task: keyword-ranked wisdom
+/// entries plus AST-strategy code chunks ranked by cosine similarity.
+pub async fn dispatch_curated_recall_context(
+    ctx: &ToolDispatchContext,
+    p: CuratedRecallContextParams,
+) -> Result<Value> {
+    let limit_wiki = p.limit_wiki.unwrap_or(5);
+    let limit_code = p.limit_code.unwrap_or(10);
+
+    // Embed OUTSIDE the DB lock (blocking network call).
+    let query_vec = embed_query(&ctx.profile, p.query.clone()).await?;
+
+    let conn = ctx.conn.clone();
+    let query = p.query.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let conn_guard = lock_conn(&conn)?;
+        let wiki_entries = rank_wiki_entries(&conn_guard, &query, limit_wiki)?;
+
+        // Code chunks: real chunker strategies (ast_*). Vectors live in the
+        // separate embeddings table.
+        let code_sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+        let code_chunks = code_rows_to_json(fetch_ranked_chunks(
+            &conn_guard,
+            &code_sql,
+            &[],
+            &query_vec,
+            limit_code,
+        )?);
+
+        Ok(serde_json::json!({
+            "wiki_entries": wiki_entries,
+            "code_chunks": code_chunks,
+            "query": query
+        }))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("recall task join error: {e}"))??;
+    Ok(result)
+}
+
+/// Fetch full content of wiki (wisdom layer) entries by entity_id or topic.
+/// Precedence (spec §6): when both are supplied, `entity_id` wins and
+/// `topic` is ignored.
+pub async fn dispatch_curated_get_wiki_entry(
+    ctx: &ToolDispatchContext,
+    p: CuratedGetWikiEntryParams,
+) -> Result<Value> {
+    let conn = ctx.conn.clone();
+    let topic = p.topic.clone();
+    let entity_id = p.entity_id.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let conn_guard = lock_conn(&conn)?;
+
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
+        {
+            // The plan's precedence fixture passes the wiki ENTRY id ("w1")
+            // as `entity_id`, so accept either the entity grouping id or the
+            // per-entry id — entry ids are unique keys, so this only ever
+            // widens the group with at most that one entry.
+            (
+                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
+                 FROM llm_wiki_entries
+                 WHERE deleted_at IS NULL AND (entity_id = ?1 OR id = ?1)
+                 ORDER BY updated_at",
+                vec![Box::new(eid.clone())],
+            )
+        } else if let Some(ref topic) = topic {
+            (
+                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
+                 FROM llm_wiki_entries
+                 WHERE deleted_at IS NULL
+                   AND (title LIKE '%' || ?1 || '%'
+                        OR body LIKE '%' || ?1 || '%'
+                        OR tags LIKE '%' || ?1 || '%')
+                 ORDER BY confidence DESC, updated_at",
+                vec![Box::new(topic.clone())],
+            )
+        } else {
+            anyhow::bail!("must provide either topic or entity_id");
+        };
+
+        let mut stmt = conn_guard
+            .prepare(sql)
+            .map_err(|e| anyhow::anyhow!("prepare wiki entry query: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,      // text
+                    row.get::<_, usize>(1)?,       // position
+                    row.get::<_, String>(2)?,      // doc_path
+                    row.get::<_, Option<u32>>(3)?, // start_line
+                    row.get::<_, Option<u32>>(4)?, // end_line
+                ))
+            })
+            .map_err(|e| anyhow::anyhow!("execute wiki entry query: {e}"))?;
+
+        let mut full_text = String::new();
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (text, position, doc_path, start_line, end_line) =
+                row.map_err(|e| anyhow::anyhow!("read wiki entry row: {e}"))?;
+            full_text.push_str(&text);
+            full_text.push('\n');
+            chunks.push(serde_json::json!({
+                "text": text,
+                "position": position,
+                "doc_path": doc_path,
+                "start_line": start_line,
+                "end_line": end_line
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "full_text": full_text.trim(),
+            "chunks": chunks,
+            "topic": topic,
+            "entity_id": entity_id
+        }))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("get_entry task join error: {e}"))??;
+    Ok(result)
+}
+
+/// Search code chunks (ast_* strategies) by query embedding, optionally
+/// narrowed to a symbol name.
+pub async fn dispatch_curated_search_code(
+    ctx: &ToolDispatchContext,
+    p: CuratedSearchCodeParams,
+) -> Result<Value> {
+    let limit = p.limit.unwrap_or(10);
+
+    // Embed OUTSIDE the DB lock (blocking network call).
+    let query_vec = embed_query(&ctx.profile, p.query.clone()).await?;
+
+    let conn = ctx.conn.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let conn_guard = lock_conn(&conn)?;
+        let sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+
+        if let Some(ref sym) = p.symbol {
+            let with_symbol = format!("{sql} AND c.symbol_name LIKE '%' || ?1 || '%'");
+            // The shared helper takes the symbol as its sole parameter.
+            let rows = fetch_ranked_chunks(&conn_guard, &with_symbol, &[sym], &query_vec, limit)?;
+            return Ok(serde_json::json!({
+                "code_chunks": code_rows_to_json(rows),
+                "query": p.query,
+                "symbol_filter": p.symbol
+            }));
+        }
+
+        let rows = fetch_ranked_chunks(&conn_guard, &sql, &[], &query_vec, limit)?;
+        Ok(serde_json::json!({
+            "code_chunks": code_rows_to_json(rows),
+            "query": p.query,
+            "symbol_filter": p.symbol
+        }))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("search_code task join error: {e}"))??;
+    Ok(result)
 }
 
 #[derive(Clone)]
@@ -1296,7 +1468,9 @@ mod curated_memory_tests {
                 start_line INTEGER NOT NULL DEFAULT 1,
                 end_line INTEGER NOT NULL DEFAULT 1,
                 symbol_name TEXT,
-                strategy TEXT NOT NULL DEFAULT 'prose'
+                strategy TEXT NOT NULL DEFAULT 'prose',
+                defined_symbol TEXT,
+                entity_id TEXT
             );
             CREATE TABLE embeddings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1313,9 +1487,9 @@ mod curated_memory_tests {
             INSERT INTO documents (path, hash, tier, status) VALUES
               ('src/main.rs', 'h1', 'user_doc', 'indexed'),
               ('docs/readme.md', 'h2', 'user_doc', 'indexed');
-            INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy) VALUES
-              (1, 'fn main() {}', 0, 1, 1, 'main', 'ast_symbols'),
-              (2, 'plain prose chunk', 0, 1, 1, NULL, 'proximity');
+            INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, entity_id) VALUES
+              (1, 'fn main() {}', 0, 1, 1, 'main', 'ast_symbols', 'tier_working'),
+              (2, 'plain prose chunk', 0, 1, 1, NULL, 'proximity', 'tier_working');
             INSERT INTO embeddings (chunk_id, vector) VALUES
               (1, x'0000803F000000000000000000000000000000000000000000000000000000'),
               (2, x'0000003F000000000000000000000000000000000000000000000000000000');
@@ -1332,5 +1506,111 @@ mod curated_memory_tests {
         let hits = rank_wiki_entries(&conn, "vault documents", 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["id"], "w1");
+    }
+
+    /// ToolDispatchContext over the shared file fixture. The embed stub env
+    /// (CURATED_EMBED_STUB=constant8) keeps `embed_batch` deterministic and
+    /// network-free; `Local` profile is the repo default.
+    fn test_ctx(conn: Connection, dir: &std::path::Path) -> ToolDispatchContext {
+        std::env::set_var("CURATED_EMBED_STUB", "constant8"); // mandated stub
+        ToolDispatchContext {
+            conn: Arc::new(Mutex::new(conn)),
+            profile: EmbedProfile::default(),
+            vault_dir: Some(dir.to_path_buf()),
+            client: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_context_returns_wiki_first() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        let v = dispatch_curated_recall_context(
+            &ctx,
+            CuratedRecallContextParams {
+                query: "vault documents".into(),
+                limit_wiki: Some(3),
+                limit_code: Some(3),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(v["wiki_entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == serde_json::json!("w1")));
+        assert_eq!(v["query"], "vault documents");
+    }
+
+    #[tokio::test]
+    async fn get_entry_requires_topic_or_entity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        assert!(dispatch_curated_get_wiki_entry(
+            &ctx,
+            CuratedGetWikiEntryParams {
+                topic: None,
+                entity_id: None
+            }
+        )
+        .await
+        .is_err());
+        let v = dispatch_curated_get_wiki_entry(
+            &ctx,
+            CuratedGetWikiEntryParams {
+                topic: Some("Repo Layout".into()),
+                entity_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(v["full_text"]
+            .as_str()
+            .unwrap()
+            .contains("immutable documents"));
+    }
+
+    #[tokio::test]
+    async fn get_entry_entity_id_wins_over_topic() {
+        // spec §6: both supplied -> entity_id takes precedence
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        let v = dispatch_curated_get_wiki_entry(
+            &ctx,
+            CuratedGetWikiEntryParams {
+                topic: Some("nonexistent-topic-xyz".into()),
+                entity_id: Some("w1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(v["full_text"]
+            .as_str()
+            .unwrap()
+            .contains("immutable documents"));
+    }
+
+    #[tokio::test]
+    async fn search_code_filters_ast_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        let v = dispatch_curated_search_code(
+            &ctx,
+            CuratedSearchCodeParams {
+                query: "main".into(),
+                limit: Some(5),
+                symbol: Some("main".into()),
+            },
+        )
+        .await
+        .unwrap();
+        for c in v["code_chunks"].as_array().unwrap() {
+            assert!(c["strategy"].as_str().unwrap().starts_with("ast_"));
+        }
     }
 }
