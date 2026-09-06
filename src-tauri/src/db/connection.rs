@@ -184,23 +184,38 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
                     // In-memory / pathless database (tests, ephemeral opens):
                     // there is no brain directory to back up into, so skip the
                     // export but still run the repair — failing the migration
-                    // here would defeat the whole one-shot.
+                    // here would defeat the whole one-shot. The DB path is
+                    // unknown to this function in this branch, so the log can
+                    // only say so.
                     eprintln!(
-                        "[ct::repair WARN] #186 V18 repair: no database path available; \
-                         skipping backup export and running repair unbacked"
+                        "[ct::repair WARN] #186 V18 repair: database path unavailable \
+                         (in-memory or unknown); skipping backup export and running \
+                         repair unbacked"
                     );
                     let report = crate::db::evidence_repair::run_evidence_repair(
                         conn,
                         crate::db::commit::ms_now(),
                     )?;
-                    eprintln!("[ct::repair] #186 V18 repair (unbacked): {report:?}");
+                    eprintln!(
+                        "[ct::repair] #186 V18 repair (unbacked): exported=0 outbox={} \
+                         valid_json={} proposal_id={} content_hash={} deleted={} ambiguous={}",
+                        report.from_outbox,
+                        report.from_valid_json,
+                        report.from_proposal_id,
+                        report.from_content_hash,
+                        report.deleted,
+                        report.ambiguous
+                    );
                 }
             }
         } else {
             eprintln!(
                 "[ct::repair WARN] #186 V18 repair SKIPPED: database is not brain-complete \
                  (missing or empty chunks/documents while chunk-derived refs exist). \
-                 Repair will run on the next open once the import is complete."
+                 This repair does NOT re-run automatically — the V18 schema stamp means \
+                 this branch fires only once. It can be triggered later via a future \
+                 migration or by manually invoking the idempotent \
+                 `run_evidence_repair`."
             );
         }
     }
