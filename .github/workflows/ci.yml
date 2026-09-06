@@ -105,6 +105,16 @@ jobs:
           CURATED_MCP_INTEGRATION_TESTS: "1"
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
 
+      # #186 acceptance gate (review round 5, finding 6): the test is #[ignore]d
+      # for local runs because it shells out to node, so the plain test step
+      # above never executes it. Run it explicitly against the pnpm-installed
+      # core-llm-wiki — a future engine bump whose selector re-matches CT
+      # tokens must fail here, not ship green while the hand-transcribed
+      # `engine_would_rewrite` still says false. setup-node-pnpm provides
+      # node 22.x (>= 22.5, built-in sqlite).
+      - name: Engine source_ref acceptance gate
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --test engine_source_ref_gate -- --ignored --test-threads=1
+
       - name: Outbox Postgres integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --lib outbox -- --test-threads=1
         env:

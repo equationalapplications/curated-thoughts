@@ -42,6 +42,12 @@ pub fn build_fact_file(fact: &WikiFact, related: &[(String, String)], profile: &
     if let Some(hash) = &fact.source_hash {
         pairs.push(("source_hash", V::String(hash.clone())));
     }
+    // CT-owned librarian evidence. Emitted whenever present (both profiles):
+    // a librarian-inferred fact loses its provenance silently if the paired
+    // evidence blob is dropped on export. Spec §2.3.
+    if let Some(evidence) = &fact.evidence_json {
+        pairs.push(("librarian_evidence", V::String(evidence.clone())));
+    }
     pairs.push(("created_at", V::Number(fact.created_at as f64)));
     if fact.access_count != 0 {
         pairs.push(("access_count", V::Number(fact.access_count as f64)));
@@ -153,6 +159,10 @@ pub fn parse_fact_file(content: &str) -> Result<ParsedFact> {
         okf_usage_window: flow_to_json_string(fm.get_str("usage_window")),
         last_verified_at: latest_verified_at(&fm),
         last_verified_by: latest_verified_by(&fm),
+        evidence_json: fm
+            .get_str("librarian_evidence")
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
     };
     Ok(ParsedFact { fact, related })
 }
@@ -868,6 +878,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
                 crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap(),
             ),
             last_verified_by: Some("process:nightly".into()),
+            evidence_json: None,
         };
         let md = build_fact_file(&fact, &[], "llm-wiki/2");
         assert!(
@@ -930,6 +941,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
                 crate::okf::timefmt::ms_from_iso("2026-07-02T00:00:00.000Z").unwrap(),
             ),
             last_verified_by: Some("process:nightly".into()),
+            evidence_json: None,
         };
         let md = build_fact_file(&fact, &[], "llm-wiki/1");
         assert!(!md.contains("status:"), "v0.1 must not emit status: {md}");
@@ -1149,6 +1161,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             okf_usage_window: None,
             last_verified_at: None,
             last_verified_by: None,
+            evidence_json: None,
         };
         let md = build_fact_file(&fact, &[], "llm-wiki/2");
         let parsed = parse_fact_file(&md).unwrap();
@@ -1239,6 +1252,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             okf_usage_window: None,
             last_verified_at: None,
             last_verified_by: None,
+            evidence_json: None,
         };
         let md = build_fact_file(&fact, &[], "llm-wiki/2");
         // The encoded scalar must stay on a single physical line — control
@@ -1289,6 +1303,7 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
             okf_usage_window: None,
             last_verified_at: None,
             last_verified_by: None,
+            evidence_json: None,
         }
     }
 

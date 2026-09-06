@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15, MIGRATION_V16, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5,
-    MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4,
+    MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -31,7 +31,7 @@ fn canonicalize_workspace_root(path: &str) -> String {
         .unwrap_or_else(|_| normalize_workspace_root(path))
 }
 
-fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
+fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(&format!(
         "BEGIN;\n{}\n{}\n{}\nCOMMIT;",
@@ -149,6 +149,150 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         }
         conn.execute(
             "INSERT OR IGNORE INTO schema_version (version) VALUES (17)",
+            [],
+        )?;
+    }
+    if version < 18 {
+        // DDL first, stamp last: the version stamp is written only after the
+        // one-shot repair below finishes. The DDL itself is idempotent (IF
+        // NOT EXISTS), making any re-entry safe. Spec §2.5.
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V18))?;
+
+        // Finding 1 (review round 5): pre-#186 wisdom writes stamped
+        // user_stated rows with the JSON sentinel
+        // `{"proposal_id":null,"evidence":[]}` (or its engine-mangled
+        // collapse `proposal_idnullevidence`) — a non-fixed-point ref
+        // outside the librarian census, so the repair below would never
+        // touch it. NULL is the "no provenance" value for manual facts;
+        // new wisdom writes have used it since the same review round.
+        // Exact-match values keep this idempotent.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET source_ref = NULL
+              WHERE source_type = 'user_stated'
+                AND source_ref IN (
+                    '{\"proposal_id\":null,\"evidence\":[]}',
+                    'proposal_idnullevidence'
+                )",
+            [],
+        )?;
+
+        // One-shot repair of the rows the engine already mangled (#186).
+        // Backup-before-mutate; deletion of unresolvable rows is gated on the
+        // brain-complete assertion so a partial import can never be mistaken
+        // for a brain full of orphans. Spec §2.5.
+        if crate::db::evidence_repair::brain_is_complete(conn)? {
+            match db_dir {
+                Some(dir) => {
+                    let export_dir = dir.join("repair-export-186");
+                    // Fail-safe posture (review round 5, finding 4): a
+                    // failure inside the backed repair arm (full disk,
+                    // read-only brain dir, mid-repair SQL fault) must not
+                    // abort migrate() — AppDb::open would fail and every
+                    // subsequent launch would retry-and-fail forever. Export
+                    // problems skip the destructive phase with a loud WARN
+                    // and the damaged data survives as-is, exactly like the
+                    // brain-incomplete branch; the stamp below still fires
+                    // (availability outranks auto-retry — the operator can
+                    // rerun the idempotent `run_evidence_repair` manually).
+                    let attempt = (|| -> Result<()> {
+                        let census = crate::db::evidence_repair::repair_census(conn)?;
+                        let exported =
+                            crate::db::evidence_repair::export_damaged_rows(conn, &export_dir)?;
+                        if exported as i64 != census.damaged {
+                            // Verifiable backup invariant (spec §2.5.2): orphan
+                            // deletion may only run when every damaged row is
+                            // provably backed up. A table-level completeness
+                            // check alone cannot prove a partial import didn't
+                            // drop a valid fact's anchor, but an export that
+                            // misses even one damaged row is a demonstrated
+                            // incomplete backup — skip the destructive phase.
+                            eprintln!(
+                                "[ct::repair WARN] #186 V18 repair SKIPPED: backup export \
+                                 wrote {exported} rows but the census counted {} damaged \
+                                 rows. Deletion must not proceed without a complete \
+                                 per-row backup (spec §2.5.2); investigate \
+                                 repair-export-186/ and invoke the idempotent \
+                                 `run_evidence_repair` manually.",
+                                census.damaged
+                            );
+                            return Ok(());
+                        }
+                        let report = crate::db::evidence_repair::run_evidence_repair(
+                            conn,
+                            crate::db::commit::ms_now(),
+                        )?;
+                        eprintln!(
+                            "[ct::repair] #186 V18 repair: exported={exported} outbox={} \
+                             valid_json={} proposal_id={} content_hash={} deleted={} \
+                             ambiguous={}",
+                            report.from_outbox,
+                            report.from_valid_json,
+                            report.from_proposal_id,
+                            report.from_content_hash,
+                            report.deleted,
+                            report.ambiguous
+                        );
+                        Ok(())
+                    })();
+                    if let Err(err) = attempt {
+                        eprintln!(
+                            "[ct::repair WARN] #186 V18 repair SKIPPED: {err:#}. The \
+                             destructive phase did not run (or stopped part-way); damaged \
+                             rows survive as-is. This repair does NOT re-run automatically \
+                             — after fixing the underlying cause (disk space, permissions \
+                             on repair-export-186/), invoke the idempotent \
+                             `run_evidence_repair` manually."
+                        );
+                    }
+                }
+                None => {
+                    // In-memory / pathless database (tests, ephemeral opens):
+                    // there is no brain directory to back up into, so skip the
+                    // export but still run the repair — failing the migration
+                    // here would defeat the whole one-shot. The DB path is
+                    // unknown to this function in this branch, so the log can
+                    // only say so. Errors propagate here: this branch is
+                    // tests-only in practice, and a swallowed SQL fault would
+                    // hide real defects from the suite.
+                    eprintln!(
+                        "[ct::repair WARN] #186 V18 repair: database path unavailable \
+                         (in-memory or unknown); skipping backup export and running \
+                         repair unbacked"
+                    );
+                    let report = crate::db::evidence_repair::run_evidence_repair(
+                        conn,
+                        crate::db::commit::ms_now(),
+                    )?;
+                    eprintln!(
+                        "[ct::repair] #186 V18 repair (unbacked): exported=0 outbox={} \
+                         valid_json={} proposal_id={} content_hash={} deleted={} ambiguous={}",
+                        report.from_outbox,
+                        report.from_valid_json,
+                        report.from_proposal_id,
+                        report.from_content_hash,
+                        report.deleted,
+                        report.ambiguous
+                    );
+                }
+            }
+        } else {
+            eprintln!(
+                "[ct::repair WARN] #186 V18 repair SKIPPED: database is not brain-complete \
+                 (missing or empty chunks/documents while chunk-derived refs exist). \
+                 This repair does NOT re-run automatically — the V18 schema stamp means \
+                 this branch fires only once. It can be triggered later via a future \
+                 migration or by manually invoking the idempotent \
+                 `run_evidence_repair`."
+            );
+        }
+        // Stamp after the repair attempt, deliberately: the brain-incomplete
+        // skip, the backup-invariant skip, and a caught repair error are all
+        // "skip with a loud WARN" decisions, not failures — blocking startup
+        // on them would turn a data defect into an availability outage
+        // (review round 5, finding 4). Manual `run_evidence_repair` remains
+        // the recovery path for any skipped repair.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (18)",
             [],
         )?;
     }
@@ -272,7 +416,7 @@ impl AppDb {
                 let root_str = root.to_string_lossy().to_string();
                 canonicalize_workspace_root(&root_str)
             });
-        migrate(&conn, vault_root.clone())?;
+        migrate(&conn, vault_root.clone(), path.parent())?;
         if let Some(root) = vault_root.as_deref() {
             let vault_path = std::path::Path::new(root);
             if vault_path.is_dir() {
@@ -285,7 +429,7 @@ impl AppDb {
 
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
-    migrate(&conn, None)?;
+    migrate(&conn, None, None)?;
     Ok(conn)
 }
 
@@ -298,7 +442,7 @@ pub fn open_in_memory() -> Result<Connection> {
 pub fn open_app_db(path: &Path, _config: Option<&Path>) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
-    migrate(&conn, None)?;
+    migrate(&conn, None, path.parent())?;
     Ok(conn)
 }
 
@@ -312,7 +456,9 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 17);
+        // Bumped from 17 to 18 by MIGRATION_V18, which adds the CT-owned
+        // `librarian_evidence` table (issue #186 spec §2.1).
+        assert_eq!(max_version, 18);
     }
 
     /// Upgraded-DB path for the core-llm-wiki@7.1.0 bump: a database created
@@ -337,7 +483,7 @@ mod tests {
             "ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failed_at;
              ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failure_kind;
              ALTER TABLE llm_wiki_entries DROP COLUMN embedding_attempts;
-             DELETE FROM schema_version WHERE version = 17;",
+             DELETE FROM schema_version WHERE version >= 17;",
         )
         .unwrap();
 
@@ -346,7 +492,7 @@ mod tests {
             .expect_err("guard must reject a pre-7.1 entries table");
         assert!(guard_err.to_string().contains("missing columns"));
 
-        migrate(&conn, None).expect("migrate must upgrade a pre-7.1 database");
+        migrate(&conn, None, None).expect("migrate must upgrade a pre-7.1 database");
 
         let post_columns: Vec<String> = conn
             .prepare("PRAGMA table_info(llm_wiki_entries)")
@@ -642,7 +788,7 @@ mod tests {
             "test precondition: no synth_hash before migrate()"
         );
 
-        migrate(&conn, None).expect("migrate must succeed upgrading a V10 DB");
+        migrate(&conn, None, None).expect("migrate must succeed upgrading a V10 DB");
 
         let post_has_synth_hash: bool = conn
             .prepare("PRAGMA table_info(documents)")
@@ -949,7 +1095,7 @@ mod tests {
         )
         .unwrap();
 
-        migrate(&conn, Some("/vault".to_string())).unwrap();
+        migrate(&conn, Some("/vault".to_string()), None).unwrap();
 
         let entity_id_working: String = conn
             .query_row(
@@ -1139,7 +1285,7 @@ mod tests {
         // Pre-fix bug: gating on `version < 7` skipped the ALTER TABLE,
         // leaving `chunks` without `content_hash`. With the V9 gate the
         // column is added.
-        migrate(&conn, None).expect("migrate must succeed on Phase 5 DB");
+        migrate(&conn, None, None).expect("migrate must succeed on Phase 5 DB");
 
         let has_content_hash: bool = conn
             .prepare("PRAGMA table_info(chunks)")
@@ -1193,6 +1339,207 @@ mod tests {
             [id],
         )
         .unwrap();
+    }
+
+    /// Hand-build the schema to the V16 state (everything except the V17
+    /// package columns and the V18 #186 step), mirroring the other
+    /// hand-built-migration tests. Stamping 16 lets migrate() run its V17 and
+    /// V18 gates against a brain that predates the fix.
+    fn build_pre_v18_brain(conn: &Connection) {
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3
+        ))
+        .unwrap();
+        conn.execute_batch(MIGRATION_V4).unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
+            .unwrap();
+        crate::db::ddl_compat::add_column_if_missing(
+            conn,
+            "documents",
+            "quarantined_at",
+            "INTEGER",
+        )
+        .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V14))
+            .unwrap();
+        conn.execute_batch(MIGRATION_V15).unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V16))
+            .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (16)",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// Seed the pre-V18 damage: a mangleable librarian row whose ref is still
+    /// valid JSON with a live chunk anchor, plus a user_stated row carrying
+    /// the old manual sentinel, on a brain-complete chunks/documents pair.
+    fn seed_v18_damage(conn: &Connection) -> String {
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        let hash64 = format!("{}{}", "feedface00", "0".repeat(54));
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line,
+                 strategy, entity_id, content_hash)
+             VALUES (?1, 'c', 0, 1, 1, 'prose', 'ent', ?2)",
+            rusqlite::params![doc_id, hash64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact_v18', 'ent', 't', 'b', '[]', 'inferred',
+                     'librarian_inferred', ?1, 1, 1)",
+            [format!(
+                r#"{{"evidence":[{{"chunk_id":1,"content_hash":"{hash64}"}}],"proposal_id":"prop_v18"}}"#
+            )],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact_manual', 'ent', 't', 'b', '[]', 'confirmed',
+                     'user_stated', '{\"proposal_id\":null,\"evidence\":[]}', 1, 1)",
+            [],
+        )
+        .unwrap();
+        hash64
+    }
+
+    /// Review round 5, finding 7: the production FILE-BACKED V18 path —
+    /// backup export, the exported==census.damaged invariant, the user_stated
+    /// sentinel normalization, the stamp — had zero coverage; every
+    /// always-run test reached migrate() with db_dir=None.
+    #[test]
+    fn v18_file_backed_repair_exports_backs_up_and_tokens_damaged_rows() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        build_pre_v18_brain(&conn);
+        seed_v18_damage(&conn);
+
+        migrate(&conn, None, Some(tmp.path())).expect("file-backed V18 migration must succeed");
+
+        // Backup invariant: one JSON file per damaged row under
+        // repair-export-186/, written BEFORE any mutation.
+        let export =
+            std::fs::read_to_string(tmp.path().join("repair-export-186").join("fact_v18.json"))
+                .expect("damaged row must be backed up before mutation");
+        assert!(export.contains("prop_v18"));
+
+        // The damaged row got the token and its paired evidence row.
+        let ref_after: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = 'fact_v18'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            ref_after,
+            crate::db::commit::librarian_source_ref_token("fact_v18")
+        );
+        let (pid, unanchored): (String, i64) = conn
+            .query_row(
+                "SELECT proposal_id, unanchored FROM librarian_evidence
+                  WHERE entry_id = 'fact_v18'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pid, "prop_v18");
+        assert_eq!(unanchored, 0, "the seeded chunk anchor is live");
+
+        // Finding 1: the user_stated sentinel is normalized to NULL.
+        let manual_ref: Option<String> = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = 'fact_manual'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(manual_ref, None, "manual sentinel must be nulled by V18");
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 18, "the V18 stamp must land after the repair");
+    }
+
+    /// Review round 5, finding 4: a file-IO failure inside the backed repair
+    /// arm must not abort migrate() — AppDb::open would fail on every launch
+    /// (boot loop). Fail-safe posture: skip the destructive phase with a loud
+    /// WARN, damaged data survives as-is, and the stamp still lands.
+    #[test]
+    fn v18_file_backed_repair_survives_an_unwritable_export_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        build_pre_v18_brain(&conn);
+        seed_v18_damage(&conn);
+        // Block the export directory with a regular FILE so
+        // create_dir_all/export fails with a non-DB error (full-disk proxy).
+        std::fs::write(tmp.path().join("repair-export-186"), "not a dir").unwrap();
+
+        migrate(&conn, None, Some(tmp.path()))
+            .expect("migrate must survive an unwritable export dir (fail-safe)");
+
+        // The destructive phase was skipped: the damaged row survives intact.
+        let ref_after: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = 'fact_v18'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            ref_after.starts_with('{'),
+            "damaged row must survive untouched when the backup export fails"
+        );
+        let evidence_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE entry_id = 'fact_v18'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence_rows, 0);
+
+        // And the stamp still lands — no boot loop on the next launch.
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 18);
     }
 
     #[test]

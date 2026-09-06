@@ -351,6 +351,39 @@ CREATE INDEX IF NOT EXISTS idx_llm_wiki_entries_tier
 INSERT OR IGNORE INTO schema_version (version) VALUES (16);
 ";
 
+/// V18: CT-owned evidence storage for librarian-inferred facts (issue #186).
+///
+/// Structured evidence moves out of `llm_wiki_entries.source_ref` — which the
+/// JS engine's `setup()` rewrites unconditionally through `normalizeSourceRef`,
+/// destroying any JSON in it — and into this table, which the engine never
+/// touches. `source_ref` keeps only a normalizer-idempotent token.
+///
+/// The `json_valid` CHECK is the guardrail: JSON is universally required in
+/// this column, so any future mangling fails loudly at write time instead of
+/// silently corrupting provenance.
+///
+/// The FK CASCADE documents intent only. SQLite enforces foreign keys per
+/// connection (`PRAGMA foreign_keys=ON`) and brain.db has several connections
+/// whose pragma state we do not control, so every deletion path issues an
+/// explicit paired `DELETE FROM librarian_evidence`. See spec §2.1.
+/// V18 DDL only — deliberately carries **no** schema_version stamp. The V18
+/// one-shot repair (connection.rs) runs after this DDL and stamps version 18
+/// itself, so a crash mid-repair leaves the database unstamped and the next
+/// open re-enters the migration and retries. Every statement here is
+/// idempotent (`IF NOT EXISTS`) to make that re-entry safe. Spec §2.5.
+pub const MIGRATION_V18: &str = "
+CREATE TABLE IF NOT EXISTS librarian_evidence (
+  entry_id      TEXT PRIMARY KEY REFERENCES llm_wiki_entries(id) ON DELETE CASCADE,
+  proposal_id   TEXT NOT NULL,
+  evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  unanchored    INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx
+  ON librarian_evidence(proposal_id);
+";
+
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
 ///
 /// The V16 CHECK is the database-level floor; this is the same set expressed

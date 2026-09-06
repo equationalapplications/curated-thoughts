@@ -139,6 +139,13 @@ pub struct WikiFact {
     /// Convenience: actor string of the latest verifier. NULL when `okf_verified` is empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_verified_by: Option<String>,
+    /// CT-owned librarian evidence blob (JSON string), carried through bundle
+    /// export/apply so a librarian-inferred fact keeps its paired
+    /// `librarian_evidence` row. `None` for every non-librarian fact and for
+    /// older bundles that predate the field (serde `default` keeps them
+    /// deserializable). Spec §2.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

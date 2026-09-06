@@ -524,7 +524,7 @@ export interface NeighborRow {
 }
 
 export const getChunkIdsForWikiEntry = (
-  entryId: number,
+  entryId: string,
   entityId: string,
 ): Promise<number[]> =>
   invoke('get_chunk_ids_for_wiki_entry', { entryId, entityId });
@@ -676,6 +676,8 @@ export interface OkfImportResult {
   edges_added: number;
   events_added: number;
   events_skipped: number;
+  /** Non-fatal provenance losses; the dropped data is preserved verbatim. */
+  warnings: string[];
 }
 
 export type OkfImportMode = "merge" | "replace" | "clone";

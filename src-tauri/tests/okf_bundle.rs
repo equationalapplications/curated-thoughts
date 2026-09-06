@@ -271,3 +271,119 @@ fn export_writes_exported_event_per_entity() {
     assert!(summary.starts_with("Exported"));
     assert!(summary.contains("Project X"));
 }
+
+/// Task 11 (#186): librarian evidence must survive the bundle round-trip.
+/// Export path: `load_export_entities` (as `okf_export_bundle_cmd` does);
+/// apply path: `apply_import` (as `okf_apply_bundle_cmd` does).
+#[test]
+fn bundle_roundtrip_preserves_librarian_evidence() {
+    use tauri_app_lib::db::bundle_apply::{apply_import, ImportMode};
+    use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::connection::open_in_memory;
+
+    // Source brain: one librarian token row plus its evidence.
+    let src = open_in_memory().unwrap();
+    src.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent-b','Bundle Entity','concept','s',100,100)",
+        [],
+    )
+    .unwrap();
+    src.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_b','ent-b','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_b",
+        )],
+    )
+    .unwrap();
+    tauri_app_lib::db::commit::insert_librarian_evidence(
+        &src,
+        "fact_b",
+        "prop_b",
+        r#"{"proposal_id":"prop_b","evidence":[{"chunk_id":1,"content_hash":"bb"}]}"#,
+        false,
+        1,
+    )
+    .unwrap();
+
+    // Round-trip through the same entry points the commands use.
+    let entities = load_export_entities(&src, None).unwrap();
+    let files = tauri_app_lib::okf::bundle_write::write_bundle(&entities).unwrap();
+    let bundle = parse_bundle(&files).unwrap();
+    let mut dest = open_in_memory().unwrap();
+    apply_import(&mut dest, &bundle, ImportMode::Merge).unwrap();
+
+    let stored = tauri_app_lib::db::commit::evidence_json_for_entry(&dest, "fact_b")
+        .unwrap()
+        .expect("evidence must survive the bundle roundtrip");
+    assert!(serde_json::from_str::<serde_json::Value>(&stored).is_ok());
+
+    let ref_after: String = dest
+        .query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE id='fact_b'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(ref_after.starts_with("librarian-"));
+}
+
+/// Final-review fix (I2): a pre-#186 bundle — legacy JSON `source_ref`, no
+/// paired `librarian_evidence` frontmatter — must apply with a token-shaped
+/// `source_ref` and a salvaged evidence row, and the row's `unanchored` flag
+/// must be computed (no live chunk in the destination ⇒ 1). Spec §2.3, §2.4.
+#[test]
+fn bundle_apply_normalizes_legacy_json_source_ref() {
+    use tauri_app_lib::db::bundle_apply::{apply_import, ImportMode};
+    use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::connection::open_in_memory;
+
+    // Source brain: a pre-#186 librarian fact — JSON ref, no evidence row.
+    let src = open_in_memory().unwrap();
+    src.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent-pre','Pre Bundle','concept','s',100,100)",
+        [],
+    )
+    .unwrap();
+    src.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_pre','ent-pre','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [r#"{"proposal_id":"prop_pre","evidence":[{"chunk_id":1,"content_hash":"cc"}]}"#],
+    )
+    .unwrap();
+
+    let entities = load_export_entities(&src, None).unwrap();
+    let files = tauri_app_lib::okf::bundle_write::write_bundle(&entities).unwrap();
+    let bundle = parse_bundle(&files).unwrap();
+    let mut dest = open_in_memory().unwrap();
+    apply_import(&mut dest, &bundle, ImportMode::Merge).unwrap();
+
+    let ref_after: String = dest
+        .query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE id='fact_pre'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        ref_after.starts_with("librarian-") && ref_after.len() == "librarian-".len() + 32,
+        "legacy JSON ref must be rewritten to the token: {ref_after}"
+    );
+
+    let (proposal_id, unanchored): (String, i64) = dest
+        .query_row(
+            "SELECT proposal_id, unanchored FROM librarian_evidence WHERE entry_id='fact_pre'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("legacy evidence must be salvaged into a librarian_evidence row");
+    assert_eq!(proposal_id, "prop_pre");
+    assert_eq!(
+        unanchored, 1,
+        "salvaged blob has no live chunk in dest, so unanchored must be computed to 1"
+    );
+}

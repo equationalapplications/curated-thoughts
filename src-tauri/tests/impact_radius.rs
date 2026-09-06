@@ -112,3 +112,143 @@ fn impact_radius_traverses_recursive_call_graphs_in_both_directions() {
         "E should be recognized as a direct caller of A"
     );
 }
+
+#[test]
+fn get_chunk_ids_returns_evidence_anchors_for_token_rows() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO documents (path, hash, tier, status)
+         VALUES ('notes.md','h','user_doc','indexed')",
+        [],
+    )
+    .unwrap();
+    let doc_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+             entity_id, content_hash)
+         VALUES (?1,'c',0,1,1,'prose','ent','h1')",
+        [doc_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_g','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_g",
+        )],
+    )
+    .unwrap();
+    tauri_app_lib::db::commit::insert_librarian_evidence(
+        &conn,
+        "fact_g",
+        "prop_g",
+        r#"{"evidence":[{"chunk_id":1,"content_hash":"h1"}],"proposal_id":"prop_g"}"#,
+        false,
+        1,
+    )
+    .unwrap();
+
+    let ids = tauri_app_lib::chunk_ids_for_entry(&conn, "fact_g", "ent", None);
+    assert!(
+        !ids.is_empty(),
+        "token rows must resolve their evidence anchors"
+    );
+}
+
+#[test]
+fn get_chunk_ids_returns_empty_for_token_row_without_evidence() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_ne','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_ne",
+        )],
+    )
+    .unwrap();
+    // Empty, not a wrong-namespace fallback. The caller must render nothing.
+    assert!(tauri_app_lib::chunk_ids_for_entry(&conn, "fact_ne", "ent", None).is_empty());
+}
+
+#[test]
+fn get_chunk_ids_matches_the_grounding_predicate_across_entity_stamps() {
+    // Review round 5, finding 9: the anchor lookup filtered chunks by
+    // entity_id and skipped chunk_id-only items, while the grounding
+    // predicate `evidence_has_live_chunk` does neither. A fact could be
+    // provably grounded (never healed, never pruned) yet yield zero chunk
+    // ids — no neighbors and no source docs in the wiki graph.
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO documents (path, hash, tier, status)
+         VALUES ('notes.md','h','user_doc','indexed')",
+        [],
+    )
+    .unwrap();
+    let doc_id = conn.last_insert_rowid();
+    // The anchor chunk is stamped with a DIFFERENT entity than the entry —
+    // e.g. after a workspace/entity-id transition. The grounding predicate
+    // matches it; the chunk-id resolver must too.
+    conn.execute(
+        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+             entity_id, content_hash)
+         VALUES (?1,'c',0,1,1,'prose','ent_other','h9')",
+        [doc_id],
+    )
+    .unwrap();
+    let chunk_rowid = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_hash','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_hash",
+        )],
+    )
+    .unwrap();
+    tauri_app_lib::db::commit::insert_librarian_evidence(
+        &conn,
+        "fact_hash",
+        "prop_hash",
+        r#"{"evidence":[{"chunk_id":999999,"content_hash":"h9"}],"proposal_id":"prop_hash"}"#,
+        false,
+        1,
+    )
+    .unwrap();
+    let ids = tauri_app_lib::chunk_ids_for_entry(&conn, "fact_hash", "ent", None);
+    assert_eq!(
+        ids,
+        vec![chunk_rowid],
+        "a hash anchor on a chunk stamped with another entity_id must still resolve"
+    );
+
+    // A chunk_id-only item (no usable content_hash) is a legacy rowid
+    // anchor — the grounding predicate accepts it as a fallback, so the
+    // resolver must too, not skip it.
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_cid','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_cid",
+        )],
+    )
+    .unwrap();
+    tauri_app_lib::db::commit::insert_librarian_evidence(
+        &conn,
+        "fact_cid",
+        "prop_cid",
+        &format!(r#"{{"evidence":[{{"chunk_id":{chunk_rowid}}}],"proposal_id":"prop_cid"}}"#),
+        false,
+        1,
+    )
+    .unwrap();
+    let ids = tauri_app_lib::chunk_ids_for_entry(&conn, "fact_cid", "ent", None);
+    assert_eq!(
+        ids,
+        vec![chunk_rowid],
+        "a chunk_id-only anchor (no content_hash) must resolve like the grounding predicate does"
+    );
+}

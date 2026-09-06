@@ -60,6 +60,12 @@ pub fn forget_entries_by_source_refs(
         )?;
     }
 
+    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
+    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
+    // deleted explicitly alongside its entry.
+    let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
+    crate::db::commit::delete_librarian_evidence(&tx, &doomed_ids)?;
+
     let delete_sql = format!("DELETE FROM llm_wiki_entries WHERE source_ref IN ({placeholders})");
     let removed = tx.execute(&delete_sql, rusqlite::params_from_iter(source_refs.iter()))?;
 
@@ -336,6 +342,39 @@ mod tests {
             .query_row("SELECT count(*) FROM llm_wiki_outbox", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn forget_entries_by_source_refs_leaves_no_orphaned_evidence() {
+        let conn = open_in_memory().unwrap();
+        // brain.db has connections whose `PRAGMA foreign_keys` state we do not
+        // control (spec §2.1); replicate the OFF case so the test cannot pass
+        // via FK CASCADE.
+        conn.execute("PRAGMA foreign_keys=OFF", []).unwrap();
+        seed_entry(&conn, "fact_p", "ent", Some("/vault/p.pdf"));
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_p",
+            "prop_p",
+            r#"{"evidence":[],"proposal_id":"prop_p"}"#,
+            false,
+            1,
+        )
+        .unwrap();
+
+        let removed =
+            forget_entries_by_source_refs(&conn, &["/vault/p.pdf".to_string()], 1_756_000_000_000)
+                .unwrap();
+        assert_eq!(removed, 1);
+
+        let orphaned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE entry_id='fact_p'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned, 0, "evidence row must be deleted with its entry");
     }
 
     #[test]

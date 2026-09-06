@@ -158,6 +158,11 @@ pub struct ImportResult {
     pub edges_added: i64,
     pub events_added: i64,
     pub events_skipped: i64,
+    /// Non-fatal provenance losses (review round 5, findings 3+10): a
+    /// librarian fact whose legacy source_ref could not be salvaged, or whose
+    /// evidence blob has no usable `proposal_id`. The dropped data is
+    /// preserved verbatim in the message so nothing is silently destroyed.
+    pub warnings: Vec<String>,
 }
 
 fn now_timestamps() -> (i64, i64) {
@@ -176,6 +181,17 @@ fn row_exists(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> 
 
 fn fact_exists(conn: &Connection, id: &str) -> Result<bool> {
     row_exists(conn, "SELECT 1 FROM llm_wiki_entries WHERE id=?1", &[&id])
+}
+
+/// True iff `source_ref` is the normative token shape `^librarian-[0-9a-f]{32}$`
+/// (spec §2.2). Delegates to the canonical `commit::is_librarian_source_ref_token`
+/// — review round 5, finding 2: this local copy accepted UPPERCASE hex via
+/// `is_ascii_hexdigit`, so a human-edited bundle carrying `librarian-<32
+/// uppercase hex>` was stored verbatim while every reader (grounding, source
+/// docs, census) classified it as a legacy document path — provenance resolved
+/// to nothing and the next heal sweep soft-deleted the healthy imported fact.
+fn is_librarian_token_shaped(source_ref: &str) -> bool {
+    crate::db::commit::is_librarian_source_ref_token(source_ref)
 }
 
 fn task_exists(conn: &Connection, id: &str) -> Result<bool> {
@@ -352,6 +368,41 @@ pub fn apply_import(
                 .okf_sources
                 .as_deref()
                 .or_else(|| synthetic_sources.get(&fact.id).map(String::as_str));
+            // Pre-#186 librarian facts carry a legacy JSON `source_ref` (the
+            // blob the engine setup rewrite mangled). On apply they are
+            // normalized to the token shape, and a ref that STRICTLY extracts
+            // a proposal_id (`proposal_id_from_evidence_json`) is salvaged
+            // into the paired librarian_evidence row. Anything else —
+            // engine-mangled non-JSON refs, JSON with a null/absent
+            // proposal_id — is not silently destroyed: the dropped ref is
+            // preserved verbatim in the result warnings (review round 5,
+            // findings 3+10), matching the V18 repair's export-before-drop
+            // posture. The row itself follows spec §2.3's
+            // token-without-evidence stance: still-grounded, never
+            // auto-purged.
+            let mut legacy_evidence_json: Option<&str> = None;
+            let effective_source_ref = if fact.source_type == "librarian_inferred"
+                && !fact
+                    .source_ref
+                    .as_deref()
+                    .map(is_librarian_token_shaped)
+                    .unwrap_or(false)
+            {
+                if let Some(legacy) = fact.source_ref.as_deref() {
+                    if crate::db::commit::proposal_id_from_evidence_json(legacy).is_some() {
+                        legacy_evidence_json = Some(legacy);
+                    } else {
+                        result.warnings.push(format!(
+                            "librarian fact {fact_id}: legacy source_ref not salvageable \
+                             (no usable proposal_id); normalized to a fresh token, dropped \
+                             ref preserved verbatim: {legacy}"
+                        ));
+                    }
+                }
+                Some(crate::db::commit::librarian_source_ref_token(&fact_id))
+            } else {
+                fact.source_ref.clone()
+            };
             tx.execute(
                 "INSERT INTO llm_wiki_entries (
                     id, entity_id, title, body, tags, confidence, source_type,
@@ -371,7 +422,7 @@ pub fn apply_import(
                     fact.confidence,
                     fact.source_type,
                     fact.source_hash,
-                    fact.source_ref,
+                    effective_source_ref,
                     fact.okf_type,
                     fact.lifecycle_status,
                     fact.stale_after,
@@ -402,7 +453,7 @@ pub fn apply_import(
                     &fact.confidence,
                     &fact.source_type,
                     fact.source_hash.as_deref(),
-                    fact.source_ref.as_deref().unwrap_or(""),
+                    effective_source_ref.as_deref().unwrap_or(""),
                     fact.okf_type.as_deref(),
                     effective_sources,
                     fact.okf_verified.as_deref(),
@@ -418,6 +469,42 @@ pub fn apply_import(
                 ),
                 now_ms,
             )?;
+            // Bundle-applied librarian facts keep their token and their evidence
+            // together; a token row without evidence is treated as still-grounded by
+            // the §2.3 rule, but importing one deliberately would be a silent
+            // provenance loss. Spec §2.3.
+            if let Some(evidence_json) = fact.evidence_json.as_deref().or(legacy_evidence_json) {
+                match crate::db::commit::proposal_id_from_evidence_json(evidence_json) {
+                    Some(proposal_id) => {
+                        // Compute the real Phase-1 flag: a bundle-applied row whose
+                        // blob has no live chunk anchor must be unanchored=1, or it
+                        // re-arms the heal-purge bait. Spec §2.4.
+                        let unanchored =
+                            !crate::db::commit::evidence_has_live_chunk(&tx, evidence_json)?;
+                        crate::db::commit::insert_librarian_evidence(
+                            &tx,
+                            &fact_id,
+                            &proposal_id,
+                            evidence_json,
+                            unanchored,
+                            now_ms,
+                        )?;
+                    }
+                    None => {
+                        // Strict routing (review round 5, finding 10): a blob
+                        // with no usable proposal_id must not become a
+                        // `proposal_id = ''` evidence row — no retraction
+                        // could ever match it and no proposal could ever be
+                        // re-attributed through it. Warn and skip, preserving
+                        // the blob verbatim in the warnings.
+                        result.warnings.push(format!(
+                            "librarian fact {fact_id}: evidence blob has no usable \
+                             proposal_id; evidence not attached, blob preserved \
+                             verbatim: {evidence_json}"
+                        ));
+                    }
+                }
+            }
             result.facts_added += 1;
         }
 
@@ -661,6 +748,14 @@ fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result
             now_ms,
         )?;
     }
+    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
+    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
+    // deleted explicitly alongside its entry.
+    tx.execute(
+        "DELETE FROM librarian_evidence WHERE entry_id IN
+             (SELECT id FROM llm_wiki_entries WHERE entity_id = ?1)",
+        [entity_id],
+    )?;
     tx.execute(
         "DELETE FROM llm_wiki_entries WHERE entity_id=?1",
         [entity_id],
@@ -712,6 +807,7 @@ mod tests {
             okf_usage_window: None,
             last_verified_at: None,
             last_verified_by: None,
+            evidence_json: None,
         }
     }
 
@@ -1056,6 +1152,104 @@ mod tests {
         assert_eq!(
             extract_citations_urls(body),
             vec!["https://example.com/a".to_string()]
+        );
+    }
+
+    #[test]
+    fn uppercase_pseudo_token_is_treated_as_legacy_and_normalized() {
+        // Review round 5, finding 2: the local shape test accepted
+        // `is_ascii_hexdigit` (uppercase too), so a human-edited bundle
+        // carrying `librarian-<32 UPPERCASE hex>` was stored verbatim while
+        // every reader classified it as a legacy document path.
+        let mut conn = open_in_memory().unwrap();
+        let mut bundle = sample_bundle();
+        bundle.entities[0].facts[0].source_type = "librarian_inferred".into();
+        bundle.entities[0].facts[0].source_ref =
+            Some("librarian-ABCDEF0123456789ABCDEF0123456789".into());
+
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id='fact_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            crate::db::commit::librarian_source_ref_token("fact_1"),
+            "an uppercase pseudo-token must be normalized, not stored verbatim"
+        );
+        // The uppercase ref is not JSON, so nothing was salvageable — the
+        // drop must be surfaced as a warning, not silence.
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn engine_mangled_ref_is_tokenized_with_a_warning_not_silent_loss() {
+        // Review round 5, finding 3: a pre-fix bundle whose librarian facts
+        // carry engine-mangled (non-JSON) refs used to get a fresh token with
+        // no evidence row, no backup, and no warning. The dropped ref must
+        // now be preserved verbatim in the result warnings.
+        let mut conn = open_in_memory().unwrap();
+        let mut bundle = sample_bundle();
+        bundle.entities[0].facts[0].source_type = "librarian_inferred".into();
+        bundle.entities[0].facts[0].source_ref =
+            Some("evidencechunk_id7content_hashfeedface00".into());
+
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(result.facts_added, 1);
+        assert_eq!(
+            result.warnings.len(),
+            1,
+            "the dropped provenance must be surfaced, not silently destroyed"
+        );
+        assert!(
+            result.warnings[0].contains("evidencechunk_id7content_hashfeedface00"),
+            "warning must preserve the dropped ref verbatim: {}",
+            result.warnings[0]
+        );
+        let evidence_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE entry_id = 'fact_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence_rows, 0, "nothing was salvageable");
+    }
+
+    #[test]
+    fn json_null_proposal_id_is_not_salvaged_into_an_empty_proposal_row() {
+        // Review round 5, finding 10: the salvage gate accepted a JSON-null
+        // proposal_id (`get().is_some()`) and then `.unwrap_or_default()`
+        // wrote an evidence row keyed `proposal_id = ''` that no retraction
+        // could ever match. Strict extraction must route it to a warning.
+        let mut conn = open_in_memory().unwrap();
+        let mut bundle = sample_bundle();
+        bundle.entities[0].facts[0].source_type = "librarian_inferred".into();
+        bundle.entities[0].facts[0].source_ref =
+            Some(r#"{"proposal_id":null,"evidence":[]}"#.into());
+
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(
+            result.warnings.len(),
+            1,
+            "a JSON-null proposal_id is not salvageable"
+        );
+        let empty_pid_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE proposal_id = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            empty_pid_rows, 0,
+            "no evidence row may be written under an empty proposal_id"
         );
     }
 }

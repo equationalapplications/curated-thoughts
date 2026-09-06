@@ -1810,6 +1810,11 @@ fn prune_old_librarian_inferred(conn: &rusqlite::Connection, now_ms: i64) -> Res
         .map_err(|e| e.to_string())?;
     }
 
+    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
+    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
+    // deleted explicitly alongside its entry.
+    crate::db::commit::delete_librarian_evidence(&tx, &doomed_ids).map_err(|e| e.to_string())?;
+
     let deleted = tx
         .execute(
             "DELETE FROM llm_wiki_entries
@@ -2524,9 +2529,127 @@ fn get_structural_neighbors(
     Ok(results)
 }
 
+/// Chunk ids underlying a wiki entry.
+///
+/// Librarian rows carry a token and keep their evidence in
+/// `librarian_evidence` (spec §2.3); document-sourced rows keep a path ref and
+/// resolve through the vault as before.
+///
+/// The old code took an `i64` and matched `WHERE rowid = ?1 OR id = ?1`.
+/// `llm_wiki_entries.id` is TEXT (`fact_<hex>`), so the `id` half could never
+/// match an integer bind — the clause was dead. The parameter is now the entry
+/// id proper. Spec §7.7.
+///
+/// Pure and connection-only so it is testable without a Tauri `State`; the
+/// command below is a thin wrapper. `vault_root` is `None` when no vault is
+/// configured, in which case document-sourced rows resolve to empty.
+pub fn chunk_ids_for_entry(
+    conn: &rusqlite::Connection,
+    entry_id: &str,
+    entity_id: &str,
+    vault_root: Option<&std::path::Path>,
+) -> Vec<i64> {
+    let source_ref: Option<String> = conn
+        .query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or(None)
+        .flatten();
+    let Some(source_ref) = source_ref else {
+        return Vec::new();
+    };
+
+    // Strict token shape, not a prefix test — same contract as
+    // `source_docs_from_ref`. Spec §2.2.
+    if crate::db::commit::is_librarian_source_ref_token(&source_ref) {
+        let Ok(Some(json)) = crate::db::commit::evidence_json_for_entry(conn, entry_id) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+            return Vec::new();
+        };
+        let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for item in evidence {
+            // Mirror `evidence_has_live_chunk` exactly (review round 5,
+            // finding 9): hashes match with NO entity filter, and the
+            // chunk_id rowid is a fallback only when the item carries no
+            // usable hash. The old `AND c.entity_id = ?2` filter let a fact
+            // be provably grounded yet yield zero chunk ids (e.g. a
+            // workspace/entity-id transition re-stamped the chunk), and
+            // skipping chunk_id-only items dropped legacy anchors the
+            // grounding predicate still accepts — so the wiki graph showed
+            // no neighbors for a fact the system insisted was grounded.
+            let hash = item
+                .get("content_hash")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let resolved: Option<i64> = if let Some(hash) = hash {
+                conn.query_row(
+                    "SELECT id FROM chunks WHERE content_hash = ?1 LIMIT 1",
+                    [hash],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap_or(None)
+            } else {
+                item.get("chunk_id")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|cid| {
+                        conn.query_row("SELECT id FROM chunks WHERE id = ?1 LIMIT 1", [cid], |r| {
+                            r.get(0)
+                        })
+                        .optional()
+                        .unwrap_or(None)
+                    })
+            };
+            if let Some(id) = resolved {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        return ids;
+    }
+
+    // Document-sourced path ref: unchanged legacy behavior.
+    let Some(vault_root) = vault_root else {
+        return Vec::new();
+    };
+    let Ok(normalized_rel) = normalize_path_argument_to_vault_relative(&source_ref, vault_root)
+    else {
+        return Vec::new();
+    };
+    let Ok(safe) = crate::vault::safe_vault_path(
+        vault_root,
+        &normalized_rel,
+        crate::vault::READABLE_SUBDIRS,
+        crate::vault::PathMode::MustExist,
+    ) else {
+        return Vec::new();
+    };
+    let abs_path = safe.to_string_lossy().into_owned();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT c.id FROM chunks c
+         JOIN documents d ON d.id = c.doc_id
+         WHERE d.path = ?1 AND c.entity_id = ?2 AND d.status = 'indexed'",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([&abs_path, entity_id], |row| row.get::<_, i64>(0)) else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
 #[tauri::command]
 fn get_chunk_ids_for_wiki_entry(
-    entry_id: i64,
+    entry_id: String,
     entity_id: String,
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
@@ -2536,63 +2659,15 @@ fn get_chunk_ids_for_wiki_entry(
         .lock()
         .unwrap()
         .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no vault path set".to_string())?;
-    let vault_root = std::path::PathBuf::from(&root);
-
-    let source_ref: Option<String> = {
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
-        conn.query_row(
-            "SELECT source_ref FROM llm_wiki_entries WHERE rowid = ?1 OR id = ?1",
-            [entry_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?
-        .flatten()
-    };
-
-    let source_ref = match source_ref {
-        Some(r) => r,
-        None => return Ok(Vec::new()),
-    };
-
-    let normalized_rel = match normalize_path_argument_to_vault_relative(&source_ref, &vault_root) {
-        Ok(r) => r,
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    let safe = match crate::vault::safe_vault_path(
-        &vault_root,
-        &normalized_rel,
-        crate::vault::READABLE_SUBDIRS,
-        crate::vault::PathMode::MustExist,
-    ) {
-        Ok(p) => p,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let abs_path = safe.to_string_lossy().into_owned();
-
+        .map_err(|e| e.to_string())?;
+    let vault_root = root.map(std::path::PathBuf::from);
     let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id FROM chunks c
-             JOIN documents d ON d.id = c.doc_id
-             WHERE d.path = ?1 AND c.entity_id = ?2 AND d.status = 'indexed'",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&abs_path, &entity_id], |row| row.get::<_, i64>(0))
-        .map_err(|e| e.to_string())?;
-
-    let mut ids = Vec::new();
-    for id in rows.flatten() {
-        ids.push(id);
-    }
-
-    Ok(ids)
+    Ok(chunk_ids_for_entry(
+        &guard.0,
+        &entry_id,
+        &entity_id,
+        vault_root.as_deref(),
+    ))
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────
@@ -4444,6 +4519,45 @@ mod maintenance_command_tests {
             )
             .unwrap();
         assert_eq!(old_gone, 0);
+    }
+
+    #[test]
+    fn prune_old_librarian_inferred_leaves_no_orphaned_evidence() {
+        let conn = open_in_memory().unwrap();
+        // brain.db has connections whose `PRAGMA foreign_keys` state we do not
+        // control (spec §2.1); replicate the OFF case so the test cannot pass
+        // via FK CASCADE.
+        conn.execute("PRAGMA foreign_keys=OFF", []).unwrap();
+        let now_ms = 1_000_000_000_000i64;
+        let old = now_ms - 8 * 24 * 60 * 60 * 1000;
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count, deleted_at)
+             VALUES ('fact_p','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0,?2)",
+            rusqlite::params![crate::db::commit::librarian_source_ref_token("fact_p"), old],
+        )
+        .unwrap();
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_p",
+            "prop_p",
+            r#"{"evidence":[],"proposal_id":"prop_p"}"#,
+            false,
+            1,
+        )
+        .unwrap();
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+        assert_eq!(deleted, 1);
+
+        let orphaned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE entry_id='fact_p'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned, 0, "evidence row must be deleted with its entry");
     }
 
     #[test]

@@ -1,0 +1,870 @@
+//! One-shot repair of `llm_wiki_entries.source_ref` blobs mangled by the JS
+//! engine's setup-time rewrite (issue #186).
+//!
+//! Detection is a **positive token-shape test**: a `librarian_inferred` row is
+//! damaged iff its `source_ref` is not already the new token. That asks "is
+//! this the new shape" rather than "does it look mangled", so it stays correct
+//! regardless of the mangled blobs' internal layout. Spec §2.5.1.
+//!
+//! Every query here carries `source_type = 'librarian_inferred'`. A legitimate
+//! document-sourced ref can itself be exactly 255 chars (long vault paths
+//! normalize to the cap), so shape/length heuristics without that predicate
+//! would classify good rows as damaged and delete them.
+
+use crate::db::outbox_format::OutboxOperation;
+use anyhow::Result;
+use rusqlite::{Connection, OptionalExtension};
+use std::path::Path;
+
+/// GLOB matching the normative token shape `^librarian-[0-9a-f]{32}$`
+/// (spec §2.2). SQLite GLOB has no repetition operator, so the 32 hex
+/// positions are spelled out.
+pub const TOKEN_GLOB: &str = "librarian-\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]";
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RepairCensus {
+    /// Rows needing repair: librarian_inferred, non-NULL, not already a token.
+    pub damaged: i64,
+    /// NULL refs — engine-era data, counted for visibility only, never touched.
+    pub null_ref: i64,
+    /// Damaged rows whose ref still parses as JSON (evidence survived intact).
+    pub valid_json: i64,
+    /// Mangled empty-evidence shape; `proposal_id` survived truncation.
+    pub shape_proposal_id: i64,
+    /// Mangled non-empty shape; `proposal_id` was truncated away.
+    pub shape_chunk_id: i64,
+    /// Damaged rows whose pristine payload is still in `llm_wiki_outbox`.
+    pub outbox_recoverable: i64,
+}
+
+fn count(conn: &Connection, sql: &str) -> Result<i64> {
+    Ok(conn
+        .query_row(sql, [], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0))
+}
+
+pub fn repair_census(conn: &Connection) -> Result<RepairCensus> {
+    let damaged_scope = format!(
+        "FROM llm_wiki_entries
+          WHERE source_type = 'librarian_inferred'
+            AND source_ref IS NOT NULL
+            AND source_ref NOT GLOB '{TOKEN_GLOB}'"
+    );
+    Ok(RepairCensus {
+        damaged: count(conn, &format!("SELECT COUNT(*) {damaged_scope}"))?,
+        null_ref: count(
+            conn,
+            "SELECT COUNT(*) FROM llm_wiki_entries
+              WHERE source_type = 'librarian_inferred' AND source_ref IS NULL",
+        )?,
+        valid_json: count(
+            conn,
+            &format!("SELECT COUNT(*) {damaged_scope} AND json_valid(source_ref)"),
+        )?,
+        shape_proposal_id: count(
+            conn,
+            &format!("SELECT COUNT(*) {damaged_scope} AND source_ref LIKE 'evidenceproposal_id%'"),
+        )?,
+        shape_chunk_id: count(
+            conn,
+            &format!("SELECT COUNT(*) {damaged_scope} AND source_ref LIKE 'evidencechunk_id%'"),
+        )?,
+        outbox_recoverable: count(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM llm_wiki_entries e
+                   JOIN llm_wiki_outbox o
+                     ON o.record_id = e.id
+                    AND o.table_name = 'entries'
+                    AND o.operation = 'INSERT'
+                  WHERE e.source_type = 'librarian_inferred'
+                    AND e.source_ref IS NOT NULL
+                    AND e.source_ref NOT GLOB '{TOKEN_GLOB}'
+                    AND json_valid(json_extract(o.payload, '$.source_ref'))"
+            ),
+        )?,
+    })
+}
+
+/// Keys emitted by `evidence_json_with_hashes` (commit.rs:628-641), in the
+/// order serde_json writes them — **alphabetically**, because
+/// `serde_json::Map` is a `BTreeMap` unless `preserve_order` is active and it
+/// is not active for this crate's runtime graph. That is why every mangled
+/// blob begins `evidence`, and why `proposal_id` sorts last. Spec §2.5.4.
+const EVIDENCE_KEYS: &[&str] = &[
+    "chunk_id",
+    "content_hash",
+    "end_line",
+    "quote",
+    "source_kind",
+    "start_line",
+];
+
+/// Path 4b: `{"evidence":[],"proposal_id":"prop_…"}` mangles to
+/// `evidenceproposal_idprop_<24hex>`. Short enough that the 255-char cap never
+/// truncated it, so the id is recoverable verbatim.
+pub fn extract_proposal_id_from_empty_shape(mangled: &str) -> Option<String> {
+    let rest = mangled.strip_prefix("evidenceproposal_id")?;
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if id.is_empty() || !id.starts_with("prop_") {
+        return None;
+    }
+    Some(id)
+}
+
+/// Minimum accepted `content_hash` length. Real content hashes are 64 hex
+/// chars; a 255-cap-truncated one is still tens of chars. Anything shorter is
+/// a mis-extraction — e.g. an empty `content_hash` followed by `end_line`
+/// yields "e", and a short probe into `proposal_for_content_hash`'s LIKE
+/// would silently mis-attribute rows. Spec §2.5.4.
+const MIN_CONTENT_HASH_LEN: usize = 8;
+
+/// Path 4c: for non-empty evidence, `proposal_id` sorted last, sat at the tail
+/// of the blob, and was truncated away by `.slice(0, 255)`. What survives in
+/// the head is the first evidence item's `content_hash` — the join key back to
+/// `curated_proposal_items.evidence`. Preferred over `chunk_id`, which is a
+/// legacy rowid and may be absent.
+///
+/// The hex run is terminated by **longest match against the known following
+/// key tokens** (`EVIDENCE_KEYS`), full or truncated: runtime serde_json
+/// writes item keys alphabetically, so a real mangled blob reads
+/// `…content_hash<hash>end_line…` and a plain hexdigit run would absorb the
+/// leading `e` of `end_line` into the hash, making it unmatchable. A run
+/// shorter than [`MIN_CONTENT_HASH_LEN`] is rejected as a mis-extraction.
+pub fn extract_leading_content_hash(mangled: &str) -> Option<String> {
+    let idx = mangled.find("content_hash")?;
+    let rest = &mangled[idx + "content_hash".len()..];
+    let mut end = rest.len();
+    for (i, c) in rest.char_indices() {
+        let suffix = &rest[i..];
+        // The next evidence-item key bleeding into the run — either the full
+        // token (untruncated blob) or its 255-cut tail (truncation landed
+        // inside the key). Both stop the hash before the key starts.
+        if EVIDENCE_KEYS
+            .iter()
+            .any(|k| suffix.starts_with(k) || (!suffix.is_empty() && k.starts_with(suffix)))
+        {
+            end = i;
+            break;
+        }
+        if !c.is_ascii_hexdigit() {
+            end = i;
+            break;
+        }
+    }
+    let hash = &rest[..end];
+    if hash.len() < MIN_CONTENT_HASH_LEN {
+        None
+    } else {
+        Some(hash.to_string())
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RepairReport {
+    pub from_outbox: usize,
+    pub from_valid_json: usize,
+    pub from_proposal_id: usize,
+    pub from_content_hash: usize,
+    pub deleted: usize,
+    pub ambiguous: usize,
+}
+
+/// Resolve the owning proposal for a `content_hash` recovered from a truncated
+/// ref. Ambiguity (a hash appearing in several proposals) is broken by
+/// proximity in `created_at` and reported, never silently picked.
+fn proposal_for_content_hash(
+    conn: &Connection,
+    hash: &str,
+    entry_created_at: i64,
+) -> Result<(Option<String>, bool)> {
+    let mut stmt = conn.prepare(
+        "SELECT i.proposal_id, p.created_at
+           FROM curated_proposal_items i
+           JOIN curated_proposals p ON p.id = i.proposal_id
+          WHERE i.evidence LIKE '%' || ?1 || '%'",
+    )?;
+    let mut rows: Vec<(String, i64)> = stmt
+        .query_map([hash], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(Result::ok)
+        .collect();
+    // Collapse to one row per proposal. `created_at` is functionally dependent
+    // on `proposal_id` (it comes from the JOIN), so duplicates are identical
+    // tuples — but sort first anyway so the distinct-proposal count below
+    // doesn't depend on the query's unspecified row order.
+    rows.sort();
+    rows.dedup();
+    let ambiguous = rows.len() > 1;
+    rows.sort_by_key(|(_, created)| (created - entry_created_at).abs());
+    Ok((rows.first().map(|(id, _)| id.clone()), ambiguous))
+}
+
+/// Rebuild an evidence blob from every item of a proposal.
+///
+/// The entry→item mapping was destroyed by the mangling, so the reconstruction
+/// rule is to attach the proposal's FULL item evidence to each surviving entry.
+/// The result may not byte-equal the original per-entry blob — acceptable:
+/// grounding re-checks chunk existence at repair time and superseding is
+/// per-entry. Spec §2.5.4.
+fn rebuild_evidence_for_proposal(conn: &Connection, proposal_id: &str) -> Result<Option<String>> {
+    let mut stmt =
+        conn.prepare("SELECT evidence FROM curated_proposal_items WHERE proposal_id = ?1")?;
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    for raw in stmt
+        .query_map([proposal_id], |r| r.get::<_, String>(0))?
+        .filter_map(Result::ok)
+    {
+        if let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&raw) {
+            merged.extend(items);
+        }
+    }
+    if merged.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        serde_json::json!({ "proposal_id": proposal_id, "evidence": merged }).to_string(),
+    ))
+}
+
+/// One-shot repair, run inside the V18 migration step. Idempotent: rows that
+/// already carry the token are out of scope, so a re-run is a no-op.
+pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairReport> {
+    let mut report = RepairReport::default();
+
+    let damaged: Vec<(String, String, String, i64)> = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, entity_id, source_ref, created_at FROM llm_wiki_entries
+              WHERE source_type = 'librarian_inferred'
+                AND source_ref IS NOT NULL
+                AND source_ref NOT GLOB '{TOKEN_GLOB}'"
+        ))?;
+        let damaged: Vec<(String, String, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .filter_map(Result::ok)
+            .collect();
+        damaged
+    };
+
+    for (entry_id, entity_id, mangled, created_at) in damaged {
+        // 4a. Outbox-first: the pristine, untruncated payload if it survived.
+        let from_outbox: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(payload, '$.source_ref') FROM llm_wiki_outbox
+                  WHERE record_id = ?1 AND table_name = 'entries' AND operation = 'INSERT'
+                  ORDER BY created_at DESC LIMIT 1",
+                [&entry_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .unwrap_or(None)
+            .flatten()
+            .filter(|s| serde_json::from_str::<serde_json::Value>(s).is_ok());
+
+        // proposal_id extraction goes through the single strict helper
+        // `commit::proposal_id_from_evidence_json` (review round 5, finding
+        // 10) — a JSON-null or absent id resolves by no path, exactly like
+        // the shape extractors below.
+        let (evidence_json, proposal_id, bucket) = if let Some(pristine) = from_outbox {
+            match crate::db::commit::proposal_id_from_evidence_json(&pristine) {
+                Some(pid) => (Some(pristine), Some(pid), 0),
+                None => (None, None, 4),
+            }
+        } else if serde_json::from_str::<serde_json::Value>(&mangled).is_ok() {
+            // Valid JSON survived: migrate verbatim, never re-derive.
+            match crate::db::commit::proposal_id_from_evidence_json(&mangled) {
+                Some(pid) => (Some(mangled.clone()), Some(pid), 1),
+                None => (None, None, 4),
+            }
+        } else if let Some(pid) = extract_proposal_id_from_empty_shape(&mangled) {
+            (rebuild_evidence_for_proposal(conn, &pid)?, Some(pid), 2)
+        } else if let Some(hash) = extract_leading_content_hash(&mangled) {
+            let (pid, ambiguous) = proposal_for_content_hash(conn, &hash, created_at)?;
+            if ambiguous {
+                report.ambiguous += 1;
+            }
+            match pid {
+                Some(pid) => (rebuild_evidence_for_proposal(conn, &pid)?, Some(pid), 3),
+                None => (None, None, 4),
+            }
+        } else {
+            (None, None, 4)
+        };
+
+        match (evidence_json, proposal_id) {
+            (Some(json), Some(pid)) => {
+                // Compute the real Phase-1 flag — a repaired blob with no live
+                // chunk anchor must carry unanchored=1, not a hardcoded 0, or
+                // it re-arms the heal-purge bait. Spec §2.4.
+                let unanchored = !crate::db::commit::evidence_has_live_chunk(conn, &json)?;
+                crate::db::commit::insert_librarian_evidence(
+                    conn, &entry_id, &pid, &json, unanchored, now_ms,
+                )?;
+                conn.execute(
+                    "UPDATE llm_wiki_entries SET source_ref = ?1
+                      WHERE id = ?2 AND source_type = 'librarian_inferred'",
+                    rusqlite::params![
+                        crate::db::commit::librarian_source_ref_token(&entry_id),
+                        &entry_id
+                    ],
+                )?;
+                match bucket {
+                    0 => report.from_outbox += 1,
+                    1 => report.from_valid_json += 1,
+                    2 => report.from_proposal_id += 1,
+                    _ => report.from_content_hash += 1,
+                }
+            }
+            _ => {
+                // Resolves by no path: export happens in Task 7 before this
+                // runs; here the row and its evidence go together.
+                //
+                // The whole arm is ONE transaction and pushes one
+                // OutboxOperation::Delete per row (review round 5, finding
+                // 5): as separate autocommit statements, a crash between the
+                // entry DELETE and the edge purge stranded edges pointing at
+                // a hard-deleted entry forever, and prisma-outbox replicas
+                // kept serving the deleted fact (#132 class). Same shape as
+                // `wiki_forget::forget_entries_by_source_refs`. The edge
+                // sweep must follow the hard delete, or edges pointing at
+                // the doomed entry dangle (#158 contract).
+                let tx = conn.unchecked_transaction()?;
+                crate::db::commit::push_entries_outbox(
+                    &tx,
+                    &entity_id,
+                    &entry_id,
+                    OutboxOperation::Delete,
+                    serde_json::json!({ "id": entry_id }),
+                    now_ms,
+                )?;
+                crate::db::commit::delete_librarian_evidence(&tx, std::slice::from_ref(&entry_id))?;
+                tx.execute(
+                    "DELETE FROM llm_wiki_entries
+                      WHERE id = ?1 AND source_type = 'librarian_inferred'",
+                    [&entry_id],
+                )?;
+                crate::db::edge_purge::purge_edges_for_hard_deleted(
+                    &tx,
+                    std::slice::from_ref(&entry_id),
+                )?;
+                tx.commit()?;
+                report.deleted += 1;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// A supported export is **brain-complete**: entries, evidence, chunks and
+/// proposals together. A partial export (entries without chunks) would make
+/// legitimately-anchored facts look like orphans and the deletion path would
+/// destroy good data.
+///
+/// Non-emptiness is required only for `chunks` and `documents`. Embedding
+/// tables are legitimately empty on any brain whose embed sweep has not run —
+/// requiring them would false-positive on healthy databases and block repair
+/// forever in the fail-safe direction. Spec §2.5.4.
+pub fn brain_is_complete(conn: &Connection) -> Result<bool> {
+    for table in [
+        "chunks",
+        "documents",
+        "curated_proposals",
+        "curated_proposal_items",
+    ] {
+        let present: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if present.is_none() {
+            return Ok(false);
+        }
+    }
+    let has_chunk_refs = count(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM llm_wiki_entries
+              WHERE source_type = 'librarian_inferred'
+                AND source_ref IS NOT NULL
+                AND source_ref NOT GLOB '{TOKEN_GLOB}'
+                AND source_ref LIKE '%chunk_id%'"
+        ),
+    )? > 0;
+    if !has_chunk_refs {
+        return Ok(true);
+    }
+    Ok(count(conn, "SELECT COUNT(*) FROM chunks")? > 0
+        && count(conn, "SELECT COUNT(*) FROM documents")? > 0)
+}
+
+/// Back up every damaged row to `<out_dir>/<entry_id>.json` before any
+/// mutation. Spec §2.5.2.
+pub fn export_damaged_rows(conn: &Connection, out_dir: &Path) -> Result<usize> {
+    std::fs::create_dir_all(out_dir)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, entity_id, title, body, source_ref, created_at
+           FROM llm_wiki_entries
+          WHERE source_type = 'librarian_inferred'
+            AND source_ref IS NOT NULL
+            AND source_ref NOT GLOB '{TOKEN_GLOB}'"
+    ))?;
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "entity_id": r.get::<_, String>(1)?,
+                "title": r.get::<_, String>(2)?,
+                "body": r.get::<_, String>(3)?,
+                "source_ref": r.get::<_, String>(4)?,
+                "created_at": r.get::<_, i64>(5)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in &rows {
+        let id = row["id"].as_str().unwrap_or("unknown");
+        std::fs::write(
+            out_dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(row)?,
+        )?;
+    }
+    Ok(rows.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::commit::librarian_source_ref_token;
+    use crate::db::connection::open_in_memory;
+    use rusqlite::Connection;
+
+    fn seed_entry(conn: &Connection, id: &str, source_type: &str, source_ref: Option<&str>) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES (?1,'ent','t','b','[]','inferred',?2,?3,1,1,0)",
+            rusqlite::params![id, source_type, source_ref],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn census_counts_shapes_and_ignores_healthy_token_rows() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_ok",
+            "librarian_inferred",
+            Some(&librarian_source_ref_token("fact_ok")),
+        );
+        seed_entry(
+            &conn,
+            "fact_a",
+            "librarian_inferred",
+            Some("evidenceproposal_idprop_0123456789abcdef01234567"),
+        );
+        seed_entry(
+            &conn,
+            "fact_b",
+            "librarian_inferred",
+            Some("evidencechunk_id12content_hashdeadbeefquotehello"),
+        );
+        seed_entry(
+            &conn,
+            "fact_c",
+            "librarian_inferred",
+            Some(r#"{"evidence":[],"proposal_id":"prop_z"}"#),
+        );
+        seed_entry(&conn, "fact_n", "librarian_inferred", None);
+
+        let c = repair_census(&conn).unwrap();
+        assert_eq!(c.damaged, 3, "token row and NULL row are not damaged");
+        assert_eq!(c.null_ref, 1);
+        assert_eq!(c.valid_json, 1);
+        assert_eq!(c.shape_proposal_id, 1);
+        assert_eq!(c.shape_chunk_id, 1);
+    }
+
+    #[test]
+    fn census_never_touches_document_sourced_rows() {
+        let conn = open_in_memory().unwrap();
+        // A legitimate document ref that itself hits the 255-char cap: the
+        // CodeRabbit census gap, pinned as a regression. Spec §2.5.1.
+        let long_path = "a".repeat(255);
+        seed_entry(&conn, "fact_doc", "document", Some(&long_path));
+
+        let c = repair_census(&conn).unwrap();
+        assert_eq!(
+            c.damaged, 0,
+            "document-sourced rows are out of scope entirely"
+        );
+    }
+
+    #[test]
+    fn extracts_proposal_id_from_empty_evidence_shape() {
+        // {"evidence":[],"proposal_id":"prop_<24 hex>"} mangles to this.
+        let mangled = "evidenceproposal_idprop_0123456789abcdef01234567";
+        assert_eq!(
+            extract_proposal_id_from_empty_shape(mangled).as_deref(),
+            Some("prop_0123456789abcdef01234567")
+        );
+        assert_eq!(
+            extract_proposal_id_from_empty_shape("evidencechunk_id1"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_leading_content_hash_from_truncated_shape() {
+        // TRUE runtime serialization order: keys alphabetical, so the value is
+        // followed by `end_line` — a hexdigit-only run would absorb the `e`.
+        let hash64 = format!("{}{}", "feedface00", "0".repeat(54));
+        let mangled = format!("evidencechunk_id7content_hash{hash64}end_line2quotehello world");
+        assert_eq!(
+            extract_leading_content_hash(&mangled).as_deref(),
+            Some(hash64.as_str())
+        );
+        // Post-hash truncation: the 255-cap cut the string inside `end_line`.
+        let mangled = format!("evidencechunk_id7content_hash{hash64}end_l");
+        assert_eq!(
+            extract_leading_content_hash(&mangled).as_deref(),
+            Some(hash64.as_str())
+        );
+        // Mid-hash truncation: the cap cut inside the hash itself. Still long
+        // enough to probe with.
+        let truncated_hash: String = hash64.chars().take(40).collect();
+        let mangled = format!("evidencechunk_id7content_hash{truncated_hash}");
+        assert_eq!(
+            extract_leading_content_hash(&mangled).as_deref(),
+            Some(truncated_hash.as_str())
+        );
+        // Empty `content_hash` followed by `end_line`: must NOT yield "e" —
+        // a one-char LIKE probe would match nearly every proposal.
+        assert_eq!(
+            extract_leading_content_hash("evidencechunk_id7content_hashend_line2quote"),
+            None
+        );
+        assert_eq!(
+            extract_leading_content_hash("evidenceproposal_idprop_x"),
+            None
+        );
+    }
+
+    #[test]
+    fn content_hash_ambiguity_reflects_distinct_proposals_not_row_order() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_a','new_entity','m','pending',100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_b','new_entity','m','pending',500)",
+            [],
+        )
+        .unwrap();
+        let dup = format!("{}{}", "ded0ded0", "0".repeat(56));
+        let uniq = format!("{}{}", "c0dec0de", "0".repeat(56));
+        for (item_id, proposal_id, hash) in [
+            ("item_a1", "prop_a", &dup),
+            ("item_a2", "prop_a", &dup),
+            ("item_b1", "prop_b", &dup),
+            ("item_a3", "prop_a", &uniq),
+            ("item_a4", "prop_a", &uniq),
+        ] {
+            let evidence = format!(r#"[{{"chunk_id":1,"content_hash":"{hash}"}}]"#);
+            conn.execute(
+                "INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, evidence)
+                 VALUES (?1, ?2, 'fact_add','{}', ?3)",
+                rusqlite::params![item_id, proposal_id, evidence],
+            )
+            .unwrap();
+        }
+
+        // Both proposals carry `dup`; proximity to entry created_at 480 picks
+        // prop_b (|500-480| < |100-480|) and the ambiguity is genuine.
+        let (picked, ambiguous) = proposal_for_content_hash(&conn, &dup, 480).unwrap();
+        assert_eq!(picked.as_deref(), Some("prop_b"));
+        assert!(ambiguous, "two distinct proposals are genuinely ambiguous");
+
+        // `uniq` lives only in prop_a, as two items — identical (proposal_id,
+        // created_at) tuples that must collapse to ONE proposal regardless of
+        // the query's row order.
+        let (picked, ambiguous) = proposal_for_content_hash(&conn, &uniq, 480).unwrap();
+        assert_eq!(picked.as_deref(), Some("prop_a"));
+        assert!(
+            !ambiguous,
+            "duplicate rows within one proposal are not ambiguity"
+        );
+    }
+
+    #[test]
+    fn repair_empty_content_hash_does_not_mis_attribute() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_e','new_entity','m','pending',1)",
+            [],
+        )
+        .unwrap();
+        // A proposal whose evidence contains a short hex-looking probe — with
+        // the old extractor the empty-hash "e" run could LIKE-match it.
+        conn.execute(
+            "INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, evidence)
+             VALUES ('item_e','prop_e','fact_add','{}',
+                     '[{\"chunk_id\":1,\"content_hash\":\"e0123abcd\"}]')",
+            [],
+        )
+        .unwrap();
+        seed_entry(
+            &conn,
+            "fact_empty",
+            "librarian_inferred",
+            Some("evidencechunk_id7content_hashend_line2quote"),
+        );
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(
+            report.deleted, 1,
+            "empty-hash row must fall to delete, not mis-attribute"
+        );
+        let attached: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE proposal_id='prop_e'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attached, 0, "no proposal may be attached via a bogus probe");
+    }
+
+    #[test]
+    fn repair_prefers_outbox_payload_verbatim() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_o",
+            "librarian_inferred",
+            Some("evidencechunk_id1content_hashaa"),
+        );
+        let pristine =
+            r#"{"evidence":[{"chunk_id":1,"content_hash":"aa"}],"proposal_id":"prop_o"}"#;
+        conn.execute(
+            "INSERT INTO llm_wiki_outbox (id, entity_id, table_name, record_id, operation,
+                 payload, created_at)
+             VALUES ('o1','ent','entries','fact_o','INSERT',?1,1)",
+            [serde_json::json!({ "id": "fact_o", "source_ref": pristine }).to_string()],
+        )
+        .unwrap();
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(report.from_outbox, 1);
+
+        let stored: String = conn
+            .query_row(
+                "SELECT evidence_json FROM librarian_evidence WHERE entry_id='fact_o'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, pristine, "outbox recovery must be byte-exact");
+
+        let ref_after: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id='fact_o'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ref_after, librarian_source_ref_token("fact_o"));
+    }
+
+    #[test]
+    fn repair_recovers_chunk_shape_via_content_hash() {
+        let conn = open_in_memory().unwrap();
+        // True runtime serialization order, 64-hex content hash.
+        let hash64 = format!("{}{}", "feedface00", "0".repeat(54));
+        // kind is constrained to ('new_entity','update_entity') by DDL.
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_h','new_entity','m','pending',1)",
+            [],
+        )
+        .unwrap();
+        let evidence = format!(r#"[{{"chunk_id":7,"content_hash":"{hash64}"}}]"#);
+        conn.execute(
+            "INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, evidence)
+             VALUES ('item_h','prop_h','fact_add','{}', ?1)",
+            [&evidence],
+        )
+        .unwrap();
+        seed_entry(
+            &conn,
+            "fact_h",
+            "librarian_inferred",
+            Some(&format!(
+                "evidencechunk_id7content_hash{hash64}end_line2quotex"
+            )),
+        );
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(report.from_content_hash, 1);
+        assert_eq!(report.deleted, 0);
+
+        let (proposal_id, unanchored): (String, i64) = conn
+            .query_row(
+                "SELECT proposal_id, unanchored FROM librarian_evidence WHERE entry_id='fact_h'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(proposal_id, "prop_h");
+        // No live chunk exists in this DB, so the repaired row must carry the
+        // computed Phase-1 flag, not a hardcoded 0. Spec §2.4.
+        assert_eq!(
+            unanchored, 1,
+            "repaired row without a live chunk is unanchored"
+        );
+    }
+
+    #[test]
+    fn repair_deletes_rows_that_resolve_by_no_path() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_x",
+            "librarian_inferred",
+            Some("evidencechunk_id9content_hashnosuchhash00quote"),
+        );
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(report.deleted, 1);
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id='fact_x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn brain_complete_requires_chunks_and_documents_but_not_embeddings() {
+        let conn = open_in_memory().unwrap();
+        // Empty chunks/documents on a DB with chunk-derived refs => incomplete.
+        seed_entry(
+            &conn,
+            "fact_bc",
+            "librarian_inferred",
+            Some("evidencechunk_id1content_hashaa"),
+        );
+        assert!(!brain_is_complete(&conn).unwrap());
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('d.md','h','user_doc','indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+                 entity_id, content_hash)
+             VALUES (?1,'c',0,1,1,'prose','ent','aa')",
+            [doc_id],
+        )
+        .unwrap();
+
+        // Embeddings stay empty — legitimately so on any brain whose embed
+        // sweep has not run. Requiring them would false-positive. Spec §2.5.4.
+        assert!(brain_is_complete(&conn).unwrap());
+    }
+
+    #[test]
+    fn export_writes_a_file_per_damaged_row_before_mutation() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_e",
+            "librarian_inferred",
+            Some("evidencechunk_id1content_hashaa"),
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let n = export_damaged_rows(&conn, dir.path()).unwrap();
+        assert_eq!(n, 1);
+        let written = std::fs::read_to_string(dir.path().join("fact_e.json")).unwrap();
+        assert!(written.contains("evidencechunk_id1content_hashaa"));
+    }
+
+    #[test]
+    fn repair_deletes_null_proposal_id_json_and_pushes_outbox_deletes() {
+        // Review round 5, findings 5+10: a JSON blob with a null/absent
+        // proposal_id resolves by no path under the strict shared extractor,
+        // and its deletion must be replicated — one OutboxOperation::Delete
+        // per removed row, same shape as `wiki_forget` (#132 class).
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_null_pid",
+            "librarian_inferred",
+            Some(r#"{"proposal_id":null,"evidence":[]}"#),
+        );
+        seed_entry(
+            &conn,
+            "fact_no_pid",
+            "librarian_inferred",
+            Some(r#"{"evidence":[]}"#),
+        );
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(report.deleted, 2, "neither blob resolves by any path");
+
+        for id in ["fact_null_pid", "fact_no_pid"] {
+            let outbox_deletes: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_outbox
+                      WHERE record_id = ?1 AND table_name = 'entries'
+                        AND operation = 'DELETE'",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                outbox_deletes, 1,
+                "hard-deleted repaired row {id} must be replicated as deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_is_idempotent() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_i",
+            "librarian_inferred",
+            Some(r#"{"evidence":[],"proposal_id":"prop_i"}"#),
+        );
+
+        let first = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(first.from_valid_json, 1);
+        let second = run_evidence_repair(&conn, 1000).unwrap();
+        assert_eq!(
+            second,
+            RepairReport::default(),
+            "re-running must be a no-op"
+        );
+    }
+}

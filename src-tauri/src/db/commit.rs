@@ -259,6 +259,169 @@ pub(crate) fn generate_llm_id(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 
+/// Normalizer-idempotent `source_ref` for a librarian-inferred entry.
+///
+/// The JS engine rewrites any `source_ref` its five-predicate selector matches
+/// (dist/index.js:1454-1467) through `normalizeSourceRef`, which strips every
+/// character outside `[A-Za-z0-9._- ]` and truncates to 255. This token is a
+/// fixed point of that function, so the rewrite is a no-op for CT rows.
+///
+/// Derived by **hashing the entry id**, not by slicing the proposal id: the
+/// old JSON refs differed between facts of one proposal (different evidence
+/// subsets), so a per-proposal token would silently change dedupe/supersede
+/// collision semantics. Spec §2.2.
+pub fn librarian_source_ref_token(entry_id: &str) -> String {
+    format!(
+        "librarian-{}",
+        &crate::hasher::hash_bytes(entry_id.as_bytes())[..32]
+    )
+}
+
+/// Strict token-shape test: `^librarian-[0-9a-f]{32}$` (spec §2.2), the Rust
+/// counterpart of `evidence_repair::TOKEN_GLOB`. Every `source_ref` routing
+/// decision (`source_ref_is_still_grounded`, `source_docs_from_ref`,
+/// `chunk_ids_for_entry`) must use this, not a `starts_with` prefix test — a
+/// legacy vault path like `librarian-notes.md` shares the prefix but must keep
+/// taking the document branch or it can never be purged.
+pub(crate) fn is_librarian_source_ref_token(source_ref: &str) -> bool {
+    let Some(hex) = source_ref.strip_prefix("librarian-") else {
+        return false;
+    };
+    hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Insert the CT-owned evidence row for an entry. Callers must run this in the
+/// same transaction as the `llm_wiki_entries` INSERT (spec §2.1) so a failure
+/// rolls the fact back with it.
+pub fn insert_librarian_evidence(
+    conn: &Connection,
+    entry_id: &str,
+    proposal_id: &str,
+    evidence_json: &str,
+    unanchored: bool,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO librarian_evidence
+             (entry_id, proposal_id, evidence_json, unanchored, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            entry_id,
+            proposal_id,
+            evidence_json,
+            if unanchored { 1i64 } else { 0i64 },
+            now_ms
+        ],
+    )?;
+    Ok(())
+}
+
+/// Explicit paired delete. FK CASCADE is NOT relied upon — SQLite enforces
+/// foreign keys only with `PRAGMA foreign_keys=ON` per connection, and
+/// brain.db has connections (Rust `DbState`, engine `wiki_exec`/`wiki_run`)
+/// whose pragma state we cannot guarantee. Every path that deletes
+/// `llm_wiki_entries` rows calls this alongside. Spec §2.1.
+pub fn delete_librarian_evidence(conn: &Connection, entry_ids: &[String]) -> Result<usize> {
+    if entry_ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders: String = std::iter::repeat_n("?", entry_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("DELETE FROM librarian_evidence WHERE entry_id IN ({placeholders})");
+    let removed = conn.execute(&sql, rusqlite::params_from_iter(entry_ids.iter()))?;
+    Ok(removed)
+}
+
+/// The evidence blob for an entry, or `None` when no row exists.
+///
+/// SQLite errors propagate (review round 5): `bundle_io::load_facts` sits on
+/// the export path, and swallowing a transient `SQLITE_BUSY` here wrote
+/// bundles whose librarian facts carry bare tokens with no paired evidence —
+/// importing one elsewhere yields permanently provenance-less rows. Read-only
+/// UI callers may degrade defensively, same policy as
+/// [`evidence_has_live_chunk`]'s doc contract.
+pub fn evidence_json_for_entry(
+    conn: &Connection,
+    entry_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
+        [entry_id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+}
+
+/// Strict `proposal_id` extraction from an evidence blob: `Some` only when the
+/// blob parses and carries a non-null, non-empty string `proposal_id`.
+///
+/// Single source of truth for the salvage-vs-drop routing decision (V18 repair
+/// paths 4a/4b and bundle apply's legacy-ref salvage — review round 5, finding
+/// 10): a JSON-null or absent id resolves by no path, and the strict posture
+/// is export-and-delete — never a `proposal_id = ''` evidence row that no
+/// retraction could ever match and no proposal could ever be re-attributed
+/// through.
+pub fn proposal_id_from_evidence_json(evidence_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(evidence_json).ok()?;
+    let pid = value.get("proposal_id")?.as_str()?.trim();
+    if pid.is_empty() {
+        None
+    } else {
+        Some(pid.to_string())
+    }
+}
+
+/// True iff the evidence blob anchors at least one chunk that still exists.
+///
+/// Prefers `content_hash` (stable across re-chunks) and falls back to the
+/// legacy `chunk_id` rowid **only when the entry carries no usable hash** —
+/// a hash lookup that merely finds no row means the content is gone, and
+/// falling through to the rowid there would false-positive on rowid reuse.
+/// Empty evidence is **not** anchored — that is the Phase-1 `unanchored`
+/// condition, not an error. Spec §2.4.
+///
+/// SQLite errors propagate: callers on destructive paths (the V18 repair)
+/// must halt on a DB fault rather than read it as "no live chunk", and the
+/// heal path in `source_ref_is_still_grounded` downgrades the error to its
+/// own fail-safe policy.
+pub fn evidence_has_live_chunk(conn: &Connection, evidence_json: &str) -> rusqlite::Result<bool> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) else {
+        return Ok(false);
+    };
+    let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
+        return Ok(false);
+    };
+    for entry in evidence {
+        let hash = entry
+            .get("content_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if let Some(hash) = hash {
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM chunks WHERE content_hash = ?1 LIMIT 1",
+                    [hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if found.is_some() {
+                return Ok(true);
+            }
+        } else if let Some(cid) = entry.get("chunk_id").and_then(|v| v.as_i64()) {
+            let found: Option<i64> = conn
+                .query_row("SELECT 1 FROM chunks WHERE id = ?1 LIMIT 1", [cid], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if found.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn now_timestamps() -> (i64, i64) {
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -295,6 +458,52 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
     let trimmed = source_ref.trim();
     if trimmed.is_empty() {
         return true;
+    }
+    // Token rows (librarian_inferred): evidence lives in `librarian_evidence`,
+    // not in the ref. Spec §2.3. Strict shape match — see
+    // `is_librarian_source_ref_token` for why a prefix test is not enough.
+    if is_librarian_source_ref_token(trimmed) {
+        let entry_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM llm_wiki_entries WHERE source_ref = ?1 LIMIT 1",
+                [trimmed],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        let Some(entry_id) = entry_id else {
+            warn_source_ref_missing_evidence(trimmed, "no entry for token");
+            return true;
+        };
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT evidence_json, unanchored FROM librarian_evidence WHERE entry_id = ?1",
+                [&entry_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap_or(None);
+        return match row {
+            // Missing evidence row: defensive, same as the parse-error and
+            // DB-error branches below. Never auto-purge. Spec §2.3.
+            None => {
+                warn_source_ref_missing_evidence(trimmed, "no librarian_evidence row");
+                true
+            }
+            // Phase-1 carve-out: flagged rows survive until the Phase-2
+            // re-grade purges them deliberately, after export.
+            Some((_, 1)) => true,
+            Some((json, _)) => match evidence_has_live_chunk(conn, &json) {
+                Ok(live) => live,
+                // Same defensive policy as every other DB-error branch in
+                // this function: a failing lookup is not a demonstrably-stale
+                // reference, so the heal path treats it as still-grounded.
+                Err(err) => {
+                    warn_source_ref_db_error(trimmed, "librarian_evidence", &err);
+                    true
+                }
+            },
+        };
     }
     // Legacy contract: a plain vault-relative path. Existence-check against
     // `documents.path = ?1` with `status='indexed'`. The legacy producer never
@@ -335,8 +544,9 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
         Some(arr) => arr,
         None => return true,
     };
-    // Collect chunk_ids; if the entry has no evidence (e.g. MANUAL_SOURCE_REF
-    // for user_stated facts) it's not librarian-grounded and we leave it alone.
+    // Collect chunk_ids; if the entry has no evidence (e.g. an empty-evidence
+    // JSON blob — user_stated facts now carry NULL refs instead) it's not
+    // librarian-grounded and we leave it alone.
     let chunk_ids: Vec<i64> = evidence
         .iter()
         .filter_map(|entry| entry.get("chunk_id").and_then(|v| v.as_i64()))
@@ -378,6 +588,24 @@ fn warn_source_ref_parse_error(source_ref: &str, err: &serde_json::Error) {
 fn warn_source_ref_parse_error(source_ref: &str, err: &serde_json::Error) {
     eprintln!(
         "[ct::heal WARN] source_ref is JSON-looking but unparseable; treating as still-grounded: source_ref={source_ref:?} error={err}"
+    );
+}
+
+#[cfg(feature = "mcp-server")]
+fn warn_source_ref_missing_evidence(source_ref: &str, reason: &str) {
+    tracing::warn!(
+        target: "ct::heal",
+        source_ref = %source_ref,
+        reason = %reason,
+        "librarian token has no evidence row; treating as still-grounded (defensive)"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_source_ref_missing_evidence(source_ref: &str, reason: &str) {
+    eprintln!(
+        "[ct::heal WARN] librarian token has no evidence row; treating as still-grounded: \
+         source_ref={source_ref:?} reason={reason}"
     );
 }
 
@@ -897,7 +1125,11 @@ fn commit_fact_add(
 
     let fact_id = generate_llm_id("fact_");
     let title = fact_title_from_body(&body);
-    let source_ref = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
+    // Evidence is CT-owned and lives in `librarian_evidence`; `source_ref`
+    // carries only a normalizer-idempotent token so the engine's setup-time
+    // rewrite (dist/index.js:7782-7791) is a no-op for our rows. Spec §2.2.
+    let evidence_json = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
+    let source_ref = librarian_source_ref_token(&fact_id);
 
     // Use the precomputed vector only if it describes the text we are about
     // to write — see `PrecomputedEmbedding`. A stale vector is worse than no
@@ -933,6 +1165,22 @@ fn commit_fact_add(
             embedding_blob,
             tier,
         ],
+    )?;
+
+    // Same transaction as the entry INSERT: if this fails the fact is not
+    // written. Fail-closed, consistent with the json_valid CHECK. Spec §5.
+    //
+    // Phase 1 policy (spec §2.4): a fact whose evidence anchors no surviving
+    // chunk is still written, but flagged, so the supervised re-run can
+    // measure the real drop rate before the permanent skip+log default.
+    let unanchored = !evidence_has_live_chunk(conn, &evidence_json)?;
+    insert_librarian_evidence(
+        conn,
+        &fact_id,
+        &ctx.proposal_id,
+        &evidence_json,
+        unanchored,
+        ctx.now_ms,
     )?;
 
     push_entries_outbox(
@@ -1804,6 +2052,149 @@ mod tests {
     };
     use crate::db::queries::{insert_chunk, upsert_document};
 
+    /// Re-implementation of the engine's `normalizeSourceRef`
+    /// (dist/index.js:4082) plus its five-predicate selector
+    /// (dist/index.js:1454-1467). Used to prove the token is a fixed point.
+    fn engine_would_rewrite(source_ref: &str) -> bool {
+        let selected = source_ref.trim() != source_ref
+            || source_ref.contains('/')
+            || source_ref.contains('\\')
+            || source_ref.contains('\0')
+            || source_ref
+                .chars()
+                .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ')));
+        if !selected {
+            return false;
+        }
+        let normalized: String = source_ref
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
+            .collect::<String>()
+            .trim()
+            .chars()
+            .take(255)
+            .collect();
+        normalized != source_ref
+    }
+
+    #[test]
+    fn token_is_a_fixed_point_of_the_engine_normalizer() {
+        for entry_id in ["fact_abc123", "fact_0000", "fact_zz~!@#"] {
+            let token = librarian_source_ref_token(entry_id);
+            assert!(
+                token.starts_with("librarian-"),
+                "token must carry the librarian- prefix: {token}"
+            );
+            assert_eq!(
+                token.len(),
+                "librarian-".len() + 32,
+                "token must be 32 hex chars"
+            );
+            assert!(
+                token[10..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "digest must be lowercase hex: {token}"
+            );
+            assert!(token.len() <= 255);
+            assert!(
+                !engine_would_rewrite(&token),
+                "engine selector must not touch the token: {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_is_deterministic_and_per_entry_unique() {
+        assert_eq!(
+            librarian_source_ref_token("fact_a"),
+            librarian_source_ref_token("fact_a")
+        );
+        assert_ne!(
+            librarian_source_ref_token("fact_a"),
+            librarian_source_ref_token("fact_b")
+        );
+    }
+
+    #[test]
+    fn evidence_roundtrips_and_deletes() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_r','ent','t','b','[]','inferred','librarian_inferred','librarian-x',1,1,0)",
+            [],
+        )
+        .unwrap();
+
+        insert_librarian_evidence(
+            &conn,
+            "fact_r",
+            "prop_r",
+            r#"{"proposal_id":"prop_r","evidence":[]}"#,
+            false,
+            123,
+        )
+        .unwrap();
+
+        assert_eq!(
+            evidence_json_for_entry(&conn, "fact_r").unwrap().as_deref(),
+            Some(r#"{"proposal_id":"prop_r","evidence":[]}"#)
+        );
+        assert_eq!(
+            evidence_json_for_entry(&conn, "fact_missing").unwrap(),
+            None
+        );
+
+        let removed = delete_librarian_evidence(&conn, &["fact_r".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(evidence_json_for_entry(&conn, "fact_r").unwrap(), None);
+    }
+
+    #[test]
+    fn evidence_has_live_chunk_detects_dangling_anchors() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('d.md','h','user_doc','indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+                 entity_id, content_hash)
+             VALUES (?1,'c',0,1,1,'prose','ent','hash_live')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id: i64 = conn.last_insert_rowid();
+
+        let live = format!(
+            r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"hash_live"}}],"proposal_id":"p"}}"#
+        );
+        assert!(evidence_has_live_chunk(&conn, &live).unwrap());
+
+        let dangling =
+            r#"{"evidence":[{"chunk_id":999999,"content_hash":"hash_gone"}],"proposal_id":"p"}"#;
+        assert!(!evidence_has_live_chunk(&conn, dangling).unwrap());
+
+        // A hash present but unmatched means the content is gone: no fallback
+        // to chunk_id, even when a chunk with that rowid exists (rowid reuse
+        // must not read as live anchoring).
+        let hash_miss_rowid_live = format!(
+            r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"hash_gone"}}],"proposal_id":"p"}}"#
+        );
+        assert!(!evidence_has_live_chunk(&conn, &hash_miss_rowid_live).unwrap());
+
+        // Legacy evidence with no usable hash still falls back to chunk_id.
+        let no_hash_rowid_live =
+            format!(r#"{{"evidence":[{{"chunk_id":{chunk_id}}}],"proposal_id":"p"}}"#);
+        assert!(evidence_has_live_chunk(&conn, &no_hash_rowid_live).unwrap());
+
+        let empty = r#"{"evidence":[],"proposal_id":"p"}"#;
+        assert!(!evidence_has_live_chunk(&conn, empty).unwrap());
+    }
+
     fn seed_document(conn: &Connection, path: &str) -> i64 {
         upsert_document(conn, path, "hash").unwrap()
     }
@@ -1888,6 +2279,114 @@ mod tests {
             evidence: Vec::new(),
             edited_payload: None,
         }
+    }
+
+    /// Build the `LoadedItem` a fact_add commit consumes. `evidence` carries the
+    /// chunk anchors; an empty vec is the unanchored case.
+    fn fact_add_item(evidence: Vec<StoredEvidenceChunk>) -> LoadedItem {
+        LoadedItem {
+            id: "item_t".into(),
+            item_type: "fact_add".into(),
+            target_id: None,
+            payload: serde_json::json!({
+                "body": "A fact worth storing.",
+                "tags": [],
+                "confidence": "inferred"
+            }),
+            evidence,
+            edited_payload: None,
+        }
+    }
+
+    #[test]
+    fn commit_fact_add_writes_token_and_evidence_row() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-t", "Test Entity", "summary", 100);
+        let doc_id = seed_document(&conn, "notes.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let mut ctx = test_ctx("ent-t");
+        let item = fact_add_item(vec![StoredEvidenceChunk {
+            chunk_id: Some(chunk_id),
+            content_hash,
+            quote: "evidence".into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            source_kind: None,
+        }]);
+        let outcome = commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        assert!(matches!(outcome, FactAddOutcome::Applied));
+
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
+
+        let source_ref: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(source_ref, librarian_source_ref_token(&entry_id));
+        assert!(!engine_would_rewrite(&source_ref));
+        assert!(
+            !source_ref.contains('{'),
+            "no JSON may remain in source_ref: {source_ref}"
+        );
+
+        let stored = evidence_json_for_entry(&conn, &entry_id)
+            .unwrap()
+            .expect("evidence row must exist");
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert!(parsed.get("evidence").and_then(|v| v.as_array()).is_some());
+        assert!(parsed.get("proposal_id").is_some());
+    }
+
+    #[test]
+    fn commit_fact_add_flags_unanchored_evidence() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-u", "Test Entity", "summary", 100);
+        // No document, no chunk: the evidence references a chunk that is not there.
+        let mut ctx = test_ctx("ent-u");
+        let item = fact_add_item(vec![StoredEvidenceChunk {
+            chunk_id: Some(999_999),
+            content_hash: "nosuchhash".into(),
+            quote: "dangling".into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            source_kind: None,
+        }]);
+        commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
+        let unanchored: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Phase 1 is write-with-flag, NOT skip: the fact is still written.
+        assert_eq!(
+            unanchored, 1,
+            "zero live chunk anchors must set unanchored=1"
+        );
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "Phase 1 must not skip the write");
     }
 
     #[test]
@@ -3403,7 +3902,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_proposal_writes_content_hash_in_source_ref() {
+    fn resolve_proposal_writes_content_hash_in_evidence_row() {
         let mut conn = open_in_memory().unwrap();
         let doc_id = seed_document(&conn, "/vault/documents/note.pdf");
         // Pre-seed a chunk with a real content_hash; the commit must
@@ -3456,14 +3955,29 @@ mod tests {
         )
         .unwrap();
 
-        let source_ref: String = conn
+        // Since #186, `source_ref` carries only the librarian token; the
+        // evidence JSON (with the resolved content_hash) lives in
+        // `librarian_evidence`, written in the same transaction.
+        let entry_id: String = conn
             .query_row(
-                "SELECT source_ref FROM llm_wiki_entries ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM llm_wiki_entries ORDER BY id DESC LIMIT 1",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&source_ref).unwrap();
+        let source_ref: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_ref, librarian_source_ref_token(&entry_id));
+
+        let stored = evidence_json_for_entry(&conn, &entry_id)
+            .unwrap()
+            .expect("evidence row must exist");
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
         let evidence = parsed.get("evidence").unwrap().as_array().unwrap();
         let entry = evidence[0].as_object().unwrap();
         assert_eq!(
@@ -4114,5 +4628,75 @@ mod source_ref_grounded_tests {
             source_ref_is_still_grounded(&conn, src),
             "JSON-path DB error must defensively return true (no soft-delete)"
         );
+    }
+
+    /// D7 — the seventh D-test. §2.1 deliberately does not rely on FK CASCADE,
+    /// so a token row whose evidence row is missing is a *when*, not an *if*.
+    /// The existing defensive posture (parse errors and DB errors are grounded)
+    /// extends here: treat as grounded and warn loudly. Never auto-purge.
+    #[test]
+    fn d7_token_row_without_evidence_is_treated_as_grounded() {
+        let conn = open_in_memory().unwrap();
+        let token = librarian_source_ref_token("fact_orphan");
+        assert!(
+            source_ref_is_still_grounded(&conn, &token),
+            "a token with no librarian_evidence row must not be soft-deleted"
+        );
+    }
+
+    /// A token row whose evidence row exists and anchors no live chunk is
+    /// demonstrably stale — the heal soft-deletes it.
+    #[test]
+    fn token_row_with_dangling_evidence_is_not_grounded() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_d','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [librarian_source_ref_token("fact_d")],
+        )
+        .unwrap();
+        insert_librarian_evidence(
+            &conn,
+            "fact_d",
+            "prop_d",
+            r#"{"evidence":[{"chunk_id":999,"content_hash":"gone"}],"proposal_id":"prop_d"}"#,
+            false,
+            1,
+        )
+        .unwrap();
+        assert!(!source_ref_is_still_grounded(
+            &conn,
+            &librarian_source_ref_token("fact_d")
+        ));
+    }
+
+    /// Phase-1 carve-out: `unanchored` rows are treated as still-grounded.
+    /// Otherwise heal soft-deletes them and prune hard-deletes them 7 days
+    /// later, destroying the drop-rate data Phase 1 exists to measure. The
+    /// Phase-2 re-grade is the only path that purges them. Spec §2.3.
+    #[test]
+    fn phase1_unanchored_rows_are_treated_as_grounded() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_u','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [librarian_source_ref_token("fact_u")],
+        )
+        .unwrap();
+        insert_librarian_evidence(
+            &conn,
+            "fact_u",
+            "prop_u",
+            r#"{"evidence":[],"proposal_id":"prop_u"}"#,
+            true,
+            1,
+        )
+        .unwrap();
+        assert!(source_ref_is_still_grounded(
+            &conn,
+            &librarian_source_ref_token("fact_u")
+        ));
     }
 }

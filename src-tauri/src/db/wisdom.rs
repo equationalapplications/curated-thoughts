@@ -11,8 +11,14 @@ use crate::embedder::{embed_batch, EmbedProfile};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
-/// source_ref for user-authored wisdom: same JSON shape as proposal commits, no evidence.
-const MANUAL_SOURCE_REF: &str = r#"{"proposal_id":null,"evidence":[]}"#;
+// User-authored wisdom carries NO source_ref: NULL is the "no provenance"
+// value for manual facts. The old JSON sentinel
+// `{"proposal_id":null,"evidence":[]}` was a live mangleable ref (review
+// round 5, finding 1): the engine's setup rewrite collapsed it to the fixed
+// string `proposal_idnullevidence` — identical for every manual row, violating
+// the #186 invariant that a non-NULL source_ref must be a normalizer fixed
+// point. NULL sits outside the engine's selector entirely. The V18 migration
+// normalizes pre-existing sentinel/mangled rows on upgraded brains.
 
 fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<()> {
     let exists: Option<i64> = conn
@@ -133,8 +139,8 @@ pub fn add_wisdom_in_tx(
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
             access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, ?5, ?6, ?6, NULL, 0, NULL, ?7, NULL)",
-        params![wisdom_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms, embedding_blob],
+         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, NULL, ?5, ?5, NULL, 0, NULL, ?6, NULL)",
+        params![wisdom_id, entity_id, title, body, now_ms, embedding_blob],
     )?;
     push_entries_outbox(
         tx,
@@ -150,7 +156,10 @@ pub fn add_wisdom_in_tx(
             "confirmed",
             "user_stated",
             None,
-            MANUAL_SOURCE_REF,
+            // NULL refs serialize as "" in the payload — the same convention
+            // the update path already uses via COALESCE(source_ref, '') and
+            // bundle apply via `.unwrap_or("")`.
+            "",
             None,
             None,
             None,
@@ -516,6 +525,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(payload_lifecycle, "stable");
+    }
+
+    #[test]
+    fn add_wisdom_writes_null_source_ref_not_a_mangleable_sentinel() {
+        // Review round 5, finding 1: the old JSON sentinel
+        // `{"proposal_id":null,"evidence":[]}` was a live mangleable ref —
+        // the engine's setup rewrite collapsed it to the fixed string
+        // `proposal_idnullevidence`, identical for every manual row. NULL is
+        // the "no provenance" value and sits outside the engine's selector.
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&conn);
+
+        let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
+
+        let source_ref: Option<String> = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+                [&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            source_ref, None,
+            "user-authored wisdom must carry a NULL source_ref"
+        );
     }
 
     #[test]

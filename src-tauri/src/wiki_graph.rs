@@ -1178,7 +1178,7 @@ fn provenance_for(conn: &Connection, hit: &WikiSearchHit) -> Result<WikiContextP
         )
         .optional()?
         .flatten();
-    let sources = crate::db::entities::source_docs_from_ref(conn, source_ref.as_deref())
+    let sources = crate::db::entities::source_docs_from_ref(conn, &hit.id, source_ref.as_deref())
         .into_iter()
         .map(|(doc_path, content_hash)| WikiContextSource {
             doc_path,

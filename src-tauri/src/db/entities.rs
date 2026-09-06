@@ -200,12 +200,27 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
 /// "where did this fact come from" would be free to disagree.
 pub(crate) fn source_docs_from_ref(
     conn: &Connection,
+    entry_id: &str,
     source_ref: Option<&str>,
 ) -> Vec<(String, Option<String>)> {
-    let Some(raw) = source_ref else {
-        return Vec::new();
+    // Librarian rows carry a token; their evidence is CT-owned. Spec §2.3.
+    // Strict shape match — see `is_librarian_source_ref_token` for why a
+    // prefix test is not enough.
+    let raw = match source_ref {
+        Some(r) if crate::db::commit::is_librarian_source_ref_token(r) => {
+            match crate::db::commit::evidence_json_for_entry(conn, entry_id) {
+                Ok(Some(json)) => json,
+                // Read-path degradation only (review round 5): a DB fault is
+                // not "no provenance", but this feeds the entity reader/UI,
+                // which degrades defensively everywhere else. Export and
+                // destructive callers of the same helper propagate.
+                _ => return Vec::new(),
+            }
+        }
+        Some(r) => r.to_string(),
+        None => return Vec::new(),
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return Vec::new();
     };
     let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
@@ -389,6 +404,7 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
             last_verified_at,
             last_verified_by,
         ) = row?;
+        let source_docs = source_docs_from_ref(conn, &id, source_ref.as_deref());
         out.push(EntityWisdom {
             id,
             title,
@@ -396,7 +412,7 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
             tags: parse_tags(&tags_raw),
             confidence,
             source_type,
-            source_docs: source_docs_from_ref(conn, source_ref.as_deref())
+            source_docs: source_docs
                 .into_iter()
                 .map(|(path, chunk_hash)| SourceDocRef { path, chunk_hash })
                 .collect(),
@@ -650,7 +666,7 @@ mod tests {
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 2);
         let hashes: Vec<String> = chunks.iter().map(|(_, h)| h.clone()).collect();
         let source_ref = source_ref_json(&hashes);
-        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
             docs,
             vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
@@ -665,7 +681,7 @@ mod tests {
         let chunks_b = seed_doc_with_chunks(&conn, "documents/b.md", 1);
         let hashes = vec![chunks_a[0].1.clone(), chunks_b[0].1.clone()];
         let source_ref = source_ref_json(&hashes);
-        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
             docs,
             vec![
@@ -688,7 +704,7 @@ mod tests {
             chunks_a[1].1.clone(),
         ];
         let source_ref = source_ref_json(&hashes);
-        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
             docs,
             vec![
@@ -704,7 +720,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let bogus_hash = "0".repeat(32);
         let source_ref = source_ref_json(&[bogus_hash]);
-        assert!(source_docs_from_ref(&conn, Some(&source_ref)).is_empty());
+        assert!(source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).is_empty());
     }
 
     #[test]
@@ -716,7 +732,7 @@ mod tests {
             r#"{{"proposal_id":"prop_1","evidence":[{{"quote":"no chunk id","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
             docs,
             vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
@@ -726,8 +742,66 @@ mod tests {
     #[test]
     fn source_docs_from_ref_handles_malformed_source_ref() {
         let conn = open_in_memory().unwrap();
-        assert!(source_docs_from_ref(&conn, Some("not json")).is_empty());
-        assert!(source_docs_from_ref(&conn, None).is_empty());
+        assert!(source_docs_from_ref(&conn, "fact_t", Some("not json")).is_empty());
+        assert!(source_docs_from_ref(&conn, "fact_t", None).is_empty());
+    }
+
+    #[test]
+    fn source_docs_from_ref_routes_strict_tokens_to_librarian_evidence() {
+        // A real `librarian-<32hex>` token resolves through the CT-owned
+        // `librarian_evidence` row — pinning that the §2.2 strict shape test
+        // accepts what `librarian_source_ref_token` generates.
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
+        let token = crate::db::commit::librarian_source_ref_token("fact_lib");
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_lib','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            params![token],
+        )
+        .unwrap();
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_lib",
+            "prop_1",
+            &source_ref_json(&[chunks[0].1.clone()]),
+            false,
+            1,
+        )
+        .unwrap();
+        let docs = source_docs_from_ref(&conn, "fact_lib", Some(&token));
+        assert_eq!(
+            docs,
+            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
+        );
+    }
+
+    #[test]
+    fn source_docs_from_ref_rejects_prefix_lookalike_refs() {
+        // `librarian-notes.md` shares the token prefix but is not a §2.2
+        // token: it must keep the document branch (here: unparseable as
+        // evidence JSON → empty), never surface `librarian_evidence` through
+        // the entry-id lookup.
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "librarian-notes.md", 1);
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_doc','ent','t','b','[]','inferred','document','librarian-notes.md',1,1,0)",
+            [],
+        )
+        .unwrap();
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_doc",
+            "prop_1",
+            &source_ref_json(&[chunks[0].1.clone()]),
+            false,
+            1,
+        )
+        .unwrap();
+        assert!(source_docs_from_ref(&conn, "fact_doc", Some("librarian-notes.md")).is_empty());
     }
 
     #[test]
@@ -738,7 +812,7 @@ mod tests {
             r#"{{"proposal_id":"prop_1","evidence":[{{"content_hash":"","quote":"empty","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        let docs = source_docs_from_ref(&conn, Some(&source_ref));
+        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
             docs,
             vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))],

@@ -8,6 +8,7 @@ pub mod ddl_compat;
 pub mod edge_purge;
 pub mod entities;
 pub mod events;
+pub mod evidence_repair;
 pub mod migration;
 pub mod okf_ddl;
 pub mod okf_migration;
