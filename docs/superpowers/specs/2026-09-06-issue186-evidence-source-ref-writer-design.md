@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS librarian_evidence (
   entry_id      TEXT PRIMARY KEY REFERENCES llm_wiki_entries(id) ON DELETE CASCADE,
   proposal_id   TEXT NOT NULL,
   evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+  unanchored    INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx ON librarian_evidence(proposal_id);
@@ -131,11 +132,13 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
 | Consumer | Today | After |
 | --- | --- | --- |
 | `source_docs_from_ref` (entities.rs:201-244) | parse JSON from ref | join `librarian_evidence` |
-| `source_ref_is_still_grounded` (commit.rs:294) | parse JSON, find chunks | **branch by row type**: token rows → join `librarian_evidence`, verify chunk ids exist; path-ref document rows → existing behavior unchanged |
+| `source_ref_is_still_grounded` (commit.rs:294) | parse JSON, find chunks | **branch by row type**: token rows → join `librarian_evidence`, verify chunk ids exist; path-ref document rows → existing behavior unchanged. **Phase-1 carve-out (Round-2 review, Sep 6): token rows with `unanchored=1` are treated as still-grounded while the flag is set** — otherwise `heal_invalid_sources` (lib.rs:412) soft-deletes them and `prune_old_librarian_inferred` hard-deletes them 7 days later, destroying the drop-rate data the Phase-1 policy exists to measure. The Phase-2 re-grade (§2.4) is the ONLY path that purges still-unanchored rows, and it does so deliberately, after export |
 | `wiki_forget::forget_entries_by_source_refs` (wiki_forget.rs:25) | exact-match JSON ref | exact-match token. **Token routing (CodeRabbit/Kurt, Sep 6): the token is derived from the entry id, so a caller holding only a `proposal_id` cannot construct it directly.** Retraction must first query `librarian_evidence` by `proposal_id` to resolve the target `entry_id`s, then derive the tokens (hash of entry id) and pass those to the exact-match forget. Implementer sweeps all existing retraction callers for this two-step shape |
-| commit-path dedupe/supersede by `source_ref` (the exact-match consumers the explorer flagged: proposal retraction and ref-keyed dedupe never match a mangled ref) | match JSON ref | match token |
+| commit-path dedupe/supersede by `source_ref` | match JSON ref | match token (Round-2 review: dedupe in this codebase keys on normalized body, not source_ref — this row is precautionary; implementer verifies which consumers actually exact-match the ref) |
 | `get_chunk_ids_for_wiki_entry` (lib.rs:2528) | path-normalize the JSON blob, returns `[]` | join `librarian_evidence` chunk ids (currently dead for JSON rows — reviving it is the natural fix) |
 | outbox payload (`push_entries_outbox`, commit.rs:938-960) | carries full JSON | unchanged — CT-owned, JSON is fine there. **Verified, not assumed**: implementer confirms no outbox drain path (including the engine's apply side) ever writes the payload's source_ref back into `llm_wiki_entries`; if one exists it joins the migration |
+| **bundle export** (`bundle_io.rs:49` SELECTs source_ref into the export) | carries full JSON | export also includes the row's `librarian_evidence` row (bundle export becomes brain-complete for librarian facts: entries + evidence + chunks + proposals), and the token replaces JSON in the entries columns (Round-2 review: bundle_io/bundle_apply is a second write path into `llm_wiki_entries` the spec must cover) |
+| **bundle apply** (`bundle_apply.rs:358-405` INSERTs facts with the bundle's source_ref) | inserts JSON ref | inserts the token + its evidence row together. **Token-without-evidence grounding rule**: a token row whose `librarian_evidence` row is missing is treated as **still-grounded** (defensive, consistent with the existing parse-error/DB-error policy in `source_ref_is_still_grounded`) — never auto-purged, surfaced as a census warning instead |
 | TS/frontend readers of `source_ref` | unverified | implementer sweeps frontend for parse sites; any that JSON-parse the ref for librarian rows join the token migration |
 
 ### 2.4 Provenance enforcement (insert-time)
@@ -154,18 +157,25 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
   skip+log (unanchored inferred facts do not enter the table; logged with proposal id
   and reason, counted in the run summary). Flagged rows from Phase 1 are re-graded:
   still-unanchored ones are exported and purged (same treatment as repair orphans).
+  **Phase-2 flip includes reverting the heal/prune carve-outs** (§2.3): once no new
+  `unanchored=1` rows are being written and the re-grade has purged the old ones,
+  grounding for token rows is strictly evidence-based again.
 
 The flag is also the natural input to deciding whether synthesis's chunk selection
 itself needs a follow-up fix (dangling refs at the source).
 
 ### 2.5 Repair migration (the ~260 damaged rows)
 
-1. **Census** (extends `warn_on_malformed_source_refs`): count rows matching the mangled
-   shapes (`evidenceproposal_id%` / `evidencechunk_id%` prefixes, plus 255-char length)
-   — the `{`-prefix query alone misses them. **Census and ALL subsequent mutation are
-   explicitly restricted to `source_type = 'librarian_inferred'`** (CodeRabbit/Kurt,
+1. **Census** (extends `warn_on_malformed_source_refs`): a `librarian_inferred` row is
+   damaged **iff its `source_ref` does not match the token shape
+   `^librarian-[0-9a-f]{32}$`** (positive token-shape test, not prefix heuristics —
+   Round-2 review: `evidence_json_with_hashes` serializes `proposal_id` first and the
+   normalizer keeps underscores, so mangled blobs actually begin `proposal_id…`, not
+   `evidenceproposal_id…`; the earlier prefix list would have matched nothing and the
+   repair would silently miss rows). Census and ALL subsequent mutation are
+   explicitly restricted to `source_type = 'librarian_inferred'` (CodeRabbit/Kurt,
    Sep 6): a legitimate document-sourced `source_ref` can itself hit the 255-char cap
-   (long vault paths normalize to exactly 255), so length/prefix heuristics alone
+   (long vault paths normalize to exactly 255), so shape/length heuristics alone
    could classify valid document entries as damaged and delete good data. Every census
    query, repair UPDATE, and orphan DELETE in this migration carries the
    `source_type = 'librarian_inferred'` predicate — no exceptions.
@@ -189,9 +199,13 @@ itself needs a follow-up fix (dangling refs at the source).
    partial export (entries without chunks) would make legitimately-anchored facts look
    like orphans, and the orphan deletion above would destroy good data. Guard: the
    repair migration **asserts the database contains a complete chunk schema before
-   executing any orphan deletion** (all expected `chunks`/`documents`/embedding tables
-   present and non-empty when any `llm_wiki_entries` rows exist with chunk-derived
-   refs). If the assertion fails, orphan deletion is skipped entirely (repair of
+   executing any orphan deletion** — all expected tables present (`chunks`,
+   `documents`, `embeddings`, **and the proposals tables**, per the brain-complete
+   definition), with **non-emptiness required only for `chunks` and `documents`**
+   (embedding tables are legitimately empty on any DB whose embed sweep has not yet
+   run — requiring non-empty embeddings would false-positive on healthy databases
+   and block orphan deletion forever in the fail-safe direction, Round-2 review).
+   If the assertion fails, orphan deletion is skipped entirely (repair of
    re-derivable rows still proceeds) and the failure is reported loudly. Fallback if
    the assertion cannot be reliably expressed at migration time: introduce an
    `import_pending` state on imported graphs that heal and orphan-deletion respect
@@ -213,8 +227,12 @@ fixtures:
   1. every `librarian_inferred` `source_ref` is a **fixed point** of the normalizer
      semantics (re-implement the JS regex in the test; assert
      `normalize(token) === token` and length ≤ 255);
-  2. every inferred fact has a `librarian_evidence` row whose `evidence_json` parses
-     and contains ≥1 `chunk_id` present in `chunks`;
+  2. **phase-aware evidence assertion** (Round-2 review): every inferred fact has a
+     `librarian_evidence` row whose `evidence_json` parses; anchored facts have ≥1
+     `chunk_id` present in `chunks`; unanchored facts carry `unanchored=1` and are
+     counted in the run summary (under Phase-1 write-with-flag, a fact with zero live
+     anchors is a legitimate, expected write — the old blanket "≥1 chunk present"
+     assertion contradicted §2.4);
   3. **engine-simulation pass**: run the GLOB selector + normalize + rewrite semantics
      over the table exactly as `setup()` does → **zero rows change**. Supplemental
      fast check — NOT the acceptance gate (see engine-in-the-loop gate below).
@@ -272,7 +290,7 @@ audited hard-delete path leaves zero orphaned `librarian_evidence` rows.
 synthesis resolve_evidence (unchanged)
   → NewProposalItem.evidence (unchanged)
 commit path (one transaction):
-  [provenance gate: ≥1 existing chunk anchor]
+  [provenance gate: annotate unanchored = 0|1 per Phase-1 policy (never blocks the write)]
   INSERT llm_wiki_entries (source_ref = "librarian-<hex entry-id hash>")
   INSERT librarian_evidence (evidence_json = full JSON,              ← json_valid CHECK
                              unanchored = 0|1 per Phase-1 policy)    ← Kurt, Sep 6
@@ -321,7 +339,10 @@ live-brain guard panics otherwise).
 5. **Insert-time skip policy** *(RESOLVED, Kurt Sep 6)*: phased — write-with-flag for
    the initial supervised live run (measure the unanchored drop rate), then flip the
    permanent default to skip+log once the baseline is confirmed (§2.4).
-6. **Mock vs live** *(RESOLVED, Kurt Sep 6)*: mock for CI, supervised live run for the
-   acceptance gate.
+6. **Mock vs live** *(RESOLVED, Kurt Sep 6)*: mock for CI. The supervised live run is
+   the **live acceptance for requirement 3** (issue #186's "live synthesis output"),
+   executed **post-merge** per the HOLD release condition and doubling as the Phase-1
+   drop-rate measurement — distinct from the **pre-merge engine-in-the-loop gate**
+   (§2.6), which remains the CI acceptance gate. Two gates, two names, no conflation.
 7. `get_chunk_ids_for_wiki_entry` revival (§2.3) — still open for the implementer to
    confirm live callers vs. deprecate.
