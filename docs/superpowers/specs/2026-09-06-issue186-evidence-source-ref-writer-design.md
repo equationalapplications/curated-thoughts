@@ -134,12 +134,23 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
 
 ### 2.4 Provenance enforcement (insert-time)
 
-In the commit path: an inferred fact is written only if ≥1 evidence item has a
-`chunk_id` that **exists in `chunks`**. Otherwise the fact is skipped and logged
-(proposal id + reason) and counted in the run summary. Fail-closed: no unanchored
-inferred facts enter the table. (Missing-chunk references from synthesis become visible
-skips, not silent orphans — this also gives us the data to decide whether synthesis's
-chunk selection itself needs a follow-up.)
+**Phased policy (Kurt, Sep 6):**
+
+- **Phase 1 — write-with-flag (ships with this PR, active for the initial supervised
+  live re-run):** inferred facts whose evidence has zero existing-chunk anchors are
+  still written, but flagged (column on `librarian_evidence`, e.g.
+  `unanchored INTEGER NOT NULL DEFAULT 0`, set to 1) and counted in the run summary.
+  Purpose: measure the exact drop rate of unanchored facts against real synthesis
+  output before committing to the strict policy — the Sep 6 audit suggests it may be
+  a large fraction, and destroying that data sight-unseen would be irreversible.
+- **Phase 2 — skip+log (permanent default, flipped after the baseline is measured):**
+  once the supervised re-run confirms the drop rate, the default flips to fail-closed
+  skip+log (unanchored inferred facts do not enter the table; logged with proposal id
+  and reason, counted in the run summary). Flagged rows from Phase 1 are re-graded:
+  still-unanchored ones are exported and purged (same treatment as repair orphans).
+
+The flag is also the natural input to deciding whether synthesis's chunk selection
+itself needs a follow-up fix (dangling refs at the source).
 
 ### 2.5 Repair migration (the ~260 damaged rows)
 
@@ -161,6 +172,18 @@ chunk selection itself needs a follow-up.)
 4. **Orphans** (proposal or all anchor chunks gone — the 8/8 + 16/61 + 24/69 classes):
    export then **delete**. They are ungrounded by definition; keeping them re-arms the
    heal-purge bait problem this issue exists to end.
+   **Export hazard (Kurt, Sep 6)** — a supported export is officially defined as
+   **brain-complete**: it must include entries, evidence, chunks, and proposals. A
+   partial export (entries without chunks) would make legitimately-anchored facts look
+   like orphans, and the orphan deletion above would destroy good data. Guard: the
+   repair migration **asserts the database contains a complete chunk schema before
+   executing any orphan deletion** (all expected `chunks`/`documents`/embedding tables
+   present and non-empty when any `llm_wiki_entries` rows exist with chunk-derived
+   refs). If the assertion fails, orphan deletion is skipped entirely (repair of
+   re-derivable rows still proceeds) and the failure is reported loudly. Fallback if
+   the assertion cannot be reliably expressed at migration time: introduce an
+   `import_pending` state on imported graphs that heal and orphan-deletion respect
+   until the import is confirmed brain-complete.
 5. **Idempotent**: re-running the migration is a no-op (token rows and existing
    `librarian_evidence` rows are left untouched).
 
@@ -187,15 +210,21 @@ fixtures:
   brain.db seeded with CT-shaped rows, points node at the **actual installed engine**
   (`@equationalapplications/core-llm-wiki` as installed — NOT a re-implementation;
   with installed-vs-pinned version skew, only the real engine is authoritative), runs
-  its `setup()`, and asserts zero source_ref changes to CT rows. Run on main pre-fix
+  its `setup()`, and asserts zero source_ref changes to CT rows. **The gate must read
+  and record the active engine version** (`node -e "console.log(require(
+  '@equationalapplications/core-llm-wiki/package.json').version)"` or equivalent) in
+  its output/assertions, so drift between installed and pinned versions is visible in
+  every test run, never silent (Kurt, Sep 6). Run on main pre-fix
   (marked `#[ignore]`, demonstrated via `cargo test -- --ignored`) it doubles as the
   real-repro proof that the shipped engine mangles JSON refs; post-fix it is the
   "bug is dead" gate.
 
 Additional tests: repair-migration test (fixture with mangled-shape + orphan rows →
-repaired/deleted/exported correctly, idempotent on re-run); provenance-skip test
-(evidence referencing a missing chunk → no row, logged); `json_valid` CHECK rejection
-test (mangled write to `librarian_evidence` fails loudly).
+repaired/deleted/exported correctly, idempotent on re-run; plus a
+**brain-complete assertion fixture** — orphan deletion skipped when the chunk schema
+is partial); provenance tests per §2.4 phases (Phase 1: dangling-chunk evidence →
+row written with `unanchored=1`, counted; Phase 2: skipped+logged);
+`json_valid` CHECK rejection test (mangled write to `librarian_evidence` fails loudly).
 
 ---
 
@@ -225,9 +254,10 @@ test (mangled write to `librarian_evidence` fails loudly).
 synthesis resolve_evidence (unchanged)
   → NewProposalItem.evidence (unchanged)
 commit path (one transaction):
-  [provenance gate: ≥1 existing chunk anchor, else skip+log]
+  [provenance gate: ≥1 existing chunk anchor]
   INSERT llm_wiki_entries (source_ref = "librarian-<hex entry-id hash>")
-  INSERT librarian_evidence (evidence_json = full JSON)   ← json_valid CHECK
+  INSERT librarian_evidence (evidence_json = full JSON,              ← json_valid CHECK
+                             unanchored = 0|1 per Phase-1 policy)    ← Kurt, Sep 6
   push_entries_outbox (full JSON payload, unchanged)
 engine setup():
   GLOB '*[^-A-Za-z0-9._ ]*' matches nothing CT wrote → rewrite is a no-op
@@ -241,9 +271,11 @@ forget / retraction:
 
 - `librarian_evidence` insert failure → the whole entry transaction rolls back (the
   fact is not written). Fail-closed, consistent with the CHECK guardrail.
-- Synthesis evidence with zero existing-chunk anchors → fact skipped, logged with
-  proposal id, counted in the run summary.
-- Repair migration: backup-before-mutate; orphan deletion only after successful export;
+- Synthesis evidence with zero existing-chunk anchors → Phase 1: written with
+  `unanchored=1`, logged with proposal id, counted in the run summary. Phase 2
+  (post-baseline): skipped and logged. See §2.4.
+- Repair migration: backup-before-mutate; orphan deletion **gated on the
+  brain-complete schema assertion** (§2.5.4) and only after successful export;
   idempotent re-runs.
 
 ## §6 Testing summary
@@ -254,25 +286,24 @@ engine-simulation pass, repair, provenance-skip, CHECK-rejection, and token-idem
 property tests round it out. All tests run under `CURATED_BRAIN_DIR` redirect (the #178
 live-brain guard panics otherwise).
 
-## §7 Out of scope / open questions for Kurt
+## §7 Resolved decisions & remaining out-of-scope items
 
-1. **Upstream engine guard**: file the core-llm-wiki issue (setup back-rewrite must
-   exempt structured/JSON-parseable refs). Non-blocking for this PR.
-2. **Version skew**: installed 6.0.1 vs pinned 7.1.0 — reinstall/bump as part of this
-   work, or separate ops task? (Recommend separate; this PR must not depend on it.)
-3. **Orphaned historical rows**: proposal is export-then-delete (§2.5.4). Alternative:
-   keep them with NULL evidence. Recommend delete — they are ungrounded heal-bait.
-4. **Post-landing librarian re-run**: one supervised re-run to validate at real LLM
-   cost, per the issue's HOLD note — schedule after merge.
-5. **Insert-time skip policy** (from GLM review): when synthesis emits dangling chunk
-   refs, the spec's default is fail-closed skip+log. Alternatives: write-with-flag
-   (unanchored rows visible but marked), or block-the-run. The audit suggests dangling
-   refs are a large fraction of live output, so this choice shapes what the post-landing
-   re-run produces. Default: skip+log; Kurt may prefer write-with-flag.
-6. **Mock vs live for the requirement-3 test**: the E2E test mocks the generation
-   provider (mockito). Whether mock-based satisfies issue #186's "live synthesis
-   output" wording, or whether the supervised real re-run (item 4) is the true
-   satisfaction of it, is Kurt's call. Default: mock for CI + supervised re-run for
-   live proof.
-7. `get_chunk_ids_for_wiki_entry` revival (§2.3) — confirm it has live callers worth
-   reviving, vs. deprecating.
+1. **Upstream engine guard** *(out of scope, follow-up)*: file the core-llm-wiki issue
+   (setup back-rewrite must exempt structured/JSON-parseable refs). Non-blocking for
+   this PR.
+2. **Version skew** *(RESOLVED, Kurt Sep 6)*: installed 6.0.1 vs pinned 7.1.0 — the
+   engine version reconciliation stays a **separate ops task**, but the
+   engine-in-the-loop gate **must read and record the active engine version** in its
+   output assertions so drift is never silent (§2.6).
+3. **Orphaned historical rows** *(RESOLVED)*: export-then-delete, gated by the
+   brain-complete schema assertion (§2.5.4).
+4. **Post-landing librarian re-run** *(planned)*: one supervised re-run at real LLM
+   cost, per the issue's HOLD note — scheduled after merge; doubles as the Phase-1
+   drop-rate measurement run.
+5. **Insert-time skip policy** *(RESOLVED, Kurt Sep 6)*: phased — write-with-flag for
+   the initial supervised live run (measure the unanchored drop rate), then flip the
+   permanent default to skip+log once the baseline is confirmed (§2.4).
+6. **Mock vs live** *(RESOLVED, Kurt Sep 6)*: mock for CI, supervised live run for the
+   acceptance gate.
+7. `get_chunk_ids_for_wiki_entry` revival (§2.3) — still open for the implementer to
+   confirm live callers vs. deprecate.
