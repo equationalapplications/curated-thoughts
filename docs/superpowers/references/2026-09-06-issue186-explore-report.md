@@ -1,3 +1,9 @@
+> **STALE-ANCHOR NOTICE (Sep 6, 2026):** the engine version facts and all engine
+> dist file:line anchors in this report were taken against core-llm-wiki **6.0.1**,
+> which no longer exists in the checkout's pnpm store (resolves **7.1.0**; #183).
+> The diagnosis is unchanged — the identical mangler exists in 7.1.0 (see the spec's
+> §1.1 for 7.1.0 anchors) — but do **not** re-derive line anchors from this report.
+
 # Issue #186 — Evidence `source_ref` writer mangling: exploration report
 
 Repo: `/home/kv-thinkpad-t420-ubuntu/code/github/equationalapplications/curated-thoughts`

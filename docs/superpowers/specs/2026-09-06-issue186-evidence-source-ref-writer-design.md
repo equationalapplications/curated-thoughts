@@ -288,7 +288,7 @@ fixtures:
      anchors is a legitimate, expected write — the old blanket "≥1 chunk present"
      assertion contradicted §2.4);
   3. **engine-simulation pass**: run the **full five-predicate selector** (§2.2:
-     `TRIM != self` OR `INSTR '/'` OR `INSTR(source_ref,'\\')` OR `INSTR CHAR(0)` OR GLOB —
+     `TRIM != self` OR `INSTR '/'` OR `INSTR(source_ref,'\')` OR `INSTR CHAR(0)` OR GLOB —
      not the GLOB alone) + normalize + rewrite semantics over the table exactly as
      `setup()` does → **zero rows change**. Supplemental
      fast check — NOT the acceptance gate (see engine-in-the-loop gate below).
