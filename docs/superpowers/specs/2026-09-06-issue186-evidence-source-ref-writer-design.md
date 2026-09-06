@@ -158,7 +158,7 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
 | `source_ref_is_still_grounded` (commit.rs:294) | parse JSON, find chunks | **branch by row type**: token rows → join `librarian_evidence`, verify chunk ids exist; path-ref document rows → existing behavior unchanged. **Phase-1 carve-out (Round-2 review, Sep 6): token rows with `unanchored=1` are treated as still-grounded while the flag is set** — otherwise `heal_invalid_sources` (lib.rs:412) soft-deletes them and `prune_old_librarian_inferred` hard-deletes them 7 days later, destroying the drop-rate data the Phase-1 policy exists to measure. The Phase-2 re-grade (§2.4) is the ONLY path that purges still-unanchored rows, and it does so deliberately, after export. **Missing-evidence-row stance (Opus review, Sep 6): a token row whose `librarian_evidence` row is absent ⇒ treat as still-grounded + loud warn** — same defensive posture as the existing parse-error/DB-error branches; §2.1 deliberately does not rely on FK CASCADE, so missing-evidence windows are a *when*, not an *if*. Pinned as the **seventh D-test** alongside the existing six |
 | `wiki_forget::forget_entries_by_source_refs` (wiki_forget.rs:25) | exact-match JSON ref | exact-match token. **Token routing (CodeRabbit/Kurt, Sep 6): the token is derived from the entry id, so a caller holding only a `proposal_id` cannot construct it directly.** Retraction must first query `librarian_evidence` by `proposal_id` to resolve the target `entry_id`s, then derive the tokens (hash of entry id) and pass those to the exact-match forget. Implementer sweeps all existing retraction callers for this two-step shape |
 | commit-path dedupe/supersede by `source_ref` | match JSON ref | match token (Round-2 review: dedupe in this codebase keys on normalized body, not source_ref — this row is precautionary; implementer verifies which consumers actually exact-match the ref) |
-| `get_chunk_ids_for_wiki_entry` (lib.rs:2528) | path-normalize the JSON blob, returns `[]` | join `librarian_evidence` chunk ids (currently dead for JSON rows — reviving it is the natural fix) |
+| `get_chunk_ids_for_wiki_entry` (lib.rs:2528) | path-normalize the JSON blob, returns `[]` | join `librarian_evidence` chunk ids — **hard requirement, see §7.7**, plus the TS `rootChunkId`→`entryId` rename and the `rowid = ?1 OR id = ?1` fix. Not optional: a live consumer chain reaches it via `wikiGraphAdapter.ts:24`, and today's `[]` silently degrades into a wrong-namespace `getImpactRadius` call |
 | outbox payload (`push_entries_outbox`, commit.rs:938-960) | carries full JSON | unchanged — CT-owned, JSON is fine there. **Verified, not assumed**: implementer confirms no outbox drain path (including the engine's apply side) ever writes the payload's source_ref back into `llm_wiki_entries`; if one exists it joins the migration |
 | **bundle export** (`bundle_io.rs:49` SELECTs source_ref into the export) | carries full JSON | export also includes the row's `librarian_evidence` row (bundle export becomes brain-complete for librarian facts: entries + evidence + chunks + proposals), and the token replaces JSON in the entries columns (Round-2 review: bundle_io/bundle_apply is a second write path into `llm_wiki_entries` the spec must cover) |
 | **bundle apply** (`bundle_apply.rs:358-405` INSERTs facts with the bundle's source_ref) | inserts JSON ref | inserts the token + its evidence row together. Token-without-evidence grounding follows the **single source of truth in the `source_ref_is_still_grounded` row above** (still-grounded + loud warn + census warning; never auto-purged) |
@@ -192,13 +192,10 @@ itself needs a follow-up fix (dangling refs at the source).
 1. **Census** (extends `warn_on_malformed_source_refs`): a `librarian_inferred` row is
    damaged **iff its `source_ref` does not match the token shape
    `^librarian-[0-9a-f]{32}$`** (positive token-shape test, not prefix heuristics —
-   Round-2 review: `evidence_json_with_hashes` serializes `proposal_id` first and the
-   normalizer keeps underscores, so mangled blobs actually begin `proposal_id…`, not
-   `evidenceproposal_id…`; the earlier prefix list would have matched nothing and the
-   repair would silently miss rows. Opus review, Sep 6: **derive any prefix/shape
-   expectation from the real writer's key order at implementation time, never from the
-   Sep 5 sample** — the token-shape test makes this robust because it asks "is this
-   the new shape" rather than "does it look mangled"). Within
+   it asks "is this the new shape" rather than "does it look mangled", so detection
+   stays correct regardless of the mangled blobs' internal layout. The observed mangled
+   shapes are documented in §2.5.4, where they drive **recovery**, not detection).
+   Within
    `source_type = 'librarian_inferred'` the length-255 signal is now safe as
    corroboration **because no legitimate post-fix ref is 255 chars — the token is
    short**; that is the whole justification for the census scoping rule. Census and ALL
@@ -225,26 +222,65 @@ itself needs a follow-up fix (dangling refs at the source).
    whose ref does **not** parse proceed to re-derivation. This
    preserves exact original evidence wherever it survived, and shrinks the
    re-derivation set to the truly mangled rows.
-4. **Re-derive**: for each still-mangled row whose `curated_proposals` row survives,
+4. **Re-derive**: for each still-mangled row whose owning proposal can be resolved,
    rebuild `evidence_json` from `curated_proposal_items.evidence`, insert into
    `librarian_evidence`, rewrite `source_ref` to the token.
-   **Extraction rule (Kurt, Sep 6)**: to associate a mangled row with its proposal,
-   extract the `proposal_id` from the mangled ref: strip the leading literal
-   `proposal_id` key name, then take characters up to the next literal key token
-   (`evidence`, `chunk_id`, `content_hash`, `quote`, `start_line`, `end_line`,
-   `source_kind` — the exact key set emitted by
-   `evidence_json_with_hashes`, verified at implementation time) or end-of-string.
-   Validate the extracted value: non-empty, and must match an existing
-   `curated_proposals.id` (which are `prop_`-prefixed). **If extraction fails or the
-   value matches no proposal → fallback-to-delete** (export first, same treatment as
-   orphans) — never a stuck class, never a silent mis-attribution. The entry→item mapping was
-   destroyed by the mangling, so the **reconstruction rule is: attach the proposal's
-   FULL item evidence to each of its surviving entries** (all items of the proposal,
-   not a per-entry subset). The rebuilt blob therefore may not byte-equal the original
-   per-entry blob — acceptable: grounding verification re-checks chunk existence at
-   repair time, and superseding is per-entry. **Fallback-to-delete**: a damaged row
-   whose proposal survives but whose `curated_proposal_items` rows are all gone gets
-   exported and deleted (same treatment as orphans) — no stuck class remains.
+
+   **Key order — CORRECTED (Opus review, Sep 6; supersedes the Round-2 assumption).**
+   `evidence_json_with_hashes` does **not** emit `proposal_id` first. `serde_json::Map`
+   is a `BTreeMap` — keys serialize **alphabetically** — unless the `preserve_order`
+   feature is active, and it is **not** active for this crate's runtime graph:
+   `cargo tree` resolves two distinct feature sets for `serde_json v1.0.151`, and the
+   only `preserve_order` activation traces to `tree-sitter` under
+   `[build-dependencies]`, which `resolver = "2"` (`Cargo.toml:3`) does **not** unify
+   into the normal dependency graph. Therefore `evidence` sorts before `proposal_id`
+   and **every mangled blob begins `evidence`**. The live DB confirms exactly the two
+   shapes this predicts (explore report lines 33 and 220-222) — a `proposal_id`-first
+   writer would have produced only one. Recovery splits on those two shapes:
+
+   **4a. Outbox-first (preferred, try before any head-parsing).** Check whether local
+   `wiki_outbox` rows from the Sep 3–5 waves still carry the **pristine, untruncated**
+   JSON payload for the damaged entries (§2.3: the outbox payload is CT-owned and was
+   never mangled). Where one survives, use it directly as `evidence_json` — it is the
+   exact original, byte-for-byte, and needs no reconstruction at all. Implementer
+   establishes retention first: local outbox rows are deleted on drain, so treat
+   survival as unlikely — but it is free to check and strictly better than any
+   reconstruction below.
+
+   **4b. `evidenceproposal_id%` rows — `proposal_id` intact.** These are the
+   **empty-evidence** serializations: `{"evidence":[],"proposal_id":"prop_…"}` mangles
+   to `evidenceproposal_idprop_<24hex>`, short enough that the 255-char cap never
+   truncated it. Extract directly: strip the leading literal `evidenceproposal_id` and
+   take the remainder to end-of-string. Validate: non-empty, and must match an existing
+   `curated_proposals.id` (`prop_` + 24 hex, per `generate_llm_id`,
+   `commit.rs:256-260`). Note these rows carried **no evidence** to begin with, so they
+   land in the unanchored/orphan class on re-derivation regardless.
+
+   **4c. `evidencechunk_id%` rows — `proposal_id` destroyed, recover via
+   `content_hash`.** These are the non-empty serializations. `proposal_id` sorted last,
+   sat at the tail of the blob, and was **truncated away** by `.slice(0, 255)`: it is
+   not present in the ref, and any rule that looks for it here fails on every such row
+   — which, per explore report line 33, is the bulk of the 260. What *does* survive in
+   the truncated head is the first evidence item's `chunk_id` and `content_hash`.
+   Resolve the proposal through those: strip to the literal `content_hash` key token,
+   take the following hex run (prefer `content_hash` over `chunk_id` — the hash is
+   stable across re-chunks, while `chunk_id` is a legacy rowid and may be absent), then
+   query `curated_proposal_items.evidence` for the item carrying that hash and read its
+   owning `curated_proposals.id`. If the hash resolves into **more than one** proposal,
+   prefer the proposal whose `created_at` is nearest the entry's and record the
+   ambiguity in the repair report.
+
+   **Fallback-to-delete** applies only after 4a, 4b and 4c have all failed: a row whose
+   proposal cannot be resolved by any path — or whose proposal resolves but whose
+   `curated_proposal_items` rows are all gone — is exported and deleted (same treatment
+   as orphans). Never a stuck class, never a silent mis-attribution.
+
+   The entry→item mapping was destroyed by the mangling, so the **reconstruction rule
+   is: attach the proposal's FULL item evidence to each of its surviving entries** (all
+   items of the proposal, not a per-entry subset) — except for 4a rows, which restore
+   their exact original payload verbatim. A rebuilt blob may therefore not byte-equal
+   the original per-entry blob — acceptable: grounding verification re-checks chunk
+   existence at repair time, and superseding is per-entry.
 5. **Orphans** (proposal or all anchor chunks gone — the 8/8 + 16/61 + 24/69 classes):
    export then **delete**. They are ungrounded by definition; keeping them re-arms the
    heal-purge bait problem this issue exists to end.
@@ -306,7 +342,10 @@ fixtures:
   "bug is dead" gate.
 
 Additional tests: repair-migration test (fixture with mangled-shape + orphan rows →
-repaired/deleted/exported correctly, idempotent on re-run; plus a
+repaired/deleted/exported correctly, idempotent on re-run; **fixtures must cover both
+§2.5.4 recovery paths — an `evidenceproposal_id%` row recovered by direct id extraction
+and an `evidencechunk_id%` row recovered by `content_hash` lookup — plus a row that
+resolves by neither and must be exported-and-deleted**; plus a
 **brain-complete assertion fixture** — orphan deletion skipped when the chunk schema
 is partial); provenance tests per §2.4 phases (Phase 1: dangling-chunk evidence →
 row written with `unanchored=1`, counted; Phase 2: skipped+logged);
@@ -406,5 +445,24 @@ live-brain guard panics otherwise).
    executed **post-merge** per the HOLD release condition and doubling as the Phase-1
    drop-rate measurement — distinct from the **pre-merge engine-in-the-loop gate**
    (§2.6), which remains the CI acceptance gate. Two gates, two names, no conflation.
-7. `get_chunk_ids_for_wiki_entry` revival (§2.3) — still open for the implementer to
-   confirm live callers vs. deprecate.
+7. **`get_chunk_ids_for_wiki_entry` revival** *(RESOLVED — revive; hard requirement,
+   Opus review, Sep 6)*: **not** deprecated, and not left to implementer discretion.
+   It has a live consumer chain: `lib.rs:3651` (registered command) →
+   `src/lib/tauri.ts:526` → `src/lib/wikiGraphAdapter.ts:24` (`resolveRootChunkIds`) →
+   `tauriGraphAdapter.getNeighbors`, with coverage in
+   `src/__tests__/impact-radius.test.ts`. Its current `[]` return is **not** benign:
+   at `wikiGraphAdapter.ts:29-31` an empty result falls through to
+   `getImpactRadius(rootChunkId, …)`, passing an **entry id** into a parameter the
+   graph treats as a **chunk id** — a wrong-namespace query returning plausible
+   garbage, not a no-op. Three required changes:
+   - **Revive the lookup**: replace the `normalize_path_argument_to_vault_relative` →
+     `safe_vault_path` routing with a join against `librarian_evidence` for token rows
+     (§2.3); document-sourced path rows keep their existing behavior.
+   - **Rename in TS**: `rootChunkId` → `entryId` in `src/lib/wikiGraphAdapter.ts` and
+     `src/lib/tauri.ts` (`getChunkIdsForWikiEntry`'s first parameter is an entry id —
+     the Rust signature at `lib.rs:2529` types it `entry_id`). The current name is what
+     makes the wrong-namespace fallback read as reasonable code.
+   - **Fix the SQL**: `WHERE rowid = ?1 OR id = ?1` (`lib.rs:2547`) binds an `i64`
+     against a TEXT `id` (`fact_<hex>`), so the `id` half can never match. Either drop
+     it and match `rowid` only, or take the id as a string and match `id` — a recorded,
+     deliberate choice, not dead weight left in place.
