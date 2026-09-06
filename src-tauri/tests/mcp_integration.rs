@@ -442,3 +442,247 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
 
     client.cancel().await.expect("shutdown");
 }
+
+// ============================================================================
+// Curated memory CRUD — all 14 tools on the main MCP server (spec §2/§8).
+// Proves tools/list exposes the six curated names alongside the eight
+// existing ones, and round-trips add -> recall -> get -> search -> update
+// -> archive through the shipping stdio surface with fail-closed audit.
+// ============================================================================
+
+fn seed_curated_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    // The write path bails unless the target entity exists and is live
+    // (curated_entities.deleted_at IS NULL) — seed one ACTIVE entity.
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent_curated', 'curated-fixture', 'concept', 'integration fixture', 1000, 1000)",
+        [],
+    )?;
+    // One ast_* chunk so curated_search_code has a code hit to rank. The
+    // vector is seeded as a raw 8-dim blob (NOT via embed_one): building a
+    // reqwest::blocking client inside this #[tokio::test] panics when the
+    // Local profile is live, and the child server pins
+    // CURATED_EMBED_STUB=constant8 itself, so nothing here needs the
+    // ambient embed environment to be stubbed.
+    let doc_id = upsert_document(conn, "/fixtures/curated_code.rs", "h_curated")?;
+    let chunk = Chunk {
+        text: "curated fixture rust symbol body for search".into(),
+        start_line: 1,
+        end_line: 3,
+        symbol_name: Some("curated_sym".into()),
+        defined_symbol: Some("curated_sym".into()),
+        strategy: ChunkStrategyTag::AstSymbolRust,
+    };
+    let cid = insert_chunk(conn, doc_id, &chunk, 0, "ent_curated", "")?;
+    let v = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    insert_embedding(conn, cid, &v)?;
+    mark_document_indexed(conn, doc_id)?;
+    Ok(())
+}
+
+async fn call_tool(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tool: &str,
+    args: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let res = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new(tool.to_string())
+                .with_arguments(args.as_object().unwrap().clone()),
+        )
+        .await?;
+    let text = first_text_hit(&res);
+    Ok(serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("{tool} did not return JSON ({e}): {text}")))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
+    if std::env::var("CURATED_MCP_INTEGRATION_TESTS").is_err() {
+        eprintln!("Skipping MCP integration test — set CURATED_MCP_INTEGRATION_TESTS=1 to run");
+        return;
+    }
+    let root = tempdir().expect("tempdir");
+    let brain = root.path().join("brain");
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(brain.join("wiki")).unwrap();
+    std::fs::create_dir_all(vault.join("wiki")).unwrap();
+
+    // vault_path must resolve to a real dir so AppDb::open_with_config runs
+    // the OKF migration (curated_entities / curated_agent_log live there).
+    let config = serde_json::json!({ "vault_path": vault.to_str().unwrap() });
+    std::fs::write(brain.join("config.json"), config.to_string()).unwrap();
+    temp_env::with_vars(
+        [("CURATED_BRAIN_DIR", Some(brain.to_str().unwrap()))],
+        || {
+            let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+            let db = tauri_app_lib::retrieval::AppDb::open_with_config(
+                &paths.db_path,
+                &paths.config_path,
+            )
+            .expect("seed brain.db");
+            seed_curated_fixture(&db.0).unwrap();
+        },
+    );
+
+    assert!(
+        mcp_exe().exists(),
+        "MCP binary missing: {:?}\nbuild with:\n  cargo build --workspace --features mcp-server --bin curated-thoughts",
+        mcp_exe()
+    );
+
+    let client = spawn_mcp(&brain).await.expect("mcp handshake");
+
+    // -- tools/list: exactly the 14 spec'd names -----------------------------
+    let tools = client.list_all_tools().await.expect("list_all_tools");
+    let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    names.sort();
+    let expected = [
+        "curated_add_wisdom",
+        "curated_archive_wisdom",
+        "curated_get_wiki_entry",
+        "curated_recall_context",
+        "curated_search_code",
+        "curated_update_wisdom",
+        "vault_related_chunks",
+        "vault_semantic_search",
+        "vault_upsert_index_entry",
+        "vault_write_note",
+        "wiki_context",
+        "wiki_get_ontology",
+        "wiki_search",
+        "wiki_traverse_graph",
+    ];
+    assert_eq!(names, expected, "tools/list must expose all 14 names");
+
+    // -- add: creates user-stated wisdom, fail-closed audit row on disk ------
+    let added: serde_json::Value = call_tool(
+        &client,
+        "curated_add_wisdom",
+        serde_json::json!({
+            "entity_id": "ent_curated",
+            "body": "integration wisdom: the curated MCP surface round-trips"
+        }),
+    )
+    .await
+    .expect("curated_add_wisdom");
+    let wisdom_id = added["id"].as_str().expect("wisdom id").to_string();
+    assert_eq!(added["entity_id"], "ent_curated");
+
+    let audit_count = {
+        let conn = rusqlite::Connection::open_with_flags(
+            brain.join("brain.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .expect("reopen brain.db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM curated_agent_log
+             WHERE tool = 'curated_add_wisdom' AND operation = 'write' AND client = 'local-mcp'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(audit_count, 1, "fail-closed audit row must be persisted");
+
+    // -- read tools see the new entry ----------------------------------------
+    let recalled: serde_json::Value = call_tool(
+        &client,
+        "curated_recall_context",
+        serde_json::json!({ "query": "curated MCP surface round-trips" }),
+    )
+    .await
+    .expect("curated_recall_context");
+    let wiki_hits = recalled["wiki_entries"].as_array().expect("wiki array");
+    assert!(
+        wiki_hits
+            .iter()
+            .any(|h| h["id"].as_str() == Some(wisdom_id.as_str())),
+        "recall should surface the fresh wisdom: {recalled}"
+    );
+    assert!(
+        recalled["code_chunks"]
+            .as_array()
+            .expect("code array")
+            .iter()
+            .any(|c| c["symbol"].as_str() == Some("curated_sym")),
+        "recall should include the ast chunk: {recalled}"
+    );
+
+    let entry: serde_json::Value = call_tool(
+        &client,
+        "curated_get_wiki_entry",
+        serde_json::json!({ "entity_id": "ent_curated" }),
+    )
+    .await
+    .expect("curated_get_wiki_entry");
+    assert!(
+        entry["full_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("round-trips"),
+        "get_wiki_entry should return the stored body: {entry}"
+    );
+
+    let code: serde_json::Value = call_tool(
+        &client,
+        "curated_search_code",
+        serde_json::json!({ "query": "curated fixture rust symbol body" }),
+    )
+    .await
+    .expect("curated_search_code");
+    assert!(
+        code["code_chunks"]
+            .as_array()
+            .expect("code hits")
+            .iter()
+            .any(|c| c["symbol"].as_str() == Some("curated_sym")),
+        "search_code should rank the ast chunk: {code}"
+    );
+
+    // -- update: response is reloaded from the DB, not echoed -----------------
+    let updated: serde_json::Value = call_tool(
+        &client,
+        "curated_update_wisdom",
+        serde_json::json!({
+            "entity_id": "ent_curated",
+            "wisdom_id": wisdom_id,
+            "body": "integration wisdom: updated through the shipping surface"
+        }),
+    )
+    .await
+    .expect("curated_update_wisdom");
+    assert_eq!(
+        updated["body"], "integration wisdom: updated through the shipping surface",
+        "update returns reloaded entry: {updated}"
+    );
+
+    // -- archive: soft delete hides the entry from reads ----------------------
+    let archived: serde_json::Value = call_tool(
+        &client,
+        "curated_archive_wisdom",
+        serde_json::json!({
+            "entity_id": "ent_curated",
+            "wisdom_id": wisdom_id
+        }),
+    )
+    .await
+    .expect("curated_archive_wisdom");
+    assert_eq!(archived["archived"], true);
+
+    let after: serde_json::Value = call_tool(
+        &client,
+        "curated_get_wiki_entry",
+        serde_json::json!({ "entity_id": "ent_curated" }),
+    )
+    .await
+    .expect("curated_get_wiki_entry after archive");
+    assert_eq!(
+        after["full_text"].as_str().unwrap_or_default().trim(),
+        "",
+        "archived entry must not appear in reads: {after}"
+    );
+
+    client.cancel().await.expect("shutdown");
+}

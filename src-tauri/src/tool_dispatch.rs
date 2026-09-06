@@ -322,11 +322,716 @@ pub fn dispatch_vault_upsert_index_entry(
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
+// ---------------------------------------------------------------------------
+// Curated memory read helpers — ported from tools/src/queries.rs (SQL kept
+// verbatim so sidecar behavior is unchanged). These back the curated_* MCP
+// tools; the `tools` crate keeps its own copies and must NOT depend on this
+// crate's internals.
+// ---------------------------------------------------------------------------
+
+/// One cosine-ranked code chunk from the chunks-JOIN-embeddings recall leg.
+#[derive(Debug, Clone)]
+pub(crate) struct RankedChunkRow {
+    pub id: i64,
+    pub text: String,
+    pub doc_path: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    pub symbol_name: Option<String>,
+    /// Second strategy-ish column (`c.strategy` in curated_search_code).
+    #[allow(dead_code)] // ported verbatim from tools/src/queries.rs; the
+    // curated_recall_context leg reads strategy only
+    pub language: Option<String>,
+    /// Kept for parity with the tools-crate struct; unused on this ported path.
+    #[allow(dead_code)]
+    pub entity_id: String,
+    pub score: f32,
+}
+
+/// Recall-leg SQL over real chunker strategies (ast_*). Vectors live in the
+/// separate embeddings table. With the AST predicate appended this matches the
+/// sidecar's `curated_recall_context` / `curated_search_code` leg exactly.
+pub(crate) const RECALL_CHUNKS_SQL_BASE: &str = "
+    SELECT c.id, c.chunk_text, e.vector, d.path, c.start_line, c.end_line,
+           c.symbol_name, c.strategy, c.entity_id
+    FROM chunks c
+    JOIN documents d ON c.doc_id = d.id
+    JOIN embeddings e ON e.chunk_id = c.id
+    WHERE d.status = 'indexed'
+";
+pub(crate) const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
+
+/// Little-endian f32 bytes -> Vec<f32> (mirrors `search::bytes_to_f32`).
+fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+/// Cosine similarity in [0-ish, 1], clamped; 0.0 on length mismatch/zero norm
+/// (mirrors `search::cosine_similarity`).
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+}
+
+/// Coerce a stored `updated_at` cell into an integer epoch ranking key.
+///
+/// The live schema declares `updated_at INTEGER`, but desktop-app writes and
+/// older sidecars may have produced TEXT-form values; NULL is also tolerated.
+/// Any value that cannot be coerced ranks as 0 — acceptable for a sort key.
+pub(crate) fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
+    match value {
+        Some(rusqlite::types::Value::Integer(i)) => i,
+        Some(rusqlite::types::Value::Text(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Wisdom layer keyword ranking (ported verbatim from tools/src/queries.rs).
+///
+/// Term-overlap scoring over live (`deleted_at IS NULL`) `llm_wiki_entries`:
+/// each matching term adds one overlap point; ties break by confidence string
+/// (desc) then numeric `updated_at` (desc). Doubles as the keyword fallback
+/// when no query embedding is available.
+pub(crate) fn rank_wiki_entries(
+    conn: &Connection,
+    query: &str,
+    limit_wiki: usize,
+) -> Result<Vec<Value>> {
+    // Keep terms of any length >= 2; short technical terms ("sql", "rag")
+    // are often the most meaningful.
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, title, body, source_ref, confidence,
+                updated_at
+         FROM llm_wiki_entries
+         WHERE deleted_at IS NULL
+           AND (title LIKE '%' || ?1 || '%'
+                OR body LIKE '%' || ?1 || '%')",
+    )?;
+    // id -> (overlap_count, json_value, confidence_rank, updated_at)
+    use std::collections::HashMap;
+    let mut candidates: HashMap<String, (usize, Value, String, i64)> = HashMap::new();
+    for term in &terms {
+        let rows = stmt.query_map(rusqlite::params![term], |row| {
+            Ok((
+                row.get::<_, String>(0)?,                         // id (TEXT PK)
+                row.get::<_, Option<String>>(1)?,                 // entity_id
+                row.get::<_, Option<String>>(2)?,                 // title
+                row.get::<_, Option<String>>(3)?,                 // body
+                row.get::<_, Option<String>>(4)?,                 // source_ref
+                row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
+                row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
+            ))
+        })?;
+        for row in rows {
+            // A single malformed row must never abort the whole tool call:
+            // log it and skip.
+            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
+                Ok(row) => row,
+                Err(e) => {
+                    eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
+                    continue;
+                }
+            };
+            let updated_at = coerce_updated_at(updated_at_raw);
+            let entry = candidates.entry(id.clone()).or_insert_with(|| {
+                let v = serde_json::json!({
+                    "id": id,
+                    "entity_id": entity_id,
+                    "title": title,
+                    "text": text,
+                    "source_ref": source_ref,
+                    "confidence": confidence,
+                });
+                // Higher confidence string sorts later; rank key is
+                // inverted for descending sort convenience.
+                (0, v, confidence.clone().unwrap_or_default(), updated_at)
+            });
+            entry.0 += 1; // one overlap point per matching term
+        }
+    }
+    let mut ranked: Vec<_> = candidates.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1 .0
+            .cmp(&a.1 .0) // term overlap desc
+            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+            .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
+    });
+    Ok(ranked
+        .into_iter()
+        .take(limit_wiki)
+        .map(|(_, (_, v, _, _))| v)
+        .collect())
+}
+
+/// Fetch and rank chunk rows by cosine similarity against `query_emb`.
+/// Chunks with mismatched embedding dimensions are skipped; results are
+/// sorted by score descending and truncated to `limit`. (Ported from
+/// tools/src/queries.rs; errors adapted to anyhow.)
+pub(crate) fn fetch_ranked_chunks(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+    query_emb: &[f32],
+    limit: usize,
+) -> Result<Vec<RankedChunkRow>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, i64>(0)?,            // id
+            row.get::<_, String>(1)?,         // text
+            row.get::<_, Vec<u8>>(2)?,        // embedding bytes
+            row.get::<_, String>(3)?,         // doc_path
+            row.get::<_, Option<u32>>(4)?,    // start_line
+            row.get::<_, Option<u32>>(5)?,    // end_line
+            row.get::<_, Option<String>>(6)?, // symbol (optional)
+            row.get::<_, Option<String>>(7)?, // strategy/language (optional)
+            row.get::<_, Option<String>>(8)?, // entity_id (optional)
+        ))
+    })?;
+
+    let mut scored: Vec<RankedChunkRow> = Vec::new();
+    for row in rows {
+        let (id, text, emb_bytes, doc_path, start_line, end_line, symbol, language, entity_id) =
+            row?;
+        let chunk_emb = bytes_to_f32(&emb_bytes);
+        if chunk_emb.len() != query_emb.len() {
+            continue; // skip chunks with mismatched embedding dimensions
+        }
+        let score = cosine_similarity(query_emb, &chunk_emb);
+        scored.push(RankedChunkRow {
+            id,
+            text,
+            doc_path,
+            start_line,
+            end_line,
+            symbol_name: symbol,
+            language,
+            entity_id: entity_id.unwrap_or_default(),
+            score,
+        });
+    }
+
+    // Sort descending by score, take top limit
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+/// Chunk-row -> JSON mapper (ported from the coding server bin's
+/// `code_rows_to_json`).
+pub(crate) fn code_rows_to_json(rows: Vec<RankedChunkRow>) -> Vec<Value> {
+    rows.into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "text": r.text,
+                "doc_path": r.doc_path,
+                "start_line": r.start_line,
+                "end_line": r.end_line,
+                "symbol": r.symbol_name,
+                "strategy": r.language,
+                "score": r.score
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedRecallContextParams {
+    /// Coding task query to recall context for
+    pub query: String,
+    /// Max number of wisdom layer (wiki) entries to return (default: 5)
+    #[serde(default)]
+    pub limit_wiki: Option<usize>,
+    /// Max number of code chunks to return (default: 10)
+    #[serde(default)]
+    pub limit_code: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedGetWikiEntryParams {
+    /// Topic to search for in wiki entries (title/body/tags match)
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Specific entity ID of the wiki entry to fetch
+    #[serde(default)]
+    pub entity_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedSearchCodeParams {
+    /// Query to search code chunks
+    pub query: String,
+    /// Max number of code chunks to return (default: 10)
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Optional symbol name to filter code chunks (e.g., function name)
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Curated memory read dispatchers (ported from the coding server sidecar's
+// handler bodies; rmcp::ErrorData -> anyhow).
+// ---------------------------------------------------------------------------
+
+/// Recall prioritized context for a coding task: keyword-ranked wisdom
+/// entries plus AST-strategy code chunks ranked by cosine similarity.
+pub async fn dispatch_curated_recall_context(
+    ctx: &ToolDispatchContext,
+    p: CuratedRecallContextParams,
+) -> Result<Value> {
+    let limit_wiki = p.limit_wiki.unwrap_or(5);
+    let limit_code = p.limit_code.unwrap_or(10);
+
+    // Embed OUTSIDE the DB lock (blocking network call).
+    let query_vec = embed_query(&ctx.profile, p.query.clone()).await?;
+
+    let conn = ctx.conn.clone();
+    let query = p.query.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let conn_guard = lock_conn(&conn)?;
+        let wiki_entries = rank_wiki_entries(&conn_guard, &query, limit_wiki)?;
+
+        // Code chunks: real chunker strategies (ast_*). Vectors live in the
+        // separate embeddings table.
+        let code_sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+        let code_chunks = code_rows_to_json(fetch_ranked_chunks(
+            &conn_guard,
+            &code_sql,
+            &[],
+            &query_vec,
+            limit_code,
+        )?);
+
+        Ok(serde_json::json!({
+            "wiki_entries": wiki_entries,
+            "code_chunks": code_chunks,
+            "query": query
+        }))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("recall task join error: {e}"))??;
+    Ok(result)
+}
+
+/// Fetch full content of wiki (wisdom layer) entries by entity_id or topic.
+/// Precedence (spec §6): when both are supplied, `entity_id` wins and
+/// `topic` is ignored.
+pub async fn dispatch_curated_get_wiki_entry(
+    ctx: &ToolDispatchContext,
+    p: CuratedGetWikiEntryParams,
+) -> Result<Value> {
+    let conn = ctx.conn.clone();
+    let topic = p.topic.clone();
+    let entity_id = p.entity_id.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let conn_guard = lock_conn(&conn)?;
+
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
+        {
+            // The plan's precedence fixture passes the wiki ENTRY id ("w1")
+            // as `entity_id`, so accept either the entity grouping id or the
+            // per-entry id — entry ids are unique keys, so this only ever
+            // widens the group with at most that one entry.
+            (
+                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
+                 FROM llm_wiki_entries
+                 WHERE deleted_at IS NULL AND (entity_id = ?1 OR id = ?1)
+                 ORDER BY updated_at",
+                vec![Box::new(eid.clone())],
+            )
+        } else if let Some(ref topic) = topic {
+            (
+                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
+                 FROM llm_wiki_entries
+                 WHERE deleted_at IS NULL
+                   AND (title LIKE '%' || ?1 || '%'
+                        OR body LIKE '%' || ?1 || '%'
+                        OR tags LIKE '%' || ?1 || '%')
+                 ORDER BY confidence DESC, updated_at",
+                vec![Box::new(topic.clone())],
+            )
+        } else {
+            anyhow::bail!("must provide either topic or entity_id");
+        };
+
+        let mut stmt = conn_guard
+            .prepare(sql)
+            .map_err(|e| anyhow::anyhow!("prepare wiki entry query: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,      // text
+                    row.get::<_, usize>(1)?,       // position
+                    row.get::<_, String>(2)?,      // doc_path
+                    row.get::<_, Option<u32>>(3)?, // start_line
+                    row.get::<_, Option<u32>>(4)?, // end_line
+                ))
+            })
+            .map_err(|e| anyhow::anyhow!("execute wiki entry query: {e}"))?;
+
+        let mut full_text = String::new();
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (text, position, doc_path, start_line, end_line) =
+                row.map_err(|e| anyhow::anyhow!("read wiki entry row: {e}"))?;
+            full_text.push_str(&text);
+            full_text.push('\n');
+            chunks.push(serde_json::json!({
+                "text": text,
+                "position": position,
+                "doc_path": doc_path,
+                "start_line": start_line,
+                "end_line": end_line
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "full_text": full_text.trim(),
+            "chunks": chunks,
+            "topic": topic,
+            "entity_id": entity_id
+        }))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("get_entry task join error: {e}"))??;
+    Ok(result)
+}
+
+/// Search code chunks (ast_* strategies) by query embedding, optionally
+/// narrowed to a symbol name.
+pub async fn dispatch_curated_search_code(
+    ctx: &ToolDispatchContext,
+    p: CuratedSearchCodeParams,
+) -> Result<Value> {
+    let limit = p.limit.unwrap_or(10);
+
+    // Embed OUTSIDE the DB lock (blocking network call).
+    let query_vec = embed_query(&ctx.profile, p.query.clone()).await?;
+
+    let conn = ctx.conn.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let conn_guard = lock_conn(&conn)?;
+        let sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+
+        if let Some(ref sym) = p.symbol {
+            let with_symbol = format!("{sql} AND c.symbol_name LIKE '%' || ?1 || '%'");
+            // The shared helper takes the symbol as its sole parameter.
+            let rows = fetch_ranked_chunks(&conn_guard, &with_symbol, &[sym], &query_vec, limit)?;
+            return Ok(serde_json::json!({
+                "code_chunks": code_rows_to_json(rows),
+                "query": p.query,
+                "symbol_filter": p.symbol
+            }));
+        }
+
+        let rows = fetch_ranked_chunks(&conn_guard, &sql, &[], &query_vec, limit)?;
+        Ok(serde_json::json!({
+            "code_chunks": code_rows_to_json(rows),
+            "query": p.query,
+            "symbol_filter": p.symbol
+        }))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("search_code task join error: {e}"))??;
+    Ok(result)
+}
+
+impl ToolDispatchContext {
+    /// Run `f` with the lazily-opened read-write brain connection.
+    ///
+    /// First call opens `db_path` with `SQLITE_OPEN_READ_WRITE` (NO create —
+    /// a missing brain file is an error, never a fresh DB) plus a 5s busy
+    /// timeout, and caches the connection for subsequent calls. The async
+    /// surface hides the blocking open/lock behind `spawn_blocking`; callers
+    /// `await` directly (there is no `run_sync` helper).
+    pub async fn with_rw<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Get-or-open the cached RW connection.
+        let existing = {
+            let cache = self
+                .rw_conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rw_conn mutex poisoned"))?;
+            cache.clone()
+        };
+
+        let conn: Arc<Mutex<Connection>> = match existing {
+            Some(c) => c,
+            None => {
+                let db_path = self.db_path.clone();
+                let opened = tokio::task::spawn_blocking(move || {
+                    Connection::open_with_flags(
+                        &db_path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("read-write brain open failed ({}): {e}", db_path.display())
+                    })
+                    .map(|conn| {
+                        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                        Arc::new(Mutex::new(conn))
+                    })
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("rw open task join error: {e}"))??;
+
+                // Cache only on success; a concurrent caller may have won the
+                // race — either handle works, keep the first one stored.
+                let mut cache = self
+                    .rw_conn
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("rw_conn mutex poisoned"))?;
+                if let Some(c) = cache.as_ref() {
+                    c.clone()
+                } else {
+                    *cache = Some(opened.clone());
+                    opened
+                }
+            }
+        };
+
+        tokio::task::spawn_blocking(move || {
+            let mut guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rw connection mutex poisoned"))?;
+            f(&mut guard)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("rw task join error: {e}"))?
+    }
+
+    /// Compute the wisdom embedding blob OFF any DB lock and OFF the tokio
+    /// worker thread (the Local profile is a blocking HTTP round-trip with a
+    /// long timeout, and `embed_batch` builds a `reqwest::blocking` client —
+    /// same contract as `embed_query`). Provider failures collapse to `None`;
+    /// the embedding sweep fills the blob later.
+    pub async fn precompute_wisdom_embedding(&self, body: &str) -> Option<Vec<u8>> {
+        let profile = self.profile.clone();
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::db::wisdom::precompute_entry_embedding(Some(&profile), &body)
+        })
+        .await
+        .ok()?
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Curated memory write dispatchers + fail-closed audit logging (spec §5/§7).
+// Every DB write goes through db::wisdom; audit INSERT failures FAIL the
+// tool call (fail-closed) — the existing 8 non-curated tools keep their
+// best-effort path (log_agent_access) untouched.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedAddWisdomParams {
+    /// Entity to attach the new wisdom entry to (must be active)
+    pub entity_id: String,
+    /// Body of the wisdom entry (title is derived from it)
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedUpdateWisdomParams {
+    /// Owning entity of the wisdom entry
+    pub entity_id: String,
+    /// Id of the wisdom entry to rewrite
+    pub wisdom_id: String,
+    /// New body (title re-derived from it)
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedArchiveWisdomParams {
+    /// Owning entity of the wisdom entry
+    pub entity_id: String,
+    /// Id of the wisdom entry to soft-delete
+    pub wisdom_id: String,
+}
+
+/// Fail-closed audit log for curated tool calls (spec §7): a failed INSERT
+/// propagates and fails the tool call, unlike the best-effort
+/// [`log_agent_access`] used by the eight pre-existing read tools
+/// (their migration to fail-closed is tracked separately).
+/// Accepts `&Connection` or `&Transaction` (deref coercion) so write tools
+/// can audit inside the same transaction as the mutation.
+pub fn log_agent_access_checked(
+    conn: &Connection,
+    client: &str,
+    tool: &str,
+    entity_id: Option<&str>,
+    operation: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        rusqlite::params![client, tool, operation, entity_id],
+    )
+    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
+    Ok(())
+}
+
+/// Reload one live wisdom entry as JSON (per-entry query shape shared with
+/// the coding server). Used by `dispatch_curated_update_wisdom` so the
+/// response is read back from the DB, never echoed from the request.
+fn load_wisdom_json(conn: &Connection, entity_id: &str, wisdom_id: &str) -> Result<Value> {
+    let (id, ent, title, body, source_type): (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT id, entity_id, title, body, source_type
+             FROM llm_wiki_entries
+             WHERE entity_id = ?1 AND id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![entity_id, wisdom_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("reloading updated wisdom {wisdom_id} under {entity_id}: {e}")
+        })?;
+    Ok(serde_json::json!({
+        "id": id,
+        "entity_id": ent,
+        "title": title,
+        "body": body,
+        "source_type": source_type,
+    }))
+}
+
+/// Add a user-stated wisdom entry through the `db::wisdom` core.
+///
+/// Embedding is precomputed OUTSIDE the RW lock. The mutation and the
+/// fail-closed audit row commit ATOMICALLY on the RW connection: if the
+/// audit INSERT fails, the mutation is rolled back (PR #185 review — an
+/// entry must never exist without its audit trail, and a client retry
+/// must never create a duplicate).
+pub async fn dispatch_curated_add_wisdom(
+    ctx: &ToolDispatchContext,
+    p: CuratedAddWisdomParams,
+) -> Result<Value> {
+    let blob = ctx.precompute_wisdom_embedding(&p.body).await;
+    let client = ctx.client.clone();
+    let entity_id = p.entity_id.clone();
+    let wisdom = ctx
+        .with_rw(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let wisdom = crate::db::wisdom::add_wisdom_in_tx(&tx, &p.entity_id, &p.body, blob)?;
+            log_agent_access_checked(
+                &tx,
+                &client,
+                "curated_add_wisdom",
+                Some(&p.entity_id),
+                "write",
+            )?;
+            tx.commit()?;
+            Ok(wisdom)
+        })
+        .await?;
+    Ok(serde_json::json!({
+        "id": wisdom.id,
+        "entity_id": entity_id,
+        "title": wisdom.title,
+        "body": wisdom.body,
+        "source_type": wisdom.source_type,
+    }))
+}
+
+/// Rewrite a wisdom entry's body through the `db::wisdom` core and return the
+/// RELOADED entry (read back from the DB; `update_wisdom_with_blob` returns
+/// `Result<()>`, so echoing the request would fabricate the response).
+/// Atomic mutation+audit contract matches [`dispatch_curated_add_wisdom`].
+pub async fn dispatch_curated_update_wisdom(
+    ctx: &ToolDispatchContext,
+    p: CuratedUpdateWisdomParams,
+) -> Result<Value> {
+    let blob = ctx.precompute_wisdom_embedding(&p.body).await;
+    let client = ctx.client.clone();
+    ctx.with_rw(move |conn| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::db::wisdom::update_wisdom_in_tx(&tx, &p.entity_id, &p.wisdom_id, &p.body, blob)?;
+        log_agent_access_checked(
+            &tx,
+            &client,
+            "curated_update_wisdom",
+            Some(&p.entity_id),
+            "write",
+        )?;
+        tx.commit()?;
+        let reloaded = load_wisdom_json(conn, &p.entity_id, &p.wisdom_id)?;
+        Ok(reloaded)
+    })
+    .await
+}
+
+/// Soft-delete a wisdom entry through the `db::wisdom` core.
+/// Atomic mutation+audit contract matches [`dispatch_curated_add_wisdom`].
+pub async fn dispatch_curated_archive_wisdom(
+    ctx: &ToolDispatchContext,
+    p: CuratedArchiveWisdomParams,
+) -> Result<Value> {
+    let client = ctx.client.clone();
+    ctx.with_rw(move |conn| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::db::wisdom::archive_wisdom_in_tx(&tx, &p.entity_id, &p.wisdom_id)?;
+        log_agent_access_checked(
+            &tx,
+            &client,
+            "curated_archive_wisdom",
+            Some(&p.entity_id),
+            "write",
+        )?;
+        tx.commit()?;
+        Ok(serde_json::json!({
+            "archived": true,
+            "wisdom_id": p.wisdom_id,
+        }))
+    })
+    .await
+}
+
 #[derive(Clone)]
 pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
     pub profile: EmbedProfile,
     pub vault_dir: Option<PathBuf>,
+    /// Path to the brain DB file, used to lazily open the RW connection for
+    /// curated write tools. Opens must NEVER create the file.
+    pub db_path: PathBuf,
+    /// Lazily-opened read-write brain connection (curated write tools +
+    /// fail-closed audit logging). `None` until the first `with_rw` call.
+    pub rw_conn: Arc<Mutex<Option<Arc<Mutex<Connection>>>>>,
     /// Agent-log client label: "clanker-bridge" for cloud bridge, static label for local MCP (e.g. "local-mcp").
     /// The actual MCP client name is only known after the initialize handshake, which happens
     /// after this context is constructed; for now we use a static label.
@@ -435,6 +1140,10 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, 
 
 /// Best-effort audit log for agent tool access. A failed log write must never fail
 /// the tool call — tool availability wins over audit completeness.
+///
+/// Spec §7 carve-out: this best-effort policy is LEGACY-ONLY. The six curated
+/// `curated_*` tools use [`log_agent_access_checked`] (fail-closed) instead;
+/// the remaining non-curated tools migrate in a separate follow-up.
 pub fn log_agent_access(conn: &Connection, client: &str, tool: &str, entity_id: Option<&str>) {
     let _ = conn.execute(
         "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
@@ -572,21 +1281,92 @@ pub async fn dispatch_tool_call(
             .await??;
             Ok(serde_json::to_value(result)?)
         }
+        // Curated memory tools (spec: agent-memory CRUD). All six audit
+        // fail-closed through the lazy RW connection inside their dispatchers;
+        // they MUST bypass the best-effort outer log below (spec §7:
+        // SUPERSEDES the best-effort rule for these tools).
+        "curated_recall_context" => {
+            let p: CuratedRecallContextParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_recall_context(ctx, p).await?;
+            log_curated_access_rw(ctx, "curated_recall_context", entity_id.as_deref(), "read")
+                .await?;
+            Ok(result)
+        }
+        "curated_get_wiki_entry" => {
+            let p: CuratedGetWikiEntryParams = serde_json::from_value(params)?;
+            let entity_id_ref = p.entity_id.clone();
+            let result = dispatch_curated_get_wiki_entry(ctx, p).await?;
+            log_curated_access_rw(
+                ctx,
+                "curated_get_wiki_entry",
+                entity_id_ref.as_deref().or(entity_id.as_deref()),
+                "read",
+            )
+            .await?;
+            Ok(result)
+        }
+        "curated_search_code" => {
+            let p: CuratedSearchCodeParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_search_code(ctx, p).await?;
+            log_curated_access_rw(ctx, "curated_search_code", entity_id.as_deref(), "read").await?;
+            Ok(result)
+        }
+        "curated_add_wisdom" => {
+            let p: CuratedAddWisdomParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_add_wisdom(ctx, p).await?;
+            // The write dispatcher already logged fail-closed (write op).
+            Ok(result)
+        }
+        "curated_update_wisdom" => {
+            let p: CuratedUpdateWisdomParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_update_wisdom(ctx, p).await?;
+            Ok(result)
+        }
+        "curated_archive_wisdom" => {
+            let p: CuratedArchiveWisdomParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_archive_wisdom(ctx, p).await?;
+            Ok(result)
+        }
         other => Err(UnknownToolError(other.to_string()).into()),
     };
 
     // Agent access log: best-effort, never fail the tool call.
     // Log both successful and failed attempts (including unknown tool).
-    let _ = tokio::task::spawn_blocking(move || {
-        let guard = match conn_for_log.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
-    })
-    .await;
+    // Curated tools are excluded: they audit fail-closed via the RW
+    // connection inside their dispatchers (spec §7), and a best-effort
+    // attempt here would either double-log writes or silently swallow
+    // read-audit failures on the readonly connection.
+    if !tool.starts_with("curated_") {
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = match conn_for_log.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            log_agent_access(&guard, &client, &tool_owned, entity_id.as_deref());
+        })
+        .await;
+    }
 
     result
+}
+
+/// Fail-closed audit for curated READ tools (spec §7): routed through the
+/// lazy RW connection because the readonly connection cannot service
+/// INSERTs; a failed log write fails the tool call.
+async fn log_curated_access_rw(
+    ctx: &ToolDispatchContext,
+    tool: &str,
+    entity_id: Option<&str>,
+    operation: &str,
+) -> Result<()> {
+    let client = ctx.client.clone();
+    let tool = tool.to_string();
+    let entity_id = entity_id.map(str::to_string);
+    let operation = operation.to_string();
+    ctx.with_rw(move |conn| {
+        log_agent_access_checked(conn, &client, &tool, entity_id.as_deref(), &operation)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -898,6 +1678,8 @@ mod dispatch_tool_call_tests {
             profile: EmbedProfile::default(),
             vault_dir: None,
             client: "test-client".into(),
+            db_path: PathBuf::from("/nonexistent/brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -944,5 +1726,480 @@ mod dispatch_tool_call_tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown tool"));
+    }
+}
+
+#[cfg(test)]
+mod curated_memory_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// File-backed brain fixture (spec §9): tests exercising BOTH the RO and RW
+    /// connections must share one real DB file — bare `open_in_memory()` is
+    /// per-connection-private. Table shapes mirror the live DDL in
+    /// `db/schema.rs` (documents/chunks/embeddings) and `db/okf_ddl.rs`
+    /// (llm_wiki_entries/curated_entities/curated_agent_log/llm_wiki_outbox).
+    pub(crate) fn seed_file_db(dir: &std::path::Path) -> Connection {
+        let conn = Connection::open(dir.join("brain.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                source_type TEXT NOT NULL DEFAULT 'user_stated',
+                source_hash TEXT,
+                source_ref TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_accessed_at INTEGER,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER,
+                embedding TEXT,
+                embedding_blob BLOB,
+                okf_type TEXT,
+                ontology_checked_at INTEGER,
+                heal_checked_at INTEGER,
+                lifecycle_status TEXT NOT NULL DEFAULT 'stable',
+                stale_after INTEGER,
+                generated_by TEXT,
+                last_verified_at INTEGER,
+                last_verified_by TEXT,
+                okf_sources TEXT,
+                okf_verified TEXT,
+                okf_usage_window TEXT,
+                embedding_failed_at INTEGER,
+                embedding_failure_kind TEXT,
+                embedding_attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE curated_entities (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'concept',
+                summary TEXT NOT NULL DEFAULT '',
+                summary_embedding BLOB,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                deleted_at INTEGER
+            );
+            CREATE TABLE curated_agent_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('read','write')),
+                entity_id TEXT,
+                summary TEXT,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE llm_wiki_tasks (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                deleted_at INTEGER
+            );
+            CREATE TABLE llm_wiki_events (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                related_entry_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE llm_wiki_edges (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(entity_id, source_id, target_id, edge_type)
+            );
+            CREATE TABLE llm_wiki_outbox (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                hash TEXT NOT NULL,
+                tier TEXT NOT NULL CHECK(tier IN ('user_doc', 'wiki')),
+                folder_rules_id INTEGER,
+                last_indexed INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'pending_reindex', 'indexed', 'error', 'orphaned'))
+            );
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_text TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                start_line INTEGER NOT NULL DEFAULT 1,
+                end_line INTEGER NOT NULL DEFAULT 1,
+                symbol_name TEXT,
+                strategy TEXT NOT NULL DEFAULT 'prose',
+                defined_symbol TEXT,
+                entity_id TEXT
+            );
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                vector BLOB NOT NULL
+            );
+            INSERT INTO curated_entities VALUES
+              ('ent-1', 'Farmhouse', 'concept', '', NULL, 1756000000, 1756000000, NULL);
+            INSERT INTO llm_wiki_entries
+              (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+               created_at, updated_at, deleted_at) VALUES
+              ('w1','ent-1','Repo Layout','The vault stores immutable documents.','[]','confirmed','user_stated','{"proposal_id":null,"evidence":[]}',1756000000000,1756000000000,NULL),
+              ('w2','ent-1','Archived note','older body','[]','inferred','user_stated','x',1756000000000,1756000000000,1756000000001);
+            INSERT INTO documents (path, hash, tier, status) VALUES
+              ('src/main.rs', 'h1', 'user_doc', 'indexed'),
+              ('docs/readme.md', 'h2', 'user_doc', 'indexed');
+            INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy, entity_id) VALUES
+              (1, 'fn main() {}', 0, 1, 1, 'main', 'ast_symbols', 'tier_working'),
+              (2, 'plain prose chunk', 0, 1, 1, NULL, 'proximity', 'tier_working');
+            INSERT INTO embeddings (chunk_id, vector) VALUES
+              (1, x'0000803F00000000000000000000000000000000000000000000000000000000'),
+              (2, x'0000003F00000000000000000000000000000000000000000000000000000000');
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn rank_wiki_entries_skips_deleted_and_ranks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let hits = rank_wiki_entries(&conn, "vault documents", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["id"], "w1");
+    }
+
+    /// ToolDispatchContext over the shared file fixture. The embed stub env
+    /// (CURATED_EMBED_STUB=constant8) keeps `embed_batch` deterministic and
+    /// network-free; `Local` profile is the repo default.
+    fn test_ctx(conn: Connection, dir: &std::path::Path) -> ToolDispatchContext {
+        std::env::set_var("CURATED_EMBED_STUB", "constant8"); // mandated stub
+        ToolDispatchContext {
+            conn: Arc::new(Mutex::new(conn)),
+            profile: EmbedProfile::default(),
+            vault_dir: Some(dir.to_path_buf()),
+            client: "test".into(),
+            db_path: dir.join("brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_context_returns_wiki_first() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        let v = dispatch_curated_recall_context(
+            &ctx,
+            CuratedRecallContextParams {
+                query: "vault documents".into(),
+                limit_wiki: Some(3),
+                limit_code: Some(3),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(v["wiki_entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == serde_json::json!("w1")));
+        assert_eq!(v["query"], "vault documents");
+    }
+
+    #[tokio::test]
+    async fn get_entry_requires_topic_or_entity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        assert!(dispatch_curated_get_wiki_entry(
+            &ctx,
+            CuratedGetWikiEntryParams {
+                topic: None,
+                entity_id: None
+            }
+        )
+        .await
+        .is_err());
+        let v = dispatch_curated_get_wiki_entry(
+            &ctx,
+            CuratedGetWikiEntryParams {
+                topic: Some("Repo Layout".into()),
+                entity_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(v["full_text"]
+            .as_str()
+            .unwrap()
+            .contains("immutable documents"));
+    }
+
+    #[tokio::test]
+    async fn get_entry_entity_id_wins_over_topic() {
+        // spec §6: both supplied -> entity_id takes precedence
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        let v = dispatch_curated_get_wiki_entry(
+            &ctx,
+            CuratedGetWikiEntryParams {
+                topic: Some("nonexistent-topic-xyz".into()),
+                entity_id: Some("w1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(v["full_text"]
+            .as_str()
+            .unwrap()
+            .contains("immutable documents"));
+    }
+
+    #[tokio::test]
+    async fn search_code_filters_ast_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let ctx = test_ctx(conn, dir.path());
+        let v = dispatch_curated_search_code(
+            &ctx,
+            CuratedSearchCodeParams {
+                query: "main".into(),
+                limit: Some(5),
+                symbol: Some("main".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let code = v["code_chunks"].as_array().expect("code_chunks array");
+        assert!(
+            !code.is_empty(),
+            "fixture must produce at least one ranked hit"
+        );
+        for c in code {
+            assert!(c["strategy"].as_str().unwrap().starts_with("ast_"));
+        }
+    }
+
+    #[tokio::test]
+    async fn with_rw_errors_when_db_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = std::path::PathBuf::from("/nonexistent/brain.db");
+        // with_rw is async — awaited directly (no run_sync helper).
+        let err = ctx.with_rw(|_c| Ok(())).await;
+        assert!(err.is_err()); // never creates the brain file
+        assert!(
+            !std::path::Path::new("/nonexistent/brain.db").exists(),
+            "with_rw must never create the DB file"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_rw_opens_existing_db_readwrite() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("brain.db");
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x);")
+            .unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = db;
+        ctx.with_rw(|c| {
+            c.execute("INSERT INTO t VALUES (1)", [])
+                .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_wisdom_inserts_user_stated_wisdom() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db"); // real RW path over the seeded file
+        let v = dispatch_curated_add_wisdom(
+            &ctx,
+            CuratedAddWisdomParams {
+                entity_id: "ent-1".into(),
+                body: "Agent learned: deploy scripts need sudo.".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["source_type"], "user_stated");
+        // id prefix is storage-level.
+        assert!(v["id"].as_str().unwrap().starts_with("fact_"));
+        // Audit row landed (fail-closed path wrote a 'write' row).
+        let audit_count: i64 = ctx
+            .with_rw(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM curated_agent_log WHERE tool = 'curated_add_wisdom'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    #[tokio::test]
+    async fn update_wisdom_returns_reloaded_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        // Update the seeded entry w1 under entity ent-1.
+        let v = dispatch_curated_update_wisdom(
+            &ctx,
+            CuratedUpdateWisdomParams {
+                entity_id: "ent-1".into(),
+                wisdom_id: "w1".into(),
+                body: "updated body v2".into(),
+            },
+        )
+        .await
+        .unwrap();
+        // Reloaded from the DB — not echoed from the request.
+        assert_eq!(v["body"], "updated body v2");
+        assert_eq!(v["id"], "w1");
+        assert_eq!(v["entity_id"], "ent-1");
+    }
+
+    #[tokio::test]
+    async fn archive_wisdom_soft_deletes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        let v = dispatch_curated_archive_wisdom(
+            &ctx,
+            CuratedArchiveWisdomParams {
+                entity_id: "ent-1".into(),
+                wisdom_id: "w1".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["archived"], true);
+        assert_eq!(v["wisdom_id"], "w1");
+        // Verify via the RO conn: deleted_at set (ms epoch) + live count dropped.
+        let (deleted_at, live_count): (Option<i64>, i64) = {
+            let guard = ctx.conn.lock().unwrap();
+            (
+                guard
+                    .query_row(
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'w1'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap(),
+                guard
+                    .query_row(
+                        "SELECT COUNT(*) FROM llm_wiki_entries WHERE deleted_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap(),
+            )
+        };
+        assert!(deleted_at.is_some(), "w1 must carry a deleted_at ms stamp");
+        assert_eq!(
+            live_count, 0,
+            "w2 was seeded pre-archived; after archiving w1 no live rows remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_fails_when_entity_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        let err = dispatch_curated_add_wisdom(
+            &ctx,
+            CuratedAddWisdomParams {
+                entity_id: "ent-gone".into(),
+                body: "orphan wisdom".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("ent-gone")
+                || err.to_string().to_lowercase().contains("not found")
+                || err.to_string().to_lowercase().contains("inactive"),
+            "core must bail on inactive/missing entity; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn curated_call_fails_when_audit_log_unwritable() {
+        // spec §9 log-failure test: DROP TABLE curated_agent_log via a THIRD
+        // direct Connection handle (the RO conn cannot write DDL), then the
+        // curated write must fail (fail-closed audit).
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        {
+            let third = Connection::open(dir.path().join("brain.db")).unwrap();
+            third
+                .execute_batch("DROP TABLE curated_agent_log;")
+                .unwrap();
+        }
+        let err = dispatch_curated_add_wisdom(
+            &ctx,
+            CuratedAddWisdomParams {
+                entity_id: "ent-1".into(),
+                body: "should fail on audit write".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("audit"),
+            "error must trace to the audit insert; got: {err}"
+        );
+        // Atomicity (PR #185 review): the failed audit insert must roll back
+        // the mutation — no wisdom row may survive.
+        let check = Connection::open(dir.path().join("brain.db")).unwrap();
+        let n: i64 = check
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE body = 'should fail on audit write'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "failed audit insert must roll back the wisdom mutation"
+        );
     }
 }

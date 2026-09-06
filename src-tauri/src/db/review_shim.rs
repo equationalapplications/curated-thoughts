@@ -359,19 +359,20 @@ mod tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-            let mut conn = open_in_memory().unwrap();
-            let rowid = seed_proposal(&conn, "prop-approve", "Beta");
-            approve_proposal_shim(&mut conn, rowid, None).unwrap();
-            assert!(list_pending_review_pages(&conn).unwrap().is_empty());
-            let status: String = conn
-                .query_row(
-                    "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(status, "approved");
-        });
+                let mut conn = open_in_memory().unwrap();
+                let rowid = seed_proposal(&conn, "prop-approve", "Beta");
+                approve_proposal_shim(&mut conn, rowid, None).unwrap();
+                assert!(list_pending_review_pages(&conn).unwrap().is_empty());
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM curated_proposals WHERE id = 'prop-approve'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(status, "approved");
+            },
+        );
     }
 
     #[test]

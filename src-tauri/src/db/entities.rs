@@ -36,7 +36,7 @@ pub struct EntitySummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntityFact {
+pub struct EntityWisdom {
     pub id: String, // raw OKF fact id (displayed directly by the "..." power menu)
     pub title: String,
     pub body: String,
@@ -100,9 +100,9 @@ pub struct OkfUsageWindow {
     pub to: String,
 }
 
-/// One resolved source-document reference on an [`EntityFact`].
+/// One resolved source-document reference on an [`EntityWisdom`].
 /// Wire shape is `{ "path": ..., "chunkId": ... }` — `chunkId` is the
-/// camelCase exception to `EntityFact`'s snake_case fields because it
+/// camelCase exception to `EntityWisdom`'s snake_case fields because it
 /// feeds the frontend `NavTarget.chunkId` deep-link surface. The value
 /// is the stable SHA-256 first-16-bytes hex from `db::chunk_hash`, or
 /// `null` when the fact's evidence did not resolve to a chunk.
@@ -140,7 +140,7 @@ pub struct EntityDetail {
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
-    pub facts: Vec<EntityFact>,
+    pub facts: Vec<EntityWisdom>,
     pub tasks: Vec<EntityTask>,
     pub events: Vec<EntityEvent>,
 }
@@ -340,7 +340,7 @@ pub fn list_entities(
     Ok(out)
 }
 
-fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
+fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at,
                 lifecycle_status, stale_after, generated_by, okf_sources, okf_verified,
@@ -389,7 +389,7 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityFact>> {
             last_verified_at,
             last_verified_by,
         ) = row?;
-        out.push(EntityFact {
+        out.push(EntityWisdom {
             id,
             title,
             body,

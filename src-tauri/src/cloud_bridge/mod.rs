@@ -575,6 +575,8 @@ mod session_tests {
             profile: crate::embedder::EmbedProfile::default(),
             vault_dir: None,
             client: "clanker-bridge".into(),
+            db_path: std::path::PathBuf::from("/nonexistent/brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -844,6 +846,8 @@ mod reconnect_loop_tests {
             profile: crate::embedder::EmbedProfile::default(),
             vault_dir: None,
             client: "clanker-bridge".into(),
+            db_path: std::path::PathBuf::from("/nonexistent/brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let retry_now = Arc::new(AtomicBool::new(false));
@@ -912,6 +916,8 @@ mod reconnect_loop_tests {
             profile: crate::embedder::EmbedProfile::default(),
             vault_dir: None,
             client: "clanker-bridge".into(),
+            db_path: std::path::PathBuf::from("/nonexistent/brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
         });
         let cancel = Arc::new(AtomicBool::new(false));
         let retry_now = Arc::new(AtomicBool::new(false));

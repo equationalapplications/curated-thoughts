@@ -8,7 +8,6 @@ pub mod ddl_compat;
 pub mod edge_purge;
 pub mod entities;
 pub mod events;
-pub mod facts;
 pub mod migration;
 pub mod okf_ddl;
 pub mod okf_migration;
@@ -21,6 +20,7 @@ pub mod schema;
 pub mod schema_guard;
 pub mod tasks;
 pub mod wiki_forget;
+pub mod wisdom;
 
 pub use connection::AppDb;
 pub use queries::*;

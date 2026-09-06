@@ -1,17 +1,17 @@
-//! Manual fact CRUD from Brain mode entity pages — mirrors commit.rs write conventions
+//! Manual wisdom CRUD from Brain mode entity pages — mirrors commit.rs write conventions
 //! (ms timestamps on llm_wiki_entries, outbox rows, curated_entities touch).
 
 use crate::db::commit::{
     fact_title_from_body, generate_llm_id, now_timestamps, push_entries_outbox,
     wiki_fact_outbox_payload,
 };
-use crate::db::entities::EntityFact;
+use crate::db::entities::EntityWisdom;
 use crate::db::outbox_format::OutboxOperation;
 use crate::embedder::{embed_batch, EmbedProfile};
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
-/// source_ref for user-authored facts: same JSON shape as proposal commits, no evidence.
+/// source_ref for user-authored wisdom: same JSON shape as proposal commits, no evidence.
 const MANUAL_SOURCE_REF: &str = r#"{"proposal_id":null,"evidence":[]}"#;
 
 fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<()> {
@@ -36,20 +36,20 @@ fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()>
     Ok(())
 }
 
-/// Insert a user-authored fact with outbox row; returns the new fact.
+/// Insert a user-authored wisdom entry with outbox row; returns the new entry.
 ///
-/// Equivalent to `add_fact_with_blob(conn, entity_id, body, None)` — the
+/// Equivalent to `add_wisdom_with_blob(conn, entity_id, body, None)` — the
 /// entry lands with a NULL embedding for the sweep to fill.
-pub fn add_fact(conn: &mut Connection, entity_id: &str, body: &str) -> Result<EntityFact> {
-    add_fact_with_blob(conn, entity_id, body, None)
+pub fn add_wisdom(conn: &mut Connection, entity_id: &str, body: &str) -> Result<EntityWisdom> {
+    add_wisdom_with_blob(conn, entity_id, body, None)
 }
 
-/// Compute the embedding blob for a single user-authored fact, OUTSIDE any
+/// Compute the embedding blob for a single user-authored wisdom entry, OUTSIDE any
 /// DB or app-level mutex. `embed_batch` is a blocking network call and must
 /// never run while a write lock is held.
 ///
 /// Returns `None` when no profile is configured, the body is empty after
-/// trim, or the provider fails — the caller commits the fact anyway and
+/// trim, or the provider fails — the caller commits the wisdom anyway and
 /// leaves the blob NULL for the null-embedding sweep to retry.
 pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) -> Option<Vec<u8>> {
     let profile = profile?;
@@ -93,40 +93,56 @@ pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) ->
     }
 }
 
-/// Insert a user-authored fact with an outbox row, taking a precomputed
+/// Insert a user-authored wisdom entry with an outbox row, taking a precomputed
 /// embedding blob. Callers that want write-time embeddings must compute the
 /// blob up front via [`precompute_entry_embedding`] — outside any lock.
-pub fn add_fact_with_blob(
+pub fn add_wisdom_with_blob(
     conn: &mut Connection,
     entity_id: &str,
     body: &str,
     embedding_blob: Option<Vec<u8>>,
-) -> Result<EntityFact> {
+) -> Result<EntityWisdom> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let wisdom = add_wisdom_in_tx(&tx, entity_id, body, embedding_blob)?;
+    tx.commit()?;
+    Ok(wisdom)
+}
+
+/// Transaction-scoped core of [`add_wisdom_with_blob`]: inserts the entry and
+/// its outbox row on the CALLER's transaction (no BEGIN, no COMMIT) so MCP
+/// write tools can commit mutation + fail-closed audit atomically
+/// (PR #185 review: an audit failure must roll the mutation back, not leave a
+/// committed entry with no audit trail).
+pub fn add_wisdom_in_tx(
+    tx: &Transaction<'_>,
+    entity_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
+) -> Result<EntityWisdom> {
     let body = body.trim();
     if body.is_empty() {
-        bail!("fact body must not be empty");
+        bail!("wisdom body must not be empty");
     }
     let (now_secs, now_ms) = now_timestamps();
-    let fact_id = generate_llm_id("fact_");
+    let wisdom_id = generate_llm_id("fact_");
     let title = fact_title_from_body(body);
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    assert_entity_active(&tx, entity_id)?;
+    assert_entity_active(tx, entity_id)?;
     tx.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
             access_count, deleted_at, embedding_blob, embedding
          ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, ?5, ?6, ?6, NULL, 0, NULL, ?7, NULL)",
-        params![fact_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms, embedding_blob],
+        params![wisdom_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms, embedding_blob],
     )?;
     push_entries_outbox(
-        &tx,
+        tx,
         entity_id,
-        &fact_id,
+        &wisdom_id,
         OutboxOperation::Insert,
         wiki_fact_outbox_payload(
-            &fact_id,
+            &wisdom_id,
             entity_id,
             &title,
             body,
@@ -156,11 +172,10 @@ pub fn add_fact_with_blob(
         ),
         now_ms,
     )?;
-    touch_entity(&tx, entity_id, now_secs)?;
-    tx.commit()?;
+    touch_entity(tx, entity_id, now_secs)?;
 
-    Ok(EntityFact {
-        id: fact_id,
+    Ok(EntityWisdom {
+        id: wisdom_id,
         title,
         body: body.to_string(),
         tags: Vec::new(),
@@ -179,61 +194,75 @@ pub fn add_fact_with_blob(
     })
 }
 
-/// Insert a user-authored fact, computing the embedding blob inside the call.
+/// Insert a user-authored wisdom entry, computing the embedding blob inside the call.
 /// New callers should compute the blob up front via
 /// [`precompute_entry_embedding`] so the blocking network call does not run
 /// under a write lock; this wrapper keeps the old test/library API.
-pub fn add_fact_with_profile(
+pub fn add_wisdom_with_profile(
     conn: &mut Connection,
     entity_id: &str,
     body: &str,
     profile: Option<&EmbedProfile>,
-) -> Result<EntityFact> {
+) -> Result<EntityWisdom> {
     let embedding_blob = precompute_entry_embedding(profile, body);
-    add_fact_with_blob(conn, entity_id, body, embedding_blob)
+    add_wisdom_with_blob(conn, entity_id, body, embedding_blob)
 }
 
-/// Rewrite a fact's body (title re-derived); pushes full-payload outbox UPDATE.
+/// Rewrite a wisdom entry's body (title re-derived); pushes full-payload outbox UPDATE.
 ///
-/// Equivalent to `update_fact_with_blob(conn, entity_id, fact_id, body, None)`
+/// Equivalent to `update_wisdom_with_blob(conn, entity_id, wisdom_id, body, None)`
 /// — the entry lands with a NULL embedding for the sweep to fill. Kept for
 /// tests and callers with no embed profile to hand.
-pub fn update_fact(
+pub fn update_wisdom(
     conn: &mut Connection,
     entity_id: &str,
-    fact_id: &str,
+    wisdom_id: &str,
     body: &str,
 ) -> Result<()> {
-    update_fact_with_blob(conn, entity_id, fact_id, body, None)
+    update_wisdom_with_blob(conn, entity_id, wisdom_id, body, None)
 }
 
-/// Rewrite a fact's body, storing a caller-computed embedding blob.
+/// Rewrite a wisdom entry's body, storing a caller-computed embedding blob.
 ///
 /// The blob must be computed OUTSIDE the caller's DB lock via
 /// [`precompute_entry_embedding`], for the same reason as
-/// [`add_fact_with_blob`]: `embed_batch` is a blocking network round-trip.
+/// [`add_wisdom_with_blob`]: `embed_batch` is a blocking network round-trip.
 ///
 /// `None` writes NULL, which is what a provider failure collapses to — the
 /// null-embedding sweep re-derives it later. Passing the fresh blob is what
-/// keeps an edited fact searchable immediately instead of falling out of
+/// keeps an edited wisdom entry searchable immediately instead of falling out of
 /// semantic retrieval until the next sweep trigger (which this path does not
 /// itself fire).
-pub fn update_fact_with_blob(
+pub fn update_wisdom_with_blob(
     conn: &mut Connection,
     entity_id: &str,
-    fact_id: &str,
+    wisdom_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    update_wisdom_in_tx(&tx, entity_id, wisdom_id, body, embedding_blob)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Transaction-scoped core of [`update_wisdom_with_blob`] (no BEGIN/COMMIT;
+/// same atomic audit rationale as [`add_wisdom_in_tx`]).
+pub fn update_wisdom_in_tx(
+    tx: &Transaction<'_>,
+    entity_id: &str,
+    wisdom_id: &str,
     body: &str,
     embedding_blob: Option<Vec<u8>>,
 ) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
-        bail!("fact body must not be empty");
+        bail!("wisdom body must not be empty");
     }
     let (now_secs, now_ms) = now_timestamps();
     let title = fact_title_from_body(body);
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    assert_entity_active(&tx, entity_id)?;
+    assert_entity_active(tx, entity_id)?;
     let existing = tx
         .query_row(
             "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
@@ -242,7 +271,7 @@ pub fn update_fact_with_blob(
                     last_verified_at, last_verified_by
              FROM llm_wiki_entries
              WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
-            params![fact_id, entity_id],
+            params![wisdom_id, entity_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -282,7 +311,7 @@ pub fn update_fact_with_blob(
         existing_last_verified_by,
     )) = existing
     else {
-        bail!("fact not found or archived: {fact_id}");
+        bail!("wisdom not found or archived: {wisdom_id}");
     };
 
     // Write the caller's freshly computed vector, or NULL when there is none
@@ -292,16 +321,16 @@ pub fn update_fact_with_blob(
         "UPDATE llm_wiki_entries
             SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4
           WHERE id = ?5",
-        params![title, body, now_ms, embedding_blob, fact_id],
+        params![title, body, now_ms, embedding_blob, wisdom_id],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
-        &tx,
+        tx,
         entity_id,
-        fact_id,
+        wisdom_id,
         OutboxOperation::Update,
         wiki_fact_outbox_payload(
-            fact_id,
+            wisdom_id,
             entity_id,
             &title,
             body,
@@ -325,44 +354,50 @@ pub fn update_fact_with_blob(
         ),
         now_ms,
     )?;
-    touch_entity(&tx, entity_id, now_secs)?;
+    touch_entity(tx, entity_id, now_secs)?;
+    Ok(())
+}
+
+/// Soft-delete a wisdom entry; pushes minimal outbox DELETE (same shape as commit_fact_archive).
+pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    archive_wisdom_in_tx(&tx, entity_id, wisdom_id)?;
     tx.commit()?;
     Ok(())
 }
 
-/// Soft-delete a fact; pushes minimal outbox DELETE (same shape as commit_fact_archive).
-pub fn archive_fact(conn: &mut Connection, entity_id: &str, fact_id: &str) -> Result<()> {
+/// Transaction-scoped core of [`archive_wisdom`] (no BEGIN/COMMIT; same
+/// atomic audit rationale as [`add_wisdom_in_tx`]).
+pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &str) -> Result<()> {
     let (now_secs, now_ms) = now_timestamps();
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    assert_entity_active(&tx, entity_id)?;
+    assert_entity_active(tx, entity_id)?;
     let changes = tx.execute(
         "UPDATE llm_wiki_entries
          SET deleted_at = ?1, updated_at = ?1
          WHERE id = ?2 AND entity_id = ?3 AND deleted_at IS NULL",
-        params![now_ms, fact_id, entity_id],
+        params![now_ms, wisdom_id, entity_id],
     )?;
     if changes == 0 {
-        bail!("fact not found or already archived: {fact_id}");
+        bail!("wisdom not found or already archived: {wisdom_id}");
     }
 
     // Edges die with their endpoints, inside this same transaction (spec §2).
-    crate::db::edge_purge::purge_edges_for_entry(&tx, fact_id)?;
+    crate::db::edge_purge::purge_edges_for_entry(tx, wisdom_id)?;
 
     push_entries_outbox(
-        &tx,
+        tx,
         entity_id,
-        fact_id,
+        wisdom_id,
         OutboxOperation::Delete,
         serde_json::json!({
-            "id": fact_id,
+            "id": wisdom_id,
             "entity_id": entity_id,
             "deleted_at": now_ms,
         }),
         now_ms,
     )?;
-    touch_entity(&tx, entity_id, now_secs)?;
-    tx.commit()?;
+    touch_entity(tx, entity_id, now_secs)?;
     Ok(())
 }
 
@@ -373,19 +408,23 @@ mod tests {
     use crate::db::entities::{create_entity, get_entity, CreateEntityInput};
 
     // -------------------------------------------------------------------------
-    // add_fact_with_profile tests (Task 10)
+    // add_wisdom_with_profile tests (Task 10)
     // -------------------------------------------------------------------------
 
     #[test]
-    fn add_fact_with_profile_stores_an_embedding() {
+    fn add_wisdom_with_profile_stores_an_embedding() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
             let entity_id = make_entity(&conn);
             let profile = crate::embedder::EmbedProfile::default();
 
-            let fact =
-                add_fact_with_profile(&mut conn, &entity_id, "A user-stated fact.", Some(&profile))
-                    .unwrap();
+            let fact = add_wisdom_with_profile(
+                &mut conn,
+                &entity_id,
+                "A user-stated fact.",
+                Some(&profile),
+            )
+            .unwrap();
 
             let blob_len: Option<i64> = conn
                 .query_row(
@@ -399,11 +438,11 @@ mod tests {
     }
 
     #[test]
-    fn add_fact_without_a_profile_leaves_the_blob_null() {
+    fn add_wisdom_without_a_profile_leaves_the_blob_null() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
 
-        let fact = add_fact(&mut conn, &entity_id, "A user-stated fact.").unwrap();
+        let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
 
         let blob: Option<Vec<u8>> = conn
             .query_row(
@@ -443,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn add_fact_inserts_row_outbox_and_touches_entity() {
+    fn add_wisdom_inserts_row_outbox_and_touches_entity() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
         conn.execute(
@@ -452,7 +491,7 @@ mod tests {
         )
         .unwrap();
 
-        let fact = add_fact(&mut conn, &entity_id, "  The subject ships on Fridays.  ").unwrap();
+        let fact = add_wisdom(&mut conn, &entity_id, "  The subject ships on Fridays.  ").unwrap();
         assert!(fact.id.starts_with("fact_"));
         assert_eq!(fact.body, "The subject ships on Fridays.");
         assert_eq!(fact.title, "The subject ships on Fridays.");
@@ -480,20 +519,20 @@ mod tests {
     }
 
     #[test]
-    fn add_fact_rejects_empty_body_and_missing_entity() {
+    fn add_wisdom_rejects_empty_body_and_missing_entity() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
-        assert!(add_fact(&mut conn, &entity_id, "   ").is_err());
-        assert!(add_fact(&mut conn, "ent_missing", "Body").is_err());
+        assert!(add_wisdom(&mut conn, &entity_id, "   ").is_err());
+        assert!(add_wisdom(&mut conn, "ent_missing", "Body").is_err());
     }
 
     #[test]
-    fn update_fact_rewrites_body_and_pushes_outbox_update() {
+    fn update_wisdom_rewrites_body_and_pushes_outbox_update() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
-        let fact = add_fact(&mut conn, &entity_id, "Old body.").unwrap();
+        let fact = add_wisdom(&mut conn, &entity_id, "Old body.").unwrap();
 
-        update_fact(
+        update_wisdom(
             &mut conn,
             &entity_id,
             &fact.id,
@@ -508,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn update_fact_clears_embedding_blob_so_sweep_rederives_it() {
+    fn update_wisdom_clears_embedding_blob_so_sweep_rederives_it() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
             let entity_id = make_entity(&conn);
@@ -516,7 +555,7 @@ mod tests {
 
             // Seed a fact with a real (non-NULL) embedding blob.
             let fact =
-                add_fact_with_profile(&mut conn, &entity_id, "Original body.", Some(&profile))
+                add_wisdom_with_profile(&mut conn, &entity_id, "Original body.", Some(&profile))
                     .unwrap();
             let blob_before: Option<Vec<u8>> = conn
                 .query_row(
@@ -531,7 +570,7 @@ mod tests {
             );
 
             // Edit the fact — body changes, blob must be wiped.
-            update_fact(&mut conn, &entity_id, &fact.id, "Edited body.").unwrap();
+            update_wisdom(&mut conn, &entity_id, &fact.id, "Edited body.").unwrap();
 
             let blob_after: Option<Vec<u8>> = conn
                 .query_row(
@@ -542,44 +581,44 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 blob_after, None,
-                "update_fact must NULL embedding_blob so the sweep re-derives it",
+                "update_wisdom must NULL embedding_blob so the sweep re-derives it",
             );
         });
     }
 
     #[test]
-    fn update_fact_rejects_unknown_or_archived_fact() {
+    fn update_wisdom_rejects_unknown_or_archived_fact() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
-        assert!(update_fact(&mut conn, &entity_id, "fact_missing", "x").is_err());
-        let fact = add_fact(&mut conn, &entity_id, "Body.").unwrap();
-        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
-        assert!(update_fact(&mut conn, &entity_id, &fact.id, "x").is_err());
+        assert!(update_wisdom(&mut conn, &entity_id, "fact_missing", "x").is_err());
+        let fact = add_wisdom(&mut conn, &entity_id, "Body.").unwrap();
+        archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
+        assert!(update_wisdom(&mut conn, &entity_id, &fact.id, "x").is_err());
     }
 
     #[test]
-    fn archive_fact_soft_deletes_and_pushes_outbox_delete() {
+    fn archive_wisdom_soft_deletes_and_pushes_outbox_delete() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
-        let fact = add_fact(&mut conn, &entity_id, "Ephemeral.").unwrap();
+        let fact = add_wisdom(&mut conn, &entity_id, "Ephemeral.").unwrap();
 
-        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+        archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
 
         let loaded = get_entity(&conn, &entity_id).unwrap().unwrap();
         assert!(loaded.facts.is_empty(), "archived fact must not be listed");
         assert_eq!(outbox_count(&conn, &fact.id, "DELETE"), 1);
         assert!(
-            archive_fact(&mut conn, &entity_id, &fact.id).is_err(),
+            archive_wisdom(&mut conn, &entity_id, &fact.id).is_err(),
             "double archive errors"
         );
     }
 
     #[test]
-    fn archive_fact_purges_edges_touching_the_fact() {
+    fn archive_wisdom_purges_edges_touching_the_fact() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
-        let fact = add_fact(&mut conn, &entity_id, "The archived fact body.").unwrap();
-        let other = add_fact(&mut conn, &entity_id, "The surviving fact body.").unwrap();
+        let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
+        let other = add_wisdom(&mut conn, &entity_id, "The surviving fact body.").unwrap();
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -605,7 +644,7 @@ mod tests {
         )
         .unwrap();
 
-        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+        archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
@@ -617,12 +656,12 @@ mod tests {
     }
 
     #[test]
-    fn archive_fact_leaves_unrelated_edges_alone() {
+    fn archive_wisdom_leaves_unrelated_edges_alone() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&conn);
-        let fact = add_fact(&mut conn, &entity_id, "The archived fact body.").unwrap();
-        let b = add_fact(&mut conn, &entity_id, "Fact B body.").unwrap();
-        let c = add_fact(&mut conn, &entity_id, "Fact C body.").unwrap();
+        let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
+        let b = add_wisdom(&mut conn, &entity_id, "Fact B body.").unwrap();
+        let c = add_wisdom(&mut conn, &entity_id, "Fact C body.").unwrap();
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -631,7 +670,7 @@ mod tests {
         )
         .unwrap();
 
-        archive_fact(&mut conn, &entity_id, &fact.id).unwrap();
+        archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
 
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))

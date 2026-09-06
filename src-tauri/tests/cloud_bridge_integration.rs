@@ -32,6 +32,8 @@ fn seeded_ctx() -> ToolDispatchContext {
         profile: EmbedProfile::default(),
         vault_dir: None,
         client: "test-client".into(),
+        db_path: std::path::PathBuf::new(),
+        rw_conn: Default::default(),
     }
 }
 

@@ -142,9 +142,7 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
         for (column, declared_type) in V17_EMBEDDING_FAILURE_COLUMNS {
             if !existing.iter().any(|c| c == column) {
                 conn.execute(
-                    &format!(
-                        "ALTER TABLE llm_wiki_entries ADD COLUMN {column} {declared_type}"
-                    ),
+                    &format!("ALTER TABLE llm_wiki_entries ADD COLUMN {column} {declared_type}"),
                     [],
                 )?;
             }
@@ -357,7 +355,11 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .collect();
-        for column in ["embedding_failed_at", "embedding_failure_kind", "embedding_attempts"] {
+        for column in [
+            "embedding_failed_at",
+            "embedding_failure_kind",
+            "embedding_attempts",
+        ] {
             assert!(
                 post_columns.iter().any(|c| c == column),
                 "{column} must exist after migrate()"

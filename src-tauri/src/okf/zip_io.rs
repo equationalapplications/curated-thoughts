@@ -142,16 +142,17 @@ mod tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-            let dir = tempfile::tempdir().unwrap();
-            let zip_path = dir.path().join("bomb.zip");
-            let many: Vec<OkfFile> = (0..=MAX_ZIP_ENTRIES)
-                .map(|i| OkfFile {
-                    path: format!("entities/e/facts/f{i}.md"),
-                    content: "x".into(),
-                })
-                .collect();
-            write_bundle_zip(&zip_path, &many).unwrap();
-            assert!(read_bundle_source(&zip_path).is_err());
-        });
+                let dir = tempfile::tempdir().unwrap();
+                let zip_path = dir.path().join("bomb.zip");
+                let many: Vec<OkfFile> = (0..=MAX_ZIP_ENTRIES)
+                    .map(|i| OkfFile {
+                        path: format!("entities/e/facts/f{i}.md"),
+                        content: "x".into(),
+                    })
+                    .collect();
+                write_bundle_zip(&zip_path, &many).unwrap();
+                assert!(read_bundle_source(&zip_path).is_err());
+            },
+        );
     }
 }

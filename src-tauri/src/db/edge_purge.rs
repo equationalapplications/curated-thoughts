@@ -472,7 +472,7 @@ mod tests {
         seed_edge(&conn, "edge_other", "ent-1", "fact_b", "fact_c");
 
         // Soft-delete fact_a to mirror the production cascade call sites
-        // (`commit::fact_archive` and `facts::archive_fact` soft-delete
+        // (`commit::fact_archive` and `wisdom::archive_wisdom` soft-delete
         // before purging).
         conn.execute(
             "UPDATE llm_wiki_entries SET deleted_at = 1 WHERE id = 'fact_a'",
@@ -868,13 +868,7 @@ mod tests {
         // In-manifest edge and an off-manifest edge, both anchored on
         // curated entity ids.
         seed_live_edge(&conn, "ent_demo", "ce_a", "ce_b", "depends_on");
-        seed_live_edge(
-            &conn,
-            "ent_demo",
-            "ce_a",
-            "ce_b",
-            "fabricated_2026-09-09",
-        );
+        seed_live_edge(&conn, "ent_demo", "ce_a", "ce_b", "fabricated_2026-09-09");
 
         let removed = purge_off_manifest_edges(&conn, "ent_demo").unwrap();
         assert_eq!(
@@ -1027,9 +1021,7 @@ mod tests {
             "only the off-manifest edge for its OWN partition is purged"
         );
         let remaining: Vec<(String, String)> = conn
-            .prepare(
-                "SELECT entity_id, edge_type FROM llm_wiki_edges ORDER BY entity_id",
-            )
+            .prepare("SELECT entity_id, edge_type FROM llm_wiki_edges ORDER BY entity_id")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
