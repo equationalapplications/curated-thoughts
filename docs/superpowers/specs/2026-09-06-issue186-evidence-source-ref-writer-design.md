@@ -21,13 +21,22 @@ The Rust commit path writes **valid JSON** into `llm_wiki_entries.source_ref`
 The destruction happens **afterwards, in the JS engine**:
 
 - core-llm-wiki's `setup()` runs an **unconditional legacy-ref back-rewrite**:
-  `findRowsForSourceRefMigration()` (dist/index.js:1363-1376) selects every row whose
-  `source_ref` matches GLOB `'*[^-A-Za-z0-9._ ]*'` — **every JSON blob qualifies** —
-  and rewrites each through `normalizeSourceRef` (dist:3905:
-  `value.replace(/[^A-Za-z0-9._\- ]/g, "").trim().slice(0, 255)`).
+  `findRowsForSourceRefMigration()` (7.1.0 dist/index.js:1454) selects every row whose
+  `source_ref` triggers any of **five predicates** — `TRIM(source_ref) != source_ref`,
+  `INSTR(source_ref,'/')>0`, `INSTR(source_ref,'\')>0`,
+  `INSTR(source_ref,CHAR(0))>0`, or GLOB `'*[^-A-Za-z0-9._ ]*'` — **every JSON blob
+  qualifies** — and rewrites each through `normalizeSourceRef` (7.1.0 dist:4082)
+  unconditionally inside `setup()` (7.1.0 dist:7782-7791).
 - This runs on **every app launch** (`src/main.tsx:32`) and **every outbox-worker
   start/stop transition** (`src/lib/wiki.ts:332-352`), over the **shared brain.db**
   (`wiki_exec`/`wiki_run` → `src-tauri/src/lib.rs:2190/2207`).
+- **Engine version ground truth (Kurt, Sep 6)**: the pin is **7.1.0** (#183,
+  `2bf1c18`; V17 gates opening pre-7.1 DBs). The mangler is intact in the 7.1.0 dist
+  at the anchors above — **the current pin itself mangles**. (Checkout note: this
+  working copy's `node_modules` still resolves 6.0.1 from a stale install predating
+  #183 — run `pnpm install` before implementing; 6.0.1 and 7.1.0 carry the identical
+  mangler, so the diagnosis is unchanged either way. The committed explore report's
+  anchors were taken against 6.0.1; §1.1's anchors here are 7.1.0.)
 - Fingerprints matching byte-for-byte: 260 live `librarian_inferred` rows are exactly
   **255 chars** (the JS `.slice(0,255)` cap; the Rust writer never truncates), and the
   mangling charset is exactly the normalizer's keep-set.
@@ -93,7 +102,7 @@ CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx ON librarian_evidence
 The repo has `db/migration.rs` / `db/okf_migration.rs`; `tests/okf_migration.rs:222`
 currently pins `assert_eq!(max_version, 17)` and moves to 18 with this change. The
 repair pass (§2.5) is a **one-shot repair inside the V18 step** — not a recurring
-startup pass — which is what makes §2.5.5's idempotence requirement natural: a numbered
+startup pass — which is what makes §2.5.6's idempotence requirement natural: a numbered
 migration runs once per DB, and re-running against an already-repaired DB must be a
 no-op.
 
@@ -119,9 +128,11 @@ no-op.
 
 ### 2.2 `source_ref` becomes a normalizer-idempotent token
 
-For `librarian_inferred` rows: `source_ref := "librarian-" + <hex hash of entry id>`
-(lowercase hex digest, e.g. first 32 hex chars of SHA-256 — **derived by hash, not by
-slicing the proposal id**, so no assumption about id format). The token is
+For `librarian_inferred` rows: `source_ref := "librarian-" + <hex digest>`, where
+`<hex digest>` is **exactly the first 32 lowercase hex characters of the SHA-256 of
+the entry id (normative — no 'e.g.'; this exact shape is what the census regex
+`^librarian-[0-9a-f]{32}$` keys on)** — **derived by hash, not by
+slicing the proposal id**, so no assumption about id format. The token is
 **per-entry unique**: the old JSON refs could differ between facts of one proposal
 (different evidence subsets), so a per-proposal token would silently change
 dedupe/supersede collision semantics — the hash-of-entry-id scheme preserves
@@ -153,7 +164,7 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
 | `get_chunk_ids_for_wiki_entry` (lib.rs:2528) | path-normalize the JSON blob, returns `[]` | join `librarian_evidence` chunk ids (currently dead for JSON rows — reviving it is the natural fix) |
 | outbox payload (`push_entries_outbox`, commit.rs:938-960) | carries full JSON | unchanged — CT-owned, JSON is fine there. **Verified, not assumed**: implementer confirms no outbox drain path (including the engine's apply side) ever writes the payload's source_ref back into `llm_wiki_entries`; if one exists it joins the migration |
 | **bundle export** (`bundle_io.rs:49` SELECTs source_ref into the export) | carries full JSON | export also includes the row's `librarian_evidence` row (bundle export becomes brain-complete for librarian facts: entries + evidence + chunks + proposals), and the token replaces JSON in the entries columns (Round-2 review: bundle_io/bundle_apply is a second write path into `llm_wiki_entries` the spec must cover) |
-| **bundle apply** (`bundle_apply.rs:358-405` INSERTs facts with the bundle's source_ref) | inserts JSON ref | inserts the token + its evidence row together. **Token-without-evidence grounding rule**: a token row whose `librarian_evidence` row is missing is treated as **still-grounded** (defensive, consistent with the existing parse-error/DB-error policy in `source_ref_is_still_grounded`) — never auto-purged, surfaced as a census warning instead |
+| **bundle apply** (`bundle_apply.rs:358-405` INSERTs facts with the bundle's source_ref) | inserts JSON ref | inserts the token + its evidence row together. Token-without-evidence grounding follows the **single source of truth in the `source_ref_is_still_grounded` row above** (still-grounded + loud warn + census warning; never auto-purged) |
 | TS/frontend readers of `source_ref` | unverified | implementer sweeps frontend for parse sites; any that JSON-parse the ref for librarian rows join the token migration |
 
 ### 2.4 Provenance enforcement (insert-time)
@@ -200,12 +211,34 @@ itself needs a follow-up fix (dangling refs at the source).
    normalize to exactly 255), so shape/length heuristics alone could classify valid
    document entries as damaged and delete good data. Every census query, repair UPDATE,
    and orphan DELETE in this migration carries the `source_type = 'librarian_inferred'`
-   predicate — no exceptions.
+   predicate — no exceptions. **NULL refs**: the census explicitly requires
+   `source_ref IS NOT NULL` — a NULL `source_ref` on a `librarian_inferred` row is
+   pre-existing engine-era data (the engine's own writes), is untouched by this
+   migration, and is counted in the census output as `null_ref_count` for visibility
+   only (no repair, no delete — NULL is outside the central invariant's scope, which
+   permits NULL).
 2. **Backup**: export affected rows (+ their re-derived evidence) to
    `<brain>/repair-export-186/` before any mutation.
-3. **Re-derive**: for each damaged row whose `curated_proposals` row survives, rebuild
-   `evidence_json` from `curated_proposal_items.evidence`, insert into
-   `librarian_evidence`, rewrite `source_ref` to the token. The entry→item mapping was
+3. **Valid-JSON-first branch** (Kurt, Sep 6): if a damaged-scope row's `source_ref`
+   still **parses as valid JSON**, migrate it **verbatim** into
+   `librarian_evidence.evidence_json` (using the parsed `proposal_id` field; if the
+   JSON lacks it, fall through to the extraction rule below) and rewrite the ref to
+   the token. Only rows whose ref does **not** parse proceed to re-derivation. This
+   preserves exact original evidence wherever it survived, and shrinks the
+   re-derivation set to the truly mangled rows.
+4. **Re-derive**: for each still-mangled row whose `curated_proposals` row survives,
+   rebuild `evidence_json` from `curated_proposal_items.evidence`, insert into
+   `librarian_evidence`, rewrite `source_ref` to the token.
+   **Extraction rule (Kurt, Sep 6)**: to associate a mangled row with its proposal,
+   extract the `proposal_id` from the mangled ref: strip the leading literal
+   `proposal_id` key name, then take characters up to the next literal key token
+   (`evidence`, `chunk_id`, `content_hash`, `quote`, `start_line`, `end_line`,
+   `source_kind`, `okf_version` — the exact key set emitted by
+   `evidence_json_with_hashes`, verified at implementation time) or end-of-string.
+   Validate the extracted value: non-empty, and must match an existing
+   `curated_proposals.id` (which are `prop_`-prefixed). **If extraction fails or the
+   value matches no proposal → fallback-to-delete** (export first, same treatment as
+   orphans) — never a stuck class, never a silent mis-attribution. The entry→item mapping was
    destroyed by the mangling, so the **reconstruction rule is: attach the proposal's
    FULL item evidence to each of its surviving entries** (all items of the proposal,
    not a per-entry subset). The rebuilt blob therefore may not byte-equal the original
@@ -213,7 +246,7 @@ itself needs a follow-up fix (dangling refs at the source).
    repair time, and superseding is per-entry. **Fallback-to-delete**: a damaged row
    whose proposal survives but whose `curated_proposal_items` rows are all gone gets
    exported and deleted (same treatment as orphans) — no stuck class remains.
-4. **Orphans** (proposal or all anchor chunks gone — the 8/8 + 16/61 + 24/69 classes):
+5. **Orphans** (proposal or all anchor chunks gone — the 8/8 + 16/61 + 24/69 classes):
    export then **delete**. They are ungrounded by definition; keeping them re-arms the
    heal-purge bait problem this issue exists to end.
    **Export hazard (Kurt, Sep 6)** — a supported export is officially defined as
@@ -232,7 +265,7 @@ itself needs a follow-up fix (dangling refs at the source).
    the assertion cannot be reliably expressed at migration time: introduce an
    `import_pending` state on imported graphs that heal and orphan-deletion respect
    until the import is confirmed brain-complete.
-5. **Idempotent**: re-running the migration is a no-op (token rows and existing
+6. **Idempotent**: re-running the migration is a no-op (token rows and existing
    `librarian_evidence` rows are left untouched).
 
 ### 2.6 End-to-end regression test (the #169 lesson)
@@ -255,8 +288,10 @@ fixtures:
      counted in the run summary (under Phase-1 write-with-flag, a fact with zero live
      anchors is a legitimate, expected write — the old blanket "≥1 chunk present"
      assertion contradicted §2.4);
-  3. **engine-simulation pass**: run the GLOB selector + normalize + rewrite semantics
-     over the table exactly as `setup()` does → **zero rows change**. Supplemental
+  3. **engine-simulation pass**: run the **full five-predicate selector** (§2.2:
+     `TRIM != self` OR `INSTR '/'` OR `INSTR ''` OR `INSTR CHAR(0)` OR GLOB —
+     not the GLOB alone) + normalize + rewrite semantics over the table exactly as
+     `setup()` does → **zero rows change**. Supplemental
      fast check — NOT the acceptance gate (see engine-in-the-loop gate below).
 - **Engine-in-the-loop gate (the acceptance gate)**: a test harness copies a scratch
   brain.db seeded with CT-shaped rows, points node at the **actual installed engine**
@@ -321,7 +356,7 @@ commit path (one transaction):
                              unanchored = 0|1 per Phase-1 policy)    ← Kurt, Sep 6
   push_entries_outbox (full JSON payload, unchanged)
 engine setup():
-  GLOB '*[^-A-Za-z0-9._ ]*' matches nothing CT wrote → rewrite is a no-op
+  full five-predicate selector (§2.2) matches nothing CT wrote → rewrite is a no-op
 heal / grounding / provenance display:
   join librarian_evidence by entry_id
 forget / retraction:
@@ -336,7 +371,7 @@ forget / retraction:
   `unanchored=1`, logged with proposal id, counted in the run summary. Phase 2
   (post-baseline): skipped and logged. See §2.4.
 - Repair migration: backup-before-mutate; orphan deletion **gated on the
-  brain-complete schema assertion** (§2.5.4) and only after successful export;
+  brain-complete schema assertion** (§2.5.5) and only after successful export;
   idempotent re-runs.
 
 ## §6 Testing summary
@@ -360,7 +395,7 @@ live-brain guard panics otherwise).
    requirement in the engine-in-the-loop gate (§2.6) stays: good practice against
    future drift.
 3. **Orphaned historical rows** *(RESOLVED)*: export-then-delete, gated by the
-   brain-complete schema assertion (§2.5.4).
+   brain-complete schema assertion (§2.5.5).
 4. **Post-landing librarian re-run** *(planned)*: one supervised re-run at real LLM
    cost, per the issue's HOLD note — scheduled after merge; doubles as the Phase-1
    drop-rate measurement run.
