@@ -7,7 +7,7 @@
 **Baseline:** `main` @ `bc2a283` (v2.5.1)
 **Issue:** equationalapplications/curated-thoughts#186 ("Fixes #186" on the implementation PR)
 **Evidence base:** explore-first report (this session, 68 tool calls, read-only):
-`/tmp/issue186-explore-report.md` — all file:line anchors below are from that report and
+`docs/superpowers/references/2026-09-06-issue186-explore-report.md` — all file:line anchors below are from that report and
 must be re-verified by the implementer against the checkout at implementation time.
 
 ---
@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS librarian_evidence (
 CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx ON librarian_evidence(proposal_id);
 ```
 
+**Migration placement (Opus review, Sep 6)**: this is a **numbered ladder step — V18**.
+The repo has `db/migration.rs` / `db/okf_migration.rs`; `tests/okf_migration.rs:222`
+currently pins `assert_eq!(max_version, 17)` and moves to 18 with this change. The
+repair pass (§2.5) is a **one-shot repair inside the V18 step** — not a recurring
+startup pass — which is what makes §2.5.5's idempotence requirement natural: a numbered
+migration runs once per DB, and re-running against an already-repaired DB must be a
+no-op.
+
 - Written in the **same transaction** as the `llm_wiki_entries` INSERT.
 - `evidence_json` is the exact `evidence_json_with_hashes` payload (unchanged shape).
 - The `json_valid` CHECK is the database-level guardrail (Kurt's suggestion, adapted):
@@ -121,8 +129,15 @@ distinctness. Charset-legal, well under 255, `normalizeSourceRef(token) === toke
 Document-sourced rows keep their existing refs: after the engine's first setup pass any
 legacy path-like ref is already at a normalizer fixed point (that rewrite is the
 migration working as intended — **implementer must verify** no CT write path introduces
-new non-fixed-point path refs). The GLOB selector never matches the token → the setup
-rewrite becomes a no-op for CT rows.
+new non-fixed-point path refs). **The engine's migration selector is a five-predicate
+OR, not just the GLOB** (Opus review, Sep 6 — implementer reads it from the installed
+engine's dist, not from this spec): `TRIM(source_ref) != source_ref` OR
+`INSTR(source_ref,'/')>0` OR `INSTR(source_ref,'\')>0` OR `INSTR(source_ref,CHAR(0))>0`
+OR the GLOB `'*[^-A-Za-z0-9._ ]*'`. The token survives all five — but note the charset
+permits **space**, so a ref with leading/trailing whitespace passes GLOB and is still
+selected by the TRIM predicate; the token-idempotence property test must assert against
+the full predicate set, not the GLOB alone. The setup rewrite becomes a no-op for CT
+rows.
 
 ### 2.3 Consumer migration
 
@@ -132,7 +147,7 @@ Consumers that currently parse JSON out of `source_ref` move to `librarian_evide
 | Consumer | Today | After |
 | --- | --- | --- |
 | `source_docs_from_ref` (entities.rs:201-244) | parse JSON from ref | join `librarian_evidence` |
-| `source_ref_is_still_grounded` (commit.rs:294) | parse JSON, find chunks | **branch by row type**: token rows → join `librarian_evidence`, verify chunk ids exist; path-ref document rows → existing behavior unchanged. **Phase-1 carve-out (Round-2 review, Sep 6): token rows with `unanchored=1` are treated as still-grounded while the flag is set** — otherwise `heal_invalid_sources` (lib.rs:412) soft-deletes them and `prune_old_librarian_inferred` hard-deletes them 7 days later, destroying the drop-rate data the Phase-1 policy exists to measure. The Phase-2 re-grade (§2.4) is the ONLY path that purges still-unanchored rows, and it does so deliberately, after export |
+| `source_ref_is_still_grounded` (commit.rs:294) | parse JSON, find chunks | **branch by row type**: token rows → join `librarian_evidence`, verify chunk ids exist; path-ref document rows → existing behavior unchanged. **Phase-1 carve-out (Round-2 review, Sep 6): token rows with `unanchored=1` are treated as still-grounded while the flag is set** — otherwise `heal_invalid_sources` (lib.rs:412) soft-deletes them and `prune_old_librarian_inferred` hard-deletes them 7 days later, destroying the drop-rate data the Phase-1 policy exists to measure. The Phase-2 re-grade (§2.4) is the ONLY path that purges still-unanchored rows, and it does so deliberately, after export. **Missing-evidence-row stance (Opus review, Sep 6): a token row whose `librarian_evidence` row is absent ⇒ treat as still-grounded + loud warn** — same defensive posture as the existing parse-error/DB-error branches; §2.1 deliberately does not rely on FK CASCADE, so missing-evidence windows are a *when*, not an *if*. Pinned as the **seventh D-test** alongside the existing six |
 | `wiki_forget::forget_entries_by_source_refs` (wiki_forget.rs:25) | exact-match JSON ref | exact-match token. **Token routing (CodeRabbit/Kurt, Sep 6): the token is derived from the entry id, so a caller holding only a `proposal_id` cannot construct it directly.** Retraction must first query `librarian_evidence` by `proposal_id` to resolve the target `entry_id`s, then derive the tokens (hash of entry id) and pass those to the exact-match forget. Implementer sweeps all existing retraction callers for this two-step shape |
 | commit-path dedupe/supersede by `source_ref` | match JSON ref | match token (Round-2 review: dedupe in this codebase keys on normalized body, not source_ref — this row is precautionary; implementer verifies which consumers actually exact-match the ref) |
 | `get_chunk_ids_for_wiki_entry` (lib.rs:2528) | path-normalize the JSON blob, returns `[]` | join `librarian_evidence` chunk ids (currently dead for JSON rows — reviving it is the natural fix) |
@@ -172,13 +187,20 @@ itself needs a follow-up fix (dangling refs at the source).
    Round-2 review: `evidence_json_with_hashes` serializes `proposal_id` first and the
    normalizer keeps underscores, so mangled blobs actually begin `proposal_id…`, not
    `evidenceproposal_id…`; the earlier prefix list would have matched nothing and the
-   repair would silently miss rows). Census and ALL subsequent mutation are
-   explicitly restricted to `source_type = 'librarian_inferred'` (CodeRabbit/Kurt,
-   Sep 6): a legitimate document-sourced `source_ref` can itself hit the 255-char cap
-   (long vault paths normalize to exactly 255), so shape/length heuristics alone
-   could classify valid document entries as damaged and delete good data. Every census
-   query, repair UPDATE, and orphan DELETE in this migration carries the
-   `source_type = 'librarian_inferred'` predicate — no exceptions.
+   repair would silently miss rows. Opus review, Sep 6: **derive any prefix/shape
+   expectation from the real writer's key order at implementation time, never from the
+   Sep 5 sample** — the token-shape test makes this robust because it asks "is this
+   the new shape" rather than "does it look mangled"). Within
+   `source_type = 'librarian_inferred'` the length-255 signal is now safe as
+   corroboration **because no legitimate post-fix ref is 255 chars — the token is
+   short**; that is the whole justification for the census scoping rule. Census and ALL
+   subsequent mutation are explicitly restricted to
+   `source_type = 'librarian_inferred'` (CodeRabbit/Kurt, Sep 6): a legitimate
+   document-sourced `source_ref` can itself hit the 255-char cap (long vault paths
+   normalize to exactly 255), so shape/length heuristics alone could classify valid
+   document entries as damaged and delete good data. Every census query, repair UPDATE,
+   and orphan DELETE in this migration carries the `source_type = 'librarian_inferred'`
+   predicate — no exceptions.
 2. **Backup**: export affected rows (+ their re-derived evidence) to
    `<brain>/repair-export-186/` before any mutation.
 3. **Re-derive**: for each damaged row whose `curated_proposals` row survives, rebuild
@@ -268,10 +290,13 @@ audited hard-delete path leaves zero orphaned `librarian_evidence` rows.
 
 - **Engine-side fix only** (exempt JSON-parseable refs from
   `findRowsForSourceRefMigration`): correct long-term, and worth doing upstream — but
-  every existing install keeps mangling until upgraded, and version skew is not
-  hypothetical: **installed core-llm-wiki is 6.0.1 while package.json pins 7.1.0**
-  (verified in `node_modules`). CT's data must be engine-proof regardless. Filed
-  upstream, non-blocking (§7).
+  every existing install keeps mangling until the engine ships a fix. **The current
+  pin itself mangles**: core-llm-wiki **7.1.0** (the checkout's installed version —
+  the earlier 6.0.1-vs-7.1.0 skew was resolved by #183 / `2bf1c18`, which also gates
+  pre-7.1 DB opens via V17; the mangler is verifiably intact in 7.1.0's dist at the
+  `setup()` rewrite) still rewrites JSON refs unconditionally (Opus review, Sep 6 —
+  re-verified against the checkout). CT's data must be engine-proof regardless of
+  upstream timing. Filed upstream, non-blocking (§7).
 - **`CHECK(json_valid(source_ref))` directly on `llm_wiki_entries`**: rejects
   legitimate path-like refs (document-sourced facts) and the engine's NULL writes; the
   table's DDL is co-owned with the engine (mirrored in engine dist), so a CT-side CHECK
@@ -327,10 +352,13 @@ live-brain guard panics otherwise).
 1. **Upstream engine guard** *(out of scope, follow-up)*: file the core-llm-wiki issue
    (setup back-rewrite must exempt structured/JSON-parseable refs). Non-blocking for
    this PR.
-2. **Version skew** *(RESOLVED, Kurt Sep 6)*: installed 6.0.1 vs pinned 7.1.0 — the
-   engine version reconciliation stays a **separate ops task**, but the
-   engine-in-the-loop gate **must read and record the active engine version** in its
-   output assertions so drift is never silent (§2.6).
+2. **Version skew** *(RESOLVED twice over)*: the 6.0.1-vs-7.1.0 skew Kurt ruled a
+   separate ops task (Sep 6) is **already resolved** — #183 (`2bf1c18`) landed; the
+   checkout now resolves to core-llm-wiki 7.1.0 matching the pin, and V17 gates
+   pre-7.1 DB opens (Opus review, Sep 6). The re-grounded fact: **7.1.0 itself still
+   mangles** — the fix in this spec remains required. The engine-version recording
+   requirement in the engine-in-the-loop gate (§2.6) stays: good practice against
+   future drift.
 3. **Orphaned historical rows** *(RESOLVED)*: export-then-delete, gated by the
    brain-complete schema assertion (§2.5.4).
 4. **Post-landing librarian re-run** *(planned)*: one supervised re-run at real LLM
