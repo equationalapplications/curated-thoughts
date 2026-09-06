@@ -1810,6 +1810,11 @@ fn prune_old_librarian_inferred(conn: &rusqlite::Connection, now_ms: i64) -> Res
         .map_err(|e| e.to_string())?;
     }
 
+    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
+    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
+    // deleted explicitly alongside its entry.
+    crate::db::commit::delete_librarian_evidence(&tx, &doomed_ids).map_err(|e| e.to_string())?;
+
     let deleted = tx
         .execute(
             "DELETE FROM llm_wiki_entries
@@ -4444,6 +4449,45 @@ mod maintenance_command_tests {
             )
             .unwrap();
         assert_eq!(old_gone, 0);
+    }
+
+    #[test]
+    fn prune_old_librarian_inferred_leaves_no_orphaned_evidence() {
+        let conn = open_in_memory().unwrap();
+        // brain.db has connections whose `PRAGMA foreign_keys` state we do not
+        // control (spec §2.1); replicate the OFF case so the test cannot pass
+        // via FK CASCADE.
+        conn.execute("PRAGMA foreign_keys=OFF", []).unwrap();
+        let now_ms = 1_000_000_000_000i64;
+        let old = now_ms - 8 * 24 * 60 * 60 * 1000;
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count, deleted_at)
+             VALUES ('fact_p','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0,?2)",
+            rusqlite::params![crate::db::commit::librarian_source_ref_token("fact_p"), old],
+        )
+        .unwrap();
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_p",
+            "prop_p",
+            r#"{"evidence":[],"proposal_id":"prop_p"}"#,
+            false,
+            1,
+        )
+        .unwrap();
+
+        let deleted = prune_old_librarian_inferred(&conn, now_ms).unwrap();
+        assert_eq!(deleted, 1);
+
+        let orphaned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE entry_id='fact_p'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned, 0, "evidence row must be deleted with its entry");
     }
 
     #[test]

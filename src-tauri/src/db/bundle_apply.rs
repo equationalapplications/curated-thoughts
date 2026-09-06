@@ -661,6 +661,14 @@ fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result
             now_ms,
         )?;
     }
+    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
+    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
+    // deleted explicitly alongside its entry.
+    tx.execute(
+        "DELETE FROM librarian_evidence WHERE entry_id IN
+             (SELECT id FROM llm_wiki_entries WHERE entity_id = ?1)",
+        [entity_id],
+    )?;
     tx.execute(
         "DELETE FROM llm_wiki_entries WHERE entity_id=?1",
         [entity_id],
