@@ -271,3 +271,60 @@ fn export_writes_exported_event_per_entity() {
     assert!(summary.starts_with("Exported"));
     assert!(summary.contains("Project X"));
 }
+
+/// Task 11 (#186): librarian evidence must survive the bundle round-trip.
+/// Export path: `load_export_entities` (as `okf_export_bundle_cmd` does);
+/// apply path: `apply_import` (as `okf_apply_bundle_cmd` does).
+#[test]
+fn bundle_roundtrip_preserves_librarian_evidence() {
+    use tauri_app_lib::db::bundle_apply::{apply_import, ImportMode};
+    use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::connection::open_in_memory;
+
+    // Source brain: one librarian token row plus its evidence.
+    let src = open_in_memory().unwrap();
+    src.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES ('ent-b','Bundle Entity','concept','s',100,100)",
+        [],
+    )
+    .unwrap();
+    src.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_b','ent-b','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_b",
+        )],
+    )
+    .unwrap();
+    tauri_app_lib::db::commit::insert_librarian_evidence(
+        &src,
+        "fact_b",
+        "prop_b",
+        r#"{"proposal_id":"prop_b","evidence":[{"chunk_id":1,"content_hash":"bb"}]}"#,
+        false,
+        1,
+    )
+    .unwrap();
+
+    // Round-trip through the same entry points the commands use.
+    let entities = load_export_entities(&src, None).unwrap();
+    let files = tauri_app_lib::okf::bundle_write::write_bundle(&entities).unwrap();
+    let bundle = parse_bundle(&files).unwrap();
+    let mut dest = open_in_memory().unwrap();
+    apply_import(&mut dest, &bundle, ImportMode::Merge).unwrap();
+
+    let stored = tauri_app_lib::db::commit::evidence_json_for_entry(&dest, "fact_b")
+        .expect("evidence must survive the bundle roundtrip");
+    assert!(serde_json::from_str::<serde_json::Value>(&stored).is_ok());
+
+    let ref_after: String = dest
+        .query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE id='fact_b'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(ref_after.starts_with("librarian-"));
+}

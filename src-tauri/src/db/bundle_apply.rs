@@ -418,6 +418,28 @@ pub fn apply_import(
                 ),
                 now_ms,
             )?;
+            // Bundle-applied librarian facts keep their token and their evidence
+            // together; a token row without evidence is treated as still-grounded by
+            // the §2.3 rule, but importing one deliberately would be a silent
+            // provenance loss. Spec §2.3.
+            if let Some(evidence_json) = fact.evidence_json.as_deref() {
+                let proposal_id = serde_json::from_str::<serde_json::Value>(evidence_json)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("proposal_id")
+                            .and_then(|p| p.as_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_default();
+                crate::db::commit::insert_librarian_evidence(
+                    &tx,
+                    &fact_id,
+                    &proposal_id,
+                    evidence_json,
+                    false,
+                    now_ms,
+                )?;
+            }
             result.facts_added += 1;
         }
 
@@ -720,6 +742,7 @@ mod tests {
             okf_usage_window: None,
             last_verified_at: None,
             last_verified_by: None,
+            evidence_json: None,
         }
     }
 
