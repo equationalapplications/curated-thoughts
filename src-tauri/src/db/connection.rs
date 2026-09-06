@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15, MIGRATION_V16, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5,
-    MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4,
+    MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -151,6 +151,9 @@ fn migrate(conn: &Connection, vault_root: Option<String>) -> Result<()> {
             "INSERT OR IGNORE INTO schema_version (version) VALUES (17)",
             [],
         )?;
+    }
+    if version < 18 {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V18))?;
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)

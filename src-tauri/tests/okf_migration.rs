@@ -219,5 +219,61 @@ fn test_app_open_runs_v7_schema() {
     // `embedding_failure_kind`, `embedding_attempts`) before the startup
     // schema guard runs — the JS package migration otherwise only runs after
     // the frontend boots, too late for the guard.
-    assert_eq!(max_version, 17);
+    // Bumped from 17 to 18 by MIGRATION_V18, which adds the CT-owned
+    // `librarian_evidence` table (issue #186 spec §2.1) and runs the one-shot
+    // evidence repair. See docs/superpowers/specs/2026-09-06-issue186-*.md.
+    assert_eq!(max_version, 18);
+}
+
+#[test]
+fn v18_creates_librarian_evidence_with_json_check() {
+    let conn = open_in_memory().unwrap();
+
+    // Table exists with the expected columns.
+    let cols: Vec<String> = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(librarian_evidence)")
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+        rows.filter_map(Result::ok).collect()
+    };
+    for expected in [
+        "entry_id",
+        "proposal_id",
+        "evidence_json",
+        "unanchored",
+        "created_at",
+    ] {
+        assert!(
+            cols.iter().any(|c| c == expected),
+            "missing column {expected}"
+        );
+    }
+
+    // The json_valid CHECK must reject a mangled payload loudly.
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_x','ent','t','b','[]','inferred','librarian_inferred',
+                 'librarian-00000000000000000000000000000000', 1, 1, 0)",
+        [],
+    )
+    .unwrap();
+    let err = conn.execute(
+        "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+         VALUES ('fact_x','prop_1','evidencechunk_id1',0,1)",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "json_valid CHECK must reject non-JSON evidence"
+    );
+
+    // A valid payload is accepted.
+    conn.execute(
+        "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+         VALUES ('fact_x','prop_1','{\"proposal_id\":\"prop_1\",\"evidence\":[]}',0,1)",
+        [],
+    )
+    .unwrap();
 }
