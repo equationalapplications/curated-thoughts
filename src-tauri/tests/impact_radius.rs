@@ -112,3 +112,62 @@ fn impact_radius_traverses_recursive_call_graphs_in_both_directions() {
         "E should be recognized as a direct caller of A"
     );
 }
+
+#[test]
+fn get_chunk_ids_returns_evidence_anchors_for_token_rows() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO documents (path, hash, tier, status)
+         VALUES ('notes.md','h','user_doc','indexed')",
+        [],
+    )
+    .unwrap();
+    let doc_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+             entity_id, content_hash)
+         VALUES (?1,'c',0,1,1,'prose','ent','h1')",
+        [doc_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_g','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_g",
+        )],
+    )
+    .unwrap();
+    tauri_app_lib::db::commit::insert_librarian_evidence(
+        &conn,
+        "fact_g",
+        "prop_g",
+        r#"{"evidence":[{"chunk_id":1,"content_hash":"h1"}],"proposal_id":"prop_g"}"#,
+        false,
+        1,
+    )
+    .unwrap();
+
+    let ids = tauri_app_lib::chunk_ids_for_entry(&conn, "fact_g", "ent", None);
+    assert!(
+        !ids.is_empty(),
+        "token rows must resolve their evidence anchors"
+    );
+}
+
+#[test]
+fn get_chunk_ids_returns_empty_for_token_row_without_evidence() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+             source_type, source_ref, created_at, updated_at, access_count)
+         VALUES ('fact_ne','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+        [tauri_app_lib::db::commit::librarian_source_ref_token(
+            "fact_ne",
+        )],
+    )
+    .unwrap();
+    // Empty, not a wrong-namespace fallback. The caller must render nothing.
+    assert!(tauri_app_lib::chunk_ids_for_entry(&conn, "fact_ne", "ent", None).is_empty());
+}

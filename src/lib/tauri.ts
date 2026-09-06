@@ -524,7 +524,7 @@ export interface NeighborRow {
 }
 
 export const getChunkIdsForWikiEntry = (
-  entryId: number,
+  entryId: string,
   entityId: string,
 ): Promise<number[]> =>
   invoke('get_chunk_ids_for_wiki_entry', { entryId, entityId });

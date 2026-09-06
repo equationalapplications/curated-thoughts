@@ -25,9 +25,9 @@ describe('tauriGraphAdapter', () => {
         { chunk_id: 203, depth: 4, rel_type: 'IMPORTS' },
       ]);
 
-    const result = await tauriGraphAdapter.getNeighbors(1, 'tier_fact', 'both', 3);
+    const result = await tauriGraphAdapter.getNeighbors('fact_abc', 'tier_fact', 'both', 3);
 
-    expect(getChunkIdsForWikiEntry).toHaveBeenCalledWith(1, 'tier_fact');
+    expect(getChunkIdsForWikiEntry).toHaveBeenCalledWith('fact_abc', 'tier_fact');
     expect(getImpactRadius).toHaveBeenCalledTimes(2);
     expect(result).toEqual([
       { chunkId: 201, depth: 1, relType: 'CALLS' },
@@ -36,16 +36,18 @@ describe('tauriGraphAdapter', () => {
     ]);
   });
 
-  it('falls back to the root chunk when no wiki entry chunk IDs exist', async () => {
+  it('returns no neighbors when no wiki entry chunk IDs resolve', async () => {
     vi.mocked(getChunkIdsForWikiEntry).mockResolvedValue([]);
     vi.mocked(getImpactRadius).mockResolvedValue([
       { chunk_id: 300, depth: 1, rel_type: 'CALLS' },
     ]);
 
-    const result = await tauriGraphAdapter.getNeighbors(5, 'tier_fact', 'callers', 2);
+    const result = await tauriGraphAdapter.getNeighbors('fact_ne', 'tier_fact', 'callers', 2);
 
-    expect(getChunkIdsForWikiEntry).toHaveBeenCalledWith(5, 'tier_fact');
-    expect(getImpactRadius).toHaveBeenCalledWith(5, 'tier_fact', 'callers', 2);
-    expect(result).toEqual([{ chunkId: 300, depth: 1, relType: 'CALLS' }]);
+    expect(getChunkIdsForWikiEntry).toHaveBeenCalledWith('fact_ne', 'tier_fact');
+    // No anchors resolved => no neighbors. An entry id must never be passed
+    // into getImpactRadius's chunk-id parameter (wrong-namespace query).
+    expect(getImpactRadius).not.toHaveBeenCalled();
+    expect(result).toEqual([]);
   });
 });

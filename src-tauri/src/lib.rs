@@ -2529,9 +2529,104 @@ fn get_structural_neighbors(
     Ok(results)
 }
 
+/// Chunk ids underlying a wiki entry.
+///
+/// Librarian rows carry a token and keep their evidence in
+/// `librarian_evidence` (spec §2.3); document-sourced rows keep a path ref and
+/// resolve through the vault as before.
+///
+/// The old code took an `i64` and matched `WHERE rowid = ?1 OR id = ?1`.
+/// `llm_wiki_entries.id` is TEXT (`fact_<hex>`), so the `id` half could never
+/// match an integer bind — the clause was dead. The parameter is now the entry
+/// id proper. Spec §7.7.
+///
+/// Pure and connection-only so it is testable without a Tauri `State`; the
+/// command below is a thin wrapper. `vault_root` is `None` when no vault is
+/// configured, in which case document-sourced rows resolve to empty.
+pub fn chunk_ids_for_entry(
+    conn: &rusqlite::Connection,
+    entry_id: &str,
+    entity_id: &str,
+    vault_root: Option<&std::path::Path>,
+) -> Vec<i64> {
+    let source_ref: Option<String> = conn
+        .query_row(
+            "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or(None)
+        .flatten();
+    let Some(source_ref) = source_ref else {
+        return Vec::new();
+    };
+
+    if source_ref.starts_with("librarian-") {
+        let Some(json) = crate::db::commit::evidence_json_for_entry(conn, entry_id) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+            return Vec::new();
+        };
+        let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for item in evidence {
+            if let Some(hash) = item.get("content_hash").and_then(|v| v.as_str()) {
+                let resolved: Option<i64> = conn
+                    .query_row(
+                        "SELECT c.id FROM chunks c
+                         WHERE c.content_hash = ?1 AND c.entity_id = ?2 LIMIT 1",
+                        rusqlite::params![hash, entity_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .unwrap_or(None);
+                if let Some(id) = resolved {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        return ids;
+    }
+
+    // Document-sourced path ref: unchanged legacy behavior.
+    let Some(vault_root) = vault_root else {
+        return Vec::new();
+    };
+    let Ok(normalized_rel) = normalize_path_argument_to_vault_relative(&source_ref, vault_root)
+    else {
+        return Vec::new();
+    };
+    let Ok(safe) = crate::vault::safe_vault_path(
+        vault_root,
+        &normalized_rel,
+        crate::vault::READABLE_SUBDIRS,
+        crate::vault::PathMode::MustExist,
+    ) else {
+        return Vec::new();
+    };
+    let abs_path = safe.to_string_lossy().into_owned();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT c.id FROM chunks c
+         JOIN documents d ON d.id = c.doc_id
+         WHERE d.path = ?1 AND c.entity_id = ?2 AND d.status = 'indexed'",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([&abs_path, entity_id], |row| row.get::<_, i64>(0)) else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
 #[tauri::command]
 fn get_chunk_ids_for_wiki_entry(
-    entry_id: i64,
+    entry_id: String,
     entity_id: String,
     db_state: State<DbState>,
     vault_state: State<VaultConfigState>,
@@ -2541,63 +2636,15 @@ fn get_chunk_ids_for_wiki_entry(
         .lock()
         .unwrap()
         .get_vault_path()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no vault path set".to_string())?;
-    let vault_root = std::path::PathBuf::from(&root);
-
-    let source_ref: Option<String> = {
-        let guard = db_state.0.lock().unwrap();
-        let conn = &guard.0;
-        conn.query_row(
-            "SELECT source_ref FROM llm_wiki_entries WHERE rowid = ?1 OR id = ?1",
-            [entry_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?
-        .flatten()
-    };
-
-    let source_ref = match source_ref {
-        Some(r) => r,
-        None => return Ok(Vec::new()),
-    };
-
-    let normalized_rel = match normalize_path_argument_to_vault_relative(&source_ref, &vault_root) {
-        Ok(r) => r,
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    let safe = match crate::vault::safe_vault_path(
-        &vault_root,
-        &normalized_rel,
-        crate::vault::READABLE_SUBDIRS,
-        crate::vault::PathMode::MustExist,
-    ) {
-        Ok(p) => p,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let abs_path = safe.to_string_lossy().into_owned();
-
+        .map_err(|e| e.to_string())?;
+    let vault_root = root.map(std::path::PathBuf::from);
     let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id FROM chunks c
-             JOIN documents d ON d.id = c.doc_id
-             WHERE d.path = ?1 AND c.entity_id = ?2 AND d.status = 'indexed'",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&abs_path, &entity_id], |row| row.get::<_, i64>(0))
-        .map_err(|e| e.to_string())?;
-
-    let mut ids = Vec::new();
-    for id in rows.flatten() {
-        ids.push(id);
-    }
-
-    Ok(ids)
+    Ok(chunk_ids_for_entry(
+        &guard.0,
+        &entry_id,
+        &entity_id,
+        vault_root.as_deref(),
+    ))
 }
 
 // ── Vault file listing ────────────────────────────────────────────────────────
