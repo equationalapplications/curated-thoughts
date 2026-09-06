@@ -832,11 +832,19 @@ impl ToolDispatchContext {
         .map_err(|e| anyhow::anyhow!("rw task join error: {e}"))?
     }
 
-    /// Compute the embedding blob for a wisdom body OUTSIDE any DB lock
-    /// (blocking network call). Provider failures collapse to `None`; the
-    /// embedding sweep fills the blob later.
-    pub fn precompute_wisdom_embedding(&self, body: &str) -> Option<Vec<u8>> {
-        crate::db::wisdom::precompute_entry_embedding(Some(&self.profile), body)
+    /// Compute the wisdom embedding blob OFF any DB lock and OFF the tokio
+    /// worker thread (the Local profile is a blocking HTTP round-trip with a
+    /// long timeout, and `embed_batch` builds a `reqwest::blocking` client —
+    /// same contract as `embed_query`). Provider failures collapse to `None`;
+    /// the embedding sweep fills the blob later.
+    pub async fn precompute_wisdom_embedding(&self, body: &str) -> Option<Vec<u8>> {
+        let profile = self.profile.clone();
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::db::wisdom::precompute_entry_embedding(Some(&profile), &body)
+        })
+        .await
+        .ok()?
     }
 }
 
@@ -933,7 +941,7 @@ pub async fn dispatch_curated_add_wisdom(
     ctx: &ToolDispatchContext,
     p: CuratedAddWisdomParams,
 ) -> Result<Value> {
-    let blob = ctx.precompute_wisdom_embedding(&p.body);
+    let blob = ctx.precompute_wisdom_embedding(&p.body).await;
     let client = ctx.client.clone();
     let entity_id = p.entity_id.clone();
     let wisdom = ctx
@@ -968,7 +976,7 @@ pub async fn dispatch_curated_update_wisdom(
     ctx: &ToolDispatchContext,
     p: CuratedUpdateWisdomParams,
 ) -> Result<Value> {
-    let blob = ctx.precompute_wisdom_embedding(&p.body);
+    let blob = ctx.precompute_wisdom_embedding(&p.body).await;
     let client = ctx.client.clone();
     ctx.with_rw(move |conn| {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1132,6 +1140,10 @@ fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, 
 
 /// Best-effort audit log for agent tool access. A failed log write must never fail
 /// the tool call — tool availability wins over audit completeness.
+///
+/// Spec §7 carve-out: this best-effort policy is LEGACY-ONLY. The six curated
+/// `curated_*` tools use [`log_agent_access_checked`] (fail-closed) instead;
+/// the remaining non-curated tools migrate in a separate follow-up.
 pub fn log_agent_access(conn: &Connection, client: &str, tool: &str, entity_id: Option<&str>) {
     let _ = conn.execute(
         "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
