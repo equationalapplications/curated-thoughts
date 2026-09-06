@@ -1,6 +1,6 @@
 # Spec: Agent-memory CRUD tools on the main MCP server
 
-**Status:** Approved design, not yet implemented.
+**Status:** Implemented 2026-09-05 (PR #185).
 **Date:** 2026-09-05
 **Baseline:** `main` @ `2bf1c189` (v2.4.3)
 **Scope:** Curated Thoughts `src-tauri` only (main `--mcp` server +
