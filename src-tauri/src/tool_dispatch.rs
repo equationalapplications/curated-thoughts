@@ -906,15 +906,7 @@ fn load_wisdom_json(conn: &Connection, entity_id: &str, wisdom_id: &str) -> Resu
              FROM llm_wiki_entries
              WHERE entity_id = ?1 AND id = ?2 AND deleted_at IS NULL",
             rusqlite::params![entity_id, wisdom_id],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                ))
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|e| {
             anyhow::anyhow!("reloading updated wisdom {wisdom_id} under {entity_id}: {e}")
@@ -1305,8 +1297,7 @@ pub async fn dispatch_tool_call(
         "curated_search_code" => {
             let p: CuratedSearchCodeParams = serde_json::from_value(params)?;
             let result = dispatch_curated_search_code(ctx, p).await?;
-            log_curated_access_rw(ctx, "curated_search_code", entity_id.as_deref(), "read")
-                .await?;
+            log_curated_access_rw(ctx, "curated_search_code", entity_id.as_deref(), "read").await?;
             Ok(result)
         }
         "curated_add_wisdom" => {
@@ -1362,13 +1353,7 @@ async fn log_curated_access_rw(
     let entity_id = entity_id.map(str::to_string);
     let operation = operation.to_string();
     ctx.with_rw(move |conn| {
-        log_agent_access_checked(
-            conn,
-            &client,
-            &tool,
-            entity_id.as_deref(),
-            &operation,
-        )
+        log_agent_access_checked(conn, &client, &tool, entity_id.as_deref(), &operation)
     })
     .await
 }
@@ -2052,7 +2037,8 @@ mod curated_memory_tests {
         .await
         .unwrap();
         assert_eq!(v["source_type"], "user_stated");
-        assert!(v["id"].as_str().unwrap().starts_with("fact_")); // id prefix is storage-level
+        // id prefix is storage-level.
+        assert!(v["id"].as_str().unwrap().starts_with("fact_"));
         // Audit row landed (fail-closed path wrote a 'write' row).
         let audit_count: i64 = ctx
             .with_rw(|c| {
@@ -2128,7 +2114,10 @@ mod curated_memory_tests {
             )
         };
         assert!(deleted_at.is_some(), "w1 must carry a deleted_at ms stamp");
-        assert_eq!(live_count, 0, "w2 was seeded pre-archived; after archiving w1 no live rows remain");
+        assert_eq!(
+            live_count, 0,
+            "w2 was seeded pre-archived; after archiving w1 no live rows remain"
+        );
     }
 
     #[tokio::test]
@@ -2165,7 +2154,9 @@ mod curated_memory_tests {
         ctx.db_path = dir.path().join("brain.db");
         {
             let third = Connection::open(dir.path().join("brain.db")).unwrap();
-            third.execute_batch("DROP TABLE curated_agent_log;").unwrap();
+            third
+                .execute_batch("DROP TABLE curated_agent_log;")
+                .unwrap();
         }
         let err = dispatch_curated_add_wisdom(
             &ctx,

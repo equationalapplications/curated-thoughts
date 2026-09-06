@@ -597,9 +597,11 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
         "recall should surface the fresh wisdom: {recalled}"
     );
     assert!(
-        recalled["code_chunks"].as_array().expect("code array").iter().any(
-            |c| c["symbol"].as_str() == Some("curated_sym")
-        ),
+        recalled["code_chunks"]
+            .as_array()
+            .expect("code array")
+            .iter()
+            .any(|c| c["symbol"].as_str() == Some("curated_sym")),
         "recall should include the ast chunk: {recalled}"
     );
 
@@ -611,7 +613,10 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
     .await
     .expect("curated_get_wiki_entry");
     assert!(
-        entry["full_text"].as_str().unwrap_or_default().contains("round-trips"),
+        entry["full_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("round-trips"),
         "get_wiki_entry should return the stored body: {entry}"
     );
 
@@ -623,9 +628,11 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
     .await
     .expect("curated_search_code");
     assert!(
-        code["code_chunks"].as_array().expect("code hits").iter().any(
-            |c| c["symbol"].as_str() == Some("curated_sym")
-        ),
+        code["code_chunks"]
+            .as_array()
+            .expect("code hits")
+            .iter()
+            .any(|c| c["symbol"].as_str() == Some("curated_sym")),
         "search_code should rank the ast chunk: {code}"
     );
 
@@ -642,8 +649,7 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
     .await
     .expect("curated_update_wisdom");
     assert_eq!(
-        updated["body"],
-        "integration wisdom: updated through the shipping surface",
+        updated["body"], "integration wisdom: updated through the shipping surface",
         "update returns reloaded entry: {updated}"
     );
 
