@@ -78,11 +78,14 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
             okf_verified: r.get(20)?,
             okf_usage_window: r.get(21)?,
             // Paired librarian_evidence blob, so the bundle carries a
-            // librarian fact's provenance with it. Spec §2.3.
+            // librarian fact's provenance with it. Spec §2.3. SQLite errors
+            // PROPAGATE here (review round 5): this is the export path, and
+            // a swallowed transient fault would write bundles whose librarian
+            // facts carry bare tokens with no paired evidence.
             evidence_json: crate::db::commit::evidence_json_for_entry(
                 conn,
                 &r.get::<_, String>(0)?,
-            ),
+            )?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -334,14 +334,42 @@ pub fn delete_librarian_evidence(conn: &Connection, entry_ids: &[String]) -> Res
 }
 
 /// The evidence blob for an entry, or `None` when no row exists.
-pub fn evidence_json_for_entry(conn: &Connection, entry_id: &str) -> Option<String> {
+///
+/// SQLite errors propagate (review round 5): `bundle_io::load_facts` sits on
+/// the export path, and swallowing a transient `SQLITE_BUSY` here wrote
+/// bundles whose librarian facts carry bare tokens with no paired evidence —
+/// importing one elsewhere yields permanently provenance-less rows. Read-only
+/// UI callers may degrade defensively, same policy as
+/// [`evidence_has_live_chunk`]'s doc contract.
+pub fn evidence_json_for_entry(
+    conn: &Connection,
+    entry_id: &str,
+) -> rusqlite::Result<Option<String>> {
     conn.query_row(
         "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
         [entry_id],
         |r| r.get::<_, String>(0),
     )
     .optional()
-    .unwrap_or(None)
+}
+
+/// Strict `proposal_id` extraction from an evidence blob: `Some` only when the
+/// blob parses and carries a non-null, non-empty string `proposal_id`.
+///
+/// Single source of truth for the salvage-vs-drop routing decision (V18 repair
+/// paths 4a/4b and bundle apply's legacy-ref salvage — review round 5, finding
+/// 10): a JSON-null or absent id resolves by no path, and the strict posture
+/// is export-and-delete — never a `proposal_id = ''` evidence row that no
+/// retraction could ever match and no proposal could ever be re-attributed
+/// through.
+pub fn proposal_id_from_evidence_json(evidence_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(evidence_json).ok()?;
+    let pid = value.get("proposal_id")?.as_str()?.trim();
+    if pid.is_empty() {
+        None
+    } else {
+        Some(pid.to_string())
+    }
 }
 
 /// True iff the evidence blob anchors at least one chunk that still exists.
@@ -516,8 +544,9 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
         Some(arr) => arr,
         None => return true,
     };
-    // Collect chunk_ids; if the entry has no evidence (e.g. MANUAL_SOURCE_REF
-    // for user_stated facts) it's not librarian-grounded and we leave it alone.
+    // Collect chunk_ids; if the entry has no evidence (e.g. an empty-evidence
+    // JSON blob — user_stated facts now carry NULL refs instead) it's not
+    // librarian-grounded and we leave it alone.
     let chunk_ids: Vec<i64> = evidence
         .iter()
         .filter_map(|entry| entry.get("chunk_id").and_then(|v| v.as_i64()))
@@ -2109,14 +2138,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            evidence_json_for_entry(&conn, "fact_r").as_deref(),
+            evidence_json_for_entry(&conn, "fact_r").unwrap().as_deref(),
             Some(r#"{"proposal_id":"prop_r","evidence":[]}"#)
         );
-        assert_eq!(evidence_json_for_entry(&conn, "fact_missing"), None);
+        assert_eq!(
+            evidence_json_for_entry(&conn, "fact_missing").unwrap(),
+            None
+        );
 
         let removed = delete_librarian_evidence(&conn, &["fact_r".to_string()]).unwrap();
         assert_eq!(removed, 1);
-        assert_eq!(evidence_json_for_entry(&conn, "fact_r"), None);
+        assert_eq!(evidence_json_for_entry(&conn, "fact_r").unwrap(), None);
     }
 
     #[test]
@@ -2309,7 +2341,9 @@ mod tests {
             "no JSON may remain in source_ref: {source_ref}"
         );
 
-        let stored = evidence_json_for_entry(&conn, &entry_id).expect("evidence row must exist");
+        let stored = evidence_json_for_entry(&conn, &entry_id)
+            .unwrap()
+            .expect("evidence row must exist");
         let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert!(parsed.get("evidence").and_then(|v| v.as_array()).is_some());
         assert!(parsed.get("proposal_id").is_some());
@@ -3940,7 +3974,9 @@ mod tests {
             .unwrap();
         assert_eq!(source_ref, librarian_source_ref_token(&entry_id));
 
-        let stored = evidence_json_for_entry(&conn, &entry_id).expect("evidence row must exist");
+        let stored = evidence_json_for_entry(&conn, &entry_id)
+            .unwrap()
+            .expect("evidence row must exist");
         let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
         let evidence = parsed.get("evidence").unwrap().as_array().unwrap();
         let entry = evidence[0].as_object().unwrap();

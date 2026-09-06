@@ -213,6 +213,7 @@ fn synthesis_writes_tokens_and_anchored_evidence() {
     let mut unanchored = 0;
     for entry_id in entry_ids(&conn) {
         let json = tauri_app_lib::db::commit::evidence_json_for_entry(&conn, &entry_id)
+            .unwrap()
             .unwrap_or_else(|| panic!("every inferred fact needs an evidence row: {entry_id}"));
         serde_json::from_str::<serde_json::Value>(&json)
             .unwrap_or_else(|_| panic!("evidence_json must parse: {entry_id}"));

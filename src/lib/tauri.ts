@@ -676,6 +676,8 @@ export interface OkfImportResult {
   edges_added: number;
   events_added: number;
   events_skipped: number;
+  /** Non-fatal provenance losses; the dropped data is preserved verbatim. */
+  warnings: string[];
 }
 
 export type OkfImportMode = "merge" | "replace" | "clone";

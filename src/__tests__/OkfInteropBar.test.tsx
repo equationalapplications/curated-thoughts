@@ -74,6 +74,7 @@ test("import flow: preview counts shown, apply on confirm", async () => {
         edges_added: 2,
         events_added: 4,
         events_skipped: 0,
+        warnings: [],
       });
     }
     return Promise.resolve(null);
@@ -166,6 +167,7 @@ test("successful import refreshes the WikilinkText resolver cache", async () => 
         edges_added: 2,
         events_added: 4,
         events_skipped: 0,
+        warnings: [],
       });
     }
     if (cmd === "list_entities_cmd") {

@@ -209,8 +209,12 @@ pub(crate) fn source_docs_from_ref(
     let raw = match source_ref {
         Some(r) if crate::db::commit::is_librarian_source_ref_token(r) => {
             match crate::db::commit::evidence_json_for_entry(conn, entry_id) {
-                Some(json) => json,
-                None => return Vec::new(),
+                Ok(Some(json)) => json,
+                // Read-path degradation only (review round 5): a DB fault is
+                // not "no provenance", but this feeds the entity reader/UI,
+                // which degrades defensively everywhere else. Export and
+                // destructive callers of the same helper propagate.
+                _ => return Vec::new(),
             }
         }
         Some(r) => r.to_string(),

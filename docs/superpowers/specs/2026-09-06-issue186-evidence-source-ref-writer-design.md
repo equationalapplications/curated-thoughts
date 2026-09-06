@@ -352,7 +352,10 @@ fixtures:
   and pinned versions is visible in every test run, never silent (Kurt, Sep 6). Run on main pre-fix
   (marked `#[ignore]`, demonstrated via `cargo test -- --ignored`) it doubles as the
   real-repro proof that the shipped engine mangles JSON refs; post-fix it is the
-  "bug is dead" gate.
+  "bug is dead" gate. **CI runs it on every push** (review round 5, finding 6): the
+  "Engine source_ref acceptance gate" step in `ci.yml` executes the `#[ignore]`d test
+  with `--ignored` against the pnpm-installed engine, so the gate the spec designates
+  as the CI acceptance gate actually runs in CI instead of only on demand.
 
 Additional tests: repair-migration test (fixture with mangled-shape + orphan rows →
 repaired/deleted/exported correctly, idempotent on re-run; **fixtures must cover both
@@ -458,6 +461,38 @@ live-brain guard panics otherwise).
    executed **post-merge** per the HOLD release condition and doubling as the Phase-1
    drop-rate measurement — distinct from the **pre-merge engine-in-the-loop gate**
    (§2.6), which remains the CI acceptance gate. Two gates, two names, no conflation.
+7. **Deep-review round 5 amendments** *(Sep 6, post-implementation on PR #188)* — six
+   behavior changes from the 10-finding review wave, all landed in the PR branch:
+   - **Manual facts carry NULL** (finding 1): `wisdom.rs` no longer writes the JSON
+     sentinel `{"proposal_id":null,"evidence":[]}` — a live mangleable ref this same
+     PR wired new MCP/UI writers into. NULL is the "no provenance" value for
+     `user_stated` rows; the V18 step normalizes pre-existing sentinel and
+     mangled (`proposal_idnullevidence`) user_stated rows to NULL.
+   - **One token-shape predicate** (finding 2): `bundle_apply`'s local
+     `is_ascii_hexdigit` copy (uppercase-tolerant) is replaced by delegation to the
+     canonical `commit::is_librarian_source_ref_token` (`^librarian-[0-9a-f]{32}$`).
+   - **No silent provenance loss at the bundle boundary** (findings 3+10): salvage
+     uses the single strict helper `commit::proposal_id_from_evidence_json`
+     (non-null, non-empty string only). Unsalvageable refs and blobs without a
+     usable `proposal_id` are preserved **verbatim in `ImportResult.warnings`**
+     instead of silently dropped, and no `proposal_id = ''` evidence row is ever
+     written. The V18 repair's two hand-copied extractions use the same helper.
+   - **V18 fail-safe posture** (finding 4): an error inside the file-backed repair
+     arm (full disk, unwritable `repair-export-186/`, mid-repair SQL fault) no
+     longer aborts `migrate()`/`AppDb::open` — the destructive phase is skipped
+     with a loud WARN, damaged data survives as-is, and the version stamp still
+     lands. Availability outranks auto-retry; manual idempotent
+     `run_evidence_repair` is the documented recovery path.
+   - **Atomic, replicated repair deletes** (finding 5): the repair's delete arm is
+     one transaction (evidence delete + entry delete + edge purge) and pushes one
+     `OutboxOperation::Delete` per removed entry — same shape as `wiki_forget`
+     (#132 class), so prisma-outbox replicas converge on the erasure.
+   - **Errors propagate on export; readers stay aligned** (findings 8+9):
+     `evidence_json_for_entry` propagates SQLite errors (the bundle-export path
+     halts rather than writing bare tokens with no evidence; UI read paths
+     degrade defensively), and `chunk_ids_for_entry` mirrors
+     `evidence_has_live_chunk` exactly — hash anchors match with no entity-id
+     filter and chunk_id rowid items are accepted as fallback anchors.
 7. **`get_chunk_ids_for_wiki_entry` revival** *(RESOLVED — revive; hard requirement,
    Opus review, Sep 6)*: **not** deprecated, and not left to implementer discretion.
    It has a live consumer chain: `lib.rs:3651` (registered command) →

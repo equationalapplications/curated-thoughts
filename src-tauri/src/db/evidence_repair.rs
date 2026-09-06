@@ -11,6 +11,7 @@
 //! normalize to the cap), so shape/length heuristics without that predicate
 //! would classify good rows as damaged and delete them.
 
+use crate::db::outbox_format::OutboxOperation;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -238,21 +239,21 @@ fn rebuild_evidence_for_proposal(conn: &Connection, proposal_id: &str) -> Result
 pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairReport> {
     let mut report = RepairReport::default();
 
-    let damaged: Vec<(String, String, i64)> = {
+    let damaged: Vec<(String, String, String, i64)> = {
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, source_ref, created_at FROM llm_wiki_entries
+            "SELECT id, entity_id, source_ref, created_at FROM llm_wiki_entries
               WHERE source_type = 'librarian_inferred'
                 AND source_ref IS NOT NULL
                 AND source_ref NOT GLOB '{TOKEN_GLOB}'"
         ))?;
-        let damaged: Vec<(String, String, i64)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        let damaged: Vec<(String, String, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .filter_map(Result::ok)
             .collect();
         damaged
     };
 
-    for (entry_id, mangled, created_at) in damaged {
+    for (entry_id, entity_id, mangled, created_at) in damaged {
         // 4a. Outbox-first: the pristine, untruncated payload if it survived.
         let from_outbox: Option<String> = conn
             .query_row(
@@ -267,28 +268,18 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
             .flatten()
             .filter(|s| serde_json::from_str::<serde_json::Value>(s).is_ok());
 
+        // proposal_id extraction goes through the single strict helper
+        // `commit::proposal_id_from_evidence_json` (review round 5, finding
+        // 10) — a JSON-null or absent id resolves by no path, exactly like
+        // the shape extractors below.
         let (evidence_json, proposal_id, bucket) = if let Some(pristine) = from_outbox {
-            let pid = serde_json::from_str::<serde_json::Value>(&pristine)
-                .ok()
-                .and_then(|v| {
-                    v.get("proposal_id")
-                        .and_then(|p| p.as_str())
-                        .map(String::from)
-                });
-            match pid {
+            match crate::db::commit::proposal_id_from_evidence_json(&pristine) {
                 Some(pid) => (Some(pristine), Some(pid), 0),
                 None => (None, None, 4),
             }
         } else if serde_json::from_str::<serde_json::Value>(&mangled).is_ok() {
             // Valid JSON survived: migrate verbatim, never re-derive.
-            let pid = serde_json::from_str::<serde_json::Value>(&mangled)
-                .ok()
-                .and_then(|v| {
-                    v.get("proposal_id")
-                        .and_then(|p| p.as_str())
-                        .map(String::from)
-                });
-            match pid {
+            match crate::db::commit::proposal_id_from_evidence_json(&mangled) {
                 Some(pid) => (Some(mangled.clone()), Some(pid), 1),
                 None => (None, None, 4),
             }
@@ -333,22 +324,37 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
             }
             _ => {
                 // Resolves by no path: export happens in Task 7 before this
-                // runs; here the row and its evidence go together. The edge
-                // sweep must follow the hard delete, or edges pointing at the
-                // doomed entry dangle (#158 contract).
-                crate::db::commit::delete_librarian_evidence(
-                    conn,
-                    std::slice::from_ref(&entry_id),
+                // runs; here the row and its evidence go together.
+                //
+                // The whole arm is ONE transaction and pushes one
+                // OutboxOperation::Delete per row (review round 5, finding
+                // 5): as separate autocommit statements, a crash between the
+                // entry DELETE and the edge purge stranded edges pointing at
+                // a hard-deleted entry forever, and prisma-outbox replicas
+                // kept serving the deleted fact (#132 class). Same shape as
+                // `wiki_forget::forget_entries_by_source_refs`. The edge
+                // sweep must follow the hard delete, or edges pointing at
+                // the doomed entry dangle (#158 contract).
+                let tx = conn.unchecked_transaction()?;
+                crate::db::commit::push_entries_outbox(
+                    &tx,
+                    &entity_id,
+                    &entry_id,
+                    OutboxOperation::Delete,
+                    serde_json::json!({ "id": entry_id }),
+                    now_ms,
                 )?;
-                conn.execute(
+                crate::db::commit::delete_librarian_evidence(&tx, std::slice::from_ref(&entry_id))?;
+                tx.execute(
                     "DELETE FROM llm_wiki_entries
                       WHERE id = ?1 AND source_type = 'librarian_inferred'",
                     [&entry_id],
                 )?;
                 crate::db::edge_purge::purge_edges_for_hard_deleted(
-                    conn,
+                    &tx,
                     std::slice::from_ref(&entry_id),
                 )?;
+                tx.commit()?;
                 report.deleted += 1;
             }
         }
@@ -800,6 +806,46 @@ mod tests {
         assert_eq!(n, 1);
         let written = std::fs::read_to_string(dir.path().join("fact_e.json")).unwrap();
         assert!(written.contains("evidencechunk_id1content_hashaa"));
+    }
+
+    #[test]
+    fn repair_deletes_null_proposal_id_json_and_pushes_outbox_deletes() {
+        // Review round 5, findings 5+10: a JSON blob with a null/absent
+        // proposal_id resolves by no path under the strict shared extractor,
+        // and its deletion must be replicated — one OutboxOperation::Delete
+        // per removed row, same shape as `wiki_forget` (#132 class).
+        let conn = open_in_memory().unwrap();
+        seed_entry(
+            &conn,
+            "fact_null_pid",
+            "librarian_inferred",
+            Some(r#"{"proposal_id":null,"evidence":[]}"#),
+        );
+        seed_entry(
+            &conn,
+            "fact_no_pid",
+            "librarian_inferred",
+            Some(r#"{"evidence":[]}"#),
+        );
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(report.deleted, 2, "neither blob resolves by any path");
+
+        for id in ["fact_null_pid", "fact_no_pid"] {
+            let outbox_deletes: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_outbox
+                      WHERE record_id = ?1 AND table_name = 'entries'
+                        AND operation = 'DELETE'",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                outbox_deletes, 1,
+                "hard-deleted repaired row {id} must be replicated as deleted"
+            );
+        }
     }
 
     #[test]

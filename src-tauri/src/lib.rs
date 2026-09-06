@@ -2565,7 +2565,7 @@ pub fn chunk_ids_for_entry(
     // Strict token shape, not a prefix test — same contract as
     // `source_docs_from_ref`. Spec §2.2.
     if crate::db::commit::is_librarian_source_ref_token(&source_ref) {
-        let Some(json) = crate::db::commit::evidence_json_for_entry(conn, entry_id) else {
+        let Ok(Some(json)) = crate::db::commit::evidence_json_for_entry(conn, entry_id) else {
             return Vec::new();
         };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
@@ -2576,20 +2576,41 @@ pub fn chunk_ids_for_entry(
         };
         let mut ids = Vec::new();
         for item in evidence {
-            if let Some(hash) = item.get("content_hash").and_then(|v| v.as_str()) {
-                let resolved: Option<i64> = conn
-                    .query_row(
-                        "SELECT c.id FROM chunks c
-                         WHERE c.content_hash = ?1 AND c.entity_id = ?2 LIMIT 1",
-                        rusqlite::params![hash, entity_id],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .unwrap_or(None);
-                if let Some(id) = resolved {
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
+            // Mirror `evidence_has_live_chunk` exactly (review round 5,
+            // finding 9): hashes match with NO entity filter, and the
+            // chunk_id rowid is a fallback only when the item carries no
+            // usable hash. The old `AND c.entity_id = ?2` filter let a fact
+            // be provably grounded yet yield zero chunk ids (e.g. a
+            // workspace/entity-id transition re-stamped the chunk), and
+            // skipping chunk_id-only items dropped legacy anchors the
+            // grounding predicate still accepts — so the wiki graph showed
+            // no neighbors for a fact the system insisted was grounded.
+            let hash = item
+                .get("content_hash")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let resolved: Option<i64> = if let Some(hash) = hash {
+                conn.query_row(
+                    "SELECT id FROM chunks WHERE content_hash = ?1 LIMIT 1",
+                    [hash],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap_or(None)
+            } else {
+                item.get("chunk_id")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|cid| {
+                        conn.query_row("SELECT id FROM chunks WHERE id = ?1 LIMIT 1", [cid], |r| {
+                            r.get(0)
+                        })
+                        .optional()
+                        .unwrap_or(None)
+                    })
+            };
+            if let Some(id) = resolved {
+                if !ids.contains(&id) {
+                    ids.push(id);
                 }
             }
         }

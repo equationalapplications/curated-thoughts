@@ -1,8 +1,16 @@
 //! The #186 acceptance gate. Seeds a scratch brain.db with CT-shaped rows,
 //! runs the REAL installed engine's setup(), and asserts it rewrites nothing.
 //!
-//! Marked #[ignore] because it shells out to node. Run explicitly:
+//! Marked #[ignore] because it shells out to node, which local `cargo test`
+//! runs cannot assume. Run explicitly:
 //!   cargo test -p curated-thoughts --test engine_source_ref_gate -- --ignored
+//!
+//! CI runs it on every push (review round 5, finding 6): the
+//! "Engine source_ref acceptance gate" step in ci.yml executes this test with
+//! `--ignored` against the pnpm-installed core-llm-wiki, so a future engine
+//! bump whose selector re-matches CT tokens fails the build instead of
+//! shipping green while the hand-transcribed `engine_would_rewrite` still
+//! says false.
 //!
 //! On main pre-fix this doubles as the real-repro proof that the shipped
 //! engine mangles JSON refs (seed a JSON source_ref instead of a token; see

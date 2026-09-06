@@ -316,6 +316,7 @@ fn bundle_roundtrip_preserves_librarian_evidence() {
     apply_import(&mut dest, &bundle, ImportMode::Merge).unwrap();
 
     let stored = tauri_app_lib::db::commit::evidence_json_for_entry(&dest, "fact_b")
+        .unwrap()
         .expect("evidence must survive the bundle roundtrip");
     assert!(serde_json::from_str::<serde_json::Value>(&stored).is_ok());
 
