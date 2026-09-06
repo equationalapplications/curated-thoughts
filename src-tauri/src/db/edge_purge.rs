@@ -472,7 +472,7 @@ mod tests {
         seed_edge(&conn, "edge_other", "ent-1", "fact_b", "fact_c");
 
         // Soft-delete fact_a to mirror the production cascade call sites
-        // (`commit::fact_archive` and `facts::archive_fact` soft-delete
+        // (`commit::fact_archive` and `wisdom::archive_wisdom` soft-delete
         // before purging).
         conn.execute(
             "UPDATE llm_wiki_entries SET deleted_at = 1 WHERE id = 'fact_a'",
