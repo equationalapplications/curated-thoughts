@@ -383,9 +383,13 @@ mod tests {
             let entity_id = make_entity(&conn);
             let profile = crate::embedder::EmbedProfile::default();
 
-            let fact =
-                add_wisdom_with_profile(&mut conn, &entity_id, "A user-stated fact.", Some(&profile))
-                    .unwrap();
+            let fact = add_wisdom_with_profile(
+                &mut conn,
+                &entity_id,
+                "A user-stated fact.",
+                Some(&profile),
+            )
+            .unwrap();
 
             let blob_len: Option<i64> = conn
                 .query_row(

@@ -1361,6 +1361,9 @@ verified: [ { by: process:p1, at: 2026-07-01T00:00:00.000Z }, { by: human:alice,
                 failures.push(name);
             }
         }
-        assert!(failures.is_empty(), "OKF round trip broke for: {failures:?}");
+        assert!(
+            failures.is_empty(),
+            "OKF round trip broke for: {failures:?}"
+        );
     }
 }

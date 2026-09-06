@@ -840,6 +840,179 @@ impl ToolDispatchContext {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Curated memory write dispatchers + fail-closed audit logging (spec §5/§7).
+// Every DB write goes through db::wisdom; audit INSERT failures FAIL the
+// tool call (fail-closed) — the existing 8 non-curated tools keep their
+// best-effort path (log_agent_access) untouched.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedAddWisdomParams {
+    /// Entity to attach the new wisdom entry to (must be active)
+    pub entity_id: String,
+    /// Body of the wisdom entry (title is derived from it)
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedUpdateWisdomParams {
+    /// Owning entity of the wisdom entry
+    pub entity_id: String,
+    /// Id of the wisdom entry to rewrite
+    pub wisdom_id: String,
+    /// New body (title re-derived from it)
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedArchiveWisdomParams {
+    /// Owning entity of the wisdom entry
+    pub entity_id: String,
+    /// Id of the wisdom entry to soft-delete
+    pub wisdom_id: String,
+}
+
+/// Fail-closed audit log for curated tool calls (spec §7): a failed INSERT
+/// propagates and fails the tool call, unlike the best-effort
+/// [`log_agent_access`] used by the eight pre-existing read tools
+/// (their migration to fail-closed is tracked separately).
+pub fn log_agent_access_checked(
+    conn: &Connection,
+    client: &str,
+    tool: &str,
+    entity_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
+         VALUES (?1, ?2, 'write', ?3, NULL)",
+        rusqlite::params![client, tool, entity_id],
+    )
+    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
+    Ok(())
+}
+
+/// Reload one live wisdom entry as JSON (per-entry query shape shared with
+/// the coding server). Used by `dispatch_curated_update_wisdom` so the
+/// response is read back from the DB, never echoed from the request.
+fn load_wisdom_json(conn: &Connection, entity_id: &str, wisdom_id: &str) -> Result<Value> {
+    let (id, ent, title, body, source_type): (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT id, entity_id, title, body, source_type
+             FROM llm_wiki_entries
+             WHERE entity_id = ?1 AND id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![entity_id, wisdom_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            },
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("reloading updated wisdom {wisdom_id} under {entity_id}: {e}")
+        })?;
+    Ok(serde_json::json!({
+        "id": id,
+        "entity_id": ent,
+        "title": title,
+        "body": body,
+        "source_type": source_type,
+    }))
+}
+
+/// Add a user-stated wisdom entry through the `db::wisdom` core.
+///
+/// Embedding is precomputed OUTSIDE the RW lock; the audit row is written in
+/// the SAME `with_rw` closure, after the mutation and BEFORE returning — an
+/// audit failure aborts the response even though the mutation itself already
+/// committed (the outbox/mutation is not rolled back).
+pub async fn dispatch_curated_add_wisdom(
+    ctx: &ToolDispatchContext,
+    p: CuratedAddWisdomParams,
+) -> Result<Value> {
+    let blob = ctx.precompute_wisdom_embedding(&p.body);
+    let client = ctx.client.clone();
+    let entity_id = p.entity_id.clone();
+    let wisdom = ctx
+        .with_rw(move |conn| {
+            let wisdom =
+                crate::db::wisdom::add_wisdom_with_blob(conn, &p.entity_id, &p.body, blob)?;
+            // Audit follows the mutation; the mutation itself is not rolled back.
+            log_agent_access_checked(conn, &client, "curated_add_wisdom", Some(&p.entity_id))?;
+            Ok(wisdom)
+        })
+        .await?;
+    Ok(serde_json::json!({
+        "id": wisdom.id,
+        "entity_id": entity_id,
+        "title": wisdom.title,
+        "body": wisdom.body,
+        "source_type": wisdom.source_type,
+    }))
+}
+
+/// Rewrite a wisdom entry's body through the `db::wisdom` core and return the
+/// RELOADED entry (read back from the DB; `update_wisdom_with_blob` returns
+/// `Result<()>`, so echoing the request would fabricate the response).
+/// Audit contract matches [`dispatch_curated_add_wisdom`].
+pub async fn dispatch_curated_update_wisdom(
+    ctx: &ToolDispatchContext,
+    p: CuratedUpdateWisdomParams,
+) -> Result<Value> {
+    let blob = ctx.precompute_wisdom_embedding(&p.body);
+    let client = ctx.client.clone();
+    ctx.with_rw(move |conn| {
+        crate::db::wisdom::update_wisdom_with_blob(
+            conn,
+            &p.entity_id,
+            &p.wisdom_id,
+            &p.body,
+            blob,
+        )?;
+        let reloaded = load_wisdom_json(conn, &p.entity_id, &p.wisdom_id)?;
+        // Audit follows the mutation; the mutation itself is not rolled back.
+        log_agent_access_checked(
+            conn,
+            &client,
+            "curated_update_wisdom",
+            Some(&p.entity_id),
+        )?;
+        Ok(reloaded)
+    })
+    .await
+}
+
+/// Soft-delete a wisdom entry through the `db::wisdom` core.
+/// Audit contract matches [`dispatch_curated_add_wisdom`].
+pub async fn dispatch_curated_archive_wisdom(
+    ctx: &ToolDispatchContext,
+    p: CuratedArchiveWisdomParams,
+) -> Result<Value> {
+    let client = ctx.client.clone();
+    ctx.with_rw(move |conn| {
+        crate::db::wisdom::archive_wisdom(conn, &p.entity_id, &p.wisdom_id)?;
+        // Audit follows the mutation; the mutation itself is not rolled back.
+        log_agent_access_checked(
+            conn,
+            &client,
+            "curated_archive_wisdom",
+            Some(&p.entity_id),
+        )?;
+        Ok(serde_json::json!({
+            "archived": true,
+            "wisdom_id": p.wisdom_id,
+        }))
+    })
+    .await
+}
+
 #[derive(Clone)]
 pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
@@ -1503,7 +1676,21 @@ mod curated_memory_tests {
                 access_count INTEGER NOT NULL DEFAULT 0,
                 deleted_at INTEGER,
                 embedding TEXT,
-                embedding_blob BLOB
+                embedding_blob BLOB,
+                okf_type TEXT,
+                ontology_checked_at INTEGER,
+                heal_checked_at INTEGER,
+                lifecycle_status TEXT NOT NULL DEFAULT 'stable',
+                stale_after INTEGER,
+                generated_by TEXT,
+                last_verified_at INTEGER,
+                last_verified_by TEXT,
+                okf_sources TEXT,
+                okf_verified TEXT,
+                okf_usage_window TEXT,
+                embedding_failed_at INTEGER,
+                embedding_failure_kind TEXT,
+                embedding_attempts INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE curated_entities (
                 id TEXT PRIMARY KEY,
@@ -1523,6 +1710,34 @@ mod curated_memory_tests {
                 entity_id TEXT,
                 summary TEXT,
                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE llm_wiki_tasks (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                deleted_at INTEGER
+            );
+            CREATE TABLE llm_wiki_events (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                related_entry_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE llm_wiki_edges (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(entity_id, source_id, target_id, edge_type)
             );
             CREATE TABLE llm_wiki_outbox (
                 id TEXT PRIMARY KEY,
@@ -1732,5 +1947,151 @@ mod curated_memory_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_wisdom_inserts_user_stated_wisdom() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db"); // real RW path over the seeded file
+        let v = dispatch_curated_add_wisdom(
+            &ctx,
+            CuratedAddWisdomParams {
+                entity_id: "ent-1".into(),
+                body: "Agent learned: deploy scripts need sudo.".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["source_type"], "user_stated");
+        assert!(v["id"].as_str().unwrap().starts_with("fact_")); // id prefix is storage-level
+        // Audit row landed (fail-closed path wrote a 'write' row).
+        let audit_count: i64 = ctx
+            .with_rw(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM curated_agent_log WHERE tool = 'curated_add_wisdom'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(audit_count, 1);
+    }
+
+    #[tokio::test]
+    async fn update_wisdom_returns_reloaded_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        // Update the seeded entry w1 under entity ent-1.
+        let v = dispatch_curated_update_wisdom(
+            &ctx,
+            CuratedUpdateWisdomParams {
+                entity_id: "ent-1".into(),
+                wisdom_id: "w1".into(),
+                body: "updated body v2".into(),
+            },
+        )
+        .await
+        .unwrap();
+        // Reloaded from the DB — not echoed from the request.
+        assert_eq!(v["body"], "updated body v2");
+        assert_eq!(v["id"], "w1");
+        assert_eq!(v["entity_id"], "ent-1");
+    }
+
+    #[tokio::test]
+    async fn archive_wisdom_soft_deletes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        let v = dispatch_curated_archive_wisdom(
+            &ctx,
+            CuratedArchiveWisdomParams {
+                entity_id: "ent-1".into(),
+                wisdom_id: "w1".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["archived"], true);
+        assert_eq!(v["wisdom_id"], "w1");
+        // Verify via the RO conn: deleted_at set (ms epoch) + live count dropped.
+        let (deleted_at, live_count): (Option<i64>, i64) = {
+            let guard = ctx.conn.lock().unwrap();
+            (
+                guard
+                    .query_row(
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'w1'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap(),
+                guard
+                    .query_row(
+                        "SELECT COUNT(*) FROM llm_wiki_entries WHERE deleted_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap(),
+            )
+        };
+        assert!(deleted_at.is_some(), "w1 must carry a deleted_at ms stamp");
+        assert_eq!(live_count, 0, "w2 was seeded pre-archived; after archiving w1 no live rows remain");
+    }
+
+    #[tokio::test]
+    async fn write_fails_when_entity_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        let err = dispatch_curated_add_wisdom(
+            &ctx,
+            CuratedAddWisdomParams {
+                entity_id: "ent-gone".into(),
+                body: "orphan wisdom".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("ent-gone")
+                || err.to_string().to_lowercase().contains("not found")
+                || err.to_string().to_lowercase().contains("inactive"),
+            "core must bail on inactive/missing entity; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn curated_call_fails_when_audit_log_unwritable() {
+        // spec §9 log-failure test: DROP TABLE curated_agent_log via a THIRD
+        // direct Connection handle (the RO conn cannot write DDL), then the
+        // curated write must fail (fail-closed audit).
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = dir.path().join("brain.db");
+        {
+            let third = Connection::open(dir.path().join("brain.db")).unwrap();
+            third.execute_batch("DROP TABLE curated_agent_log;").unwrap();
+        }
+        let err = dispatch_curated_add_wisdom(
+            &ctx,
+            CuratedAddWisdomParams {
+                entity_id: "ent-1".into(),
+                body: "should fail on audit write".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("audit"),
+            "error must trace to the audit insert; got: {err}"
+        );
     }
 }
