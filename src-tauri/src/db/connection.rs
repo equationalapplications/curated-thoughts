@@ -315,7 +315,9 @@ mod tests {
         let max_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 17);
+        // Bumped from 17 to 18 by MIGRATION_V18, which adds the CT-owned
+        // `librarian_evidence` table (issue #186 spec §2.1).
+        assert_eq!(max_version, 18);
     }
 
     /// Upgraded-DB path for the core-llm-wiki@7.1.0 bump: a database created
@@ -340,7 +342,7 @@ mod tests {
             "ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failed_at;
              ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failure_kind;
              ALTER TABLE llm_wiki_entries DROP COLUMN embedding_attempts;
-             DELETE FROM schema_version WHERE version = 17;",
+             DELETE FROM schema_version WHERE version >= 17;",
         )
         .unwrap();
 
