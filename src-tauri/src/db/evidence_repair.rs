@@ -119,22 +119,51 @@ pub fn extract_proposal_id_from_empty_shape(mangled: &str) -> Option<String> {
     Some(id)
 }
 
+/// Minimum accepted `content_hash` length. Real content hashes are 64 hex
+/// chars; a 255-cap-truncated one is still tens of chars. Anything shorter is
+/// a mis-extraction — e.g. an empty `content_hash` followed by `end_line`
+/// yields "e", and a short probe into `proposal_for_content_hash`'s LIKE
+/// would silently mis-attribute rows. Spec §2.5.4.
+const MIN_CONTENT_HASH_LEN: usize = 8;
+
 /// Path 4c: for non-empty evidence, `proposal_id` sorted last, sat at the tail
 /// of the blob, and was truncated away by `.slice(0, 255)`. What survives in
 /// the head is the first evidence item's `content_hash` — the join key back to
 /// `curated_proposal_items.evidence`. Preferred over `chunk_id`, which is a
 /// legacy rowid and may be absent.
+///
+/// The hex run is terminated by **longest match against the known following
+/// key tokens** (`EVIDENCE_KEYS`), full or truncated: runtime serde_json
+/// writes item keys alphabetically, so a real mangled blob reads
+/// `…content_hash<hash>end_line…` and a plain hexdigit run would absorb the
+/// leading `e` of `end_line` into the hash, making it unmatchable. A run
+/// shorter than [`MIN_CONTENT_HASH_LEN`] is rejected as a mis-extraction.
 pub fn extract_leading_content_hash(mangled: &str) -> Option<String> {
     let idx = mangled.find("content_hash")?;
     let rest = &mangled[idx + "content_hash".len()..];
-    let hash: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-    // Stop before a following key token bleeds in (hex-only already excludes
-    // every key in EVIDENCE_KEYS except a pathological all-hex prefix).
-    debug_assert!(EVIDENCE_KEYS.iter().all(|k| !hash.starts_with(k)));
-    if hash.is_empty() {
+    let mut end = rest.len();
+    for (i, c) in rest.char_indices() {
+        let suffix = &rest[i..];
+        // The next evidence-item key bleeding into the run — either the full
+        // token (untruncated blob) or its 255-cut tail (truncation landed
+        // inside the key). Both stop the hash before the key starts.
+        if EVIDENCE_KEYS
+            .iter()
+            .any(|k| suffix.starts_with(k) || (!suffix.is_empty() && k.starts_with(suffix)))
+        {
+            end = i;
+            break;
+        }
+        if !c.is_ascii_hexdigit() {
+            end = i;
+            break;
+        }
+    }
+    let hash = &rest[..end];
+    if hash.len() < MIN_CONTENT_HASH_LEN {
         None
     } else {
-        Some(hash)
+        Some(hash.to_string())
     }
 }
 
@@ -275,8 +304,12 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
 
         match (evidence_json, proposal_id) {
             (Some(json), Some(pid)) => {
+                // Compute the real Phase-1 flag — a repaired blob with no live
+                // chunk anchor must carry unanchored=1, not a hardcoded 0, or
+                // it re-arms the heal-purge bait. Spec §2.4.
+                let unanchored = !crate::db::commit::evidence_has_live_chunk(conn, &json);
                 crate::db::commit::insert_librarian_evidence(
-                    conn, &entry_id, &pid, &json, false, now_ms,
+                    conn, &entry_id, &pid, &json, unanchored, now_ms,
                 )?;
                 conn.execute(
                     "UPDATE llm_wiki_entries SET source_ref = ?1
@@ -473,15 +506,78 @@ mod tests {
 
     #[test]
     fn extracts_leading_content_hash_from_truncated_shape() {
-        let mangled = "evidencechunk_id42content_hashdeadbeefcafe0123quotehello world";
+        // TRUE runtime serialization order: keys alphabetical, so the value is
+        // followed by `end_line` — a hexdigit-only run would absorb the `e`.
+        let hash64 = format!("{}{}", "feedface00", "0".repeat(54));
+        let mangled = format!("evidencechunk_id7content_hash{hash64}end_line2quotehello world");
         assert_eq!(
-            extract_leading_content_hash(mangled).as_deref(),
-            Some("deadbeefcafe0123")
+            extract_leading_content_hash(&mangled).as_deref(),
+            Some(hash64.as_str())
+        );
+        // Post-hash truncation: the 255-cap cut the string inside `end_line`.
+        let mangled = format!("evidencechunk_id7content_hash{hash64}end_l");
+        assert_eq!(
+            extract_leading_content_hash(&mangled).as_deref(),
+            Some(hash64.as_str())
+        );
+        // Mid-hash truncation: the cap cut inside the hash itself. Still long
+        // enough to probe with.
+        let truncated_hash: String = hash64.chars().take(40).collect();
+        let mangled = format!("evidencechunk_id7content_hash{truncated_hash}");
+        assert_eq!(
+            extract_leading_content_hash(&mangled).as_deref(),
+            Some(truncated_hash.as_str())
+        );
+        // Empty `content_hash` followed by `end_line`: must NOT yield "e" —
+        // a one-char LIKE probe would match nearly every proposal.
+        assert_eq!(
+            extract_leading_content_hash("evidencechunk_id7content_hashend_line2quote"),
+            None
         );
         assert_eq!(
             extract_leading_content_hash("evidenceproposal_idprop_x"),
             None
         );
+    }
+
+    #[test]
+    fn repair_empty_content_hash_does_not_mis_attribute() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_e','new_entity','m','pending',1)",
+            [],
+        )
+        .unwrap();
+        // A proposal whose evidence contains a short hex-looking probe — with
+        // the old extractor the empty-hash "e" run could LIKE-match it.
+        conn.execute(
+            "INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, evidence)
+             VALUES ('item_e','prop_e','fact_add','{}',
+                     '[{\"chunk_id\":1,\"content_hash\":\"e0123abcd\"}]')",
+            [],
+        )
+        .unwrap();
+        seed_entry(
+            &conn,
+            "fact_empty",
+            "librarian_inferred",
+            Some("evidencechunk_id7content_hashend_line2quote"),
+        );
+
+        let report = run_evidence_repair(&conn, 999).unwrap();
+        assert_eq!(
+            report.deleted, 1,
+            "empty-hash row must fall to delete, not mis-attribute"
+        );
+        let attached: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE proposal_id='prop_e'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attached, 0, "no proposal may be attached via a bogus probe");
     }
 
     #[test]
@@ -528,6 +624,8 @@ mod tests {
     #[test]
     fn repair_recovers_chunk_shape_via_content_hash() {
         let conn = open_in_memory().unwrap();
+        // True runtime serialization order, 64-hex content hash.
+        let hash64 = format!("{}{}", "feedface00", "0".repeat(54));
         // kind is constrained to ('new_entity','update_entity') by DDL.
         conn.execute(
             "INSERT INTO curated_proposals (id, kind, model, status, created_at)
@@ -535,32 +633,40 @@ mod tests {
             [],
         )
         .unwrap();
+        let evidence = format!(r#"[{{"chunk_id":7,"content_hash":"{hash64}"}}]"#);
         conn.execute(
             "INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, evidence)
-             VALUES ('item_h','prop_h','fact_add','{}',
-                     '[{\"chunk_id\":7,\"content_hash\":\"feedface00\"}]')",
-            [],
+             VALUES ('item_h','prop_h','fact_add','{}', ?1)",
+            [&evidence],
         )
         .unwrap();
         seed_entry(
             &conn,
             "fact_h",
             "librarian_inferred",
-            Some("evidencechunk_id7content_hashfeedface00quotex"),
+            Some(&format!(
+                "evidencechunk_id7content_hash{hash64}end_line2quotex"
+            )),
         );
 
         let report = run_evidence_repair(&conn, 999).unwrap();
         assert_eq!(report.from_content_hash, 1);
         assert_eq!(report.deleted, 0);
 
-        let proposal_id: String = conn
+        let (proposal_id, unanchored): (String, i64) = conn
             .query_row(
-                "SELECT proposal_id FROM librarian_evidence WHERE entry_id='fact_h'",
+                "SELECT proposal_id, unanchored FROM librarian_evidence WHERE entry_id='fact_h'",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(proposal_id, "prop_h");
+        // No live chunk exists in this DB, so the repaired row must carry the
+        // computed Phase-1 flag, not a hardcoded 0. Spec §2.4.
+        assert_eq!(
+            unanchored, 1,
+            "repaired row without a live chunk is unanchored"
+        );
     }
 
     #[test]

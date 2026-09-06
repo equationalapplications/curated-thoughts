@@ -178,6 +178,15 @@ fn fact_exists(conn: &Connection, id: &str) -> Result<bool> {
     row_exists(conn, "SELECT 1 FROM llm_wiki_entries WHERE id=?1", &[&id])
 }
 
+/// True iff `source_ref` is the normative token shape `^librarian-[0-9a-f]{32}$`
+/// (spec §2.2) — the Rust mirror of `evidence_repair::TOKEN_GLOB`.
+fn is_librarian_token_shaped(source_ref: &str) -> bool {
+    source_ref
+        .strip_prefix("librarian-")
+        .map(|rest| rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or(false)
+}
+
 fn task_exists(conn: &Connection, id: &str) -> Result<bool> {
     row_exists(conn, "SELECT 1 FROM llm_wiki_tasks WHERE id=?1", &[&id])
 }
@@ -352,6 +361,30 @@ pub fn apply_import(
                 .okf_sources
                 .as_deref()
                 .or_else(|| synthetic_sources.get(&fact.id).map(String::as_str));
+            // Pre-#186 librarian facts carry a legacy JSON `source_ref` (the
+            // blob the engine setup rewrite mangled). On apply they are
+            // normalized to the token shape, and a ref that still parses as
+            // JSON with a `proposal_id` is salvaged into the paired
+            // librarian_evidence row instead of being dropped. Spec §2.3.
+            let mut legacy_evidence_json: Option<&str> = None;
+            let effective_source_ref = if fact.source_type == "librarian_inferred"
+                && !fact
+                    .source_ref
+                    .as_deref()
+                    .map(is_librarian_token_shaped)
+                    .unwrap_or(false)
+            {
+                if let Some(legacy) = fact.source_ref.as_deref() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(legacy) {
+                        if v.get("proposal_id").is_some() {
+                            legacy_evidence_json = Some(legacy);
+                        }
+                    }
+                }
+                Some(crate::db::commit::librarian_source_ref_token(&fact_id))
+            } else {
+                fact.source_ref.clone()
+            };
             tx.execute(
                 "INSERT INTO llm_wiki_entries (
                     id, entity_id, title, body, tags, confidence, source_type,
@@ -371,7 +404,7 @@ pub fn apply_import(
                     fact.confidence,
                     fact.source_type,
                     fact.source_hash,
-                    fact.source_ref,
+                    effective_source_ref,
                     fact.okf_type,
                     fact.lifecycle_status,
                     fact.stale_after,
@@ -402,7 +435,7 @@ pub fn apply_import(
                     &fact.confidence,
                     &fact.source_type,
                     fact.source_hash.as_deref(),
-                    fact.source_ref.as_deref().unwrap_or(""),
+                    effective_source_ref.as_deref().unwrap_or(""),
                     fact.okf_type.as_deref(),
                     effective_sources,
                     fact.okf_verified.as_deref(),
@@ -422,7 +455,7 @@ pub fn apply_import(
             // together; a token row without evidence is treated as still-grounded by
             // the §2.3 rule, but importing one deliberately would be a silent
             // provenance loss. Spec §2.3.
-            if let Some(evidence_json) = fact.evidence_json.as_deref() {
+            if let Some(evidence_json) = fact.evidence_json.as_deref().or(legacy_evidence_json) {
                 let proposal_id = serde_json::from_str::<serde_json::Value>(evidence_json)
                     .ok()
                     .and_then(|v| {
@@ -431,12 +464,16 @@ pub fn apply_import(
                             .map(String::from)
                     })
                     .unwrap_or_default();
+                // Compute the real Phase-1 flag: a bundle-applied row whose
+                // blob has no live chunk anchor must be unanchored=1, or it
+                // re-arms the heal-purge bait. Spec §2.4.
+                let unanchored = !crate::db::commit::evidence_has_live_chunk(&tx, evidence_json);
                 crate::db::commit::insert_librarian_evidence(
                     &tx,
                     &fact_id,
                     &proposal_id,
                     evidence_json,
-                    false,
+                    unanchored,
                     now_ms,
                 )?;
             }
