@@ -1,3 +1,10 @@
+## [2.5.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.5.0...v2.5.1) (2026-09-06)
+
+### Bug Fixes
+
+* **bridge:** explicit curated_* capability gate in dispatch (defense in depth over sentinel path) ([bac24e9](https://github.com/equationalapplications/curated-thoughts/commit/bac24e9795cec7e4e7227585bb608ee86ddde3c5))
+* **bridge:** point cloud bridge ctx at sentinel db_path so curated tools fail closed (hotfix for [#185](https://github.com/equationalapplications/curated-thoughts/issues/185)) ([4b18fd8](https://github.com/equationalapplications/curated-thoughts/commit/4b18fd82344d772b7c4a9ed3753475d48a924db2))
+
 ## [2.5.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.3...v2.5.0) (2026-09-06)
 
 ### Features
