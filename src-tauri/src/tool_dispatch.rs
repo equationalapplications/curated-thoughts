@@ -880,6 +880,8 @@ pub struct CuratedArchiveWisdomParams {
 /// propagates and fails the tool call, unlike the best-effort
 /// [`log_agent_access`] used by the eight pre-existing read tools
 /// (their migration to fail-closed is tracked separately).
+/// Accepts `&Connection` or `&Transaction` (deref coercion) so write tools
+/// can audit inside the same transaction as the mutation.
 pub fn log_agent_access_checked(
     conn: &Connection,
     client: &str,
@@ -922,10 +924,11 @@ fn load_wisdom_json(conn: &Connection, entity_id: &str, wisdom_id: &str) -> Resu
 
 /// Add a user-stated wisdom entry through the `db::wisdom` core.
 ///
-/// Embedding is precomputed OUTSIDE the RW lock; the audit row is written in
-/// the SAME `with_rw` closure, after the mutation and BEFORE returning — an
-/// audit failure aborts the response even though the mutation itself already
-/// committed (the outbox/mutation is not rolled back).
+/// Embedding is precomputed OUTSIDE the RW lock. The mutation and the
+/// fail-closed audit row commit ATOMICALLY on the RW connection: if the
+/// audit INSERT fails, the mutation is rolled back (PR #185 review — an
+/// entry must never exist without its audit trail, and a client retry
+/// must never create a duplicate).
 pub async fn dispatch_curated_add_wisdom(
     ctx: &ToolDispatchContext,
     p: CuratedAddWisdomParams,
@@ -935,16 +938,16 @@ pub async fn dispatch_curated_add_wisdom(
     let entity_id = p.entity_id.clone();
     let wisdom = ctx
         .with_rw(move |conn| {
-            let wisdom =
-                crate::db::wisdom::add_wisdom_with_blob(conn, &p.entity_id, &p.body, blob)?;
-            // Audit follows the mutation; the mutation itself is not rolled back.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let wisdom = crate::db::wisdom::add_wisdom_in_tx(&tx, &p.entity_id, &p.body, blob)?;
             log_agent_access_checked(
-                conn,
+                &tx,
                 &client,
                 "curated_add_wisdom",
                 Some(&p.entity_id),
                 "write",
             )?;
+            tx.commit()?;
             Ok(wisdom)
         })
         .await?;
@@ -960,7 +963,7 @@ pub async fn dispatch_curated_add_wisdom(
 /// Rewrite a wisdom entry's body through the `db::wisdom` core and return the
 /// RELOADED entry (read back from the DB; `update_wisdom_with_blob` returns
 /// `Result<()>`, so echoing the request would fabricate the response).
-/// Audit contract matches [`dispatch_curated_add_wisdom`].
+/// Atomic mutation+audit contract matches [`dispatch_curated_add_wisdom`].
 pub async fn dispatch_curated_update_wisdom(
     ctx: &ToolDispatchContext,
     p: CuratedUpdateWisdomParams,
@@ -968,44 +971,40 @@ pub async fn dispatch_curated_update_wisdom(
     let blob = ctx.precompute_wisdom_embedding(&p.body);
     let client = ctx.client.clone();
     ctx.with_rw(move |conn| {
-        crate::db::wisdom::update_wisdom_with_blob(
-            conn,
-            &p.entity_id,
-            &p.wisdom_id,
-            &p.body,
-            blob,
-        )?;
-        let reloaded = load_wisdom_json(conn, &p.entity_id, &p.wisdom_id)?;
-        // Audit follows the mutation; the mutation itself is not rolled back.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::db::wisdom::update_wisdom_in_tx(&tx, &p.entity_id, &p.wisdom_id, &p.body, blob)?;
         log_agent_access_checked(
-            conn,
+            &tx,
             &client,
             "curated_update_wisdom",
             Some(&p.entity_id),
             "write",
         )?;
+        tx.commit()?;
+        let reloaded = load_wisdom_json(conn, &p.entity_id, &p.wisdom_id)?;
         Ok(reloaded)
     })
     .await
 }
 
 /// Soft-delete a wisdom entry through the `db::wisdom` core.
-/// Audit contract matches [`dispatch_curated_add_wisdom`].
+/// Atomic mutation+audit contract matches [`dispatch_curated_add_wisdom`].
 pub async fn dispatch_curated_archive_wisdom(
     ctx: &ToolDispatchContext,
     p: CuratedArchiveWisdomParams,
 ) -> Result<Value> {
     let client = ctx.client.clone();
     ctx.with_rw(move |conn| {
-        crate::db::wisdom::archive_wisdom(conn, &p.entity_id, &p.wisdom_id)?;
-        // Audit follows the mutation; the mutation itself is not rolled back.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::db::wisdom::archive_wisdom_in_tx(&tx, &p.entity_id, &p.wisdom_id)?;
         log_agent_access_checked(
-            conn,
+            &tx,
             &client,
             "curated_archive_wisdom",
             Some(&p.entity_id),
             "write",
         )?;
+        tx.commit()?;
         Ok(serde_json::json!({
             "archived": true,
             "wisdom_id": p.wisdom_id,
@@ -1861,8 +1860,8 @@ mod curated_memory_tests {
               (1, 'fn main() {}', 0, 1, 1, 'main', 'ast_symbols', 'tier_working'),
               (2, 'plain prose chunk', 0, 1, 1, NULL, 'proximity', 'tier_working');
             INSERT INTO embeddings (chunk_id, vector) VALUES
-              (1, x'0000803F000000000000000000000000000000000000000000000000000000'),
-              (2, x'0000003F000000000000000000000000000000000000000000000000000000');
+              (1, x'0000803F00000000000000000000000000000000000000000000000000000000'),
+              (2, x'0000003F00000000000000000000000000000000000000000000000000000000');
             "#,
         )
         .unwrap();
@@ -1981,7 +1980,12 @@ mod curated_memory_tests {
         )
         .await
         .unwrap();
-        for c in v["code_chunks"].as_array().unwrap() {
+        let code = v["code_chunks"].as_array().expect("code_chunks array");
+        assert!(
+            !code.is_empty(),
+            "fixture must produce at least one ranked hit"
+        );
+        for c in code {
             assert!(c["strategy"].as_str().unwrap().starts_with("ast_"));
         }
     }
@@ -2170,6 +2174,20 @@ mod curated_memory_tests {
         assert!(
             err.to_string().contains("audit"),
             "error must trace to the audit insert; got: {err}"
+        );
+        // Atomicity (PR #185 review): the failed audit insert must roll back
+        // the mutation — no wisdom row may survive.
+        let check = Connection::open(dir.path().join("brain.db")).unwrap();
+        let n: i64 = check
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE body = 'should fail on audit write'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "failed audit insert must roll back the wisdom mutation"
         );
     }
 }

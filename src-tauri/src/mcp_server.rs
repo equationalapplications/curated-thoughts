@@ -164,7 +164,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "curated_recall_context",
-        description = "Recall prioritized context for a coding task: keyword-ranked wisdom layer entries plus AST-strategy code chunks ranked by embedding similarity. Read-only."
+        description = "Recall prioritized context for a coding task: keyword-ranked wisdom layer entries plus AST-strategy code chunks ranked by embedding similarity. Reads memory and records one audit row (fails closed if the audit write fails)."
     )]
     async fn curated_recall_context(
         &self,
@@ -182,7 +182,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "curated_get_wiki_entry",
-        description = "Fetch the full content of wisdom layer (wiki) entries. Provide entity_id (exact match, wins over topic when both are supplied) or topic (substring match on title/body/tags). Read-only."
+        description = "Fetch the full content of wisdom layer (wiki) entries. Provide entity_id (exact match, wins over topic when both are supplied) or topic (substring match on title/body/tags). Reads memory and records one audit row (fails closed if the audit write fails)."
     )]
     async fn curated_get_wiki_entry(
         &self,
@@ -200,7 +200,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "curated_search_code",
-        description = "Search AST-strategy code chunks by query embedding, optionally narrowed to a symbol name. Read-only."
+        description = "Search AST-strategy code chunks by query embedding, optionally narrowed to a symbol name. Reads memory and records one audit row (fails closed if the audit write fails)."
     )]
     async fn curated_search_code(
         &self,

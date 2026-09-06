@@ -9,7 +9,7 @@ use crate::db::entities::EntityWisdom;
 use crate::db::outbox_format::OutboxOperation;
 use crate::embedder::{embed_batch, EmbedProfile};
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 /// source_ref for user-authored wisdom: same JSON shape as proposal commits, no evidence.
 const MANUAL_SOURCE_REF: &str = r#"{"proposal_id":null,"evidence":[]}"#;
@@ -102,6 +102,23 @@ pub fn add_wisdom_with_blob(
     body: &str,
     embedding_blob: Option<Vec<u8>>,
 ) -> Result<EntityWisdom> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let wisdom = add_wisdom_in_tx(&tx, entity_id, body, embedding_blob)?;
+    tx.commit()?;
+    Ok(wisdom)
+}
+
+/// Transaction-scoped core of [`add_wisdom_with_blob`]: inserts the entry and
+/// its outbox row on the CALLER's transaction (no BEGIN, no COMMIT) so MCP
+/// write tools can commit mutation + fail-closed audit atomically
+/// (PR #185 review: an audit failure must roll the mutation back, not leave a
+/// committed entry with no audit trail).
+pub fn add_wisdom_in_tx(
+    tx: &Transaction<'_>,
+    entity_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
+) -> Result<EntityWisdom> {
     let body = body.trim();
     if body.is_empty() {
         bail!("wisdom body must not be empty");
@@ -110,8 +127,7 @@ pub fn add_wisdom_with_blob(
     let wisdom_id = generate_llm_id("fact_");
     let title = fact_title_from_body(body);
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    assert_entity_active(&tx, entity_id)?;
+    assert_entity_active(tx, entity_id)?;
     tx.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
@@ -121,7 +137,7 @@ pub fn add_wisdom_with_blob(
         params![wisdom_id, entity_id, title, body, MANUAL_SOURCE_REF, now_ms, embedding_blob],
     )?;
     push_entries_outbox(
-        &tx,
+        tx,
         entity_id,
         &wisdom_id,
         OutboxOperation::Insert,
@@ -156,8 +172,7 @@ pub fn add_wisdom_with_blob(
         ),
         now_ms,
     )?;
-    touch_entity(&tx, entity_id, now_secs)?;
-    tx.commit()?;
+    touch_entity(tx, entity_id, now_secs)?;
 
     Ok(EntityWisdom {
         id: wisdom_id,
@@ -225,6 +240,21 @@ pub fn update_wisdom_with_blob(
     body: &str,
     embedding_blob: Option<Vec<u8>>,
 ) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    update_wisdom_in_tx(&tx, entity_id, wisdom_id, body, embedding_blob)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Transaction-scoped core of [`update_wisdom_with_blob`] (no BEGIN/COMMIT;
+/// same atomic audit rationale as [`add_wisdom_in_tx`]).
+pub fn update_wisdom_in_tx(
+    tx: &Transaction<'_>,
+    entity_id: &str,
+    wisdom_id: &str,
+    body: &str,
+    embedding_blob: Option<Vec<u8>>,
+) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
         bail!("wisdom body must not be empty");
@@ -232,8 +262,7 @@ pub fn update_wisdom_with_blob(
     let (now_secs, now_ms) = now_timestamps();
     let title = fact_title_from_body(body);
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    assert_entity_active(&tx, entity_id)?;
+    assert_entity_active(tx, entity_id)?;
     let existing = tx
         .query_row(
             "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
@@ -296,7 +325,7 @@ pub fn update_wisdom_with_blob(
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
-        &tx,
+        tx,
         entity_id,
         wisdom_id,
         OutboxOperation::Update,
@@ -325,17 +354,24 @@ pub fn update_wisdom_with_blob(
         ),
         now_ms,
     )?;
-    touch_entity(&tx, entity_id, now_secs)?;
-    tx.commit()?;
+    touch_entity(tx, entity_id, now_secs)?;
     Ok(())
 }
 
 /// Soft-delete a wisdom entry; pushes minimal outbox DELETE (same shape as commit_fact_archive).
 pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    archive_wisdom_in_tx(&tx, entity_id, wisdom_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Transaction-scoped core of [`archive_wisdom`] (no BEGIN/COMMIT; same
+/// atomic audit rationale as [`add_wisdom_in_tx`]).
+pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &str) -> Result<()> {
     let (now_secs, now_ms) = now_timestamps();
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    assert_entity_active(&tx, entity_id)?;
+    assert_entity_active(tx, entity_id)?;
     let changes = tx.execute(
         "UPDATE llm_wiki_entries
          SET deleted_at = ?1, updated_at = ?1
@@ -347,10 +383,10 @@ pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -
     }
 
     // Edges die with their endpoints, inside this same transaction (spec §2).
-    crate::db::edge_purge::purge_edges_for_entry(&tx, wisdom_id)?;
+    crate::db::edge_purge::purge_edges_for_entry(tx, wisdom_id)?;
 
     push_entries_outbox(
-        &tx,
+        tx,
         entity_id,
         wisdom_id,
         OutboxOperation::Delete,
@@ -361,8 +397,7 @@ pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -
         }),
         now_ms,
     )?;
-    touch_entity(&tx, entity_id, now_secs)?;
-    tx.commit()?;
+    touch_entity(tx, entity_id, now_secs)?;
     Ok(())
 }
 
