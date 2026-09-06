@@ -259,6 +259,123 @@ pub(crate) fn generate_llm_id(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 
+/// Normalizer-idempotent `source_ref` for a librarian-inferred entry.
+///
+/// The JS engine rewrites any `source_ref` its five-predicate selector matches
+/// (dist/index.js:1454-1467) through `normalizeSourceRef`, which strips every
+/// character outside `[A-Za-z0-9._- ]` and truncates to 255. This token is a
+/// fixed point of that function, so the rewrite is a no-op for CT rows.
+///
+/// Derived by **hashing the entry id**, not by slicing the proposal id: the
+/// old JSON refs differed between facts of one proposal (different evidence
+/// subsets), so a per-proposal token would silently change dedupe/supersede
+/// collision semantics. Spec §2.2.
+pub fn librarian_source_ref_token(entry_id: &str) -> String {
+    format!(
+        "librarian-{}",
+        &crate::hasher::hash_bytes(entry_id.as_bytes())[..32]
+    )
+}
+
+/// Insert the CT-owned evidence row for an entry. Callers must run this in the
+/// same transaction as the `llm_wiki_entries` INSERT (spec §2.1) so a failure
+/// rolls the fact back with it.
+pub fn insert_librarian_evidence(
+    conn: &Connection,
+    entry_id: &str,
+    proposal_id: &str,
+    evidence_json: &str,
+    unanchored: bool,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO librarian_evidence
+             (entry_id, proposal_id, evidence_json, unanchored, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            entry_id,
+            proposal_id,
+            evidence_json,
+            if unanchored { 1i64 } else { 0i64 },
+            now_ms
+        ],
+    )?;
+    Ok(())
+}
+
+/// Explicit paired delete. FK CASCADE is NOT relied upon — SQLite enforces
+/// foreign keys only with `PRAGMA foreign_keys=ON` per connection, and
+/// brain.db has connections (Rust `DbState`, engine `wiki_exec`/`wiki_run`)
+/// whose pragma state we cannot guarantee. Every path that deletes
+/// `llm_wiki_entries` rows calls this alongside. Spec §2.1.
+pub fn delete_librarian_evidence(conn: &Connection, entry_ids: &[String]) -> Result<usize> {
+    if entry_ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders: String = std::iter::repeat_n("?", entry_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("DELETE FROM librarian_evidence WHERE entry_id IN ({placeholders})");
+    let removed = conn.execute(&sql, rusqlite::params_from_iter(entry_ids.iter()))?;
+    Ok(removed)
+}
+
+/// The evidence blob for an entry, or `None` when no row exists.
+pub fn evidence_json_for_entry(conn: &Connection, entry_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
+        [entry_id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .unwrap_or(None)
+}
+
+/// True iff the evidence blob anchors at least one chunk that still exists.
+///
+/// Prefers `content_hash` (stable across re-chunks) and falls back to the
+/// legacy `chunk_id` rowid. Empty evidence is **not** anchored — that is the
+/// Phase-1 `unanchored` condition, not an error. Spec §2.4.
+pub fn evidence_has_live_chunk(conn: &Connection, evidence_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) else {
+        return false;
+    };
+    let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    for entry in evidence {
+        if let Some(hash) = entry
+            .get("content_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM chunks WHERE content_hash = ?1 LIMIT 1",
+                    [hash],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+            if found.is_some() {
+                return true;
+            }
+        }
+        if let Some(cid) = entry.get("chunk_id").and_then(|v| v.as_i64()) {
+            let found: Option<i64> = conn
+                .query_row("SELECT 1 FROM chunks WHERE id = ?1 LIMIT 1", [cid], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .unwrap_or(None);
+            if found.is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn now_timestamps() -> (i64, i64) {
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1803,6 +1920,133 @@ mod tests {
         ProposalSourceRole, StoredEvidenceChunk,
     };
     use crate::db::queries::{insert_chunk, upsert_document};
+
+    /// Re-implementation of the engine's `normalizeSourceRef`
+    /// (dist/index.js:4082) plus its five-predicate selector
+    /// (dist/index.js:1454-1467). Used to prove the token is a fixed point.
+    fn engine_would_rewrite(source_ref: &str) -> bool {
+        let selected = source_ref.trim() != source_ref
+            || source_ref.contains('/')
+            || source_ref.contains('\\')
+            || source_ref.contains('\0')
+            || source_ref
+                .chars()
+                .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ')));
+        if !selected {
+            return false;
+        }
+        let normalized: String = source_ref
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
+            .collect::<String>()
+            .trim()
+            .chars()
+            .take(255)
+            .collect();
+        normalized != source_ref
+    }
+
+    #[test]
+    fn token_is_a_fixed_point_of_the_engine_normalizer() {
+        for entry_id in ["fact_abc123", "fact_0000", "fact_zz~!@#"] {
+            let token = librarian_source_ref_token(entry_id);
+            assert!(
+                token.starts_with("librarian-"),
+                "token must carry the librarian- prefix: {token}"
+            );
+            assert_eq!(
+                token.len(),
+                "librarian-".len() + 32,
+                "token must be 32 hex chars"
+            );
+            assert!(
+                token[10..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "digest must be lowercase hex: {token}"
+            );
+            assert!(token.len() <= 255);
+            assert!(
+                !engine_would_rewrite(&token),
+                "engine selector must not touch the token: {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_is_deterministic_and_per_entry_unique() {
+        assert_eq!(
+            librarian_source_ref_token("fact_a"),
+            librarian_source_ref_token("fact_a")
+        );
+        assert_ne!(
+            librarian_source_ref_token("fact_a"),
+            librarian_source_ref_token("fact_b")
+        );
+    }
+
+    #[test]
+    fn evidence_roundtrips_and_deletes() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_r','ent','t','b','[]','inferred','librarian_inferred','librarian-x',1,1,0)",
+            [],
+        )
+        .unwrap();
+
+        insert_librarian_evidence(
+            &conn,
+            "fact_r",
+            "prop_r",
+            r#"{"proposal_id":"prop_r","evidence":[]}"#,
+            false,
+            123,
+        )
+        .unwrap();
+
+        assert_eq!(
+            evidence_json_for_entry(&conn, "fact_r").as_deref(),
+            Some(r#"{"proposal_id":"prop_r","evidence":[]}"#)
+        );
+        assert_eq!(evidence_json_for_entry(&conn, "fact_missing"), None);
+
+        let removed = delete_librarian_evidence(&conn, &["fact_r".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(evidence_json_for_entry(&conn, "fact_r"), None);
+    }
+
+    #[test]
+    fn evidence_has_live_chunk_detects_dangling_anchors() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('d.md','h','user_doc','indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy,
+                 entity_id, content_hash)
+             VALUES (?1,'c',0,1,1,'prose','ent','hash_live')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id: i64 = conn.last_insert_rowid();
+
+        let live = format!(
+            r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"hash_live"}}],"proposal_id":"p"}}"#
+        );
+        assert!(evidence_has_live_chunk(&conn, &live));
+
+        let dangling =
+            r#"{"evidence":[{"chunk_id":999999,"content_hash":"hash_gone"}],"proposal_id":"p"}"#;
+        assert!(!evidence_has_live_chunk(&conn, dangling));
+
+        let empty = r#"{"evidence":[],"proposal_id":"p"}"#;
+        assert!(!evidence_has_live_chunk(&conn, empty));
+    }
 
     fn seed_document(conn: &Connection, path: &str) -> i64 {
         upsert_document(conn, path, "hash").unwrap()
