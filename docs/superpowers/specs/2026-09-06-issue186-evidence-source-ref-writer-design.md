@@ -1,7 +1,7 @@
 # Spec: Issue #186 — evidence source_ref mangling: structural fix, provenance enforcement, data repair
 
 **Date:** 2026-09-06
-**Status:** Draft
+**Status:** Implemented (2026-09-06, branch `spec/issue186-source-ref-writer`, PR #188)
 **Branch:** `spec/issue186-source-ref-writer`
 **Priority:** P1 — librarian re-runs are on HOLD until this lands; blocks the evidence-provenance backlog item and the wiki rebuild.
 **Baseline:** `main` @ `bc2a283` (v2.5.1)
