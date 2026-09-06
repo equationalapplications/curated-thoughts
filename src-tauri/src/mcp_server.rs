@@ -211,6 +211,8 @@ async fn async_run() -> anyhow::Result<()> {
             profile,
             vault_dir,
             client: "local-mcp".into(), // static label; actual client name only known after initialize handshake
+            db_path: p.db_path.clone(),
+            rw_conn: Default::default(),
         },
     };
 

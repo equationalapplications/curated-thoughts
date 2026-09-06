@@ -192,6 +192,8 @@ fn build_cloud_bridge_ctx() -> anyhow::Result<tool_dispatch::ToolDispatchContext
         profile,
         vault_dir,
         client: "clanker-bridge".into(),
+        db_path: paths.db_path.clone(),
+        rw_conn: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -4135,62 +4137,63 @@ mod heal_invalid_sources_tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-            let tmp = TempDir::new().unwrap();
-            let vault_root = tmp.path().join("vault");
-            std::fs::create_dir_all(vault_root.join("documents")).unwrap();
+                let tmp = TempDir::new().unwrap();
+                let vault_root = tmp.path().join("vault");
+                std::fs::create_dir_all(vault_root.join("documents")).unwrap();
 
-            let config = VaultConfig::new(tmp.path().join("config.json"));
-            config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
+                let config = VaultConfig::new(tmp.path().join("config.json"));
+                config.set_vault_path(vault_root.to_str().unwrap()).unwrap();
 
-            let db_path = tmp.path().join("brain.db");
-            let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json")).unwrap();
-            let db_state = DbState(Mutex::new(db));
-            let vault_state = VaultConfigState(Mutex::new(config));
+                let db_path = tmp.path().join("brain.db");
+                let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json")).unwrap();
+                let db_state = DbState(Mutex::new(db));
+                let vault_state = VaultConfigState(Mutex::new(config));
 
-            {
-                let guard = db_state.0.lock().unwrap();
-                let conn = &guard.0;
-                conn.execute(
-                    "INSERT INTO llm_wiki_entries (
+                {
+                    let guard = db_state.0.lock().unwrap();
+                    let conn = &guard.0;
+                    conn.execute(
+                        "INSERT INTO llm_wiki_entries (
                         id, entity_id, title, body, tags, confidence, source_type,
                         source_ref, created_at, updated_at, deleted_at
                      ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred',
                                ?5, 1, 1, NULL)",
-                    params![
-                        "entry-missing",
-                        "tier_fact",
-                        "Missing",
-                        "body",
-                        "documents/missing.md"
-                    ],
-                )
-                .unwrap();
+                        params![
+                            "entry-missing",
+                            "tier_fact",
+                            "Missing",
+                            "body",
+                            "documents/missing.md"
+                        ],
+                    )
+                    .unwrap();
 
-                let before: Option<i64> = conn
+                    let before: Option<i64> = conn
+                        .query_row(
+                            "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert!(before.is_none());
+                }
+
+                heal_invalid_sources(&db_state, &vault_state).unwrap();
+
+                let after: Option<i64> = db_state
+                    .0
+                    .lock()
+                    .unwrap()
+                    .0
                     .query_row(
                         "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
                         [],
                         |r| r.get(0),
                     )
                     .unwrap();
-                assert!(before.is_none());
-            }
-
-            heal_invalid_sources(&db_state, &vault_state).unwrap();
-
-            let after: Option<i64> = db_state
-                .0
-                .lock()
-                .unwrap()
-                .0
-                .query_row(
-                    "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(after.is_some());
-        });
+                assert!(after.is_some());
+            },
+        );
     }
 }
 
@@ -4618,91 +4621,93 @@ mod maintenance_command_tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let vault_root = tmp.path();
-            std::fs::create_dir_all(vault_root.join("documents")).unwrap();
+                let tmp = tempfile::TempDir::new().unwrap();
+                let vault_root = tmp.path();
+                std::fs::create_dir_all(vault_root.join("documents")).unwrap();
 
-            // Build a DbState backed by a file DB and seed three rows: one
-            // librarian_inferred (must be soft-deleted), one user_stated
-            // (must NOT be touched), one immutable_document (must NOT be
-            // touched). The heal function takes &DbState directly so we seed
-            // against the AppDb's connection rather than an in-memory one.
-            let db_path = tmp.path().join("test.db");
-            let db = crate::db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
-                .expect("open test db");
-            let manual = r#"{"proposal_id":null,"evidence":[]}"#;
-            // Three rows: one librarian_inferred (must be touched), one
-            // user_stated with the MANUAL sentinel (must NOT be touched), one
-            // immutable_document with a missing path (must NOT be touched).
-            db.0.execute(
-                "INSERT INTO llm_wiki_entries
+                // Build a DbState backed by a file DB and seed three rows: one
+                // librarian_inferred (must be soft-deleted), one user_stated
+                // (must NOT be touched), one immutable_document (must NOT be
+                // touched). The heal function takes &DbState directly so we seed
+                // against the AppDb's connection rather than an in-memory one.
+                let db_path = tmp.path().join("test.db");
+                let db =
+                    crate::db::AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
+                        .expect("open test db");
+                let manual = r#"{"proposal_id":null,"evidence":[]}"#;
+                // Three rows: one librarian_inferred (must be touched), one
+                // user_stated with the MANUAL sentinel (must NOT be touched), one
+                // immutable_document with a missing path (must NOT be touched).
+                db.0.execute(
+                    "INSERT INTO llm_wiki_entries
                     (id, entity_id, title, body, tags, confidence, source_type,
                      source_ref, created_at, updated_at, deleted_at)
                  VALUES (?1, 'tier_fact', 'Title lost-inferred', 'body', '[]',
                          'inferred', 'librarian_inferred', 'documents/gone.md', 1, 1, NULL)",
-                rusqlite::params!["lost-inferred"],
-            )
-            .expect("insert librarian_inferred");
-            db.0.execute(
-                "INSERT INTO llm_wiki_entries
+                    rusqlite::params!["lost-inferred"],
+                )
+                .expect("insert librarian_inferred");
+                db.0.execute(
+                    "INSERT INTO llm_wiki_entries
                     (id, entity_id, title, body, tags, confidence, source_type,
                      source_ref, created_at, updated_at, deleted_at)
                  VALUES (?1, 'tier_fact', 'Title user-stated', 'body', '[]',
                          'confirmed', 'user_stated', ?2, 1, 1, NULL)",
-                rusqlite::params!["user-stated", manual],
-            )
-            .expect("insert user_stated");
-            db.0.execute(
-                "INSERT INTO llm_wiki_entries
+                    rusqlite::params!["user-stated", manual],
+                )
+                .expect("insert user_stated");
+                db.0.execute(
+                    "INSERT INTO llm_wiki_entries
                     (id, entity_id, title, body, tags, confidence, source_type,
                      source_ref, created_at, updated_at, deleted_at)
                  VALUES (?1, 'tier_fact', 'Title immutable', 'body', '[]',
                          'inferred', 'immutable_document', 'documents/gone.md', 1, 1, NULL)",
-                rusqlite::params!["immutable"],
-            )
-            .expect("insert immutable_document");
-
-            let cfg = crate::vault::VaultConfig::new(tmp.path().join("config.json"));
-            cfg.set_vault_path(&vault_root.to_string_lossy())
-                .expect("set vault");
-            let db_state = DbState(std::sync::Mutex::new(db));
-            let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
-
-            heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
-
-            let deleted_at_lost: Option<i64> = db_state
-                .0
-                .lock()
-                .unwrap()
-                .0
-                .query_row(
-                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'lost-inferred'",
-                    [],
-                    |row| row.get(0),
+                    rusqlite::params!["immutable"],
                 )
-                .unwrap();
-            assert!(
-                deleted_at_lost.is_some(),
-                "lost-inferred (librarian_inferred) must be soft-deleted by heal_invalid_sources"
-            );
-            for id in ["user-stated", "immutable"] {
-                let deleted_at: Option<i64> = db_state
+                .expect("insert immutable_document");
+
+                let cfg = crate::vault::VaultConfig::new(tmp.path().join("config.json"));
+                cfg.set_vault_path(&vault_root.to_string_lossy())
+                    .expect("set vault");
+                let db_state = DbState(std::sync::Mutex::new(db));
+                let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
+
+                heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
+
+                let deleted_at_lost: Option<i64> = db_state
                     .0
                     .lock()
                     .unwrap()
                     .0
                     .query_row(
-                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = ?1",
-                        [id],
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'lost-inferred'",
+                        [],
                         |row| row.get(0),
                     )
                     .unwrap();
                 assert!(
-                    deleted_at.is_none(),
-                    "{id} (non-librarian_inferred) must NOT be touched by heal_invalid_sources"
-                );
-            }
-        });
+                deleted_at_lost.is_some(),
+                "lost-inferred (librarian_inferred) must be soft-deleted by heal_invalid_sources"
+            );
+                for id in ["user-stated", "immutable"] {
+                    let deleted_at: Option<i64> = db_state
+                        .0
+                        .lock()
+                        .unwrap()
+                        .0
+                        .query_row(
+                            "SELECT deleted_at FROM llm_wiki_entries WHERE id = ?1",
+                            [id],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    assert!(
+                        deleted_at.is_none(),
+                        "{id} (non-librarian_inferred) must NOT be touched by heal_invalid_sources"
+                    );
+                }
+            },
+        );
     }
 
     /// E4 — Both heal writers write `deleted_at` in milliseconds (post-fix).
@@ -4724,68 +4729,69 @@ mod maintenance_command_tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-            use crate::db::schema::SEC_VS_MS_THRESHOLD;
+                use crate::db::schema::SEC_VS_MS_THRESHOLD;
 
-            // (a) heal_lost_librarian_inferred
-            let conn = open_in_memory().unwrap();
-            insert_wiki_entry(
-                &conn,
-                "target-lost",
-                "librarian_inferred",
-                "documents/missing.md",
-                None,
-            );
-            let tmp = tempfile::TempDir::new().unwrap();
-            heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
-            let deleted_at_lost: i64 = conn
-                .query_row(
-                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-lost'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(
-                deleted_at_lost >= SEC_VS_MS_THRESHOLD,
-                "heal_lost_librarian_inferred wrote seconds (deleted_at={deleted_at_lost})"
-            );
+                // (a) heal_lost_librarian_inferred
+                let conn = open_in_memory().unwrap();
+                insert_wiki_entry(
+                    &conn,
+                    "target-lost",
+                    "librarian_inferred",
+                    "documents/missing.md",
+                    None,
+                );
+                let tmp = tempfile::TempDir::new().unwrap();
+                heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+                let deleted_at_lost: i64 = conn
+                    .query_row(
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-lost'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(
+                    deleted_at_lost >= SEC_VS_MS_THRESHOLD,
+                    "heal_lost_librarian_inferred wrote seconds (deleted_at={deleted_at_lost})"
+                );
 
-            // (b) heal_invalid_sources
-            let db_path = tmp.path().join("e4.db");
-            let db =
-                crate::db::AppDb::open_with_config(&db_path, tmp.path().join("e4-config.json"))
-                    .expect("open test db");
-            db.0.execute(
-                "INSERT INTO llm_wiki_entries
+                // (b) heal_invalid_sources
+                let db_path = tmp.path().join("e4.db");
+                let db =
+                    crate::db::AppDb::open_with_config(&db_path, tmp.path().join("e4-config.json"))
+                        .expect("open test db");
+                db.0.execute(
+                    "INSERT INTO llm_wiki_entries
                     (id, entity_id, title, body, tags, confidence, source_type,
                      source_ref, created_at, updated_at, deleted_at)
                  VALUES ('target-invalid', 'tier_fact', 'Title target-invalid', 'body',
                          '[]', 'inferred', 'librarian_inferred',
                          'documents/missing.md', 1, 1, NULL)",
-                [],
-            )
-            .expect("insert target-invalid");
-            let cfg = crate::vault::VaultConfig::new(tmp.path().join("e4-config.json"));
-            cfg.set_vault_path(&tmp.path().to_string_lossy())
-                .expect("set vault");
-            let db_state = DbState(std::sync::Mutex::new(db));
-            let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
-            heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
-            let deleted_at_invalid: Option<i64> = db_state
-                .0
-                .lock()
-                .unwrap()
-                .0
-                .query_row(
-                    "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-invalid'",
                     [],
-                    |row| row.get(0),
                 )
-                .expect("query target-invalid");
-            assert!(
+                .expect("insert target-invalid");
+                let cfg = crate::vault::VaultConfig::new(tmp.path().join("e4-config.json"));
+                cfg.set_vault_path(&tmp.path().to_string_lossy())
+                    .expect("set vault");
+                let db_state = DbState(std::sync::Mutex::new(db));
+                let vault_state = VaultConfigState(std::sync::Mutex::new(cfg));
+                heal_invalid_sources(&db_state, &vault_state).expect("heal_invalid_sources");
+                let deleted_at_invalid: Option<i64> = db_state
+                    .0
+                    .lock()
+                    .unwrap()
+                    .0
+                    .query_row(
+                        "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'target-invalid'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("query target-invalid");
+                assert!(
                 deleted_at_invalid.is_some_and(|v| v >= SEC_VS_MS_THRESHOLD),
                 "heal_invalid_sources wrote seconds or NULL (deleted_at={deleted_at_invalid:?})"
             );
-        });
+            },
+        );
     }
 
     /// E5 — MIGRATION_V12 mix-and-idempotency: a row whose `deleted_at` is
@@ -5160,50 +5166,51 @@ mod maintenance_command_tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-            let (db_state, tmp) = build_test_db_state_with_brain_paths();
-            let brain_dir = tmp.path().to_str().unwrap().to_string();
-            let config_path = tmp.path().join("config.json");
-            let db_path = tmp.path().join("brain.db");
+                let (db_state, tmp) = build_test_db_state_with_brain_paths();
+                let brain_dir = tmp.path().to_str().unwrap().to_string();
+                let config_path = tmp.path().join("config.json");
+                let db_path = tmp.path().join("brain.db");
 
-            temp_env::with_vars(
-                [
-                    ("CURATED_EMBED_STUB", Some("constant8")),
-                    ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
-                    ("CURATED_BRAIN_CONFIG", Some(config_path.to_str().unwrap())),
-                    ("CURATED_BRAIN_DB", Some(db_path.to_str().unwrap())),
-                ],
-                || {
-                    {
+                temp_env::with_vars(
+                    [
+                        ("CURATED_EMBED_STUB", Some("constant8")),
+                        ("CURATED_BRAIN_DIR", Some(brain_dir.as_str())),
+                        ("CURATED_BRAIN_CONFIG", Some(config_path.to_str().unwrap())),
+                        ("CURATED_BRAIN_DB", Some(db_path.to_str().unwrap())),
+                    ],
+                    || {
+                        {
+                            let guard = db_state.0.lock().unwrap();
+                            insert_wiki_entry_ms(
+                                &guard.0,
+                                "fact_a",
+                                "librarian_inferred",
+                                "documents/a.md",
+                                None,
+                            );
+                            insert_wiki_entry_ms(
+                                &guard.0,
+                                "fact_b",
+                                "librarian_inferred",
+                                "documents/b.md",
+                                None,
+                            );
+                        }
+
+                        let report = run_embedding_sweep(&db_state).unwrap();
+
+                        assert_eq!(report.filled, 2);
+                        assert_eq!(report.remaining_null, 0);
+
                         let guard = db_state.0.lock().unwrap();
-                        insert_wiki_entry_ms(
-                            &guard.0,
-                            "fact_a",
-                            "librarian_inferred",
-                            "documents/a.md",
-                            None,
-                        );
-                        insert_wiki_entry_ms(
-                            &guard.0,
-                            "fact_b",
-                            "librarian_inferred",
-                            "documents/b.md",
-                            None,
-                        );
-                    }
-
-                    let report = run_embedding_sweep(&db_state).unwrap();
-
-                    assert_eq!(report.filled, 2);
-                    assert_eq!(report.remaining_null, 0);
-
-                    let guard = db_state.0.lock().unwrap();
-                    let sql =
+                        let sql =
                         "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = 'fact_a'";
-                    let blob_len: i64 = guard.0.query_row(sql, [], |r| r.get(0)).unwrap();
-                    assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
-                },
-            );
-        });
+                        let blob_len: i64 = guard.0.query_row(sql, [], |r| r.get(0)).unwrap();
+                        assert_eq!(blob_len, 32, "constant8 gives 8 dims -> 32 bytes");
+                    },
+                );
+            },
+        );
     }
 }
 

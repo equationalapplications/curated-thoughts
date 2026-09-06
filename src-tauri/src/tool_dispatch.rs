@@ -765,11 +765,92 @@ pub async fn dispatch_curated_search_code(
     Ok(result)
 }
 
+impl ToolDispatchContext {
+    /// Run `f` with the lazily-opened read-write brain connection.
+    ///
+    /// First call opens `db_path` with `SQLITE_OPEN_READ_WRITE` (NO create —
+    /// a missing brain file is an error, never a fresh DB) plus a 5s busy
+    /// timeout, and caches the connection for subsequent calls. The async
+    /// surface hides the blocking open/lock behind `spawn_blocking`; callers
+    /// `await` directly (there is no `run_sync` helper).
+    pub async fn with_rw<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Get-or-open the cached RW connection.
+        let existing = {
+            let cache = self
+                .rw_conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rw_conn mutex poisoned"))?;
+            cache.clone()
+        };
+
+        let conn: Arc<Mutex<Connection>> = match existing {
+            Some(c) => c,
+            None => {
+                let db_path = self.db_path.clone();
+                let opened = tokio::task::spawn_blocking(move || {
+                    Connection::open_with_flags(
+                        &db_path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("read-write brain open failed ({}): {e}", db_path.display())
+                    })
+                    .map(|conn| {
+                        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                        Arc::new(Mutex::new(conn))
+                    })
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("rw open task join error: {e}"))??;
+
+                // Cache only on success; a concurrent caller may have won the
+                // race — either handle works, keep the first one stored.
+                let mut cache = self
+                    .rw_conn
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("rw_conn mutex poisoned"))?;
+                if let Some(c) = cache.as_ref() {
+                    c.clone()
+                } else {
+                    *cache = Some(opened.clone());
+                    opened
+                }
+            }
+        };
+
+        tokio::task::spawn_blocking(move || {
+            let mut guard = conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rw connection mutex poisoned"))?;
+            f(&mut guard)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("rw task join error: {e}"))?
+    }
+
+    /// Compute the embedding blob for a wisdom body OUTSIDE any DB lock
+    /// (blocking network call). Provider failures collapse to `None`; the
+    /// embedding sweep fills the blob later.
+    pub fn precompute_wisdom_embedding(&self, body: &str) -> Option<Vec<u8>> {
+        crate::db::wisdom::precompute_entry_embedding(Some(&self.profile), body)
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
     pub profile: EmbedProfile,
     pub vault_dir: Option<PathBuf>,
+    /// Path to the brain DB file, used to lazily open the RW connection for
+    /// curated write tools. Opens must NEVER create the file.
+    pub db_path: PathBuf,
+    /// Lazily-opened read-write brain connection (curated write tools +
+    /// fail-closed audit logging). `None` until the first `with_rw` call.
+    pub rw_conn: Arc<Mutex<Option<Arc<Mutex<Connection>>>>>,
     /// Agent-log client label: "clanker-bridge" for cloud bridge, static label for local MCP (e.g. "local-mcp").
     /// The actual MCP client name is only known after the initialize handshake, which happens
     /// after this context is constructed; for now we use a static label.
@@ -1341,6 +1422,8 @@ mod dispatch_tool_call_tests {
             profile: EmbedProfile::default(),
             vault_dir: None,
             client: "test-client".into(),
+            db_path: PathBuf::from("/nonexistent/brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1518,6 +1601,8 @@ mod curated_memory_tests {
             profile: EmbedProfile::default(),
             vault_dir: Some(dir.to_path_buf()),
             client: "test".into(),
+            db_path: dir.join("brain.db"),
+            rw_conn: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1612,5 +1697,40 @@ mod curated_memory_tests {
         for c in v["code_chunks"].as_array().unwrap() {
             assert!(c["strategy"].as_str().unwrap().starts_with("ast_"));
         }
+    }
+
+    #[tokio::test]
+    async fn with_rw_errors_when_db_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = std::path::PathBuf::from("/nonexistent/brain.db");
+        // with_rw is async — awaited directly (no run_sync helper).
+        let err = ctx.with_rw(|_c| Ok(())).await;
+        assert!(err.is_err()); // never creates the brain file
+        assert!(
+            !std::path::Path::new("/nonexistent/brain.db").exists(),
+            "with_rw must never create the DB file"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_rw_opens_existing_db_readwrite() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("brain.db");
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x);")
+            .unwrap();
+        let conn = seed_file_db(dir.path());
+        let mut ctx = test_ctx(conn, dir.path());
+        ctx.db_path = db;
+        ctx.with_rw(|c| {
+            c.execute("INSERT INTO t VALUES (1)", [])
+                .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 }
