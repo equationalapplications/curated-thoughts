@@ -1172,6 +1172,16 @@ pub async fn dispatch_tool_call(
     let client = ctx.client.clone();
     let conn_for_log = ctx.conn.clone();
 
+    // Cloud-bridge capability gate (hotfix for #185, Kurt's Option B + PR #187
+    // review): remote clanker sessions must never reach the curated memory
+    // tools. The sentinel db_path below is defense-in-depth only — filesystem
+    // nonexistence is not an authorization boundary (a file could exist at the
+    // sentinel path, and the curated READ tools query the real RO connection
+    // before their audit insert). This explicit deny is the actual gate.
+    if client == "clanker-bridge" && tool.starts_with("curated_") {
+        anyhow::bail!("curated memory tools are not available to cloud-bridge sessions: {tool}");
+    }
+
     let result = match tool {
         "vault_semantic_search" => {
             let p: VaultSemanticSearchParams = serde_json::from_value(params)?;
