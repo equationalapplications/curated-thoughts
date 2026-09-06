@@ -227,7 +227,7 @@ fn synthesis_writes_tokens_and_anchored_evidence() {
             unanchored += 1;
         } else {
             assert!(
-                tauri_app_lib::db::commit::evidence_has_live_chunk(&conn, &json),
+                tauri_app_lib::db::commit::evidence_has_live_chunk(&conn, &json).unwrap(),
                 "unanchored=0 must mean a live chunk anchor exists: {entry_id}"
             );
             anchored += 1;

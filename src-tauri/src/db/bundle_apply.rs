@@ -467,7 +467,7 @@ pub fn apply_import(
                 // Compute the real Phase-1 flag: a bundle-applied row whose
                 // blob has no live chunk anchor must be unanchored=1, or it
                 // re-arms the heal-purge bait. Spec §2.4.
-                let unanchored = !crate::db::commit::evidence_has_live_chunk(&tx, evidence_json);
+                let unanchored = !crate::db::commit::evidence_has_live_chunk(&tx, evidence_json)?;
                 crate::db::commit::insert_librarian_evidence(
                     &tx,
                     &fact_id,

@@ -39,9 +39,23 @@ fn installed_engine_setup_does_not_rewrite_ct_source_refs() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Engine version is recorded in the assertion output so drift between the
-    // installed and pinned versions is visible in every run, never silent.
+    // The gate is only meaningful against the pinned engine: assert the
+    // version the probe reports is exactly 7.1.0 before checking the
+    // source_refs, so drift between the installed and pinned versions fails
+    // loudly instead of silently passing against the wrong engine. The probe
+    // degrades to 'unknown' when pnpm cannot read the installed version —
+    // install workspace deps first in that case.
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("probe output was not JSON ({e}): {stdout}"));
+    assert_eq!(
+        report["engineVersion"].as_str(),
+        Some("7.1.0"),
+        "engine-in-the-loop gate must run against core-llm-wiki 7.1.0, got {:?}. \
+         A value of \"unknown\" means pnpm could not read the installed package \
+         version — run `pnpm install` before this gate",
+        report["engineVersion"]
+    );
     eprintln!("engine-in-the-loop gate ran against: {stdout}");
 
     let conn = open_app_db(&db_path, None).unwrap();

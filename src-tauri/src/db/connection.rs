@@ -153,6 +153,11 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
         )?;
     }
     if version < 18 {
+        // DDL first, stamp last: the version stamp is written only after the
+        // one-shot repair below finishes, so a repair that crashes or errors
+        // mid-way leaves the database unstamped and the next open re-enters
+        // this block and retries. The DDL itself is idempotent (IF NOT
+        // EXISTS), making that re-entry safe. Spec §2.5.
         conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V18))?;
 
         // One-shot repair of the rows the engine already mangled (#186).
@@ -218,6 +223,16 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
                  `run_evidence_repair`."
             );
         }
+        // Stamp only after the repair attempt has run to completion. The
+        // brain-incomplete skip above is a deliberate decision, not a
+        // failure, so it still stamps (ruling: honest WARN + manual
+        // `run_evidence_repair`, no auto-rerun) — but a crash or propagated
+        // error inside the repair never reaches this line, keeping the
+        // migration retryable.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (18)",
+            [],
+        )?;
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)

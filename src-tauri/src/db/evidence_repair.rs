@@ -307,7 +307,7 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
                 // Compute the real Phase-1 flag — a repaired blob with no live
                 // chunk anchor must carry unanchored=1, not a hardcoded 0, or
                 // it re-arms the heal-purge bait. Spec §2.4.
-                let unanchored = !crate::db::commit::evidence_has_live_chunk(conn, &json);
+                let unanchored = !crate::db::commit::evidence_has_live_chunk(conn, &json)?;
                 crate::db::commit::insert_librarian_evidence(
                     conn, &entry_id, &pid, &json, unanchored, now_ms,
                 )?;
@@ -328,12 +328,21 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
             }
             _ => {
                 // Resolves by no path: export happens in Task 7 before this
-                // runs; here the row and its evidence go together.
-                crate::db::commit::delete_librarian_evidence(conn, &[entry_id.clone()])?;
+                // runs; here the row and its evidence go together. The edge
+                // sweep must follow the hard delete, or edges pointing at the
+                // doomed entry dangle (#158 contract).
+                crate::db::commit::delete_librarian_evidence(
+                    conn,
+                    std::slice::from_ref(&entry_id),
+                )?;
                 conn.execute(
                     "DELETE FROM llm_wiki_entries
                       WHERE id = ?1 AND source_type = 'librarian_inferred'",
                     [&entry_id],
+                )?;
+                crate::db::edge_purge::purge_edges_for_hard_deleted(
+                    conn,
+                    std::slice::from_ref(&entry_id),
                 )?;
                 report.deleted += 1;
             }
@@ -409,8 +418,7 @@ pub fn export_damaged_rows(conn: &Connection, out_dir: &Path) -> Result<usize> {
                 "created_at": r.get::<_, i64>(5)?,
             }))
         })?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     for row in &rows {
         let id = row["id"].as_str().unwrap_or("unknown");
         std::fs::write(

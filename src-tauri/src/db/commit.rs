@@ -277,6 +277,18 @@ pub fn librarian_source_ref_token(entry_id: &str) -> String {
     )
 }
 
+/// Strict token-shape test: `^librarian-[0-9a-f]{32}$` (spec §2.2), the Rust
+/// counterpart of `evidence_repair::TOKEN_GLOB`. Routing in
+/// `source_ref_is_still_grounded` must use this, not a `starts_with` prefix
+/// test — a legacy vault path like `librarian-notes.md` shares the prefix but
+/// must keep taking the `documents.path` branch or it can never be purged.
+fn is_librarian_source_ref_token(source_ref: &str) -> bool {
+    let Some(hex) = source_ref.strip_prefix("librarian-") else {
+        return false;
+    };
+    hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Insert the CT-owned evidence row for an entry. Callers must run this in the
 /// same transaction as the `llm_wiki_entries` INSERT (spec §2.1) so a failure
 /// rolls the fact back with it.
@@ -334,46 +346,51 @@ pub fn evidence_json_for_entry(conn: &Connection, entry_id: &str) -> Option<Stri
 /// True iff the evidence blob anchors at least one chunk that still exists.
 ///
 /// Prefers `content_hash` (stable across re-chunks) and falls back to the
-/// legacy `chunk_id` rowid. Empty evidence is **not** anchored — that is the
-/// Phase-1 `unanchored` condition, not an error. Spec §2.4.
-pub fn evidence_has_live_chunk(conn: &Connection, evidence_json: &str) -> bool {
+/// legacy `chunk_id` rowid **only when the entry carries no usable hash** —
+/// a hash lookup that merely finds no row means the content is gone, and
+/// falling through to the rowid there would false-positive on rowid reuse.
+/// Empty evidence is **not** anchored — that is the Phase-1 `unanchored`
+/// condition, not an error. Spec §2.4.
+///
+/// SQLite errors propagate: callers on destructive paths (the V18 repair)
+/// must halt on a DB fault rather than read it as "no live chunk", and the
+/// heal path in `source_ref_is_still_grounded` downgrades the error to its
+/// own fail-safe policy.
+pub fn evidence_has_live_chunk(conn: &Connection, evidence_json: &str) -> rusqlite::Result<bool> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) else {
-        return false;
+        return Ok(false);
     };
     let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
-        return false;
+        return Ok(false);
     };
     for entry in evidence {
-        if let Some(hash) = entry
+        let hash = entry
             .get("content_hash")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
+            .filter(|s| !s.is_empty());
+        if let Some(hash) = hash {
             let found: Option<i64> = conn
                 .query_row(
                     "SELECT 1 FROM chunks WHERE content_hash = ?1 LIMIT 1",
                     [hash],
                     |r| r.get(0),
                 )
-                .optional()
-                .unwrap_or(None);
+                .optional()?;
             if found.is_some() {
-                return true;
+                return Ok(true);
             }
-        }
-        if let Some(cid) = entry.get("chunk_id").and_then(|v| v.as_i64()) {
+        } else if let Some(cid) = entry.get("chunk_id").and_then(|v| v.as_i64()) {
             let found: Option<i64> = conn
                 .query_row("SELECT 1 FROM chunks WHERE id = ?1 LIMIT 1", [cid], |r| {
                     r.get(0)
                 })
-                .optional()
-                .unwrap_or(None);
+                .optional()?;
             if found.is_some() {
-                return true;
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
 }
 
 pub(crate) fn now_timestamps() -> (i64, i64) {
@@ -414,8 +431,9 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
         return true;
     }
     // Token rows (librarian_inferred): evidence lives in `librarian_evidence`,
-    // not in the ref. Spec §2.3.
-    if trimmed.starts_with("librarian-") {
+    // not in the ref. Spec §2.3. Strict shape match — see
+    // `is_librarian_source_ref_token` for why a prefix test is not enough.
+    if is_librarian_source_ref_token(trimmed) {
         let entry_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM llm_wiki_entries WHERE source_ref = ?1 LIMIT 1",
@@ -446,7 +464,16 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
             // Phase-1 carve-out: flagged rows survive until the Phase-2
             // re-grade purges them deliberately, after export.
             Some((_, 1)) => true,
-            Some((json, _)) => evidence_has_live_chunk(conn, &json),
+            Some((json, _)) => match evidence_has_live_chunk(conn, &json) {
+                Ok(live) => live,
+                // Same defensive policy as every other DB-error branch in
+                // this function: a failing lookup is not a demonstrably-stale
+                // reference, so the heal path treats it as still-grounded.
+                Err(err) => {
+                    warn_source_ref_db_error(trimmed, "librarian_evidence", &err);
+                    true
+                }
+            },
         };
     }
     // Legacy contract: a plain vault-relative path. Existence-check against
@@ -1116,7 +1143,7 @@ fn commit_fact_add(
     // Phase 1 policy (spec §2.4): a fact whose evidence anchors no surviving
     // chunk is still written, but flagged, so the supervised re-run can
     // measure the real drop rate before the permanent skip+log default.
-    let unanchored = !evidence_has_live_chunk(conn, &evidence_json);
+    let unanchored = !evidence_has_live_chunk(conn, &evidence_json)?;
     insert_librarian_evidence(
         conn,
         &fact_id,
@@ -2112,14 +2139,28 @@ mod tests {
         let live = format!(
             r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"hash_live"}}],"proposal_id":"p"}}"#
         );
-        assert!(evidence_has_live_chunk(&conn, &live));
+        assert!(evidence_has_live_chunk(&conn, &live).unwrap());
 
         let dangling =
             r#"{"evidence":[{"chunk_id":999999,"content_hash":"hash_gone"}],"proposal_id":"p"}"#;
-        assert!(!evidence_has_live_chunk(&conn, dangling));
+        assert!(!evidence_has_live_chunk(&conn, dangling).unwrap());
+
+        // A hash present but unmatched means the content is gone: no fallback
+        // to chunk_id, even when a chunk with that rowid exists (rowid reuse
+        // must not read as live anchoring).
+        let hash_miss_rowid_live = format!(
+            r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"hash_gone"}}],"proposal_id":"p"}}"#
+        );
+        assert!(!evidence_has_live_chunk(&conn, &hash_miss_rowid_live).unwrap());
+
+        // Legacy evidence with no usable hash still falls back to chunk_id.
+        let no_hash_rowid_live = format!(
+            r#"{{"evidence":[{{"chunk_id":{chunk_id}}}],"proposal_id":"p"}}"#
+        );
+        assert!(evidence_has_live_chunk(&conn, &no_hash_rowid_live).unwrap());
 
         let empty = r#"{"evidence":[],"proposal_id":"p"}"#;
-        assert!(!evidence_has_live_chunk(&conn, empty));
+        assert!(!evidence_has_live_chunk(&conn, empty).unwrap());
     }
 
     fn seed_document(conn: &Connection, path: &str) -> i64 {

@@ -366,6 +366,11 @@ INSERT OR IGNORE INTO schema_version (version) VALUES (16);
 /// connection (`PRAGMA foreign_keys=ON`) and brain.db has several connections
 /// whose pragma state we do not control, so every deletion path issues an
 /// explicit paired `DELETE FROM librarian_evidence`. See spec §2.1.
+/// V18 DDL only — deliberately carries **no** schema_version stamp. The V18
+/// one-shot repair (connection.rs) runs after this DDL and stamps version 18
+/// itself, so a crash mid-repair leaves the database unstamped and the next
+/// open re-enters the migration and retries. Every statement here is
+/// idempotent (`IF NOT EXISTS`) to make that re-entry safe. Spec §2.5.
 pub const MIGRATION_V18: &str = "
 CREATE TABLE IF NOT EXISTS librarian_evidence (
   entry_id      TEXT PRIMARY KEY REFERENCES llm_wiki_entries(id) ON DELETE CASCADE,
@@ -377,8 +382,6 @@ CREATE TABLE IF NOT EXISTS librarian_evidence (
 
 CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx
   ON librarian_evidence(proposal_id);
-
-INSERT OR IGNORE INTO schema_version (version) VALUES (18);
 ";
 
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.

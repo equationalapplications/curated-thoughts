@@ -84,6 +84,6 @@ const after = snapshot();
 
 const changed = Object.keys(after)
   .filter((rowid) => before[rowid]?.source_ref !== after[rowid].source_ref)
-  .map((rowid) => ({ id: after[rowid].id, before: before[rowid].source_ref, after: after[rowid].source_ref }));
+  .map((rowid) => ({ id: after[rowid].id, before: before[rowid]?.source_ref ?? null, after: after[rowid].source_ref }));
 
 console.log(JSON.stringify({ engineVersion: version, changedRows: changed, changedCount: changed.length }));
