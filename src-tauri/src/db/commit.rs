@@ -278,11 +278,12 @@ pub fn librarian_source_ref_token(entry_id: &str) -> String {
 }
 
 /// Strict token-shape test: `^librarian-[0-9a-f]{32}$` (spec §2.2), the Rust
-/// counterpart of `evidence_repair::TOKEN_GLOB`. Routing in
-/// `source_ref_is_still_grounded` must use this, not a `starts_with` prefix
-/// test — a legacy vault path like `librarian-notes.md` shares the prefix but
-/// must keep taking the `documents.path` branch or it can never be purged.
-fn is_librarian_source_ref_token(source_ref: &str) -> bool {
+/// counterpart of `evidence_repair::TOKEN_GLOB`. Every `source_ref` routing
+/// decision (`source_ref_is_still_grounded`, `source_docs_from_ref`,
+/// `chunk_ids_for_entry`) must use this, not a `starts_with` prefix test — a
+/// legacy vault path like `librarian-notes.md` shares the prefix but must keep
+/// taking the document branch or it can never be purged.
+pub(crate) fn is_librarian_source_ref_token(source_ref: &str) -> bool {
     let Some(hex) = source_ref.strip_prefix("librarian-") else {
         return false;
     };

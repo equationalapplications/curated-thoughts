@@ -2562,7 +2562,9 @@ pub fn chunk_ids_for_entry(
         return Vec::new();
     };
 
-    if source_ref.starts_with("librarian-") {
+    // Strict token shape, not a prefix test — same contract as
+    // `source_docs_from_ref`. Spec §2.2.
+    if crate::db::commit::is_librarian_source_ref_token(&source_ref) {
         let Some(json) = crate::db::commit::evidence_json_for_entry(conn, entry_id) else {
             return Vec::new();
         };

@@ -195,7 +195,12 @@ fn proposal_for_content_hash(
         .query_map([hash], |r| Ok((r.get(0)?, r.get(1)?)))?
         .filter_map(Result::ok)
         .collect();
-    rows.dedup_by(|a, b| a.0 == b.0);
+    // Collapse to one row per proposal. `created_at` is functionally dependent
+    // on `proposal_id` (it comes from the JOIN), so duplicates are identical
+    // tuples — but sort first anyway so the distinct-proposal count below
+    // doesn't depend on the query's unspecified row order.
+    rows.sort();
+    rows.dedup();
     let ambiguous = rows.len() > 1;
     rows.sort_by_key(|(_, created)| (created - entry_created_at).abs());
     Ok((rows.first().map(|(id, _)| id.clone()), ambiguous))
@@ -545,6 +550,56 @@ mod tests {
         assert_eq!(
             extract_leading_content_hash("evidenceproposal_idprop_x"),
             None
+        );
+    }
+
+    #[test]
+    fn content_hash_ambiguity_reflects_distinct_proposals_not_row_order() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_a','new_entity','m','pending',100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('prop_b','new_entity','m','pending',500)",
+            [],
+        )
+        .unwrap();
+        let dup = format!("{}{}", "ded0ded0", "0".repeat(56));
+        let uniq = format!("{}{}", "c0dec0de", "0".repeat(56));
+        for (item_id, proposal_id, hash) in [
+            ("item_a1", "prop_a", &dup),
+            ("item_a2", "prop_a", &dup),
+            ("item_b1", "prop_b", &dup),
+            ("item_a3", "prop_a", &uniq),
+            ("item_a4", "prop_a", &uniq),
+        ] {
+            let evidence = format!(r#"[{{"chunk_id":1,"content_hash":"{hash}"}}]"#);
+            conn.execute(
+                "INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, evidence)
+                 VALUES (?1, ?2, 'fact_add','{}', ?3)",
+                rusqlite::params![item_id, proposal_id, evidence],
+            )
+            .unwrap();
+        }
+
+        // Both proposals carry `dup`; proximity to entry created_at 480 picks
+        // prop_b (|500-480| < |100-480|) and the ambiguity is genuine.
+        let (picked, ambiguous) = proposal_for_content_hash(&conn, &dup, 480).unwrap();
+        assert_eq!(picked.as_deref(), Some("prop_b"));
+        assert!(ambiguous, "two distinct proposals are genuinely ambiguous");
+
+        // `uniq` lives only in prop_a, as two items — identical (proposal_id,
+        // created_at) tuples that must collapse to ONE proposal regardless of
+        // the query's row order.
+        let (picked, ambiguous) = proposal_for_content_hash(&conn, &uniq, 480).unwrap();
+        assert_eq!(picked.as_deref(), Some("prop_a"));
+        assert!(
+            !ambiguous,
+            "duplicate rows within one proposal are not ambiguity"
         );
     }
 

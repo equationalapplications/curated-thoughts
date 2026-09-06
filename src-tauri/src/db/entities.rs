@@ -204,8 +204,10 @@ pub(crate) fn source_docs_from_ref(
     source_ref: Option<&str>,
 ) -> Vec<(String, Option<String>)> {
     // Librarian rows carry a token; their evidence is CT-owned. Spec §2.3.
+    // Strict shape match — see `is_librarian_source_ref_token` for why a
+    // prefix test is not enough.
     let raw = match source_ref {
-        Some(r) if r.starts_with("librarian-") => {
+        Some(r) if crate::db::commit::is_librarian_source_ref_token(r) => {
             match crate::db::commit::evidence_json_for_entry(conn, entry_id) {
                 Some(json) => json,
                 None => return Vec::new(),
@@ -738,6 +740,64 @@ mod tests {
         let conn = open_in_memory().unwrap();
         assert!(source_docs_from_ref(&conn, "fact_t", Some("not json")).is_empty());
         assert!(source_docs_from_ref(&conn, "fact_t", None).is_empty());
+    }
+
+    #[test]
+    fn source_docs_from_ref_routes_strict_tokens_to_librarian_evidence() {
+        // A real `librarian-<32hex>` token resolves through the CT-owned
+        // `librarian_evidence` row — pinning that the §2.2 strict shape test
+        // accepts what `librarian_source_ref_token` generates.
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
+        let token = crate::db::commit::librarian_source_ref_token("fact_lib");
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_lib','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            params![token],
+        )
+        .unwrap();
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_lib",
+            "prop_1",
+            &source_ref_json(&[chunks[0].1.clone()]),
+            false,
+            1,
+        )
+        .unwrap();
+        let docs = source_docs_from_ref(&conn, "fact_lib", Some(&token));
+        assert_eq!(
+            docs,
+            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
+        );
+    }
+
+    #[test]
+    fn source_docs_from_ref_rejects_prefix_lookalike_refs() {
+        // `librarian-notes.md` shares the token prefix but is not a §2.2
+        // token: it must keep the document branch (here: unparseable as
+        // evidence JSON → empty), never surface `librarian_evidence` through
+        // the entry-id lookup.
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "librarian-notes.md", 1);
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_doc','ent','t','b','[]','inferred','document','librarian-notes.md',1,1,0)",
+            [],
+        )
+        .unwrap();
+        crate::db::commit::insert_librarian_evidence(
+            &conn,
+            "fact_doc",
+            "prop_1",
+            &source_ref_json(&[chunks[0].1.clone()]),
+            false,
+            1,
+        )
+        .unwrap();
+        assert!(source_docs_from_ref(&conn, "fact_doc", Some("librarian-notes.md")).is_empty());
     }
 
     #[test]
