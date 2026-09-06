@@ -413,6 +413,42 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
     if trimmed.is_empty() {
         return true;
     }
+    // Token rows (librarian_inferred): evidence lives in `librarian_evidence`,
+    // not in the ref. Spec §2.3.
+    if trimmed.starts_with("librarian-") {
+        let entry_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM llm_wiki_entries WHERE source_ref = ?1 LIMIT 1",
+                [trimmed],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        let Some(entry_id) = entry_id else {
+            warn_source_ref_missing_evidence(trimmed, "no entry for token");
+            return true;
+        };
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT evidence_json, unanchored FROM librarian_evidence WHERE entry_id = ?1",
+                [&entry_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap_or(None);
+        return match row {
+            // Missing evidence row: defensive, same as the parse-error and
+            // DB-error branches below. Never auto-purge. Spec §2.3.
+            None => {
+                warn_source_ref_missing_evidence(trimmed, "no librarian_evidence row");
+                true
+            }
+            // Phase-1 carve-out: flagged rows survive until the Phase-2
+            // re-grade purges them deliberately, after export.
+            Some((_, 1)) => true,
+            Some((json, _)) => evidence_has_live_chunk(conn, &json),
+        };
+    }
     // Legacy contract: a plain vault-relative path. Existence-check against
     // `documents.path = ?1` with `status='indexed'`. The legacy producer never
     // started its value with `{`, so the leading-byte test is sufficient.
@@ -495,6 +531,24 @@ fn warn_source_ref_parse_error(source_ref: &str, err: &serde_json::Error) {
 fn warn_source_ref_parse_error(source_ref: &str, err: &serde_json::Error) {
     eprintln!(
         "[ct::heal WARN] source_ref is JSON-looking but unparseable; treating as still-grounded: source_ref={source_ref:?} error={err}"
+    );
+}
+
+#[cfg(feature = "mcp-server")]
+fn warn_source_ref_missing_evidence(source_ref: &str, reason: &str) {
+    tracing::warn!(
+        target: "ct::heal",
+        source_ref = %source_ref,
+        reason = %reason,
+        "librarian token has no evidence row; treating as still-grounded (defensive)"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_source_ref_missing_evidence(source_ref: &str, reason: &str) {
+    eprintln!(
+        "[ct::heal WARN] librarian token has no evidence row; treating as still-grounded: \
+         source_ref={source_ref:?} reason={reason}"
     );
 }
 
@@ -4497,5 +4551,75 @@ mod source_ref_grounded_tests {
             source_ref_is_still_grounded(&conn, src),
             "JSON-path DB error must defensively return true (no soft-delete)"
         );
+    }
+
+    /// D7 — the seventh D-test. §2.1 deliberately does not rely on FK CASCADE,
+    /// so a token row whose evidence row is missing is a *when*, not an *if*.
+    /// The existing defensive posture (parse errors and DB errors are grounded)
+    /// extends here: treat as grounded and warn loudly. Never auto-purge.
+    #[test]
+    fn d7_token_row_without_evidence_is_treated_as_grounded() {
+        let conn = open_in_memory().unwrap();
+        let token = librarian_source_ref_token("fact_orphan");
+        assert!(
+            source_ref_is_still_grounded(&conn, &token),
+            "a token with no librarian_evidence row must not be soft-deleted"
+        );
+    }
+
+    /// A token row whose evidence row exists and anchors no live chunk is
+    /// demonstrably stale — the heal soft-deletes it.
+    #[test]
+    fn token_row_with_dangling_evidence_is_not_grounded() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_d','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [librarian_source_ref_token("fact_d")],
+        )
+        .unwrap();
+        insert_librarian_evidence(
+            &conn,
+            "fact_d",
+            "prop_d",
+            r#"{"evidence":[{"chunk_id":999,"content_hash":"gone"}],"proposal_id":"prop_d"}"#,
+            false,
+            1,
+        )
+        .unwrap();
+        assert!(!source_ref_is_still_grounded(
+            &conn,
+            &librarian_source_ref_token("fact_d")
+        ));
+    }
+
+    /// Phase-1 carve-out: `unanchored` rows are treated as still-grounded.
+    /// Otherwise heal soft-deletes them and prune hard-deletes them 7 days
+    /// later, destroying the drop-rate data Phase 1 exists to measure. The
+    /// Phase-2 re-grade is the only path that purges them. Spec §2.3.
+    #[test]
+    fn phase1_unanchored_rows_are_treated_as_grounded() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_u','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [librarian_source_ref_token("fact_u")],
+        )
+        .unwrap();
+        insert_librarian_evidence(
+            &conn,
+            "fact_u",
+            "prop_u",
+            r#"{"evidence":[],"proposal_id":"prop_u"}"#,
+            true,
+            1,
+        )
+        .unwrap();
+        assert!(source_ref_is_still_grounded(
+            &conn,
+            &librarian_source_ref_token("fact_u")
+        ));
     }
 }
