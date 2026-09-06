@@ -322,6 +322,277 @@ pub fn dispatch_vault_upsert_index_entry(
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
+// ---------------------------------------------------------------------------
+// Curated memory read helpers — ported from tools/src/queries.rs (SQL kept
+// verbatim so sidecar behavior is unchanged). These back the curated_* MCP
+// tools; the `tools` crate keeps its own copies and must NOT depend on this
+// crate's internals.
+// ---------------------------------------------------------------------------
+
+/// One cosine-ranked code chunk from the chunks-JOIN-embeddings recall leg.
+#[derive(Debug, Clone)]
+pub(crate) struct RankedChunkRow {
+    pub id: i64,
+    pub text: String,
+    pub doc_path: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    pub symbol_name: Option<String>,
+    /// Second strategy-ish column (`c.strategy` in curated_search_code).
+    pub language: Option<String>,
+    pub entity_id: String,
+    pub score: f32,
+}
+
+/// Recall-leg SQL over real chunker strategies (ast_*). Vectors live in the
+/// separate embeddings table. With the AST predicate appended this matches the
+/// sidecar's `curated_recall_context` / `curated_search_code` leg exactly.
+pub(crate) const RECALL_CHUNKS_SQL_BASE: &str = "
+    SELECT c.id, c.chunk_text, e.vector, d.path, c.start_line, c.end_line,
+           c.symbol_name, c.strategy, c.entity_id
+    FROM chunks c
+    JOIN documents d ON c.doc_id = d.id
+    JOIN embeddings e ON e.chunk_id = c.id
+    WHERE d.status = 'indexed'
+";
+pub(crate) const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
+
+/// Little-endian f32 bytes -> Vec<f32> (mirrors `search::bytes_to_f32`).
+fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+/// Cosine similarity in [0-ish, 1], clamped; 0.0 on length mismatch/zero norm
+/// (mirrors `search::cosine_similarity`).
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+}
+
+/// Coerce a stored `updated_at` cell into an integer epoch ranking key.
+///
+/// The live schema declares `updated_at INTEGER`, but desktop-app writes and
+/// older sidecars may have produced TEXT-form values; NULL is also tolerated.
+/// Any value that cannot be coerced ranks as 0 — acceptable for a sort key.
+pub(crate) fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
+    match value {
+        Some(rusqlite::types::Value::Integer(i)) => i,
+        Some(rusqlite::types::Value::Text(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Wisdom layer keyword ranking (ported verbatim from tools/src/queries.rs).
+///
+/// Term-overlap scoring over live (`deleted_at IS NULL`) `llm_wiki_entries`:
+/// each matching term adds one overlap point; ties break by confidence string
+/// (desc) then numeric `updated_at` (desc). Doubles as the keyword fallback
+/// when no query embedding is available.
+pub(crate) fn rank_wiki_entries(
+    conn: &Connection,
+    query: &str,
+    limit_wiki: usize,
+) -> Result<Vec<Value>> {
+    // Keep terms of any length >= 2; short technical terms ("sql", "rag")
+    // are often the most meaningful.
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, title, body, source_ref, confidence,
+                updated_at
+         FROM llm_wiki_entries
+         WHERE deleted_at IS NULL
+           AND (title LIKE '%' || ?1 || '%'
+                OR body LIKE '%' || ?1 || '%')",
+    )?;
+    // id -> (overlap_count, json_value, confidence_rank, updated_at)
+    use std::collections::HashMap;
+    let mut candidates: HashMap<String, (usize, Value, String, i64)> = HashMap::new();
+    for term in &terms {
+        let rows = stmt.query_map(rusqlite::params![term], |row| {
+            Ok((
+                row.get::<_, String>(0)?,                         // id (TEXT PK)
+                row.get::<_, Option<String>>(1)?,                 // entity_id
+                row.get::<_, Option<String>>(2)?,                 // title
+                row.get::<_, Option<String>>(3)?,                 // body
+                row.get::<_, Option<String>>(4)?,                 // source_ref
+                row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
+                row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
+            ))
+        })?;
+        for row in rows {
+            // A single malformed row must never abort the whole tool call:
+            // log it and skip.
+            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
+                Ok(row) => row,
+                Err(e) => {
+                    eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
+                    continue;
+                }
+            };
+            let updated_at = coerce_updated_at(updated_at_raw);
+            let entry = candidates.entry(id.clone()).or_insert_with(|| {
+                let v = serde_json::json!({
+                    "id": id,
+                    "entity_id": entity_id,
+                    "title": title,
+                    "text": text,
+                    "source_ref": source_ref,
+                    "confidence": confidence,
+                });
+                // Higher confidence string sorts later; rank key is
+                // inverted for descending sort convenience.
+                (0, v, confidence.clone().unwrap_or_default(), updated_at)
+            });
+            entry.0 += 1; // one overlap point per matching term
+        }
+    }
+    let mut ranked: Vec<_> = candidates.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1 .0
+            .cmp(&a.1 .0) // term overlap desc
+            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+            .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
+    });
+    Ok(ranked
+        .into_iter()
+        .take(limit_wiki)
+        .map(|(_, (_, v, _, _))| v)
+        .collect())
+}
+
+/// Fetch and rank chunk rows by cosine similarity against `query_emb`.
+/// Chunks with mismatched embedding dimensions are skipped; results are
+/// sorted by score descending and truncated to `limit`. (Ported from
+/// tools/src/queries.rs; errors adapted to anyhow.)
+pub(crate) fn fetch_ranked_chunks(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+    query_emb: &[f32],
+    limit: usize,
+) -> Result<Vec<RankedChunkRow>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, i64>(0)?,            // id
+            row.get::<_, String>(1)?,         // text
+            row.get::<_, Vec<u8>>(2)?,        // embedding bytes
+            row.get::<_, String>(3)?,         // doc_path
+            row.get::<_, Option<u32>>(4)?,    // start_line
+            row.get::<_, Option<u32>>(5)?,    // end_line
+            row.get::<_, Option<String>>(6)?, // symbol (optional)
+            row.get::<_, Option<String>>(7)?, // strategy/language (optional)
+            row.get::<_, Option<String>>(8)?, // entity_id (optional)
+        ))
+    })?;
+
+    let mut scored: Vec<RankedChunkRow> = Vec::new();
+    for row in rows {
+        let (id, text, emb_bytes, doc_path, start_line, end_line, symbol, language, entity_id) =
+            row?;
+        let chunk_emb = bytes_to_f32(&emb_bytes);
+        if chunk_emb.len() != query_emb.len() {
+            continue; // skip chunks with mismatched embedding dimensions
+        }
+        let score = cosine_similarity(query_emb, &chunk_emb);
+        scored.push(RankedChunkRow {
+            id,
+            text,
+            doc_path,
+            start_line,
+            end_line,
+            symbol_name: symbol,
+            language,
+            entity_id: entity_id.unwrap_or_default(),
+            score,
+        });
+    }
+
+    // Sort descending by score, take top limit
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+/// Chunk-row -> JSON mapper (ported from the coding server bin's
+/// `code_rows_to_json`).
+pub(crate) fn code_rows_to_json(rows: Vec<RankedChunkRow>) -> Vec<Value> {
+    rows.into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "text": r.text,
+                "doc_path": r.doc_path,
+                "start_line": r.start_line,
+                "end_line": r.end_line,
+                "symbol": r.symbol_name,
+                "strategy": r.language,
+                "score": r.score
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedRecallContextParams {
+    /// Coding task query to recall context for
+    pub query: String,
+    /// Max number of wisdom layer (wiki) entries to return (default: 5)
+    #[serde(default)]
+    pub limit_wiki: Option<usize>,
+    /// Max number of code chunks to return (default: 10)
+    #[serde(default)]
+    pub limit_code: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedGetWikiEntryParams {
+    /// Topic to search for in wiki entries (title/body/tags match)
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Specific entity ID of the wiki entry to fetch
+    #[serde(default)]
+    pub entity_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedSearchCodeParams {
+    /// Query to search code chunks
+    pub query: String,
+    /// Max number of code chunks to return (default: 10)
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Optional symbol name to filter code chunks (e.g., function name)
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
@@ -944,5 +1215,122 @@ mod dispatch_tool_call_tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown tool"));
+    }
+}
+
+#[cfg(test)]
+mod curated_memory_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// File-backed brain fixture (spec §9): tests exercising BOTH the RO and RW
+    /// connections must share one real DB file — bare `open_in_memory()` is
+    /// per-connection-private. Table shapes mirror the live DDL in
+    /// `db/schema.rs` (documents/chunks/embeddings) and `db/okf_ddl.rs`
+    /// (llm_wiki_entries/curated_entities/curated_agent_log/llm_wiki_outbox).
+    pub(crate) fn seed_file_db(dir: &std::path::Path) -> Connection {
+        let conn = Connection::open(dir.join("brain.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                source_type TEXT NOT NULL DEFAULT 'user_stated',
+                source_hash TEXT,
+                source_ref TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_accessed_at INTEGER,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER,
+                embedding TEXT,
+                embedding_blob BLOB
+            );
+            CREATE TABLE curated_entities (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'concept',
+                summary TEXT NOT NULL DEFAULT '',
+                summary_embedding BLOB,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                deleted_at INTEGER
+            );
+            CREATE TABLE curated_agent_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('read','write')),
+                entity_id TEXT,
+                summary TEXT,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE llm_wiki_outbox (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                hash TEXT NOT NULL,
+                tier TEXT NOT NULL CHECK(tier IN ('user_doc', 'wiki')),
+                folder_rules_id INTEGER,
+                last_indexed INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'pending_reindex', 'indexed', 'error', 'orphaned'))
+            );
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_text TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                start_line INTEGER NOT NULL DEFAULT 1,
+                end_line INTEGER NOT NULL DEFAULT 1,
+                symbol_name TEXT,
+                strategy TEXT NOT NULL DEFAULT 'prose'
+            );
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                vector BLOB NOT NULL
+            );
+            INSERT INTO curated_entities VALUES
+              ('ent-1', 'Farmhouse', 'concept', '', NULL, 1756000000, 1756000000, NULL);
+            INSERT INTO llm_wiki_entries
+              (id, entity_id, title, body, tags, confidence, source_type, source_ref,
+               created_at, updated_at, deleted_at) VALUES
+              ('w1','ent-1','Repo Layout','The vault stores immutable documents.','[]','confirmed','user_stated','{"proposal_id":null,"evidence":[]}',1756000000000,1756000000000,NULL),
+              ('w2','ent-1','Archived note','older body','[]','inferred','user_stated','x',1756000000000,1756000000000,1756000000001);
+            INSERT INTO documents (path, hash, tier, status) VALUES
+              ('src/main.rs', 'h1', 'user_doc', 'indexed'),
+              ('docs/readme.md', 'h2', 'user_doc', 'indexed');
+            INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, symbol_name, strategy) VALUES
+              (1, 'fn main() {}', 0, 1, 1, 'main', 'ast_symbols'),
+              (2, 'plain prose chunk', 0, 1, 1, NULL, 'proximity');
+            INSERT INTO embeddings (chunk_id, vector) VALUES
+              (1, x'0000803F000000000000000000000000000000000000000000000000000000'),
+              (2, x'0000003F000000000000000000000000000000000000000000000000000000');
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn rank_wiki_entries_skips_deleted_and_ranks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let hits = rank_wiki_entries(&conn, "vault documents", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["id"], "w1");
     }
 }
