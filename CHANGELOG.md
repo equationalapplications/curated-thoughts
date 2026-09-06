@@ -1,3 +1,20 @@
+## [2.5.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.3...v2.5.0) (2026-09-06)
+
+### Features
+
+* **mcp:** curated read dispatchers (recall/get_entry/search_code) ([9f2783e](https://github.com/equationalapplications/curated-thoughts/commit/9f2783e699d492b36fbc7b263f39cae75d6d1fdd))
+* **mcp:** curated wisdom write tools via db::wisdom core (fail-closed audit) ([e1fe838](https://github.com/equationalapplications/curated-thoughts/commit/e1fe838445f1b3974df006853f84cf1962defaf4))
+* **mcp:** expose curated memory CRUD tools on the main MCP server ([305aabf](https://github.com/equationalapplications/curated-thoughts/commit/305aabf07708902eaec9346a6ba93fdfa370961f))
+* **mcp:** lazy read-write brain connection for memory tools ([f5aebb3](https://github.com/equationalapplications/curated-thoughts/commit/f5aebb3be816a0c2a5c0bdb7618d6e5183458f21))
+* **mcp:** port curated memory read helpers into tool_dispatch ([8af9dab](https://github.com/equationalapplications/curated-thoughts/commit/8af9dab3d04e1813e733a1bac4cb8839460176d7))
+
+### Bug Fixes
+
+* **mcp:** atomic wisdom+audit transactions, accurate tool descriptions, padded test vectors ([778ac07](https://github.com/equationalapplications/curated-thoughts/commit/778ac075990a87ad32827dd75bf6a07902214549))
+* **mcp:** move wisdom embedding precompute off the tokio worker thread ([fd03b73](https://github.com/equationalapplications/curated-thoughts/commit/fd03b73026fef6c49833e0a68c01ae4e67ad38e8)), closes [#185](https://github.com/equationalapplications/curated-thoughts/issues/185)
+* **tests:** add db_path/rw_conn to cloud_bridge_integration context literal (Task 4 ripple) ([29f0522](https://github.com/equationalapplications/curated-thoughts/commit/29f052201132bf5337e7d5f592357c6a87c7457c))
+* **tests:** seed curated integration fixture with raw vector blobs ([a444de8](https://github.com/equationalapplications/curated-thoughts/commit/a444de81e6e30a32dbc677989943775d063a68d3))
+
 ## [2.4.3](https://github.com/equationalapplications/curated-thoughts/compare/v2.4.2...v2.4.3) (2026-09-04)
 
 ### Bug Fixes
