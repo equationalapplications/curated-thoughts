@@ -41,12 +41,20 @@ this section before touching code.
 
 ### 1.1 Where edges are written
 
-`llm_wiki_edges` has many insert sites. The one the Active Librarian drives —
-and the only one implicated in #189 — is:
+`llm_wiki_edges` has many insert sites. There are exactly **two production
+writers**. The one the Active Librarian drives — and the only one implicated in
+#189 — is:
 
 - `commit_edge_add`, `src-tauri/src/db/commit.rs:1575`
 
-The others, all of which PR 1 must audit for the `created_at` unit (§2.4) but
+The second is the OKF bundle import, reached from the `okf_import_apply_cmd`
+Tauri command:
+
+- `apply_import`'s edge loop, `src-tauri/src/db/bundle_apply.rs:576`
+
+`edge_purge`'s module docs already name both ("`commit_edge_add` and the bundle
+import path insert them without CDC"). Everything below is a `#[cfg(test)]`
+fixture — all of which PR 1 must audit for the `created_at` unit (§2.4) but
 none of which change behavior otherwise:
 
 - `src-tauri/src/lib.rs:5035`, `:5041`, `:5233`
@@ -354,12 +362,35 @@ already owns the question:
 
 `"self"` is unchanged: it names the entity the commit is writing to.
 
-**Scope.** `commit_edge_add` is the only production writer of
-`llm_wiki_edges`. Every other insert site listed in §1.1 is a `#[cfg(test)]`
+**Scope.** There are **two** production writers of `llm_wiki_edges`, and both
+carry the guard. Every other insert site listed in §1.1 is a `#[cfg(test)]`
 fixture (re-audited: `lib.rs:5035/5041/5233`, `wiki_graph.rs:758`,
 `connections.rs:249/342/375`, `bundle_io.rs:196/259`, `wisdom.rs:658`,
-`wiki_forget.rs:107` — all inside test modules), so no second call site needs
-the same guard.
+`wiki_forget.rs:107` — all inside test modules).
+
+The second writer is `apply_import`'s edge loop
+(`src-tauri/src/db/bundle_apply.rs:576`, production code — the test module
+starts at line 778), reached from the `okf_import_apply_cmd` Tauri command. It
+inserts `mapped(source, &id_map)` / `mapped(target, &id_map)`, and `mapped`
+returns the id verbatim when it is not in the map, so the endpoint written is
+whatever the bundle named.
+
+The reachable failure needs **no malformed bundle**. `fact_exists` /
+`task_exists` (`bundle_apply.rs:182`, `:197`) test only
+`SELECT 1 ... WHERE id=?1` — no `deleted_at` gate — so a merge or replace whose
+bundle row is already present but **soft-deleted** in the destination counts it
+as existing and skips it, leaving the tombstone in place. An edge naming that
+id is then half-live, and the post-loop `purge_dead_edges` only collects an
+edge once *both* endpoints are dead, so the dangling edge survives for as long
+as its live partner does — exactly the class this section exists to refuse.
+
+The import path therefore calls the same `endpoint_is_live` before its INSERT
+and skips the edge with a `result.warnings` entry naming both ids (the same
+drop-don't-fail contract as the commit path). The check cannot drop a
+legitimate forward reference: `bundle_read` builds `concept_ids` per entity
+directory and discards unresolvable links at parse time, so both endpoints are
+always ids from the same entity, and that entity's facts and tasks are written
+by the two loops immediately above the edge loop.
 
 **Interaction with §2.3.** The liveness check now fires *before* the same-name
 guard, so on the commit path a tombstoned endpoint never reaches
@@ -376,6 +407,14 @@ guard exists to catch. It is defence in depth, and its doc comment says so.
 | `edge_add_drops_soft_deleted_entry_endpoint` | soft-deleted `llm_wiki_entries` endpoint (no `curated_entities` row at all) → dropped and reported |
 | `edge_add_drops_unknown_existing_id_endpoint` | an id present in none of the three tables → dropped and reported |
 | `edge_add_admits_live_task_endpoint` | live `llm_wiki_tasks` endpoint still writes — guards the fix against narrowing to two tables |
+| `edge_add_drops_tombstoned_task_endpoint` | tombstoned `llm_wiki_tasks` endpoint → dropped; the live-task test alone cannot catch a narrowed OR chain |
+
+Bundle-import tests (in `db::bundle_apply::tests`):
+
+| Test | Asserts |
+| --- | --- |
+| `merge_writes_edge_between_live_endpoints` | live-to-live intra-entity edge still writes — the guard does not over-restrict the import path |
+| `merge_refuses_edge_to_tombstoned_endpoint` | a merge over a soft-deleted destination row writes no half-live edge, and records an attributable warning |
 
 `same_name_guard_sees_tombstoned_endpoints` keeps passing and keeps its
 assertions; its docstring is rewritten, because two independent gates now

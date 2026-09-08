@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::commit::{
     push_entries_outbox, push_tasks_outbox, wiki_fact_outbox_payload, wiki_task_outbox_payload,
 };
-use crate::db::edge_purge::{purge_dead_edges, purge_edges_for_hard_deleted};
+use crate::db::edge_purge::{endpoint_is_live, purge_dead_edges, purge_edges_for_hard_deleted};
 use crate::db::outbox_format::OutboxOperation;
 use crate::okf::bundle_read::{ParsedBundle, ParsedEntity};
 use crate::okf::ids::generate_id;
@@ -574,6 +574,44 @@ pub fn apply_import(
         }
 
         for (source, target, edge_type) in &entity.edges {
+            let source_id = mapped(source, &id_map);
+            let target_id = mapped(target, &id_map);
+
+            // The import path is the SECOND production writer of
+            // `llm_wiki_edges` (the first is `commit_edge_add`), so it needs
+            // the same liveness contract: an endpoint the purger calls dead
+            // must not be written. `purge_dead_edges` below only collects an
+            // edge once BOTH endpoints are dead — a **half-live** edge is
+            // deliberately retained (edge_purge module docs) — so a dead
+            // endpoint paired with a live one dangles for as long as its live
+            // partner survives, and no later cascade ever collects it.
+            //
+            // The reachable case needs no malformed bundle: `fact_exists` /
+            // `task_exists` test only `SELECT 1 ... WHERE id=?1`, with no
+            // `deleted_at` gate, so in merge/replace mode a bundle row whose
+            // id is already present but **soft-deleted** in the destination is
+            // counted as existing and skipped — it stays a tombstone. An edge
+            // naming it would then point at a dead row while its partner
+            // stayed live.
+            //
+            // Both endpoints are always ids from this same entity's bundle
+            // directory (`bundle_read` builds `concept_ids` per entity dir and
+            // drops unresolvable links at parse), and this entity's facts and
+            // tasks are written by the two loops above, so a live endpoint is
+            // already visible here — the check cannot drop a legitimate
+            // forward reference.
+            //
+            // Skip-and-warn rather than fail: the same drop-don't-fail
+            // contract `resolve_edge_ref` uses on the commit path, and the
+            // warning carries both ids so the loss is attributable.
+            if !endpoint_is_live(&tx, &source_id)? || !endpoint_is_live(&tx, &target_id)? {
+                result.warnings.push(format!(
+                    "dropped edge {source_id} -{edge_type}-> {target_id}: an endpoint names no \
+                     live row in llm_wiki_entries, curated_entities, or llm_wiki_tasks"
+                ));
+                continue;
+            }
+
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO llm_wiki_edges
                     (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -581,8 +619,8 @@ pub fn apply_import(
                 params![
                     generate_id("edge_"),
                     target_entity_id,
-                    mapped(source, &id_map),
-                    mapped(target, &id_map),
+                    source_id,
+                    target_id,
                     edge_type,
                     now_ms,
                 ],
@@ -855,6 +893,85 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outbox, 1);
+    }
+
+    /// A bundle whose edge names two live endpoints must still write. Guards
+    /// the liveness check against over-restricting the import path: both
+    /// endpoints are this entity's own facts, written by the loop above.
+    #[test]
+    fn merge_writes_edge_between_live_endpoints() {
+        let mut conn = open_in_memory().unwrap();
+        let mut bundle = sample_bundle();
+        bundle.entities[0]
+            .facts
+            .push(sample_fact("fact_2", "ent_a"));
+        bundle.entities[0]
+            .edges
+            .push(("fact_1".into(), "fact_2".into(), "relates_to".into()));
+
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(result.edges_added, 1, "a live-to-live edge must be written");
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges
+                  WHERE source_id='fact_1' AND target_id='fact_2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// The import path is the second production writer of `llm_wiki_edges`
+    /// and needs `commit_edge_add`'s liveness contract.
+    ///
+    /// No malformed bundle is required. `fact_exists` has no `deleted_at`
+    /// gate, so a merge whose fact id is already present but **soft-deleted**
+    /// counts it as existing and skips it — the row stays a tombstone. The
+    /// edge naming it would then be half-live (live `fact_1`, dead `fact_2`),
+    /// and `purge_dead_edges` only collects an edge once BOTH endpoints are
+    /// dead, so pre-fix it dangled for the life of its live partner.
+    #[test]
+    fn merge_refuses_edge_to_tombstoned_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let mut bundle = sample_bundle();
+        bundle.entities[0]
+            .facts
+            .push(sample_fact("fact_2", "ent_a"));
+        bundle.entities[0]
+            .edges
+            .push(("fact_1".into(), "fact_2".into(), "relates_to".into()));
+
+        // Seed the destination with a soft-deleted `fact_2`: the import will
+        // count it as existing, skip it, and leave the tombstone in place.
+        apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+        conn.execute("DELETE FROM llm_wiki_edges", []).unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 1234 WHERE id = 'fact_2'",
+            [],
+        )
+        .unwrap();
+
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(
+            result.edges_added, 0,
+            "an edge naming a tombstoned endpoint must not be written"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "no half-live edge may survive the import");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("fact_2") && w.contains("dropped edge")),
+            "the drop must be attributable: {:?}",
+            result.warnings
+        );
     }
 
     #[test]

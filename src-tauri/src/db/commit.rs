@@ -3823,6 +3823,44 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    /// The third endpoint home needs the tombstone case too, not just the
+    /// live one. `edge_add_admits_live_task_endpoint` below keeps passing if
+    /// the `llm_wiki_tasks` branch of `endpoint_is_live` is dropped entirely
+    /// (a live task is still live via no branch at all only if the OR chain
+    /// still names it) — but nothing would catch a refactor that narrows the
+    /// chain to two tables and lets a *tombstoned* task mint the very edge
+    /// #189/#191 set out to refuse.
+    #[test]
+    fn edge_add_drops_tombstoned_task_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        conn.execute(
+            "INSERT INTO llm_wiki_tasks (
+                id, entity_id, description, status, priority,
+                created_at, updated_at, resolved_at, deleted_at
+             ) VALUES ('task-dead', 'ent-1', 'Ship it', 'pending', 0, 100, 100, NULL, 1234)",
+            [],
+        )
+        .unwrap();
+        insert_edge_proposal(
+            &conn,
+            "prop-task-dead",
+            "ent-1",
+            "blocks",
+            "task-dead",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-task-dead");
+
+        assert_eq!(result.dropped_edges, vec!["edge-1".to_string()]);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     /// The liveness check spans all three endpoint homes, so a live
     /// `llm_wiki_tasks` endpoint must still write. Guards the fix against
     /// over-restricting to `llm_wiki_entries` + `curated_entities`.
