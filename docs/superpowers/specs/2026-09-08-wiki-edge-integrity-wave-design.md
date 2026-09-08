@@ -360,7 +360,15 @@ already owns the question:
   unresolvable-endpoint branches — and logs the id, since a dead id is
   otherwise indistinguishable from a live one in the proposal payload.
 
-`"self"` is unchanged: it names the entity the commit is writing to.
+- The `"self"` branch calls it too. `"self"` names the entity the commit is
+  writing to, but that entity is not automatically live: `ctx.entity_id` falls
+  back to `proposal.entity_id` (the id stored on the pending proposal row), and
+  nothing between a proposal being raised and being resolved keeps its entity
+  alive. A proposal that outlives a soft-delete of its own entity resolves
+  `"self"` to a tombstone, and paired with a live target that is precisely the
+  half-live edge no cascade collects. The same check also covers the empty
+  `entity_id` that `unwrap_or_default()` produces for a proposal carrying no
+  entity at all.
 
 **Scope.** There are **two** production writers of `llm_wiki_edges`, and both
 carry the guard. Every other insert site listed in §1.1 is a `#[cfg(test)]`
@@ -408,6 +416,7 @@ guard exists to catch. It is defence in depth, and its doc comment says so.
 | `edge_add_drops_unknown_existing_id_endpoint` | an id present in none of the three tables → dropped and reported |
 | `edge_add_admits_live_task_endpoint` | live `llm_wiki_tasks` endpoint still writes — guards the fix against narrowing to two tables |
 | `edge_add_drops_tombstoned_task_endpoint` | tombstoned `llm_wiki_tasks` endpoint → dropped; the live-task test alone cannot catch a narrowed OR chain |
+| `edge_add_drops_self_endpoint_of_soft_deleted_entity` | entity soft-deleted between proposal and resolve, target live → `"self"` drops rather than minting a half-live edge |
 
 Bundle-import tests (in `db::bundle_apply::tests`):
 

@@ -1162,6 +1162,29 @@ fn resolve_edge_ref(
     entity_id: &str,
 ) -> Result<Option<String>> {
     if value == "self" || value.as_str() == Some("self") {
+        // `"self"` names the entity the commit is writing to, but that entity
+        // is not automatically live. `ctx.entity_id` falls back to
+        // `proposal.entity_id` — the id stored on the pending proposal row —
+        // and nothing between the proposal being raised and being resolved
+        // keeps that entity alive. A proposal that outlives a soft-delete of
+        // its own entity therefore reaches here naming a tombstone.
+        //
+        // Returning it verbatim minted exactly the edge the `existing_id`
+        // branch below refuses: paired with a live endpoint it is half-live,
+        // and `edge_purge` retains a half-live edge on purpose (module docs),
+        // so no later cascade ever collects it.
+        //
+        // `unwrap_or_default()` at the `CommitContext` construction also makes
+        // `entity_id` the empty string when a proposal carries no entity at
+        // all; no row has that id, so the same check drops those too.
+        if !crate::db::edge_purge::endpoint_is_live(conn, entity_id)? {
+            eprintln!(
+                "[commit] edge endpoint \"self\" resolves to entity {entity_id:?}, which names \
+                 no live row in llm_wiki_entries, curated_entities, or llm_wiki_tasks; dropping \
+                 the edge item. A dangling endpoint is never written."
+            );
+            return Ok(None);
+        }
         return Ok(Some(entity_id.to_string()));
     }
     if let Some(id) = value.get("existing_id").and_then(|v| v.as_str()) {
@@ -3821,6 +3844,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// `"self"` is not automatically live. A proposal raised while its entity
+    /// was healthy, then resolved after the entity was soft-deleted, resolves
+    /// `"self"` to a tombstone — and paired with the live `fact-dst` target
+    /// that is a half-live edge `purge_dead_edges` would never collect.
+    #[test]
+    fn edge_add_drops_self_endpoint_of_soft_deleted_entity() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        insert_edge_proposal(
+            &conn,
+            "prop-dead-self",
+            "ent-1",
+            "supersedes",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+        // The entity dies between the proposal being raised and resolved. The
+        // target stays live, so nothing else would refuse this edge.
+        conn.execute(
+            "UPDATE curated_entities SET deleted_at = 1234 WHERE id = 'ent-1'",
+            [],
+        )
+        .unwrap();
+
+        let result = accept_edge(&mut conn, "prop-dead-self");
+
+        assert_eq!(
+            result.dropped_edges,
+            vec!["edge-1".to_string()],
+            "a dead `self` endpoint must be dropped and reported"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "no half-live edge may be written");
     }
 
     /// The third endpoint home needs the tombstone case too, not just the
