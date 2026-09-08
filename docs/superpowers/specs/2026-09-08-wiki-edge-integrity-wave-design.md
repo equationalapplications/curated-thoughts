@@ -43,7 +43,7 @@ this section before touching code.
 
 `llm_wiki_edges` has many insert sites. There are exactly **two production
 writers**. The one the Active Librarian drives — and the only one implicated in
-#189 — is:
+issue #189 — is:
 
 - `commit_edge_add`, in `src-tauri/src/db/commit.rs`
 
@@ -86,7 +86,7 @@ reads as precision. Re-derive this list with a grep rather than trusting
 remembered positions:
 
 ```
-rg -n 'INSERT INTO llm_wiki_edges' src-tauri/src
+rg -n 'INSERT( OR IGNORE)? INTO llm_wiki_edges' src-tauri/src
 ```
 
 The table's uniqueness constraint is
