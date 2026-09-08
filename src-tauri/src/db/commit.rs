@@ -1727,7 +1727,7 @@ fn commit_edge_add(
             source_id,
             target_id,
             edge_type,
-            ctx.now_secs,
+            ctx.now_ms,
         ],
     )?;
 
@@ -2326,7 +2326,7 @@ mod tests {
     fn seed_edge_row(conn: &Connection, id: &str, entity_id: &str, source: &str, target: &str) {
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'related_to', 100)",
+             VALUES (?1, ?2, ?3, ?4, 'related_to', 1757000000000)",
             params![id, entity_id, source, target],
         )
         .unwrap();

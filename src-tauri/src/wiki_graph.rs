@@ -756,7 +756,7 @@ mod unit_tests {
         let id = format!("edge-{n}");
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 100)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 1757000000000)",
             params![id, entity_id, source, target, edge_type],
         )
         .unwrap();
@@ -1059,7 +1059,7 @@ struct CompositeWalk {
     /// no edge types. Mirrors the write-time gate so reads and writes agree
     /// on what is legal. Resolved per entity because one `wiki_context` call
     /// can seed from several partitions, each with its own manifest.
-    edge_vocabularies: HashMap<String, Option<std::collections::HashSet<String>>>,
+    edge_vocabularies: HashMap<String, Option<crate::db::commit::EdgeVocabulary>>,
 }
 
 impl CompositeWalk {
@@ -1107,7 +1107,7 @@ impl CompositeWalk {
             // `fetch_neighbors` applies the read-side manifest filter
             // (issue #158) — only its own `entity_id`'s edges are admitted
             // when that partition has a strict ontology.
-            let edge_vocabulary: &Option<std::collections::HashSet<String>> = self
+            let edge_vocabulary: &Option<crate::db::commit::EdgeVocabulary> = self
                 .edge_vocabularies
                 .entry(entity_id.to_string())
                 .or_insert_with(|| {

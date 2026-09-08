@@ -194,7 +194,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_1', 'ent_a', 'fact_1', 'task_1', 'blocks', 100)",
+             VALUES ('edge_1', 'ent_a', 'fact_1', 'task_1', 'blocks', 1757000000000)",
             [],
         )
         .unwrap();
@@ -257,7 +257,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_off', 'ent_a', 'fact_1', 'task_1', 'fabricated_2026-09-09', 101)",
+             VALUES ('edge_off', 'ent_a', 'fact_1', 'task_1', 'fabricated_2026-09-09', 1757000000001)",
             [],
         )
         .unwrap();

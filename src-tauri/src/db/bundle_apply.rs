@@ -584,7 +584,7 @@ pub fn apply_import(
                     mapped(source, &id_map),
                     mapped(target, &id_map),
                     edge_type,
-                    now_secs,
+                    now_ms,
                 ],
             )?;
             result.edges_added += inserted as i64;
@@ -998,14 +998,14 @@ mod tests {
         // survive — this is the R1 regression guard.
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_cross', 'ent_a', 'fact_b_1', 'fact_b_2', 'related_to', 1)",
+             VALUES ('edge_cross', 'ent_a', 'fact_b_1', 'fact_b_2', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();
         // Truly dead edge: neither endpoint exists anywhere.
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_orphan', 'ent_a', 'ghost_a', 'ghost_b', 'related_to', 1)",
+             VALUES ('edge_orphan', 'ent_a', 'ghost_a', 'ghost_b', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();
@@ -1058,13 +1058,13 @@ mod tests {
         // One in each direction, both anchored on the fact Replace destroys.
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_out', 'ent_a', 'fact_a_1', 'fact_b_1', 'related_to', 1)",
+             VALUES ('edge_out', 'ent_a', 'fact_a_1', 'fact_b_1', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_in', 'ent_b', 'fact_b_1', 'fact_a_1', 'related_to', 1)",
+             VALUES ('edge_in', 'ent_b', 'fact_b_1', 'fact_a_1', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();

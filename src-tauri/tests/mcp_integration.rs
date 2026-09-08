@@ -135,7 +135,7 @@ fn seed_wiki_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     )?;
     conn.execute(
         "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-         VALUES ('edge-ab', 'tier_fact', 'seed-a', 'seed-b', 'relates', 1)",
+         VALUES ('edge-ab', 'tier_fact', 'seed-a', 'seed-b', 'relates', 1757000000000)",
         [],
     )?;
     conn.execute(

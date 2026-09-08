@@ -247,7 +247,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_1', ?1, 'fact_a', 'task_b', 'blocks', 100)",
+             VALUES ('edge_1', ?1, 'fact_a', 'task_b', 'blocks', 1757000000000)",
             [&entity_id],
         )
         .unwrap();
@@ -340,8 +340,8 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_ok', ?1, 'ce_src', 'ce_tgt', 'depends_on', 100),
-                    ('edge_off', ?1, 'ce_src', 'ce_tgt', 'fabricated_2026-09-09', 100)",
+             VALUES ('edge_ok', ?1, 'ce_src', 'ce_tgt', 'depends_on', 1757000000000),
+                    ('edge_off', ?1, 'ce_src', 'ce_tgt', 'fabricated_2026-09-09', 1757000000000)",
             params![&entity_id],
         )
         .unwrap();
@@ -373,8 +373,8 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_a', ?1, 'ce_src', 'ce_tgt', 'depends_on', 100),
-                    ('edge_b', ?1, 'ce_src', 'ce_tgt', 'fabricated', 100)",
+             VALUES ('edge_a', ?1, 'ce_src', 'ce_tgt', 'depends_on', 1757000000000),
+                    ('edge_b', ?1, 'ce_src', 'ce_tgt', 'fabricated', 1757000000000)",
             params![&entity_id],
         )
         .unwrap();
