@@ -1,3 +1,11 @@
+## [2.6.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.6.1...v2.6.2) (2026-09-08)
+
+### Bug Fixes
+
+* **edges:** guard the bundle import path against dead endpoints ([275203d](https://github.com/equationalapplications/curated-thoughts/commit/275203d142e4de94889cbd0b90b685d49c102148)), closes [#193](https://github.com/equationalapplications/curated-thoughts/issues/193)
+* **edges:** refuse a dead `self` edge endpoint ([673adca](https://github.com/equationalapplications/curated-thoughts/commit/673adca507bb87931ec06874c41b4b01ed40299b))
+* **edges:** refuse dead edge endpoints; declare pnpm workspace root ([8a65b5c](https://github.com/equationalapplications/curated-thoughts/commit/8a65b5cdb817384f5bcaf386fd44a86b29b160b2)), closes [#192](https://github.com/equationalapplications/curated-thoughts/issues/192) [#189](https://github.com/equationalapplications/curated-thoughts/issues/189)
+
 ## [2.6.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.6.0...v2.6.1) (2026-09-08)
 
 ### Bug Fixes
