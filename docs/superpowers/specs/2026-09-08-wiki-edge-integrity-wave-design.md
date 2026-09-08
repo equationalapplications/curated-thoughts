@@ -45,26 +45,41 @@ this section before touching code.
 writers**. The one the Active Librarian drives — and the only one implicated in
 #189 — is:
 
-- `commit_edge_add`, `src-tauri/src/db/commit.rs:1575`
+- `commit_edge_add`, in `src-tauri/src/db/commit.rs`
 
 The second is the OKF bundle import, reached from the `okf_import_apply_cmd`
 Tauri command:
 
-- `apply_import`'s edge loop, `src-tauri/src/db/bundle_apply.rs:576`
+- the edge loop in `apply_import`, `src-tauri/src/db/bundle_apply.rs`
 
 `edge_purge`'s module docs already name both ("`commit_edge_add` and the bundle
-import path insert them without CDC"). Everything below is a `#[cfg(test)]`
-fixture — all of which PR 1 must audit for the `created_at` unit (§2.4) but
-none of which change behavior otherwise:
+import path insert them without CDC").
 
-- `src-tauri/src/lib.rs:5035`, `:5041`, `:5233`
-- `src-tauri/src/wiki_graph.rs:758`
-- `src-tauri/src/db/connections.rs:249`, `:342`, `:375`
-- `src-tauri/src/db/bundle_io.rs:196`, `:259`
-- `src-tauri/src/db/commit.rs:2239`, `:3478`, `:3708` (test fixtures)
-- `src-tauri/src/db/wiki_forget.rs:107`
-- `src-tauri/src/db/edge_purge.rs:392`, `:444` (test fixtures)
-- `src-tauri/src/db/wisdom.rs:658`
+Every other `INSERT INTO llm_wiki_edges` in the tree is inside a
+`#[cfg(test)] mod tests` — all of which PR 1 must audit for the `created_at`
+unit (§2.4) but none of which change behavior otherwise:
+
+- `src-tauri/src/lib.rs` (3 fixtures)
+- `src-tauri/src/wiki_graph.rs` (1)
+- `src-tauri/src/db/connections.rs` (3)
+- `src-tauri/src/db/bundle_io.rs` (2)
+- `src-tauri/src/db/commit.rs` (3)
+- `src-tauri/src/db/wiki_forget.rs` (`seed_edge`)
+- `src-tauri/src/db/edge_purge.rs` (2)
+- `src-tauri/src/db/wisdom.rs` (3)
+- `src-tauri/src/db/bundle_apply.rs` (4)
+
+**Cite symbols, not line numbers.** This list carried exact line numbers until
+the endpoint-liveness wave, and by the third commit of that wave half of them
+pointed at unrelated code — `commit.rs:1575` landed on a comment, `:2239` on a
+`source_ref` check, `wiki_graph.rs:758` on a doc line, `edge_purge.rs:392` on a
+`curated_entities` insert. A stale offset is worse than no offset, because it
+reads as precision. Re-derive this list with a grep rather than trusting
+remembered positions:
+
+```
+rg -n 'INSERT INTO llm_wiki_edges' src-tauri/src
+```
 
 The table's uniqueness constraint is
 `UNIQUE(entity_id, source_id, target_id, edge_type)`. Case-variant types are
@@ -372,19 +387,20 @@ already owns the question:
 
 **Scope.** There are **two** production writers of `llm_wiki_edges`, and both
 carry the guard. Every other insert site listed in §1.1 is a `#[cfg(test)]`
-fixture (re-audited: `lib.rs:5035/5041/5233`, `wiki_graph.rs:758`,
-`connections.rs:249/342/375`, `bundle_io.rs:196/259`, `wisdom.rs:658`,
-`wiki_forget.rs:107` — all inside test modules).
+fixture (re-audited against the §1.1 list: `lib.rs`, `wiki_graph.rs`,
+`connections.rs`, `bundle_io.rs`, `wisdom.rs`, `wiki_forget.rs`,
+`bundle_apply.rs` — every one inside a `#[cfg(test)] mod tests`).
 
-The second writer is `apply_import`'s edge loop
-(`src-tauri/src/db/bundle_apply.rs:576`, production code — the test module
-starts at line 778), reached from the `okf_import_apply_cmd` Tauri command. It
+The second writer is the edge loop in `apply_import`
+(`src-tauri/src/db/bundle_apply.rs`, production code — every other edge insert
+in that file sits inside its `#[cfg(test)] mod tests`), reached from the
+`okf_import_apply_cmd` Tauri command. It
 inserts `mapped(source, &id_map)` / `mapped(target, &id_map)`, and `mapped`
 returns the id verbatim when it is not in the map, so the endpoint written is
 whatever the bundle named.
 
 The reachable failure needs **no malformed bundle**. `fact_exists` /
-`task_exists` (`bundle_apply.rs:182`, `:197`) test only
+`task_exists` test only
 `SELECT 1 ... WHERE id=?1` — no `deleted_at` gate — so a merge or replace whose
 bundle row is already present but **soft-deleted** in the destination counts it
 as existing and skips it, leaving the tombstone in place. An edge naming that
