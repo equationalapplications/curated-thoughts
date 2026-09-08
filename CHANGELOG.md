@@ -1,3 +1,15 @@
+## [2.6.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.6.0...v2.6.1) (2026-09-08)
+
+### Bug Fixes
+
+* **#189,#191:** close review gaps in the edge writer wave ([8b75953](https://github.com/equationalapplications/curated-thoughts/commit/8b75953e590500ac822969f8a749c41f679afbb3)), closes [#192](https://github.com/equationalapplications/curated-thoughts/issues/192) [#189](https://github.com/equationalapplications/curated-thoughts/issues/189)
+* **#189:** drop same-name curated endpoint pairs ([0e97ca6](https://github.com/equationalapplications/curated-thoughts/commit/0e97ca6f4c15d94a7f11713e5e6f1686c5caa236)), closes [#189](https://github.com/equationalapplications/curated-thoughts/issues/189)
+* **#189:** write the manifest's canonical edge_type spelling ([fd6a71c](https://github.com/equationalapplications/curated-thoughts/commit/fd6a71cf5b44aafc84f0d9060dc9ec59e7441e9a)), closes [#189](https://github.com/equationalapplications/curated-thoughts/issues/189)
+* **#191:** normalize_epoch_ms read guard for edge timestamps ([b55d5b3](https://github.com/equationalapplications/curated-thoughts/commit/b55d5b39d0a99375af1db2bdc3ce3cc5072b206a)), closes [#191](https://github.com/equationalapplications/curated-thoughts/issues/191)
+* **#191:** tighten V19 idempotency claim and add tiny-value test ([c8c2211](https://github.com/equationalapplications/curated-thoughts/commit/c8c2211be2799edb68db389382f2f8f99c6428e7)), closes [#191](https://github.com/equationalapplications/curated-thoughts/issues/191)
+* **#191:** V19 repairs seconds-epoch llm_wiki_edges.created_at ([089440c](https://github.com/equationalapplications/curated-thoughts/commit/089440c64c2e513fe7080f7ffe6c22233c5ebc36)), closes [#191](https://github.com/equationalapplications/curated-thoughts/issues/191)
+* **#191:** write llm_wiki_edges.created_at in milliseconds ([b9af291](https://github.com/equationalapplications/curated-thoughts/commit/b9af2916b8c1070b40ef7c4e3b115aa041e6a09c)), closes [#191](https://github.com/equationalapplications/curated-thoughts/issues/191)
+
 ## [2.6.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.5.1...v2.6.0) (2026-09-06)
 
 ### Features
