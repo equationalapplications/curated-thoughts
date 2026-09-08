@@ -767,6 +767,20 @@ fn entity_display_name(conn: &Connection, entity_id: &str) -> Result<String> {
     Ok(name.unwrap_or_else(|| entity_id.to_string()))
 }
 
+/// The `curated_entities` name for `id`, or `None` when `id` names no live
+/// curated entity — which includes every `llm_wiki_entries` endpoint, since
+/// an edge endpoint may live in either space (`resolve_edge_ref`).
+fn curated_entity_name(conn: &Connection, id: &str) -> Result<Option<String>> {
+    let name: Option<String> = conn
+        .query_row(
+            "SELECT name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(name)
+}
+
 fn trigger_source_label(conn: &Connection, proposal_id: &str) -> Result<String> {
     let path: Option<String> = conn
         .query_row(
@@ -1645,6 +1659,31 @@ fn commit_edge_add(
             return Ok(());
         }
     };
+
+    // Issue #189: the librarian's dedupe artifacts arrive as edges between
+    // two curated entities that render as the same name — three `supersedes`
+    // self-edges on "Curated Thoughts" in the Sep 6 run. They carry no
+    // semantic value, and the duplication they encode is the entity-merge
+    // pass's problem, not the graph's.
+    //
+    // Both endpoints must be curated entities for the comparison to mean
+    // anything: an `llm_wiki_entries` endpoint has no `curated_entities` row,
+    // and two facts sharing a title is ordinary. Dropped and reported,
+    // matching the unresolvable-endpoint branches above.
+    let source_name = curated_entity_name(conn, &source_id)?;
+    let target_name = curated_entity_name(conn, &target_id)?;
+    if let (Some(s), Some(t)) = (&source_name, &target_name) {
+        if s.trim() == t.trim() {
+            eprintln!(
+                "[commit] same-name curated endpoints {source_id:?} and {target_id:?} \
+                 (both named {s:?}); dropping {edge_type:?} edge item {item}. \
+                 Duplicate entities are resolved by the entity-merge pass, not by edges.",
+                item = item.id,
+            );
+            ctx.dropped_edges.push(item.id.clone());
+            return Ok(());
+        }
+    }
 
     // Strict-mode write boundary (spec §2.3). `llm_wiki_edges` is the semantic
     // knowledge graph, so in strict mode an `edge_type` absent from the
