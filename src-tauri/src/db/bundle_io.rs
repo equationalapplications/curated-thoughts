@@ -140,7 +140,7 @@ fn load_edges(conn: &Connection, entity_id: &str) -> Result<Vec<(String, String,
     for row in rows {
         let (source_id, target_id, edge_type): (String, String, String) = row?;
         let keep = match &vocab {
-            Some(v) => v.contains(&edge_type.trim().to_lowercase()),
+            Some(v) => v.contains(&edge_type),
             None => true,
         };
         if keep {

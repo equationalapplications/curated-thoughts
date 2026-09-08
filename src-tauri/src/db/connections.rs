@@ -135,7 +135,7 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
             .into_iter()
             .filter(
                 |(_, _, _, edge_type): &(String, String, String, String)| match &vocab {
-                    Some(v) => v.contains(&edge_type.trim().to_lowercase()),
+                    Some(v) => v.contains(edge_type),
                     None => true,
                 },
             )

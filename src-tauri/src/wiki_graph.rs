@@ -421,7 +421,7 @@ fn fetch_neighbors(
     direction: TraverseDirection,
     edge_types: &[&str],
     space: NodeSpace,
-    edge_vocabulary: Option<&std::collections::HashSet<String>>,
+    edge_vocabulary: Option<&crate::db::commit::EdgeVocabulary>,
 ) -> Result<Vec<(WikiTraverseEdge, String)>> {
     let edge_filter = if edge_types.is_empty() {
         String::new()
@@ -490,13 +490,13 @@ fn fetch_neighbors(
     }
     // Read-side manifest filter (issue #158). Both callers — the standalone
     // `walk_seed` traversal and `CompositeWalk::walk_seed` — pass the same
-    // `Option<&HashSet<String>>` vocabulary they resolved for `entity_id`,
+    // `Option<&EdgeVocabulary>` vocabulary they resolved for `entity_id`,
     // so the off-manifest retention lives in exactly one place. A `None`
     // vocab means "no strict ontology" → every edge is admitted; a strict
     // vocab keeps edges whose lowercased, trimmed `edge_type` is not in
     // the declared set out of the traversal entirely.
     if let Some(vocab) = edge_vocabulary {
-        out.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
+        out.retain(|(edge, _)| vocab.contains(&edge.edge_type));
     }
     Ok(out)
 }

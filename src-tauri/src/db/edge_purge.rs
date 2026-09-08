@@ -253,7 +253,7 @@ fn purge_off_manifest_edges_in_tx(
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let edge_type: String = row.get(1)?;
-            if !vocab.contains(&edge_type.trim().to_lowercase()) {
+            if !vocab.contains(&edge_type) {
                 v.push((id, edge_type));
             }
         }
