@@ -1,3 +1,18 @@
+# This repo is a single package, not a multi-package workspace. The file
+# exists for the settings below (`minimumReleaseAge`, the 14-day supply-chain
+# age gate from #103), which pnpm reads only from here.
+#
+# `packages:` is required all the same: pnpm 9 treats the presence of this
+# file as a workspace declaration and aborts with "packages field missing or
+# empty" on every command — including `pnpm --version` — when the key is
+# absent. pnpm 10 (the version `packageManager` pins, and the one CI installs
+# via pnpm/action-setup) made the key optional, which is why CI stayed green
+# while a contributor on a pnpm 9 toolchain could run nothing at all.
+# Listing the root explicitly satisfies both: it leaves the pnpm 10 lockfile
+# byte-identical (`--frozen-lockfile` passes unchanged) and makes pnpm 9 work.
+packages:
+  - .
+
 minimumReleaseAge: 20160          # 14 days in minutes
 minimumReleaseAgeExclude:
   - '@equationalapplications/*'   # first-party: published and consumed same-day

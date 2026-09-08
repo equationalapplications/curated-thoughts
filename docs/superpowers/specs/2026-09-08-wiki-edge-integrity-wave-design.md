@@ -7,7 +7,10 @@
 #191 (`llm_wiki_edges.created_at` mixes seconds and milliseconds),
 #190 (activate strict manifests on `ent_*` + entity-scoped MCP traversal).
 
-PR 1 (this design's §2) is implemented on branch `spec/issue189-edge-writer-correctness`. PR 2 (manifest activation + sweep arming, §3) and PR 3 (entity-scoped traversal, §4) are still open.
+PR 1 (this design's §2) is implemented and merged (`b0e4d78`). Its follow-up
+§2.9 (endpoint liveness at write time) is implemented on branch
+`spec/edge-endpoint-liveness`. PR 2 (manifest activation + sweep arming, §3)
+and PR 3 (entity-scoped traversal, §4) are still open.
 **Scope:** Curated Thoughts codebase only. No upstream (`core-llm-wiki` /
 `expo-llm-wiki`) changes.
 
@@ -309,6 +312,74 @@ a substitute for it — the migration is what makes the column single-unit.
 Against the live brain: no `llm_wiki_edges` row has
 `created_at < SEC_VS_MS_THRESHOLD`, and no row's `edge_type` differs from a
 manifest-declared spelling by case alone.
+
+### 2.9 Endpoint liveness at write time (PR 1 follow-up)
+
+Landed after PR 1 merged, from the §2.3 review note that `resolve_edge_ref`
+returns an `existing_id` verbatim.
+
+**The defect.** `resolve_edge_ref` (`commit.rs`) has three endpoint branches.
+`"self"` yields the proposal's own entity; `new_name` resolves by exact name
+with a `deleted_at IS NULL` filter and yields `None` when it misses; and
+`existing_id` returned the id **verbatim** — no existence check, no
+`deleted_at` check. So a proposal naming a hallucinated id, a tombstoned
+`curated_entities` row, or a soft-deleted `llm_wiki_entries` row minted a real
+edge against it.
+
+This is worse than a stray row, because `edge_purge` retains a **half-live**
+edge by design (module docs: "A half-live edge — one endpoint still alive — is
+deliberately retained, so the surviving side keeps its connection"). An edge
+written against a dead endpoint whose partner is alive is therefore never
+collected by any cascade. It dangles for as long as the live half survives.
+
+It also contradicts a stated contract. The okf-backend-migration design
+(`2026-07-05-okf-backend-migration-design.md`, §"Edge endpoint `REF`") says:
+"an unresolved ref auto-rejects that item with a recorded reason — **a
+dangling id is never written**."
+
+**The fix.** One shared definition of a live endpoint, in the module that
+already owns the question:
+
+- `edge_purge::endpoint_is_live(conn, id) -> Result<bool>` — the same
+  three-table contract as `SOURCE_ALIVE_SQL` / `TARGET_ALIVE_SQL`
+  (`llm_wiki_entries`, `curated_entities`, `llm_wiki_tasks`, each gated on
+  `deleted_at IS NULL`), asked of a bound id instead of an `llm_wiki_edges`
+  column. Keeping it in `edge_purge.rs` is the point: a writer that admitted
+  an endpoint the purger calls dead would mint edges no cascade ever collects.
+- `resolve_edge_ref`'s `existing_id` branch calls it and returns `None` when
+  the endpoint is dead, which drops the item into `ctx.dropped_edges` — the
+  same drop-don't-fail contract as §2.3 and the two pre-existing
+  unresolvable-endpoint branches — and logs the id, since a dead id is
+  otherwise indistinguishable from a live one in the proposal payload.
+
+`"self"` is unchanged: it names the entity the commit is writing to.
+
+**Scope.** `commit_edge_add` is the only production writer of
+`llm_wiki_edges`. Every other insert site listed in §1.1 is a `#[cfg(test)]`
+fixture (re-audited: `lib.rs:5035/5041/5233`, `wiki_graph.rs:758`,
+`connections.rs:249/342/375`, `bundle_io.rs:196/259`, `wisdom.rs:658`,
+`wiki_forget.rs:107` — all inside test modules), so no second call site needs
+the same guard.
+
+**Interaction with §2.3.** The liveness check now fires *before* the same-name
+guard, so on the commit path a tombstoned endpoint never reaches
+`curated_entity_names`. That helper still reads tombstones deliberately: a
+`deleted_at IS NULL` filter there would return `(None, None)` for a same-name
+pair of soft-deleted entities and skip the comparison on exactly the rows the
+guard exists to catch. It is defence in depth, and its doc comment says so.
+
+**Tests** (all in `db::commit::tests`):
+
+| Test | Asserts |
+| --- | --- |
+| `edge_add_drops_tombstoned_curated_endpoint` | tombstoned `curated_entities` endpoint, named differently from the source so §2.3 provably cannot be the gate that fires → no row, `item.id` in `dropped_edges` |
+| `edge_add_drops_soft_deleted_entry_endpoint` | soft-deleted `llm_wiki_entries` endpoint (no `curated_entities` row at all) → dropped and reported |
+| `edge_add_drops_unknown_existing_id_endpoint` | an id present in none of the three tables → dropped and reported |
+| `edge_add_admits_live_task_endpoint` | live `llm_wiki_tasks` endpoint still writes — guards the fix against narrowing to two tables |
+
+`same_name_guard_sees_tombstoned_endpoints` keeps passing and keeps its
+assertions; its docstring is rewritten, because two independent gates now
+produce that outcome and the test cannot distinguish them.
 
 ---
 
