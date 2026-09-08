@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4,
-    MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2, MIGRATION_V3,
+    MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -296,6 +296,22 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
             [],
         )?;
     }
+    if version < 19 {
+        // Wrapped in an explicit transaction even though this is a single
+        // statement SQLite would make atomic on its own: the boundary is
+        // stated so that chunking this UPDATE, or landing another statement
+        // beside it, cannot silently lose the guarantee. A partial V19 is
+        // not an acceptable outcome under any future edit here.
+        //
+        // Stamp last, matching V18: a crash before the stamp re-runs a body
+        // that is idempotent by construction (see MIGRATION_V19). Spec §2.5.
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V19))?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (19)",
+            [],
+        )?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -458,7 +474,10 @@ mod tests {
             .unwrap();
         // Bumped from 17 to 18 by MIGRATION_V18, which adds the CT-owned
         // `librarian_evidence` table (issue #186 spec §2.1).
-        assert_eq!(max_version, 18);
+        // Bumped from 18 to 19 by MIGRATION_V19, which repairs the mixed
+        // seconds/milliseconds units in `llm_wiki_edges.created_at`
+        // (issue #191 spec §2.5).
+        assert_eq!(max_version, 19);
     }
 
     /// Upgraded-DB path for the core-llm-wiki@7.1.0 bump: a database created
@@ -1490,7 +1509,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 18, "the V18 stamp must land after the repair");
+        assert_eq!(
+            version, 19,
+            "the V18 stamp must land after the repair (V19 stamp now follows)"
+        );
     }
 
     /// Review round 5, finding 4: a file-IO failure inside the backed repair
@@ -1539,7 +1561,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[test]

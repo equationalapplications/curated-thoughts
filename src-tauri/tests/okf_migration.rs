@@ -222,7 +222,135 @@ fn test_app_open_runs_v7_schema() {
     // Bumped from 17 to 18 by MIGRATION_V18, which adds the CT-owned
     // `librarian_evidence` table (issue #186 spec §2.1) and runs the one-shot
     // evidence repair. See docs/superpowers/specs/2026-09-06-issue186-*.md.
-    assert_eq!(max_version, 18);
+    // Bumped from 18 to 19 by MIGRATION_V19, which repairs the mixed
+    // seconds/milliseconds units in `llm_wiki_edges.created_at` (issue #191).
+    // See docs/superpowers/specs/2026-09-08-wiki-edge-integrity-wave-design.md §2.5.
+    assert_eq!(max_version, 19);
+}
+
+/// Issue #191: rows written before the ms fix hold epoch seconds. V19
+/// multiplies exactly those and leaves everything else alone.
+#[test]
+fn v19_converts_seconds_edge_rows_to_milliseconds() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('edge-sec', 'ent-1', 'a', 'b', 'supports', 1757000000)",
+        [],
+    )
+    .unwrap();
+
+    apply_v19(&conn);
+
+    let created_at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-sec'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(created_at, 1_757_000_000_000);
+}
+
+#[test]
+fn v19_leaves_millisecond_rows_untouched() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('edge-ms', 'ent-1', 'a', 'b', 'supports', 1757000000000)",
+        [],
+    )
+    .unwrap();
+
+    apply_v19(&conn);
+
+    let created_at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-ms'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        created_at, 1_757_000_000_000,
+        "an ms row must not be re-scaled"
+    );
+}
+
+/// The stamp is written last, so a crash re-enters the body. Applying it
+/// twice must equal applying it once — otherwise a retry multiplies a
+/// converted value into the year 31,000.
+#[test]
+fn v19_is_idempotent() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('edge-sec', 'ent-1', 'a', 'b', 'supports', 1757000000)",
+        [],
+    )
+    .unwrap();
+
+    apply_v19(&conn);
+    apply_v19(&conn);
+
+    let created_at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-sec'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(created_at, 1_757_000_000_000);
+}
+
+/// A zero sentinel is "no timestamp", not "the epoch". Scaling it would
+/// still yield zero, but the WHERE clause states the intent explicitly and
+/// this pins it.
+#[test]
+fn v19_leaves_zero_untouched() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('edge-zero', 'ent-1', 'a', 'b', 'supports', 0)",
+        [],
+    )
+    .unwrap();
+
+    apply_v19(&conn);
+
+    let created_at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-zero'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(created_at, 0);
+}
+
+/// The SQL carries the threshold as a literal because SQLite cannot read a
+/// Rust constant. This is the seam where the two can drift; V12's backfill
+/// has the same test for the same reason.
+#[test]
+fn v19_literal_matches_the_threshold_constant() {
+    assert!(
+        tauri_app_lib::db::schema::MIGRATION_V19.contains("1000000000000"),
+        "V19 must filter on the twelve-zero threshold literal"
+    );
+    assert_eq!(
+        tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD,
+        1_000_000_000_000,
+        "SEC_VS_MS_THRESHOLD changed — update the V19 literal and this test together"
+    );
+}
+
+/// Helper: apply just the V19 body, the way `connection.rs` does.
+fn apply_v19(conn: &Connection) {
+    conn.execute_batch(&format!(
+        "BEGIN;\n{}\nCOMMIT;",
+        tauri_app_lib::db::schema::MIGRATION_V19
+    ))
+    .unwrap();
 }
 
 #[test]

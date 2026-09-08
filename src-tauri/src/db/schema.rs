@@ -384,6 +384,30 @@ CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx
   ON librarian_evidence(proposal_id);
 ";
 
+/// V19 — repair `llm_wiki_edges.created_at` (issue #191).
+///
+/// The commit path wrote epoch **seconds** into a column every other writer
+/// filled with **milliseconds**, so time-windowed queries assuming ms silently
+/// missed every recent edge. The writer is fixed; this converts the rows it
+/// already wrote.
+///
+/// Idempotent by construction: a converted value is `>= SEC_VS_MS_THRESHOLD`
+/// and no longer matches the `WHERE`, so a crash-and-retry or a
+/// double-applied replica cannot multiply a millisecond value into the year
+/// 31,000. `created_at > 0` leaves the "no timestamp" sentinel alone.
+///
+/// The literal below is `SEC_VS_MS_THRESHOLD` — twelve zeros, 2001-09-09 in
+/// ms. SQLite cannot read the Rust constant, so the two are pinned together
+/// by `v19_literal_matches_the_threshold_constant` in
+/// `tests/okf_migration.rs`. Changing one without the other is the failure
+/// that test exists to catch.
+pub const MIGRATION_V19: &str = "
+UPDATE llm_wiki_edges
+   SET created_at = created_at * 1000
+ WHERE created_at > 0
+   AND created_at < 1000000000000;
+";
+
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
 ///
 /// The V16 CHECK is the database-level floor; this is the same set expressed
