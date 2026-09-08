@@ -69,6 +69,14 @@ unit (§2.4) but none of which change behavior otherwise:
 - `src-tauri/src/db/wisdom.rs` (3)
 - `src-tauri/src/db/bundle_apply.rs` (4)
 
+**This list is enforced.** `src-tauri/tests/edge_writer_gate.rs` scans the
+tree for `INSERT ... INTO llm_wiki_edges`, classifies each site as production
+or `#[cfg(test)]` fixture, and fails CI when the set changes — so a third
+writer can no longer be added without someone consciously updating a baseline
+and reading why the guard exists. Enforcing the contract was always a one-line
+change; *noticing* a new writer is what this closes. Both omissions this wave
+fixed were caught by human review, never by CI.
+
 **Cite symbols, not line numbers.** This list carried exact line numbers until
 the endpoint-liveness wave, and by the third commit of that wave half of them
 pointed at unrelated code — `commit.rs:1575` landed on a comment, `:2239` on a
