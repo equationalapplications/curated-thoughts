@@ -409,10 +409,19 @@ CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx
 /// missed every recent edge. The writer is fixed; this converts the rows it
 /// already wrote.
 ///
-/// Idempotent by construction: a converted value is `>= SEC_VS_MS_THRESHOLD`
-/// and no longer matches the `WHERE`, so a crash-and-retry or a
-/// double-applied replica cannot multiply a millisecond value into the year
-/// 31,000. `created_at > 0` leaves the "no timestamp" sentinel alone.
+/// Idempotent for the production data range: any realistic seconds-epoch
+/// value (today ~1.7e9) is multiplied once and lands at or above
+/// `SEC_VS_MS_THRESHOLD`, so a crash-and-retry or a double-applied replica
+/// finds no match and leaves the row alone. `created_at > 0` leaves the
+/// "no timestamp" sentinel alone.
+///
+/// Bounded behavior for sub-1e9 values: a row in `(0, 1e9)` (ancient
+/// seconds-epoch or a test fixture) becomes a sub-threshold value after one
+/// multiplication and is multiplied *again* on retry, landing at exactly
+/// `SEC_VS_MS_THRESHOLD`. A third application finds no match. The value is
+/// eventually stable after at most two applications and never reaches 1e15.
+/// Production data is never in this band; `v19_is_idempotent_for_tiny_values`
+/// in `tests/okf_migration.rs` pins the bounded behavior. Spec §2.5.
 ///
 /// The literal below is `SEC_VS_MS_THRESHOLD` — twelve zeros, 2001-09-09 in
 /// ms. SQLite cannot read the Rust constant, so the two are pinned together

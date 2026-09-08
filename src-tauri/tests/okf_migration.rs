@@ -303,6 +303,68 @@ fn v19_is_idempotent() {
     assert_eq!(created_at, 1_757_000_000_000);
 }
 
+/// Sub-1e9 values cannot land above `SEC_VS_MS_THRESHOLD` after one
+/// multiplication, so the `WHERE` would re-match on a second application.
+/// This pins the *bounded* behavior described in spec §2.5: the value is
+/// eventually stable at exactly `SEC_VS_MS_THRESHOLD` and never reaches 1e15.
+/// Production data is never in this band; this is a regression pin for the
+/// "smallest positive sub-threshold" case, which is the worst case for
+/// repeated application.
+#[test]
+fn v19_is_idempotent_for_tiny_values() {
+    let conn = open_in_memory().unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('edge-tiny', 'ent-1', 'a', 'b', 'supports', 1_000_000)",
+        [],
+    )
+    .unwrap();
+
+    // First application: 1_000_000 -> 1_000_000_000 (still sub-threshold).
+    apply_v19(&conn);
+    let after_one: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after_one, 1_000_000_000,
+        "tiny value lands at 1e9 after one application"
+    );
+
+    // Second application: 1_000_000_000 -> 1_000_000_000_000 (threshold).
+    apply_v19(&conn);
+    let after_two: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after_two,
+        tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD,
+        "second application lands at exactly the threshold; never at 1e15"
+    );
+
+    // Third application: WHERE no longer matches; value is stable.
+    apply_v19(&conn);
+    let after_three: i64 = conn
+        .query_row(
+            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after_three,
+        tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD,
+        "third application is a no-op; value is stable at the threshold"
+    );
+}
+
 /// A zero sentinel is "no timestamp", not "the epoch". Scaling it would
 /// still yield zero, but the WHERE clause states the intent explicitly and
 /// this pins it.

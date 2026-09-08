@@ -238,10 +238,24 @@ Requirements:
   outcome under any future edit to this migration.
 - **Stamp last.** `INSERT OR IGNORE INTO schema_version (version) VALUES (19)`
   after the body, matching V18.
-- **Idempotent by construction.** A converted row is `>=
-  SEC_VS_MS_THRESHOLD` and no longer matches the `WHERE`. Re-entry after a
-  crash, or a double-applied replica, cannot multiply a millisecond value into
-  the year 31,000. The `created_at > 0` clause leaves sentinel zeros alone.
+- **Idempotent for the production data range.** Any `created_at` in the
+  realistic seconds-epoch band (today ~1.7e9, any future value up to but not
+  including `SEC_VS_MS_THRESHOLD`) is multiplied once and lands at or above
+  `SEC_VS_MS_THRESHOLD`, so a retry's `WHERE` no longer matches and the row
+  is left alone. Re-entry after a crash, or a double-applied replica, cannot
+  multiply a millisecond value into the year 31,000. The `created_at > 0`
+  clause leaves sentinel zeros alone.
+- **Bounded behavior for sub-1e9 values.** A row whose `created_at` is in
+  `(0, 1e9)` — i.e. written before 2001 in seconds, or as a test fixture —
+  is below the threshold *after* one multiplication as well: 1_000_000
+  becomes 1_000_000_000. A second application then multiplies it again to
+  exactly `SEC_VS_MS_THRESHOLD`, and a third finds no match. The value is
+  *eventually stable* after at most two applications and never reaches
+  1e15; this is the worst case and the only case that depends on the
+  `WHERE` rather than on landing above the threshold on the first pass.
+  Production data never lands in this band, and the existing
+  `v19_is_idempotent` test covers the production case. The `tiny` test in
+  §2.7 pins the bounded behavior so it cannot regress silently.
 - **The literal must carry a comment naming the threshold**, and a test must
   assert the migration's constant agrees with
   `schema::SEC_VS_MS_THRESHOLD` — the same protection
@@ -279,6 +293,7 @@ a substitute for it — the migration is what makes the column single-unit.
 | V19 converts seconds | a seconds row becomes `value * 1000` |
 | V19 leaves ms alone | a ms row is byte-identical after migration |
 | V19 is idempotent | applying the body twice equals applying it once |
+| V19 is bounded for tiny values | a sub-1e9 seconds row is stable after at most two applications; the third is a no-op |
 | V19 leaves zero alone | `created_at = 0` is untouched |
 | threshold agreement | the migration literal equals `schema::SEC_VS_MS_THRESHOLD` |
 | watermark | `okf_migration.rs` max version is 19 |
