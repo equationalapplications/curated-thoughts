@@ -656,13 +656,13 @@ mod tests {
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_out', ?1, ?2, ?3, 'related_to', 100)",
+             VALUES ('edge_out', ?1, ?2, ?3, 'related_to', 1757000000000)",
             params![entity_id, fact.id, other.id],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_in', ?1, ?2, ?3, 'related_to', 100)",
+             VALUES ('edge_in', ?1, ?2, ?3, 'related_to', 1757000000000)",
             params![entity_id, other.id, fact.id],
         )
         .unwrap();
@@ -699,7 +699,7 @@ mod tests {
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_bc', ?1, ?2, ?3, 'related_to', 100)",
+             VALUES ('edge_bc', ?1, ?2, ?3, 'related_to', 1757000000000)",
             params![entity_id, b.id, c.id],
         )
         .unwrap();

@@ -69,20 +69,26 @@ impl WikiManifest {
     /// Case-insensitive to match the engine's own `resolveEdgeDefinitions`,
     /// which lowercases both sides. A guard stricter than the producer would
     /// reject edge types the librarian was told were legal.
+    ///
+    /// Delegates to [`EdgeVocabulary`] rather than comparing here: the
+    /// trim-and-lowercase rule has exactly one owner (issue #189), and a
+    /// manifest that answered this question by its own rule could admit a
+    /// type the writer then drops.
     pub fn declares_edge_type(&self, edge_type: &str) -> bool {
-        let needle = edge_type.trim().to_lowercase();
-        self.edge_types
-            .iter()
-            .any(|e| e.type_name.trim().to_lowercase() == needle)
+        crate::db::commit::EdgeVocabulary::from_manifest(self).contains(edge_type)
     }
 
     /// Declared edge-type names in manifest order, deduplicated — the
     /// vocabulary a rejection diagnostic names.
+    ///
+    /// Deduplicated by [`EdgeVocabulary::key`], the same rule that decides
+    /// membership, so this list and the gate can never disagree about which
+    /// declarations are the same type.
     pub fn edge_type_names(&self) -> Vec<&str> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         for e in &self.edge_types {
-            if seen.insert(e.type_name.trim().to_lowercase()) {
+            if seen.insert(crate::db::commit::EdgeVocabulary::key(&e.type_name)) {
                 out.push(e.type_name.as_str());
             }
         }
@@ -421,7 +427,7 @@ fn fetch_neighbors(
     direction: TraverseDirection,
     edge_types: &[&str],
     space: NodeSpace,
-    edge_vocabulary: Option<&std::collections::HashSet<String>>,
+    edge_vocabulary: Option<&crate::db::commit::EdgeVocabulary>,
 ) -> Result<Vec<(WikiTraverseEdge, String)>> {
     let edge_filter = if edge_types.is_empty() {
         String::new()
@@ -490,13 +496,13 @@ fn fetch_neighbors(
     }
     // Read-side manifest filter (issue #158). Both callers — the standalone
     // `walk_seed` traversal and `CompositeWalk::walk_seed` — pass the same
-    // `Option<&HashSet<String>>` vocabulary they resolved for `entity_id`,
+    // `Option<&EdgeVocabulary>` vocabulary they resolved for `entity_id`,
     // so the off-manifest retention lives in exactly one place. A `None`
     // vocab means "no strict ontology" → every edge is admitted; a strict
     // vocab keeps edges whose lowercased, trimmed `edge_type` is not in
     // the declared set out of the traversal entirely.
     if let Some(vocab) = edge_vocabulary {
-        out.retain(|(edge, _)| vocab.contains(&edge.edge_type.trim().to_lowercase()));
+        out.retain(|(edge, _)| vocab.contains(&edge.edge_type));
     }
     Ok(out)
 }
@@ -756,7 +762,7 @@ mod unit_tests {
         let id = format!("edge-{n}");
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 100)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 1757000000000)",
             params![id, entity_id, source, target, edge_type],
         )
         .unwrap();
@@ -1059,7 +1065,7 @@ struct CompositeWalk {
     /// no edge types. Mirrors the write-time gate so reads and writes agree
     /// on what is legal. Resolved per entity because one `wiki_context` call
     /// can seed from several partitions, each with its own manifest.
-    edge_vocabularies: HashMap<String, Option<std::collections::HashSet<String>>>,
+    edge_vocabularies: HashMap<String, Option<crate::db::commit::EdgeVocabulary>>,
 }
 
 impl CompositeWalk {
@@ -1107,7 +1113,7 @@ impl CompositeWalk {
             // `fetch_neighbors` applies the read-side manifest filter
             // (issue #158) — only its own `entity_id`'s edges are admitted
             // when that partition has a strict ontology.
-            let edge_vocabulary: &Option<std::collections::HashSet<String>> = self
+            let edge_vocabulary: &Option<crate::db::commit::EdgeVocabulary> = self
                 .edge_vocabularies
                 .entry(entity_id.to_string())
                 .or_insert_with(|| {

@@ -140,7 +140,7 @@ fn load_edges(conn: &Connection, entity_id: &str) -> Result<Vec<(String, String,
     for row in rows {
         let (source_id, target_id, edge_type): (String, String, String) = row?;
         let keep = match &vocab {
-            Some(v) => v.contains(&edge_type.trim().to_lowercase()),
+            Some(v) => v.contains(&edge_type),
             None => true,
         };
         if keep {
@@ -194,7 +194,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_1', 'ent_a', 'fact_1', 'task_1', 'blocks', 100)",
+             VALUES ('edge_1', 'ent_a', 'fact_1', 'task_1', 'blocks', 1757000000000)",
             [],
         )
         .unwrap();
@@ -257,7 +257,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_off', 'ent_a', 'fact_1', 'task_1', 'fabricated_2026-09-09', 101)",
+             VALUES ('edge_off', 'ent_a', 'fact_1', 'task_1', 'fabricated_2026-09-09', 1757000000001)",
             [],
         )
         .unwrap();

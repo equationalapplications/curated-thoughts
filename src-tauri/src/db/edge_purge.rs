@@ -253,7 +253,7 @@ fn purge_off_manifest_edges_in_tx(
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let edge_type: String = row.get(1)?;
-            if !vocab.contains(&edge_type.trim().to_lowercase()) {
+            if !vocab.contains(&edge_type) {
                 v.push((id, edge_type));
             }
         }
@@ -390,7 +390,7 @@ mod tests {
     fn seed_edge(conn: &Connection, id: &str, entity_id: &str, source: &str, target: &str) {
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'related_to', 100)",
+             VALUES (?1, ?2, ?3, ?4, 'related_to', 1757000000000)",
             params![id, entity_id, source, target],
         )
         .unwrap();
@@ -442,7 +442,7 @@ mod tests {
         let id = format!("edge_{entity_id}_{edge_type}");
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 100)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 1757000000000)",
             params![id, entity_id, source, target, edge_type],
         )
         .unwrap();

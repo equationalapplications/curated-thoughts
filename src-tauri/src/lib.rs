@@ -5033,13 +5033,13 @@ mod maintenance_command_tests {
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_doomed', 'ent-1', 'old-inferred', 'live-a', 'related_to', 100)",
+             VALUES ('edge_doomed', 'ent-1', 'old-inferred', 'live-a', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_survivor', 'ent-1', 'live-a', 'live-b', 'related_to', 100)",
+             VALUES ('edge_survivor', 'ent-1', 'live-a', 'live-b', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();
@@ -5231,7 +5231,7 @@ mod maintenance_command_tests {
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_doomed', 'ent-1', 'lost-entry', 'live-a', 'related_to', 100)",
+             VALUES ('edge_doomed', 'ent-1', 'lost-entry', 'live-a', 'related_to', 1757000000000)",
             [],
         )
         .unwrap();

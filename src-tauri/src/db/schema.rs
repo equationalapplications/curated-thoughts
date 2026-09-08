@@ -7,6 +7,24 @@
 /// variant was the bug caught in spec review for the V12 migration; both
 /// constants are pinned by U1/U2.
 pub const SEC_VS_MS_THRESHOLD: i64 = 1_000_000_000_000;
+
+/// Normalize a possibly-seconds epoch timestamp to milliseconds.
+///
+/// Values `>= SEC_VS_MS_THRESHOLD` are already ms and pass through unchanged;
+/// positive values below it are seconds and are scaled. Zero and negatives
+/// are sentinels ("no timestamp"), not times, and pass through.
+///
+/// Defense-in-depth for replicas and imported bundles that have not taken
+/// V19 (issue #191). V19 is what makes the column single-unit; this keeps a
+/// stale input from reading as 1970.
+pub fn normalize_epoch_ms(value: i64) -> i64 {
+    if value > 0 && value < SEC_VS_MS_THRESHOLD {
+        value * 1000
+    } else {
+        value
+    }
+}
+
 pub const MIGRATION_V1: &str = "
 PRAGMA foreign_keys = ON;
 
@@ -382,6 +400,51 @@ CREATE TABLE IF NOT EXISTS librarian_evidence (
 
 CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx
   ON librarian_evidence(proposal_id);
+";
+
+/// V19 — repair `llm_wiki_edges.created_at` (issue #191).
+///
+/// The commit path wrote epoch **seconds** into a column every other writer
+/// filled with **milliseconds**, so time-windowed queries assuming ms silently
+/// missed every recent edge. The writer is fixed; this converts the rows it
+/// already wrote.
+///
+/// Idempotent for the production data range: any realistic seconds-epoch
+/// value (today ~1.7e9) is multiplied once and lands at or above
+/// `SEC_VS_MS_THRESHOLD`, so a crash-and-retry or a double-applied replica
+/// finds no match and leaves the row alone. `created_at > 0` leaves the
+/// "no timestamp" sentinel alone.
+///
+/// Bounded behavior for sub-1e9 values: a row in `(0, 1e9)` (ancient
+/// seconds-epoch or a test fixture) is still below the threshold after one
+/// multiplication, so a retry matches it again. Each application multiplies
+/// by 1000 while the value stays below the threshold, so the value converges
+/// upward and then stops:
+///
+/// * **At most four applications.** The smallest positive value is 1, and
+///   `1 * 1000^4 == SEC_VS_MS_THRESHOLD`; every larger value needs fewer.
+/// * **It lands in `[1e12, 1e15)`, not at the threshold.** The final
+///   application starts from a value below 1e12, so the result is below
+///   1e15 — 999 converges to 9.99e14, not to `SEC_VS_MS_THRESHOLD`. Only
+///   exact powers of 1000 land on the threshold itself.
+/// * **It cannot overflow.** 1e15 is four orders of magnitude below
+///   `i64::MAX`, for any starting value the `WHERE` admits.
+///
+/// The first applications are *not* idempotent — only the converged value is
+/// stable. Production data is never in this band;
+/// `v19_converges_for_tiny_values` in `tests/okf_migration.rs` pins each
+/// claim above. Spec §2.5.
+///
+/// The literal below is `SEC_VS_MS_THRESHOLD` — twelve zeros, 2001-09-09 in
+/// ms. SQLite cannot read the Rust constant, so the two are pinned together
+/// by `v19_literal_matches_the_threshold_constant` in
+/// `tests/okf_migration.rs`. Changing one without the other is the failure
+/// that test exists to catch.
+pub const MIGRATION_V19: &str = "
+UPDATE llm_wiki_edges
+   SET created_at = created_at * 1000
+ WHERE created_at > 0
+   AND created_at < 1000000000000;
 ";
 
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
