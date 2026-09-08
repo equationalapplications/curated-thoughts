@@ -245,17 +245,23 @@ Requirements:
   is left alone. Re-entry after a crash, or a double-applied replica, cannot
   multiply a millisecond value into the year 31,000. The `created_at > 0`
   clause leaves sentinel zeros alone.
-- **Bounded behavior for sub-1e9 values.** A row whose `created_at` is in
+- **Bounded convergence for sub-1e9 values.** A row whose `created_at` is in
   `(0, 1e9)` — i.e. written before 2001 in seconds, or as a test fixture —
-  is below the threshold *after* one multiplication as well: 1_000_000
-  becomes 1_000_000_000. A second application then multiplies it again to
-  exactly `SEC_VS_MS_THRESHOLD`, and a third finds no match. The value is
-  *eventually stable* after at most two applications and never reaches
-  1e15; this is the worst case and the only case that depends on the
-  `WHERE` rather than on landing above the threshold on the first pass.
-  Production data never lands in this band, and the existing
-  `v19_is_idempotent` test covers the production case. The `tiny` test in
-  §2.7 pins the bounded behavior so it cannot regress silently.
+  is still below the threshold *after* one multiplication: 1_000_000 becomes
+  1_000_000_000, which the `WHERE` matches again. Each application multiplies
+  by 1000 while the value stays below the threshold, so the value converges
+  upward and then stops. The bound is **four applications**, not two: the
+  smallest positive value is 1, and `1 * 1000^4 == SEC_VS_MS_THRESHOLD`.
+  The converged value lands in `[1e12, 1e15)` rather than *at* the
+  threshold — 999 converges to 9.99e14 — because the final application
+  starts from a value below 1e12; only exact powers of 1000 land on the
+  threshold itself. Overflow is impossible: 1e15 is four orders of magnitude
+  below `i64::MAX`. Note that the intermediate applications are **not**
+  idempotent; only the converged value is stable, which is why the test in
+  §2.7 is named for convergence rather than idempotence. This is the only
+  case that depends on the `WHERE` rather than on landing above the
+  threshold on the first pass. Production data never lands in this band, and
+  the existing `v19_is_idempotent` test covers the production case.
 - **The literal must carry a comment naming the threshold**, and a test must
   assert the migration's constant agrees with
   `schema::SEC_VS_MS_THRESHOLD` — the same protection
@@ -293,7 +299,7 @@ a substitute for it — the migration is what makes the column single-unit.
 | V19 converts seconds | a seconds row becomes `value * 1000` |
 | V19 leaves ms alone | a ms row is byte-identical after migration |
 | V19 is idempotent | applying the body twice equals applying it once |
-| V19 is bounded for tiny values | a sub-1e9 seconds row is stable after at most two applications; the third is a no-op |
+| V19 converges for tiny values | a sub-1e9 seconds row converges in at most four applications into `[1e12, 1e15)`; the next application is a no-op |
 | V19 leaves zero alone | `created_at = 0` is untouched |
 | threshold agreement | the migration literal equals `schema::SEC_VS_MS_THRESHOLD` |
 | watermark | `okf_migration.rs` max version is 19 |

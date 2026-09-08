@@ -304,65 +304,97 @@ fn v19_is_idempotent() {
 }
 
 /// Sub-1e9 values cannot land above `SEC_VS_MS_THRESHOLD` after one
-/// multiplication, so the `WHERE` would re-match on a second application.
-/// This pins the *bounded* behavior described in spec §2.5: the value is
-/// eventually stable at exactly `SEC_VS_MS_THRESHOLD` and never reaches 1e15.
-/// Production data is never in this band; this is a regression pin for the
-/// "smallest positive sub-threshold" case, which is the worst case for
-/// repeated application.
+/// multiplication, so the `WHERE` re-matches on a second application. This
+/// pins the *convergence* behavior described in spec §2.5 — deliberately not
+/// named "idempotent", because the intermediate applications are not: only
+/// the converged value is stable.
+///
+/// Three claims, one per case below:
+///
+/// * the bound is four applications, not two (`1` is the worst case, and
+///   `1 * 1000^4 == SEC_VS_MS_THRESHOLD`);
+/// * convergence lands in `[1e12, 1e15)`, *not* at the threshold — only
+///   exact powers of 1000 land on the threshold itself;
+/// * the converged value is stable under further application.
+///
+/// Production data is never in this band.
 #[test]
-fn v19_is_idempotent_for_tiny_values() {
-    let conn = open_in_memory().unwrap();
-    conn.execute(
-        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-         VALUES ('edge-tiny', 'ent-1', 'a', 'b', 'supports', 1_000_000)",
-        [],
-    )
-    .unwrap();
+fn v19_converges_for_tiny_values() {
+    const THRESHOLD: i64 = tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD;
 
-    // First application: 1_000_000 -> 1_000_000_000 (still sub-threshold).
-    apply_v19(&conn);
-    let after_one: i64 = conn
-        .query_row(
-            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
-            [],
-            |r| r.get(0),
+    // (start, applications needed to converge, converged value)
+    let cases: [(i64, usize, i64); 3] = [
+        // The smallest positive value: the worst case for repeated
+        // application, and the only one that needs all four. Lands exactly on
+        // the threshold because it is a power of 1000.
+        (1, 4, THRESHOLD),
+        // A power of 1000 partway up: converges in two, also exactly on the
+        // threshold. This is the case the pre-#192 docstring generalized from.
+        (1_000_000, 2, THRESHOLD),
+        // NOT a power of 1000: converges ABOVE the threshold, at 9.99e14.
+        // This is the case that disproves "lands at exactly the threshold",
+        // and it also pins the 1e15 ceiling.
+        (999, 4, 999_000_000_000_000),
+    ];
+
+    for (start, expected_applications, converged) in cases {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge-tiny', 'ent-1', 'a', 'b', 'supports', ?1)",
+            [start],
         )
         .unwrap();
-    assert_eq!(
-        after_one, 1_000_000_000,
-        "tiny value lands at 1e9 after one application"
-    );
 
-    // Second application: 1_000_000_000 -> 1_000_000_000_000 (threshold).
-    apply_v19(&conn);
-    let after_two: i64 = conn
-        .query_row(
-            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        after_two,
-        tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD,
-        "second application lands at exactly the threshold; never at 1e15"
-    );
+        let read = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
 
-    // Third application: WHERE no longer matches; value is stable.
-    apply_v19(&conn);
-    let after_three: i64 = conn
-        .query_row(
-            "SELECT created_at FROM llm_wiki_edges WHERE id = 'edge-tiny'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        after_three,
-        tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD,
-        "third application is a no-op; value is stable at the threshold"
-    );
+        // Apply until the value stops changing, counting the applications
+        // that actually moved it.
+        let mut applications = 0usize;
+        loop {
+            let before = read(&conn);
+            apply_v19(&conn);
+            let after = read(&conn);
+            if after == before {
+                break;
+            }
+            applications += 1;
+            assert!(
+                applications <= 4,
+                "start {start} must converge within four applications, still moving at {applications}"
+            );
+        }
+
+        assert_eq!(
+            applications, expected_applications,
+            "start {start} must converge in {expected_applications} applications"
+        );
+        assert_eq!(
+            read(&conn),
+            converged,
+            "start {start} must converge to {converged}"
+        );
+        assert!(
+            (THRESHOLD..1_000_000_000_000_000).contains(&read(&conn)),
+            "start {start} must converge into [1e12, 1e15); got {}",
+            read(&conn)
+        );
+
+        // Stable: one more application is a no-op.
+        apply_v19(&conn);
+        assert_eq!(
+            read(&conn),
+            converged,
+            "start {start} must be stable once converged"
+        );
+    }
 }
 
 /// A zero sentinel is "no timestamp", not "the epoch". Scaling it would
@@ -395,9 +427,19 @@ fn v19_leaves_zero_untouched() {
 /// has the same test for the same reason.
 #[test]
 fn v19_literal_matches_the_threshold_constant() {
+    // Anchored on the full clause, not the bare digits: a bare
+    // `.contains("1000000000000")` also matches a thirteen-zero literal
+    // (1e13), so a stray extra zero would slip past the very drift this test
+    // exists to catch. The needle is built from the constant so the two
+    // cannot be edited apart.
+    let clause = format!(
+        "created_at < {};",
+        tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD
+    );
     assert!(
-        tauri_app_lib::db::schema::MIGRATION_V19.contains("1000000000000"),
-        "V19 must filter on the twelve-zero threshold literal"
+        tauri_app_lib::db::schema::MIGRATION_V19.contains(&clause),
+        "V19 must filter on the threshold constant; expected the clause {clause:?} in:\n{}",
+        tauri_app_lib::db::schema::MIGRATION_V19
     );
     assert_eq!(
         tauri_app_lib::db::schema::SEC_VS_MS_THRESHOLD,

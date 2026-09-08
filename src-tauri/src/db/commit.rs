@@ -138,8 +138,28 @@ pub(crate) struct EdgeVocabulary {
 }
 
 impl EdgeVocabulary {
-    fn key(candidate: &str) -> String {
+    /// The membership rule, in one place. `wiki_graph::WikiManifest` defers to
+    /// it so a manifest never answers "is this declared?" by a different rule
+    /// than the writer that gates on the answer.
+    pub(crate) fn key(candidate: &str) -> String {
         candidate.trim().to_lowercase()
+    }
+
+    /// The single construction point for a vocabulary.
+    ///
+    /// Manifest order decides the winner when a manifest declares two
+    /// case-variants of one type (`Knows` before `knows` keeps `Knows`):
+    /// first-declared is the canonical spelling, matching
+    /// `WikiManifest::edge_type_names`.
+    pub(crate) fn from_manifest(manifest: &crate::wiki_graph::WikiManifest) -> Self {
+        let mut by_key: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for edge in &manifest.edge_types {
+            by_key
+                .entry(Self::key(&edge.type_name))
+                .or_insert_with(|| edge.type_name.trim().to_string());
+        }
+        Self { by_key }
     }
 
     /// Whether `candidate` names a declared edge type, ignoring case and
@@ -209,12 +229,7 @@ pub(crate) fn resolve_strict_edge_vocabulary(
         match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
             Ok(o) if o.mode == "strict" => {
                 let manifest = o.manifest?;
-                let by_key: std::collections::HashMap<String, String> = manifest
-                    .edge_type_names()
-                    .into_iter()
-                    .map(|n| (EdgeVocabulary::key(n), n.trim().to_string()))
-                    .collect();
-                let vocabulary = EdgeVocabulary { by_key };
+                let vocabulary = EdgeVocabulary::from_manifest(&manifest);
                 if vocabulary.is_empty() {
                     warn_strict_manifest_declares_no_edge_types(entity_id, lookup);
                     return None;
@@ -767,18 +782,37 @@ fn entity_display_name(conn: &Connection, entity_id: &str) -> Result<String> {
     Ok(name.unwrap_or_else(|| entity_id.to_string()))
 }
 
-/// The `curated_entities` name for `id`, or `None` when `id` names no live
-/// curated entity — which includes every `llm_wiki_entries` endpoint, since
-/// an edge endpoint may live in either space (`resolve_edge_ref`).
-fn curated_entity_name(conn: &Connection, id: &str) -> Result<Option<String>> {
-    let name: Option<String> = conn
-        .query_row(
-            "SELECT name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(name)
+/// The `curated_entities` names for both endpoints of one edge, `None` for an
+/// id that names no curated entity — which includes every `llm_wiki_entries`
+/// endpoint, since an edge endpoint may live in either space
+/// (`resolve_edge_ref`).
+///
+/// Tombstones are deliberately INCLUDED. `resolve_edge_ref` returns an
+/// `existing_id` verbatim without checking `deleted_at`, so a proposal can
+/// name a soft-deleted entity; filtering tombstones out here would return
+/// `(None, None)` for a same-name pair of soft-deleted entities and let the
+/// #189 guard fall through on exactly the rows it exists to catch. A
+/// same-name pair is a dedupe artifact whether or not either half is
+/// tombstoned.
+///
+/// Both endpoints are read in one statement: the guard always probes both,
+/// and a self-edge (`source == target`) legitimately matches a single row,
+/// which both names then take.
+fn curated_entity_names(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    let mut stmt = conn.prepare("SELECT id, name FROM curated_entities WHERE id IN (?1, ?2)")?;
+    let mut by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let rows = stmt.query_map(params![source_id, target_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, name) = row?;
+        by_id.insert(id, name);
+    }
+    Ok((by_id.get(source_id).cloned(), by_id.get(target_id).cloned()))
 }
 
 fn trigger_source_label(conn: &Connection, proposal_id: &str) -> Result<String> {
@@ -1660,31 +1694,6 @@ fn commit_edge_add(
         }
     };
 
-    // Issue #189: the librarian's dedupe artifacts arrive as edges between
-    // two curated entities that render as the same name — three `supersedes`
-    // self-edges on "Curated Thoughts" in the Sep 6 run. They carry no
-    // semantic value, and the duplication they encode is the entity-merge
-    // pass's problem, not the graph's.
-    //
-    // Both endpoints must be curated entities for the comparison to mean
-    // anything: an `llm_wiki_entries` endpoint has no `curated_entities` row,
-    // and two facts sharing a title is ordinary. Dropped and reported,
-    // matching the unresolvable-endpoint branches above.
-    let source_name = curated_entity_name(conn, &source_id)?;
-    let target_name = curated_entity_name(conn, &target_id)?;
-    if let (Some(s), Some(t)) = (&source_name, &target_name) {
-        if s.trim() == t.trim() {
-            eprintln!(
-                "[commit] same-name curated endpoints {source_id:?} and {target_id:?} \
-                 (both named {s:?}); dropping {edge_type:?} edge item {item}. \
-                 Duplicate entities are resolved by the entity-merge pass, not by edges.",
-                item = item.id,
-            );
-            ctx.dropped_edges.push(item.id.clone());
-            return Ok(());
-        }
-    }
-
     // Strict-mode write boundary (spec §2.3). `llm_wiki_edges` is the semantic
     // knowledge graph, so in strict mode an `edge_type` absent from the
     // manifest is not written.
@@ -1716,6 +1725,37 @@ fn commit_edge_add(
         // No strict vocabulary: nothing to canonicalize against, write verbatim.
         None => edge_type,
     };
+
+    // Issue #189: the librarian's dedupe artifacts arrive as edges between
+    // two curated entities that render as the same name — three `supersedes`
+    // self-edges on "Curated Thoughts" in the Sep 6 run. They carry no
+    // semantic value, and the duplication they encode is the entity-merge
+    // pass's problem, not the graph's.
+    //
+    // Ordered AFTER the strict gate deliberately: an off-manifest edge_type
+    // between two same-name endpoints is BOTH a dedupe artifact and a
+    // manifest violation, and the manifest violation is the one an operator
+    // must see — it is the signal that the librarian is inventing types.
+    // Running the cheap in-memory gate first also spares the two endpoint
+    // lookups below for every edge the gate already rejects.
+    //
+    // Both endpoints must be curated entities for the comparison to mean
+    // anything: an `llm_wiki_entries` endpoint has no `curated_entities` row,
+    // and two facts sharing a title is ordinary. Dropped and reported,
+    // matching the unresolvable-endpoint branches above.
+    let (source_name, target_name) = curated_entity_names(conn, &source_id, &target_id)?;
+    if let (Some(s), Some(t)) = (&source_name, &target_name) {
+        if s.trim() == t.trim() {
+            eprintln!(
+                "[commit] same-name curated endpoints {source_id:?} and {target_id:?} \
+                 (both named {s:?}); dropping {edge_type:?} edge item {item}. \
+                 Duplicate entities are resolved by the entity-merge pass, not by edges.",
+                item = item.id,
+            );
+            ctx.dropped_edges.push(item.id.clone());
+            return Ok(());
+        }
+    }
 
     let edge_id = generate_llm_id("edge_");
     let inserted = conn.execute(
@@ -3599,6 +3639,53 @@ mod tests {
             result.dropped_edges,
             vec!["edge-1".to_string()],
             "a same-name pair must be dropped AND reported, not silently skipped"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// A tombstoned endpoint must not smuggle a same-name pair past the
+    /// guard. `resolve_edge_ref` returns an `existing_id` verbatim without
+    /// checking `deleted_at`, so a proposal can name a soft-deleted entity;
+    /// a `deleted_at IS NULL` filter on the name lookup would return `None`
+    /// for that endpoint and skip the comparison on exactly the rows the
+    /// guard exists to catch — a merge that tombstoned one half of a
+    /// duplicate pair is the likeliest way to produce one.
+    #[test]
+    fn same_name_guard_sees_tombstoned_endpoints() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_entity(&conn, "ent-dupe", "Existing", "Duplicate summary", 100);
+        conn.execute(
+            "UPDATE curated_entities SET deleted_at = 1234 WHERE id = 'ent-dupe'",
+            [],
+        )
+        .unwrap();
+        seed_manifest(
+            &conn,
+            "ent-1",
+            "strict",
+            &["thing"],
+            &[("supersedes", "thing", "thing")],
+        );
+        insert_edge_proposal(
+            &conn,
+            "prop-tomb",
+            "ent-1",
+            "supersedes",
+            "ent-dupe",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-tomb");
+
+        assert_eq!(
+            result.dropped_edges,
+            vec!["edge-1".to_string()],
+            "a same-name pair must be dropped even when one half is tombstoned"
         );
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
