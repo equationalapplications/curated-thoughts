@@ -55,6 +55,25 @@ const TARGET_ALIVE_SQL: &str = "EXISTS (SELECT 1 FROM llm_wiki_entries e  WHERE 
       OR EXISTS (SELECT 1 FROM curated_entities ce WHERE ce.id = target_id AND ce.deleted_at IS NULL) \
       OR EXISTS (SELECT 1 FROM llm_wiki_tasks st WHERE st.id = target_id AND st.deleted_at IS NULL)";
 
+/// Whether `id` names a **live** edge endpoint: a row with `deleted_at IS
+/// NULL` in `llm_wiki_entries`, `curated_entities`, or `llm_wiki_tasks`.
+///
+/// The same three-table contract as `SOURCE_ALIVE_SQL` / `TARGET_ALIVE_SQL`
+/// above, asked of a bound id instead of an `llm_wiki_edges` column, so the
+/// write path can refuse an endpoint this module would call dead. Keeping the
+/// question in one file is the point: a writer that admitted an endpoint the
+/// purger considers dead would mint edges no cascade ever collects.
+pub fn endpoint_is_live(conn: &Connection, id: &str) -> Result<bool> {
+    let alive: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM llm_wiki_entries e  WHERE e.id  = ?1 AND e.deleted_at  IS NULL)
+             OR EXISTS (SELECT 1 FROM curated_entities ce WHERE ce.id = ?1 AND ce.deleted_at IS NULL)
+             OR EXISTS (SELECT 1 FROM llm_wiki_tasks t    WHERE t.id  = ?1 AND t.deleted_at  IS NULL)",
+        params![id],
+        |r| r.get(0),
+    )?;
+    Ok(alive)
+}
+
 /// Max entry ids bound into one batch purge statement. Each id is bound twice
 /// (one IN clause per endpoint column), so 2 * this must stay under SQLite's
 /// SQLITE_MAX_VARIABLE_NUMBER (32766 on the bundled build).

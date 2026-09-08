@@ -787,11 +787,14 @@ fn entity_display_name(conn: &Connection, entity_id: &str) -> Result<String> {
 /// endpoint, since an edge endpoint may live in either space
 /// (`resolve_edge_ref`).
 ///
-/// Tombstones are deliberately INCLUDED. `resolve_edge_ref` returns an
-/// `existing_id` verbatim without checking `deleted_at`, so a proposal can
-/// name a soft-deleted entity; filtering tombstones out here would return
-/// `(None, None)` for a same-name pair of soft-deleted entities and let the
-/// #189 guard fall through on exactly the rows it exists to catch. A
+/// Tombstones are deliberately INCLUDED, as defence in depth. Since the
+/// endpoint-liveness check in `resolve_edge_ref`, a tombstoned endpoint is
+/// dropped before it ever reaches this guard, so on the commit path the
+/// filter would make no difference today. It stays permissive anyway:
+/// filtering tombstones out here would return `(None, None)` for a same-name
+/// pair of soft-deleted entities and let the #189 guard fall through on
+/// exactly the rows it exists to catch, which is the wrong failure mode to
+/// build in if a future caller reaches this helper by another route. A
 /// same-name pair is a dedupe artifact whether or not either half is
 /// tombstoned.
 ///
@@ -1159,9 +1162,56 @@ fn resolve_edge_ref(
     entity_id: &str,
 ) -> Result<Option<String>> {
     if value == "self" || value.as_str() == Some("self") {
+        // `"self"` names the entity the commit is writing to, but that entity
+        // is not automatically live. `ctx.entity_id` falls back to
+        // `proposal.entity_id` — the id stored on the pending proposal row —
+        // and nothing between the proposal being raised and being resolved
+        // keeps that entity alive. A proposal that outlives a soft-delete of
+        // its own entity therefore reaches here naming a tombstone.
+        //
+        // Returning it verbatim minted exactly the edge the `existing_id`
+        // branch below refuses: paired with a live endpoint it is half-live,
+        // and `edge_purge` retains a half-live edge on purpose (module docs),
+        // so no later cascade ever collects it.
+        //
+        // `unwrap_or_default()` at the `CommitContext` construction also makes
+        // `entity_id` the empty string when a proposal carries no entity at
+        // all; no row has that id, so the same check drops those too.
+        if !crate::db::edge_purge::endpoint_is_live(conn, entity_id)? {
+            eprintln!(
+                "[commit] edge endpoint \"self\" resolves to entity {entity_id:?}, which names \
+                 no live row in llm_wiki_entries, curated_entities, or llm_wiki_tasks; dropping \
+                 the edge item. A dangling endpoint is never written."
+            );
+            return Ok(None);
+        }
         return Ok(Some(entity_id.to_string()));
     }
     if let Some(id) = value.get("existing_id").and_then(|v| v.as_str()) {
+        // An endpoint the purge path would call dead must not be written.
+        //
+        // This branch used to return the id verbatim — no existence check, no
+        // `deleted_at` check — while the `new_name` branch below has always
+        // refused a missing-or-tombstoned name. That asymmetry let a proposal
+        // naming a hallucinated or soft-deleted endpoint mint an edge, and
+        // `edge_purge` retains a **half-live** edge on purpose (module docs),
+        // so such an edge dangles for as long as its live partner survives —
+        // no later cascade ever collects it. The okf-backend-migration design
+        // states the contract this restores: "an unresolved ref auto-rejects
+        // that item with a recorded reason — a dangling id is never written."
+        //
+        // `None` drops the item into `dropped_edges`, matching every other
+        // unresolvable-endpoint branch; the log makes the drop attributable,
+        // since a dead id is otherwise indistinguishable from a live one in
+        // the proposal payload.
+        if !crate::db::edge_purge::endpoint_is_live(conn, id)? {
+            eprintln!(
+                "[commit] edge endpoint {id:?} names no live row in llm_wiki_entries, \
+                 curated_entities, or llm_wiki_tasks; dropping the edge item for entity \
+                 {entity_id}. A dangling endpoint is never written."
+            );
+            return Ok(None);
+        }
         return Ok(Some(id.to_string()));
     }
     if let Some(name) = value.get("new_name").and_then(|v| v.as_str()) {
@@ -3646,13 +3696,14 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    /// A tombstoned endpoint must not smuggle a same-name pair past the
-    /// guard. `resolve_edge_ref` returns an `existing_id` verbatim without
-    /// checking `deleted_at`, so a proposal can name a soft-deleted entity;
-    /// a `deleted_at IS NULL` filter on the name lookup would return `None`
-    /// for that endpoint and skip the comparison on exactly the rows the
-    /// guard exists to catch — a merge that tombstoned one half of a
-    /// duplicate pair is the likeliest way to produce one.
+    /// A tombstoned same-name endpoint is dropped and reported, not written.
+    ///
+    /// Two independent gates now reach this verdict, and the assertions below
+    /// cannot tell them apart: `resolve_edge_ref`'s endpoint-liveness check
+    /// refuses the tombstoned endpoint first, and if it ever stopped doing so
+    /// the #189 same-name guard would catch the pair — which is why
+    /// `curated_entity_names` keeps reading tombstones. The behaviour under
+    /// test is the outcome, and the outcome must hold either way.
     #[test]
     fn same_name_guard_sees_tombstoned_endpoints() {
         let mut conn = open_in_memory().unwrap();
@@ -3691,6 +3742,225 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// A dead `existing_id` endpoint must never be written.
+    ///
+    /// `edge_purge` retains a **half-live** edge on purpose (module docs), so
+    /// an edge minted against a dead endpoint whose partner is alive is never
+    /// collected by any later cascade — it dangles for the life of the graph.
+    /// The okf-backend-migration design states the contract directly: "an
+    /// unresolved ref auto-rejects that item with a recorded reason — a
+    /// dangling id is never written."
+    ///
+    /// The endpoint here is named differently from `ent-1` so the #189
+    /// same-name guard cannot be what drops it: only the endpoint-liveness
+    /// check can.
+    #[test]
+    fn edge_add_drops_tombstoned_curated_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        seed_entity(&conn, "ent-gone", "Retired Concept", "Summary", 100);
+        conn.execute(
+            "UPDATE curated_entities SET deleted_at = 1234 WHERE id = 'ent-gone'",
+            [],
+        )
+        .unwrap();
+        insert_edge_proposal(
+            &conn,
+            "prop-dead",
+            "ent-1",
+            "supersedes",
+            "ent-gone",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-dead");
+
+        assert_eq!(
+            result.dropped_edges,
+            vec!["edge-1".to_string()],
+            "a tombstoned endpoint must be dropped AND reported"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// A soft-deleted `llm_wiki_entries` endpoint is dead for the same reason
+    /// a tombstoned curated entity is — and this one has no `curated_entities`
+    /// row at all, so the same-name guard provably cannot see it.
+    #[test]
+    fn edge_add_drops_soft_deleted_entry_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 1234 WHERE id = 'fact-dst'",
+            [],
+        )
+        .unwrap();
+        insert_edge_proposal(
+            &conn,
+            "prop-soft",
+            "ent-1",
+            "supersedes",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-soft");
+
+        assert_eq!(result.dropped_edges, vec!["edge-1".to_string()]);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// An `existing_id` that names no row in any of the three endpoint tables
+    /// is a hallucinated id. The `new_name` branch of `resolve_edge_ref`
+    /// already refuses one; `existing_id` must too.
+    #[test]
+    fn edge_add_drops_unknown_existing_id_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        insert_edge_proposal(
+            &conn,
+            "prop-ghost",
+            "ent-1",
+            "supersedes",
+            "ent-nowhere",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-ghost");
+
+        assert_eq!(result.dropped_edges, vec!["edge-1".to_string()]);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// `"self"` is not automatically live. A proposal raised while its entity
+    /// was healthy, then resolved after the entity was soft-deleted, resolves
+    /// `"self"` to a tombstone — and paired with the live `fact-dst` target
+    /// that is a half-live edge `purge_dead_edges` would never collect.
+    #[test]
+    fn edge_add_drops_self_endpoint_of_soft_deleted_entity() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        insert_edge_proposal(
+            &conn,
+            "prop-dead-self",
+            "ent-1",
+            "supersedes",
+            "fact-dst",
+            doc_id,
+            chunk_id,
+        );
+        // The entity dies between the proposal being raised and resolved. The
+        // target stays live, so nothing else would refuse this edge.
+        conn.execute(
+            "UPDATE curated_entities SET deleted_at = 1234 WHERE id = 'ent-1'",
+            [],
+        )
+        .unwrap();
+
+        let result = accept_edge(&mut conn, "prop-dead-self");
+
+        assert_eq!(
+            result.dropped_edges,
+            vec!["edge-1".to_string()],
+            "a dead `self` endpoint must be dropped and reported"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "no half-live edge may be written");
+    }
+
+    /// The third endpoint home needs the tombstone case too, not just the
+    /// live one. `edge_add_admits_live_task_endpoint` below keeps passing if
+    /// the `llm_wiki_tasks` branch of `endpoint_is_live` is dropped entirely
+    /// (a live task is still live via no branch at all only if the OR chain
+    /// still names it) — but nothing would catch a refactor that narrows the
+    /// chain to two tables and lets a *tombstoned* task mint the very edge
+    /// #189/#191 set out to refuse.
+    #[test]
+    fn edge_add_drops_tombstoned_task_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        conn.execute(
+            "INSERT INTO llm_wiki_tasks (
+                id, entity_id, description, status, priority,
+                created_at, updated_at, resolved_at, deleted_at
+             ) VALUES ('task-dead', 'ent-1', 'Ship it', 'pending', 0, 100, 100, NULL, 1234)",
+            [],
+        )
+        .unwrap();
+        insert_edge_proposal(
+            &conn,
+            "prop-task-dead",
+            "ent-1",
+            "blocks",
+            "task-dead",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-task-dead");
+
+        assert_eq!(result.dropped_edges, vec!["edge-1".to_string()]);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// The liveness check spans all three endpoint homes, so a live
+    /// `llm_wiki_tasks` endpoint must still write. Guards the fix against
+    /// over-restricting to `llm_wiki_entries` + `curated_entities`.
+    #[test]
+    fn edge_add_admits_live_task_endpoint() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_linkable_entity(&conn);
+        conn.execute(
+            "INSERT INTO llm_wiki_tasks (
+                id, entity_id, description, status, priority,
+                created_at, updated_at, resolved_at, deleted_at
+             ) VALUES ('task-live', 'ent-1', 'Ship it', 'pending', 0, 100, 100, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        insert_edge_proposal(
+            &conn,
+            "prop-task",
+            "ent-1",
+            "blocks",
+            "task-live",
+            doc_id,
+            chunk_id,
+        );
+
+        let result = accept_edge(&mut conn, "prop-task");
+
+        assert!(
+            result.dropped_edges.is_empty(),
+            "a live task endpoint must not be dropped"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE target_id = 'task-live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     /// A true self-edge is the degenerate case of the same-name pair and is

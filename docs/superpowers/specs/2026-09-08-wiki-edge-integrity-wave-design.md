@@ -7,7 +7,10 @@
 #191 (`llm_wiki_edges.created_at` mixes seconds and milliseconds),
 #190 (activate strict manifests on `ent_*` + entity-scoped MCP traversal).
 
-PR 1 (this design's §2) is implemented on branch `spec/issue189-edge-writer-correctness`. PR 2 (manifest activation + sweep arming, §3) and PR 3 (entity-scoped traversal, §4) are still open.
+PR 1 (this design's §2) is implemented and merged (`b0e4d78`). Its follow-up
+§2.9 (endpoint liveness at write time) is implemented on branch
+`spec/edge-endpoint-liveness`. PR 2 (manifest activation + sweep arming, §3)
+and PR 3 (entity-scoped traversal, §4) are still open.
 **Scope:** Curated Thoughts codebase only. No upstream (`core-llm-wiki` /
 `expo-llm-wiki`) changes.
 
@@ -38,22 +41,53 @@ this section before touching code.
 
 ### 1.1 Where edges are written
 
-`llm_wiki_edges` has many insert sites. The one the Active Librarian drives —
-and the only one implicated in #189 — is:
+`llm_wiki_edges` has many insert sites. There are exactly **two production
+writers**. The one the Active Librarian drives — and the only one implicated in
+issue #189 — is:
 
-- `commit_edge_add`, `src-tauri/src/db/commit.rs:1575`
+- `commit_edge_add`, in `src-tauri/src/db/commit.rs`
 
-The others, all of which PR 1 must audit for the `created_at` unit (§2.4) but
-none of which change behavior otherwise:
+The second is the OKF bundle import, reached from the `okf_import_apply_cmd`
+Tauri command:
 
-- `src-tauri/src/lib.rs:5035`, `:5041`, `:5233`
-- `src-tauri/src/wiki_graph.rs:758`
-- `src-tauri/src/db/connections.rs:249`, `:342`, `:375`
-- `src-tauri/src/db/bundle_io.rs:196`, `:259`
-- `src-tauri/src/db/commit.rs:2239`, `:3478`, `:3708` (test fixtures)
-- `src-tauri/src/db/wiki_forget.rs:107`
-- `src-tauri/src/db/edge_purge.rs:392`, `:444` (test fixtures)
-- `src-tauri/src/db/wisdom.rs:658`
+- the edge loop in `apply_import`, `src-tauri/src/db/bundle_apply.rs`
+
+`edge_purge`'s module docs already name both ("`commit_edge_add` and the bundle
+import path insert them without CDC").
+
+Every other `INSERT INTO llm_wiki_edges` in the tree is inside a
+`#[cfg(test)] mod tests` — all of which PR 1 must audit for the `created_at`
+unit (§2.4) but none of which change behavior otherwise:
+
+- `src-tauri/src/lib.rs` (3 fixtures)
+- `src-tauri/src/wiki_graph.rs` (1)
+- `src-tauri/src/db/connections.rs` (3)
+- `src-tauri/src/db/bundle_io.rs` (2)
+- `src-tauri/src/db/commit.rs` (3)
+- `src-tauri/src/db/wiki_forget.rs` (`seed_edge`)
+- `src-tauri/src/db/edge_purge.rs` (2)
+- `src-tauri/src/db/wisdom.rs` (3)
+- `src-tauri/src/db/bundle_apply.rs` (4)
+
+**This list is enforced.** `src-tauri/tests/edge_writer_gate.rs` scans the
+tree for `INSERT ... INTO llm_wiki_edges`, classifies each site as production
+or `#[cfg(test)]` fixture, and fails CI when the set changes — so a third
+writer can no longer be added without someone consciously updating a baseline
+and reading why the guard exists. Enforcing the contract was always a one-line
+change; *noticing* a new writer is what this closes. Both omissions this wave
+fixed were caught by human review, never by CI.
+
+**Cite symbols, not line numbers.** This list carried exact line numbers until
+the endpoint-liveness wave, and by the third commit of that wave half of them
+pointed at unrelated code — `commit.rs:1575` landed on a comment, `:2239` on a
+`source_ref` check, `wiki_graph.rs:758` on a doc line, `edge_purge.rs:392` on a
+`curated_entities` insert. A stale offset is worse than no offset, because it
+reads as precision. Re-derive this list with a grep rather than trusting
+remembered positions:
+
+```
+rg -n 'INSERT( OR IGNORE)? INTO llm_wiki_edges' src-tauri/src
+```
 
 The table's uniqueness constraint is
 `UNIQUE(entity_id, source_id, target_id, edge_type)`. Case-variant types are
@@ -309,6 +343,115 @@ a substitute for it — the migration is what makes the column single-unit.
 Against the live brain: no `llm_wiki_edges` row has
 `created_at < SEC_VS_MS_THRESHOLD`, and no row's `edge_type` differs from a
 manifest-declared spelling by case alone.
+
+### 2.9 Endpoint liveness at write time (PR 1 follow-up)
+
+Landed after PR 1 merged, from the §2.3 review note that `resolve_edge_ref`
+returns an `existing_id` verbatim.
+
+**The defect.** `resolve_edge_ref` (`commit.rs`) has three endpoint branches.
+`"self"` yields the proposal's own entity; `new_name` resolves by exact name
+with a `deleted_at IS NULL` filter and yields `None` when it misses; and
+`existing_id` returned the id **verbatim** — no existence check, no
+`deleted_at` check. So a proposal naming a hallucinated id, a tombstoned
+`curated_entities` row, or a soft-deleted `llm_wiki_entries` row minted a real
+edge against it.
+
+This is worse than a stray row, because `edge_purge` retains a **half-live**
+edge by design (module docs: "A half-live edge — one endpoint still alive — is
+deliberately retained, so the surviving side keeps its connection"). An edge
+written against a dead endpoint whose partner is alive is therefore never
+collected by any cascade. It dangles for as long as the live half survives.
+
+It also contradicts a stated contract. The okf-backend-migration design
+(`2026-07-05-okf-backend-migration-design.md`, §"Edge endpoint `REF`") says:
+"an unresolved ref auto-rejects that item with a recorded reason — **a
+dangling id is never written**."
+
+**The fix.** One shared definition of a live endpoint, in the module that
+already owns the question:
+
+- `edge_purge::endpoint_is_live(conn, id) -> Result<bool>` — the same
+  three-table contract as `SOURCE_ALIVE_SQL` / `TARGET_ALIVE_SQL`
+  (`llm_wiki_entries`, `curated_entities`, `llm_wiki_tasks`, each gated on
+  `deleted_at IS NULL`), asked of a bound id instead of an `llm_wiki_edges`
+  column. Keeping it in `edge_purge.rs` is the point: a writer that admitted
+  an endpoint the purger calls dead would mint edges no cascade ever collects.
+- `resolve_edge_ref`'s `existing_id` branch calls it and returns `None` when
+  the endpoint is dead, which drops the item into `ctx.dropped_edges` — the
+  same drop-don't-fail contract as §2.3 and the two pre-existing
+  unresolvable-endpoint branches — and logs the id, since a dead id is
+  otherwise indistinguishable from a live one in the proposal payload.
+
+- The `"self"` branch calls it too. `"self"` names the entity the commit is
+  writing to, but that entity is not automatically live: `ctx.entity_id` falls
+  back to `proposal.entity_id` (the id stored on the pending proposal row), and
+  nothing between a proposal being raised and being resolved keeps its entity
+  alive. A proposal that outlives a soft-delete of its own entity resolves
+  `"self"` to a tombstone, and paired with a live target that is precisely the
+  half-live edge no cascade collects. The same check also covers the empty
+  `entity_id` that `unwrap_or_default()` produces for a proposal carrying no
+  entity at all.
+
+**Scope.** There are **two** production writers of `llm_wiki_edges`, and both
+carry the guard. Every other insert site listed in §1.1 is a `#[cfg(test)]`
+fixture (re-audited against the §1.1 list: `lib.rs`, `wiki_graph.rs`,
+`connections.rs`, `bundle_io.rs`, `wisdom.rs`, `wiki_forget.rs`,
+`bundle_apply.rs` — every one inside a `#[cfg(test)] mod tests`).
+
+The second writer is the edge loop in `apply_import`
+(`src-tauri/src/db/bundle_apply.rs`, production code — every other edge insert
+in that file sits inside its `#[cfg(test)] mod tests`), reached from the
+`okf_import_apply_cmd` Tauri command. It
+inserts `mapped(source, &id_map)` / `mapped(target, &id_map)`, and `mapped`
+returns the id verbatim when it is not in the map, so the endpoint written is
+whatever the bundle named.
+
+The reachable failure needs **no malformed bundle**. `fact_exists` /
+`task_exists` test only
+`SELECT 1 ... WHERE id=?1` — no `deleted_at` gate — so a merge or replace whose
+bundle row is already present but **soft-deleted** in the destination counts it
+as existing and skips it, leaving the tombstone in place. An edge naming that
+id is then half-live, and the post-loop `purge_dead_edges` only collects an
+edge once *both* endpoints are dead, so the dangling edge survives for as long
+as its live partner does — exactly the class this section exists to refuse.
+
+The import path therefore calls the same `endpoint_is_live` before its INSERT
+and skips the edge with a `result.warnings` entry naming both ids (the same
+drop-don't-fail contract as the commit path). The check cannot drop a
+legitimate forward reference: `bundle_read` builds `concept_ids` per entity
+directory and discards unresolvable links at parse time, so both endpoints are
+always ids from the same entity, and that entity's facts and tasks are written
+by the two loops immediately above the edge loop.
+
+**Interaction with §2.3.** The liveness check now fires *before* the same-name
+guard, so on the commit path a tombstoned endpoint never reaches
+`curated_entity_names`. That helper still reads tombstones deliberately: a
+`deleted_at IS NULL` filter there would return `(None, None)` for a same-name
+pair of soft-deleted entities and skip the comparison on exactly the rows the
+guard exists to catch. It is defence in depth, and its doc comment says so.
+
+**Tests** (all in `db::commit::tests`):
+
+| Test | Asserts |
+| --- | --- |
+| `edge_add_drops_tombstoned_curated_endpoint` | tombstoned `curated_entities` endpoint, named differently from the source so §2.3 provably cannot be the gate that fires → no row, `item.id` in `dropped_edges` |
+| `edge_add_drops_soft_deleted_entry_endpoint` | soft-deleted `llm_wiki_entries` endpoint (no `curated_entities` row at all) → dropped and reported |
+| `edge_add_drops_unknown_existing_id_endpoint` | an id present in none of the three tables → dropped and reported |
+| `edge_add_admits_live_task_endpoint` | live `llm_wiki_tasks` endpoint still writes — guards the fix against narrowing to two tables |
+| `edge_add_drops_tombstoned_task_endpoint` | tombstoned `llm_wiki_tasks` endpoint → dropped; the live-task test alone cannot catch a narrowed OR chain |
+| `edge_add_drops_self_endpoint_of_soft_deleted_entity` | entity soft-deleted between proposal and resolve, target live → `"self"` drops rather than minting a half-live edge |
+
+Bundle-import tests (in `db::bundle_apply::tests`):
+
+| Test | Asserts |
+| --- | --- |
+| `merge_writes_edge_between_live_endpoints` | live-to-live intra-entity edge still writes — the guard does not over-restrict the import path |
+| `merge_refuses_edge_to_tombstoned_endpoint` | a merge over a soft-deleted destination row writes no half-live edge, and records an attributable warning |
+
+`same_name_guard_sees_tombstoned_endpoints` keeps passing and keeps its
+assertions; its docstring is rewritten, because two independent gates now
+produce that outcome and the test cannot distinguish them.
 
 ---
 
