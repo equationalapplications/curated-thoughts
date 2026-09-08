@@ -7,6 +7,24 @@
 /// variant was the bug caught in spec review for the V12 migration; both
 /// constants are pinned by U1/U2.
 pub const SEC_VS_MS_THRESHOLD: i64 = 1_000_000_000_000;
+
+/// Normalize a possibly-seconds epoch timestamp to milliseconds.
+///
+/// Values `>= SEC_VS_MS_THRESHOLD` are already ms and pass through unchanged;
+/// positive values below it are seconds and are scaled. Zero and negatives
+/// are sentinels ("no timestamp"), not times, and pass through.
+///
+/// Defense-in-depth for replicas and imported bundles that have not taken
+/// V19 (issue #191). V19 is what makes the column single-unit; this keeps a
+/// stale input from reading as 1970.
+pub fn normalize_epoch_ms(value: i64) -> i64 {
+    if value > 0 && value < SEC_VS_MS_THRESHOLD {
+        value * 1000
+    } else {
+        value
+    }
+}
+
 pub const MIGRATION_V1: &str = "
 PRAGMA foreign_keys = ON;
 

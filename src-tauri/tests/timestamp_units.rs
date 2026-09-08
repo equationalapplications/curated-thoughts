@@ -423,6 +423,29 @@ fn read_deleted_at(conn: &Connection, id: &str) -> Option<i64> {
     .unwrap()
 }
 
+/// Issue #191: a value below the threshold is seconds and scales; a value at
+/// or above it is already ms and passes through. Zero and negatives are
+/// sentinels, not timestamps, and pass through untouched.
+#[test]
+fn normalize_epoch_ms_scales_only_sub_threshold_positives() {
+    use tauri_app_lib::db::schema::normalize_epoch_ms;
+
+    assert_eq!(normalize_epoch_ms(1_757_000_000), 1_757_000_000_000);
+    assert_eq!(normalize_epoch_ms(1_757_000_000_000), 1_757_000_000_000);
+    assert_eq!(normalize_epoch_ms(0), 0);
+    assert_eq!(normalize_epoch_ms(-1), -1);
+}
+
+/// Normalizing an already-normalized value is a no-op — the same property
+/// V19 relies on.
+#[test]
+fn normalize_epoch_ms_is_idempotent() {
+    use tauri_app_lib::db::schema::normalize_epoch_ms;
+
+    let once = normalize_epoch_ms(1_757_000_000);
+    assert_eq!(normalize_epoch_ms(once), once);
+}
+
 fn read_all_deleted_at(conn: &Connection) -> std::collections::BTreeMap<String, Option<i64>> {
     let mut stmt = conn
         .prepare("SELECT id, deleted_at FROM llm_wiki_entries")
