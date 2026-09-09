@@ -330,20 +330,20 @@ fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &s
 /// A fact_add whose evidence anchored no surviving chunk was skipped, not
 /// written (Phase-2 default, spec §2.4).
 #[cfg(feature = "mcp-server")]
-fn warn_unanchored_fact_skipped(entity_id: &str, body: &str) {
+fn warn_unanchored_fact_skipped(proposal_id: &str, fact_title: &str) {
     tracing::warn!(
         target: "ct::commit",
-        entity_id = %entity_id,
-        body = %body,
+        proposal_id = %proposal_id,
+        fact_title = %fact_title,
         "fact_add skipped: evidence anchors no surviving chunk"
     );
 }
 
 #[cfg(not(feature = "mcp-server"))]
-fn warn_unanchored_fact_skipped(entity_id: &str, body: &str) {
+fn warn_unanchored_fact_skipped(proposal_id: &str, fact_title: &str) {
     eprintln!(
-        "[ct::commit WARN] fact_add skipped for entity {entity_id}: evidence anchors no \
-         surviving chunk (body: {body})"
+        "[ct::commit WARN] fact_add skipped for proposal {proposal_id}: evidence anchors no \
+         surviving chunk (fact: {fact_title})"
     );
 }
 
@@ -1312,8 +1312,11 @@ fn commit_fact_add(
     // surviving chunk is NOT written. The skip is logged (cfg-gated warn
     // helper) and counted so the resolution summary can surface the drop
     // rate. Fail-closed: an unreadable evidence payload counts as unanchored.
-    if !evidence_has_live_chunk(conn, &evidence_json)? {
-        warn_unanchored_fact_skipped(&ctx.entity_id, &body);
+    // Computed once here and reused for the evidence-row flag below (plan
+    // Task 1 Step 3: no duplicate evaluation).
+    let unanchored = !evidence_has_live_chunk(conn, &evidence_json)?;
+    if unanchored {
+        warn_unanchored_fact_skipped(&ctx.proposal_id, &title);
         ctx.skipped_unanchored += 1;
         return Ok(FactAddOutcome::SkippedUnanchored);
     }
@@ -1360,8 +1363,7 @@ fn commit_fact_add(
     // Phase 2 policy (spec §2.4): unanchored facts are skipped above, so a
     // written fact always has a live anchor and this flag is 0 for new rows.
     // The column stays populated (0) to keep the schema and the historic
-    // Phase-1 rows meaningful.
-    let unanchored = !evidence_has_live_chunk(conn, &evidence_json)?;
+    // Phase-1 rows meaningful. The binding is the gate's computation above.
     insert_librarian_evidence(
         conn,
         &fact_id,
