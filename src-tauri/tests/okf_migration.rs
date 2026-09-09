@@ -225,7 +225,10 @@ fn test_app_open_runs_v7_schema() {
     // Bumped from 18 to 19 by MIGRATION_V19, which repairs the mixed
     // seconds/milliseconds units in `llm_wiki_edges.created_at` (issue #191).
     // See docs/superpowers/specs/2026-09-08-wiki-edge-integrity-wave-design.md §2.5.
-    assert_eq!(max_version, 19);
+    // Bumped from 19 to 20 by the V20 gate, which runs the issue #186 §2.4
+    // evidence re-grade + export + purge of the live unanchored stock
+    // (body in `evidence_regrade.rs`; no SQL migration constant).
+    assert_eq!(max_version, 20);
 }
 
 /// Issue #191: rows written before the ms fix hold epoch seconds. V19
