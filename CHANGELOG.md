@@ -1,3 +1,19 @@
+## [2.7.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.6.2...v2.7.0) (2026-09-09)
+
+### Features
+
+* **mcp:** entityId optional + cross-partition mode docs + wiki_search steer fix ([#190](https://github.com/equationalapplications/curated-thoughts/issues/190)) ([6887914](https://github.com/equationalapplications/curated-thoughts/commit/6887914c2b8e2f307d115d8cbcee450b4dbe3441))
+* **wiki-graph:** cross-partition walker — ranking, cap 8, per-partition gating, node stamping, Both-mode fan-out ([c24a085](https://github.com/equationalapplications/curated-thoughts/commit/c24a0855c78b027ec5b1d295403992d55f11b2d5)), closes [#190](https://github.com/equationalapplications/curated-thoughts/issues/190)
+* **wiki-graph:** Option entity_id dispatch + scoped characterization + entry-space error contract ([#190](https://github.com/equationalapplications/curated-thoughts/issues/190)) ([cfb792f](https://github.com/equationalapplications/curated-thoughts/commit/cfb792ffbe0e699316436c5c470d75774ad92066))
+
+### Bug Fixes
+
+* **review:** CodeRabbit wave 1 — 4-field edge_keys (partition-distinct triples) + two-id wiki_search description ([#190](https://github.com/equationalapplications/curated-thoughts/issues/190)) ([9c347f0](https://github.com/equationalapplications/curated-thoughts/commit/9c347f090a83526886cc4897f730d27ded344922))
+* **review:** CodeRabbit wave 2 — pre-rank per-partition dedup + empty-manifest ungated alignment ([#190](https://github.com/equationalapplications/curated-thoughts/issues/190)) ([eb9c0d2](https://github.com/equationalapplications/curated-thoughts/commit/eb9c0d28809781aac77686d483d61f7f81d50e9b))
+* **review:** correct description escaping to rust convention (1 backslash + quote) ([4b3e43c](https://github.com/equationalapplications/curated-thoughts/commit/4b3e43c29be4b7db96cd0bd39d3475a200dff811))
+* **wiki-graph:** dedup self-loop edges in cross-partition Both mode ([#190](https://github.com/equationalapplications/curated-thoughts/issues/190) final review) ([7f263e9](https://github.com/equationalapplications/curated-thoughts/commit/7f263e99e52cc68b5ec775eb1a9aa65a1c43d89b))
+* **wiki-graph:** resolve cross-partition gate through the shared cascade ([#190](https://github.com/equationalapplications/curated-thoughts/issues/190)) ([0b588b3](https://github.com/equationalapplications/curated-thoughts/commit/0b588b354187e0df245d8be6d696c59a869d8009)), closes [#197](https://github.com/equationalapplications/curated-thoughts/issues/197) [#158](https://github.com/equationalapplications/curated-thoughts/issues/158)
+
 ## [2.6.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.6.1...v2.6.2) (2026-09-08)
 
 ### Bug Fixes
