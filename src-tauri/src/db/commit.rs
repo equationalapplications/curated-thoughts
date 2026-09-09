@@ -584,9 +584,8 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
                 warn_source_ref_missing_evidence(trimmed, "no librarian_evidence row");
                 true
             }
-            // Phase-1 carve-out: flagged rows survive until the Phase-2
-            // re-grade purges them deliberately, after export.
-            Some((_, 1)) => true,
+            // Phase-1 carve-out REMOVED (Phase-2, spec §2.3): flagged rows
+            // are grounded strictly by live-chunk evidence again.
             Some((json, _)) => match evidence_has_live_chunk(conn, &json) {
                 Ok(live) => live,
                 // Same defensive policy as every other DB-error branch in
@@ -2438,11 +2437,11 @@ mod tests {
         assert!(!evidence_has_live_chunk(&conn, empty).unwrap());
     }
 
-    fn seed_document(conn: &Connection, path: &str) -> i64 {
+    pub(super) fn seed_document(conn: &Connection, path: &str) -> i64 {
         upsert_document(conn, path, "hash").unwrap()
     }
 
-    fn seed_chunk(conn: &Connection, doc_id: i64) -> i64 {
+    pub(super) fn seed_chunk(conn: &Connection, doc_id: i64) -> i64 {
         let chunk = Chunk {
             text: "evidence".into(),
             start_line: 1,
@@ -5581,12 +5580,11 @@ mod source_ref_grounded_tests {
         ));
     }
 
-    /// Phase-1 carve-out: `unanchored` rows are treated as still-grounded.
-    /// Otherwise heal soft-deletes them and prune hard-deletes them 7 days
-    /// later, destroying the drop-rate data Phase 1 exists to measure. The
-    /// Phase-2 re-grade is the only path that purges them. Spec §2.3.
+    /// Phase-2 revert (spec §2.3): grounding for token rows is strictly
+    /// evidence-based. A flagged row whose evidence anchors no live chunk is
+    /// NOT grounded — heal soft-deletes it, prune finishes it.
     #[test]
-    fn phase1_unanchored_rows_are_treated_as_grounded() {
+    fn phase2_unanchored_rows_with_no_live_chunk_are_not_grounded() {
         let conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
@@ -5604,9 +5602,48 @@ mod source_ref_grounded_tests {
             1,
         )
         .unwrap();
-        assert!(source_ref_is_still_grounded(
+        assert!(!source_ref_is_still_grounded(
             &conn,
             &librarian_source_ref_token("fact_u")
+        ));
+    }
+
+    /// Flagged-but-actually-anchored rows ARE grounded (the re-grade clears
+    /// them, but heal must also be correct on the flagged value itself).
+    #[test]
+    fn phase2_flagged_but_anchored_rows_are_grounded() {
+        let conn = open_in_memory().unwrap();
+        // Seed a live chunk, an entry with a token ref, and a FLAGGED
+        // (unanchored=1) evidence row whose JSON carries that live chunk's
+        // content_hash — grounding must follow the evidence, not the flag.
+        let doc_id = super::tests::seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = super::tests::seed_chunk(&conn, doc_id);
+        let hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_a','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [librarian_source_ref_token("fact_a")],
+        )
+        .unwrap();
+        insert_librarian_evidence(
+            &conn,
+            "fact_a",
+            "prop_a",
+            &format!(r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"{hash}"}}],"proposal_id":"prop_a"}}"#),
+            true,
+            1,
+        )
+        .unwrap();
+        assert!(source_ref_is_still_grounded(
+            &conn,
+            &librarian_source_ref_token("fact_a")
         ));
     }
 }
