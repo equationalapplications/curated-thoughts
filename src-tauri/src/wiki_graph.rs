@@ -888,12 +888,18 @@ fn cross_partition_traverse(
     // exactly one owning entity_id, so per-assembly dedup suffices.
     let mut nodes: HashMap<String, WikiTraverseNode> = HashMap::new();
     let mut edges: Vec<WikiTraverseEdge> = Vec::new();
-    let mut edge_keys: HashSet<(String, String, String)> = HashSet::new();
+    let mut edge_keys: HashSet<(String, String, String, String)> = HashSet::new();
     let mut truncated = false;
     nodes.insert(seed.id.clone(), seed.clone());
     for (pid, pairs) in per_partition.into_iter() {
         for (edge, neighbor_id) in pairs {
+            // Four-field key = the table's own UNIQUE(entity_id, source,
+            // target, edge_type) contract (CodeRabbit): the same triple can
+            // exist as distinct rows in different partitions and must NOT
+            // collapse; only the within-partition duplicate direction fetches
+            // (self-loops in Both mode) dedup.
             if !edge_keys.insert((
+                edge.entity_id.clone(),
                 edge.source_id.clone(),
                 edge.target_id.clone(),
                 edge.edge_type.clone(),

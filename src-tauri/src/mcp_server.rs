@@ -53,7 +53,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "wiki_search",
-        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Returns entity-space (ent_*) ids for graph endpoints, each entry with its stored tier. Optional tier filter: \"fact\" or \"wisdom\"; omit for every live entry."
+        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Each result carries two ids: \\"id\\" is the llm_wiki_entries entry id (fact_*/wisdom_*), and \\"entity_id\\" is the curated-entity graph endpoint (ent_*) — graph tools (wiki_traverse_graph) need the entity_id, not the entry id. Each entry includes its stored tier. Optional tier filter: \\"fact\\" or \\"wisdom\\"; omit for every live entry."
     )]
     async fn wiki_search(
         &self,
