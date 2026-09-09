@@ -454,7 +454,7 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         },
     )?;
     println!(
-        "approved {pid}: items={} source={} committed={} conflicts={} dropped_edges={} status={}",
+        "approved {pid}: items={} source={} committed={} conflicts={} dropped_edges={} skipped_unanchored={} status={}",
         decisions.len(),
         detail
             .source_doc_paths
@@ -464,6 +464,7 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         result.committed.len(),
         result.conflicts.len(),
         result.dropped_edges.len(),
+        result.skipped_unanchored,
         result.proposal_status,
     );
     Ok(())
