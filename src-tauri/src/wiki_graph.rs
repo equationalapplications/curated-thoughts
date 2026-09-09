@@ -819,9 +819,7 @@ fn cross_partition_traverse(
                 // Skip-with-warn (spec Error handling): a partition whose
                 // manifest cannot be read is not safely gateable, and the
                 // walk must not fail wholesale over one bad row.
-                eprintln!(
-                    "wiki_traverse_graph: partition '{pid}' skipped: unreadable ontology: {reason}"
-                );
+                warn_partition_skipped(pid, &reason);
                 continue;
             }
             PartitionVocabulary::Gated(vocab) => Some(vocab),
@@ -936,6 +934,27 @@ enum PartitionVocabulary {
     /// `wiki_get_ontology` returned `Err` — the partition is skipped with a
     /// warning rather than aborting (or un-gating) the whole traversal.
     Unreadable(String),
+}
+
+/// Skip-warn for an unreadable partition manifest. Dual-path per the repo
+/// convention (see `warn_ontology_unreadable` in db/commit.rs): `tracing`
+/// under the `mcp-server` feature where a subscriber exists, `eprintln!` in
+/// the Tauri build, which has none. Message text is identical in both.
+#[cfg(feature = "mcp-server")]
+fn warn_partition_skipped(entity_id: &str, reason: &str) {
+    tracing::warn!(
+        target: "ct::wiki_graph",
+        entity_id = %entity_id,
+        reason = %reason,
+        "partition skipped: unreadable ontology"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_partition_skipped(entity_id: &str, reason: &str) {
+    eprintln!(
+        "wiki_traverse_graph: partition '{entity_id}' skipped: unreadable ontology: {reason}"
+    );
 }
 
 /// Resolve one partition's edge-type gate by calling `wiki_get_ontology`
