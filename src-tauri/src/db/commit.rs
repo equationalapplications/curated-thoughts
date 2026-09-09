@@ -196,6 +196,13 @@ impl EdgeVocabulary {
 /// * **The ontology could not be read.** A manifest that fails to load is a
 ///   degraded brain, not a licence to reject the librarian's whole output; PR
 ///   #78's graceful-degradation contract says the wiki keeps working. Logged.
+///
+///   Readers degrade the same way, deliberately (#190 review): the
+///   cross-partition walker once skipped an unresolvable partition instead,
+///   which made the writer fail OPEN while the reader failed CLOSED — a
+///   corrupt `tier_fact` would keep accepting edges while hiding the entire
+///   graph from traversal. One contract for both sides is what makes that
+///   class of divergence unrepresentable rather than merely absent (#158).
 /// * **Strict mode declares zero edge types.** A gate needs a vocabulary to be
 ///   a gate. Mode `strict` with an empty `edge_types` is far more likely a
 ///   half-finished seed than a deliberate "no edges permitted" policy, and
@@ -301,7 +308,7 @@ fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &s
         entity_id = %entity_id,
         fallback = ?lookup_ids,
         last_error = %last_error,
-        "ontology unreadable; edge types are not gated for this commit"
+        "ontology unreadable; edge types are not gated"
     );
 }
 
@@ -309,7 +316,7 @@ fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &s
 fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &str) {
     eprintln!(
         "[ct::commit WARN] ontology unreadable for entity {entity_id} (fallback {lookup_ids:?}, \
-         last error: {last_error}); edge types are not gated for this commit"
+         last error: {last_error}); edge types are not gated"
     );
 }
 

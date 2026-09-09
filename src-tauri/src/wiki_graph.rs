@@ -189,7 +189,7 @@ pub struct WikiTraverseResult {
     pub nodes: Vec<WikiTraverseNode>,
     pub edges: Vec<WikiTraverseEdge>,
     pub truncated: bool,
-    /// Cross-partition mode only: the `MAX_CROSS_PARTITIONS` cap was hit
+    /// Cross-partition mode only: the `MAX_CROSS_PARTITION_PARTITIONS` cap
     /// after ranking (spec I3/I6). Scoped mode always reports `false`; the
     /// existing `truncated` keeps its single meaning — the 50-node cap.
     pub partitions_truncated: bool,
@@ -379,23 +379,21 @@ fn load_live_entry(
 
 /// Resolve a live `curated_entities` row as a traversal node.
 ///
-/// `curated_entities` has no `entity_id` column, so the caller's `entity_id`
-/// (the edge partition being walked) is what the node reports. `name` is the
-/// table's title-equivalent.
+/// `curated_entities` has no `entity_id` column, so the node reports the
+/// partition the caller supplies. Scoped mode passes `Some(entity_id)` — the
+/// edge partition being walked. Cross-partition mode passes `None`, because
+/// it has not chosen a partition yet, and stamps the node itself once ranking
+/// decides which partition surfaced it. `name` is the table's
+/// title-equivalent.
 fn load_live_curated_entity(
     conn: &Connection,
-    entity_id: &str,
+    partition: Option<&str>,
     id: &str,
 ) -> Result<Option<WikiTraverseNode>> {
     // Test fixtures and older brains may carry only `llm_wiki_entries`. Treat
     // a missing table as "no row in this space" so entry-anchored databases
     // behave exactly as they did before heterogeneous traversal existed.
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'curated_entities'",
-        [],
-        |row| row.get(0),
-    )?;
-    if exists == 0 {
+    if !table_exists(conn, "curated_entities")? {
         return Ok(None);
     }
     let mut stmt =
@@ -407,7 +405,7 @@ fn load_live_curated_entity(
     Ok(Some(WikiTraverseNode {
         id: row.get(0)?,
         title: row.get(1)?,
-        entity_id: entity_id.to_string(),
+        entity_id: partition.unwrap_or_default().to_string(),
     }))
 }
 
@@ -422,7 +420,7 @@ fn load_live_node(
     if let Some(node) = load_live_entry(conn, entity_id, id)? {
         return Ok(Some((node, NodeSpace::Entry)));
     }
-    if let Some(node) = load_live_curated_entity(conn, entity_id, id)? {
+    if let Some(node) = load_live_curated_entity(conn, Some(entity_id), id)? {
         return Ok(Some((node, NodeSpace::Entity)));
     }
     Ok(None)
@@ -615,7 +613,10 @@ fn fetch_entity_neighbors(
          JOIN curated_entities t ON t.id = e.target_id AND t.deleted_at IS NULL
          WHERE e.entity_id = ?1 AND {anchor_col} = ?2{edge_filter}"
     );
-    let mut stmt = conn.prepare(&sql)?;
+    // Cached, not re-compiled: cross-partition mode calls this up to
+    // MAX_CROSS_PARTITION_PARTITIONS x 2 directions per traversal with only
+    // ?1 varying, and the cache keys on the SQL text those calls share.
+    let mut stmt = conn.prepare_cached(&sql)?;
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
         Box::new(entity_id.to_string()),
         Box::new(node_id.to_string()),
@@ -729,7 +730,9 @@ fn scoped_traverse(
                 // neighbor boundary either (spec section 3).
                 let resolved = match space {
                     NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
-                    NodeSpace::Entity => load_live_curated_entity(conn, entity_id, &neighbor_id)?,
+                    NodeSpace::Entity => {
+                        load_live_curated_entity(conn, Some(entity_id), &neighbor_id)?
+                    }
                 };
                 if let Some(node) = resolved {
                     visited.insert(neighbor_id.clone());
@@ -769,11 +772,10 @@ fn cross_partition_traverse(
     // Resolution-based entry-space rejection (spec I5): entity space first;
     // an entry-space hit (or total miss) is the wiki_context case. NO prefix
     // heuristic — production ids are `ent_<hash>` with an underscore.
-    let seed = match load_live_curated_entity_unscoped(conn, source_id)? {
+    let seed = match load_live_curated_entity(conn, None, source_id)? {
         Some(seed) => seed,
         None => {
-            let entry_hit = load_live_entry_unscoped(conn, source_id)?;
-            let hint = if entry_hit.is_some() {
+            let hint = if live_entry_exists(conn, source_id)? {
                 "resolves in entry space"
             } else {
                 "not found"
@@ -789,14 +791,17 @@ fn cross_partition_traverse(
     // partition qualifies by holding any live entity-space edge anchored at
     // the seed, inbound or outbound. Only anchors matter here; the actual
     // edge set is fetched per-direction next, so this never double-counts.
-    // (Duplicates are impossible: the two UNION branches disagree on which
-    // column equals the seed id.)
+    //
+    // `OR` over one scan rather than a two-branch UNION: a self-loop edge
+    // satisfies both anchors, so the branches are NOT disjoint and the dedup
+    // is `DISTINCT`'s doing either way — spelling it as one scan makes that
+    // the visible reason. `ORDER BY` states the ordering Step 3's
+    // VACUUM-stability note relies on instead of inheriting it from UNION's
+    // incidental sort.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT entity_id FROM llm_wiki_edges
-         WHERE source_id = ?1
-         UNION
-         SELECT DISTINCT entity_id FROM llm_wiki_edges
-         WHERE target_id = ?1",
+         WHERE source_id = ?1 OR target_id = ?1
+         ORDER BY entity_id",
     )?;
     let partition_ids: Vec<String> = stmt
         .query_map(rusqlite::params![source_id], |row| row.get(0))?
@@ -814,17 +819,23 @@ fn cross_partition_traverse(
     };
     let mut per_partition: Vec<(String, Vec<(WikiTraverseEdge, String)>)> = Vec::new();
     for pid in &partition_ids {
-        let vocab = match resolve_partition_vocabulary(conn, pid)? {
-            PartitionVocabulary::Unreadable(reason) => {
-                // Skip-with-warn (spec Error handling): a partition whose
-                // manifest cannot be read is not safely gateable, and the
-                // walk must not fail wholesale over one bad row.
-                warn_partition_skipped(pid, &reason);
-                continue;
-            }
-            PartitionVocabulary::Gated(vocab) => Some(vocab),
-            PartitionVocabulary::Ungated => None,
-        };
+        // The SHARED resolver, not a direct `wiki_get_ontology` call (spec
+        // line 73). `llm_wiki_edges.entity_id` holds whatever id the writer
+        // gated under — in production a curated `ent_<hash>`, which has no
+        // manifest row of its own — so resolving it needs the same
+        // curated-id -> `tier_fact` cascade the writer used. Looking the
+        // partition id up directly would miss on every production row and
+        // silently un-gate the whole read path, which is the #158 divergence
+        // this gate exists to close; spec section C makes the dependence
+        // explicit ("per-ent manifest rows are NOT added ... the tier
+        // fallback already arms" the gate).
+        //
+        // Identical call, identical meaning: an unresolvable ontology ungates
+        // here exactly as it does for the writer, and warns from inside the
+        // resolver. Nothing is skipped. Reading the same rows back through
+        // the same function the writer gated them with is what makes a
+        // read/write divergence unrepresentable rather than merely absent.
+        let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, pid);
         let mut pairs: Vec<(WikiTraverseEdge, String)> = Vec::new();
         // `fetch_entity_neighbors` anchors ONE column per call, so Both mode
         // fans out to two calls (mirrors `fetch_neighbors` in scoped mode).
@@ -924,7 +935,7 @@ fn cross_partition_traverse(
             }
             edges.push(edge);
             if !nodes.contains_key(&neighbor_id) {
-                if let Some(mut node) = load_live_curated_entity_unscoped(conn, &neighbor_id)? {
+                if let Some(mut node) = load_live_curated_entity(conn, None, &neighbor_id)? {
                     node.entity_id = pid.clone();
                     nodes.insert(neighbor_id.clone(), node);
                 }
@@ -934,8 +945,12 @@ fn cross_partition_traverse(
             break;
         }
     }
-    // Stamp the seed with the top-ranked surviving partition ("" when the
-    // walker kept no edges).
+    // Stamp the seed with the top-ranked surviving partition. Empty string
+    // when the walker kept no edges: the seed is a real curated entity that
+    // no partition surfaced, and there is no partition to name. Callers must
+    // read an empty `entity_id` as "no partition", NOT as "unknown node" —
+    // `nodes` carries the resolved seed either way. Pinned by
+    // `cross_partition_mode_accepts_curated_entity_seed`.
     let seed_stamp = edges
         .first()
         .map(|e| e.entity_id.clone())
@@ -955,114 +970,30 @@ fn cross_partition_traverse(
     })
 }
 
-/// One partition's edge-type gate, with the corrupt-manifest case kept
-/// distinct from "no manifest" (review C2 — collapsing them would silently
-/// un-gate a partition that cannot be read safely).
-enum PartitionVocabulary {
-    /// Strict mode with a parseable manifest: only these edge types pass.
-    Gated(crate::db::commit::EdgeVocabulary),
-    /// No manifest, `mode = off`, or any non-strict mode: every type passes.
-    Ungated,
-    /// `wiki_get_ontology` returned `Err` — the partition is skipped with a
-    /// warning rather than aborting (or un-gating) the whole traversal.
-    Unreadable(String),
-}
-
-/// Skip-warn for an unreadable partition manifest. Dual-path per the repo
-/// convention (see `warn_ontology_unreadable` in db/commit.rs): `tracing`
-/// under the `mcp-server` feature where a subscriber exists, `eprintln!` in
-/// the Tauri build, which has none. Message text is identical in both.
-#[cfg(feature = "mcp-server")]
-fn warn_partition_skipped(entity_id: &str, reason: &str) {
-    tracing::warn!(
-        target: "ct::wiki_graph",
-        entity_id = %entity_id,
-        reason = %reason,
-        "partition skipped: unreadable ontology"
-    );
-}
-
-#[cfg(not(feature = "mcp-server"))]
-fn warn_partition_skipped(entity_id: &str, reason: &str) {
-    eprintln!(
-        "wiki_traverse_graph: partition '{entity_id}' skipped: unreadable ontology: {reason}"
-    );
-}
-
-/// Resolve one partition's edge-type gate by calling `wiki_get_ontology`
-/// directly.
-fn resolve_partition_vocabulary(conn: &Connection, entity_id: &str) -> Result<PartitionVocabulary> {
-    let onto = match wiki_get_ontology(conn, entity_id) {
-        Ok(onto) => onto,
-        Err(e) => return Ok(PartitionVocabulary::Unreadable(format!("{e:#}"))),
-    };
-    if onto.mode != "strict" {
-        return Ok(PartitionVocabulary::Ungated);
-    }
-    match onto.manifest {
-        Some(manifest) => {
-            let vocab = crate::db::commit::EdgeVocabulary::from_manifest(&manifest);
-            // An empty strict manifest is deliberately UNGATED, matching
-            // `resolve_strict_edge_vocabulary` and the pinned writer test
-            // `strict_mode_with_no_declared_edge_types_does_not_gate`
-            // (CodeRabbit: cross-partition mode must not diverge from the
-            // scoped walker / writer on this state).
-            if vocab.is_empty() {
-                Ok(PartitionVocabulary::Ungated)
-            } else {
-                Ok(PartitionVocabulary::Gated(vocab))
-            }
-        }
-        None => Ok(PartitionVocabulary::Ungated),
-    }
-}
-
-/// Resolve a live `curated_entities` row regardless of partition. The scoped
-/// loaders key on the caller's `entity_id`; cross-partition mode by
-/// definition does not know one yet, so the seed resolves by id alone.
-fn load_live_curated_entity_unscoped(
-    conn: &Connection,
-    id: &str,
-) -> Result<Option<WikiTraverseNode>> {
-    // Same missing-table leniency as `load_live_curated_entity`: test
-    // fixtures and older brains may carry only `llm_wiki_entries`.
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'curated_entities'",
-        [],
+/// Does `table` exist in this database? Test fixtures and older brains may
+/// carry only a subset of the wiki tables, and a traversal over one of them
+/// must report "no row in this space" rather than a raw SQL error.
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        rusqlite::params![table],
         |row| row.get(0),
     )?;
-    if exists == 0 {
-        return Ok(None);
-    }
-    let mut stmt =
-        conn.prepare("SELECT id, name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL")?;
-    let mut rows = stmt.query(rusqlite::params![id])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    Ok(Some(WikiTraverseNode {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        entity_id: String::new(),
-    }))
+    Ok(count > 0)
 }
 
-/// Resolve a live `llm_wiki_entries` row regardless of partition. Only used
-/// to distinguish "entry-space seed" from "unknown id" in the rejection
-/// message; cross-partition mode never traverses entry space.
-fn load_live_entry_unscoped(conn: &Connection, id: &str) -> Result<Option<WikiTraverseNode>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title FROM llm_wiki_entries WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
-    )?;
-    let mut rows = stmt.query(rusqlite::params![id])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    Ok(Some(WikiTraverseNode {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        entity_id: String::new(),
-    }))
+/// Is there a live `llm_wiki_entries` row with this id, in any partition?
+///
+/// Only used to tell "entry-space seed" from "unknown id" in the
+/// cross-partition rejection message, so it answers a bool and reads no
+/// columns; cross-partition mode never traverses entry space.
+fn live_entry_exists(conn: &Connection, id: &str) -> Result<bool> {
+    if !table_exists(conn, "llm_wiki_entries")? {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM llm_wiki_entries WHERE id = ?1 AND deleted_at IS NULL LIMIT 1")?;
+    Ok(stmt.exists(rusqlite::params![id])?)
 }
 
 #[cfg(test)]
@@ -1413,6 +1344,9 @@ mod unit_tests {
             wiki_traverse_graph(&conn, None, "ent_live", 2, TraverseDirection::Both, &[]).unwrap();
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].id, "ent_live");
+        // A seed no partition surfaced reports an EMPTY partition, not a
+        // missing node — the distinction callers key on.
+        assert_eq!(result.nodes[0].entity_id, "");
         assert!(result.edges.is_empty());
         assert!(!result.truncated);
         assert!(!result.partitions_truncated);
@@ -1565,11 +1499,39 @@ mod unit_tests {
             .any(|e| e.entity_id == "ent_p1" && e.edge_type == "worksFor"));
     }
 
-    /// Corrupt manifest row: wiki_get_ontology returns Err — the partition is
-    /// skipped with a warn, the call never aborts (spec Error handling; the
-    /// resolver must distinguish Err from no-manifest — review C2).
+    /// The production shape, and the one the partition-id-keyed resolver got
+    /// wrong: manifests are seeded against `tier_fact`, NOT against the
+    /// `ent_<hash>` ids that `llm_wiki_edges.entity_id` actually holds
+    /// (`src/lib/wiki.ts`; spec section C). The cross-partition gate must
+    /// resolve through the same curated-id -> `tier_fact` cascade the writer
+    /// used, or every production partition reads back ungated (#158).
+    ///
+    /// Every other gating test here seeds the manifest AT the partition id,
+    /// where the first lookup hits and the fallback never runs — which is why
+    /// they all passed while production was ungated.
     #[test]
-    fn cross_partition_skips_partition_with_corrupt_manifest() {
+    fn cross_partition_gate_falls_back_to_tier_fact_manifest() {
+        let conn = open_in_memory().unwrap();
+        seed_curated(&conn, "nodeA", "Node A");
+        seed_curated(&conn, "nodeB", "Node B");
+        seed_curated(&conn, "nodeX", "Node X");
+        // The ONLY manifest in the brain, exactly as production seeds it.
+        seed_strict_ontology(&conn, "tier_fact", &["worksFor"]);
+        seed_edge(&conn, "ent_p1", "nodeA", "nodeB", "worksFor");
+        seed_edge(&conn, "ent_p1", "nodeA", "nodeX", "hates");
+        let result =
+            wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
+        let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
+        assert_eq!(types, vec!["worksFor"], "off-manifest edge was not gated");
+    }
+
+    /// A corrupt row at the partition id is NOT a resolution failure: the
+    /// cascade falls through to `tier_fact` and gates on it, matching the
+    /// writer, which resolves the identical two-id cascade for the same
+    /// entity. Skipping here would hide edges the writer accepted — the #158
+    /// divergence in the opposite direction.
+    #[test]
+    fn cross_partition_corrupt_partition_row_falls_back_to_tier_fact() {
         let conn = open_in_memory().unwrap();
         seed_curated(&conn, "nodeA", "Node A");
         seed_curated(&conn, "nodeB", "Node B");
@@ -1580,13 +1542,52 @@ mod unit_tests {
             [],
         )
         .unwrap();
+        seed_strict_ontology(&conn, "tier_fact", &["worksFor"]);
         seed_edge(&conn, "ent_bad", "nodeA", "nodeB", "worksFor");
-        seed_edge(&conn, "ent_good", "nodeA", "nodeC", "owns");
+        seed_edge(&conn, "ent_bad", "nodeA", "nodeC", "hates");
         let result =
             wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
-        let owners: Vec<&str> = result.edges.iter().map(|e| e.entity_id.as_str()).collect();
-        assert!(!owners.contains(&"ent_bad"));
-        assert!(owners.contains(&"ent_good"));
+        let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
+        assert_eq!(
+            types,
+            vec!["worksFor"],
+            "corrupt partition row should gate on the tier_fact fallback"
+        );
+    }
+
+    /// Vocabulary genuinely unresolvable — every id in the cascade fails to
+    /// read — UNGATES with a warn, mirroring the writer (#190 review).
+    ///
+    /// The walker used to skip such a partition. Because the fallback id is
+    /// shared, an unreadable `tier_fact` un-resolves every partition at once,
+    /// so skipping made the writer fail OPEN (still accepting edges) while
+    /// the reader failed CLOSED (hiding the entire graph) — a data black hole
+    /// on a brain that is merely degraded. Edges the writer accepted stay
+    /// visible; the warn is the operator's signal.
+    #[test]
+    fn cross_partition_ungates_when_the_cascade_is_unreadable() {
+        let conn = open_in_memory().unwrap();
+        seed_curated(&conn, "nodeA", "Node A");
+        seed_curated(&conn, "nodeB", "Node B");
+        seed_curated(&conn, "nodeC", "Node C");
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', 'not json', 0)",
+            [],
+        )
+        .unwrap();
+        seed_edge(&conn, "ent_p1", "nodeA", "nodeB", "worksFor");
+        seed_edge(&conn, "ent_p2", "nodeA", "nodeC", "hates");
+        let result =
+            wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
+        let mut types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
+        types.sort_unstable();
+        assert_eq!(
+            types,
+            vec!["hates", "worksFor"],
+            "a degraded brain must still read back the edges the writer accepted"
+        );
+        assert_eq!(result.nodes.len(), 3);
     }
 
     /// MAX_TRAVERSAL_NODES interaction: a hub with 60 distinct neighbors
@@ -1776,7 +1777,7 @@ impl CompositeWalk {
                     let resolved = match space {
                         NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
                         NodeSpace::Entity => {
-                            load_live_curated_entity(conn, entity_id, &neighbor_id)?
+                            load_live_curated_entity(conn, Some(entity_id), &neighbor_id)?
                         }
                     };
                     if let Some(node) = resolved {

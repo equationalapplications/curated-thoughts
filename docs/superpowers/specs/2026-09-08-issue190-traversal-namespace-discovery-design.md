@@ -74,8 +74,31 @@ strict vocabulary (`resolve_strict_edge_vocabulary(conn, partition)`) and
 filters that partition's edges through it before adding them to the result.
 A partition whose vocabulary rejects an edge type excludes that edge — read
 and write gates stay consistent (the #158 class of bug stays closed).
-Vocabulary resolution failures for a partition skip that partition with a
-warn, never abort the call.
+
+The shared resolver is load-bearing, not a convenience: `llm_wiki_edges.
+entity_id` holds the id the *writer* gated under, which in production is a
+curated `ent_<hash>` with no manifest row of its own (see section C). Only
+the resolver's curated-id -> `tier_fact` cascade arms the gate; looking the
+partition id up directly against `wiki_get_ontology` misses on every
+production row and silently un-gates the whole read path. Tests must seed the
+manifest at `tier_fact`, as production does — a test that seeds it at the
+partition id hits on the first lookup and exercises neither the fallback nor
+the bug.
+
+Vocabulary resolution failures UNGATE that partition with a warn, never
+abort the call and never skip it. This supersedes the original
+skip-with-warn rule (#190 review): skipping made the writer fail OPEN while
+the reader failed CLOSED. Because the fallback id is shared, an unreadable
+`tier_fact` un-resolves every partition at once, so a single corrupt row
+would have kept accepting edges while hiding the entire graph from traversal
+— a data black hole on a brain that is merely degraded, and precisely the
+read/write asymmetry #158 exists to prevent.
+
+The reader therefore calls `resolve_strict_edge_vocabulary` unchanged and
+takes its `None` at face value; the resolver owns the warning. There is
+deliberately no reader-side variant that distinguishes unreadable from
+ungated, because a second contract is what lets the two sides drift. Edges
+the writer accepted stay readable, and the warn is the operator's signal.
 
 **Deterministic partition ordering (I3):** partitions are ranked by matching
 edge count descending, then `entity_id` ascending — no SQLite row-order
