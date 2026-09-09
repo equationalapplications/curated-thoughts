@@ -43,3 +43,4 @@ dist/
 # src-tauri/target/flycheck0 regardless of the workspace layout.
 target/
 .aider*
+tools/tests/fixtures/
