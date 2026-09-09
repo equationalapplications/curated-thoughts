@@ -1,7 +1,7 @@
 # Cross-partition graph traversal + namespace discovery (issue #190)
 
 **Date:** 2026-09-08
-**Status:** Draft (rev 2 — GLM 5.3 frontier review folded: C1, I1–I5, M1–M3)
+**Status:** Implemented 2026-09-08 (PR #197) — engine + MCP surface; live post-install verification pending release
 **Branch:** spec/issue190-traversal-discovery
 **Priority:** P2
 
