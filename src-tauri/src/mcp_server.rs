@@ -53,7 +53,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "wiki_search",
-        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Returns entry ids for use with wiki_traverse_graph, each with its stored tier. Optional tier filter: \"fact\" or \"wisdom\"; omit for every live entry."
+        description = "Semantic search over llm_wiki_entries (Active Librarian facts). Each result carries two ids: \"id\" is the llm_wiki_entries entry id (fact_*/wisdom_*), and \"entity_id\" is the curated-entity graph endpoint (ent_*) — graph tools (wiki_traverse_graph) need the entity_id, not the entry id. Each entry includes its stored tier. Optional tier filter: \"fact\" or \"wisdom\"; omit for every live entry."
     )]
     async fn wiki_search(
         &self,
@@ -107,7 +107,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "wiki_traverse_graph",
-        description = "BFS traversal of llm_wiki_edges from a source entry id. Use wiki_search first to obtain sourceId."
+        description = "BFS traversal of llm_wiki_edges from a source node. entityId scopes the walk to one curated namespace; omit it to discover the node's edges across all namespaces. sourceId must be a curated-entity id (ent_*); entry/fact ids are not graph endpoints — use wiki_context for fact-anchored context."
     )]
     async fn wiki_traverse_graph(
         &self,

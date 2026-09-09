@@ -262,7 +262,7 @@ pub fn dispatch_wiki_get_ontology(
 
 pub fn dispatch_wiki_traverse_graph(
     conn: &Connection,
-    entity_id: &str,
+    entity_id: Option<&str>,
     source_id: &str,
     max_depth: Option<usize>,
     direction: Option<String>,
@@ -1093,8 +1093,10 @@ pub struct WikiGetOntologyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WikiTraverseGraphParams {
-    #[serde(rename = "entityId", alias = "entity_id")]
-    pub entity_id: String,
+    /// `None` (omitted) selects cross-partition discovery mode (#190);
+    /// `Some` scopes the walk to one curated namespace.
+    #[serde(default, rename = "entityId", alias = "entity_id")]
+    pub entity_id: Option<String>,
     #[serde(rename = "sourceId", alias = "source_id")]
     pub source_id: String,
     #[serde(default, rename = "maxDepth", alias = "max_depth")]
@@ -1248,7 +1250,7 @@ pub async fn dispatch_tool_call(
                 let conn_guard = lock_conn(&conn)?;
                 dispatch_wiki_traverse_graph(
                     &conn_guard,
-                    &p.entity_id,
+                    p.entity_id.as_deref(),
                     &p.source_id,
                     p.max_depth,
                     p.direction,
@@ -1554,7 +1556,7 @@ mod dispatch_tests {
         )
         .unwrap();
         let result =
-            dispatch_wiki_traverse_graph(&conn, "tier_fact", "a", None, None, None).unwrap();
+            dispatch_wiki_traverse_graph(&conn, Some("tier_fact"), "a", None, None, None).unwrap();
         assert_eq!(result.nodes.len(), 1);
         assert!(!result.truncated);
     }
@@ -1711,6 +1713,36 @@ mod dispatch_tool_call_tests {
             .await
             .unwrap();
         assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+    }
+
+    /// Spec §B (MCP surface): `entityId` is optional — omitting it selects
+    /// cross-partition discovery mode. The seed fixture only has entry-space
+    /// rows, so the omitted-entityId call must hit the cross-partition seed
+    /// resolver and return its entry-space rejection (naming wiki_context)
+    /// rather than a serde "missing field" error or a silent empty.
+    #[tokio::test]
+    async fn wiki_traverse_graph_entity_id_is_optional_cross_partition() {
+        let ctx = seeded_ctx();
+        let params = serde_json::json!({ "sourceId": "a" });
+        let err = dispatch_tool_call(&ctx, "wiki_traverse_graph", params)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("wiki_traverse_graph") && err.contains("wiki_context"),
+            "entry-space rejection from the cross-partition resolver, got: {err}"
+        );
+        // Explicit null and the snake_case aliases must deserialize to the
+        // same cross-partition mode.
+        let params = serde_json::json!({ "entity_id": null, "source_id": "a" });
+        let err = dispatch_tool_call(&ctx, "wiki_traverse_graph", params)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("wiki_context"),
+            "alias path identical, got: {err}"
+        );
     }
 
     /// `wiki_context` must be reachable through the shared dispatcher — the
