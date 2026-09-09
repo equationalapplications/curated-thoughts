@@ -185,6 +185,10 @@ pub struct WikiTraverseResult {
     pub nodes: Vec<WikiTraverseNode>,
     pub edges: Vec<WikiTraverseEdge>,
     pub truncated: bool,
+    /// Cross-partition mode only: the `MAX_CROSS_PARTITIONS` cap was hit
+    /// after ranking (spec I3/I6). Scoped mode always reports `false`; the
+    /// existing `truncated` keeps its single meaning — the 50-node cap.
+    pub partitions_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,6 +636,26 @@ fn fetch_entity_neighbors(
 
 pub fn wiki_traverse_graph(
     conn: &Connection,
+    entity_id: Option<&str>,
+    source_id: &str,
+    max_depth: usize,
+    direction: TraverseDirection,
+    edge_types: &[&str],
+) -> Result<WikiTraverseResult> {
+    match entity_id {
+        Some(entity_id) => {
+            scoped_traverse(conn, entity_id, source_id, max_depth, direction, edge_types)
+        }
+        None => cross_partition_traverse(conn, source_id, direction, edge_types),
+    }
+}
+
+/// Scoped traversal — the pre-#190 walker, verbatim. `Some(entity_id)` calls
+/// must stay byte-identical to the old single-mode behavior (spec I1
+/// characterization contract); every behavioral change lives on the `None`
+/// branch only.
+fn scoped_traverse(
+    conn: &Connection,
     entity_id: &str,
     source_id: &str,
     max_depth: usize,
@@ -644,6 +668,7 @@ pub fn wiki_traverse_graph(
             nodes: Vec::new(),
             edges: Vec::new(),
             truncated: false,
+            partitions_truncated: false,
         });
     };
 
@@ -721,7 +746,84 @@ pub fn wiki_traverse_graph(
         nodes: node_list,
         edges,
         truncated,
+        partitions_truncated: false,
     })
+}
+
+/// Cross-partition mode (spec Approach A) — walker lands in Task 2. Task 1
+/// ships only the mode dispatch plus the entry-space rejection contract so
+/// the error shape is pinned before walker semantics arrive.
+fn cross_partition_traverse(
+    conn: &Connection,
+    source_id: &str,
+    _direction: TraverseDirection,
+    _edge_types: &[&str],
+) -> Result<WikiTraverseResult> {
+    // Resolution-based entry-space rejection (spec I5): entity space first;
+    // an entry-space hit (or total miss) is the wiki_context case. NO prefix
+    // heuristic — production ids are `ent_<hash>` with an underscore.
+    let entity_hit = load_live_curated_entity_unscoped(conn, source_id)?;
+    if entity_hit.is_none() {
+        let entry_hit = load_live_entry_unscoped(conn, source_id)?;
+        let hint = if entry_hit.is_some() {
+            "resolves in entry space"
+        } else {
+            "not found"
+        };
+        return Err(anyhow::anyhow!(
+            "wiki_traverse_graph cross-partition mode requires a curated-entity id (ent_*); \
+             sourceId '{source_id}' {hint} — use wiki_context for fact-anchored context"
+        ));
+    }
+    todo!("Task 2: cross-partition walker")
+}
+
+/// Resolve a live `curated_entities` row regardless of partition. The scoped
+/// loaders key on the caller's `entity_id`; cross-partition mode by
+/// definition does not know one yet, so the seed resolves by id alone.
+fn load_live_curated_entity_unscoped(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<WikiTraverseNode>> {
+    // Same missing-table leniency as `load_live_curated_entity`: test
+    // fixtures and older brains may carry only `llm_wiki_entries`.
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'curated_entities'",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(None);
+    }
+    let mut stmt =
+        conn.prepare("SELECT id, name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL")?;
+    let mut rows = stmt.query(rusqlite::params![id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(WikiTraverseNode {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        entity_id: String::new(),
+    }))
+}
+
+/// Resolve a live `llm_wiki_entries` row regardless of partition. Only used
+/// to distinguish "entry-space seed" from "unknown id" in the rejection
+/// message; cross-partition mode never traverses entry space.
+fn load_live_entry_unscoped(conn: &Connection, id: &str) -> Result<Option<WikiTraverseNode>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title FROM llm_wiki_entries WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(WikiTraverseNode {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        entity_id: String::new(),
+    }))
 }
 
 #[cfg(test)]
@@ -793,6 +895,17 @@ mod unit_tests {
         .unwrap();
     }
 
+    /// Seed a live curated_entities row. Cross-partition mode resolves seeds
+    /// and neighbors against this table, so tests must populate it.
+    fn seed_curated(conn: &Connection, id: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, 'concept', '', NULL, 1757000000000, 1757000000000, NULL)",
+            params![id, name],
+        )
+        .unwrap();
+    }
+
     /// Characterization test — this behavior already exists and must not regress.
     /// A ghost edge (endpoint soft-deleted) must be invisible in BOTH directions.
     #[test]
@@ -822,9 +935,15 @@ mod unit_tests {
         // A wholly live edge, as the positive control.
         seed_edge(&conn, "ent-1", "fact_live", "fact_other", "related_to");
 
-        let result =
-            wiki_traverse_graph(&conn, "ent-1", "fact_live", 2, TraverseDirection::Both, &[])
-                .unwrap();
+        let result = wiki_traverse_graph(
+            &conn,
+            Some("ent-1"),
+            "fact_live",
+            2,
+            TraverseDirection::Both,
+            &[],
+        )
+        .unwrap();
 
         let edge_targets: Vec<&str> = result.edges.iter().map(|e| e.target_id.as_str()).collect();
         assert!(
@@ -871,7 +990,8 @@ mod unit_tests {
         );
 
         let result =
-            wiki_traverse_graph(&conn, "ent_demo", &a, 2, TraverseDirection::Both, &[]).unwrap();
+            wiki_traverse_graph(&conn, Some("ent_demo"), &a, 2, TraverseDirection::Both, &[])
+                .unwrap();
 
         let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
         assert!(
@@ -898,7 +1018,8 @@ mod unit_tests {
         seed_edge(&conn, "ent_open", &a, &b, "anything_goes_here");
 
         let result =
-            wiki_traverse_graph(&conn, "ent_open", &a, 2, TraverseDirection::Both, &[]).unwrap();
+            wiki_traverse_graph(&conn, Some("ent_open"), &a, 2, TraverseDirection::Both, &[])
+                .unwrap();
         let types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
         assert!(
             types.contains(&"anything_goes_here"),
@@ -995,6 +1116,60 @@ mod unit_tests {
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"manifest\":null"));
+    }
+
+    /// Spec I1: `Some(entity_id)` must be byte-identical to the pre-#190
+    /// scoped walker. Scoped traversal reports `partitions_truncated: false`
+    /// — the cross-partition cap does not exist in that mode.
+    #[test]
+    fn scoped_traverse_reports_partitions_truncated_false() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "ent-1", "a");
+        seed_entry(&conn, "ent-1", "b");
+        seed_edge(&conn, "ent-1", "a", "b", "related_to");
+
+        let result = wiki_traverse_graph(&conn, Some("ent-1"), "a", 2, TraverseDirection::Both, &[])
+            .unwrap();
+        assert_eq!(result.nodes.len(), 2);
+        assert_eq!(result.edges.len(), 1);
+        assert!(!result.truncated);
+        assert!(!result.partitions_truncated);
+    }
+
+    /// Spec I5: cross-partition mode (`None`) rejects entry-space seeds by
+    /// resolution, not by prefix. The error names the tool so a caller can
+    /// route to `wiki_context`; a total miss gets the "not found" hint.
+    #[test]
+    fn cross_partition_mode_rejects_entry_space_and_unknown_seeds() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "tier_fact", "fact_1");
+        seed_curated(&conn, "ent_live", "Live Entity");
+
+        // Entry-space seed: resolves in llm_wiki_entries.
+        let err = wiki_traverse_graph(&conn, None, "fact_1", 2, TraverseDirection::Both, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("wiki_traverse_graph"), "tool name in: {err}");
+        assert!(err.contains("fact_1"), "offending id in: {err}");
+        assert!(err.contains("wiki_context"), "redirect hint in: {err}");
+        assert!(err.contains("resolves in entry space"), "hint in: {err}");
+
+        // Unknown seed: resolves in neither space.
+        let err = wiki_traverse_graph(&conn, None, "missing", 2, TraverseDirection::Both, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "miss hint in: {err}");
+    }
+
+    /// Spec I5 positive control: a curated-entity seed passes the rejection
+    /// gate (and reaches the Task 2 walker boundary, which currently panics
+    /// with `todo!` — pinned here so Task 2 replacing it is observable).
+    #[test]
+    #[should_panic(expected = "Task 2: cross-partition walker")]
+    fn cross_partition_mode_accepts_curated_entity_seed() {
+        let conn = open_in_memory().unwrap();
+        seed_curated(&conn, "ent_live", "Live Entity");
+        let _ = wiki_traverse_graph(&conn, None, "ent_live", 2, TraverseDirection::Both, &[]);
     }
 }
 

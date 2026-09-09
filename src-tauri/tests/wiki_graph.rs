@@ -403,7 +403,7 @@ fn wiki_traverse_graph_multi_hop_bfs() {
     insert_edge(&conn, "e2", "tier_fact", "b", "c", "relates");
 
     let got =
-        wiki_traverse_graph(&conn, "tier_fact", "a", 2, TraverseDirection::Outbound, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("tier_fact"), "a", 2, TraverseDirection::Outbound, &[]).unwrap();
 
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert!(ids.contains("a") && ids.contains("b") && ids.contains("c"));
@@ -419,7 +419,7 @@ fn wiki_traverse_graph_direction_inbound_only() {
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
 
     let got =
-        wiki_traverse_graph(&conn, "tier_fact", "b", 1, TraverseDirection::Inbound, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("tier_fact"), "b", 1, TraverseDirection::Inbound, &[]).unwrap();
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, HashSet::from(["a", "b"]));
 }
@@ -435,7 +435,7 @@ fn wiki_traverse_graph_filters_edge_types() {
 
     let got = wiki_traverse_graph(
         &conn,
-        "tier_fact",
+        Some("tier_fact"),
         "a",
         1,
         TraverseDirection::Outbound,
@@ -454,7 +454,7 @@ fn wiki_traverse_graph_excludes_deleted_endpoint() {
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
 
     let got =
-        wiki_traverse_graph(&conn, "tier_fact", "a", 1, TraverseDirection::Outbound, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("tier_fact"), "a", 1, TraverseDirection::Outbound, &[]).unwrap();
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, HashSet::from(["a"]));
     assert!(got.edges.is_empty());
@@ -465,7 +465,7 @@ fn wiki_traverse_graph_unknown_source_returns_empty() {
     let conn = open_graph_db();
     let got = wiki_traverse_graph(
         &conn,
-        "tier_fact",
+        Some("tier_fact"),
         "missing",
         2,
         TraverseDirection::Both,
@@ -486,7 +486,7 @@ fn wiki_traverse_graph_truncates_at_max_nodes() {
     }
     let got = wiki_traverse_graph(
         &conn,
-        "tier_fact",
+        Some("tier_fact"),
         "hub",
         1,
         TraverseDirection::Outbound,
@@ -510,7 +510,7 @@ fn wiki_traverse_graph_excludes_cross_tier_endpoints() {
     insert_edge(&conn, "e1", "tier_fact", "a", "b", "relates");
 
     let got =
-        wiki_traverse_graph(&conn, "tier_fact", "a", 1, TraverseDirection::Outbound, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("tier_fact"), "a", 1, TraverseDirection::Outbound, &[]).unwrap();
     let ids: HashSet<_> = got.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, HashSet::from(["a"]));
     assert!(got.edges.is_empty());
@@ -553,7 +553,7 @@ fn wiki_traverse_graph_resolves_seed_from_curated_entities() {
     insert_curated_entity(&conn, "ce_1", "Ingest Watchdog", false);
 
     let result =
-        wiki_traverse_graph(&conn, "ent_448a", "ce_1", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("ent_448a"), "ce_1", 2, TraverseDirection::Both, &[]).unwrap();
 
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.nodes[0].id, "ce_1");
@@ -575,7 +575,7 @@ fn wiki_traverse_graph_ignores_soft_deleted_curated_entity_seed() {
 
     let result = wiki_traverse_graph(
         &conn,
-        "ent_448a",
+        Some("ent_448a"),
         "ce_dead",
         2,
         TraverseDirection::Both,
@@ -598,7 +598,7 @@ fn wiki_traverse_graph_prefers_the_entry_table_when_an_id_exists_in_both() {
     insert_curated_entity(&conn, "dup", "Entity Name", false);
 
     let result =
-        wiki_traverse_graph(&conn, "tier_fact", "dup", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("tier_fact"), "dup", 2, TraverseDirection::Both, &[]).unwrap();
 
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.nodes[0].title, "Entry Title");
@@ -615,7 +615,7 @@ fn wiki_traverse_graph_walks_entity_anchored_edges() {
     insert_edge(&conn, "edge_bc", "ent_448a", "ce_b", "ce_c", "related_to");
 
     let result =
-        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("ent_448a"), "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
 
     let ids: HashSet<&str> = result.nodes.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(
@@ -642,7 +642,7 @@ fn wiki_traverse_graph_excludes_soft_deleted_entity_endpoint() {
     );
 
     let result =
-        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("ent_448a"), "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
 
     assert_eq!(result.nodes.len(), 1, "only the seed survives");
     assert!(
@@ -667,7 +667,7 @@ fn wiki_traverse_graph_entity_space_respects_edge_partition() {
     );
 
     let result =
-        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("ent_448a"), "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
 
     assert_eq!(result.nodes.len(), 1);
     assert!(result.edges.is_empty());
@@ -684,7 +684,7 @@ fn wiki_traverse_graph_entity_space_filters_edge_types() {
 
     let result = wiki_traverse_graph(
         &conn,
-        "ent_448a",
+        Some("ent_448a"),
         "ce_a",
         2,
         TraverseDirection::Both,
@@ -706,7 +706,7 @@ fn wiki_traverse_graph_entity_space_direction_inbound_only() {
 
     let result = wiki_traverse_graph(
         &conn,
-        "ent_448a",
+        Some("ent_448a"),
         "ce_a",
         1,
         TraverseDirection::Inbound,
@@ -737,7 +737,7 @@ fn wiki_traverse_graph_entity_space_truncates_at_max_nodes() {
     }
 
     let result =
-        wiki_traverse_graph(&conn, "ent_448a", "hub", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("ent_448a"), "hub", 2, TraverseDirection::Both, &[]).unwrap();
 
     assert!(result.nodes.len() <= MAX_TRAVERSAL_NODES);
     assert!(
@@ -758,7 +758,7 @@ fn wiki_traverse_graph_entity_space_neighbor_keeps_entity_identity_on_id_collisi
     insert_edge(&conn, "edge_ad", "ent_448a", "ce_a", "dup", "related_to");
 
     let result =
-        wiki_traverse_graph(&conn, "ent_448a", "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("ent_448a"), "ce_a", 2, TraverseDirection::Both, &[]).unwrap();
 
     let dup = result
         .nodes
@@ -782,7 +782,7 @@ fn wiki_traverse_graph_entry_space_neighbor_unaffected_by_id_collision() {
     insert_edge(&conn, "edge_ad", "tier_fact", "e_a", "dup", "related_to");
 
     let result =
-        wiki_traverse_graph(&conn, "tier_fact", "e_a", 2, TraverseDirection::Both, &[]).unwrap();
+        wiki_traverse_graph(&conn, Some("tier_fact"), "e_a", 2, TraverseDirection::Both, &[]).unwrap();
 
     let dup = result
         .nodes

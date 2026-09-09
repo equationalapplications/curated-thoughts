@@ -276,7 +276,7 @@ pub fn dispatch_wiki_traverse_graph(
     let edge_type_refs: Vec<&str> = edge_types.iter().map(|s| s.as_str()).collect();
     wiki_graph::wiki_traverse_graph(
         conn,
-        entity_id,
+        Some(entity_id),
         source_id,
         max_depth,
         direction,

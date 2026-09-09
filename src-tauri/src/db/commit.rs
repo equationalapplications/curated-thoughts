@@ -4226,7 +4226,7 @@ mod tests {
         // first-class neighbour.
         let walked = crate::wiki_graph::wiki_traverse_graph(
             &conn,
-            "ent-1",
+            Some("ent-1"),
             "fact-src",
             2,
             crate::wiki_graph::TraverseDirection::Both,
