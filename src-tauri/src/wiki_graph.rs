@@ -880,12 +880,26 @@ fn cross_partition_traverse(
     // exactly; a self-loop edge simply re-uses the seed's entry instead of
     // clobbering a neighbor's stamp. Neighbor nodes are stamped with the
     // FIRST ranked partition that surfaced them.
+    //
+    // Edge dedup mirrors the scoped walker's `edge_keys`: a self-loop on the
+    // seed matches BOTH direction fetches in Both mode and would otherwise
+    // appear twice (and double-count in Step 3's rank). Keyed on the physical
+    // edge identity (source, target, edge_type); the same physical edge has
+    // exactly one owning entity_id, so per-assembly dedup suffices.
     let mut nodes: HashMap<String, WikiTraverseNode> = HashMap::new();
     let mut edges: Vec<WikiTraverseEdge> = Vec::new();
+    let mut edge_keys: HashSet<(String, String, String)> = HashSet::new();
     let mut truncated = false;
     nodes.insert(seed.id.clone(), seed.clone());
     for (pid, pairs) in per_partition.into_iter() {
         for (edge, neighbor_id) in pairs {
+            if !edge_keys.insert((
+                edge.source_id.clone(),
+                edge.target_id.clone(),
+                edge.edge_type.clone(),
+            )) {
+                continue;
+            }
             if !nodes.contains_key(&neighbor_id) && nodes.len() >= MAX_TRAVERSAL_NODES {
                 truncated = true;
                 break;
@@ -1431,6 +1445,27 @@ mod unit_tests {
         types.sort_unstable();
         assert_eq!(types, vec!["owns", "worksFor"]);
         assert!(!result.nodes.iter().any(|n| n.id == "nodeC"));
+    }
+
+    /// Final-review blocking fix: a self-loop edge on the seed matches BOTH
+    /// direction fetches in Both mode and must appear exactly once (the
+    /// Step 4 `edge_keys` dedup mirrors the scoped walker).
+    #[test]
+    fn cross_partition_dedups_self_loop_in_both_mode() {
+        let conn = open_in_memory().unwrap();
+        seed_curated(&conn, "nodeA", "Node A");
+        seed_curated(&conn, "nodeB", "Node B");
+        seed_edge(&conn, "ent_p1", "nodeA", "nodeA", "knows"); // self-loop
+        seed_edge(&conn, "ent_p1", "nodeA", "nodeB", "worksFor");
+        let result =
+            wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
+        let knows: Vec<&WikiTraverseEdge> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == "knows")
+            .collect();
+        assert_eq!(knows.len(), 1, "self-loop must appear exactly once");
+        assert_eq!(result.edges.len(), 2);
     }
 
     /// Ranking + cap: partitions ranked by matching-edge count desc then
