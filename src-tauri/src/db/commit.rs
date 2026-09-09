@@ -181,7 +181,7 @@ impl EdgeVocabulary {
         v
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.by_key.is_empty()
     }
 }

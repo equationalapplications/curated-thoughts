@@ -861,6 +861,18 @@ fn cross_partition_traverse(
         if let Some(vocab) = vocab.as_ref() {
             pairs.retain(|(edge, _)| vocab.contains(&edge.edge_type));
         }
+        // Dedup within the partition BEFORE ranking (CodeRabbit): in Both
+        // mode a self-loop enters `pairs` via both direction fetches and
+        // would double-count in `pairs.len()` at the rank sort, letting a
+        // self-loop-heavy partition outrank one with more distinct edges.
+        let mut seen: HashSet<(String, String, String)> = HashSet::new();
+        pairs.retain(|(edge, _)| {
+            seen.insert((
+                edge.source_id.clone(),
+                edge.target_id.clone(),
+                edge.edge_type.clone(),
+            ))
+        });
         per_partition.push((pid.clone(), pairs));
     }
 
@@ -988,9 +1000,19 @@ fn resolve_partition_vocabulary(conn: &Connection, entity_id: &str) -> Result<Pa
         return Ok(PartitionVocabulary::Ungated);
     }
     match onto.manifest {
-        Some(manifest) => Ok(PartitionVocabulary::Gated(
-            crate::db::commit::EdgeVocabulary::from_manifest(&manifest),
-        )),
+        Some(manifest) => {
+            let vocab = crate::db::commit::EdgeVocabulary::from_manifest(&manifest);
+            // An empty strict manifest is deliberately UNGATED, matching
+            // `resolve_strict_edge_vocabulary` and the pinned writer test
+            // `strict_mode_with_no_declared_edge_types_does_not_gate`
+            // (CodeRabbit: cross-partition mode must not diverge from the
+            // scoped walker / writer on this state).
+            if vocab.is_empty() {
+                Ok(PartitionVocabulary::Ungated)
+            } else {
+                Ok(PartitionVocabulary::Gated(vocab))
+            }
+        }
         None => Ok(PartitionVocabulary::Ungated),
     }
 }
