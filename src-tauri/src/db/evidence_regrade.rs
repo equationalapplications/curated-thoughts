@@ -70,7 +70,7 @@ pub struct DoomedRow {
 /// extra evidence fields, so it is a dedicated exporter rather than a
 /// force-fit of the V18 one.
 pub fn export_doomed_rows(
-    conn: &Connection,
+    _conn: &Connection,
     doomed: &[DoomedRow],
     dir: &Path,
 ) -> Result<usize> {

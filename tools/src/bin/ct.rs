@@ -56,6 +56,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WikiCmd,
     },
+    /// Librarian evidence operations (#186 provenance).
+    Evidence {
+        #[command(subcommand)]
+        cmd: EvidenceCmd,
+    },
     /// Curated proposal operations (read-only).
     Proposals {
         #[command(subcommand)]
@@ -201,6 +206,17 @@ enum ProposalsCmd {
 }
 
 #[derive(Subcommand)]
+enum EvidenceCmd {
+    /// Re-run the V20 unanchored-evidence re-grade (export + purge).
+    /// Idempotent; the same lib fn the V20 migration gate calls.
+    Regrade {
+        /// Confirm the destructive write (export + purge).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum LibrarianCmd {
     /// Run the Active Librarian over indexed documents (write; requires --yes).
     Run {
@@ -262,6 +278,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                 yes,
             } => cli_common::wiki_forget_cmd(refs, like, dry_run, yes),
             WikiCmd::Sweep { yes } => cli_common::wiki_sweep_cmd(yes),
+        },
+        Cmd::Evidence { cmd } => match cmd {
+            EvidenceCmd::Regrade { yes } => cli_common::evidence_regrade_cmd(yes),
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
