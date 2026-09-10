@@ -1160,7 +1160,6 @@ pub struct VaultUpsertIndexEntryParams {
     pub metadata: Option<Value>,
 }
 
-
 /// hvg Task 4: list proposals by status (default pending — the review
 /// queue). Read path on the RO connection; audit via the RW wrapper.
 pub async fn dispatch_curated_proposals_list(
@@ -1245,7 +1244,10 @@ pub async fn dispatch_curated_proposal_decide(
             }))
         }
         "reject" => {
-            let note = p.note.clone().unwrap_or_else(|| "Rejected during review".to_string());
+            let note = p
+                .note
+                .clone()
+                .unwrap_or_else(|| "Rejected during review".to_string());
             let reject_reason = note.clone();
             let proposal_id = p.proposal_id.clone();
             let outcome = ctx
@@ -1273,10 +1275,7 @@ pub async fn dispatch_curated_proposal_decide(
                 "reject_reason": reject_reason,
             }))
         }
-        other => anyhow::bail!(
-            "invalid decision {:?} — expected approve or reject",
-            other
-        ),
+        other => anyhow::bail!("invalid decision {:?} — expected approve or reject", other),
     }
 }
 
@@ -2408,7 +2407,6 @@ mod curated_memory_tests {
     }
 }
 
-
 #[cfg(test)]
 mod curated_proposals_tests {
     //! hvg Task 4: MCP surface tests for curated_proposals_list +
@@ -2500,11 +2498,8 @@ mod curated_proposals_tests {
             seed_pending(&guard, "prop-list-2");
             // An approved proposal must NOT appear under the default filter.
             seed_pending(&guard, "prop-list-3");
-            let approved = crate::db::proposals_review::review_approve(
-                &mut guard,
-                "prop-list-3",
-                "tessera",
-            );
+            let approved =
+                crate::db::proposals_review::review_approve(&mut guard, "prop-list-3", "tessera");
             assert!(approved.is_ok());
         }
         let v = dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
