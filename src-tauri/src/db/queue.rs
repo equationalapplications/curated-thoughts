@@ -11,6 +11,15 @@
 //!
 //! For Delete events: skip step 4 (file is gone); DELETE the documents row.
 //! chunks cascade-delete via FK ON DELETE CASCADE.
+//!
+//! Path stored in `documents.path` is the VIRTUAL form (`abs`, pre-
+//! canonicalize) — issue #204 unifies the column on the virtual form so the
+//! watcher's row matches the walker's (reconcile.rs:74-77 documents the
+//! column as virtual). The canonical form is still computed for the
+//! containment check (symlink targets can canonicalize outside the vault)
+//! and for `std::fs::read` (the bytes live at the canonical location).
+//! Pre-#204, the watcher stored canonical, which diverged from the walker
+//! under approved `documents/` trusted links and created phantom rows.
 
 use std::path::{Path, PathBuf};
 
@@ -57,9 +66,8 @@ pub fn enqueue_vault_event(
         // canonicalize) to a path outside the canonical vault root, so the
         // canonical-only containment check would drop the event before the
         // gate ever runs. Accepting the VIRTUAL path when it lies under the
-        // as-configured root lets trusted-link files stage (their canonical
-        // form is the staged row per spec D2a). Truly external paths still
-        // fail both checks.
+        // as-configured root lets trusted-link files stage. Truly external
+        // paths still fail both checks.
         let abs_in_vault = configured_root
             .as_deref()
             .is_some_and(|vroot| abs.starts_with(vroot));
@@ -72,7 +80,15 @@ pub fn enqueue_vault_event(
         }
     }
 
-    let path_str = canonical.to_string_lossy().into_owned();
+    // Issue #204: store the VIRTUAL path (`abs`), matching what the walker
+    // writes (tools/src/cmds.rs:217) and what reconcile.rs:74-77 documents
+    // as the column's contract. Pre-fix, this wrote `canonical`, which
+    // diverged from the walker under approved `documents/` trusted links
+    // (e.g. a Modify under `documents/specs` → `<external>/target/` staged
+    // a row keyed by the external canonical path and every reconcile pass
+    // then saw that row as vanished). `canonical` is still computed above
+    // for the containment check (above) and for `std::fs::read` below.
+    let path_str = abs.to_string_lossy().into_owned();
 
     // Deletes must run BEFORE the exclusion check: a `documents` row staged
     // by pre-filter code (or another tool) must still be deletable when the
@@ -261,9 +277,12 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT status, hash, tier FROM documents WHERE path = ?1")
             .unwrap();
-        let canonical = std::fs::canonicalize(&file_path).unwrap();
+        // Issue #204: the watcher stores the VIRTUAL path (`abs`), matching
+        // what the walker writes. Pre-fix this looked up by the CANONICAL
+        // path and silently missed the row.
+        let abs = std::path::absolute(&file_path).unwrap();
         let mut rows = stmt
-            .query(rusqlite::params![canonical.to_string_lossy()])
+            .query(rusqlite::params![abs.to_string_lossy()])
             .unwrap();
         let row = rows.next().unwrap().unwrap();
         let status: String = row.get(0).unwrap();
@@ -272,9 +291,56 @@ mod tests {
         assert_eq!(status, "pending");
         assert_eq!(hash, super::sha256_hex(b"hello world"));
         assert_eq!(tier, "user_doc");
-        // Touch the vault so the TempDir isn't optimized away (it owns the
-        // canonicalized path's parent).
         let _ = vault.path();
+    }
+
+    /// Issue #204: the watcher's row for a Modify event under a trusted
+    /// link in `documents/` MUST be keyed by the VIRTUAL path (the path
+    /// notify saw), not the canonical path the symlink resolves to. Pre-fix
+    /// the watcher wrote the external canonical path; every subsequent
+    /// `reconcile_vault` pass then saw the row as vanished and deleted it
+    /// (or, when the walker had already written a virtual-path row, the
+    /// two paths never collapsed via the UNIQUE(path) constraint and the
+    /// watcher created a divergent phantom row alongside the walker's
+    /// authoritative one).
+    #[cfg(unix)]
+    #[test]
+    fn enqueue_modify_under_trusted_link_stages_virtual_path_not_canonical() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("documents")).unwrap();
+        let target = tmp.path().join("ext");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("x.md"), b"content").unwrap();
+        // Trusted link: <vault>/documents/specs → <target>
+        std::os::unix::fs::symlink(&target, root.join("documents").join("specs")).unwrap();
+
+        let mut conn = open_seeded_conn();
+        // raw_path is what notify delivers — the VIRTUAL form notify saw,
+        // which is also the path the walker would store under.
+        let virtual_path = root.join("documents").join("specs").join("x.md");
+        enqueue_vault_event(&mut conn, modify(), &virtual_path, Some(&root)).unwrap();
+
+        let staged = staged_paths(&conn);
+        assert_eq!(staged.len(), 1, "exactly one row must be staged");
+        // The stored path MUST be the virtual form, not the canonical
+        // (external) target. Pre-fix this asserted canonical and broke
+        // reconcile for any vault with an approved `documents/` trusted
+        // link.
+        assert_eq!(
+            staged[0],
+            virtual_path.to_string_lossy(),
+            "watcher must stage the virtual path, not the canonical symlink \
+             target — pre-fix divergence from the walker (issue #204)"
+        );
+        // The canonical form (external target) must NOT appear in the
+        // documents table — that was the phantom row D2a called out.
+        let canonical_external = std::fs::canonicalize(target.join("x.md")).unwrap();
+        assert_ne!(
+            staged[0],
+            canonical_external.to_string_lossy(),
+            "the external canonical path must not be the staged form"
+        );
     }
 
     #[test]
@@ -284,8 +350,13 @@ mod tests {
         let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         // Pre-seed: indexed doc with stale hash + synth watermark.
+        // Issue #204: pre-seed under the VIRTUAL path (abs), matching what
+        // the watcher stores post-fix. The bytes-on-disk write still uses
+        // the canonical path below — write goes to the filesystem, the row
+        // stores the path, and the two are independent.
+        let abs = std::path::absolute(&file_path).unwrap();
         let canonical = std::fs::canonicalize(&file_path).unwrap();
-        let path_str = canonical.to_string_lossy().into_owned();
+        let path_str = abs.to_string_lossy().into_owned();
         upsert_document(&conn, &path_str, "stale-hash").unwrap();
         conn.execute(
             "UPDATE documents SET status = 'indexed', synth_hash = 'stale-hash', synth_model = 'm' WHERE path = ?1",
@@ -324,8 +395,8 @@ mod tests {
         let mut conn = open_seeded_conn();
         let _env = VAULT_ENV_LOCK.lock().unwrap();
 
-        let canonical = std::fs::canonicalize(&file_path).unwrap();
-        let path_str = canonical.to_string_lossy().into_owned();
+        let abs = std::path::absolute(&file_path).unwrap();
+        let path_str = abs.to_string_lossy().into_owned();
         let stable_hash = super::sha256_hex(b"stable");
         upsert_document(&conn, &path_str, &stable_hash).unwrap();
         conn.execute(
@@ -364,8 +435,8 @@ mod tests {
         let mut conn = open_seeded_conn();
         let _env = VAULT_ENV_LOCK.lock().unwrap();
 
-        let canonical = std::fs::canonicalize(&file_path).unwrap();
-        let path_str = canonical.to_string_lossy().into_owned();
+        let abs = std::path::absolute(&file_path).unwrap();
+        let path_str = abs.to_string_lossy().into_owned();
         upsert_document(&conn, &path_str, "h").unwrap();
         let count_before: i64 = conn
             .query_row(
@@ -403,8 +474,8 @@ mod tests {
         let mut conn = open_seeded_conn();
         let _env = VAULT_ENV_LOCK.lock().unwrap();
 
-        let canonical = std::fs::canonicalize(&file_path).unwrap();
-        let _path_str = canonical.to_string_lossy().into_owned();
+        let abs = std::path::absolute(&file_path).unwrap();
+        let _path_str = abs.to_string_lossy().into_owned();
         let before: i64 = conn
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
             .unwrap();
@@ -449,8 +520,8 @@ mod tests {
             .unwrap();
         });
 
-        let canonical = std::fs::canonicalize(&outer_file).unwrap();
-        let path_str = canonical.to_string_lossy().into_owned();
+        let abs = std::path::absolute(&outer_file).unwrap();
+        let path_str = abs.to_string_lossy().into_owned();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM documents WHERE path = ?1",
@@ -483,8 +554,8 @@ mod tests {
             .unwrap();
         });
 
-        let canonical = std::fs::canonicalize(&note).unwrap();
-        let path_str = canonical.to_string_lossy().into_owned();
+        let abs = std::path::absolute(&note).unwrap();
+        let path_str = abs.to_string_lossy().into_owned();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM documents WHERE path = ?1",
@@ -779,11 +850,23 @@ mod tests {
             1,
             "trusted link into .brain was gated: {staged:?}"
         );
-        // Spec D2a: the watcher stores the CANONICAL path. Unifying
-        // documents.path on the virtual path is out of scope; this assert
-        // keeps the divergence visible rather than papering over it.
+        // Issue #204: the watcher now stores the VIRTUAL path, matching
+        // the walker's space (reconcile.rs:74-77 documents the column as
+        // virtual). Pre-fix this asserted the CANONICAL path, which kept
+        // the divergence visible per the old D2a "out of scope" framing.
+        // The canonical form MUST NOT appear here — that would re-create
+        // the phantom row whose reconcile-pass delete D2a warned about.
         let canonical_target = std::fs::canonicalize(target.join("x.md")).unwrap();
-        assert_eq!(staged[0], canonical_target.to_string_lossy());
+        assert_eq!(
+            staged[0],
+            virtual_path.to_string_lossy(),
+            "watcher must stage the virtual path the walker and reconcile use"
+        );
+        assert_ne!(
+            staged[0],
+            canonical_target.to_string_lossy(),
+            "the external canonical target must not be the staged form (issue #204)"
+        );
     }
 
     /// Spec D3: no resolvable root -> gate skipped, behavior unchanged.
@@ -850,13 +933,17 @@ mod tests {
         let root = tmp.path().join("vault");
         std::fs::create_dir_all(&root).unwrap();
         let p = write_at(&root, ".brain/errors.log", b"x");
-        let canonical = std::fs::canonicalize(&p).unwrap();
+        // Issue #204: the seed row must use the VIRTUAL path (`abs(p)`),
+        // matching the form the watcher now stores. Pre-fix the watcher
+        // stored `canonical`, which on macOS (/var → /private/var) diverges
+        // from `p` and the DELETE no-ops.
+        let abs = std::path::absolute(&p).unwrap();
 
         let mut conn = open_seeded_conn();
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
              VALUES (?1, 'deadbeef', 'user_doc', 'pending')",
-            rusqlite::params![canonical.to_string_lossy()],
+            rusqlite::params![abs.to_string_lossy()],
         )
         .unwrap();
         assert_eq!(staged_paths(&conn).len(), 1);
