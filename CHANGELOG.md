@@ -1,3 +1,21 @@
+## [2.9.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.8.0...v2.9.0) (2026-09-10)
+
+### Features
+
+* **cli:** ct proposals review + evidence-rendering show + folder-rule gate test (hvg) ([daa60be](https://github.com/equationalapplications/curated-thoughts/commit/daa60be8b0c17ff72144226224dd08d8d64e1c2e))
+* **db:** migration V21 — curated_proposals.reviewed_by (hvg) ([64b2979](https://github.com/equationalapplications/curated-thoughts/commit/64b297934f517b7dd60d57e2364a3377b5708122))
+* **db:** reviewed_by in ResolveOptions + in-transaction pending guard (hvg) ([758100e](https://github.com/equationalapplications/curated-thoughts/commit/758100e2bc91bb4d67319faa5b0d592506a695c9))
+* **db:** shared proposals review core (hvg) ([eabbf57](https://github.com/equationalapplications/curated-thoughts/commit/eabbf57ee12e0817ac84e8bc0a33278f9ef7d99d))
+* **mcp:** curated_proposals_list + curated_proposal_decide (hvg) ([120bba4](https://github.com/equationalapplications/curated-thoughts/commit/120bba48073527a7cf78bfbb5d926474451b8920))
+
+### Bug Fixes
+
+* **cli:** make review-loop skip advance past skipped proposals + review fixes (hvg) ([db7bbdc](https://github.com/equationalapplications/curated-thoughts/commit/db7bbdc769492910bb87b87ee8f5aa0f70e46bd5))
+* **hvg:** address 8 verified findings from /code-review; push back on 2 ([8422909](https://github.com/equationalapplications/curated-thoughts/commit/842290972a8ee51c48b7576aa998eba7c87acb24))
+* **hvg:** CI tool-list gate + CodeRabbit review wave (PR [#201](https://github.com/equationalapplications/curated-thoughts/issues/201)) ([a0f22ea](https://github.com/equationalapplications/curated-thoughts/commit/a0f22ea20d6139fd77721fa168c46388e83ff186))
+* **hvg:** final review wave — V20 recovery-pending semantics, shell rollback, item-less reject un-wedged ([b5e8da6](https://github.com/equationalapplications/curated-thoughts/commit/b5e8da6a1551fb09ef7d342e5e368dc7eb6f296e)), closes [#132](https://github.com/equationalapplications/curated-thoughts/issues/132)
+* **mcp:** decide approve echoes true outcome status, not hardcoded 'approved' (hvg whole-branch F1) ([f895119](https://github.com/equationalapplications/curated-thoughts/commit/f895119ebff7322b54801f5ec6fbdc86b0b4f692))
+
 ## [2.8.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.7.0...v2.8.0) (2026-09-10)
 
 ### Features
