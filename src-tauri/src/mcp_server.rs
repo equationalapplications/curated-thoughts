@@ -269,6 +269,42 @@ impl VaultMcpServer {
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
+
+    #[tool(
+        name = "curated_proposals_list",
+        description = "List curated proposals by status (default: pending — the review queue). Each item: proposal_id, proposed_name, kind, item_count, evidence chunk count, source docs, created_at. Statuses: pending|approved|rejected|partial|superseded. Empty array on a fresh brain."
+    )]
+    async fn curated_proposals_list(
+        &self,
+        args: Parameters<tool_dispatch::CuratedProposalsListParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_proposals_list", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_proposal_decide",
+        description = "Approve or reject a pending proposal after review. decision: approve|reject. note (optional): for rejects, the stored reason (reject_reason); for approves, acknowledged in the result but not stored. Approved entries are stamped user_confirmed with reviewed_by provenance. Errors cleanly if already resolved or superseded."
+    )]
+    async fn curated_proposal_decide(
+        &self,
+        args: Parameters<tool_dispatch::CuratedProposalDecideParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_proposal_decide", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
 }
 
 /// Blocking entrypoint for `--mcp` mode. Calls into a tokio runtime internally.

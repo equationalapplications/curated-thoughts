@@ -855,6 +855,36 @@ impl ToolDispatchContext {
 // best-effort path (log_agent_access) untouched.
 // ---------------------------------------------------------------------------
 
+// -- hvg Task 4: proposals review surface (curated_proposals_list /
+// curated_proposal_decide). Params mirror the curated_* family; the
+// `curated_` capability gate in `dispatch_tool_call` already denies these
+// for cloud-bridge sessions (issue #187), so no new auth code lives here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedProposalsListParams {
+    /// Optional status filter: pending | approved | rejected | partial |
+    /// superseded. Defaults to `pending` (the review queue).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Page size; defaults to 50, clamped to 1..=200.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedProposalDecideParams {
+    /// Proposal to resolve (accepts camelCase or snake_case spelling).
+    #[serde(rename = "proposalId", alias = "proposal_id")]
+    pub proposal_id: String,
+    /// "approve" | "reject"
+    pub decision: String,
+    /// For rejects: the stored reason (`reject_reason`). For approves:
+    /// acknowledged in the result but NOT stored.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct CuratedAddWisdomParams {
@@ -1130,6 +1160,126 @@ pub struct VaultUpsertIndexEntryParams {
     pub metadata: Option<Value>,
 }
 
+
+/// hvg Task 4: list proposals by status (default pending — the review
+/// queue). Read path on the RO connection; audit via the RW wrapper.
+pub async fn dispatch_curated_proposals_list(
+    ctx: ToolDispatchContext,
+    p: CuratedProposalsListParams,
+) -> Result<serde_json::Value> {
+    let status = p.status.clone().unwrap_or_else(|| "pending".to_string());
+    if !matches!(
+        status.as_str(),
+        "pending" | "approved" | "rejected" | "partial" | "superseded"
+    ) {
+        anyhow::bail!(
+            "invalid status {:?} — expected pending|approved|rejected|partial|superseded",
+            status
+        );
+    }
+    let limit = p.limit.unwrap_or(50).clamp(1, 200);
+    let filter = crate::db::proposals::ProposalFilter {
+        status: Some(status.clone()),
+    };
+    let items = {
+        let conn = ctx.conn.lock().unwrap();
+        let mut all = crate::db::proposals::list_proposals(&conn, &filter)?;
+        all.truncate(limit);
+        all
+    };
+    // Map to the plan's MCP shape: proposal_id / proposed_name / kind /
+    // item_count / evidence_chunks / source_docs / created_at.
+    let items: Vec<serde_json::Value> = items
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "proposal_id": s.id,
+                "proposed_name": s.target_name,
+                "kind": s.kind,
+                "entity_id": s.entity_id,
+                "item_count": s.item_counts.total,
+                "evidence_chunks": s.item_counts.facts + s.item_counts.edges + s.item_counts.tasks,
+                "source_docs": s.source_doc_paths,
+                "created_at": s.created_at,
+                "age_secs": s.age_secs,
+                "model": s.model,
+            })
+        })
+        .collect();
+    let items = serde_json::Value::Array(items);
+    log_curated_access_rw(&ctx, "curated_proposals_list", None, "read").await?;
+    Ok(items)
+}
+
+/// hvg Task 4: approve or reject a pending proposal after human review.
+/// Routes through the lazy RW connection exactly like curated_add_wisdom;
+/// the review core (db::proposals_review) enforces the in-transaction
+/// pending guard so already-resolved or superseded proposals error cleanly.
+pub async fn dispatch_curated_proposal_decide(
+    ctx: ToolDispatchContext,
+    p: CuratedProposalDecideParams,
+) -> Result<serde_json::Value> {
+    let reviewed_by = ctx.client.clone();
+    match p.decision.as_str() {
+        "approve" => {
+            let proposal_id = p.proposal_id.clone();
+            let outcome = ctx
+                .with_rw(move |conn| {
+                    crate::db::proposals_review::review_approve(conn, &proposal_id, &reviewed_by)
+                })
+                .await?;
+            log_curated_access_rw(
+                &ctx,
+                "curated_proposal_decide",
+                Some(p.proposal_id.as_str()),
+                "write",
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "proposal_id": p.proposal_id,
+                "decision": "approve",
+                "status": "approved",
+                "reviewed_by": outcome.reviewed_by,
+                "committed": outcome.committed,
+                "note": p.note.map(|n| serde_json::json!({ "acknowledged": true, "text": n })),
+            }))
+        }
+        "reject" => {
+            let note = p.note.clone().unwrap_or_else(|| "Rejected during review".to_string());
+            let reject_reason = note.clone();
+            let proposal_id = p.proposal_id.clone();
+            let outcome = ctx
+                .with_rw(move |conn| {
+                    crate::db::proposals_review::review_reject(
+                        conn,
+                        &proposal_id,
+                        &reviewed_by,
+                        &note,
+                    )
+                })
+                .await?;
+            log_curated_access_rw(
+                &ctx,
+                "curated_proposal_decide",
+                Some(p.proposal_id.as_str()),
+                "write",
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "proposal_id": p.proposal_id,
+                "decision": "reject",
+                "status": "rejected",
+                "reviewed_by": outcome.reviewed_by,
+                "reject_reason": reject_reason,
+            }))
+        }
+        other => anyhow::bail!(
+            "invalid decision {:?} — expected approve or reject",
+            other
+        ),
+    }
+}
+
 async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> {
     let profile = profile.clone();
     tokio::task::spawn_blocking(move || crate::embedder::embed_one(&profile, query)).await?
@@ -1321,6 +1471,18 @@ pub async fn dispatch_tool_call(
             let p: CuratedSearchCodeParams = serde_json::from_value(params)?;
             let result = dispatch_curated_search_code(ctx, p).await?;
             log_curated_access_rw(ctx, "curated_search_code", entity_id.as_deref(), "read").await?;
+            Ok(result)
+        }
+        "curated_proposals_list" => {
+            let p: CuratedProposalsListParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_proposals_list(ctx.clone(), p).await?;
+            // Audit already recorded fail-closed inside the dispatcher (read op).
+            Ok(result)
+        }
+        "curated_proposal_decide" => {
+            let p: CuratedProposalDecideParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_proposal_decide(ctx.clone(), p).await?;
+            // Audit already recorded fail-closed inside the dispatcher (write op).
             Ok(result)
         }
         "curated_add_wisdom" => {
@@ -2243,5 +2405,318 @@ mod curated_memory_tests {
             n, 0,
             "failed audit insert must roll back the wisdom mutation"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod curated_proposals_tests {
+    //! hvg Task 4: MCP surface tests for curated_proposals_list +
+    //! curated_proposal_decide, dispatched through the shared
+    //! `dispatch_tool_call` path (the one code path behind both callers).
+    use super::*;
+    use crate::chunker::{Chunk, ChunkStrategyTag};
+    use crate::db::connection::open_app_db;
+    use crate::db::proposals::{
+        insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalKind,
+        ProposalSourceRole, StoredEvidenceChunk,
+    };
+    use crate::db::queries::{insert_chunk, upsert_document};
+
+    /// Full-schema, migrated, FILE-backed brain (open_app_db applies every
+    /// migration incl. V21 reviewed_by). The RO conn handle and the context's
+    /// db_path point at the same file, so `with_rw` materializes against the
+    /// seeded state — the RW-fixture variant the write path needs.
+    fn file_ctx() -> (tempfile::TempDir, ToolDispatchContext) {
+        std::env::set_var("CURATED_EMBED_STUB", "constant8"); // mandated stub
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let conn = open_app_db(&db_path, None).unwrap();
+        let ctx = ToolDispatchContext {
+            conn: Arc::new(Mutex::new(conn)),
+            profile: EmbedProfile::default(),
+            vault_dir: Some(dir.path().to_path_buf()),
+            client: "test".into(),
+            db_path,
+            rw_conn: Arc::new(Mutex::new(None)),
+        };
+        (dir, ctx)
+    }
+
+    fn seed_chunk(conn: &rusqlite::Connection, doc_id: i64) -> i64 {
+        let chunk = Chunk {
+            text: "evidence".into(),
+            start_line: 1,
+            end_line: 2,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap()
+    }
+
+    /// Seed a pending new_entity proposal with one anchored fact_add item.
+    /// Distinct proposed_name + doc per id so sibling seeds never supersede
+    /// each other.
+    fn seed_pending(conn: &rusqlite::Connection, id: &str) {
+        let doc_id = upsert_document(conn, &format!("/vault/documents/{id}.pdf"), "hash").unwrap();
+        let chunk_id = seed_chunk(conn, doc_id);
+        insert_proposal(
+            conn,
+            &NewProposal {
+                id: id.into(),
+                kind: ProposalKind::NewEntity,
+                entity_id: None,
+                proposed_name: Some(format!("Project {id}")),
+                proposed_type: Some("project".into()),
+                reasoning: Some("Because.".into()),
+                model: "test".into(),
+            },
+            &[NewProposalItem {
+                id: format!("item-{id}"),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({ "body": "A verified fact.", "tags": [], "confidence": "inferred" }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
+                    quote: "evidence".into(),
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    source_kind: None,
+                }],
+            }],
+            &[NewProposalSource { doc_id, role: ProposalSourceRole::Trigger }],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn curated_proposals_list_defaults_to_pending_and_handles_fresh_brain() {
+        let (_dir, ctx) = file_ctx();
+        {
+            let mut guard = ctx.conn.lock().unwrap();
+            seed_pending(&guard, "prop-list-1");
+            seed_pending(&guard, "prop-list-2");
+            // An approved proposal must NOT appear under the default filter.
+            seed_pending(&guard, "prop-list-3");
+            let approved = crate::db::proposals_review::review_approve(
+                &mut guard,
+                "prop-list-3",
+                "tessera",
+            );
+            assert!(approved.is_ok());
+        }
+        let v = dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
+            .await
+            .unwrap();
+        let items = v.as_array().expect("top-level array");
+        assert_eq!(items.len(), 2, "default filter = pending only");
+        for p in items {
+            assert!(p["proposal_id"].is_string());
+            assert!(p["proposed_name"].is_string());
+            assert_eq!(p["kind"], "new_entity");
+            assert!(p["item_count"].as_u64().unwrap() >= 1);
+            assert!(p["evidence_chunks"].as_u64().unwrap() >= 1);
+            assert!(!p["source_docs"].as_array().unwrap().is_empty());
+            assert!(p["created_at"].is_i64());
+        }
+
+        // Fresh brain (no proposals at all) -> EMPTY ARRAY, not an error.
+        let (_dir2, ctx2) = file_ctx();
+        let v2 = dispatch_tool_call(&ctx2, "curated_proposals_list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            v2.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "fresh brain must list an empty array, got: {v2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn curated_proposal_decide_approve_stamps_reviewer() {
+        let (_dir, ctx) = file_ctx();
+        {
+            let mut guard = ctx.conn.lock().unwrap();
+            seed_pending(&mut guard, "prop-appr-1");
+        }
+        let v = dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({ "proposalId": "prop-appr-1", "decision": "approve" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["status"], "approved");
+        assert_eq!(v["reviewed_by"], "test");
+        assert!(v["committed"].as_u64().unwrap() >= 1);
+
+        // Stored state read back from the RO connection.
+        let guard = ctx.conn.lock().unwrap();
+        let rb: Option<String> = guard
+            .query_row(
+                "SELECT reviewed_by FROM curated_proposals WHERE id = 'prop-appr-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rb.as_deref(), Some("test"));
+        let confirmed: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(confirmed >= 1, "approved entries are user_confirmed");
+    }
+
+    #[tokio::test]
+    async fn curated_proposal_decide_reject_writes_reason() {
+        let (_dir, ctx) = file_ctx();
+        {
+            let mut guard = ctx.conn.lock().unwrap();
+            seed_pending(&mut guard, "prop-rej-1");
+        }
+        let v = dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({
+                "proposal_id": "prop-rej-1",
+                "decision": "reject",
+                "note": "stale corpus"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["status"], "rejected");
+
+        let guard = ctx.conn.lock().unwrap();
+        let rr: String = guard
+            .query_row(
+                "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-rej-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rr, "stale corpus");
+        let n: i64 = guard
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "reject writes no entries");
+    }
+
+    #[tokio::test]
+    async fn curated_proposal_decide_rejects_bad_inputs() {
+        let (_dir, ctx) = file_ctx();
+        {
+            let mut guard = ctx.conn.lock().unwrap();
+            seed_pending(&mut guard, "prop-bad-1");
+        }
+        let err = dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({ "proposalId": "prop-bad-1", "decision": "maybe" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("maybe"),
+            "invalid decision names the bad value: {err}"
+        );
+
+        let err = dispatch_tool_call(
+            &ctx,
+            "curated_proposals_list",
+            serde_json::json!({ "status": "bogus" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("bogus"),
+            "invalid status names the bad value: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn curated_proposal_decide_on_resolved_and_superseded_errors_cleanly() {
+        let (_dir, ctx) = file_ctx();
+        {
+            let mut guard = ctx.conn.lock().unwrap();
+            seed_pending(&mut guard, "prop-res-1");
+            seed_pending(&mut guard, "prop-sup-1");
+            // SQL-flip a pending proposal to superseded (spec Testing 5).
+            guard
+                .execute(
+                    "UPDATE curated_proposals SET status = 'superseded' WHERE id = 'prop-sup-1'",
+                    [],
+                )
+                .unwrap();
+        }
+        let v = dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({ "proposalId": "prop-res-1", "decision": "approve" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["status"], "approved");
+
+        // Second decision on the same proposal -> clean error, not a panic.
+        let err = dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({ "proposalId": "prop-res-1", "decision": "approve" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not pending"),
+            "second decision must err on the resolved proposal, got: {err}"
+        );
+
+        // Deciding a superseded proposal errs cleanly (no panic, no silent ok).
+        let err = dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({ "proposalId": "prop-sup-1", "decision": "approve" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not pending"),
+            "superseded proposal must err cleanly, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn curated_proposals_tools_audit_fail_closed() {
+        let (_dir, ctx) = file_ctx();
+        {
+            let mut guard = ctx.conn.lock().unwrap();
+            seed_pending(&mut guard, "prop-audit-1");
+        }
+        dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
+            .await
+            .unwrap();
+        dispatch_tool_call(
+            &ctx,
+            "curated_proposal_decide",
+            serde_json::json!({ "proposalId": "prop-audit-1", "decision": "reject" }),
+        )
+        .await
+        .unwrap();
+        let n: i64 = {
+            let guard = ctx.conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT COUNT(*) FROM curated_agent_log WHERE tool IN
+                     ('curated_proposals_list','curated_proposal_decide')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(n, 2, "both tools wrote one audit row each");
     }
 }
