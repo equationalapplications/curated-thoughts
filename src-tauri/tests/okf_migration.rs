@@ -228,7 +228,9 @@ fn test_app_open_runs_v7_schema() {
     // Bumped from 19 to 20 by the V20 gate, which runs the issue #186 §2.4
     // evidence re-grade + export + purge of the live unanchored stock
     // (body in `evidence_regrade.rs`; no SQL migration constant).
-    assert_eq!(max_version, 20);
+    // Bumped from 20 to 21 by MIGRATION_V21, which adds the nullable
+    // `curated_proposals.reviewed_by` column (Human Verification Gate).
+    assert_eq!(max_version, 21);
 }
 
 /// Issue #191: rows written before the ms fix hold epoch seconds. V19

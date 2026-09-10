@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
     MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2, MIGRATION_V3,
-    MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2, MIGRATION_V21,
+    MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -360,6 +360,23 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
             [],
         )?;
     }
+    if version < 21 {
+        // Human Verification Gate (hvg): add the nullable
+        // `curated_proposals.reviewed_by` column. ALTER TABLE ADD COLUMN is
+        // NOT idempotent (no IF NOT EXISTS), so unlike V19's
+        // WHERE-convergence this body cannot be safely re-run: the stamp is
+        // written only AFTER the ALTER lands, matching the V13
+        // "documents predates this migration" precedent. A crash between
+        // ALTER and stamp replays the statement on next open and fails with
+        // a loud duplicate-column error — preferred over a silent skip that
+        // would mask a half-applied migration.
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V21))?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (21)",
+            [],
+        )?;
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -525,7 +542,40 @@ mod tests {
         // Bumped from 18 to 19 by MIGRATION_V19, which repairs the mixed
         // seconds/milliseconds units in `llm_wiki_edges.created_at`
         // (issue #191 spec §2.5).
-        assert_eq!(max_version, 20);
+        assert_eq!(max_version, 21);
+    }
+
+    /// Human Verification Gate (hvg): MIGRATION_V21 adds the nullable
+    /// `reviewed_by` column to `curated_proposals`. Existing rows keep NULL
+    /// — only resolutions made after this migration carry a reviewer.
+    #[test]
+    fn v21_adds_reviewed_by_column_null_on_existing_rows() {
+        let conn = open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('curated_proposals') WHERE name='reviewed_by'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "reviewed_by column must exist after migration");
+        // Seed one proposal row, assert its reviewed_by is NULL: the ALTER
+        // appends the column, so every pre-migration row must read back as
+        // unreviewed rather than failing the SELECT or inventing a value.
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+             VALUES ('p1','new_entity','m','pending', 1)",
+            [],
+        )
+        .unwrap();
+        let rb: Option<String> = conn
+            .query_row(
+                "SELECT reviewed_by FROM curated_proposals WHERE id='p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(rb.is_none());
     }
 
     /// Upgraded-DB path for the core-llm-wiki@7.1.0 bump: a database created
@@ -538,8 +588,13 @@ mod tests {
         let conn = open_in_memory().unwrap();
 
         // Rewind to the pre-7.1 shape: drop the three package columns and
-        // remove the V17 stamp so the production gate re-runs. A pre-existing
-        // row proves the added columns backfill their DDL defaults.
+        // remove the V17..V21 stamps (the DELETE pulls the whole ladder, so
+        // migrate() re-runs every gate from 17 up). The rewind must drop
+        // `reviewed_by` as well: V21's ALTER is deliberately NOT idempotent
+        // (stamp-last design), so re-running it against the surviving column
+        // would fail with a duplicate-column error instead of re-applying.
+        // A pre-existing row proves the added columns backfill their DDL
+        // defaults.
         conn.execute(
             "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
              VALUES ('e1', 'ent1', 't', 'b', 1, 1)",
@@ -550,6 +605,7 @@ mod tests {
             "ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failed_at;
              ALTER TABLE llm_wiki_entries DROP COLUMN embedding_failure_kind;
              ALTER TABLE llm_wiki_entries DROP COLUMN embedding_attempts;
+             ALTER TABLE curated_proposals DROP COLUMN reviewed_by;
              DELETE FROM schema_version WHERE version >= 17;",
         )
         .unwrap();
@@ -1558,8 +1614,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            version, 20,
-            "the V18 stamp must land after the repair (V19/V20 stamps now follow)"
+            version, 21,
+            "the V18 stamp must land after the repair (V19/V20/V21 stamps now follow)"
         );
     }
 
@@ -1680,7 +1736,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 20, "one open must stamp through V20");
+        assert_eq!(version, 21, "one open must stamp through V21");
     }
 
     /// Review round 5, finding 4: a file-IO failure inside the backed repair
@@ -1729,7 +1785,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     /// V20 test parity with the V18 fail-safe above (final review F1): a
@@ -1815,7 +1871,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[test]
