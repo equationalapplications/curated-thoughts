@@ -663,11 +663,11 @@ where
 ///    Falls back to absolute path on failure (typical for Delete events).
 /// 3. `canonical.starts_with(vault_root)` guard — rejects out-of-vault events.
 ///    The vault root is read from `CURATED_VAULT_ROOT`. If unset (the watcher
-///    runs with it set; tests may not), the guard is skipped.
-/// 3b. Excluded-directory gate — rejects `.brain` and other EXCLUDED_DIRS
-///     content on the vault-RELATIVE virtual path. `vault_root` is the
-///     explicit root; `None` falls back to `CURATED_VAULT_ROOT`, which is
-///     the established mechanism for `ct watch`.
+///    runs with it set; tests may not), the guard is skipped. Excluded-directory
+///    gate (step 3b): rejects `.brain` and other EXCLUDED_DIRS content on the
+///    vault-RELATIVE virtual path. `vault_root` is the explicit root; `None`
+///    falls back to `CURATED_VAULT_ROOT`, which is the established mechanism
+///    for `ct watch`.
 /// 4. sha256 the bytes; upsert documents row with status='pending'.
 ///
 /// For Delete: skip step 4 (file is gone); DELETE the documents row.

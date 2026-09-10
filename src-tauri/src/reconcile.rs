@@ -116,9 +116,7 @@ pub fn reconcile_vault(
     // delete them. Filter them out up front so neither arm can touch them.
     let (excluded, remaining): (Vec<_>, Vec<_>) = vanished
         .into_iter()
-        .filter(|(p, _)| {
-            crate::walk_vault::relativize_to_vault(Path::new(p), vault_root).is_some()
-        })
+        .filter(|(p, _)| crate::walk_vault::relativize_to_vault(Path::new(p), vault_root).is_some())
         .partition(|(p, _)| {
             crate::walk_vault::abs_path_is_excluded_in_vault(Path::new(p), vault_root)
         });
@@ -276,7 +274,7 @@ fn purge_brain_rows(conn: &Connection, vault_root: &Path) -> Result<ReconcileOut
 mod tests {
     use super::*;
     use crate::walk_vault::WalkedFile;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     /// A document row plus `n` chunks hanging off it.
     fn seed_doc(conn: &Connection, path: &str, hash: &str, tier: &str, chunks: usize) -> i64 {
@@ -329,7 +327,7 @@ mod tests {
         crate::db::queue::sha256_hex(content)
     }
 
-    fn s(p: &PathBuf) -> String {
+    fn s(p: &Path) -> String {
         p.to_str().unwrap().to_string()
     }
 
@@ -344,7 +342,7 @@ mod tests {
         let old_path = s(&tmp.path().join("note.md"));
         let doc_id = seed_doc(&conn, &old_path, &hash_of(content), "user_doc", 12);
 
-        let out = reconcile_vault(&conn, &[new.clone()], tmp.path()).unwrap();
+        let out = reconcile_vault(&conn, std::slice::from_ref(&new), tmp.path()).unwrap();
 
         assert_eq!(out.repointed, vec![(old_path, s(&new.virtual_path))]);
         assert!(out.deleted.is_empty());
@@ -460,7 +458,7 @@ mod tests {
         let f = walked(tmp.path(), "note.md", b"# new content");
         let doc_id = seed_doc(&conn, &s(&f.virtual_path), "stale-hash", "user_doc", 6);
 
-        let out = reconcile_vault(&conn, &[f.clone()], tmp.path()).unwrap();
+        let out = reconcile_vault(&conn, std::slice::from_ref(&f), tmp.path()).unwrap();
 
         assert_eq!(out, ReconcileOutcome::default());
         assert_eq!(path_of(&conn, doc_id), s(&f.virtual_path));
@@ -482,7 +480,7 @@ mod tests {
         // A newly added empty user file, not yet in the DB.
         let todo = walked(&root, "inbox/todo.md", b"");
 
-        let out = reconcile_vault(&conn, &[todo.clone()], &root).unwrap();
+        let out = reconcile_vault(&conn, std::slice::from_ref(&todo), &root).unwrap();
 
         assert!(
             out.repointed.is_empty(),
@@ -540,9 +538,15 @@ mod tests {
         seed_doc(&conn, &s(&nm), "h1", "user_doc", 1);
         seed_doc(&conn, &s(&tgt), "h2", "user_doc", 1);
         let keep = walked(&root, "notes.md", b"real");
-        let keep_id = seed_doc(&conn, &s(&keep.virtual_path), &hash_of(b"real"), "user_doc", 2);
+        let keep_id = seed_doc(
+            &conn,
+            &s(&keep.virtual_path),
+            &hash_of(b"real"),
+            "user_doc",
+            2,
+        );
 
-        let out = reconcile_vault(&conn, &[keep.clone()], &root).unwrap();
+        let out = reconcile_vault(&conn, std::slice::from_ref(&keep), &root).unwrap();
 
         assert!(out.deleted.contains(&s(&nm)));
         assert!(out.deleted.contains(&s(&tgt)));
@@ -561,11 +565,17 @@ mod tests {
         let conn = crate::db::connection::open_in_memory().unwrap();
 
         let keep = walked(&root, "notes.md", b"real");
-        let keep_id = seed_doc(&conn, &s(&keep.virtual_path), &hash_of(b"real"), "user_doc", 2);
+        let keep_id = seed_doc(
+            &conn,
+            &s(&keep.virtual_path),
+            &hash_of(b"real"),
+            "user_doc",
+            2,
+        );
         let phantom = root.join(".brain").join("notes.md");
         seed_doc(&conn, &s(&phantom), "h9", "user_doc", 1);
 
-        let out = reconcile_vault(&conn, &[keep.clone()], &root).unwrap();
+        let out = reconcile_vault(&conn, std::slice::from_ref(&keep), &root).unwrap();
 
         assert_eq!(
             path_of(&conn, keep_id),
@@ -588,7 +598,13 @@ mod tests {
         let stray = tmp.path().join("elsewhere").join(".brain").join("x.log");
         let stray_id = seed_doc(&conn, &s(&stray), "h1", "user_doc", 1);
         let keep = walked(&root, "notes.md", b"real");
-        seed_doc(&conn, &s(&keep.virtual_path), &hash_of(b"real"), "user_doc", 1);
+        seed_doc(
+            &conn,
+            &s(&keep.virtual_path),
+            &hash_of(b"real"),
+            "user_doc",
+            1,
+        );
 
         let out = reconcile_vault(&conn, &[keep], &root).unwrap();
 
@@ -611,7 +627,13 @@ mod tests {
         let brain_path = root.join(".brain").join("errors.log");
         let brain_id = seed_doc(&conn, &s(&brain_path), "h1", "user_doc", 2);
         let keep = walked(&root, "notes.md", b"real");
-        let keep_id = seed_doc(&conn, &s(&keep.virtual_path), &hash_of(b"real"), "user_doc", 1);
+        let keep_id = seed_doc(
+            &conn,
+            &s(&keep.virtual_path),
+            &hash_of(b"real"),
+            "user_doc",
+            1,
+        );
 
         let out = reconcile_vault(&conn, &[keep], &root).unwrap();
 

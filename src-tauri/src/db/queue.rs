@@ -46,9 +46,7 @@ pub fn enqueue_vault_event(
     // canonicalized `/private/var/vault/note.md` and be silently dropped.
     let containment_root: Option<PathBuf> = configured_root
         .as_ref()
-        .map(|p| {
-            std::path::absolute(p).map(|abs| std::fs::canonicalize(&abs).unwrap_or(abs))
-        })
+        .map(|p| std::path::absolute(p).map(|abs| std::fs::canonicalize(&abs).unwrap_or(abs)))
         .transpose()?;
 
     let abs = std::path::absolute(raw_path)?;
@@ -654,7 +652,9 @@ mod tests {
     }
 
     fn staged_paths(conn: &Connection) -> Vec<String> {
-        let mut stmt = conn.prepare("SELECT path FROM documents ORDER BY path").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path FROM documents ORDER BY path")
+            .unwrap();
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -677,7 +677,7 @@ mod tests {
             write_at(&root, ".brain/errors.log", b"x"),
             write_at(&root, "nested/.brain/x.log", b"x"),
         ];
-        let controls = vec![
+        let controls = [
             write_at(&root, "notes.md", b"a"),
             write_at(&root, "brain/x.md", b"b"),
             write_at(&root, "my.brain.notes/x.md", b"c"),
@@ -774,7 +774,11 @@ mod tests {
         enqueue_vault_event(&mut conn, modify(), &virtual_path, Some(&root)).unwrap();
 
         let staged = staged_paths(&conn);
-        assert_eq!(staged.len(), 1, "trusted link into .brain was gated: {staged:?}");
+        assert_eq!(
+            staged.len(),
+            1,
+            "trusted link into .brain was gated: {staged:?}"
+        );
         // Spec D2a: the watcher stores the CANONICAL path. Unifying
         // documents.path on the virtual path is out of scope; this assert
         // keeps the divergence visible rather than papering over it.
@@ -824,7 +828,11 @@ mod tests {
         // containment guard is what rejects out-of-vault paths; the GATE
         // itself must fail open rather than fail closed.
         enqueue_vault_event(&mut conn, modify(), &p, Some(&outside)).unwrap();
-        assert_eq!(staged_paths(&conn).len(), 0, "control: .brain under its own root is gated");
+        assert_eq!(
+            staged_paths(&conn).len(),
+            0,
+            "control: .brain under its own root is gated"
+        );
 
         let mut conn2 = open_seeded_conn();
         enqueue_vault_event(&mut conn2, modify(), &p, Some(&root)).unwrap();

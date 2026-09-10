@@ -1,7 +1,7 @@
 # Watcher + walker: exclude `.brain` working directories from ingestion
 
 **Date:** 2026-09-10
-**Status:** Draft (rev 7 — second Opus 5 review of rev 6 + plan addressed:
+**Status:** Implemented (rev 7 — second Opus 5 review of rev 6 + plan addressed:
 desktop startup connection must set `PRAGMA foreign_keys=ON` explicitly
 (it bypasses `migrate()`, so the chunks cascade never fired there),
 relativization gained a canonicalize-the-input fallback (canonical root ×

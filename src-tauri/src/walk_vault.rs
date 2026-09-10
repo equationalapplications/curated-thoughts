@@ -337,7 +337,9 @@ pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>
             outcome.denied.push(DeniedLink {
                 link: link_rel,
                 target,
-                reason: crate::trusted_links::DenyReason::ExcludedDirName.message().to_string(),
+                reason: crate::trusted_links::DenyReason::ExcludedDirName
+                    .message()
+                    .to_string(),
             });
             continue;
         }
@@ -459,7 +461,9 @@ mod tests {
     #[test]
     fn rel_predicate_matches_brain_component_exactly() {
         use std::path::Path;
-        assert!(super::rel_path_has_excluded_component(Path::new(".brain/errors.log")));
+        assert!(super::rel_path_has_excluded_component(Path::new(
+            ".brain/errors.log"
+        )));
         assert!(super::rel_path_has_excluded_component(Path::new(
             "immutable-source-files/agents/people/.brain/errors.log"
         )));
@@ -472,23 +476,33 @@ mod tests {
     #[test]
     fn rel_predicate_rejects_substring_lookalikes() {
         use std::path::Path;
-        assert!(!super::rel_path_has_excluded_component(Path::new("brain/x.md")));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "brain/x.md"
+        )));
         assert!(!super::rel_path_has_excluded_component(Path::new(
             "my.brain.notes/x.md"
         )));
-        assert!(!super::rel_path_has_excluded_component(Path::new(".brainish/x.md")));
-        assert!(!super::rel_path_has_excluded_component(Path::new("notes.md")));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            ".brainish/x.md"
+        )));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "notes.md"
+        )));
     }
 
     /// Spec item 4: the narrow predicate matches ONLY `.brain`.
     #[test]
     fn brain_predicate_is_narrower_than_excluded_predicate() {
         use std::path::Path;
-        assert!(super::rel_path_has_brain_component(Path::new("a/.brain/x.log")));
+        assert!(super::rel_path_has_brain_component(Path::new(
+            "a/.brain/x.log"
+        )));
         assert!(!super::rel_path_has_brain_component(Path::new(
             "node_modules/x.md"
         )));
-        assert!(!super::rel_path_has_brain_component(Path::new("target/x.md")));
+        assert!(!super::rel_path_has_brain_component(Path::new(
+            "target/x.md"
+        )));
         // ...but the broad one does match those.
         assert!(super::rel_path_has_excluded_component(Path::new(
             "node_modules/x.md"
@@ -585,10 +599,7 @@ mod tests {
         let outside_link = tmp.path().join("outside-link");
         std::os::unix::fs::symlink(&outside, &outside_link).unwrap();
         assert_eq!(
-            super::relativize_to_vault(
-                &outside_link.join(".brain").join("x.log"),
-                &canonical_root
-            ),
+            super::relativize_to_vault(&outside_link.join(".brain").join("x.log"), &canonical_root),
             None
         );
     }
@@ -609,11 +620,7 @@ mod tests {
         std::fs::create_dir_all(root.join("my.brain.notes")).unwrap();
         std::fs::write(root.join("notes.md"), b"a").unwrap();
         std::fs::write(root.join("my.brain.notes").join("x.md"), b"b").unwrap();
-        std::fs::write(
-            root.join("nested").join(".brain").join("leaked.md"),
-            b"c",
-        )
-        .unwrap();
+        std::fs::write(root.join("nested").join(".brain").join("leaked.md"), b"c").unwrap();
 
         let mut out = Vec::new();
         let mut errs = Vec::new();
@@ -647,11 +654,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".brainish")).unwrap();
         std::fs::write(root.join("notes.md"), b"a").unwrap();
         std::fs::write(root.join(".brain").join("leaked.md"), b"b").unwrap();
-        std::fs::write(
-            root.join("nested").join(".brain").join("leaked.md"),
-            b"c",
-        )
-        .unwrap();
+        std::fs::write(root.join("nested").join(".brain").join("leaked.md"), b"c").unwrap();
         std::fs::write(root.join("brain").join("x.md"), b"d").unwrap();
         std::fs::write(root.join(".brainish").join("x.md"), b"e").unwrap();
 
@@ -683,8 +686,7 @@ mod tests {
         std::fs::create_dir_all(root.join("documents")).unwrap();
         let target = tmp.path().join("outside-target");
         std::fs::create_dir_all(&target).unwrap();
-        std::os::unix::fs::symlink(&target, root.join("documents").join(".brain"))
-            .unwrap();
+        std::os::unix::fs::symlink(&target, root.join("documents").join(".brain")).unwrap();
 
         let outcome = super::walk_vault(&root, &[], None);
 

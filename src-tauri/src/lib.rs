@@ -826,10 +826,7 @@ fn remove_sqlite_sidecars(db_path: &Path) {
 ///
 /// Returns the number of rows deleted. Non-fatal on failure: the caller
 /// logs and the next launch retries.
-fn purge_excluded_rows(
-    conn: &rusqlite::Connection,
-    vault_root: &Path,
-) -> rusqlite::Result<usize> {
+fn purge_excluded_rows(conn: &rusqlite::Connection, vault_root: &Path) -> rusqlite::Result<usize> {
     let paths: Vec<String> = {
         let mut stmt = conn.prepare("SELECT path FROM documents WHERE tier = 'user_doc'")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -929,7 +926,9 @@ mod excluded_row_purge_tests {
         assert_eq!(n, 2, "expected both .brain rows purged");
 
         let survivors: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT path FROM documents ORDER BY path").unwrap();
+            let mut stmt = conn
+                .prepare("SELECT path FROM documents ORDER BY path")
+                .unwrap();
             let r = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
             r.collect::<std::result::Result<Vec<_>, _>>().unwrap()
         };
