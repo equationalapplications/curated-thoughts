@@ -1237,7 +1237,7 @@ pub async fn dispatch_curated_proposal_decide(
             Ok(serde_json::json!({
                 "proposal_id": p.proposal_id,
                 "decision": "approve",
-                "status": "approved",
+                "status": outcome.status,
                 "reviewed_by": outcome.reviewed_by,
                 "committed": outcome.committed,
                 "note": p.note.map(|n| serde_json::json!({ "acknowledged": true, "text": n })),
