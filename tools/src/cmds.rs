@@ -1371,6 +1371,19 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
         "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
         report.regraded_anchored, report.exported, report.purged, report.skipped_destructive
     );
+    // A skipped destructive phase is a FAILURE for scripting purposes (PR
+    // #201 review finding 5): this command is the documented, idempotent
+    // recovery every V20 skip WARN names, and cron/scripts treat exit 0 as
+    // "the purge ran". Exit non-zero so the doomed rows' survival is
+    // discoverable without parsing stderr.
+    if report.skipped_destructive {
+        eprintln!(
+            "refusing to report success: the destructive phase was SKIPPED \
+             (blocked export dir, pathless DB, or brain-incomplete) — doomed \
+             rows survive un-exported; fix the cause and re-run"
+        );
+        return Ok(1);
+    }
     Ok(0)
 }
 
@@ -1502,7 +1515,11 @@ fn report_decision_error(
     skipped: &mut std::collections::HashSet<String>,
 ) {
     println!("could not {action} {proposal_id}: {err}");
-    println!("(left pending; moving on)");
+    // Neutral wording (PR #201 review): the error may BE "no longer pending"
+    // (a concurrent desktop/ingest process resolved or superseded the queue
+    // head between the card printing and the keypress landing), so asserting
+    // the row was left pending can contradict the database.
+    println!("(decision not applied by this command; moving on)");
     skipped.insert(proposal_id.to_string());
 }
 
@@ -1526,6 +1543,11 @@ fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewIt
 /// whose items hit the summary-update conflict path lands as `partial` (or
 /// `rejected`), and printing a hard-coded verb would contradict the database.
 fn print_review_outcome(outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
+    // codeql[rust/cleartext-logging]: `reviewed_by` is the operator's own OS
+    // account echoed to that same operator's terminal — displaying reviewer
+    // attribution is the entire purpose of the Human Verification Gate
+    // (curated_proposals.reviewed_by), not a credential leak: no secret,
+    // token, or other account's data reaches this string.
     println!(
         "{} {}: committed={} conflicts={} reviewed_by={}",
         outcome.status,

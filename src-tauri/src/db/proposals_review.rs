@@ -28,7 +28,7 @@ use crate::db::commit::{
 use crate::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
 use crate::embedder::EmbedProfile;
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
 /// Reason recorded when a reviewer rejects without giving one. Canonical here
@@ -91,6 +91,21 @@ pub struct ReviewOptions {
     pub entry_embeddings: Option<EntryEmbeddings>,
     /// Audit row to write in the resolution transaction (curated tool calls).
     pub audit: Option<ResolveAudit>,
+    /// All-accept decisions preloaded by the caller OUTSIDE its write lock
+    /// (via [`load_review_embed_inputs`]) — the same three-phase shape as
+    /// `entry_embeddings` (PR #201 review finding 6): `get_proposal_detail`
+    /// hydrates every evidence chunk, and the MCP decide tool holds the RW
+    /// connection mutex for the whole resolve, so loading them under the lock
+    /// queues every other curated write tool behind per-chunk SELECTs for
+    /// nothing. The resolver re-checks pending-ness in its own transaction,
+    /// so a stale preload fails cleanly instead of double-resolving.
+    pub decisions: Option<Vec<ItemDecision>>,
+    /// `wiki.deposit_default_tier` resolved by the caller OUTSIDE its write
+    /// lock (path resolution + config.json read/parse — filesystem I/O the
+    /// MCP decide tool must not do under the RW mutex). `None` means "not
+    /// preloaded": the resolver then reads the on-disk config itself, which
+    /// is fine for lock-free callers (the CLI).
+    pub deposit_default_tier: Option<String>,
 }
 
 /// A human/agent-under-rules review decision: resolve the proposal through
@@ -138,7 +153,10 @@ pub fn review_approve_with(
     reviewed_by: &str,
     opts: ReviewOptions,
 ) -> Result<ReviewOutcome> {
-    let decisions = load_accept_all_decisions(conn, proposal_id)?;
+    let decisions = match opts.decisions {
+        Some(d) => d,
+        None => load_accept_all_decisions(conn, proposal_id)?,
+    };
     let result = resolve_proposal(
         conn,
         proposal_id,
@@ -155,7 +173,12 @@ pub fn review_approve_with(
             // it the resolver falls back to the shipped DEFAULT_DEPOSIT_TIER and
             // an operator who set `fact` would silently get deposit entries in
             // `wisdom` — but only when they approved through a review surface.
-            deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            // Lock-holding callers preload it (`ReviewOptions::deposit_default_tier`)
+            // so no filesystem I/O happens under their mutex.
+            deposit_default_tier: Some(
+                opts.deposit_default_tier
+                    .unwrap_or_else(crate::config::BrainConfig::deposit_default_tier_on_disk),
+            ),
         },
     )?;
     Ok(ReviewOutcome {
@@ -198,7 +221,32 @@ pub fn review_reject_with(
     reason: &str,
     opts: ReviewOptions,
 ) -> Result<ReviewOutcome> {
-    let decisions = load_accept_all_decisions(conn, proposal_id)?;
+    // Item-less pending proposals (PR #201 review finding 3): rows written by
+    // older binaries predate the insert-time guard and are listed by every
+    // review surface, yet `load_accept_all_decisions` bails on their empty
+    // item set — permanently un-approvable AND un-rejectable through any
+    // surface; only raw SQL could clear them. Rejecting is the cleanup: no
+    // items exist to accept, so nothing is lost, and the guarded UPDATE keeps
+    // the same in-transaction pending semantics as
+    // `finalize_proposal_status_guarded`.
+    if let Some((status, item_count)) = proposal_status_and_item_count(conn, proposal_id)? {
+        if status != "pending" {
+            bail!("proposal {proposal_id} is not pending: {status}");
+        }
+        if item_count == 0 {
+            return reject_itemless_proposal(
+                conn,
+                proposal_id,
+                reviewed_by,
+                reason,
+                opts.audit.as_ref(),
+            );
+        }
+    }
+    let decisions = match opts.decisions {
+        Some(d) => d,
+        None => load_accept_all_decisions(conn, proposal_id)?,
+    };
     let rejected: Vec<ItemDecision> = decisions
         .into_iter()
         .map(|mut d| {
@@ -227,6 +275,66 @@ pub fn review_reject_with(
     })
 }
 
+/// `(status, item_count)` for a proposal, or `None` when the id matches no
+/// row. One query so the item-less pre-check in [`review_reject_with`] does
+/// not pay a second `get_proposal_detail` (per-evidence hydration) just to
+/// count items.
+fn proposal_status_and_item_count(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Option<(String, i64)>> {
+    conn.query_row(
+        "SELECT p.status,
+                (SELECT COUNT(*) FROM curated_proposal_items i WHERE i.proposal_id = p.id)
+         FROM curated_proposals p WHERE p.id = ?1",
+        [proposal_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Reject a pending item-less proposal directly (see the pre-check in
+/// [`review_reject_with`]). One transaction: the guarded UPDATE (pending
+/// re-checked in the WHERE, exactly like the resolver's finalizer) plus the
+/// fail-closed audit insert, if any.
+fn reject_itemless_proposal(
+    conn: &mut Connection,
+    proposal_id: &str,
+    reviewed_by: &str,
+    reason: &str,
+    audit: Option<&ResolveAudit>,
+) -> Result<ReviewOutcome> {
+    let now_secs = crate::db::commit::now_timestamps().0;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE curated_proposals
+         SET status = 'rejected', resolved_at = ?1, reject_reason = ?2, reviewed_by = ?3
+         WHERE id = ?4 AND status = 'pending'",
+        params![now_secs, reason, reviewed_by, proposal_id],
+    )?;
+    if changed != 1 {
+        bail!("proposal {proposal_id} already resolved (concurrent or repeated decision)");
+    }
+    if let Some(audit) = audit {
+        crate::db::commit::log_agent_access_checked(
+            &tx,
+            &audit.client,
+            &audit.tool,
+            Some(proposal_id),
+            &audit.operation,
+        )?;
+    }
+    tx.commit()?;
+    Ok(ReviewOutcome {
+        proposal_id: proposal_id.to_string(),
+        status: "rejected".to_string(),
+        committed: 0,
+        conflicts: Vec::new(),
+        reviewed_by: reviewed_by.to_string(),
+    })
+}
+
 /// Items + all-accept decisions for a review, loaded under whatever read lock
 /// the caller holds and carried ACROSS the lock drop.
 ///
@@ -241,6 +349,16 @@ pub fn review_reject_with(
 pub struct ReviewEmbedInputs {
     items: Vec<crate::db::commit::LoadedItem>,
     decisions: Vec<ItemDecision>,
+}
+
+impl ReviewEmbedInputs {
+    /// The preloaded all-accept decisions. Hand these to
+    /// [`ReviewOptions::decisions`] when resolving under a write lock, so the
+    /// resolver skips its own `get_proposal_detail` pass (per-evidence
+    /// hydration) inside the lock (PR #201 review finding 6).
+    pub fn into_decisions(self) -> Vec<ItemDecision> {
+        self.decisions
+    }
 }
 
 /// Phase 1: load the proposal's items and all-accept decisions. Cheap (two
@@ -299,7 +417,7 @@ pub fn pending_review_queue(
     let mut out = Vec::new();
     for row in rows {
         let (proposal_id, proposed_name, kind, created_at, item_count, evidence_chunks) = row?;
-        let docs = source_doc_paths(conn, &proposal_id)?;
+        let docs = crate::db::proposals::source_paths_for_proposal(conn, &proposal_id)?;
         out.push(PendingReviewItem {
             proposal_id,
             proposed_name,
@@ -336,18 +454,39 @@ fn load_accept_all_decisions(conn: &Connection, proposal_id: &str) -> Result<Vec
         .collect())
 }
 
-fn source_doc_paths(conn: &Connection, proposal_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT d.path
-         FROM curated_proposal_sources s
-         JOIN documents d ON d.id = s.doc_id
-         WHERE s.proposal_id = ?1
-         ORDER BY CASE s.role WHEN 'trigger' THEN 0 ELSE 1 END, d.path",
-    )?;
-    let paths = stmt
-        .query_map([proposal_id], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(paths)
+/// Reject-decision set for a caller hoisting work OUT of its write lock (the
+/// MCP decide tool). Unlike [`load_accept_all_decisions`] this never touches
+/// `get_proposal_detail`: an all-reject resolution reads no evidence, so the
+/// per-chunk hydration would be pure lock-queueing cost. And an item-less
+/// pending row yields `Ok(vec![])` instead of erroring — [`review_reject_with`]'s
+/// item-less pre-check runs before the decision set is consulted, so the empty
+/// set routes the row to [`reject_itemless_proposal`] rather than wedging the
+/// MCP reject the way it did before finding 3's fix (the CLI path never
+/// hoisted, so it was already clear).
+pub fn load_reject_decisions(conn: &Connection, proposal_id: &str) -> Result<Vec<ItemDecision>> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM curated_proposals WHERE id = ?1",
+            [proposal_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match status.as_deref() {
+        None => bail!("proposal {proposal_id} not found"),
+        Some(s) if s != "pending" => bail!("proposal {proposal_id} is not pending: {s}"),
+        _ => {}
+    }
+    let mut stmt = conn.prepare("SELECT id FROM curated_proposal_items WHERE proposal_id = ?1")?;
+    let ids = stmt.query_map([proposal_id], |r| r.get::<_, String>(0))?;
+    Ok(ids
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|item_id| ItemDecision {
+            item_id,
+            decision: ItemDecisionKind::Reject,
+            edited_payload: None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -557,6 +696,52 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(summary, "Newer summary");
+        });
+    }
+
+    /// Item-less pending rows (PR #201 review finding 3): proposals written
+    /// by older binaries predate `insert_proposal`'s item guard, yet every
+    /// review surface lists them — and `load_accept_all_decisions` bails on
+    /// their empty item set, leaving them permanently un-approvable AND
+    /// un-rejectable. Rejecting is the cleanup: it stamps reviewer + reason
+    /// on the guarded UPDATE, while approve still fails loudly. The row is
+    /// seeded with raw SQL because the current `insert_proposal` refuses
+    /// item-less proposals (that guard is exactly what the old binary lacked).
+    #[test]
+    fn itemless_pending_proposal_is_rejectable_but_not_approvable() {
+        with_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            conn.execute(
+                "INSERT INTO curated_proposals
+                     (id, kind, proposed_name, proposed_type, reasoning, model,
+                      status, created_at)
+                 VALUES ('prop-itemless', 'new_entity', 'Project Itemless',
+                         'project', 'Because.', 'test', 'pending', 100)",
+                [],
+            )
+            .unwrap();
+
+            let err = review_approve(&mut conn, "prop-itemless", "tessera").unwrap_err();
+            assert!(
+                err.to_string().contains("has no items"),
+                "approve must bail on the empty item set, got: {err}"
+            );
+
+            let out =
+                review_reject(&mut conn, "prop-itemless", "tessera", "stale empty row").unwrap();
+            assert_eq!(out.status, "rejected");
+
+            let (st, rb, reason): (String, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT status, reviewed_by, reject_reason FROM curated_proposals
+                     WHERE id = 'prop-itemless'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(st, "rejected");
+            assert_eq!(rb.as_deref(), Some("tessera"));
+            assert_eq!(reason.as_deref(), Some("stale empty row"));
         });
     }
 

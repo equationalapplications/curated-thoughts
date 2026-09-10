@@ -1781,52 +1781,17 @@ fn prune_old_librarian_inferred(conn: &rusqlite::Connection, now_ms: i64) -> Res
             .map_err(|e| e.to_string())?
     };
 
-    let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
-    // HARD delete, so the hard-delete purge. `purge_edges_for_entries` keeps an
-    // edge whose partner is still alive — correct at the soft-delete sites,
-    // where the dead row can be recovered — but here the id disappears from
-    // every endpoint table, so such an edge would reference nothing and no
-    // later cascade could ever find it to clean up (spec §2, "Soft delete vs
-    // hard delete").
-    crate::db::edge_purge::purge_edges_for_hard_deleted(&tx, &doomed_ids)
-        .map_err(|e| e.to_string())?;
-
-    // Push one OutboxOperation::Delete row per doomed entry so replicas
-    // converge on the prune. Same shape as `commit_fact_archive` /
-    // `archive_fact`. The entity_id is sourced from the doomed row itself
-    // (not assumed uniform) because pruning may span multiple entities if a
-    // future migration ever allows that; today all librarian_inferred rows
-    // share an entity in practice, but the outbox is keyed on entity and
-    // pushing the wrong one would mis-attribute the delete.
-    for (id, entity_id) in &doomed {
-        crate::db::commit::push_entries_outbox(
-            &tx,
-            entity_id,
-            id,
-            crate::db::outbox_format::OutboxOperation::Delete,
-            serde_json::json!({ "id": id }),
-            now_ms,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
-    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
-    // deleted explicitly alongside its entry.
-    crate::db::commit::delete_librarian_evidence(&tx, &doomed_ids).map_err(|e| e.to_string())?;
-
-    let deleted = tx
-        .execute(
-            "DELETE FROM llm_wiki_entries
-                 WHERE source_type = 'librarian_inferred'
-                   AND deleted_at IS NOT NULL
-                   AND deleted_at < ?1",
-            [cutoff],
-        )
-        .map_err(|e| e.to_string())?;
+    // The shared hard-delete ceremony (`commit::hard_delete_entries`): outbox
+    // Delete per row (entity_id sourced from the doomed row itself — the
+    // outbox is keyed on entity, so pushing the wrong partition would
+    // mis-attribute the delete), the paired evidence delete, the entry
+    // hard-DELETE, and the edge sweep — all in this one transaction. The set
+    // was selected under the same transaction, so deleting by id is exactly
+    // the old predicate DELETE.
+    crate::db::commit::hard_delete_entries(&tx, &doomed, now_ms).map_err(|e| e.to_string())?;
 
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(deleted)
+    Ok(doomed.len())
 }
 
 /// Run a bounded null-embedding sweep against the app's live DB connection.

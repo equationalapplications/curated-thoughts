@@ -344,7 +344,15 @@ fn resolve_target_name(
     Ok(proposed_name.unwrap_or("Unknown entity").to_string())
 }
 
-fn source_paths_for_proposal(conn: &Connection, proposal_id: &str) -> Result<Vec<String>> {
+/// Source-doc paths for a proposal: the trigger document first, then the
+/// rest by path. Shared by `proposals list`/`show` AND the review surfaces
+/// (`proposals_review::pending_review_queue`) so both report the same
+/// sources for the same proposal — a private copy in each module drifted
+/// silently (PR #201 review finding 10).
+pub(crate) fn source_paths_for_proposal(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT d.path
          FROM curated_proposal_sources s

@@ -918,8 +918,10 @@ pub struct CuratedArchiveWisdomParams {
 /// propagates and fails the tool call, unlike the best-effort
 /// [`log_agent_access`] used by the eight pre-existing read tools
 /// (their migration to fail-closed is tracked separately).
-/// Accepts `&Connection` or `&Transaction` (deref coercion) so write tools
-/// can audit inside the same transaction as the mutation.
+/// Thin delegate to the db-layer owner of the `curated_agent_log` write
+/// contract, `db::commit::log_agent_access_checked` (PR #201 review finding
+/// 9), so `resolve_proposal` can share the exact same INSERT without the
+/// writer layer depending on the dispatch layer.
 pub fn log_agent_access_checked(
     conn: &Connection,
     client: &str,
@@ -927,13 +929,7 @@ pub fn log_agent_access_checked(
     entity_id: Option<&str>,
     operation: &str,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
-         VALUES (?1, ?2, ?3, ?4, NULL)",
-        rusqlite::params![client, tool, operation, entity_id],
-    )
-    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
-    Ok(())
+    crate::db::commit::log_agent_access_checked(conn, client, tool, entity_id, operation)
 }
 
 /// Reload one live wisdom entry as JSON (per-entry query shape shared with
@@ -1221,11 +1217,17 @@ fn mcp_reviewer(client: &str) -> String {
 ///
 /// Phase 1 loads items + decisions under the read guard; the guard is dropped
 /// before phase 2 issues the provider call. The whole thing runs on a blocking
-/// thread because both phases are synchronous.
+/// thread because both phases are synchronous. The loaded inputs are returned
+/// alongside the embeddings so the caller can also hand the preloaded
+/// decision set to the resolver and keep its `get_proposal_detail` pass
+/// (per-evidence hydration) out of the write lock (PR #201 review finding 6).
 async fn precompute_decide_embeddings(
     ctx: &ToolDispatchContext,
     proposal_id: &str,
-) -> Result<crate::db::commit::EntryEmbeddings> {
+) -> Result<(
+    crate::db::proposals_review::ReviewEmbedInputs,
+    crate::db::commit::EntryEmbeddings,
+)> {
     let conn = ctx.conn.clone();
     let profile = ctx.profile.clone();
     let proposal_id = proposal_id.to_string();
@@ -1235,10 +1237,8 @@ async fn precompute_decide_embeddings(
             crate::db::proposals_review::load_review_embed_inputs(&guard, &proposal_id)?
             // guard drops here — the embed below holds no lock.
         };
-        Ok(crate::db::proposals_review::embed_review_inputs(
-            &inputs,
-            Some(&profile),
-        ))
+        let embeddings = crate::db::proposals_review::embed_review_inputs(&inputs, Some(&profile));
+        Ok((inputs, embeddings))
     })
     .await
     .map_err(|e| anyhow::anyhow!("curated_proposal_decide embed task join error: {e}"))?
@@ -1271,7 +1271,19 @@ pub async fn dispatch_curated_proposal_decide(
             // lands NULL-embedded would stay invisible to semantic retrieval
             // until someone opened the desktop app. Best-effort — a provider
             // failure yields an empty map and the fact still commits.
-            let entry_embeddings = precompute_decide_embeddings(&ctx, &p.proposal_id).await?;
+            //
+            // The decision set and the on-disk `wiki.deposit_default_tier`
+            // (path resolution + config.json read/parse) are hoisted out of
+            // the write lock too (PR #201 review finding 6): the resolver's
+            // own loads would otherwise run per-evidence-chunk SELECTs and
+            // filesystem I/O while holding the RW connection mutex, queueing
+            // every other curated write tool behind them. The resolver
+            // re-checks pending-ness inside its transaction, so a stale
+            // preload fails cleanly.
+            let (inputs, entry_embeddings) =
+                precompute_decide_embeddings(&ctx, &p.proposal_id).await?;
+            let decisions = inputs.into_decisions();
+            let deposit_default_tier = crate::config::BrainConfig::deposit_default_tier_on_disk();
             let proposal_id = p.proposal_id.clone();
             let approver = reviewed_by.clone();
             let outcome = ctx
@@ -1282,6 +1294,8 @@ pub async fn dispatch_curated_proposal_decide(
                         &approver,
                         crate::db::proposals_review::ReviewOptions {
                             entry_embeddings: Some(entry_embeddings),
+                            decisions: Some(decisions),
+                            deposit_default_tier: Some(deposit_default_tier),
                             audit: Some(audit),
                             ..Default::default()
                         },
@@ -1309,6 +1323,25 @@ pub async fn dispatch_curated_proposal_decide(
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or_else(|| crate::db::proposals_review::DEFAULT_REJECT_REASON.to_string());
             let reason = reject_reason.clone();
+            // Decision set loaded before the write lock (same hoist as the
+            // approve arm): the resolver's own load hydrates every evidence
+            // chunk, which has no business running under the RW mutex. The
+            // reject-specific loader reads bare item ids (an all-reject
+            // resolution never reads evidence) and yields an empty set for an
+            // item-less pending row, so `review_reject_with`'s pre-check can
+            // route it to `reject_itemless_proposal` instead of erroring here.
+            let decisions = {
+                let conn = ctx.conn.clone();
+                let proposal_id = p.proposal_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    let guard = lock_conn(&conn)?;
+                    crate::db::proposals_review::load_reject_decisions(&guard, &proposal_id)
+                })
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("curated_proposal_decide load task join error: {e}")
+                })??
+            };
             let proposal_id = p.proposal_id.clone();
             let rejecter = reviewed_by.clone();
             let outcome = ctx
@@ -1319,6 +1352,7 @@ pub async fn dispatch_curated_proposal_decide(
                         &rejecter,
                         &reason,
                         crate::db::proposals_review::ReviewOptions {
+                            decisions: Some(decisions),
                             audit: Some(audit),
                             ..Default::default()
                         },
@@ -2485,8 +2519,13 @@ mod curated_proposals_tests {
     /// migration incl. V21 reviewed_by). The RO conn handle and the context's
     /// db_path point at the same file, so `with_rw` materializes against the
     /// seeded state — the RW-fixture variant the write path needs.
+    ///
+    /// Does NOT set `CURATED_EMBED_STUB` itself (PR #201 review): a raw
+    /// `set_var` here leaked the process-wide env into whichever test ran
+    /// next and raced the temp_env-serialized tests that unset the var or
+    /// use `constant8_short`. The stub is scoped per complete test by
+    /// [`with_brain`], under temp_env's shared serialization.
     fn file_ctx() -> (tempfile::TempDir, ToolDispatchContext) {
-        std::env::set_var("CURATED_EMBED_STUB", "constant8"); // mandated stub
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("brain.db");
         let conn = open_app_db(&db_path, None).unwrap();
@@ -2520,6 +2559,9 @@ mod curated_proposals_tests {
                 // make the test non-hermetic (#178).
                 ("CURATED_BRAIN_CONFIG", None::<&str>),
                 ("CURATED_BRAIN_DB", None::<&str>),
+                // Scoped here (not in `file_ctx`) so the stub never leaks
+                // process-wide — see the `file_ctx` doc comment above.
+                ("CURATED_EMBED_STUB", Some("constant8")),
             ],
             || {
                 tokio::runtime::Builder::new_current_thread()
@@ -2671,71 +2713,148 @@ mod curated_proposals_tests {
         });
     }
 
-    #[tokio::test]
-    async fn curated_proposal_decide_reject_writes_reason() {
-        let (_dir, ctx) = file_ctx();
-        {
-            let guard = ctx.conn.lock().unwrap();
-            seed_pending(&guard, "prop-rej-1");
-        }
-        let v = dispatch_tool_call(
-            &ctx,
-            "curated_proposal_decide",
-            serde_json::json!({
-                "proposal_id": "prop-rej-1",
-                "decision": "reject",
-                "note": "stale corpus"
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(v["status"], "rejected");
-
-        let guard = ctx.conn.lock().unwrap();
-        let rr: String = guard
-            .query_row(
-                "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-rej-1'",
-                [],
-                |r| r.get(0),
+    #[test]
+    fn curated_proposal_decide_reject_writes_reason() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-rej-1");
+            }
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposal_id": "prop-rej-1",
+                    "decision": "reject",
+                    "note": "stale corpus"
+                }),
             )
+            .await
             .unwrap();
-        assert_eq!(rr, "stale corpus");
-        let n: i64 = guard
-            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 0, "reject writes no entries");
+            assert_eq!(v["status"], "rejected");
+
+            let guard = ctx.conn.lock().unwrap();
+            let rr: String = guard
+                .query_row(
+                    "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-rej-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rr, "stale corpus");
+            let n: i64 = guard
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "reject writes no entries");
+        });
     }
 
-    #[tokio::test]
-    async fn curated_proposal_decide_rejects_bad_inputs() {
-        let (_dir, ctx) = file_ctx();
-        {
-            let guard = ctx.conn.lock().unwrap();
-            seed_pending(&guard, "prop-bad-1");
-        }
-        let err = dispatch_tool_call(
-            &ctx,
-            "curated_proposal_decide",
-            serde_json::json!({ "proposalId": "prop-bad-1", "decision": "maybe" }),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("maybe"),
-            "invalid decision names the bad value: {err}"
-        );
+    /// Item-less pending row over MCP (PR #201 review finding 3): the reject
+    /// hoist uses the id-only decision loader, so the row reaches
+    /// `review_reject_with`'s item-less pre-check and clears cleanly — while
+    /// approve still errors loudly, there being no items to accept. The row
+    /// is seeded with raw SQL because current `insert_proposal` refuses
+    /// item-less proposals (the guard the old binary predated).
+    #[test]
+    fn curated_proposal_decide_itemless_pending_rejects_but_not_approves() {
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                guard
+                    .execute(
+                        "INSERT INTO curated_proposals
+                             (id, kind, proposed_name, proposed_type, reasoning, model,
+                              status, created_at)
+                         VALUES ('prop-mcp-empty', 'new_entity', 'Project Empty',
+                                 'project', 'Because.', 'test', 'pending', 100)",
+                        [],
+                    )
+                    .unwrap();
+            }
 
-        let err = dispatch_tool_call(
-            &ctx,
-            "curated_proposals_list",
-            serde_json::json!({ "status": "bogus" }),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("bogus"),
-            "invalid status names the bad value: {err}"
-        );
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposal_id": "prop-mcp-empty",
+                    "decision": "approve"
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("has no items"),
+                "approve must bail on the empty item set, got: {err}"
+            );
+
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposal_id": "prop-mcp-empty",
+                    "decision": "reject"
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["status"], "rejected");
+
+            let guard = ctx.conn.lock().unwrap();
+            let (st, rb): (String, Option<String>) = guard
+                .query_row(
+                    "SELECT status, reviewed_by FROM curated_proposals
+                     WHERE id = 'prop-mcp-empty'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(st, "rejected");
+            assert!(
+                rb.is_some(),
+                "MCP reject of an item-less row must still stamp the reviewer"
+            );
+        });
+    }
+
+    #[test]
+    fn curated_proposal_decide_rejects_bad_inputs() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-bad-1");
+            }
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-bad-1", "decision": "maybe" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("maybe"),
+                "invalid decision names the bad value: {err}"
+            );
+
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposals_list",
+                serde_json::json!({ "status": "bogus" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("bogus"),
+                "invalid status names the bad value: {err}"
+            );
+        });
     }
 
     #[test]
@@ -2794,35 +2913,39 @@ mod curated_proposals_tests {
         });
     }
 
-    #[tokio::test]
-    async fn curated_proposals_tools_audit_fail_closed() {
-        let (_dir, ctx) = file_ctx();
-        {
-            let guard = ctx.conn.lock().unwrap();
-            seed_pending(&guard, "prop-audit-1");
-        }
-        dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
+    #[test]
+    fn curated_proposals_tools_audit_fail_closed() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-audit-1");
+            }
+            dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
+                .await
+                .unwrap();
+            dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-audit-1", "decision": "reject" }),
+            )
             .await
             .unwrap();
-        dispatch_tool_call(
-            &ctx,
-            "curated_proposal_decide",
-            serde_json::json!({ "proposalId": "prop-audit-1", "decision": "reject" }),
-        )
-        .await
-        .unwrap();
-        let n: i64 = {
-            let guard = ctx.conn.lock().unwrap();
-            guard
-                .query_row(
-                    "SELECT COUNT(*) FROM curated_agent_log WHERE tool IN
-                     ('curated_proposals_list','curated_proposal_decide')",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        assert_eq!(n, 2, "both tools wrote one audit row each");
+            let n: i64 = {
+                let guard = ctx.conn.lock().unwrap();
+                guard
+                    .query_row(
+                        "SELECT COUNT(*) FROM curated_agent_log WHERE tool IN
+                         ('curated_proposals_list','curated_proposal_decide')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(n, 2, "both tools wrote one audit row each");
+        });
     }
 
     /// The audit row shares the resolution's transaction (spec §7): when the
@@ -2922,36 +3045,40 @@ mod curated_proposals_tests {
 
     /// Blank-as-unset: an explicitly empty note is not a reason. Storing `""`
     /// would be indistinguishable from erased attribution.
-    #[tokio::test]
-    async fn curated_proposal_decide_blank_note_uses_the_default_reason() {
-        let (_dir, ctx) = file_ctx();
-        {
-            let guard = ctx.conn.lock().unwrap();
-            seed_pending(&guard, "prop-blank-1");
-        }
-        let v = dispatch_tool_call(
-            &ctx,
-            "curated_proposal_decide",
-            serde_json::json!({
-                "proposalId": "prop-blank-1",
-                "decision": "reject",
-                "note": "   "
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            v["reject_reason"],
-            crate::db::proposals_review::DEFAULT_REJECT_REASON
-        );
-        let guard = ctx.conn.lock().unwrap();
-        let rr: String = guard
-            .query_row(
-                "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-blank-1'",
-                [],
-                |r| r.get(0),
+    #[test]
+    fn curated_proposal_decide_blank_note_uses_the_default_reason() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-blank-1");
+            }
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposalId": "prop-blank-1",
+                    "decision": "reject",
+                    "note": "   "
+                }),
             )
+            .await
             .unwrap();
-        assert_eq!(rr, crate::db::proposals_review::DEFAULT_REJECT_REASON);
+            assert_eq!(
+                v["reject_reason"],
+                crate::db::proposals_review::DEFAULT_REJECT_REASON
+            );
+            let guard = ctx.conn.lock().unwrap();
+            let rr: String = guard
+                .query_row(
+                    "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-blank-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rr, crate::db::proposals_review::DEFAULT_REJECT_REASON);
+        });
     }
 }

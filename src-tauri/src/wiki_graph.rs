@@ -818,6 +818,13 @@ fn cross_partition_traverse(
         format!(" AND e.edge_type IN ({})", ph.trim_end_matches(','))
     };
     let mut per_partition: Vec<(String, Vec<(WikiTraverseEdge, String)>)> = Vec::new();
+    // Memoized vocabulary resolution for the whole traversal (PR #201 review
+    // finding 7): every production partition id cascades to the same
+    // `tier_fact` manifest, so resolving it once per partition re-parses the
+    // same manifest ~2K times on a K-partition hub. The cache keeps the
+    // per-entity lookup fresh — a partition with its own manifest still wins
+    // exactly as it does for the writer.
+    let mut vocab_cache = crate::db::commit::StrictVocabCache::default();
     for pid in &partition_ids {
         // The SHARED resolver, not a direct `wiki_get_ontology` call (spec
         // line 73). `llm_wiki_edges.entity_id` holds whatever id the writer
@@ -835,7 +842,8 @@ fn cross_partition_traverse(
         // resolver. Nothing is skipped. Reading the same rows back through
         // the same function the writer gated them with is what makes a
         // read/write divergence unrepresentable rather than merely absent.
-        let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, pid);
+        let vocab =
+            crate::db::commit::resolve_strict_edge_vocabulary_with(conn, pid, &mut vocab_cache);
         let mut pairs: Vec<(WikiTraverseEdge, String)> = Vec::new();
         // `fetch_entity_neighbors` anchors ONE column per call, so Both mode
         // fans out to two calls (mirrors `fetch_neighbors` in scoped mode).

@@ -327,6 +327,21 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
         // matching V18/V19: a crash before the stamp re-runs a body that is
         // safe to re-run. Every skip path WARNs and names the idempotent
         // manual recovery command `ct evidence regrade`.
+        //
+        // UNLIKE V18, a skipped destructive phase does NOT stamp (review
+        // finding on PR #201): heal runs `source_ref_is_still_grounded`
+        // strictly again (the Phase-2 carve-out revert), so if V20 stamped
+        // while doomed rows were still live, the same session's heal would
+        // soft-delete those rows BEFORE `ct evidence regrade` could export
+        // them — regrade only selects `deleted_at IS NULL` stock, so the
+        // documented recovery would report zeros, and the 7-day prune would
+        // hard-delete the never-exported rows. Leaving the stamp unwritten
+        // keeps `MAX(version) < 20` a durable "recovery pending" marker that
+        // heal defers to (see `source_ref_is_still_grounded`), makes every
+        // open retry the (idempotent) re-grade, and gates V21 below until
+        // the brain settles — an exceptional, loudly-WARNed, self-healing
+        // state rather than an availability outage.
+        let mut v20_settled = true;
         let now_ms = crate::db::commit::ms_now();
         match crate::db::evidence_regrade::regrade_unanchored(conn, db_dir, now_ms) {
             Ok(report) => {
@@ -343,6 +358,9 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
                         report.skipped_destructive
                     );
                 }
+                if report.skipped_destructive {
+                    v20_settled = false;
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -355,10 +373,12 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
             }
         }
 
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (20)",
-            [],
-        )?;
+        if v20_settled {
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (20)",
+                [],
+            )?;
+        }
     }
     if version < 21 {
         // Human Verification Gate (hvg): add the nullable
@@ -370,10 +390,66 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
         // find the column present with the version still at 20 (which would
         // replay the ALTER and fail `AppDb::open` permanently with a
         // duplicate-column error). No boot loop, no silent skip.
-        conn.execute_batch(&format!(
-            "BEGIN;\n{}\nINSERT OR IGNORE INTO schema_version (version) VALUES (21);\nCOMMIT;",
-            MIGRATION_V21
-        ))?;
+        //
+        // V20 recovery pending (review finding on PR #201): the version
+        // snapshot above predates the V20 re-grade, so a skipped destructive
+        // phase leaves the brain at 19 while this block would still run —
+        // stamping 21 and permanently masking the unwritten 20 (every later
+        // open reads MAX(version) >= 21 and never retries the re-grade, and
+        // heal's version gate stops deferring). V21 is therefore deferred
+        // until V20 settles; it lands on the first open after recovery.
+        let v20_recovery_pending = {
+            let stamped: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version >= 20",
+                [],
+                |r| r.get(0),
+            )?;
+            stamped == 0
+        };
+        if v20_recovery_pending {
+            eprintln!(
+                "[ct::repair WARN] #186 V21 DEFERRED: the V20 re-grade skipped its \
+                 destructive phase and left doomed rows un-purged; adding \
+                 `curated_proposals.reviewed_by` now would stamp 21 and mask the \
+                 unwritten 20. Complete the recovery (fix the export dir / brain \
+                 completeness, then `ct evidence regrade` or the next open) and V21 \
+                 lands on the following open."
+            );
+        } else {
+            // Concurrent-migration guard (review finding on PR #201): the
+            // desktop app and a simultaneously launching `--mcp` server can
+            // BOTH read version=20 at the top of migrate() and enter this
+            // block; the second ALTER would then fail its open with
+            // `duplicate column name: reviewed_by`. BEGIN IMMEDIATE takes
+            // the write lock up front (the loser blocks on it, via the busy
+            // timeout set at open), and the column is re-checked UNDER that
+            // lock, so exactly one process runs the ALTER and the other
+            // no-ops into the idempotent stamp.
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let applied = (|| -> Result<()> {
+                let has_column: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('curated_proposals')
+                      WHERE name = 'reviewed_by'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if has_column == 0 {
+                    conn.execute_batch(MIGRATION_V21)?;
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_version (version) VALUES (21)",
+                    [],
+                )?;
+                Ok(())
+            })();
+            match applied {
+                Ok(()) => conn.execute_batch("COMMIT;")?,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(e);
+                }
+            }
+        }
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
@@ -1837,8 +1913,15 @@ mod tests {
     /// file-backed brain with a live doomed (flagged, unanchored) row whose
     /// `repair-export-phase2/` export path is blocked by a regular FILE must
     /// NOT abort migrate() — the export fs error takes the fail-safe posture
-    /// (WARN + skip destructive phase + stamp), so AppDb::open still succeeds
-    /// and the doomed row survives for the manual `ct evidence regrade`.
+    /// (WARN + skip destructive phase, AppDb::open still succeeds) — and the
+    /// doomed row survives for the manual `ct evidence regrade`.
+    ///
+    /// Unlike V18, the stamp does NOT land on a skip (PR #201 review): heal
+    /// grounds strictly again post-revert, so a stamp here would let the same
+    /// session's heal soft-delete the doomed rows before the manual regrade
+    /// could export them (regrade only sees `deleted_at IS NULL` stock). The
+    /// unwritten 20 is the durable "recovery pending" marker heal defers to,
+    /// and V21 is deferred behind it.
     #[test]
     fn v20_file_backed_regrade_survives_an_unwritable_export_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1863,7 +1946,7 @@ mod tests {
                  source_ref, created_at, updated_at)
              VALUES ('fact_orphan', 'ent', 'orphan', 'b', '[]', 'inferred',
                      'librarian_inferred',
-                     'librarian-orphan00000000000000000000000000000', 1, 1)",
+                     'librarian-abababababababababababababababab', 1, 1)",
             [],
         )
         .unwrap();
@@ -1908,7 +1991,9 @@ mod tests {
             "doomed row must remain flagged when the destructive phase is skipped"
         );
 
-        // And the stamp still lands — no boot loop on the next launch.
+        // And the stamp does NOT land — the unwritten 20 is the durable
+        // "recovery pending" marker: heal defers the doomed row, every open
+        // retries the idempotent re-grade, and V21 stays deferred behind it.
         let version: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -1916,7 +2001,61 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(
+            version, 19,
+            "a skipped V20 destructive phase must not stamp"
+        );
+
+        // V21 is deferred with it: stamping 21 here would mask the unwritten
+        // 20 forever (every later open reads MAX(version) >= 21).
+        let has_reviewed_by: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('curated_proposals')
+                  WHERE name = 'reviewed_by'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_reviewed_by, 0, "V21 must wait for the V20 recovery");
+
+        // Heal defers the still-flagged row while recovery is pending — this
+        // is the exact soft-delete that defeated export-before-purge when the
+        // skip path stamped anyway (PR #201 review finding 1).
+        let token: String = conn
+            .query_row(
+                "SELECT source_ref FROM llm_wiki_entries WHERE id = 'fact_orphan'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            crate::db::commit::source_ref_is_still_grounded(&conn, &token),
+            "heal must treat a flagged row as grounded while the V20 recovery is pending"
+        );
+
+        // Recovery unblocks the ladder: unblock the export dir, re-run the
+        // re-grade (what `ct evidence regrade` / the next open does), and the
+        // following migrate() stamps 20 AND lands V21.
+        std::fs::remove_file(tmp.path().join("repair-export-phase2")).unwrap();
+        let now_ms = crate::db::commit::ms_now();
+        let report =
+            crate::db::evidence_regrade::regrade_unanchored(&conn, Some(tmp.path()), now_ms)
+                .unwrap();
+        assert_eq!(
+            report.purged, 1,
+            "recovered re-grade must purge the doomed row"
+        );
+        assert!(!report.skipped_destructive);
+
+        migrate(&conn, None, Some(tmp.path())).expect("migrate must succeed after the recovery");
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 21, "recovery settles V20 and lands V21");
     }
 
     #[test]
