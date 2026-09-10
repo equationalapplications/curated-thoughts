@@ -313,6 +313,54 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
         )?;
     }
 
+    if version < 20 {
+        // The Phase-2 flip itself (issue #186 §2.4): re-grade every live
+        // unanchored librarian_evidence row against current chunk state.
+        // Anchored rows are cleared; still-orphaned rows are exported to
+        // `<db_dir>/repair-export-phase2/` and then purged — export
+        // before purge is a hard gate, and the purge helper re-counts the
+        // exported *.json files per doomed id before deleting anything.
+        //
+        // There is no SQL body: the work lives in
+        // `evidence_regrade::regrade_unanchored`. The block is idempotent
+        // (a settled brain has no flagged rows) but still stamp-last,
+        // matching V18/V19: a crash before the stamp re-runs a body that is
+        // safe to re-run. Every skip path WARNs and names the idempotent
+        // manual recovery command `ct evidence regrade`.
+        let now_ms = crate::db::commit::ms_now();
+        match crate::db::evidence_regrade::regrade_unanchored(conn, db_dir, now_ms) {
+            Ok(report) => {
+                if report.regraded_anchored > 0
+                    || report.exported > 0
+                    || report.purged > 0
+                    || report.skipped_destructive
+                {
+                    println!(
+                        "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
+                        report.regraded_anchored,
+                        report.exported,
+                        report.purged,
+                        report.skipped_destructive
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[ct::repair WARN] #186 V20 re-grade FAILED: {e}. The schema \
+                     stamp is NOT written on an error, so the re-grade re-runs on \
+                     the next open. If the failure persists, invoke the idempotent \
+                     `ct evidence regrade` manually."
+                );
+                return Err(e);
+            }
+        }
+
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (20)",
+            [],
+        )?;
+    }
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -477,7 +525,7 @@ mod tests {
         // Bumped from 18 to 19 by MIGRATION_V19, which repairs the mixed
         // seconds/milliseconds units in `llm_wiki_edges.created_at`
         // (issue #191 spec §2.5).
-        assert_eq!(max_version, 19);
+        assert_eq!(max_version, 20);
     }
 
     /// Upgraded-DB path for the core-llm-wiki@7.1.0 bump: a database created
@@ -1510,9 +1558,129 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            version, 19,
-            "the V18 stamp must land after the repair (V19 stamp now follows)"
+            version, 20,
+            "the V18 stamp must land after the repair (V19/V20 stamps now follow)"
         );
+    }
+
+    /// One-open V18→V20 (issue #186 §2.4): migrate() run over a hand-built
+    /// pre-V18 brain must land ALL of the V18 repair, the V20 re-grade and
+    /// all three stamps in the SAME pass. The seeded unanchored fact anchors
+    /// a live chunk, so the re-grade must CLEAR its flag (not purge it) —
+    /// proving the re-grade really ran between the V18 repair and the V20
+    /// stamp. This test lives here because migrate() and the fixtures are
+    /// private.
+    #[test]
+    fn v18_through_v20_regrade_clears_live_anchor_in_same_pass() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        build_pre_v18_brain(&conn);
+        let hash64 = seed_v18_damage(&conn);
+
+        // A second, genuinely unanchored live fact: the re-grade must purge
+        // it (export then hard delete) while the anchored fact survives.
+        // librarian_evidence does not exist at V16 — MIGRATION_V18 creates
+        // it. Pre-create the table and stamp 18 so migrate() skips the V18
+        // gate (which would otherwise REPAIR fact_v18's mangled ref, i.e.
+        // un-flag nothing and interleave two repairs in one pass) and runs
+        // only the V20 re-grade. The orphan's evidence row is flagged
+        // unanchored=1 with an empty evidence array; fact_v18's healthy
+        // V18-shaped row is seeded by seed_v18_damage's INSERT OR REPLACE
+        // (which now has a table to land in).
+        conn.execute_batch(crate::db::schema::MIGRATION_V18)
+            .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (18)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact_orphan', 'ent', 'orphan', 'b', '[]', 'inferred',
+                     'librarian_inferred',
+                     'librarian-orphan00000000000000000000000000000', 1, 1)",
+            [],
+        )
+        .unwrap();
+        // The orphan's flagged evidence row (empty evidence array → truly
+        // unanchored → purge after export).
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json,
+                 unanchored, created_at)
+             VALUES ('fact_orphan', 'prop_orphan',
+                 '{\"evidence\":[],\"proposal_id\":\"prop_orphan\"}', 1, 1)",
+            [],
+        )
+        .unwrap();
+        // Give the anchored fact its V18-shaped evidence row (flagged 1; the
+        // re-grade — not the V18 repair, which we are skipping — must clear
+        // it). The chunk anchor from seed_v18_damage is live, and the row is
+        // built in Rust so json_valid() sees exactly the intended blob.
+        let evidence_json = format!(
+            r#"{{"evidence":[{{"chunk_id":1,"content_hash":"{hash64}"}}],"proposal_id":"prop_v18"}}"#
+        );
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json,
+                 unanchored, created_at)
+             VALUES ('fact_v18', 'prop_v18', ?1, 1, 1)",
+            [evidence_json],
+        )
+        .unwrap();
+
+        migrate(&conn, None, Some(tmp.path())).unwrap();
+
+        // Anchored fact: the re-grade CLEARED its flag (row + evidence
+        // survive). (V18 gate is skipped in this fixture, so the token
+        // normalization is out of scope here — it is covered by
+        // v18_file_backed_repair_exports_backs_up_and_tokens_damaged_rows.)
+        let (pid, unanchored): (String, i64) = conn
+            .query_row(
+                "SELECT le.proposal_id, le.unanchored
+                   FROM llm_wiki_entries e
+                   JOIN librarian_evidence le ON le.entry_id = e.id
+                  WHERE e.id = 'fact_v18'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unanchored, 0, "live chunk anchor must survive the re-grade");
+        assert_eq!(pid, "prop_v18");
+
+        // Orphaned fact: purged (hard delete), with its evidence and any
+        // dangling edges swept, and a backup JSON on disk.
+        let gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'fact_orphan'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0, "still-orphaned row must be purged by V20");
+        let ev_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM librarian_evidence WHERE entry_id = 'fact_orphan'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ev_gone, 0, "evidence must go with the entry");
+        let backup = tmp
+            .path()
+            .join(crate::db::evidence_regrade::REGRADE_EXPORT_DIR)
+            .join("fact_orphan.json");
+        assert!(backup.exists(), "export-before-purge must leave a backup");
+
+        // The same-pass stamp contract: ALL of 18, 19 and 20 present.
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 20, "one open must stamp through V20");
     }
 
     /// Review round 5, finding 4: a file-IO failure inside the backed repair
@@ -1561,7 +1729,93 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
+    }
+
+    /// V20 test parity with the V18 fail-safe above (final review F1): a
+    /// file-backed brain with a live doomed (flagged, unanchored) row whose
+    /// `repair-export-phase2/` export path is blocked by a regular FILE must
+    /// NOT abort migrate() — the export fs error takes the fail-safe posture
+    /// (WARN + skip destructive phase + stamp), so AppDb::open still succeeds
+    /// and the doomed row survives for the manual `ct evidence regrade`.
+    #[test]
+    fn v20_file_backed_regrade_survives_an_unwritable_export_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        build_pre_v18_brain(&conn);
+        seed_v18_damage(&conn);
+        // Same fixture strategy as the same-pass test: librarian_evidence
+        // does not exist at V16 - MIGRATION_V18 creates it. Pre-create the
+        // table and stamp 18 so migrate() runs only the V20 re-grade, then
+        // seed one TRULY doomed row (empty evidence array, flagged) that V20
+        // must export and purge - unless the export is blocked.
+        conn.execute_batch(crate::db::schema::MIGRATION_V18)
+            .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (18)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact_orphan', 'ent', 'orphan', 'b', '[]', 'inferred',
+                     'librarian_inferred',
+                     'librarian-orphan00000000000000000000000000000', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json,
+                 unanchored, created_at)
+             VALUES ('fact_orphan', 'prop_orphan',
+                 '{\"evidence\":[],\"proposal_id\":\"prop_orphan\"}', 1, 1)",
+            [],
+        )
+        .unwrap();
+        // Block the V20 export directory with a regular FILE so
+        // create_dir_all/export fails with a non-DB error (full-disk proxy).
+        std::fs::write(tmp.path().join("repair-export-phase2"), "not a dir").unwrap();
+
+        migrate(&conn, None, Some(tmp.path()))
+            .expect("migrate must survive an unwritable V20 export dir (fail-safe)");
+
+        // The destructive phase was skipped: the doomed row survives intact
+        // (entry + flagged evidence), waiting for the manual
+        // `ct evidence regrade`.
+        let survived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'fact_orphan'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            survived, 1,
+            "doomed row must survive when the backup export fails"
+        );
+        let still_flagged: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = 'fact_orphan'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still_flagged, 1,
+            "doomed row must remain flagged when the destructive phase is skipped"
+        );
+
+        // And the stamp still lands — no boot loop on the next launch.
+        let version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 20);
     }
 
     #[test]

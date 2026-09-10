@@ -206,37 +206,56 @@ fn synthesis_writes_tokens_and_anchored_evidence() {
         );
     }
 
-    // 2. Phase-aware evidence assertion. Under Phase-1 write-with-flag a fact
-    //    with zero live anchors is a legitimate, expected write — a blanket
-    //    ">=1 chunk present" assertion would contradict spec §2.4.
-    let mut anchored = 0;
-    let mut unanchored = 0;
-    for entry_id in entry_ids(&conn) {
-        let json = tauri_app_lib::db::commit::evidence_json_for_entry(&conn, &entry_id)
-            .unwrap()
-            .unwrap_or_else(|| panic!("every inferred fact needs an evidence row: {entry_id}"));
-        serde_json::from_str::<serde_json::Value>(&json)
-            .unwrap_or_else(|_| panic!("evidence_json must parse: {entry_id}"));
-        let flag: i64 = conn
-            .query_row(
-                "SELECT unanchored FROM librarian_evidence WHERE entry_id = ?1",
-                [&entry_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if flag == 1 {
-            unanchored += 1;
-        } else {
-            assert!(
-                tauri_app_lib::db::commit::evidence_has_live_chunk(&conn, &json).unwrap(),
-                "unanchored=0 must mean a live chunk anchor exists: {entry_id}"
-            );
-            anchored += 1;
-        }
-    }
+    // 2. Phase-2 strict contract (spec §2.4): a fact whose evidence anchors no
+    //    live chunk is NOT written — only the anchored fact survives, with an
+    //    evidence row whose flag is unanchored=0, and the skipped item is
+    //    rejected through the standard proposal-item machinery.
+    let ids = entry_ids(&conn);
+    assert_eq!(
+        ids.len(),
+        1,
+        "phase2 gate must skip the unanchored fact; entries: {ids:?}"
+    );
+    let entry_id = &ids[0];
+    let json = tauri_app_lib::db::commit::evidence_json_for_entry(&conn, entry_id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("the anchored fact needs an evidence row: {entry_id}"));
+    serde_json::from_str::<serde_json::Value>(&json)
+        .unwrap_or_else(|_| panic!("evidence_json must parse: {entry_id}"));
+    let flag: i64 = conn
+        .query_row(
+            "SELECT unanchored FROM librarian_evidence WHERE entry_id = ?1",
+            [entry_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(flag, 0, "the surviving fact must be anchored");
     assert!(
-        anchored >= 1 && unanchored >= 1,
-        "fixture must exercise both paths (anchored={anchored}, unanchored={unanchored})"
+        tauri_app_lib::db::commit::evidence_has_live_chunk(&conn, &json).unwrap(),
+        "unanchored=0 must mean a live chunk anchor exists: {entry_id}"
+    );
+
+    // The unanchored fact left no entry and no evidence row behind...
+    let unanchored_entries: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM llm_wiki_entries WHERE body = 'Unanchored fact.'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unanchored_entries, 0, "unanchored fact must not be written");
+
+    // ...and its proposal item was rejected, not accepted.
+    let rejected_items: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM curated_proposal_items WHERE status = 'rejected'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rejected_items, 1,
+        "the skipped unanchored item must be rejected"
     );
 
     // 3. Engine-simulation pass: zero rows would change. Supplemental — Task 12

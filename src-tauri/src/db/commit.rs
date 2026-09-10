@@ -67,6 +67,9 @@ pub struct CommitResult {
     pub conflicts: Vec<String>,
     pub dropped_edges: Vec<String>,
     pub proposal_status: String,
+    /// Phase-2 (spec §2.4): fact_add items skipped at insert time because
+    /// their evidence anchored no surviving chunk.
+    pub skipped_unanchored: usize,
 }
 
 pub(crate) struct LoadedProposal {
@@ -106,6 +109,10 @@ struct CommitContext {
     facts_archived: usize,
     tasks_added: usize,
     facts_duplicated: usize,
+    /// Phase-2 (spec §2.4): fact_add items skipped because their evidence
+    /// anchored no surviving chunk. Counted so the resolution event can
+    /// surface the drop rate even though nothing was written.
+    skipped_unanchored: usize,
     /// Entry embeddings computed before the transaction opened, keyed by
     /// `LoadedItem::id`. A missing key means "no embedding available" — the
     /// entry is inserted with NULL and the sweep retries it. A key whose
@@ -317,6 +324,26 @@ fn warn_ontology_unreadable(entity_id: &str, lookup_ids: &[&str], last_error: &s
     eprintln!(
         "[ct::commit WARN] ontology unreadable for entity {entity_id} (fallback {lookup_ids:?}, \
          last error: {last_error}); edge types are not gated"
+    );
+}
+
+/// A fact_add whose evidence anchored no surviving chunk was skipped, not
+/// written (Phase-2 default, spec §2.4).
+#[cfg(feature = "mcp-server")]
+fn warn_unanchored_fact_skipped(proposal_id: &str, fact_title: &str) {
+    tracing::warn!(
+        target: "ct::commit",
+        proposal_id = %proposal_id,
+        fact_title = %fact_title,
+        "fact_add skipped: evidence anchors no surviving chunk"
+    );
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn warn_unanchored_fact_skipped(proposal_id: &str, fact_title: &str) {
+    eprintln!(
+        "[ct::commit WARN] fact_add skipped for proposal {proposal_id}: evidence anchors no \
+         surviving chunk (fact: {fact_title})"
     );
 }
 
@@ -557,9 +584,8 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
                 warn_source_ref_missing_evidence(trimmed, "no librarian_evidence row");
                 true
             }
-            // Phase-1 carve-out: flagged rows survive until the Phase-2
-            // re-grade purges them deliberately, after export.
-            Some((_, 1)) => true,
+            // Phase-1 carve-out REMOVED (Phase-2, spec §2.3): flagged rows
+            // are grounded strictly by live-chunk evidence again.
             Some((json, _)) => match evidence_has_live_chunk(conn, &json) {
                 Ok(live) => live,
                 // Same defensive policy as every other DB-error branch in
@@ -1281,6 +1307,19 @@ fn commit_fact_add(
     let evidence_json = evidence_json_with_hashes(conn, &ctx.proposal_id, &item.evidence)?;
     let source_ref = librarian_source_ref_token(&fact_id);
 
+    // Phase-2 strict gate (spec §2.4): a fact whose evidence anchors no
+    // surviving chunk is NOT written. The skip is logged (cfg-gated warn
+    // helper) and counted so the resolution summary can surface the drop
+    // rate. Fail-closed: an unreadable evidence payload counts as unanchored.
+    // Computed once here and reused for the evidence-row flag below (plan
+    // Task 1 Step 3: no duplicate evaluation).
+    let unanchored = !evidence_has_live_chunk(conn, &evidence_json)?;
+    if unanchored {
+        warn_unanchored_fact_skipped(&ctx.proposal_id, &title);
+        ctx.skipped_unanchored += 1;
+        return Ok(FactAddOutcome::SkippedUnanchored);
+    }
+
     // Use the precomputed vector only if it describes the text we are about
     // to write — see `PrecomputedEmbedding`. A stale vector is worse than no
     // vector: NULL is retried by the sweep, a wrong vector is not.
@@ -1320,10 +1359,10 @@ fn commit_fact_add(
     // Same transaction as the entry INSERT: if this fails the fact is not
     // written. Fail-closed, consistent with the json_valid CHECK. Spec §5.
     //
-    // Phase 1 policy (spec §2.4): a fact whose evidence anchors no surviving
-    // chunk is still written, but flagged, so the supervised re-run can
-    // measure the real drop rate before the permanent skip+log default.
-    let unanchored = !evidence_has_live_chunk(conn, &evidence_json)?;
+    // Phase 2 policy (spec §2.4): unanchored facts are skipped above, so a
+    // written fact always has a live anchor and this flag is 0 for new rows.
+    // The column stays populated (0) to keep the schema and the historic
+    // Phase-1 rows meaningful. The binding is the gate's computation above.
     insert_librarian_evidence(
         conn,
         &fact_id,
@@ -1654,6 +1693,10 @@ enum FactAddOutcome {
     Applied,
     /// Normalized body exactly matches an existing fact on the same entity.
     Duplicate,
+    /// Phase-2 (spec §2.4): the evidence anchored no surviving chunk, so the
+    /// fact was not written. Logged via the cfg-gated warn helper and counted
+    /// in `CommitContext::skipped_unanchored`.
+    SkippedUnanchored,
 }
 
 /// Normalize a fact body for exact-match dedupe: trim edges and collapse
@@ -1865,6 +1908,12 @@ fn write_resolution_event(
         parts.push(format!(
             "{} duplicate fact(s) skipped",
             ctx.facts_duplicated
+        ));
+    }
+    if ctx.skipped_unanchored > 0 {
+        parts.push(format!(
+            "{} unanchored fact(s) skipped",
+            ctx.skipped_unanchored
         ));
     }
 
@@ -2090,6 +2139,7 @@ pub fn resolve_proposal(
         facts_archived: 0,
         tasks_added: 0,
         facts_duplicated: 0,
+        skipped_unanchored: 0,
         entry_embeddings,
         deposit_default_tier: options
             .deposit_default_tier
@@ -2145,6 +2195,11 @@ pub fn resolve_proposal(
                         FactAddOutcome::Applied => ItemCommitOutcome::Applied,
                         FactAddOutcome::Duplicate => {
                             ctx.facts_duplicated += 1;
+                            ItemCommitOutcome::Rejected
+                        }
+                        FactAddOutcome::SkippedUnanchored => {
+                            // Counted in `commit_fact_add` itself so direct
+                            // callers see the skip too.
                             ItemCommitOutcome::Rejected
                         }
                     })
@@ -2224,6 +2279,7 @@ pub fn resolve_proposal(
         conflicts: ctx.conflicts,
         dropped_edges: ctx.dropped_edges,
         proposal_status: proposal_status.to_string(),
+        skipped_unanchored: ctx.skipped_unanchored,
     })
 }
 
@@ -2381,11 +2437,11 @@ mod tests {
         assert!(!evidence_has_live_chunk(&conn, empty).unwrap());
     }
 
-    fn seed_document(conn: &Connection, path: &str) -> i64 {
+    pub(super) fn seed_document(conn: &Connection, path: &str) -> i64 {
         upsert_document(conn, path, "hash").unwrap()
     }
 
-    fn seed_chunk(conn: &Connection, doc_id: i64) -> i64 {
+    pub(super) fn seed_chunk(conn: &Connection, doc_id: i64) -> i64 {
         let chunk = Chunk {
             text: "evidence".into(),
             start_line: 1,
@@ -2452,6 +2508,7 @@ mod tests {
             facts_archived: 0,
             tasks_added: 0,
             facts_duplicated: 0,
+            skipped_unanchored: 0,
             entry_embeddings: std::collections::HashMap::new(),
         }
     }
@@ -2535,8 +2592,11 @@ mod tests {
         assert!(parsed.get("proposal_id").is_some());
     }
 
+    /// Phase-2 strict gate (spec §2.4): a fact whose evidence anchors no
+    /// surviving chunk is NOT written. Direct-`commit_fact_add` check that the
+    /// skip is total: no entry, no evidence row, no outbox row.
     #[test]
-    fn commit_fact_add_flags_unanchored_evidence() {
+    fn phase2_commit_fact_add_skips_unanchored() {
         let conn = open_in_memory().unwrap();
         seed_entity(&conn, "ent-u", "Test Entity", "summary", 100);
         // No document, no chunk: the evidence references a chunk that is not there.
@@ -2549,22 +2609,52 @@ mod tests {
             end_line: Some(2),
             source_kind: None,
         }]);
-        commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        let outcome = commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        assert!(matches!(outcome, FactAddOutcome::SkippedUnanchored));
+        assert_eq!(ctx.skipped_unanchored, 1);
 
-        let entry_id = ctx.committed.last().unwrap().record_id.clone();
-        let unanchored: i64 = conn
+        // Nothing written — no entry, no evidence row, no outbox row.
+        for table in ["llm_wiki_entries", "librarian_evidence", "llm_wiki_outbox"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} must be untouched on phase2 skip");
+        }
+    }
+
+    /// The anchored twin of `phase2_commit_fact_add_skips_unanchored`: a live
+    /// chunk anchor still writes normally, flagged unanchored=0, and the skip
+    /// counter stays at zero. (Covers the old
+    /// `commit_fact_add_flags_unanchored_evidence` intent that anchored facts
+    /// are unaffected by the gate.)
+    #[test]
+    fn phase2_anchored_facts_still_written_and_counter_zero() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-a", "Test Entity", "summary", 100);
+        let doc_id = seed_document(&conn, "notes.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash: String = conn
             .query_row(
-                "SELECT unanchored FROM librarian_evidence WHERE entry_id = ?1",
-                [&entry_id],
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
                 |r| r.get(0),
             )
             .unwrap();
 
-        // Phase 1 is write-with-flag, NOT skip: the fact is still written.
-        assert_eq!(
-            unanchored, 1,
-            "zero live chunk anchors must set unanchored=1"
-        );
+        let mut ctx = test_ctx("ent-a");
+        let item = fact_add_item(vec![StoredEvidenceChunk {
+            chunk_id: Some(chunk_id),
+            content_hash,
+            quote: "evidence".into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            source_kind: None,
+        }]);
+        let outcome = commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        assert!(matches!(outcome, FactAddOutcome::Applied));
+        assert_eq!(ctx.skipped_unanchored, 0);
+
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = ?1",
@@ -2572,7 +2662,98 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(exists, 1, "Phase 1 must not skip the write");
+        assert_eq!(exists, 1, "anchored fact must still be written");
+
+        let unanchored: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unanchored, 0, "anchored fact must be flagged unanchored=0");
+    }
+
+    /// Resolve-level Phase-2 contract (spec §2.4): the skipped item flows
+    /// through `ItemCommitOutcome::Rejected`, so it lands as status='rejected'
+    /// on `curated_proposal_items`, increments `CommitResult.skipped_unanchored`,
+    /// and the resolution-event summary carries the skipped clause (same shape
+    /// as the duplicates clause).
+    #[test]
+    fn phase2_resolve_rejects_unanchored_item_and_counts_skip() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        seed_entity(&conn, "ent-1", "Existing", "Summary", 100);
+
+        // Evidence chunk_id dangles: no chunk row with that id exists, so
+        // evidence_has_live_chunk is false through both the hash and id paths.
+        insert_test_proposal(
+            &conn,
+            "prop-u1",
+            ProposalKind::UpdateEntity,
+            Some("ent-1"),
+            vec![NewProposalItem {
+                id: "item-1".into(),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({
+                    "body": "A fact worth storing.",
+                    "tags": [],
+                    "confidence": "inferred"
+                }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id: Some(999_999),
+                    content_hash: "nosuchhash".into(),
+                    quote: "dangling".into(),
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    source_kind: None,
+                }],
+            }],
+            doc_id,
+        );
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-u1",
+            &[ItemDecision {
+                item_id: "item-1".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                embed_profile: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.skipped_unanchored, 1);
+        assert_eq!(result.committed.len(), 0);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM curated_proposal_items WHERE id = 'item-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "rejected");
+
+        // Resolution-event summary carries the skipped clause (duplicates shape).
+        let summary: String = conn
+            .query_row(
+                "SELECT summary FROM llm_wiki_events ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            summary.contains("unanchored"),
+            "resolution summary must surface the phase2 skip, got: {summary}"
+        );
     }
 
     #[test]
@@ -5399,12 +5580,11 @@ mod source_ref_grounded_tests {
         ));
     }
 
-    /// Phase-1 carve-out: `unanchored` rows are treated as still-grounded.
-    /// Otherwise heal soft-deletes them and prune hard-deletes them 7 days
-    /// later, destroying the drop-rate data Phase 1 exists to measure. The
-    /// Phase-2 re-grade is the only path that purges them. Spec §2.3.
+    /// Phase-2 revert (spec §2.3): grounding for token rows is strictly
+    /// evidence-based. A flagged row whose evidence anchors no live chunk is
+    /// NOT grounded — heal soft-deletes it, prune finishes it.
     #[test]
-    fn phase1_unanchored_rows_are_treated_as_grounded() {
+    fn phase2_unanchored_rows_with_no_live_chunk_are_not_grounded() {
         let conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
@@ -5422,9 +5602,48 @@ mod source_ref_grounded_tests {
             1,
         )
         .unwrap();
-        assert!(source_ref_is_still_grounded(
+        assert!(!source_ref_is_still_grounded(
             &conn,
             &librarian_source_ref_token("fact_u")
+        ));
+    }
+
+    /// Flagged-but-actually-anchored rows ARE grounded (the re-grade clears
+    /// them, but heal must also be correct on the flagged value itself).
+    #[test]
+    fn phase2_flagged_but_anchored_rows_are_grounded() {
+        let conn = open_in_memory().unwrap();
+        // Seed a live chunk, an entry with a token ref, and a FLAGGED
+        // (unanchored=1) evidence row whose JSON carries that live chunk's
+        // content_hash — grounding must follow the evidence, not the flag.
+        let doc_id = super::tests::seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = super::tests::seed_chunk(&conn, doc_id);
+        let hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_a','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [librarian_source_ref_token("fact_a")],
+        )
+        .unwrap();
+        insert_librarian_evidence(
+            &conn,
+            "fact_a",
+            "prop_a",
+            &format!(r#"{{"evidence":[{{"chunk_id":{chunk_id},"content_hash":"{hash}"}}],"proposal_id":"prop_a"}}"#),
+            true,
+            1,
+        )
+        .unwrap();
+        assert!(source_ref_is_still_grounded(
+            &conn,
+            &librarian_source_ref_token("fact_a")
         ));
     }
 }

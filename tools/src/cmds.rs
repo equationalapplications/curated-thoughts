@@ -454,7 +454,7 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         },
     )?;
     println!(
-        "approved {pid}: items={} source={} committed={} conflicts={} dropped_edges={} status={}",
+        "approved {pid}: items={} source={} committed={} conflicts={} dropped_edges={} skipped_unanchored={} status={}",
         decisions.len(),
         detail
             .source_doc_paths
@@ -464,6 +464,7 @@ fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
         result.committed.len(),
         result.conflicts.len(),
         result.dropped_edges.len(),
+        result.skipped_unanchored,
         result.proposal_status,
     );
     Ok(())
@@ -1329,6 +1330,47 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
 // TempDir is referenced in tests; we use the `tempfile` crate already in
 // dev-dependencies. Imported here so the use-statement doesn't have to live
 // in every test fn.
+// ---------------------------------------------------------------------------
+// `ct evidence regrade` (issue #186 §2.4) — idempotent manual recovery for
+// the V20 migration. Calls the SAME lib fn the migration gate calls, so the
+// manual path can never drift from the automatic one.
+// ---------------------------------------------------------------------------
+
+/// `ct evidence regrade` — re-run the V20 re-grade on demand.
+///
+/// `--yes` gates the destructive phase (export + purge); without it, the
+/// command refuses with a summary of what WOULD run. On success prints the
+/// same `report line` shape the migration gate prints so grepping a brain's
+/// history finds both runs.
+pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
+    if !yes {
+        let brain = crate::write::resolve()?;
+        eprintln!(
+            "refusing: `ct evidence regrade` would re-grade, export and purge \
+             unanchored librarian facts in {} (a destructive write). Pass --yes \
+             to proceed.",
+            brain.paths.db_path.display()
+        );
+        return Ok(1);
+    }
+    let brain = crate::write::resolve()?;
+    let conn = crate::write::open_rw(&brain)?;
+    let now_ms = tauri_app_lib::db::commit::ms_now();
+    let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored(
+        &conn,
+        Some(brain.paths.db_path.parent().unwrap_or(std::path::Path::new("."))),
+        now_ms,
+    )?;
+    println!(
+        "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
+        report.regraded_anchored,
+        report.exported,
+        report.purged,
+        report.skipped_destructive
+    );
+    Ok(0)
+}
+
 #[cfg(test)]
 use tempfile::TempDir;
 
