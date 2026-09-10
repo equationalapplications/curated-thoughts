@@ -811,6 +811,143 @@ fn remove_sqlite_sidecars(db_path: &Path) {
     let _ = std::fs::remove_file(format!("{base}-shm"));
 }
 
+/// Delete `user_doc` rows whose vault-relative path contains an excluded
+/// directory component (spec item 3b).
+///
+/// The desktop is where the immortal-pending bug was reported, and
+/// desktop-only users never run `ct ingest` -- `reconcile_vault`'s only
+/// production caller. Without this the ingress closes but the symptom stays
+/// live for the primary user population.
+///
+/// `vault_root` MUST be the vault root (`target_canonical`), never
+/// `raw_docs`: the latter is `<vault>/immutable-source-files`, one level
+/// inside the vault, so a row at `<vault>/.brain/errors.log` would fail to
+/// relativize and -- fail-open per spec D2b -- survive forever.
+///
+/// Returns the number of rows deleted. Non-fatal on failure: the caller
+/// logs and the next launch retries.
+fn purge_excluded_rows(
+    conn: &rusqlite::Connection,
+    vault_root: &Path,
+) -> rusqlite::Result<usize> {
+    let paths: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT path FROM documents WHERE tier = 'user_doc'")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut deleted = 0usize;
+    for path in paths {
+        if !crate::walk_vault::abs_path_is_excluded_in_vault(Path::new(&path), vault_root) {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM documents WHERE path = ?1",
+            rusqlite::params![&path],
+        )?;
+        eprintln!("[reconcile] purging excluded-directory row: {path}");
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+#[cfg(test)]
+mod excluded_row_purge_tests {
+    use super::purge_excluded_rows;
+
+    /// Spec item 3b: the desktop must self-heal with no `ct ingest` run.
+    ///
+    /// The top-level `<vault>/.brain/errors.log` row is the assertion that
+    /// pins the corrected root: a purge scoped to `raw_docs`
+    /// (`<vault>/immutable-source-files`) cannot relativize it, and by
+    /// spec D2b a failed relativization is fail-open, so that row would
+    /// survive forever while the nested one was cleaned up.
+    #[test]
+    fn desktop_purge_clears_brain_rows_at_every_depth() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                path   TEXT NOT NULL UNIQUE,
+                hash   TEXT NOT NULL,
+                tier   TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            );
+            CREATE TABLE chunks (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id     INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_text TEXT NOT NULL,
+                position   INTEGER NOT NULL
+            );
+            PRAGMA foreign_keys=ON;",
+        )
+        .unwrap();
+
+        let insert = |p: &std::path::Path, tier: &str| {
+            conn.execute(
+                "INSERT INTO documents (path, hash, tier) VALUES (?1, 'h', ?2)",
+                rusqlite::params![p.to_string_lossy(), tier],
+            )
+            .unwrap();
+        };
+
+        let top = vault_root.join(".brain").join("errors.log");
+        let nested = vault_root
+            .join("immutable-source-files")
+            .join("agents")
+            .join("people")
+            .join(".brain")
+            .join("errors.log");
+        let keep = vault_root.join("immutable-source-files").join("notes.md");
+        let lookalike = vault_root.join("my.brain.notes").join("x.md");
+        let wiki = vault_root.join(".brain").join("page.md");
+        insert(&top, "user_doc");
+        insert(&nested, "user_doc");
+        insert(&keep, "user_doc");
+        insert(&lookalike, "user_doc");
+        insert(&wiki, "wiki");
+
+        // Seed chunk rows for every document so the cascade assertion
+        // below can detect orphaned chunks if `foreign_keys` is off.
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position)
+             SELECT id, 'x', 0 FROM documents",
+            [],
+        )
+        .unwrap();
+        let chunk_count = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(chunk_count(&conn), 5);
+
+        let n = purge_excluded_rows(&conn, &vault_root).unwrap();
+        assert_eq!(n, 2, "expected both .brain rows purged");
+
+        let survivors: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT path FROM documents ORDER BY path").unwrap();
+            let r = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            r.collect::<std::result::Result<Vec<_>, _>>().unwrap()
+        };
+        assert!(survivors.contains(&keep.to_string_lossy().into_owned()));
+        assert!(survivors.contains(&lookalike.to_string_lossy().into_owned()));
+        assert!(
+            survivors.contains(&wiki.to_string_lossy().into_owned()),
+            "wiki-tier rows must never be purged"
+        );
+        assert!(!survivors.iter().any(|s| s.contains(".brain/errors.log")));
+        assert_eq!(
+            chunk_count(&conn),
+            3,
+            "cascade must remove chunks of purged rows (foreign_keys=ON)"
+        );
+    }
+}
+
 fn validated_new_vault_root(path: &str) -> Result<PathBuf, String> {
     if path.is_empty() {
         return Err("vault path is empty".to_string());
@@ -1032,6 +1169,13 @@ fn start_file_watcher_inner(
                         eprintln!("[reconcile] failed to set busy_timeout: {e}");
                         // Non-fatal: continue without the pragma.
                     }
+                    // PRAGMA foreign_keys is per-connection and this
+                    // connection bypasses migrate() (spec 3b): without
+                    // this, `chunks`' ON DELETE CASCADE never fires and
+                    // both purges below orphan chunk rows.
+                    if let Err(e) = c.execute_batch("PRAGMA foreign_keys=ON;") {
+                        eprintln!("[reconcile] failed to enable foreign_keys: {e}");
+                    }
                     Some(c)
                 }
                 Err(e) => {
@@ -1048,6 +1192,17 @@ fn start_file_watcher_inner(
         // single corrupt DB row would silently disable vault reconcile
         // (CodeRabbit review on PR #96).
         if let Some(conn) = conn_opt.as_mut() {
+            // Self-heal: drop rows the pipeline can never ingest. Runs
+            // BEFORE the existence-based purge below because those files
+            // still exist on disk -- `.brain/errors.log` is actively
+            // appended -- so the existence check would never catch them
+            // (spec item 3b).
+            match purge_excluded_rows(conn, &target_canonical) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("[reconcile] purged {n} excluded-directory row(s)"),
+                Err(e) => eprintln!("[reconcile] excluded-row purge failed: {e}"),
+            }
+
             let db_paths: Vec<String> = match conn
                 .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
                 .and_then(|mut stmt| {
@@ -1084,6 +1239,20 @@ fn start_file_watcher_inner(
                 for entry in walkdir::WalkDir::new(&raw_docs)
                     .min_depth(1)
                     .into_iter()
+                    // Same exclusion the vault walker applies, so one notion
+                    // of "excluded" governs every traversal and the descent
+                    // cost disappears. Relativized against the vault root,
+                    // never matched absolute (spec D1). The `raw_docs` root
+                    // itself is never tested: `min_depth(1)` already skips
+                    // it, and `filter_entry` at depth 0 would short-circuit
+                    // the whole walk.
+                    .filter_entry(|e| {
+                        e.depth() == 0
+                            || !crate::walk_vault::abs_path_is_excluded_in_vault(
+                                e.path(),
+                                &target_canonical,
+                            )
+                    })
                     .filter_map(|e| e.ok())
                     .filter(|e| e.file_type().is_file())
                 {
