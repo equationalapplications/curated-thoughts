@@ -1,11 +1,11 @@
 # Watcher + walker: exclude `.brain` working directories from ingestion
 
 **Date:** 2026-09-10
-**Status:** Draft (rev 5 — Opus 5 `/code-review high` findings 1–10 addressed:
-vault-root relativization, single path space, reconcile pre-pass ordering,
-desktop self-heal, narrowed empty-walk scope, symlink-classification
-carve-out, transaction/cascade contract, startup-pass gate, corrected
-cross-reference)
+**Status:** Draft (rev 6 — Opus 5 review of rev 5 addressed: desktop purge
+root corrected from `raw_docs` to the vault root, D2's "one path space"
+claim narrowed to what `queue.rs` actually stores plus an explicit
+relativization-failure rule, reconcile pre-pass placed inside the existing
+transaction, item 5's rationale corrected, `DenyReason` variant pinned)
 **Branch:** docs/spec-2026-09-10-vault-walk-brain-dir-exclusion
 **Priority:** Low (log noise; no data corruption)
 
@@ -80,12 +80,39 @@ rewrites the path in two directions, both wrong for exclusion:
   directory the walker happily ingests, leaving those files stale and
   silent between ingest runs.
 
-The virtual path is also the space `documents.path` and `reconcile_vault`
-already use (`reconcile.rs:53-59`), so matching it keeps all three call
-sites in one space. Concretely, the gate uses `abs` (the output of
-`std::path::absolute`, `queue.rs:43`) relativized against the **as-configured**
-vault root, falling back to the canonical root if `abs` does not start with
-it (macOS `/var` → `/private/var` and similar).
+The virtual path is the space the **walker** uses, and therefore the space
+`reconcile_vault` compares against (`reconcile.rs:53-59`). Concretely, the
+gate uses `abs` (the output of `std::path::absolute`, `queue.rs:43`)
+relativized against the **as-configured** vault root, falling back to the
+canonical root if `abs` does not start with it (macOS `/var` →
+`/private/var` and similar).
+
+**D2a — The watcher does not currently store the virtual path, and this
+spec does not change that.** `enqueue_vault_event` writes
+`path_str = canonical.to_string_lossy()` (`queue.rs:56`), i.e. the
+*canonical* path, while `reconcile.rs:53-55` documents `documents.path` as
+the virtual path written by `tools/src/cmds.rs:217`. For ordinary
+non-symlinked content the two coincide — both walkers canonicalize their
+root — so the divergence is latent. It is real in exactly the case D2
+describes: a Modify under an approved `documents/specs` →
+`<external>/.brain/specs-target/` link stages a row keyed by the external
+canonical path, which every subsequent `reconcile_vault` pass then sees as
+vanished. Unifying the column on the virtual path is a data-migration-shaped
+change and is **out of scope here**; it is called out so the D2 test below
+is read correctly (it asserts the event is not *gated*, not that the row
+lands in the right path space) and so a reviewer does not read D2 as a claim
+that all three call sites already agree.
+
+**D2b — Relativization failure is fail-open.** Both the watcher gate and
+the row-oriented predicates of items 3a/3b must handle a path that does not
+start with the vault root at all — a consequence of D2a for symlinked
+content, and possible for any row written by an older code path.
+`rel_path_has_excluded_component` operates only on a successfully
+relativized path; when `strip_prefix` fails against **both** the
+as-configured and the canonical root, the path is treated as **not
+excluded** (the event stages; the row is left alone). Deleting rows we
+cannot place inside the vault would be the same class of unrecoverable
+mistake the empty-walk guard exists to prevent.
 
 **D3 — The vault root must be known. Fail-closed on the gate, not on the
 bug.** `enqueue_vault_event` reads `CURATED_VAULT_ROOT` from the process
@@ -153,7 +180,12 @@ and `brain/` must all still ingest. Matching is `component == name` over
    skipping it silently, so it stays visible in the approvals UI and the
    user can rename the link. The `continue` at `walk_vault.rs:224` is
    replaced by a `denied.push(…)` arm; `collect_files`/`filter_entry`
-   behavior is unchanged.
+   behavior is unchanged. `DeniedLink.reason` is a plain `String`, but
+   every other producer sources it from `DenyReason::message()`
+   (`walk_vault.rs:245-249`), and the approvals UI may key off that text.
+   This arm therefore adds a **new `DenyReason` variant** (e.g.
+   `ExcludedDirName`) whose `message()` returns the reason string, rather
+   than pushing a bare literal that no `DenyReason` can produce.
 
 3. **Cleanup of existing rows — reconcile *and* the desktop startup pass.**
    Rows 6185/6215 are already absent from every walker output today (the
@@ -177,10 +209,23 @@ and `brain/` must all still ingest. Matching is `component == name` over
    survives forever.
    **Contract:** `reconcile_vault` partitions `vanished` first. Rows whose
    vault-relative path has an excluded component are deleted
-   unconditionally in a pre-pass and are excluded from both
-   `unknown_by_hash` candidacy and the `vanished_per_hash` accounting, so
-   they can neither be repointed nor perturb another row's uniqueness
-   verdict. Only the remaining rows enter the existing rename/delete match.
+   unconditionally in a pre-pass and are excluded from the
+   `vanished_per_hash` accounting, so they can neither be repointed nor
+   perturb another row's uniqueness verdict. Only the remaining rows enter
+   the existing rename/delete match. (They need no exclusion from
+   `unknown_by_hash`: that map is built solely from *walked* paths absent
+   from `documents` (`reconcile.rs:85-110`), and item 2 guarantees an
+   excluded path never appears in walker output.)
+
+   **Transaction placement.** The pre-pass deletes run inside the **same**
+   `conn.unchecked_transaction()` as the existing rename/delete match
+   (`reconcile.rs:122,148`), not in a separate earlier one, so one rusqlite
+   failure rolls the whole pass back. This requires moving the transaction
+   open above the pre-pass and, critically, hoisting it above the
+   `if vanished.is_empty() { return Ok(outcome) }` early return
+   (`reconcile.rs:76`): when the pre-pass consumes every vanished row, that
+   return must not skip the commit. The early return becomes a check on the
+   *remaining* rows, taken only after the pre-pass has committed.
    `reconcile_vault` accepts `vault_root: &Path` as an explicit parameter
    (parallel to D3 for `enqueue_vault_event`) so the predicate can
    relativize the absolute paths emitted by `collect_files` against the
@@ -188,8 +233,7 @@ and `brain/` must all still ingest. Matching is `component == name` over
    absolute-path component check would falsely treat an excluded-name
    *ancestor* of the vault root (e.g. a vault at `<tmp>/target/wiki/`)
    as part of the vault-relative path, deleting every row. The existing
-   CLI caller (`tools/src/cmds.rs:193`) forwards its known root; the
-   new desktop startup pass (3b) passes its `raw_docs` boundary.
+   CLI caller (`tools/src/cmds.rs:193`) forwards its known root.
 
    **3b — Desktop-only users must self-heal (round-4 finding 3).** Rev 4
    made clearing the stuck rows require one `ct ingest` run, because
@@ -204,7 +248,21 @@ and `brain/` must all still ingest. Matching is `component == name` over
    delete `tier = 'user_doc'` rows whose vault-relative path has an
    excluded component, using `rel_path_has_excluded_component` — so the
    app self-heals on next launch with no CLI step. This is the same
-   predicate as 3a and 3c; no third notion of "excluded" is introduced.
+   predicate as 3a and item 4's narrower sibling; no third notion of
+   "excluded" is introduced.
+
+   **The root for that relativization is the vault root — `target_canonical`
+   (`lib.rs:995`) — not `raw_docs`.** `raw_docs` is
+   `target_canonical.join(IMMUTABLE_DIR)`, i.e.
+   `<vault>/immutable-source-files`, one level *inside* the vault.
+   Relativizing against it fails `strip_prefix` for any row above that
+   directory, and by D2b a failed relativization is fail-open — so a purge
+   scoped to `raw_docs` would silently leave `<vault>/.brain/errors.log`
+   staged forever. That is the file CT writes itself (`pipeline/mod.rs:484`)
+   and the one the Problem section records as actively appended today, so
+   getting this root wrong reproduces the reported bug for the top-level
+   case while appearing to fix it for the nested ones. Item 5's walk filter
+   takes the same root.
 
 4. **Empty-walk sub-case — narrowed to `.brain` (round-4 finding 5).**
    `reconcile_vault` short-circuits when `walked.is_empty()`
@@ -243,9 +301,14 @@ and `brain/` must all still ingest. Matching is `component == name` over
    `EXCLUDED_DIRS`. Rev 4's claim that "the `filter_entry` prune at every
    depth guarantees `.brain` content can never enter walker output" is
    true for `walk_vault::collect_files` and false here: every nested
-   `.brain/` subtree is descended into and `metadata()`-read on every app
-   launch, only to be rejected at enqueue time. That walk gains the same
-   vault-relative exclusion filter.
+   `.brain/` subtree is descended into and `file_type()`/`metadata()`-read
+   on every app launch. **This is a consistency and cost fix, not a
+   correctness one** — rev 5 claimed those entries were "rejected at enqueue
+   time", which is wrong: the loop already extension-gates via
+   `should_ingest_extension(ext)` (`lib.rs:1092-1094`), so a `.brain/*.log`
+   never reaches `enqueue_vault_event` from this path at all. The walk gains
+   the same vault-relative exclusion filter so that one notion of "excluded"
+   governs every traversal, and so the descent cost disappears.
 
 6. **`.brain/proposed` is intentionally excluded too.** `vault/safe_path.rs`
    sanctions `.brain/proposed` as a write location for proposed content
@@ -285,9 +348,11 @@ and `brain/` must all still ingest. Matching is `component == name` over
   The symlink-classification path changes a silent `continue` into a
   visible `Denied` entry (item 2) — strictly more information, no new
   failure mode.
-- Reconcile: the excluded pre-pass and the empty-walk branch both run
-  inside the existing transaction discipline (item 4); a rusqlite failure
-  rolls back the whole pass.
+- Reconcile: the excluded pre-pass (item 3a) and the empty-walk branch
+  (item 4) both run inside the existing transaction discipline; a rusqlite
+  failure rolls back the whole pass. A row whose path cannot be relativized
+  against either the as-configured or the canonical vault root is left
+  untouched (D2b), never deleted.
 - Desktop purge: a delete of rows the pipeline can never ingest; failure
   is logged and non-fatal, and the next launch retries.
 
@@ -310,7 +375,18 @@ and `brain/` must all still ingest. Matching is `component == name` over
   still rejected.
 - **Watcher regression — trusted link into a `.brain` target (D2,
   finding 4):** `documents/specs` → `<external>/.brain/specs-target/`;
-  assert a Modify event for `documents/specs/x.md` **stages**.
+  assert a Modify event for `documents/specs/x.md` **stages** — i.e. that
+  the gate does not reject it. Per D2a the staged row's `documents.path`
+  is the *external canonical* path, not `documents/specs/x.md`; the test
+  asserts the gate's verdict only and must not be read as asserting the
+  row lands in the walker's path space. Pin that explicitly by asserting
+  the stored path, so the pre-existing divergence stays visible rather
+  than being papered over by a green test.
+- **Watcher + purge regression — unrelativizable path (D2b):** an event
+  whose `abs` starts with neither the as-configured nor the canonical vault
+  root; assert it stages (fail-open). Companion row-side case: a
+  `user_doc` row whose stored path lies outside the vault root; assert
+  both the 3a pre-pass and the 3b desktop purge leave it untouched.
 - **Watcher regression — no vault root (D3):** with `CURATED_VAULT_ROOT`
   unset and `vault_root: None`, assert behavior is unchanged from today
   (gate skipped, event stages).
@@ -327,8 +403,9 @@ and `brain/` must all still ingest. Matching is `component == name` over
   `.brain/errors.log` is pruned (root exempt, descendants matched).
   Without the root-exemption carve-out the entire walk returns empty.
 - **Walker symlink-classification test (finding 8):** a `documents/.brain`
-  symlink is reported as `Denied` — asserting it is neither silently
-  dropped nor classified `Trusted`.
+  symlink is reported as `Denied` with the new `DenyReason` variant's
+  message — asserting it is neither silently dropped nor classified
+  `Trusted`.
 - **Reconcile test (non-empty walk):** a pre-staged `.brain/errors.log`
   row is deleted and chunks cascade.
 - **Reconcile test — empty-file hash collision (finding 2):** DB holds an
@@ -358,7 +435,10 @@ and `brain/` must all still ingest. Matching is `component == name` over
   falsely match `target` as an ancestor of every row and delete
   the entire index.
 - **Desktop self-heal test (finding 3b):** the startup purge deletes a
-  pre-existing `.brain/errors.log` row without any `ct ingest` run.
+  pre-existing `immutable-source-files/agents/.brain/errors.log` row
+  **and** a top-level `<vault>/.brain/errors.log` row, without any
+  `ct ingest` run. The second row is the one a `raw_docs`-scoped purge
+  would miss, so it is the assertion that pins the corrected root.
 - Existing walker/queue/reconcile test suites stay green; the
   `enqueue_vault_event` signature change (D3) touches `lib.rs:1072`,
   `lib.rs:1102`, `lib.rs:1224` and `tools/src/cmds.rs:671`.
@@ -404,6 +484,13 @@ and `brain/` must all still ingest. Matching is `component == name` over
 
 None. Rev-1's misattribution (walker vs watcher), the recurrence gap, the
 `.brain/proposed` interaction, the cleanup-mechanism ambiguity, the
-empty-walk contract and substring-lookalike fixtures (rounds 1–3), and the
-path-space / relativization / ordering / scope defects of round 4 are all
-resolved above.
+empty-walk contract and substring-lookalike fixtures (rounds 1–3), the
+path-space / relativization / ordering / scope defects of round 4, and
+rev 5's wrong desktop-purge root, overstated path-space claim, unplaced
+pre-pass transaction and incorrect item-5 rationale are all resolved above.
+
+One thing is deliberately left unresolved and recorded rather than fixed:
+the watcher stores canonical paths while the walker stores virtual ones
+(D2a). It predates this spec, is invisible for non-symlinked content, and
+unifying the column is a migration-shaped change. It should be filed as a
+follow-up issue alongside the generalized extension-gate defect below.
