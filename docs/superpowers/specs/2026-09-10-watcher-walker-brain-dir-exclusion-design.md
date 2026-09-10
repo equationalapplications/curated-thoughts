@@ -1,8 +1,10 @@
 # Watcher + walker: exclude `.brain` working directories from ingestion
 
 **Date:** 2026-09-10
-**Status:** Draft (rev 3 — GLM 5.3 round-2 findings addressed; cleanup
-causal story corrected)
+**Status:** Draft (rev 4 — round-3 review findings addressed:
+empty-walk reconcile contract + targeted-delete regression test,
+substring-lookalike watcher/walker fixtures; vault-walk rev-1 spec
+explicitly marked superseded)
 **Branch:** docs/spec-2026-09-10-vault-walk-brain-dir-exclusion
 **Priority:** Low (log noise; no data corruption)
 
@@ -69,6 +71,27 @@ the watcher path must be fixed or the bug recurs.
    app does not self-heal them. No new delete code is added, avoiding the
    race-with-watcher hazards a bespoke cleanup would have (rev-1's
    implementer's-choice cleanup is dropped per review finding 5).
+
+   **Empty-walk sub-case (round-3 review finding 6).**
+   `reconcile_vault` (`src-tauri/src/reconcile.rs:42-151`) short-circuits
+   when `walked.is_empty()` (lines 48-51) to protect against a
+   misconfigured or unmounted vault root — reconciling against an empty
+   walk would otherwise delete the entire index on a transient mount
+   failure. That protection must stay. **But** a row whose path matches
+   the new exclusion pattern (an `EXCLUDED_DIRS` component on every
+   segment) is *structurally* guaranteed absent from any walk — the
+   exclusion is applied at every depth in `filter_entry`, so the walker
+   can never emit such a path regardless of mount state. **Contract:**
+   on `walked.is_empty()`, `reconcile_vault` must still attempt a
+   targeted delete of rows whose path contains an excluded-directory
+   component (after resolving the path into components and comparing
+   against `EXCLUDED_DIRS`); non-excluded rows continue to be preserved
+   untouched (the mount-failure safety net is narrowed, not removed).
+   The targeting helper (`path_has_excluded_component` from item 1) is
+   reused so the watcher gate and this reconcile contract cannot drift.
+   This unblocks the "vault whose only walker-visible content is
+   excluded" case — e.g. a small vault containing only `.brain/errors.log`
+   — without giving up the mount-failure guarantee for user-visible rows.
 4. **`.brain/proposed` is intentionally excluded too.** `vault/safe_path.rs`
    sanctions `.brain/proposed` as a write location for proposed content
    operations — but proposed documents reach the wiki through the
@@ -106,14 +129,26 @@ the watcher path must be fixed or the bug recurs.
 - **Watcher unit test:** emit Add/Modify events for
   `<vault>/.brain/errors.log`, `<vault>/nested/.brain/x.log`, and control
   paths (`<vault>/notes.md`, `<vault>/brain/x.md` — lookalike dir must
-  still stage). Assert staged rows exist only for control paths.
+  still stage, plus `<vault>/my.brain.notes/x.md` and
+  `<vault>/.brainish/x.md` — these are the substring-lookalike controls:
+  a faulty `contains(".brain")` check would incorrectly exclude them, so
+  asserting they stage pins component-exact semantics). Assert staged
+  rows exist only for control paths.
 - **Remove-ordering regression:** a pre-staged `.brain` row is still
   deleted when its Remove event arrives (gate must not block deletes).
 - **Walker unit test:** fixture vault containing `notes.md`,
-  `.brain/errors.log`, `nested/.brain/errors.log`, `brain/` lookalike
-  (must be ingested). Assert only intended files are walked.
-- **Reconcile test:** with a `.brain`-excluded walk, a pre-staged
-  `.brain/errors.log` row is deleted and chunks cascade.
+  `.brain/errors.log`, `nested/.brain/errors.log`, `brain/` lookalike,
+  `my.brain.notes/x.md`, and `.brainish/x.md` (the latter two are
+  substring-lookalike controls — must be walked). Assert only intended
+  files are walked.
+- **Reconcile test (non-empty walk):** with a `.brain`-excluded walk, a
+  pre-staged `.brain/errors.log` row is deleted and chunks cascade.
+- **Reconcile test (empty-walk, round-3 review finding 6):** vault whose
+  only content is `.brain/errors.log` (walker returns empty once the
+  exclusion lands); DB has both a `.brain/errors.log` row AND an
+  unrelated `notes.md` row. Reconcile. Assert: `.brain/errors.log`
+  deleted (and chunks cascade), `notes.md` row preserved (the
+  mount-failure safety net must not be widened).
 - Existing walker/queue/reconcile test suites stay green.
 
 ## Out of scope
@@ -133,5 +168,6 @@ the watcher path must be fixed or the bug recurs.
 ## Open questions
 
 None. Rev-1's misattribution (walker vs watcher), the recurrence gap, the
-`.brain/proposed` interaction, and the cleanup-mechanism ambiguity were
-all found by the GLM 5.3 round-1 review and are resolved above.
+`.brain/proposed` interaction, and the cleanup-mechanism ambiguity (all
+from the GLM 5.3 round-1 review), plus the empty-walk reconcile contract
+and the substring-lookalike fixtures (round-3 review), are resolved above.
