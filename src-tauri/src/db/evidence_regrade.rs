@@ -60,7 +60,6 @@ pub struct DoomedRow {
     pub proposal_id: String,
 }
 
-
 /// Export every doomed row to `<dir>/<entry_id>.json` — the FULL row plus its
 /// evidence blob and proposal id. The token `source_ref` is content-free, so
 /// anything less than the full row destroys the only surviving provenance
@@ -69,11 +68,7 @@ pub struct DoomedRow {
 /// Mirrors `evidence_repair::export_damaged_rows` in shape but carries the
 /// extra evidence fields, so it is a dedicated exporter rather than a
 /// force-fit of the V18 one.
-pub fn export_doomed_rows(
-    _conn: &Connection,
-    doomed: &[DoomedRow],
-    dir: &Path,
-) -> Result<usize> {
+pub fn export_doomed_rows(_conn: &Connection, doomed: &[DoomedRow], dir: &Path) -> Result<usize> {
     std::fs::create_dir_all(dir)?;
     for row in doomed {
         let payload = serde_json::json!({
@@ -146,10 +141,7 @@ pub fn purge_doomed_rows(
             serde_json::json!({ "id": row.entry_id }),
             now_ms,
         )?;
-        crate::db::commit::delete_librarian_evidence(
-            &tx,
-            std::slice::from_ref(&row.entry_id),
-        )?;
+        crate::db::commit::delete_librarian_evidence(&tx, std::slice::from_ref(&row.entry_id))?;
         tx.execute(
             "DELETE FROM llm_wiki_entries WHERE id = ?1",
             [&row.entry_id],
@@ -222,11 +214,29 @@ pub fn regrade_unanchored(
         return Ok(report);
     }
 
-    // 4. Export (backed path only).
+    // 4. Export (backed path only). fs/backup failures take the V18 fail-safe
+    //    posture (V18 review round 5, finding 4): WARN + skip the destructive
+    //    phase + let migrate() stamp — blocking startup on a backup-path defect
+    //    would turn a data defect into an availability outage. SQL errors still
+    //    propagate (genuine DB faults fail loud and re-run on next open).
     match db_dir {
         Some(dir) => {
             let export_dir = dir.join(REGRADE_EXPORT_DIR);
-            report.exported = export_doomed_rows(conn, &doomed, &export_dir)?;
+            match export_doomed_rows(conn, &doomed, &export_dir) {
+                Ok(n) => report.exported = n,
+                Err(e) => {
+                    eprintln!(
+                        "[ct::repair WARN] #186 V20 re-grade SKIPPED: backup export \
+                         failed: {e:#}. The destructive phase did not run; doomed rows \
+                         survive as-is. This gate does NOT re-run automatically — fix \
+                         the cause (disk space, permissions on {}/) and invoke the \
+                         idempotent `ct evidence regrade` manually.",
+                        export_dir.display()
+                    );
+                    report.skipped_destructive = true;
+                    return Ok(report);
+                }
+            }
         }
         None => {
             eprintln!(
@@ -253,13 +263,22 @@ pub fn regrade_unanchored(
     }
 
     // 6. Purge — its disk-derived recount gate owns the final completeness
-    //    check (spec I1).
-    if let Some(dir) = db_dir {
-        let export_dir = dir.join(REGRADE_EXPORT_DIR);
-        let (purged, skipped) = purge_doomed_rows(conn, &doomed, &export_dir, now_ms)?;
-        report.purged = purged;
-        report.skipped_destructive = skipped;
-    }
+    //    check (spec I1). Unreachable with db_dir = None (step 4 early-returns
+    //    above); the else arm keeps that invariant loud instead of silently
+    //    mis-reporting skipped_destructive = false.
+    let Some(dir) = db_dir else {
+        eprintln!(
+            "[ct::repair WARN] #186 V20 re-grade: database path became unavailable \
+             before the purge; destructive phase SKIPPED — invoke the idempotent \
+             `ct evidence regrade` manually."
+        );
+        report.skipped_destructive = true;
+        return Ok(report);
+    };
+    let export_dir = dir.join(REGRADE_EXPORT_DIR);
+    let (purged, skipped) = purge_doomed_rows(conn, &doomed, &export_dir, now_ms)?;
+    report.purged = purged;
+    report.skipped_destructive = skipped;
 
     Ok(report)
 }
@@ -273,12 +292,7 @@ mod tests {
 
     /// Insert a documents+chunks pair so `evidence_has_live_chunk` can find
     /// the anchor, then seed one flagged librarian fact.
-    fn seed_flagged(
-        conn: &Connection,
-        entry_id: &str,
-        anchored: bool,
-        deleted_at: Option<i64>,
-    ) {
+    fn seed_flagged(conn: &Connection, entry_id: &str, anchored: bool, deleted_at: Option<i64>) {
         if anchored {
             conn.execute(
                 "INSERT OR IGNORE INTO documents (path, hash, tier, status)
@@ -473,8 +487,7 @@ mod tests {
         // Simulate a partial backup: one file vanishes after export.
         std::fs::remove_file(export_dir.join("fact_doomed_b.json")).unwrap();
 
-        let (purged, skipped) =
-            purge_doomed_rows(&conn, &doomed, &export_dir, 1_000).unwrap();
+        let (purged, skipped) = purge_doomed_rows(&conn, &doomed, &export_dir, 1_000).unwrap();
         assert_eq!(purged, 0, "a missed backup file must delete NOTHING");
         assert!(skipped);
         // Survivors on disk and in the DB.
@@ -589,6 +602,9 @@ mod tests {
         let edges: i64 = conn
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(edges, 0, "edges anchored on a hard-deleted id must be swept");
+        assert_eq!(
+            edges, 0,
+            "edges anchored on a hard-deleted id must be swept"
+        );
     }
 }
