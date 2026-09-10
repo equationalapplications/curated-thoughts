@@ -444,7 +444,7 @@ async fn mcp_write_note_and_index_roundtrip_over_real_surface() {
 }
 
 // ============================================================================
-// Curated memory CRUD — all 14 tools on the main MCP server (spec §2/§8).
+// Curated memory CRUD — all 16 tools on the main MCP server (spec §2/§8).
 // Proves tools/list exposes the six curated names alongside the eight
 // existing ones, and round-trips add -> recall -> get -> search -> update
 // -> archive through the shipping stdio surface with fail-closed audit.
@@ -498,7 +498,7 @@ async fn call_tool(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
+async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     if std::env::var("CURATED_MCP_INTEGRATION_TESTS").is_err() {
         eprintln!("Skipping MCP integration test — set CURATED_MCP_INTEGRATION_TESTS=1 to run");
         return;
@@ -534,7 +534,7 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
 
     let client = spawn_mcp(&brain).await.expect("mcp handshake");
 
-    // -- tools/list: exactly the 14 spec'd names -----------------------------
+    // -- tools/list: exactly the 16 spec'd names -----------------------------
     let tools = client.list_all_tools().await.expect("list_all_tools");
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort();
@@ -542,6 +542,9 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
         "curated_add_wisdom",
         "curated_archive_wisdom",
         "curated_get_wiki_entry",
+        // hvg Task 4: the Human Verification Gate review surface.
+        "curated_proposal_decide",
+        "curated_proposals_list",
         "curated_recall_context",
         "curated_search_code",
         "curated_update_wisdom",
@@ -554,7 +557,7 @@ async fn mcp_exposes_all_14_tools_and_curated_crud_roundtrip() {
         "wiki_search",
         "wiki_traverse_graph",
     ];
-    assert_eq!(names, expected, "tools/list must expose all 14 names");
+    assert_eq!(names, expected, "tools/list must expose all 16 names");
 
     // -- add: creates user-stated wisdom, fail-closed audit row on disk ------
     let added: serde_json::Value = call_tool(

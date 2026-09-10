@@ -1,7 +1,7 @@
 # Human verification gate for librarian synthesis (proposal review loop)
 
 **Date:** 2026-09-09
-**Status:** Draft rev 2 (GLM 5.3 frontier review folded: I-1–I-4, M-1–M-6, T-1–T-4)
+**Status:** Implemented 2026-09-10 (PR #201) — supersedes Draft rev 2 (GLM 5.3 frontier review folded: I-1–I-4, M-1–M-6, T-1–T-4)
 **Branch:** spec/human-verification-gate
 **Priority:** P1
 
@@ -68,6 +68,13 @@ MCP dispatch, and the Tauri commands call ONE implementation; `cmds::
 approve_one_on` becomes a thin wrapper (its auto semantics unchanged for
 `ct approve`'s existing users).
 
+"Mirroring `approve_wiki_page`" is the whole contract, not just the two
+fields named above: the review core also plumbs the on-disk
+`wiki.deposit_default_tier` (§3.2), as every other resolve path does.
+Building `ResolveOptions` with `..Default::default()` silently omits it and
+falls the resolver back to the shipped default, which would make an
+operator's configured tier apply everywhere EXCEPT the review surfaces.
+
 ### 3. In-transaction pending guard (I-2)
 
 `resolve_proposal` gains `UPDATE curated_proposals SET status = … WHERE id =
@@ -88,6 +95,14 @@ the audit trail for decisions. `reviewed_by` is advisory metadata: absence
 never blocks resolution; auto-approve leaves it NULL, keeping reviewed vs
 auto queryable. The three `proposals_api.rs` ResolveOptions struct literals
 (:74/:144/:202) gain `reviewed_by: None` lines (M-5).
+
+Reviewer identity per surface: the desk stamps `desktop-ui`, the CLI stamps
+the operator's OS account, and MCP stamps `<client>:<os-account>` (e.g.
+`local-mcp:kurt`). The MCP connection label alone is fixed at startup and
+identical for every caller, so it names the surface but cannot answer "who
+approved this" — the question the column exists for. `auto_approve: false`
+declares a human decision, so every path taking it names a reviewer,
+including the legacy review-desk shims.
 
 ### 5. Review loop — CLI (operator)
 
@@ -127,7 +142,25 @@ Authz: names start with `curated_` so the #187 deny (tool_dispatch.rs:1183)
 covers them with zero new code; non-clanker clients (Hermes sidecar) pass —
 which is the point: Tessera reviews. Both tools use the fail-closed
 `log_agent_access_checked` audit path (tool_dispatch.rs:1147), not the
-legacy best-effort logger.
+legacy best-effort logger. For `decide` the audit row is written INSIDE the
+resolution transaction (`ReviewOptions::audit`), matching the wisdom write
+tools: fail-closed means a failed audit aborts the decision, so a resolved
+proposal with no log row is not a reachable state.
+
+Two things `--mcp` cannot borrow from the desktop app, because neither
+exists in a headless process:
+
+- **Migrations.** The server's read connection is read-only and its lazy RW
+  connection opens the file bare, so startup runs the migration ladder over
+  the database explicitly (best-effort: a read-only database still serves
+  reads, with the reason on stderr). Without it, the first write touching a
+  migration-added column — `reviewed_by` itself — fails until the desktop
+  app or a CLI command happens to open the file.
+- **The embedding sweep.** `run_embedding_sweep` takes a `DbState` and runs
+  only in the Tauri app, so "the sweep will fill it later" is not available
+  here. `decide` precomputes entry embeddings BEFORE taking the write lock
+  (the desk's three-phase shape) rather than committing NULL-embedded facts
+  that nothing would ever re-embed.
 
 Escalation pattern (no code): Tessera's nightly run lists pending; proposals
 it cannot confidently adjudicate (novel claims, cross-entity merges) are

@@ -47,39 +47,15 @@ pub fn forget_entries_by_source_refs(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    // Push one Delete row per doomed entry, sourcing entity_id from the row
-    // itself. Same shape as `prune_old_librarian_inferred` (lib.rs:1779).
-    for (id, entity_id) in &doomed {
-        crate::db::commit::push_entries_outbox(
-            &tx,
-            entity_id,
-            id,
-            crate::db::outbox_format::OutboxOperation::Delete,
-            serde_json::json!({ "id": id }),
-            now_ms,
-        )?;
-    }
-
-    // FK CASCADE is not relied upon (spec §2.1): brain.db has connections whose
-    // `PRAGMA foreign_keys` state we do not control, so the evidence row is
-    // deleted explicitly alongside its entry.
-    let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
-    crate::db::commit::delete_librarian_evidence(&tx, &doomed_ids)?;
-
-    let delete_sql = format!("DELETE FROM llm_wiki_entries WHERE source_ref IN ({placeholders})");
-    let removed = tx.execute(&delete_sql, rusqlite::params_from_iter(source_refs.iter()))?;
-
-    if !doomed.is_empty() {
-        // HARD delete, so the hard-delete purge: `purge_edges_for_entries`
-        // keeps an edge whose partner is still alive, which is right for a
-        // soft delete but strands the edge forever here — the doomed id is
-        // gone from every table, so no future cascade can ever find it again.
-        let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
-        crate::db::edge_purge::purge_edges_for_hard_deleted(&tx, &doomed_ids)?;
-    }
+    // The shared hard-delete ceremony (outbox Delete per row + entry DELETE +
+    // paired evidence delete + edge sweep, one transaction): same shape as
+    // `prune_old_librarian_inferred` and the two evidence repairs. The set is
+    // selected under this same transaction, so deleting by id is exactly the
+    // old `source_ref IN (...)` DELETE.
+    crate::db::commit::hard_delete_entries(&tx, &doomed, now_ms)?;
 
     tx.commit()?;
-    Ok(removed)
+    Ok(doomed.len())
 }
 
 #[cfg(test)]

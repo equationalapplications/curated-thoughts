@@ -855,6 +855,36 @@ impl ToolDispatchContext {
 // best-effort path (log_agent_access) untouched.
 // ---------------------------------------------------------------------------
 
+// -- hvg Task 4: proposals review surface (curated_proposals_list /
+// curated_proposal_decide). Params mirror the curated_* family; the
+// `curated_` capability gate in `dispatch_tool_call` already denies these
+// for cloud-bridge sessions (issue #187), so no new auth code lives here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedProposalsListParams {
+    /// Optional status filter: pending | approved | rejected | partial |
+    /// superseded. Defaults to `pending` (the review queue).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Page size; defaults to 50, clamped to 1..=200.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedProposalDecideParams {
+    /// Proposal to resolve (accepts camelCase or snake_case spelling).
+    #[serde(rename = "proposalId", alias = "proposal_id")]
+    pub proposal_id: String,
+    /// "approve" | "reject"
+    pub decision: String,
+    /// For rejects: the stored reason (`reject_reason`). For approves:
+    /// acknowledged in the result but NOT stored.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct CuratedAddWisdomParams {
@@ -888,8 +918,10 @@ pub struct CuratedArchiveWisdomParams {
 /// propagates and fails the tool call, unlike the best-effort
 /// [`log_agent_access`] used by the eight pre-existing read tools
 /// (their migration to fail-closed is tracked separately).
-/// Accepts `&Connection` or `&Transaction` (deref coercion) so write tools
-/// can audit inside the same transaction as the mutation.
+/// Thin delegate to the db-layer owner of the `curated_agent_log` write
+/// contract, `db::commit::log_agent_access_checked` (PR #201 review finding
+/// 9), so `resolve_proposal` can share the exact same INSERT without the
+/// writer layer depending on the dispatch layer.
 pub fn log_agent_access_checked(
     conn: &Connection,
     client: &str,
@@ -897,13 +929,7 @@ pub fn log_agent_access_checked(
     entity_id: Option<&str>,
     operation: &str,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
-         VALUES (?1, ?2, ?3, ?4, NULL)",
-        rusqlite::params![client, tool, operation, entity_id],
-    )
-    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
-    Ok(())
+    crate::db::commit::log_agent_access_checked(conn, client, tool, entity_id, operation)
 }
 
 /// Reload one live wisdom entry as JSON (per-entry query shape shared with
@@ -1130,6 +1156,223 @@ pub struct VaultUpsertIndexEntryParams {
     pub metadata: Option<Value>,
 }
 
+/// hvg Task 4: list proposals by status (default pending — the review
+/// queue). Read path on the RO connection; audit via the RW wrapper.
+pub async fn dispatch_curated_proposals_list(
+    ctx: ToolDispatchContext,
+    p: CuratedProposalsListParams,
+) -> Result<serde_json::Value> {
+    let status = p.status.clone().unwrap_or_else(|| "pending".to_string());
+    if !matches!(
+        status.as_str(),
+        "pending" | "approved" | "rejected" | "partial" | "superseded"
+    ) {
+        anyhow::bail!(
+            "invalid status {:?} — expected pending|approved|rejected|partial|superseded",
+            status
+        );
+    }
+    let limit = p.limit.unwrap_or(50).clamp(1, 200);
+    // `pending_review_queue` IS the plan's MCP shape (proposal_id /
+    // proposed_name / kind / item_count / evidence_chunks / source_docs /
+    // created_at) and is the same read the CLI review loop uses, so both
+    // surfaces report identical numbers under identical field names — in
+    // particular `evidence_chunks`, which is a SUM over each item's stored
+    // evidence array, NOT a count of items by type. Re-deriving the mapping
+    // here is what let the two drift.
+    //
+    // The read is synchronous SQLite (with a per-proposal source-docs query),
+    // so it runs on a blocking thread rather than on the Tokio worker.
+    let conn = ctx.conn.clone();
+    let queue_status = status.clone();
+    let rows = tokio::task::spawn_blocking(move || -> Result<_> {
+        let guard = conn.lock().unwrap();
+        crate::db::proposals_review::pending_review_queue(&guard, &queue_status, limit)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("curated_proposals_list task join error: {e}"))??;
+    let items = serde_json::to_value(rows)?;
+    log_curated_access_rw(&ctx, "curated_proposals_list", None, "read").await?;
+    Ok(items)
+}
+
+/// Reviewer identity recorded for a decision made over MCP.
+///
+/// `ctx.client` alone is a per-connection LABEL (`local-mcp`), not a person:
+/// it is fixed at startup and identical for everyone who ever talks to this
+/// server, so on its own it cannot answer the question `reviewed_by` exists to
+/// answer. A local stdio MCP server is spawned per host and runs as one OS
+/// account, so qualifying the label with that account makes the stamp as
+/// specific as the CLI's (`cli_reviewer`) while still naming the surface.
+/// Falls back to the bare label where the environment names no account.
+fn mcp_reviewer(client: &str) -> String {
+    match crate::db::proposals_review::os_account() {
+        Some(user) => format!("{client}:{user}"),
+        None => client.to_string(),
+    }
+}
+
+/// Entry embeddings for an approve decision, computed with NO database lock
+/// held (spec: the blocking embedder round-trip must never run under a lock).
+///
+/// Phase 1 loads items + decisions under the read guard; the guard is dropped
+/// before phase 2 issues the provider call. The whole thing runs on a blocking
+/// thread because both phases are synchronous. The loaded inputs are returned
+/// alongside the embeddings so the caller can also hand the preloaded
+/// decision set to the resolver and keep its `get_proposal_detail` pass
+/// (per-evidence hydration) out of the write lock (PR #201 review finding 6).
+async fn precompute_decide_embeddings(
+    ctx: &ToolDispatchContext,
+    proposal_id: &str,
+) -> Result<(
+    crate::db::proposals_review::ReviewEmbedInputs,
+    crate::db::commit::EntryEmbeddings,
+)> {
+    let conn = ctx.conn.clone();
+    let profile = ctx.profile.clone();
+    let proposal_id = proposal_id.to_string();
+    tokio::task::spawn_blocking(move || -> Result<_> {
+        let inputs = {
+            let guard = lock_conn(&conn)?;
+            crate::db::proposals_review::load_review_embed_inputs(&guard, &proposal_id)?
+            // guard drops here — the embed below holds no lock.
+        };
+        let embeddings = crate::db::proposals_review::embed_review_inputs(&inputs, Some(&profile));
+        Ok((inputs, embeddings))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("curated_proposal_decide embed task join error: {e}"))?
+}
+
+/// hvg Task 4: approve or reject a pending proposal after human review.
+/// Routes through the lazy RW connection exactly like curated_add_wisdom;
+/// the review core (db::proposals_review) enforces the in-transaction
+/// pending guard so already-resolved or superseded proposals error cleanly.
+///
+/// Audit posture matches the other curated write tools: the
+/// `curated_agent_log` row is written INSIDE the resolution transaction (via
+/// `ReviewOptions::audit`), not in a second one afterwards, so a decision can
+/// never be durable while its audit row is missing (spec §7 fail-closed).
+pub async fn dispatch_curated_proposal_decide(
+    ctx: ToolDispatchContext,
+    p: CuratedProposalDecideParams,
+) -> Result<serde_json::Value> {
+    let reviewed_by = mcp_reviewer(&ctx.client);
+    let audit = crate::db::commit::ResolveAudit {
+        client: ctx.client.clone(),
+        tool: "curated_proposal_decide".to_string(),
+        operation: "write".to_string(),
+    };
+    match p.decision.as_str() {
+        "approve" => {
+            // Embeddings are computed here, before the write lock, because a
+            // headless `--mcp` process has NO embedding sweep to fall back on
+            // (`run_embedding_sweep` is Tauri-only): an approved fact that
+            // lands NULL-embedded would stay invisible to semantic retrieval
+            // until someone opened the desktop app. Best-effort — a provider
+            // failure yields an empty map and the fact still commits.
+            //
+            // The decision set and the on-disk `wiki.deposit_default_tier`
+            // (path resolution + config.json read/parse) are hoisted out of
+            // the write lock too (PR #201 review finding 6): the resolver's
+            // own loads would otherwise run per-evidence-chunk SELECTs and
+            // filesystem I/O while holding the RW connection mutex, queueing
+            // every other curated write tool behind them. The resolver
+            // re-checks pending-ness inside its transaction, so a stale
+            // preload fails cleanly.
+            let (inputs, entry_embeddings) =
+                precompute_decide_embeddings(&ctx, &p.proposal_id).await?;
+            let decisions = inputs.into_decisions();
+            let deposit_default_tier = crate::config::BrainConfig::deposit_default_tier_on_disk();
+            let proposal_id = p.proposal_id.clone();
+            let approver = reviewed_by.clone();
+            let outcome = ctx
+                .with_rw(move |conn| {
+                    crate::db::proposals_review::review_approve_with(
+                        conn,
+                        &proposal_id,
+                        &approver,
+                        crate::db::proposals_review::ReviewOptions {
+                            entry_embeddings: Some(entry_embeddings),
+                            decisions: Some(decisions),
+                            deposit_default_tier: Some(deposit_default_tier),
+                            audit: Some(audit),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .await?;
+            Ok(serde_json::json!({
+                "proposal_id": p.proposal_id,
+                "decision": "approve",
+                "status": outcome.status,
+                "reviewed_by": outcome.reviewed_by,
+                "committed": outcome.committed,
+                "conflicts": outcome.conflicts,
+                "note": p.note.map(|n| serde_json::json!({ "acknowledged": true, "text": n })),
+            }))
+        }
+        "reject" => {
+            // Blank-as-unset: an explicitly empty note is not a reason. Storing
+            // `""` would be indistinguishable from erased attribution, so it
+            // takes the same default an absent note does (matching the CLI's
+            // `cli_reviewer` treatment of a set-but-blank USER).
+            let reject_reason = p
+                .note
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| crate::db::proposals_review::DEFAULT_REJECT_REASON.to_string());
+            let reason = reject_reason.clone();
+            // Decision set loaded before the write lock (same hoist as the
+            // approve arm): the resolver's own load hydrates every evidence
+            // chunk, which has no business running under the RW mutex. The
+            // reject-specific loader reads bare item ids (an all-reject
+            // resolution never reads evidence) and yields an empty set for an
+            // item-less pending row, so `review_reject_with`'s pre-check can
+            // route it to `reject_itemless_proposal` instead of erroring here.
+            let decisions = {
+                let conn = ctx.conn.clone();
+                let proposal_id = p.proposal_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    let guard = lock_conn(&conn)?;
+                    crate::db::proposals_review::load_reject_decisions(&guard, &proposal_id)
+                })
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("curated_proposal_decide load task join error: {e}")
+                })??
+            };
+            let proposal_id = p.proposal_id.clone();
+            let rejecter = reviewed_by.clone();
+            let outcome = ctx
+                .with_rw(move |conn| {
+                    crate::db::proposals_review::review_reject_with(
+                        conn,
+                        &proposal_id,
+                        &rejecter,
+                        &reason,
+                        crate::db::proposals_review::ReviewOptions {
+                            decisions: Some(decisions),
+                            audit: Some(audit),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .await?;
+            Ok(serde_json::json!({
+                "proposal_id": p.proposal_id,
+                "decision": "reject",
+                // The resolver's own status, never a hardcoded literal — the
+                // approve arm was fixed the same way (whole-branch F1).
+                "status": outcome.status,
+                "reviewed_by": outcome.reviewed_by,
+                "reject_reason": reject_reason,
+            }))
+        }
+        other => anyhow::bail!("invalid decision {:?} — expected approve or reject", other),
+    }
+}
+
 async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> {
     let profile = profile.clone();
     tokio::task::spawn_blocking(move || crate::embedder::embed_one(&profile, query)).await?
@@ -1321,6 +1564,18 @@ pub async fn dispatch_tool_call(
             let p: CuratedSearchCodeParams = serde_json::from_value(params)?;
             let result = dispatch_curated_search_code(ctx, p).await?;
             log_curated_access_rw(ctx, "curated_search_code", entity_id.as_deref(), "read").await?;
+            Ok(result)
+        }
+        "curated_proposals_list" => {
+            let p: CuratedProposalsListParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_proposals_list(ctx.clone(), p).await?;
+            // Audit already recorded fail-closed inside the dispatcher (read op).
+            Ok(result)
+        }
+        "curated_proposal_decide" => {
+            let p: CuratedProposalDecideParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_proposal_decide(ctx.clone(), p).await?;
+            // Audit already recorded fail-closed inside the dispatcher (write op).
             Ok(result)
         }
         "curated_add_wisdom" => {
@@ -2243,5 +2498,587 @@ mod curated_memory_tests {
             n, 0,
             "failed audit insert must roll back the wisdom mutation"
         );
+    }
+}
+
+#[cfg(test)]
+mod curated_proposals_tests {
+    //! hvg Task 4: MCP surface tests for curated_proposals_list +
+    //! curated_proposal_decide, dispatched through the shared
+    //! `dispatch_tool_call` path (the one code path behind both callers).
+    use super::*;
+    use crate::chunker::{Chunk, ChunkStrategyTag};
+    use crate::db::connection::open_app_db;
+    use crate::db::proposals::{
+        insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalKind,
+        ProposalSourceRole, StoredEvidenceChunk,
+    };
+    use crate::db::queries::{insert_chunk, upsert_document};
+
+    /// Full-schema, migrated, FILE-backed brain (open_app_db applies every
+    /// migration incl. V21 reviewed_by). The RO conn handle and the context's
+    /// db_path point at the same file, so `with_rw` materializes against the
+    /// seeded state — the RW-fixture variant the write path needs.
+    ///
+    /// Does NOT set `CURATED_EMBED_STUB` itself (PR #201 review): a raw
+    /// `set_var` here leaked the process-wide env into whichever test ran
+    /// next and raced the temp_env-serialized tests that unset the var or
+    /// use `constant8_short`. The stub is scoped per complete test by
+    /// [`with_brain`], under temp_env's shared serialization.
+    fn file_ctx() -> (tempfile::TempDir, ToolDispatchContext) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let conn = open_app_db(&db_path, None).unwrap();
+        let ctx = ToolDispatchContext {
+            conn: Arc::new(Mutex::new(conn)),
+            profile: EmbedProfile::default(),
+            vault_dir: Some(dir.path().to_path_buf()),
+            client: "test".into(),
+            db_path,
+            rw_conn: Arc::new(Mutex::new(None)),
+        };
+        (dir, ctx)
+    }
+
+    /// Run an async test body with the brain paths redirected into `dir`.
+    ///
+    /// Approving through the review core reads `wiki.deposit_default_tier`
+    /// from the resolved config, exactly as every other resolve path does, so
+    /// these tests must not resolve the LIVE `~/.brain` (issue #178).
+    /// `temp_env` is synchronous (and globally serialized), so the runtime is
+    /// built inside the redirected scope rather than via `#[tokio::test]`.
+    fn with_brain<F: std::future::Future<Output = ()>>(
+        dir: &std::path::Path,
+        body: impl FnOnce() -> F,
+    ) {
+        let brain = dir.to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // An inherited value would override the redirected dir and
+                // make the test non-hermetic (#178).
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                // Scoped here (not in `file_ctx`) so the stub never leaks
+                // process-wide — see the `file_ctx` doc comment above.
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+                    .block_on(body());
+            },
+        );
+    }
+
+    fn seed_chunk(conn: &rusqlite::Connection, doc_id: i64) -> i64 {
+        let chunk = Chunk {
+            text: "evidence".into(),
+            start_line: 1,
+            end_line: 2,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap()
+    }
+
+    /// Seed a pending new_entity proposal with one anchored fact_add item.
+    /// Distinct proposed_name + doc per id so sibling seeds never supersede
+    /// each other.
+    fn seed_pending(conn: &rusqlite::Connection, id: &str) {
+        let doc_id = upsert_document(conn, &format!("/vault/documents/{id}.pdf"), "hash").unwrap();
+        let chunk_id = seed_chunk(conn, doc_id);
+        insert_proposal(
+            conn,
+            &NewProposal {
+                id: id.into(),
+                kind: ProposalKind::NewEntity,
+                entity_id: None,
+                proposed_name: Some(format!("Project {id}")),
+                proposed_type: Some("project".into()),
+                reasoning: Some("Because.".into()),
+                model: "test".into(),
+            },
+            &[NewProposalItem {
+                id: format!("item-{id}"),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({ "body": "A verified fact.", "tags": [], "confidence": "inferred" }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id: Some(chunk_id),
+                    content_hash: String::new(),
+                    quote: "evidence".into(),
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    source_kind: None,
+                }],
+            }],
+            &[NewProposalSource { doc_id, role: ProposalSourceRole::Trigger }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn curated_proposals_list_defaults_to_pending_and_handles_fresh_brain() {
+        // Redirect brain-path resolution away from the live ~/.brain; the
+        // fixture below opens its own database under its own temp dir.
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let mut guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-list-1");
+                seed_pending(&guard, "prop-list-2");
+                // An approved proposal must NOT appear under the default filter.
+                seed_pending(&guard, "prop-list-3");
+                let approved = crate::db::proposals_review::review_approve(
+                    &mut guard,
+                    "prop-list-3",
+                    "tessera",
+                );
+                assert!(approved.is_ok());
+            }
+            let v = dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
+                .await
+                .unwrap();
+            let items = v.as_array().expect("top-level array");
+            assert_eq!(items.len(), 2, "default filter = pending only");
+            for p in items {
+                assert!(p["proposal_id"].is_string());
+                assert!(p["proposed_name"].is_string());
+                assert_eq!(p["kind"], "new_entity");
+                assert!(p["item_count"].as_u64().unwrap() >= 1);
+                assert!(p["evidence_chunks"].as_u64().unwrap() >= 1);
+                assert!(!p["source_docs"].as_array().unwrap().is_empty());
+                assert!(p["created_at"].is_i64());
+            }
+
+            // Fresh brain (no proposals at all) -> EMPTY ARRAY, not an error.
+            let (_dir2, ctx2) = file_ctx();
+            let v2 = dispatch_tool_call(&ctx2, "curated_proposals_list", serde_json::json!({}))
+                .await
+                .unwrap();
+            assert!(
+                v2.as_array().map(|a| a.is_empty()).unwrap_or(false),
+                "fresh brain must list an empty array, got: {v2}"
+            );
+        });
+    }
+
+    #[test]
+    fn curated_proposal_decide_approve_stamps_reviewer() {
+        // Redirect brain-path resolution away from the live ~/.brain; the
+        // fixture below opens its own database under its own temp dir.
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-appr-1");
+            }
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-appr-1", "decision": "approve" }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["status"], "approved");
+            // The stamp qualifies the connection label with the OS account, so
+            // the audit answers "who", not just "which surface".
+            assert_eq!(v["reviewed_by"], mcp_reviewer("test"));
+            assert!(v["committed"].as_u64().unwrap() >= 1);
+
+            // Stored state read back from the RO connection.
+            let guard = ctx.conn.lock().unwrap();
+            let rb: Option<String> = guard
+                .query_row(
+                    "SELECT reviewed_by FROM curated_proposals WHERE id = 'prop-appr-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rb, Some(mcp_reviewer("test")));
+            let confirmed: i64 = guard
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(confirmed >= 1, "approved entries are user_confirmed");
+        });
+    }
+
+    #[test]
+    fn curated_proposal_decide_reject_writes_reason() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-rej-1");
+            }
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposal_id": "prop-rej-1",
+                    "decision": "reject",
+                    "note": "stale corpus"
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["status"], "rejected");
+
+            let guard = ctx.conn.lock().unwrap();
+            let rr: String = guard
+                .query_row(
+                    "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-rej-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rr, "stale corpus");
+            let n: i64 = guard
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "reject writes no entries");
+        });
+    }
+
+    /// Item-less pending row over MCP (PR #201 review finding 3): the reject
+    /// hoist uses the id-only decision loader, so the row reaches
+    /// `review_reject_with`'s item-less pre-check and clears cleanly — while
+    /// approve still errors loudly, there being no items to accept. The row
+    /// is seeded with raw SQL because current `insert_proposal` refuses
+    /// item-less proposals (the guard the old binary predated).
+    #[test]
+    fn curated_proposal_decide_itemless_pending_rejects_but_not_approves() {
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                guard
+                    .execute(
+                        "INSERT INTO curated_proposals
+                             (id, kind, proposed_name, proposed_type, reasoning, model,
+                              status, created_at)
+                         VALUES ('prop-mcp-empty', 'new_entity', 'Project Empty',
+                                 'project', 'Because.', 'test', 'pending', 100)",
+                        [],
+                    )
+                    .unwrap();
+            }
+
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposal_id": "prop-mcp-empty",
+                    "decision": "approve"
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("has no items"),
+                "approve must bail on the empty item set, got: {err}"
+            );
+
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposal_id": "prop-mcp-empty",
+                    "decision": "reject"
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["status"], "rejected");
+
+            let guard = ctx.conn.lock().unwrap();
+            let (st, rb): (String, Option<String>) = guard
+                .query_row(
+                    "SELECT status, reviewed_by FROM curated_proposals
+                     WHERE id = 'prop-mcp-empty'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(st, "rejected");
+            assert!(
+                rb.is_some(),
+                "MCP reject of an item-less row must still stamp the reviewer"
+            );
+        });
+    }
+
+    #[test]
+    fn curated_proposal_decide_rejects_bad_inputs() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-bad-1");
+            }
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-bad-1", "decision": "maybe" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("maybe"),
+                "invalid decision names the bad value: {err}"
+            );
+
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposals_list",
+                serde_json::json!({ "status": "bogus" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("bogus"),
+                "invalid status names the bad value: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn curated_proposal_decide_on_resolved_and_superseded_errors_cleanly() {
+        // Redirect brain-path resolution away from the live ~/.brain; the
+        // fixture below opens its own database under its own temp dir.
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-res-1");
+                seed_pending(&guard, "prop-sup-1");
+                // SQL-flip a pending proposal to superseded (spec Testing 5).
+                guard
+                    .execute(
+                        "UPDATE curated_proposals SET status = 'superseded' WHERE id = 'prop-sup-1'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-res-1", "decision": "approve" }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["status"], "approved");
+
+            // Second decision on the same proposal -> clean error, not a panic.
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-res-1", "decision": "approve" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not pending"),
+                "second decision must err on the resolved proposal, got: {err}"
+            );
+
+            // Deciding a superseded proposal errs cleanly (no panic, no silent ok).
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-sup-1", "decision": "approve" }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not pending"),
+                "superseded proposal must err cleanly, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn curated_proposals_tools_audit_fail_closed() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-audit-1");
+            }
+            dispatch_tool_call(&ctx, "curated_proposals_list", serde_json::json!({}))
+                .await
+                .unwrap();
+            dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-audit-1", "decision": "reject" }),
+            )
+            .await
+            .unwrap();
+            let n: i64 = {
+                let guard = ctx.conn.lock().unwrap();
+                guard
+                    .query_row(
+                        "SELECT COUNT(*) FROM curated_agent_log WHERE tool IN
+                         ('curated_proposals_list','curated_proposal_decide')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(n, 2, "both tools wrote one audit row each");
+        });
+    }
+
+    /// The audit row shares the resolution's transaction (spec §7): when the
+    /// log write cannot land, the DECISION must not land either. Without that,
+    /// a crash or a failing audit insert leaves an approved proposal with no
+    /// record of who approved it — and the caller sees an error for a decision
+    /// that actually committed.
+    #[test]
+    fn curated_proposal_decide_audit_failure_rolls_back_the_decision() {
+        // Redirect brain-path resolution away from the live ~/.brain; the
+        // fixture below opens its own database under its own temp dir.
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-atomic-1");
+            }
+            // Make the audit insert fail on the RW connection the decide tool uses.
+            ctx.with_rw(|conn| {
+                conn.execute_batch("DROP TABLE curated_agent_log;")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+            let err = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-atomic-1", "decision": "approve" }),
+            )
+            .await
+            .expect_err("a failed audit write must fail the decision");
+            assert!(
+                err.to_string().contains("audit log insert failed"),
+                "error must name the audit failure, got: {err}"
+            );
+
+            let guard = ctx.conn.lock().unwrap();
+            let status: String = guard
+                .query_row(
+                    "SELECT status FROM curated_proposals WHERE id = 'prop-atomic-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                status, "pending",
+                "the resolution rolled back with the audit"
+            );
+            let entries: i64 = guard
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(entries, 0, "no entry survives a rolled-back resolution");
+        });
+    }
+
+    /// A `--mcp` process has no embedding sweep (`run_embedding_sweep` is
+    /// Tauri-only), so an approve that left entries NULL-embedded would leave
+    /// them invisible to semantic retrieval forever. The decide tool
+    /// precomputes embeddings before taking the write lock instead.
+    #[test]
+    fn curated_proposal_decide_approve_embeds_committed_entries() {
+        // Redirect brain-path resolution away from the live ~/.brain; the
+        // fixture below opens its own database under its own temp dir.
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-embed-1");
+            }
+            dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({ "proposalId": "prop-embed-1", "decision": "approve" }),
+            )
+            .await
+            .unwrap();
+
+            let guard = ctx.conn.lock().unwrap();
+            let (total, embedded): (i64, i64) = guard
+                .query_row(
+                    "SELECT COUNT(*), COUNT(embedding_blob) FROM llm_wiki_entries
+                     WHERE deleted_at IS NULL",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(total >= 1, "approve committed at least one entry");
+            assert_eq!(
+                embedded, total,
+                "every committed entry carries an embedding, not a NULL awaiting a sweep that never runs"
+            );
+        });
+    }
+
+    /// Blank-as-unset: an explicitly empty note is not a reason. Storing `""`
+    /// would be indistinguishable from erased attribution.
+    #[test]
+    fn curated_proposal_decide_blank_note_uses_the_default_reason() {
+        // Brain redirection + scoped embed stub (see `with_brain`).
+        let env_dir = tempfile::TempDir::new().unwrap();
+        with_brain(env_dir.path(), || async move {
+            let (_dir, ctx) = file_ctx();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                seed_pending(&guard, "prop-blank-1");
+            }
+            let v = dispatch_tool_call(
+                &ctx,
+                "curated_proposal_decide",
+                serde_json::json!({
+                    "proposalId": "prop-blank-1",
+                    "decision": "reject",
+                    "note": "   "
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v["reject_reason"],
+                crate::db::proposals_review::DEFAULT_REJECT_REASON
+            );
+            let guard = ctx.conn.lock().unwrap();
+            let rr: String = guard
+                .query_row(
+                    "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-blank-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rr, crate::db::proposals_review::DEFAULT_REJECT_REASON);
+        });
     }
 }

@@ -1358,17 +1358,252 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
     let now_ms = tauri_app_lib::db::commit::ms_now();
     let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored(
         &conn,
-        Some(brain.paths.db_path.parent().unwrap_or(std::path::Path::new("."))),
+        Some(
+            brain
+                .paths
+                .db_path
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        ),
         now_ms,
     )?;
     println!(
         "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
-        report.regraded_anchored,
-        report.exported,
-        report.purged,
-        report.skipped_destructive
+        report.regraded_anchored, report.exported, report.purged, report.skipped_destructive
     );
+    // A skipped destructive phase is a FAILURE for scripting purposes (PR
+    // #201 review finding 5): this command is the documented, idempotent
+    // recovery every V20 skip WARN names, and cron/scripts treat exit 0 as
+    // "the purge ran". Exit non-zero so the doomed rows' survival is
+    // discoverable without parsing stderr.
+    if report.skipped_destructive {
+        eprintln!(
+            "refusing to report success: the destructive phase was SKIPPED \
+             (blocked export dir, pathless DB, or brain-incomplete) — doomed \
+             rows survive un-exported; fix the cause and re-run"
+        );
+        return Ok(1);
+    }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// hvg Task 5: `ct proposals review` — the interactive review loop
+// ---------------------------------------------------------------------------
+
+use tauri_app_lib::db::proposals_review::{
+    os_account, pending_review_queue, review_approve_with_profile, review_reject,
+};
+
+/// Default reason recorded when a reviewer rejects without typing one.
+/// Re-exported from the review core so the CLI and the MCP decide tool cannot
+/// drift to different wording for the same decision.
+pub use tauri_app_lib::db::proposals_review::DEFAULT_REJECT_REASON;
+
+/// Reviewer identity: the operator's OS account, or a stable fallback for
+/// headless environments that name none.
+pub fn cli_reviewer() -> String {
+    os_account().unwrap_or_else(|| "cli-operator".to_string())
+}
+
+/// `ct proposals review` — walk the pending queue oldest-first, render one
+/// compact card per proposal, and read a decision from stdin:
+///
+/// - `y` approve  (review_approve_with_profile: entries stamp user_confirmed + reviewed_by)
+/// - `n` reject   (review_reject with the default reason)
+/// - `d` show     (render the full detail card — the extended `show` render)
+/// - `s` skip     (leave pending, move to the next proposal; skipped ids are
+///   remembered for this session so the loop cannot re-prompt on the same head)
+/// - `q` quit     (leave the remaining queue pending; exit 0)
+///
+/// EOF is treated as `q`. An empty queue prints `0 pending` and exits 0 —
+/// review is a success even when there is nothing to do. A queue emptied only
+/// by skips reports the skipped count instead (those rows are still pending).
+pub fn proposals_review_cmd() -> Result<()> {
+    let paths = retrieval::resolve_brain_paths();
+    let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
+    let reviewer = cli_reviewer();
+    let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        let queue = pending_review_queue(&db.0, "pending", 1_000)?;
+        // Skip-advance: `s` mutates nothing, so re-taking queue.first()
+        // forever would re-prompt on the same proposal. Select the first
+        // queue item this session has not skipped yet; when every remaining
+        // item was skipped, the session is done.
+        let Some(head) = queue
+            .iter()
+            .find(|item| !skipped.contains(&item.proposal_id))
+        else {
+            // Distinguish "the queue is empty" from "every remaining proposal
+            // was skipped this session": the latter leaves rows pending in the
+            // database, so reporting `0 pending` there would be a lie.
+            if skipped.is_empty() {
+                println!("0 pending");
+            } else {
+                println!(
+                    "0 unskipped proposals left this session ({} skipped, still pending)",
+                    skipped.len()
+                );
+            }
+            return Ok(());
+        };
+        let pid = head.proposal_id.clone();
+        print_review_card(head);
+        let decision = loop {
+            print!("Review {pid} [y/n/d/s/q]? ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line)? == 0 {
+                println!("(eof) leaving the remaining queue pending");
+                return Ok(());
+            }
+            match line.trim() {
+                "y" | "n" | "d" | "s" | "q" => break line.trim().to_string(),
+                other => {
+                    println!("unrecognized answer {other:?} — use y/n/d/s/q");
+                }
+            }
+        };
+        match decision.as_str() {
+            "y" => {
+                // Write-time entry embedding, best-effort and matching
+                // `approve_one_on`: without it an approved `fact_add` lands
+                // with a NULL blob and stays invisible to semantic retrieval
+                // until an unrelated sweep runs.
+                let embed_profile = retrieval::load_embed_profile(&paths.config_path).ok();
+                match review_approve_with_profile(&mut db.0, &pid, &reviewer, embed_profile) {
+                    Ok(outcome) => print_review_outcome(&outcome),
+                    Err(e) => report_decision_error(&pid, "approve", &e, &mut skipped),
+                }
+            }
+            "n" => match review_reject(&mut db.0, &pid, &reviewer, DEFAULT_REJECT_REASON) {
+                Ok(outcome) => print_review_outcome(&outcome),
+                Err(e) => report_decision_error(&pid, "reject", &e, &mut skipped),
+            },
+            "d" => match get_proposal_detail(&db.0, &pid) {
+                Ok(Some(detail)) => print_proposal_detail(&detail),
+                Ok(None) => println!("(detail unavailable)"),
+                // A failed read must not end the session either — the queue
+                // head is still reviewable without its detail card.
+                Err(e) => println!("(detail unavailable: {e})"),
+            },
+            "s" => {
+                skipped.insert(pid.clone());
+                println!("skipped {pid} (still pending)");
+            }
+            "q" => {
+                println!("leaving the remaining queue pending");
+                return Ok(());
+            }
+            _ => unreachable!("decision validated above"),
+        }
+    }
+}
+
+/// Report a failed decision and advance past its proposal.
+///
+/// One proposal failing must not end the review session: a concurrent desktop
+/// or ingest process can resolve or supersede the queue head between the card
+/// being printed and the keypress landing, and the operator still has the rest
+/// of the queue to get through. The failed id joins the session's skip set so
+/// the loop moves on instead of re-prompting on a head it cannot resolve.
+fn report_decision_error(
+    proposal_id: &str,
+    action: &str,
+    err: &anyhow::Error,
+    skipped: &mut std::collections::HashSet<String>,
+) {
+    println!("could not {action} {proposal_id}: {err}");
+    // Neutral wording (PR #201 review): the error may BE "no longer pending"
+    // (a concurrent desktop/ingest process resolved or superseded the queue
+    // head between the card printing and the keypress landing), so asserting
+    // the row was left pending can contradict the database.
+    println!("(decision not applied by this command; moving on)");
+    skipped.insert(proposal_id.to_string());
+}
+
+fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewItem) {
+    println!("================================================================");
+    println!("{}\t{}\t{}", item.proposal_id, item.kind, item.created_at);
+    println!(
+        "proposed_name: {}",
+        item.proposed_name.as_deref().unwrap_or("-")
+    );
+    println!(
+        "items: {}  evidence chunks: {}",
+        item.item_count, item.evidence_chunks
+    );
+    for doc in &item.source_docs {
+        println!("source: {doc}");
+    }
+}
+
+/// Report the PERSISTED outcome, never the requested decision: an approval
+/// whose items hit the summary-update conflict path lands as `partial` (or
+/// `rejected`), and printing a hard-coded verb would contradict the database.
+fn print_review_outcome(outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
+    // NOT a `// codeql[...]` suppression: inline suppression does NOT work
+    // for Rust (see ct.rs revoke_link — "do not re-add it"), and the CodeQL
+    // alert this statement raises is a known false positive to be dismissed
+    // post-merge, like wisdom.rs #8. Rationale for keeping the print:
+    // `reviewed_by` is the operator's own OS account echoed to that same
+    // operator's terminal — displaying reviewer attribution is the entire
+    // purpose of the Human Verification Gate (`curated_proposals.reviewed_by`).
+    println!(
+        "{} {}: committed={} conflicts={} reviewed_by={}",
+        outcome.status,
+        outcome.proposal_id,
+        outcome.committed,
+        outcome.conflicts.len(),
+        outcome.reviewed_by
+    );
+    for item_id in &outcome.conflicts {
+        println!("conflict: {item_id}");
+    }
+}
+
+/// Render a full [`tauri_app_lib::db::proposals::ProposalDetail`] — the
+/// extended card shared by `proposals show` (text mode) and the review
+/// loop's `d` verb. Per item: payload plus each hydrated evidence chunk's
+/// quote, line range and source doc path.
+pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDetail) {
+    println!("{}\t{}", detail.id, detail.created_at);
+    println!(
+        "kind: {}",
+        serde_json::to_value(detail.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{:?}", detail.kind))
+    );
+    println!(
+        "proposed_name: {}",
+        detail.proposed_name.as_deref().unwrap_or("-")
+    );
+    for p in &detail.source_doc_paths {
+        println!("source: {p}");
+    }
+    println!("{} item(s)", detail.items.len());
+    for item in &detail.items {
+        println!(
+            "  {}\t{}",
+            item.id,
+            serde_json::to_string(&item.payload).unwrap_or_else(|_| "<payload>".into())
+        );
+        for ev in &item.evidence {
+            match (&ev.start_line, &ev.end_line) {
+                (Some(s), Some(e)) => println!(
+                    "    evidence: L{s}-{e} {}",
+                    ev.doc_path.as_deref().unwrap_or("(deleted source)")
+                ),
+                _ => println!(
+                    "    evidence: {}",
+                    ev.doc_path.as_deref().unwrap_or("(deleted source)")
+                ),
+            }
+            println!("    quote: {}", ev.quote);
+        }
+    }
 }
 
 #[cfg(test)]

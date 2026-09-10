@@ -447,6 +447,24 @@ UPDATE llm_wiki_edges
    AND created_at < 1000000000000;
 ";
 
+/// Human Verification Gate (hvg): nullable reviewer stamp on
+/// `curated_proposals`. Written only by `resolve_proposal` when a human
+/// decision names its reviewer; the automatic path leaves it NULL, and every
+/// row that predates this migration reads back NULL for the same reason —
+/// the ALTER appends the column without touching stored rows.
+///
+/// Unlike the CREATE TABLE / UPDATE migrations above, ALTER TABLE ADD COLUMN
+/// has no `IF NOT EXISTS` and is not idempotent: a crash after the ALTER but
+/// before the version stamp replays the statement and fails with a loud
+/// duplicate-column error. That failure is deliberate — matching the V13
+/// "documents predates this migration" precedent, a loud error at open beats
+/// silently skipping a migration whose effects were already applied. The
+/// apply site in `connection.rs` therefore stamps LAST, not inside the
+/// constant.
+pub const MIGRATION_V21: &str = "
+ALTER TABLE curated_proposals ADD COLUMN reviewed_by TEXT;
+";
+
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
 ///
 /// The V16 CHECK is the database-level floor; this is the same set expressed

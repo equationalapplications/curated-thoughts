@@ -10,6 +10,12 @@ use tauri_app_lib::inference::config::{
 };
 use tauri_app_lib::librarian::generate_summary;
 
+/// Serializes the env-mutating synthesis tests (same pattern as
+/// cli_doctor.rs): `CURATED_BRAIN_DIR` is process-wide, so two tests running
+/// in parallel race — one's `set_var` lands inside the other's live-brain
+/// guard window and trips the issue-#178 TEST BUG panic.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct EnvVarGuard {
     key: String,
     previous: Option<std::ffi::OsString>,
@@ -116,6 +122,7 @@ fn index_mode_skips_librarian_without_calling_ollama() {
 
 #[test]
 fn auto_approve_commits_proposal_via_resolve_path() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let app = TestApp::new();
     let vault = app.tmp.path().join("vault");
     // v2 layout: source tier is immutable-source-files/ (documents/ is v1 and
@@ -224,4 +231,107 @@ fn auto_approve_commits_proposal_via_resolve_path() {
         queue.is_empty(),
         "auto-approved work should not appear in legacy review queue"
     );
+}
+
+#[test]
+fn no_auto_approve_leaves_proposal_pending_with_zero_entries() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // hvg Task 5 folder-rule gate: the flip semantics counterpart to
+    // `auto_approve_commits_proposal_via_resolve_path` — auto_approve = 0 must
+    // NOT commit: the proposal row stays 'pending' (queueing a human review)
+    // and llm_wiki_entries gains nothing.
+    let app = TestApp::new();
+    let vault = app.tmp.path().join("vault");
+    // v2 layout: source tier is immutable-source-files/ (documents/ is v1 and
+    // set_vault_path migrates it away).
+    std::fs::create_dir_all(vault.join("immutable-source-files")).unwrap();
+    app.invoke::<()>("set_vault_path", json!({ "path": vault }));
+
+    let source_path = vault.join("immutable-source-files").join("manual.md");
+    let source_str = source_path.to_string_lossy().to_string();
+    std::fs::write(&source_path, "Manual review test content.").unwrap();
+    seed_chunks(&app, &source_str);
+
+    let db_conn = app.open_db();
+    db_conn
+        .execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'synthesize', 0)",
+            [&vault.join("immutable-source-files").to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+    db_conn
+        .execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent-manual', 'Manual Entity', 'concept', 'Summary', 100, 100)",
+            [],
+        )
+        .unwrap();
+
+    let mut server = mockito::Server::new();
+    let llm_json = serde_json::json!({
+        "proposals": [{
+            "target": { "existing_id": "ent-manual" },
+            "reasoning": "Manual gate test.",
+            "summary_update": null,
+            "facts": [{
+                "op": "add",
+                "body": "Manual gate fact.",
+                "tags": [],
+                "confidence": "inferred",
+                "evidence": ["C1"]
+            }],
+            "edges": [],
+            "tasks": []
+        }]
+    });
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":{}}}}}]}}",
+            serde_json::to_string(&llm_json.to_string()).unwrap()
+        ))
+        .create();
+
+    let _brain_dir_guard = EnvVarGuard::new("CURATED_BRAIN_DIR");
+    std::env::set_var(
+        "CURATED_BRAIN_DIR",
+        app.tmp.path().to_string_lossy().to_string(),
+    );
+    write_config(
+        app.tmp.path(),
+        &LlmConfig {
+            generation: GenerationConfig {
+                provider: GenerationProviderKind::External,
+                model_path: None,
+                model_name: Some("test-model".to_string()),
+                external_url: Some(server.url()),
+                api_key: None,
+                timeout_secs: None,
+            },
+            embedding: Default::default(),
+        },
+    )
+    .unwrap();
+
+    let mut conn = db_conn;
+    let result = generate_summary(&mut conn, &source_str, "test-model", false);
+    assert!(result.is_ok(), "generate_summary failed: {:?}", result);
+
+    // The gate: proposal stays pending, nothing committed.
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM curated_proposals WHERE status = 'pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 1, "auto_approve=0 must leave the proposal pending");
+
+    let entry_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(entry_count, 0, "no entries may be written without review");
 }

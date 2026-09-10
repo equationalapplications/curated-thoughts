@@ -15,6 +15,11 @@ use crate::{run_embedding_sweep, DbState};
 use anyhow::Context;
 use tauri::State;
 
+/// Reviewer identity recorded for decisions made at the desktop review desk.
+/// Persisted in `curated_proposals.reviewed_by` so a human decision made in
+/// the app is distinguishable from an automatic (`auto_approve`) commit.
+pub const DESKTOP_REVIEWER: &str = "desktop-ui";
+
 #[tauri::command]
 pub fn list_proposals_cmd(
     filter: Option<ProposalFilter>,
@@ -81,6 +86,12 @@ pub fn resolve_proposal_cmd(
             embed_profile: None,
             entry_embeddings: Some(entry_embeddings),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            // A desk decision carries the reviewer; an explicitly
+            // auto-approved resolve is not a human decision and stays NULL.
+            reviewed_by: (!auto_approve.unwrap_or(false)).then(|| DESKTOP_REVIEWER.to_string()),
+            // Desk decisions are not curated tool calls; the agent audit log
+            // records agent access, not the operator's own clicks.
+            audit: None,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -151,6 +162,8 @@ pub fn approve_wiki_page(
             embed_profile: None,
             entry_embeddings: Some(entry_embeddings),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            reviewed_by: Some(DESKTOP_REVIEWER.to_string()),
+            audit: None, // see `resolve_proposal_cmd`
         },
     )
     .map_err(|e| e.to_string())?;
@@ -209,6 +222,8 @@ pub fn reject_wiki_page(
             embed_profile: None,
             entry_embeddings: Some(std::collections::HashMap::new()),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            reviewed_by: Some(DESKTOP_REVIEWER.to_string()),
+            audit: None, // see `resolve_proposal_cmd`
         },
     )
     .map_err(|e| e.to_string())?;

@@ -207,6 +207,13 @@ pub fn approve_proposal_shim(
             // same tier as one approved through the native
             // `resolve_proposal_cmd` (which already plumbs this).
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            // `auto_approve: false` declares this a HUMAN decision, and
+            // ResolveOptions' contract is that such a decision names its
+            // reviewer. Leaving it NULL would make a desk approval
+            // indistinguishable from an automatic commit — the exact
+            // distinction the column exists to record. The shims are reached
+            // only from the legacy review desk, so they carry its identity.
+            reviewed_by: Some(crate::proposals_api::DESKTOP_REVIEWER.to_string()),
             ..Default::default()
         },
     )
@@ -238,6 +245,8 @@ pub fn reject_proposal_shim(
         ResolveOptions {
             auto_approve: false,
             embed_profile: embed_profile.cloned(),
+            // See `approve_proposal_shim`: a human decision names its reviewer.
+            reviewed_by: Some(crate::proposals_api::DESKTOP_REVIEWER.to_string()),
             ..Default::default()
         },
     )

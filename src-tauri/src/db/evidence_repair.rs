@@ -11,7 +11,6 @@
 //! normalize to the cap), so shape/length heuristics without that predicate
 //! would classify good rows as damaged and delete them.
 
-use crate::db::outbox_format::OutboxOperation;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -326,33 +325,17 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
                 // Resolves by no path: export happens in Task 7 before this
                 // runs; here the row and its evidence go together.
                 //
-                // The whole arm is ONE transaction and pushes one
-                // OutboxOperation::Delete per row (review round 5, finding
-                // 5): as separate autocommit statements, a crash between the
-                // entry DELETE and the edge purge stranded edges pointing at
-                // a hard-deleted entry forever, and prisma-outbox replicas
-                // kept serving the deleted fact (#132 class). Same shape as
-                // `wiki_forget::forget_entries_by_source_refs`. The edge
-                // sweep must follow the hard delete, or edges pointing at
-                // the doomed entry dangle (#158 contract).
+                // The whole arm is ONE transaction through the shared
+                // `commit::hard_delete_entries` ceremony (review round 5,
+                // finding 5): as separate autocommit statements, a crash
+                // between the entry DELETE and the edge purge stranded edges
+                // pointing at a hard-deleted entry forever, and prisma-outbox
+                // replicas kept serving the deleted fact (#132 class).
                 let tx = conn.unchecked_transaction()?;
-                crate::db::commit::push_entries_outbox(
+                crate::db::commit::hard_delete_entries(
                     &tx,
-                    &entity_id,
-                    &entry_id,
-                    OutboxOperation::Delete,
-                    serde_json::json!({ "id": entry_id }),
+                    &[(entry_id.clone(), entity_id.clone())],
                     now_ms,
-                )?;
-                crate::db::commit::delete_librarian_evidence(&tx, std::slice::from_ref(&entry_id))?;
-                tx.execute(
-                    "DELETE FROM llm_wiki_entries
-                      WHERE id = ?1 AND source_type = 'librarian_inferred'",
-                    [&entry_id],
-                )?;
-                crate::db::edge_purge::purge_edges_for_hard_deleted(
-                    &tx,
-                    std::slice::from_ref(&entry_id),
                 )?;
                 tx.commit()?;
                 report.deleted += 1;

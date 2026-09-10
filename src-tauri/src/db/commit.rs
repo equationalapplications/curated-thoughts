@@ -31,6 +31,58 @@ pub struct ResolveOptions {
     /// still gets spec-correct behaviour, and only an explicit
     /// `wiki.deposit_default_tier` changes the value.
     pub deposit_default_tier: Option<String>,
+    /// Human Verification Gate (hvg): reviewer identity recorded on the
+    /// proposal row when a human resolves it. `None` on the auto path keeps
+    /// the column NULL (characterized by the auto-approve test).
+    pub reviewed_by: Option<String>,
+    /// Audit row written INSIDE the resolution transaction, so a curated tool's
+    /// mutation and its `curated_agent_log` row commit or roll back together
+    /// (spec §7 fail-closed audit). The `curated_*` write tools each log inside
+    /// their own transaction; a resolve reached from one of them must do the
+    /// same, or a crash between the two writes leaves a durable decision with
+    /// no record of who made it. `None` on paths that are not curated tool
+    /// calls (the desk, the CLI, the librarian) and log elsewhere or not at all.
+    pub audit: Option<ResolveAudit>,
+}
+
+/// One `curated_agent_log` row, written in the resolution transaction.
+///
+/// Plain data rather than a callback so [`ResolveOptions`] stays `Clone` +
+/// `Debug` and the audit cannot capture connection state.
+#[derive(Debug, Clone)]
+pub struct ResolveAudit {
+    /// Calling client label (`ToolDispatchContext::client`).
+    pub client: String,
+    /// Tool name recorded in the log (e.g. `curated_proposal_decide`).
+    pub tool: String,
+    /// `read` or `write` — the audit table CHECKs this.
+    pub operation: String,
+}
+
+/// Fail-closed curated-agent-log INSERT — the db-layer owner of the
+/// `curated_agent_log` write contract (PR #201 review finding 9).
+///
+/// Lives here rather than in `tool_dispatch` so the writer layer
+/// (`resolve_proposal`, via `ResolveOptions::audit`) does not reach UP into
+/// the MCP dispatch layer for a schema it does not own; the dispatch-side
+/// `log_agent_access_checked` is a thin delegate. Accepts `&Connection` or
+/// `&Transaction` (deref coercion) so write tools audit inside the same
+/// transaction as the mutation. A failed INSERT propagates: fail-closed,
+/// unlike the best-effort legacy logger used by the pre-existing read tools.
+pub fn log_agent_access_checked(
+    conn: &Connection,
+    client: &str,
+    tool: &str,
+    entity_id: Option<&str>,
+    operation: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        rusqlite::params![client, tool, operation, entity_id],
+    )
+    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
+    Ok(())
 }
 
 /// A precomputed entry embedding together with the exact text it was derived
@@ -127,6 +179,11 @@ struct CommitContext {
     /// Resolved once per commit: the entity is fixed for the whole proposal, so
     /// re-reading and re-parsing the manifest per edge item would be pure waste.
     strict_edge_types: Option<EdgeVocabulary>,
+    /// Human Verification Gate (hvg): reviewer identity to stamp on the
+    /// proposal's final guarded UPDATE. Mirrored from `ResolveOptions` so
+    /// `finalize_proposal_status_guarded` reads it from the ctx it already
+    /// receives; `None` leaves the column NULL (auto path).
+    reviewed_by: Option<String>,
 }
 
 /// The manifest edge-type vocabulary, keyed for case-insensitive lookup while
@@ -139,6 +196,7 @@ struct CommitContext {
 /// writer came to match case-insensitively and then store the candidate's own
 /// casing, producing case-variant duplicate rows under
 /// `UNIQUE(entity_id, source_id, target_id, edge_type)`.
+#[derive(Clone)]
 pub(crate) struct EdgeVocabulary {
     /// lowercased+trimmed name → the manifest's canonical spelling
     by_key: std::collections::HashMap<String, String>,
@@ -233,55 +291,95 @@ pub(crate) fn resolve_strict_edge_vocabulary(
     conn: &Connection,
     entity_id: &str,
 ) -> Option<EdgeVocabulary> {
-    if entity_id.is_empty() {
-        return None;
-    }
-    let lookup_ids: [&str; 2] = [entity_id, "tier_fact"];
-    let mut last_err: Option<String> = None;
-    for (i, lookup) in lookup_ids.iter().enumerate() {
-        let is_last = i + 1 == lookup_ids.len();
-        match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
-            Ok(o) if o.mode == "strict" => {
-                let manifest = o.manifest?;
+    let mut cache = StrictVocabCache::default();
+    resolve_strict_edge_vocabulary_with(conn, entity_id, &mut cache)
+}
+
+/// One leg of the two-lookup cascade, with the outcome the caller needs to
+/// keep the original fall-through semantics exact.
+enum OntologyLeg {
+    /// `strict` resolved — `Some(vocab)`, or `None` for a strict manifest
+    /// that declares zero edge types (already warned: the gate disarms).
+    Strict(Option<EdgeVocabulary>),
+    /// Present but not `strict` (or strict with no manifest row): fall
+    /// through to the next lookup id. See the LATENT-ambiguity note in
+    /// [`resolve_strict_edge_vocabulary_with`].
+    NotStrict,
+    Err(String),
+}
+
+fn ontology_leg(conn: &Connection, entity_id: &str, lookup: &str) -> OntologyLeg {
+    match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+        Ok(o) if o.mode == "strict" => match o.manifest {
+            Some(manifest) => {
                 let vocabulary = EdgeVocabulary::from_manifest(&manifest);
                 if vocabulary.is_empty() {
                     warn_strict_manifest_declares_no_edge_types(entity_id, lookup);
-                    return None;
+                    OntologyLeg::Strict(None)
+                } else {
+                    OntologyLeg::Strict(Some(vocabulary))
                 }
-                return Some(vocabulary);
             }
-            // An earlier lookup that returned a non-strict manifest (e.g. the
-            // curated-id row is `mode: "off"` because manifests are seeded
-            // against partitions, not curated ids) must NOT short-circuit —
-            // fall through to the partition fallback. Only the LAST lookup
-            // returning `Ok(_)` means "no strict manifest anywhere".
-            //
-            // LATENT ambiguity (issue #158 audit, 2026-09-04): today this
-            // branch cannot distinguish "the curated-id row is missing" from
-            // "the curated-id row exists with `mode: off/emergent`", because
-            // `seedManifestsIfAbsent` (`src/lib/ontologySeed.ts`) stamps one
-            // `manifestFor(selection)` + `modeFor(selection)` across every
-            // entity id — there is no per-curated-id divergence reachable
-            // from production. The branch is kept so a future per-entity
-            // explicit-mode surface lands here as the right answer rather
-            // than a regression. The TS-side regression test
-            // `seedManifestsIfAbsent passes the same manifest and mode to
-            // every entity id in one batch` pins this contract.
-            Ok(_) if !is_last => continue,
-            Ok(_) => return None,
-            Err(e) => {
-                last_err = Some(format!("{lookup}: {e}"));
-                if !is_last {
-                    continue;
-                }
-                // fall through to the unreadable warning below
+            None => OntologyLeg::Strict(None),
+        },
+        Ok(_) => OntologyLeg::NotStrict,
+        Err(e) => OntologyLeg::Err(format!("{lookup}: {e}")),
+    }
+}
+
+/// Memoized variant of [`resolve_strict_edge_vocabulary`] for read paths that
+/// resolve MANY entity ids in one pass (`cross_partition_traverse`, PR #201
+/// review finding 7).
+///
+/// Every production partition id is a curated `ent_<hash>` with no manifest
+/// row of its own, so each cascades to the SAME `tier_fact` manifest — an
+/// uncached walk of a K-partition hub re-reads and re-parses that manifest
+/// up to twice per partition (~2K `wiki_get_ontology` round-trips). The
+/// writer already memoizes this per commit (`CommitContext::strict_edge_types`,
+/// whose comment calls per-item re-parsing "pure waste"); this gives readers
+/// the same treatment.
+///
+/// Semantics are unchanged: the entity's own manifest row is ALWAYS looked
+/// up fresh (a per-entity strict manifest still wins), only the shared
+/// `tier_fact` fallback leg is memoized — including its `None` results, so
+/// an unresolvable or non-strict partition fallback is computed once per
+/// traversal instead of once per partition. An unreadable `tier_fact`
+/// manifest consequently warns once per traversal rather than K times.
+#[derive(Default)]
+pub(crate) struct StrictVocabCache {
+    tier_fact: Option<Option<EdgeVocabulary>>,
+}
+
+pub(crate) fn resolve_strict_edge_vocabulary_with(
+    conn: &Connection,
+    entity_id: &str,
+    cache: &mut StrictVocabCache,
+) -> Option<EdgeVocabulary> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    // Leg 1 — the entity's own manifest row, always a fresh lookup.
+    match ontology_leg(conn, entity_id, entity_id) {
+        OntologyLeg::Strict(v) => return v,
+        // An entity leg that is missing or non-strict must NOT short-circuit
+        // (e.g. the curated-id row is `mode: "off"` because manifests are
+        // seeded against partitions, not curated ids) — fall through to the
+        // partition fallback. Only the fallback failing to find a strict
+        // manifest anywhere means "no gate".
+        OntologyLeg::NotStrict | OntologyLeg::Err(_) => {}
+    }
+    // Leg 2 — the canonical `tier_fact` fallback, memoized per traversal.
+    if cache.tier_fact.is_none() {
+        cache.tier_fact = Some(match ontology_leg(conn, entity_id, "tier_fact") {
+            OntologyLeg::Strict(v) => v,
+            OntologyLeg::NotStrict => None,
+            OntologyLeg::Err(e) => {
+                warn_ontology_unreadable(entity_id, &[entity_id, "tier_fact"], &e);
+                None
             }
-        }
+        });
     }
-    if let Some(e) = last_err {
-        warn_ontology_unreadable(entity_id, &lookup_ids, &e);
-    }
-    None
+    cache.tier_fact.clone().flatten()
 }
 
 /// Strict mode with an empty vocabulary disables the gate. Both variants below
@@ -427,6 +525,54 @@ pub fn delete_librarian_evidence(conn: &Connection, entry_ids: &[String]) -> Res
     Ok(removed)
 }
 
+/// The ONE hard-delete ceremony for `llm_wiki_entries` rows (PR #201 review
+/// finding 8): per doomed id, an `OutboxOperation::Delete` push (keyed on the
+/// entity the row itself names), the paired `librarian_evidence` delete and
+/// the entry hard-DELETE, then a single batched
+/// `purge_edges_for_hard_deleted` sweep — all inside the caller's open
+/// transaction, so the arms commit or roll back together.
+///
+/// This exact four-step shape was hand-rolled in `evidence_repair`,
+/// `wiki_forget`, the lib.rs prune and `evidence_regrade` before this fn
+/// existed, cross-referenced only by "same shape as" comments — and the one
+/// time the ceremony grew an arm (the outbox Delete, issue #132), a missed
+/// copy left prisma-outbox replicas serving "forgotten" facts forever. When
+/// the ceremony grows another arm (new joined table, read-marker cleanup),
+/// it grows HERE once; every hard-delete site gets it by calling this.
+///
+/// The edge sweep must follow the deletes: edges anchored on a hard-deleted
+/// id can never come back, and `purge_edges_for_entries` (the SOFT-delete
+/// sweep) deliberately retains a half-live edge, which would strand them
+/// forever (#158 contract).
+///
+/// `doomed` carries `(entry_id, entity_id)` pairs selected by the caller
+/// under the same transaction — the outbox is keyed on entity, so pushing
+/// the wrong partition would mis-attribute the delete.
+pub fn hard_delete_entries(
+    conn: &Connection,
+    doomed: &[(String, String)],
+    now_ms: i64,
+) -> Result<()> {
+    if doomed.is_empty() {
+        return Ok(());
+    }
+    for (id, entity_id) in doomed {
+        push_entries_outbox(
+            conn,
+            entity_id,
+            id,
+            crate::db::outbox_format::OutboxOperation::Delete,
+            serde_json::json!({ "id": id }),
+            now_ms,
+        )?;
+        conn.execute("DELETE FROM llm_wiki_entries WHERE id = ?1", [id])?;
+    }
+    let doomed_ids: Vec<String> = doomed.iter().map(|(id, _)| id.clone()).collect();
+    delete_librarian_evidence(conn, &doomed_ids)?;
+    crate::db::edge_purge::purge_edges_for_hard_deleted(conn, &doomed_ids)?;
+    Ok(())
+}
+
 /// The evidence blob for an entry, or `None` when no row exists.
 ///
 /// SQLite errors propagate (review round 5): `bundle_io::load_facts` sits on
@@ -548,6 +694,23 @@ pub fn ms_now() -> i64 {
 /// lookup is *not* the same thing as a demonstrably-stale reference, and
 /// silently soft-deleting on a broken DB would amplify outages. (This is the
 /// contract that the six D-tests in commit.rs lock in.)
+/// True while the V20 re-grade's destructive phase has not completed.
+///
+/// `migrate()` deliberately leaves version 20 unstamped when the re-grade
+/// skips its destructive phase (blocked export dir, brain-incomplete), so
+/// `MAX(version) < 20` doubles as the durable "recovery pending" marker the
+/// heal path defers to. A failing lookup is treated as pending — a broken
+/// read is not a demonstrably-stale reference (the same defensive policy as
+/// every other DB-error branch in `source_ref_is_still_grounded`).
+fn v20_regrade_pending(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) < 20 FROM schema_version",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(true)
+}
+
 pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool {
     let trimmed = source_ref.trim();
     if trimmed.is_empty() {
@@ -585,17 +748,32 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
                 true
             }
             // Phase-1 carve-out REMOVED (Phase-2, spec §2.3): flagged rows
-            // are grounded strictly by live-chunk evidence again.
-            Some((json, _)) => match evidence_has_live_chunk(conn, &json) {
-                Ok(live) => live,
-                // Same defensive policy as every other DB-error branch in
-                // this function: a failing lookup is not a demonstrably-stale
-                // reference, so the heal path treats it as still-grounded.
-                Err(err) => {
-                    warn_source_ref_db_error(trimmed, "librarian_evidence", &err);
-                    true
+            // are grounded strictly by live-chunk evidence again — EXCEPT
+            // while the V20 recovery is pending (PR #201 review finding 1):
+            // a flagged row whose exporting purge has not completed must not
+            // be soft-deleted here, or the doomed stock disappears from
+            // regrade's `deleted_at IS NULL` selection before the export
+            // that is its only provenance backup can run (the 7-day prune
+            // would then hard-delete it un-exported). migrate() deliberately
+            // leaves version 20 unstamped on a skipped destructive phase, so
+            // `MAX(version) < 20` is the durable pending marker. Once the
+            // regrade settles (or on a brain already at 20+), flagged rows
+            // ground strictly again, exactly as §2.3 specifies.
+            Some((json, unanchored)) => {
+                if unanchored == 1 && v20_regrade_pending(conn) {
+                    return true;
                 }
-            },
+                match evidence_has_live_chunk(conn, &json) {
+                    Ok(live) => live,
+                    // Same defensive policy as every other DB-error branch in
+                    // this function: a failing lookup is not a demonstrably-stale
+                    // reference, so the heal path treats it as still-grounded.
+                    Err(err) => {
+                        warn_source_ref_db_error(trimmed, "librarian_evidence", &err);
+                        true
+                    }
+                }
+            }
         };
     }
     // Legacy contract: a plain vault-relative path. Existence-check against
@@ -1161,12 +1339,12 @@ fn create_entity_if_needed(
     proposal: &LoadedProposal,
     accepted_any: bool,
     now_secs: i64,
-) -> Result<Option<String>> {
+) -> Result<(Option<String>, bool)> {
     if !accepted_any || proposal.kind != ProposalKind::NewEntity {
-        return Ok(proposal.entity_id.clone());
+        return Ok((proposal.entity_id.clone(), false));
     }
     if proposal.entity_id.is_some() {
-        return Ok(proposal.entity_id.clone());
+        return Ok((proposal.entity_id.clone(), false));
     }
     let name = proposal
         .proposed_name
@@ -1186,7 +1364,7 @@ fn create_entity_if_needed(
         "UPDATE curated_proposals SET entity_id = ?1 WHERE id = ?2",
         params![entity_id, proposal.id],
     )?;
-    Ok(Some(entity_id))
+    Ok((Some(entity_id), true))
 }
 
 fn resolve_edge_ref(
@@ -1881,6 +2059,44 @@ fn commit_edge_add(
     Ok(())
 }
 
+/// The single place the final proposal status write lives (hvg Task 2).
+///
+/// The `WHERE ... AND status = 'pending'` clause is the in-transaction half of
+/// the double-resolve defence: `resolve_proposal`'s :2023 pre-check runs
+/// before `BEGIN IMMEDIATE`, so a second resolver that passed the pre-check
+/// while another commit held the write lock would otherwise silently overwrite
+/// the winner's resolution. Racing on the pending row itself makes exactly one
+/// resolution land; any loser sees `rows_affected == 0` and bails before
+/// `tx.commit()`, so its resolution event, item updates and edges roll back.
+///
+/// `ctx` is `&mut` only so the loser branch can be extended with counters
+/// without touching every call site.
+fn finalize_proposal_status_guarded(
+    tx: &rusqlite::Transaction,
+    ctx: &mut CommitContext,
+    proposal_status: &str,
+    now_secs: i64,
+    reject_reason: Option<&str>,
+    proposal_id: &str,
+) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE curated_proposals
+         SET status = ?1, resolved_at = ?2, reject_reason = ?3, reviewed_by = ?4
+         WHERE id = ?5 AND status = 'pending'",
+        params![
+            proposal_status,
+            now_secs,
+            reject_reason,
+            ctx.reviewed_by,
+            proposal_id
+        ],
+    )?;
+    if changed != 1 {
+        bail!("proposal {proposal_id} already resolved (concurrent or repeated decision)");
+    }
+    Ok(())
+}
+
 fn write_resolution_event(
     conn: &Connection,
     ctx: &CommitContext,
@@ -2115,8 +2331,9 @@ pub fn resolve_proposal(
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    let entity_id = create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?
-        .or(proposal.entity_id.clone());
+    let (minted_entity, entity_was_created_here) =
+        create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?;
+    let mut entity_id = minted_entity.or(proposal.entity_id.clone());
 
     let mut ctx = CommitContext {
         proposal_id: proposal_id.to_string(),
@@ -2149,6 +2366,7 @@ pub fn resolve_proposal(
             &tx,
             entity_id.as_deref().unwrap_or_default(),
         ),
+        reviewed_by: options.reviewed_by.clone(),
     };
 
     if let Some(eid) = entity_id.as_deref() {
@@ -2259,18 +2477,57 @@ pub fn resolve_proposal(
         }
     }
 
+    // Empty-shell rollback (PR #201 review finding 2): `accepted_any` is
+    // DECISION-based (it gates entity creation before any item commits), so
+    // an approved new_entity whose every fact_add is skipped by the Phase-2
+    // unanchored gate — or lands as a duplicate — resolves to 'rejected'
+    // while the entity INSERT and the proposals.entity_id stamp already
+    // happened. Left in place, the reviewer's approval permanently mints a
+    // zero-entry curated_entities shell (visible in the entity list/graph,
+    // never pruned) AND writes a resolution event for an entity whose only
+    // content was refused. Undo both, in this transaction, when nothing
+    // landed for an entity this resolution created: the proposal reads as a
+    // plain rejection, exactly like the all-reject path that never created
+    // one (locked by `review_reject_new_entity_writes_no_event_but_columns_persist`).
+    if entity_was_created_here && ctx.accepted_count == 0 {
+        if let Some(eid) = entity_id.as_deref() {
+            tx.execute("DELETE FROM curated_entities WHERE id = ?1", [eid])?;
+            tx.execute(
+                "UPDATE curated_proposals SET entity_id = NULL WHERE id = ?1",
+                [proposal_id],
+            )?;
+        }
+        entity_id = None;
+    }
+
     let proposal_status = finalize_proposal_status(ctx.accepted_count, ctx.rejected_count);
     let source_label = trigger_source_label(&tx, proposal_id)?;
     if entity_id.is_some() {
         write_resolution_event(&tx, &ctx, proposal_status, &source_label)?;
     }
 
-    tx.execute(
-        "UPDATE curated_proposals
-         SET status = ?1, resolved_at = ?2, reject_reason = ?3
-         WHERE id = ?4",
-        params![proposal_status, now_secs, reject_reason, proposal_id,],
+    finalize_proposal_status_guarded(
+        &tx,
+        &mut ctx,
+        proposal_status,
+        now_secs,
+        reject_reason,
+        proposal_id,
     )?;
+
+    // Fail-closed audit (spec §7): the log row shares this transaction, so it
+    // is impossible to observe a resolved proposal with no record of who
+    // resolved it — and a failed audit insert aborts the resolution instead of
+    // committing it unlogged.
+    if let Some(audit) = options.audit.as_ref() {
+        log_agent_access_checked(
+            &tx,
+            &audit.client,
+            &audit.tool,
+            Some(proposal_id),
+            &audit.operation,
+        )?;
+    }
 
     tx.commit()?;
 
@@ -2510,6 +2767,7 @@ mod tests {
             facts_duplicated: 0,
             skipped_unanchored: 0,
             entry_embeddings: std::collections::HashMap::new(),
+            reviewed_by: None,
         }
     }
 
@@ -2753,6 +3011,84 @@ mod tests {
         assert!(
             summary.contains("unanchored"),
             "resolution summary must surface the phase2 skip, got: {summary}"
+        );
+    }
+
+    /// Empty-shell rollback (PR #201 review finding 2): `accepted_any` is
+    /// DECISION-based, so an approved new_entity whose only fact_add is
+    /// skipped by the Phase-2 gate has already minted the entity and stamped
+    /// `proposals.entity_id` by the time the item commits. The rollback must
+    /// undo both — the proposal resolves to 'rejected' with NO
+    /// `curated_entities` row and NO resolution event, exactly like the
+    /// all-reject path that never created an entity.
+    #[test]
+    fn phase2_unanchored_new_entity_rolls_back_the_minted_shell() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/shell.pdf");
+
+        // Evidence chunk_id dangles: the Phase-2 gate skips the only item.
+        insert_test_proposal(
+            &conn,
+            "prop-shell",
+            ProposalKind::NewEntity,
+            None,
+            vec![NewProposalItem {
+                id: "item-1".into(),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({
+                    "body": "A fact worth storing.",
+                    "tags": [],
+                    "confidence": "inferred"
+                }),
+                evidence: vec![StoredEvidenceChunk {
+                    chunk_id: Some(999_999),
+                    content_hash: "nosuchhash".into(),
+                    quote: "dangling".into(),
+                    start_line: Some(1),
+                    end_line: Some(2),
+                    source_kind: None,
+                }],
+            }],
+            doc_id,
+        );
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-shell",
+            &[ItemDecision {
+                item_id: "item-1".into(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            }],
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.skipped_unanchored, 1);
+        assert_eq!(result.proposal_status, "rejected");
+
+        let (entities, stamped_id): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM curated_entities),
+                        (SELECT entity_id FROM curated_proposals WHERE id = 'prop-shell')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(entities, 0, "the minted shell entity must be rolled back");
+        assert_eq!(stamped_id, None, "proposals.entity_id must be unstamped");
+
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            events, 0,
+            "no resolution event for an entity whose only content was refused"
         );
     }
 
@@ -3066,6 +3402,223 @@ mod tests {
                 source_kind: None,
             }],
         }
+    }
+
+    // ── HVG Task 2: reviewed_by stamp + in-tx pending guard ────────────────
+
+    /// Seed a pending NewEntity proposal with one anchored fact_add item,
+    /// reusing the suite's existing fixtures verbatim (same shape as the
+    /// `:2904` status tests).
+    fn seed_pending_proposal(conn: &Connection, id: &str) {
+        let doc_id = seed_document(conn, "/vault/documents/hvg.pdf");
+        let chunk_id = seed_chunk(conn, doc_id);
+        insert_test_proposal(
+            conn,
+            id,
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item(
+                &format!("item-{id}"),
+                chunk_id,
+                "A verified fact.",
+            )],
+            doc_id,
+        );
+    }
+
+    fn all_accept_decisions(conn: &Connection, proposal_id: &str) -> Vec<ItemDecision> {
+        let item_ids: Vec<String> = {
+            let items = load_items(conn, proposal_id).unwrap();
+            items.into_iter().map(|item| item.id).collect()
+        };
+        item_ids
+            .iter()
+            .map(|item_id| ItemDecision {
+                item_id: item_id.clone(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            })
+            .collect()
+    }
+
+    /// Spec §2: the reviewer identity carried on ResolveOptions must be
+    /// stamped into `curated_proposals.reviewed_by` on resolution, and the
+    /// entries must land as `user_confirmed` (manual review path).
+    #[test]
+    fn resolve_proposal_stamps_reviewed_by_on_resolution() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-hvg-1");
+
+        let decisions = all_accept_decisions(&conn, "prop-hvg-1");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-hvg-1",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                reviewed_by: Some("tessera".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (rb, st): (Option<String>, String) = conn
+            .query_row(
+                "SELECT reviewed_by, status FROM curated_proposals WHERE id = 'prop-hvg-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rb.as_deref(), Some("tessera"));
+        assert_eq!(st, "approved");
+        assert_eq!(result.proposal_status, "approved");
+
+        let ut: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ut >= 1, "manual resolution must stamp user_confirmed");
+    }
+
+    /// Characterization of the auto path: no reviewer on ResolveOptions →
+    /// `reviewed_by` stays NULL.
+    #[test]
+    fn resolve_proposal_leaves_reviewed_by_null_when_absent() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-hvg-2");
+
+        let decisions = all_accept_decisions(&conn, "prop-hvg-2");
+        resolve_proposal(
+            &mut conn,
+            "prop-hvg-2",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rb: Option<String> = conn
+            .query_row(
+                "SELECT reviewed_by FROM curated_proposals WHERE id = 'prop-hvg-2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(rb.is_none(), "reviewed_by must stay NULL when absent");
+    }
+
+    /// The existing `resolve_proposal` pre-check (:2023) must reject a second
+    /// sequential resolve of the same proposal.
+    #[test]
+    fn resolve_proposal_sequential_double_resolve_fails_at_precheck() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-hvg-3");
+        let decisions = all_accept_decisions(&conn, "prop-hvg-3");
+
+        resolve_proposal(
+            &mut conn,
+            "prop-hvg-3",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap();
+
+        let err = resolve_proposal(
+            &mut conn,
+            "prop-hvg-3",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("pending"),
+            "second resolve must fail at the pre-check with 'pending', got: {err}"
+        );
+    }
+
+    /// Spec T-1 simulated concurrency: extract the guarded final UPDATE into
+    /// `finalize_proposal_status_guarded` and drive it directly against a row
+    /// already flipped to 'approved' by a second connection. The guarded
+    /// UPDATE matches 0 rows → the caller bails "already resolved" and the
+    /// transaction (event rows, edge writes) rolls back.
+    #[test]
+    fn resolve_proposal_concurrent_double_resolve_fails_at_guard() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/hvg-c.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-hvg", "HVG Entity", "Summary", 100);
+        insert_test_proposal(
+            &conn,
+            "prop-hvg-4",
+            ProposalKind::UpdateEntity,
+            Some("ent-hvg"),
+            vec![fact_item("item-hvg-4", chunk_id, "A contested fact.")],
+            doc_id,
+        );
+
+        let tx = conn.unchecked_transaction().unwrap();
+        // "conn B" wins the race: the proposal is no longer pending.
+        tx.execute(
+            "UPDATE curated_proposals SET status = 'approved', resolved_at = 1 WHERE id = 'prop-hvg-4'",
+            [],
+        )
+        .unwrap();
+
+        let _ = load_items(&conn, "prop-hvg-4").unwrap();
+        let mut ctx = test_ctx("ent-hvg");
+        ctx.proposal_id = "prop-hvg-4".into();
+
+        let err =
+            finalize_proposal_status_guarded(&tx, &mut ctx, "approved", 999, None, "prop-hvg-4")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("already resolved"),
+            "guard must bail with 'already resolved', got: {err}"
+        );
+
+        // No second resolution event may have been written by the loser.
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events WHERE entity_id = 'ent-hvg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events, 0,
+            "no resolution event may be written on guard bail"
+        );
+
+        // The loser's transaction must leave no edge/item residue behind.
+        let edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE entity_id = 'ent-hvg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(edges, 0, "edge count must be unchanged on guard bail");
+
+        let accepted_items: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_proposal_items WHERE proposal_id = 'prop-hvg-4' AND status = 'accepted'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            accepted_items, 0,
+            "no item may be marked accepted by the loser"
+        );
     }
 
     #[test]

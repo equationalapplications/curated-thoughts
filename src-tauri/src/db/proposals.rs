@@ -246,6 +246,13 @@ pub fn insert_proposal(
     if sources.is_empty() {
         bail!("proposal requires at least one source document");
     }
+    if items.is_empty() {
+        // An item-less proposal is unresolvable: `resolve_proposal` bails on
+        // an empty item set, so every review surface would list it as pending
+        // forever and refuse both approve and reject. Fail loudly at the one
+        // place that could create one rather than wedging the queue later.
+        bail!("proposal requires at least one item");
+    }
 
     let now = now_secs();
     conn.execute_batch("BEGIN IMMEDIATE;")?;
@@ -337,7 +344,15 @@ fn resolve_target_name(
     Ok(proposed_name.unwrap_or("Unknown entity").to_string())
 }
 
-fn source_paths_for_proposal(conn: &Connection, proposal_id: &str) -> Result<Vec<String>> {
+/// Source-doc paths for a proposal: the trigger document first, then the
+/// rest by path. Shared by `proposals list`/`show` AND the review surfaces
+/// (`proposals_review::pending_review_queue`) so both report the same
+/// sources for the same proposal — a private copy in each module drifted
+/// silently (PR #201 review finding 10).
+pub(crate) fn source_paths_for_proposal(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT d.path
          FROM curated_proposal_sources s
@@ -907,5 +922,40 @@ mod tests {
         let for_a = list_proposals_for_document(&conn, doc_a).unwrap();
         assert_eq!(for_a.len(), 1);
         assert_eq!(for_a[0].id, "prop-a");
+    }
+    /// An item-less proposal is unresolvable — `resolve_proposal` bails on an
+    /// empty item set — so every review surface would list it as pending
+    /// forever and refuse both approve and reject. The one writer that could
+    /// create such a row rejects it instead of wedging the queue later.
+    #[test]
+    fn insert_proposal_rejects_an_item_less_proposal() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = upsert_document(&conn, "/vault/a.md", "h").unwrap();
+        let err = insert_proposal(
+            &conn,
+            &NewProposal {
+                id: "prop-empty".into(),
+                kind: ProposalKind::NewEntity,
+                entity_id: None,
+                proposed_name: Some("Empty".into()),
+                proposed_type: Some("concept".into()),
+                reasoning: None,
+                model: "test".into(),
+            },
+            &[],
+            &[NewProposalSource {
+                doc_id,
+                role: ProposalSourceRole::Trigger,
+            }],
+        )
+        .expect_err("an item-less proposal must not be written");
+        assert!(
+            err.to_string().contains("at least one item"),
+            "error must name the cause, got: {err}"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM curated_proposals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "nothing is written when the guard fires");
     }
 }

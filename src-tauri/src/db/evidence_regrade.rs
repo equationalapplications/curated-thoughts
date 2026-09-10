@@ -23,7 +23,6 @@
 //! level check alone cannot prove the backup actually landed. Every skip is
 //! a loud WARN naming the idempotent manual recovery: `ct evidence regrade`.
 
-use crate::db::outbox_format::OutboxOperation;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -97,12 +96,13 @@ pub fn export_doomed_rows(_conn: &Connection, doomed: &[DoomedRow], dir: &Path) 
 /// naming the idempotent manual recovery command, delete NOTHING, and report
 /// `skipped_destructive = true`.
 ///
-/// The purge itself is ONE transaction (spec I2): per row an
+/// The purge itself is ONE transaction (spec I2) through the shared
+/// [`crate::db::commit::hard_delete_entries`] ceremony: per row an
 /// `OutboxOperation::Delete` push, the paired `librarian_evidence` delete and
 /// the entry hard-DELETE; then a single batched `purge_edges_for_hard_deleted`
-/// after the loop (the reviewed choice — edges anchored on a hard-deleted id
-/// can never come back, and the sweep must follow the delete or the edge rows
-/// dangle, #158 contract).
+/// sweep (the reviewed choice — edges anchored on a hard-deleted id can never
+/// come back, and the sweep must follow the delete or the edge rows dangle,
+/// #158 contract).
 ///
 /// Returns `(purged, skipped_destructive)`.
 pub fn purge_doomed_rows(
@@ -132,23 +132,15 @@ pub fn purge_doomed_rows(
     }
 
     let tx = conn.unchecked_transaction()?;
-    for row in doomed {
-        crate::db::commit::push_entries_outbox(
-            &tx,
-            &row.entity_id,
-            &row.entry_id,
-            OutboxOperation::Delete,
-            serde_json::json!({ "id": row.entry_id }),
-            now_ms,
-        )?;
-        crate::db::commit::delete_librarian_evidence(&tx, std::slice::from_ref(&row.entry_id))?;
-        tx.execute(
-            "DELETE FROM llm_wiki_entries WHERE id = ?1",
-            [&row.entry_id],
-        )?;
-    }
-    let doomed_ids: Vec<String> = doomed.iter().map(|r| r.entry_id.clone()).collect();
-    crate::db::edge_purge::purge_edges_for_hard_deleted(&tx, &doomed_ids)?;
+    // The shared hard-delete ceremony (outbox Delete + entry DELETE + paired
+    // evidence delete + batched edge sweep, one transaction — see
+    // `commit::hard_delete_entries`): this path must never drift from the
+    // other three hard-delete sites again (issue #132 class).
+    let doomed_pairs: Vec<(String, String)> = doomed
+        .iter()
+        .map(|r| (r.entry_id.clone(), r.entity_id.clone()))
+        .collect();
+    crate::db::commit::hard_delete_entries(&tx, &doomed_pairs, now_ms)?;
     tx.commit()?;
     Ok((doomed.len(), false))
 }

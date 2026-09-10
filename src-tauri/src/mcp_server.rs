@@ -269,6 +269,42 @@ impl VaultMcpServer {
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
+
+    #[tool(
+        name = "curated_proposals_list",
+        description = "List curated proposals by status (default: pending — the review queue). Each item: proposal_id, proposed_name, kind, item_count, evidence chunk count, source docs, created_at. Statuses: pending|approved|rejected|partial|superseded. Empty array on a fresh brain."
+    )]
+    async fn curated_proposals_list(
+        &self,
+        args: Parameters<tool_dispatch::CuratedProposalsListParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_proposals_list", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "curated_proposal_decide",
+        description = "Approve or reject a pending proposal after review. decision: approve|reject. note (optional): for rejects, the stored reason (reject_reason); for approves, acknowledged in the result but not stored. Approved entries are stamped user_confirmed with reviewed_by provenance. Errors cleanly if already resolved or superseded."
+    )]
+    async fn curated_proposal_decide(
+        &self,
+        args: Parameters<tool_dispatch::CuratedProposalDecideParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_proposal_decide", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
 }
 
 /// Blocking entrypoint for `--mcp` mode. Calls into a tokio runtime internally.
@@ -290,6 +326,38 @@ pub fn run() -> anyhow::Result<()> {
     rt.block_on(async_run())
 }
 
+/// Run the migration ladder over the brain database, without ever creating it.
+///
+/// Failures are reported and swallowed: see the call site.
+fn migrate_brain_for_mcp(db_path: &std::path::Path) {
+    if !db_path.exists() {
+        // `open_brain_readonly` reports the missing file with the actionable
+        // env-var hint; don't pre-empt it with a second, vaguer message.
+        return;
+    }
+    let opened =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE);
+    let conn = match opened {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!(
+                "curated-thoughts [--mcp]: schema check skipped, {} not writable ({e}); \
+                 reads work, writes may fail on a missing column",
+                db_path.display()
+            );
+            return;
+        }
+    };
+    // Tolerate the desktop app or librarian holding the write lock.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    if let Err(e) = crate::db::connection::migrate_open_db(&conn, db_path.parent()) {
+        eprintln!(
+            "curated-thoughts [--mcp]: schema migration failed ({e}); \
+             reads work, writes may fail on a missing column"
+        );
+    }
+}
+
 async fn async_run() -> anyhow::Result<()> {
     let p = retrieval::resolve_brain_paths();
 
@@ -300,6 +368,20 @@ async fn async_run() -> anyhow::Result<()> {
         );
         e
     })?;
+
+    // Bring the schema forward BEFORE serving. `--mcp` has no other migration
+    // point: the read connection below is read-only and the lazy RW connection
+    // (`ToolDispatchContext::with_rw`) opens the file bare, so a brain.db last
+    // touched by an older build would keep every schema-dependent write failing
+    // on a missing column — `curated_proposal_decide` writing `reviewed_by`
+    // (V21) is the first such write — until the desktop app or a CLI command
+    // happened to open it.
+    //
+    // Best-effort: a genuinely read-only database (or one another process is
+    // migrating right now) must still serve reads, which is most of what this
+    // server does. The warning names the cause so a later write failure is not
+    // a mystery.
+    migrate_brain_for_mcp(&p.db_path);
 
     let conn = retrieval::open_brain_readonly(&p.db_path).map_err(|e| {
         eprintln!("curated-thoughts [--mcp]: {e}");
