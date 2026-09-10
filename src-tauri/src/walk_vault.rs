@@ -322,10 +322,25 @@ pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        let link_rel = format!("documents/{name}");
         if is_excluded_dir(&name) {
+            // Report, never skip. `.brain` joined EXCLUDED_DIRS for the
+            // walker prune; a silent `continue` here would make an approved
+            // `documents/.brain` link vanish from classification entirely
+            // and let reconcile delete its rows (spec item 2 carve-out).
+            // On a broken symlink, record the link's own path rather than
+            // an empty string — matches the broken-symlink error the
+            // classification loop pushes further down.
+            let target = std::fs::canonicalize(&p)
+                .map(|t| t.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+            outcome.denied.push(DeniedLink {
+                link: link_rel,
+                target,
+                reason: crate::trusted_links::DenyReason::ExcludedDirName.message().to_string(),
+            });
             continue;
         }
-        let link_rel = format!("documents/{name}");
 
         let target = match std::fs::canonicalize(&p) {
             Ok(t) => t,
@@ -654,6 +669,40 @@ mod tests {
         assert!(
             !names.iter().any(|n| n.contains("/.brain/")),
             "walk leaked .brain content: {names:?}"
+        );
+    }
+
+    /// Spec item 2 carve-out: a `documents/.brain` symlink must be reported
+    /// as Denied, never silently dropped. A silent drop removes it from the
+    /// approvals UI and lets reconcile delete its rows as "vanished".
+    #[cfg(unix)]
+    #[test]
+    fn excluded_name_symlink_is_denied_not_silently_skipped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("documents")).unwrap();
+        let target = tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("documents").join(".brain"))
+            .unwrap();
+
+        let outcome = super::walk_vault(&root, &[], None);
+
+        assert_eq!(
+            outcome.denied.len(),
+            1,
+            "expected exactly one denied link, got {:?} (pending: {:?})",
+            outcome.denied,
+            outcome.pending
+        );
+        assert_eq!(outcome.denied[0].link, "documents/.brain");
+        assert_eq!(
+            outcome.denied[0].reason,
+            crate::trusted_links::DenyReason::ExcludedDirName.message()
+        );
+        assert!(
+            outcome.pending.is_empty(),
+            "excluded-name link must not be offered for approval"
         );
     }
 }

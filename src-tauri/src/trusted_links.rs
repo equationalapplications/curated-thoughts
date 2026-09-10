@@ -40,6 +40,11 @@ pub enum DenyReason {
     /// fail-closed on nonsense input even when the `approve_into` predicate
     /// is bypassed (e.g. links read from the filesystem in `walk_vault`).
     EmptyLink,
+    /// The link's own name is an `EXCLUDED_DIRS` entry (e.g.
+    /// `documents/.brain`). Reported rather than skipped so the link stays
+    /// visible in the approvals UI and the user can rename it; a silent
+    /// skip would let reconcile delete its rows as "vanished".
+    ExcludedDirName,
 }
 
 impl DenyReason {
@@ -51,6 +56,7 @@ impl DenyReason {
             DenyReason::ContainsVault => "target contains the vault root",
             DenyReason::AncestorOfTrusted => "target is an ancestor of an already-trusted target",
             DenyReason::EmptyLink => "link is empty",
+            DenyReason::ExcludedDirName => "link name is an excluded directory name",
         }
     }
 }
