@@ -136,7 +136,7 @@ use tauri_app_lib::db::proposals::{
 };
 
 /// The CLI's default reject reason — must stay in sync with
-/// `proposals_review_cmd` in `tools/src/bin/ct.rs`.
+/// `proposals_review_cmd` in `tools/src/cmds.rs`.
 const CLI_DEFAULT_REJECT_REASON: &str = "Rejected during review";
 
 /// The CLI reviewer identity fallback — `proposals_review_cmd` uses the
@@ -150,12 +150,20 @@ const CLI_FALLBACK_REVIEWER: &str = "cli-operator";
 /// resolves `doc_path`; `content_hash` is set so the stable-hash lookup wins.
 fn insert_anchored_proposal(dir: &Path, id: &str, created_at: i64) {
     let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+    // The anchor document row is shared; only insert it the first time
+    // (seeding two proposals in one brain hits the documents.path UNIQUE).
     conn.execute(
-        "INSERT INTO documents (path, hash, tier, status) VALUES (?1, 'h_anchor', 'user_doc', 'indexed')",
+        "INSERT OR IGNORE INTO documents (path, hash, tier, status) VALUES (?1, 'h_anchor', 'user_doc', 'indexed')",
         ["/vault/anchor-doc.md"],
     )
     .unwrap();
-    let doc_id = conn.last_insert_rowid();
+    let doc_id: i64 = conn
+        .query_row(
+            "SELECT id FROM documents WHERE path = ?1",
+            ["/vault/anchor-doc.md"],
+            |r| r.get(0),
+        )
+        .unwrap();
     let chunk = Chunk {
         text: "the quokka is a small macropod".into(),
         start_line: 3,
@@ -164,9 +172,27 @@ fn insert_anchored_proposal(dir: &Path, id: &str, created_at: i64) {
         defined_symbol: None,
         strategy: ChunkStrategyTag::Prose,
     };
-    let chunk_id =
-        tauri_app_lib::retrieval::insert_chunk(&conn, doc_id, &chunk, 0, "ent_anchor", "hash-anchor")
-            .unwrap();
+    let chunk_id: i64 = {
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM chunks WHERE doc_id = ?1 AND content_hash = 'hash-anchor'",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .ok();
+        match existing {
+            Some(id) => id,
+            None => tauri_app_lib::retrieval::insert_chunk(
+                &conn,
+                doc_id,
+                &chunk,
+                0,
+                "ent_anchor",
+                "hash-anchor",
+            )
+            .unwrap(),
+        }
+    };
     insert_proposal(
         &conn,
         &NewProposal {
@@ -248,12 +274,12 @@ fn proposal_status(dir: &Path, id: &str) -> String {
 fn review_command_empty_queue_exits_zero() {
     common::with_seeded_brain(|| {
         let out = common::run_ct(&["proposals", "review"]);
-    assert!(
-        out.status.success(),
-        "review on empty queue must exit 0: {} stderr={}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
+        assert!(
+            out.status.success(),
+            "review on empty queue must exit 0: {} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             String::from_utf8_lossy(&out.stdout).contains("0 pending"),
             "stdout must report the empty queue: {}",
@@ -336,6 +362,42 @@ fn review_command_rejects_via_piped_n() {
             .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
             .unwrap();
         assert_eq!(entries, 0, "a reject writes no wiki entries");
+    });
+}
+
+/// F1 regression: `s` (skip) must advance past the skipped proposal to the
+/// next queue head instead of re-prompting on the same one forever. Seeds
+/// TWO anchored proposals; piping `s` then `y` must approve the SECOND
+/// proposal and leave the first pending.
+#[test]
+fn review_command_skip_advances_to_next_proposal() {
+    let brain = tempdir().unwrap();
+    let dir = brain.path().to_path_buf();
+    let dir_str = dir.to_str().unwrap().to_string();
+    with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
+        init_brain_db(&dir);
+        insert_anchored_proposal(&dir, "prop-s1", 1_000);
+        insert_anchored_proposal(&dir, "prop-s2", 2_000);
+        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"s\ny\n");
+        assert!(
+            out.status.success(),
+            "review must exit 0: {} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("skipped prop-s1"), "skip echo: {text}");
+        assert!(text.contains("approved"), "decision echo: {text}");
+        assert_eq!(
+            proposal_status(&dir, "prop-s1"),
+            "pending",
+            "skipped proposal must stay pending"
+        );
+        assert_eq!(
+            proposal_status(&dir, "prop-s2"),
+            "approved",
+            "skip must advance to the second proposal"
+        );
     });
 }
 

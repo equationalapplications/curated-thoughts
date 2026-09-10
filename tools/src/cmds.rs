@@ -1358,15 +1358,18 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
     let now_ms = tauri_app_lib::db::commit::ms_now();
     let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored(
         &conn,
-        Some(brain.paths.db_path.parent().unwrap_or(std::path::Path::new("."))),
+        Some(
+            brain
+                .paths
+                .db_path
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        ),
         now_ms,
     )?;
     println!(
         "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
-        report.regraded_anchored,
-        report.exported,
-        report.purged,
-        report.skipped_destructive
+        report.regraded_anchored, report.exported, report.purged, report.skipped_destructive
     );
     Ok(0)
 }
@@ -1391,9 +1394,10 @@ pub fn cli_reviewer() -> String {
 /// compact card per proposal, and read a decision from stdin:
 ///
 /// - `y` approve  (review_approve: entries stamp user_confirmed + reviewed_by)
-/// - `n` reject   (review_reject; default reason, or `r <text>` typed first)
+/// - `n` reject   (review_reject with the default reason)
 /// - `d` show     (render the full detail card — the extended `show` render)
-/// - `s` skip     (leave pending, move to the next proposal)
+/// - `s` skip     (leave pending, move to the next proposal; skipped ids are
+///   remembered for this session so the loop cannot re-prompt on the same head)
 /// - `q` quit     (leave the remaining queue pending; exit 0)
 ///
 /// EOF is treated as `q`. Empty queue prints `0 pending` and exits 0 —
@@ -1402,14 +1406,22 @@ pub fn proposals_review_cmd() -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
     let reviewer = cli_reviewer();
+    let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         let queue = pending_review_queue(&db.0, "pending", 1_000)?;
-        let Some(head) = queue.first() else {
+        // Skip-advance: `s` mutates nothing, so re-taking queue.first()
+        // forever would re-prompt on the same proposal. Select the first
+        // queue item this session has not skipped yet; when every remaining
+        // item was skipped, the session is done.
+        let Some(head) = queue
+            .iter()
+            .find(|item| !skipped.contains(&item.proposal_id))
+        else {
             println!("0 pending");
             return Ok(());
         };
         let pid = head.proposal_id.clone();
-        print_review_card(&db.0, head);
+        print_review_card(head);
         let decision = loop {
             print!("Review {pid} [y/n/d/s/q]? ");
             use std::io::Write;
@@ -1437,11 +1449,13 @@ pub fn proposals_review_cmd() -> Result<()> {
             }
             "d" => {
                 let detail = get_proposal_detail(&db.0, &pid)?;
-                if let Some(detail) = detail {
-                    print_proposal_detail(&detail);
+                match detail {
+                    Some(detail) => print_proposal_detail(&detail),
+                    None => println!("(detail unavailable)"),
                 }
             }
             "s" => {
+                skipped.insert(pid.clone());
                 println!("skipped {pid} (still pending)");
             }
             "q" => {
@@ -1453,8 +1467,7 @@ pub fn proposals_review_cmd() -> Result<()> {
     }
 }
 
-fn print_review_card(conn: &rusqlite::Connection, item: &tauri_app_lib::db::proposals_review::PendingReviewItem) {
-    let _ = conn;
+fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewItem) {
     println!("================================================================");
     println!("{}\t{}\t{}", item.proposal_id, item.kind, item.created_at);
     println!(
@@ -1473,7 +1486,10 @@ fn print_review_card(conn: &rusqlite::Connection, item: &tauri_app_lib::db::prop
 fn print_review_outcome(verb: &str, outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
     println!(
         "{verb} {}: committed={} conflicts={} reviewed_by={}",
-        outcome.proposal_id, outcome.committed, outcome.conflicts.len(), outcome.reviewed_by
+        outcome.proposal_id,
+        outcome.committed,
+        outcome.conflicts.len(),
+        outcome.reviewed_by
     );
     for item_id in &outcome.conflicts {
         println!("conflict: {item_id}");
@@ -1493,7 +1509,10 @@ pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDeta
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_else(|| format!("{:?}", detail.kind))
     );
-    println!("proposed_name: {}", detail.proposed_name.as_deref().unwrap_or("-"));
+    println!(
+        "proposed_name: {}",
+        detail.proposed_name.as_deref().unwrap_or("-")
+    );
     for p in &detail.source_doc_paths {
         println!("source: {p}");
     }
@@ -1506,8 +1525,14 @@ pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDeta
         );
         for ev in &item.evidence {
             match (&ev.start_line, &ev.end_line) {
-                (Some(s), Some(e)) => println!("    evidence: L{s}-{e} {}", ev.doc_path.as_deref().unwrap_or("(deleted source)")),
-                _ => println!("    evidence: {}", ev.doc_path.as_deref().unwrap_or("(deleted source)")),
+                (Some(s), Some(e)) => println!(
+                    "    evidence: L{s}-{e} {}",
+                    ev.doc_path.as_deref().unwrap_or("(deleted source)")
+                ),
+                _ => println!(
+                    "    evidence: {}",
+                    ev.doc_path.as_deref().unwrap_or("(deleted source)")
+                ),
             }
             println!("    quote: {}", ev.quote);
         }
