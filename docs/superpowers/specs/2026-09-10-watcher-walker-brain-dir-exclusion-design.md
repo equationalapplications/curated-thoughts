@@ -1,7 +1,12 @@
 # Watcher + walker: exclude `.brain` working directories from ingestion
 
 **Date:** 2026-09-10
-**Status:** Draft (rev 6 — Opus 5 review of rev 5 addressed: desktop purge
+**Status:** Draft (rev 7 — second Opus 5 review of rev 6 + plan addressed:
+desktop startup connection must set `PRAGMA foreign_keys=ON` explicitly
+(it bypasses `migrate()`, so the chunks cascade never fired there),
+relativization gained a canonicalize-the-input fallback (canonical root ×
+non-canonical event path), and the ancestor-vault test wording corrected
+to absolute paths. Rev 6 — Opus 5 review of rev 5 addressed: desktop purge
 root corrected from `raw_docs` to the vault root, D2's "one path space"
 claim narrowed to what `queue.rs` actually stores plus an explicit
 relativization-failure rule, reconcile pre-pass placed inside the existing
@@ -85,7 +90,11 @@ The virtual path is the space the **walker** uses, and therefore the space
 gate uses `abs` (the output of `std::path::absolute`, `queue.rs:43`)
 relativized against the **as-configured** vault root, falling back to the
 canonical root if `abs` does not start with it (macOS `/var` →
-`/private/var` and similar).
+`/private/var` and similar), and finally to a canonicalized `abs`
+stripped against the canonical root — for a canonical root paired with a
+non-canonical event path (symlinked ancestor). Canonicalizing the input
+cannot mask a genuinely symlinked-out `.brain`: the strip still misses
+once the link resolves, so D2's rejection behavior is unchanged.
 
 **D2a — The watcher does not currently store the virtual path, and this
 spec does not change that.** `enqueue_vault_event` writes
@@ -108,8 +117,9 @@ the row-oriented predicates of items 3a/3b must handle a path that does not
 start with the vault root at all — a consequence of D2a for symlinked
 content, and possible for any row written by an older code path.
 `rel_path_has_excluded_component` operates only on a successfully
-relativized path; when `strip_prefix` fails against **both** the
-as-configured and the canonical root, the path is treated as **not
+relativized path; when `strip_prefix` fails against **all** the attempts
+(as-configured root, canonical root, canonicalized input against the
+canonical root), the path is treated as **not
 excluded** (the event stages; the row is left alone). Deleting rows we
 cannot place inside the vault would be the same class of unrecoverable
 mistake the empty-walk guard exists to prevent.
@@ -290,10 +300,17 @@ and `brain/` must all still ingest. Matching is `component == name` over
    (`reconcile.rs:122,148`), so a mid-loop rusqlite error rolls back
    rather than leaving a half-deleted index. Chunk cleanup relies on
    `chunks.doc_id` `ON DELETE CASCADE`, which fires **only** with
-   `PRAGMA foreign_keys=ON`; that pragma is set in
+   `PRAGMA foreign_keys=ON`; that pragma is per-connection and set in
    `db/connection.rs:35` for every connection opened through the standard
-   path, and the empty-walk regression test asserts the chunk count
-   reaches zero rather than assuming the cascade.
+   path — **but the desktop startup pass opens its connection raw**
+   (`lib.rs:1021-1035`, `rusqlite::Connection::open` + `busy_timeout`
+   only, never routed through `migrate()`), so item 3b must set
+   `PRAGMA foreign_keys=ON` on that connection explicitly, after the
+   `busy_timeout` block. Without it, both the new purge and the
+   pre-existing Remove purge (`lib.rs:1072`) orphan the `chunks` rows
+   behind every deleted `documents` row. The empty-walk regression test
+   and the 3b purge test assert the chunk count reaches zero rather than
+   assuming the cascade.
 
 5. **Desktop startup walk also honors the exclusion (round-4 finding 10).**
    The startup pass builds its own `walkdir::WalkDir::new(&raw_docs)`
@@ -424,11 +441,15 @@ and `brain/` must all still ingest. Matching is `component == name` over
 - **Reconcile regression — vault under excluded ancestor:** vault root
   at `<tmp>/target/wiki/` (an absolute ancestor path whose
   component `target` matches `EXCLUDED_DIRS`); DB has a `notes.md`
-  row whose `documents.path` is the vault-relative `notes.md`,
-  plus a phantom `.brain/notes.md` row whose absolute path is
-  `<tmp>/target/wiki/.brain/notes.md`. Walk yields both relative
-  paths. Assert the `notes.md` row is **not** deleted (its
-  vault-relative path has no excluded component — `target` is the
+  row whose `documents.path` is the absolute vault-internal path
+  `<tmp>/target/wiki/notes.md` (both `documents.path` values and
+  `collect_files` output are absolute — the walker joins onto the
+  canonicalized root), plus a phantom `.brain/notes.md` row whose
+  absolute path is
+  `<tmp>/target/wiki/.brain/notes.md`. Walk yields both absolute
+  paths. Assert the `notes.md` row is **not** deleted (relativized
+  against the `<tmp>/target/wiki/` root its path has no excluded
+  component — `target` is the
   ancestor of the vault, not a vault-internal directory) and the
   `.brain/notes.md` row **is** deleted. Without `vault_root`
   parameterisation, a raw absolute-path component check would
