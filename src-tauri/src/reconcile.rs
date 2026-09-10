@@ -57,9 +57,18 @@ pub fn reconcile_vault(
     // An empty walk means a misconfigured or unmounted vault root, not an
     // empty vault. Reconciling against it would delete the entire index --
     // a transient mount failure must never be able to do that.
+    //
+    // The one carve-out is `.brain`: CT owns that directory, writes into it
+    // itself (`pipeline/mod.rs:484`), and no CT code path has ever
+    // legitimately ingested from it, so such a row is illegitimate whether
+    // or not the vault is mounted. The scope is deliberately NARROWER than
+    // the non-empty pre-pass: for `node_modules/`, `target/`, `.git/` etc.
+    // an empty walk is not proof the row should be absent, and deleting
+    // them on an unmounted vault is exactly the disaster this guard exists
+    // to prevent (spec item 4).
     if walked.is_empty() {
         eprintln!("[reconcile] walk returned no files; skipping reconciliation");
-        return Ok(outcome);
+        return purge_brain_rows(conn, vault_root);
     }
 
     // `documents.path` stores the VIRTUAL path (tools/src/cmds.rs:217).
@@ -217,6 +226,49 @@ pub fn reconcile_vault(
     }
     tx.commit()?;
 
+    Ok(outcome)
+}
+
+/// Delete `user_doc` rows whose vault-relative path contains a `.brain`
+/// component, and nothing else. Used only by the empty-walk branch.
+///
+/// Wrapped in a transaction matching the main path so a mid-loop rusqlite
+/// error rolls back rather than leaving a half-deleted index. Chunk cleanup
+/// relies on `chunks.doc_id ON DELETE CASCADE`, which fires only with
+/// `PRAGMA foreign_keys=ON` — set in `db/connection.rs:35` for every
+/// connection opened through the standard path.
+fn purge_brain_rows(conn: &Connection, vault_root: &Path) -> Result<ReconcileOutcome> {
+    let mut outcome = ReconcileOutcome::default();
+
+    let rows: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT path FROM documents WHERE tier = 'user_doc'")?;
+        let r = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        r.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    let doomed: Vec<String> = rows
+        .into_iter()
+        .filter(|p| crate::walk_vault::abs_path_has_brain_in_vault(Path::new(p), vault_root))
+        .collect();
+
+    if doomed.is_empty() {
+        return Ok(outcome);
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for path in &doomed {
+        tx.execute(
+            "DELETE FROM documents WHERE path = ?1",
+            rusqlite::params![path],
+        )?;
+        outcome.deleted.push(path.clone());
+    }
+    tx.commit()?;
+
+    eprintln!(
+        "[reconcile] empty walk: purged {} .brain row(s); all other rows preserved",
+        outcome.deleted.len()
+    );
     Ok(outcome)
 }
 
@@ -576,5 +628,68 @@ mod tests {
         );
         assert_eq!(chunk_count(&conn, brain_id), 0);
         assert_eq!(chunk_count(&conn, keep_id), 1);
+    }
+
+    /// Spec item 4: the hole punched in the mount-failure safety net is
+    /// `.brain`-ONLY. For node_modules/, target/, … an empty walk is not
+    /// proof the row should be absent -- it may be a transient unmount,
+    /// which is exactly the disaster the guard exists to prevent.
+    #[test]
+    fn empty_walk_deletes_only_brain_rows() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+
+        let brain = root.join(".brain").join("errors.log");
+        let notes = root.join("notes.md");
+        let nm = root.join("node_modules").join("x.md");
+        let brain_id = seed_doc(&conn, &s(&brain), "h1", "user_doc", 3);
+        let notes_id = seed_doc(&conn, &s(&notes), "h2", "user_doc", 2);
+        let nm_id = seed_doc(&conn, &s(&nm), "h3", "user_doc", 1);
+
+        let out = reconcile_vault(&conn, &[], &root).unwrap();
+
+        assert_eq!(out.deleted, vec![s(&brain)]);
+        // Spec item 4 asserts the chunk count reaches zero rather than
+        // assuming the FK cascade fired.
+        assert_eq!(chunk_count(&conn, brain_id), 0);
+        assert_eq!(path_of(&conn, notes_id), s(&notes));
+        assert_eq!(chunk_count(&conn, notes_id), 2);
+        assert_eq!(
+            path_of(&conn, nm_id),
+            s(&nm),
+            "node_modules row must survive an empty walk"
+        );
+        assert_eq!(chunk_count(&conn, nm_id), 1);
+    }
+
+    /// An empty walk on a vault with no .brain rows still changes nothing.
+    #[test]
+    fn empty_walk_with_no_brain_rows_is_a_no_op() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let notes = root.join("notes.md");
+        let notes_id = seed_doc(&conn, &s(&notes), "h1", "user_doc", 2);
+
+        let out = reconcile_vault(&conn, &[], &root).unwrap();
+
+        assert_eq!(out, ReconcileOutcome::default());
+        assert_eq!(path_of(&conn, notes_id), s(&notes));
+    }
+
+    /// Wiki-tier rows never participate, even on the empty-walk path.
+    #[test]
+    fn empty_walk_leaves_wiki_tier_rows_alone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let wiki = root.join(".brain").join("page.md");
+        let wiki_id = seed_doc(&conn, &s(&wiki), "h1", "wiki", 1);
+
+        let out = reconcile_vault(&conn, &[], &root).unwrap();
+
+        assert!(out.deleted.is_empty());
+        assert_eq!(path_of(&conn, wiki_id), s(&wiki));
     }
 }
