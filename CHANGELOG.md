@@ -1,3 +1,18 @@
+## [2.10.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.9.0...v2.10.0) (2026-09-10)
+
+### Features
+
+* **walk:** add .brain to EXCLUDED_DIRS with shared exclusion predicates ([12f4ca6](https://github.com/equationalapplications/curated-thoughts/commit/12f4ca60d212d3c7e9c50aa3ee47bef9da31d826))
+
+### Bug Fixes
+
+* **desktop:** self-heal excluded-dir rows on startup ([32b136a](https://github.com/equationalapplications/curated-thoughts/commit/32b136ab893052659ca45dc4ffe7e1601ee96ea1))
+* **reconcile:** delete excluded-dir rows before rename detection ([f4dac80](https://github.com/equationalapplications/curated-thoughts/commit/f4dac807ad795612517086c706d7b63fb1214328))
+* **reconcile:** purge .brain rows on an empty walk, nothing else ([153eecc](https://github.com/equationalapplications/curated-thoughts/commit/153eecc828eb94807d095db059d0ee94a7556dc2))
+* **walk:** report excluded-name symlinks as Denied instead of skipping ([8d02be0](https://github.com/equationalapplications/curated-thoughts/commit/8d02be09e37c17c87368268f2653298dc5652a4d))
+* **watch:** clippy/fmt cleanup for brain-dir-exclusion PR ([d42bba0](https://github.com/equationalapplications/curated-thoughts/commit/d42bba04e65a6c0c1a2e58ca445dfd37e6f37e7e))
+* **watch:** gate .brain and excluded dirs in enqueue_vault_event ([05a967b](https://github.com/equationalapplications/curated-thoughts/commit/05a967b37c1acda0e953452baf2380124e3fd753))
+
 ## [2.9.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.8.0...v2.9.0) (2026-09-10)
 
 ### Features
