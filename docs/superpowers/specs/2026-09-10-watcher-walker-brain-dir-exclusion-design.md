@@ -130,6 +130,15 @@ and `brain/` must all still ingest. Matching is `component == name` over
    `EXCLUDED_DIRS` in `src-tauri/src/walk_vault.rs` (line 20). The
    `filter_entry` prune at every depth then guarantees `.brain` content
    can never enter `collect_files` output even if extensions change.
+   The vault root itself is exempt from this prune: a vault rooted at
+   `<tmp>/.brain/` must still have its files visited, because
+   `filter_entry` returning `false` on the root would short-circuit
+   the entire `WalkDir` before any descent. The
+   `is_excluded_dir` check is therefore applied only to entries whose
+   depth is greater than the root — the root itself is returned as-is
+   before the prune. A naïve "add `.brain` to `EXCLUDED_DIRS` and let
+   `filter_entry` do the rest" reading would silently empty a vault
+   whose top-level directory happens to be named `.brain`.
 
    **Symlink-classification carve-out (round-4 finding 8).** Adding to
    `EXCLUDED_DIRS` is *not* inert: `walk_vault.rs:224` also calls
@@ -172,6 +181,15 @@ and `brain/` must all still ingest. Matching is `component == name` over
    `unknown_by_hash` candidacy and the `vanished_per_hash` accounting, so
    they can neither be repointed nor perturb another row's uniqueness
    verdict. Only the remaining rows enter the existing rename/delete match.
+   `reconcile_vault` accepts `vault_root: &Path` as an explicit parameter
+   (parallel to D3 for `enqueue_vault_event`) so the predicate can
+   relativize the absolute paths emitted by `collect_files` against the
+   as-configured vault root before applying `is_excluded_dir`. A raw
+   absolute-path component check would falsely treat an excluded-name
+   *ancestor* of the vault root (e.g. a vault at `<tmp>/target/wiki/`)
+   as part of the vault-relative path, deleting every row. The existing
+   CLI caller (`tools/src/cmds.rs:193`) forwards its known root; the
+   new desktop startup pass (3b) passes its `raw_docs` boundary.
 
    **3b — Desktop-only users must self-heal (round-4 finding 3).** Rev 4
    made clearing the stuck rows require one `ct ingest` run, because
@@ -302,6 +320,12 @@ and `brain/` must all still ingest. Matching is `component == name` over
   `.brain/errors.log`, `nested/.brain/errors.log`, `brain/` lookalike,
   `my.brain.notes/x.md`, `.brainish/x.md`. Assert only intended files are
   walked.
+- **Walker regression — vault root named `.brain`:** fixture vault root
+  at `<tmp>/.brain/` containing `notes.md`, `nested/.brain/errors.log`,
+  and `my.brain.notes/x.md`. Assert `notes.md` and
+  `my.brain.notes/x.md` are walked, while the nested
+  `.brain/errors.log` is pruned (root exempt, descendants matched).
+  Without the root-exemption carve-out the entire walk returns empty.
 - **Walker symlink-classification test (finding 8):** a `documents/.brain`
   symlink is reported as `Denied` — asserting it is neither silently
   dropped nor classified `Trusted`.
@@ -320,6 +344,19 @@ and `brain/` must all still ingest. Matching is `component == name` over
   `.brain/errors.log` deleted with chunk count zero, `notes.md` preserved,
   and `node_modules/x.md` **preserved** (the hole in the mount-failure
   safety net is `.brain`-only).
+- **Reconcile regression — vault under excluded ancestor:** vault root
+  at `<tmp>/target/wiki/` (an absolute ancestor path whose
+  component `target` matches `EXCLUDED_DIRS`); DB has a `notes.md`
+  row whose `documents.path` is the vault-relative `notes.md`,
+  plus a phantom `.brain/notes.md` row whose absolute path is
+  `<tmp>/target/wiki/.brain/notes.md`. Walk yields both relative
+  paths. Assert the `notes.md` row is **not** deleted (its
+  vault-relative path has no excluded component — `target` is the
+  ancestor of the vault, not a vault-internal directory) and the
+  `.brain/notes.md` row **is** deleted. Without `vault_root`
+  parameterisation, a raw absolute-path component check would
+  falsely match `target` as an ancestor of every row and delete
+  the entire index.
 - **Desktop self-heal test (finding 3b):** the startup purge deletes a
   pre-existing `.brain/errors.log` row without any `ct ingest` run.
 - Existing walker/queue/reconcile test suites stay green; the
@@ -336,9 +373,24 @@ and `brain/` must all still ingest. Matching is `component == name` over
   `should_ingest_extension`) is a sensible follow-up and should be filed
   as an issue rather than folded in here.
 - **Purging pre-existing rows under the other `EXCLUDED_DIRS` names**
-  (`node_modules/`, `target/`, …). Deliberately untouched per item 4: we
-  have no proof such rows are illegitimate, and the empty-walk safety net
-  keeps covering them.
+  (`node_modules/`, `target/`, …). Two clauses, often conflated:
+  - During **non-empty** reconciliation (item 3a), vanished rows under
+    any excluded directory — `node_modules/`, `target/`, `.brain`, and
+    every other name in `EXCLUDED_DIRS` — ARE deleted by the pre-pass.
+    We *do* know such rows should be absent from a successful walk, the
+    pre-pass exists precisely to prevent the empty-file hash collision
+    from repointing them, and the empty-walk safety net does not apply
+    here. Item 3a's wording ("Rows whose vault-relative path has an
+    excluded component") is intentional and broad.
+  - During **empty** walks (item 4), the narrow scope is `.brain`-only;
+    `node_modules/`, `target/`, … rows are preserved because the empty
+    walk may signal a transient mount failure rather than real absence,
+    and the mount-failure safety net must hold for them.
+  - What is genuinely **out of scope** in this spec is any code that
+    proactively discovers and deletes *non-vanished* rows under
+    `node_modules/`, `target/`, …. We have no proof such rows are
+    illegitimate, no walker output today suggests them, and adding
+    such a discovery pass is a separate change.
 - folder_rules exclude mode.
 - ct_doctor import-preflight live-row scoping
   (`curated-thoughts-integrations:2026-09-10-doctor-preflight-live-scope-design.md`).

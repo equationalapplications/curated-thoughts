@@ -3,7 +3,7 @@
 **Date:** 2026-09-10
 **Status:** ~~Draft~~ **Superseded by
 [`2026-09-10-watcher-walker-brain-dir-exclusion-design.md`](./2026-09-10-watcher-walker-brain-dir-exclusion-design.md)
-(rev 3).** This rev-1 spec misattributes the cause to the vault walker; the
+(rev 5).** This rev-1 spec misattributes the cause to the vault walker; the
 filesystem watcher in `src-tauri/src/db/queue.rs` is the actual staging
 vector (see the watcher-walker spec §"Problem" for the corrected causal
 story and §"Approach" for the watcher gate as the primary fix). The
