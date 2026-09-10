@@ -81,6 +81,7 @@ pub fn resolve_proposal_cmd(
             embed_profile: None,
             entry_embeddings: Some(entry_embeddings),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            reviewed_by: None,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -151,6 +152,7 @@ pub fn approve_wiki_page(
             embed_profile: None,
             entry_embeddings: Some(entry_embeddings),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            reviewed_by: None,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -209,6 +211,7 @@ pub fn reject_wiki_page(
             embed_profile: None,
             entry_embeddings: Some(std::collections::HashMap::new()),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
+            reviewed_by: None,
         },
     )
     .map_err(|e| e.to_string())?;

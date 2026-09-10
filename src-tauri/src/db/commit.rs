@@ -31,6 +31,10 @@ pub struct ResolveOptions {
     /// still gets spec-correct behaviour, and only an explicit
     /// `wiki.deposit_default_tier` changes the value.
     pub deposit_default_tier: Option<String>,
+    /// Human Verification Gate (hvg): reviewer identity recorded on the
+    /// proposal row when a human resolves it. `None` on the auto path keeps
+    /// the column NULL (characterized by the auto-approve test).
+    pub reviewed_by: Option<String>,
 }
 
 /// A precomputed entry embedding together with the exact text it was derived
@@ -127,6 +131,11 @@ struct CommitContext {
     /// Resolved once per commit: the entity is fixed for the whole proposal, so
     /// re-reading and re-parsing the manifest per edge item would be pure waste.
     strict_edge_types: Option<EdgeVocabulary>,
+    /// Human Verification Gate (hvg): reviewer identity to stamp on the
+    /// proposal's final guarded UPDATE. Mirrored from `ResolveOptions` so
+    /// `finalize_proposal_status_guarded` reads it from the ctx it already
+    /// receives; `None` leaves the column NULL (auto path).
+    reviewed_by: Option<String>,
 }
 
 /// The manifest edge-type vocabulary, keyed for case-insensitive lookup while
@@ -1881,6 +1890,44 @@ fn commit_edge_add(
     Ok(())
 }
 
+/// The single place the final proposal status write lives (hvg Task 2).
+///
+/// The `WHERE ... AND status = 'pending'` clause is the in-transaction half of
+/// the double-resolve defence: `resolve_proposal`'s :2023 pre-check runs
+/// before `BEGIN IMMEDIATE`, so a second resolver that passed the pre-check
+/// while another commit held the write lock would otherwise silently overwrite
+/// the winner's resolution. Racing on the pending row itself makes exactly one
+/// resolution land; any loser sees `rows_affected == 0` and bails before
+/// `tx.commit()`, so its resolution event, item updates and edges roll back.
+///
+/// `ctx` is `&mut` only so the loser branch can be extended with counters
+/// without touching every call site.
+fn finalize_proposal_status_guarded(
+    tx: &rusqlite::Transaction,
+    ctx: &mut CommitContext,
+    proposal_status: &str,
+    now_secs: i64,
+    reject_reason: Option<&str>,
+    proposal_id: &str,
+) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE curated_proposals
+         SET status = ?1, resolved_at = ?2, reject_reason = ?3, reviewed_by = ?4
+         WHERE id = ?5 AND status = 'pending'",
+        params![
+            proposal_status,
+            now_secs,
+            reject_reason,
+            ctx.reviewed_by,
+            proposal_id
+        ],
+    )?;
+    if changed != 1 {
+        bail!("proposal {proposal_id} already resolved (concurrent or repeated decision)");
+    }
+    Ok(())
+}
+
 fn write_resolution_event(
     conn: &Connection,
     ctx: &CommitContext,
@@ -2149,6 +2196,7 @@ pub fn resolve_proposal(
             &tx,
             entity_id.as_deref().unwrap_or_default(),
         ),
+        reviewed_by: options.reviewed_by.clone(),
     };
 
     if let Some(eid) = entity_id.as_deref() {
@@ -2265,11 +2313,13 @@ pub fn resolve_proposal(
         write_resolution_event(&tx, &ctx, proposal_status, &source_label)?;
     }
 
-    tx.execute(
-        "UPDATE curated_proposals
-         SET status = ?1, resolved_at = ?2, reject_reason = ?3
-         WHERE id = ?4",
-        params![proposal_status, now_secs, reject_reason, proposal_id,],
+    finalize_proposal_status_guarded(
+        &tx,
+        &mut ctx,
+        proposal_status,
+        now_secs,
+        reject_reason,
+        proposal_id,
     )?;
 
     tx.commit()?;
@@ -2510,6 +2560,7 @@ mod tests {
             facts_duplicated: 0,
             skipped_unanchored: 0,
             entry_embeddings: std::collections::HashMap::new(),
+            reviewed_by: None,
         }
     }
 
@@ -3066,6 +3117,223 @@ mod tests {
                 source_kind: None,
             }],
         }
+    }
+
+    // ── HVG Task 2: reviewed_by stamp + in-tx pending guard ────────────────
+
+    /// Seed a pending NewEntity proposal with one anchored fact_add item,
+    /// reusing the suite's existing fixtures verbatim (same shape as the
+    /// `:2904` status tests).
+    fn seed_pending_proposal(conn: &Connection, id: &str) {
+        let doc_id = seed_document(conn, "/vault/documents/hvg.pdf");
+        let chunk_id = seed_chunk(conn, doc_id);
+        insert_test_proposal(
+            conn,
+            id,
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item(
+                &format!("item-{id}"),
+                chunk_id,
+                "A verified fact.",
+            )],
+            doc_id,
+        );
+    }
+
+    fn all_accept_decisions(conn: &Connection, proposal_id: &str) -> Vec<ItemDecision> {
+        let item_ids: Vec<String> = {
+            let items = load_items(conn, proposal_id).unwrap();
+            items.into_iter().map(|item| item.id).collect()
+        };
+        item_ids
+            .iter()
+            .map(|item_id| ItemDecision {
+                item_id: item_id.clone(),
+                decision: ItemDecisionKind::Accept,
+                edited_payload: None,
+            })
+            .collect()
+    }
+
+    /// Spec §2: the reviewer identity carried on ResolveOptions must be
+    /// stamped into `curated_proposals.reviewed_by` on resolution, and the
+    /// entries must land as `user_confirmed` (manual review path).
+    #[test]
+    fn resolve_proposal_stamps_reviewed_by_on_resolution() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-hvg-1");
+
+        let decisions = all_accept_decisions(&conn, "prop-hvg-1");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-hvg-1",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                reviewed_by: Some("tessera".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (rb, st): (Option<String>, String) = conn
+            .query_row(
+                "SELECT reviewed_by, status FROM curated_proposals WHERE id = 'prop-hvg-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rb.as_deref(), Some("tessera"));
+        assert_eq!(st, "approved");
+        assert_eq!(result.proposal_status, "approved");
+
+        let ut: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ut >= 1, "manual resolution must stamp user_confirmed");
+    }
+
+    /// Characterization of the auto path: no reviewer on ResolveOptions →
+    /// `reviewed_by` stays NULL.
+    #[test]
+    fn resolve_proposal_leaves_reviewed_by_null_when_absent() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-hvg-2");
+
+        let decisions = all_accept_decisions(&conn, "prop-hvg-2");
+        resolve_proposal(
+            &mut conn,
+            "prop-hvg-2",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rb: Option<String> = conn
+            .query_row(
+                "SELECT reviewed_by FROM curated_proposals WHERE id = 'prop-hvg-2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(rb.is_none(), "reviewed_by must stay NULL when absent");
+    }
+
+    /// The existing `resolve_proposal` pre-check (:2023) must reject a second
+    /// sequential resolve of the same proposal.
+    #[test]
+    fn resolve_proposal_sequential_double_resolve_fails_at_precheck() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-hvg-3");
+        let decisions = all_accept_decisions(&conn, "prop-hvg-3");
+
+        resolve_proposal(
+            &mut conn,
+            "prop-hvg-3",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap();
+
+        let err = resolve_proposal(
+            &mut conn,
+            "prop-hvg-3",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("pending"),
+            "second resolve must fail at the pre-check with 'pending', got: {err}"
+        );
+    }
+
+    /// Spec T-1 simulated concurrency: extract the guarded final UPDATE into
+    /// `finalize_proposal_status_guarded` and drive it directly against a row
+    /// already flipped to 'approved' by a second connection. The guarded
+    /// UPDATE matches 0 rows → the caller bails "already resolved" and the
+    /// transaction (event rows, edge writes) rolls back.
+    #[test]
+    fn resolve_proposal_concurrent_double_resolve_fails_at_guard() {
+        let conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/hvg-c.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-hvg", "HVG Entity", "Summary", 100);
+        insert_test_proposal(
+            &conn,
+            "prop-hvg-4",
+            ProposalKind::UpdateEntity,
+            Some("ent-hvg"),
+            vec![fact_item("item-hvg-4", chunk_id, "A contested fact.")],
+            doc_id,
+        );
+
+        let tx = conn.unchecked_transaction().unwrap();
+        // "conn B" wins the race: the proposal is no longer pending.
+        tx.execute(
+            "UPDATE curated_proposals SET status = 'approved', resolved_at = 1 WHERE id = 'prop-hvg-4'",
+            [],
+        )
+        .unwrap();
+
+        let _ = load_items(&conn, "prop-hvg-4").unwrap();
+        let mut ctx = test_ctx("ent-hvg");
+        ctx.proposal_id = "prop-hvg-4".into();
+
+        let err =
+            finalize_proposal_status_guarded(&tx, &mut ctx, "approved", 999, None, "prop-hvg-4")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("already resolved"),
+            "guard must bail with 'already resolved', got: {err}"
+        );
+
+        // No second resolution event may have been written by the loser.
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events WHERE entity_id = 'ent-hvg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events, 0,
+            "no resolution event may be written on guard bail"
+        );
+
+        // The loser's transaction must leave no edge/item residue behind.
+        let edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE entity_id = 'ent-hvg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(edges, 0, "edge count must be unchanged on guard bail");
+
+        let accepted_items: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_proposal_items WHERE proposal_id = 'prop-hvg-4' AND status = 'accepted'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            accepted_items, 0,
+            "no item may be marked accepted by the loser"
+        );
     }
 
     #[test]
