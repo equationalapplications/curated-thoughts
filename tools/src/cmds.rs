@@ -1378,30 +1378,42 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
 // hvg Task 5: `ct proposals review` — the interactive review loop
 // ---------------------------------------------------------------------------
 
-use tauri_app_lib::db::proposals_review::{pending_review_queue, review_approve, review_reject};
+use tauri_app_lib::db::proposals_review::{
+    pending_review_queue, review_approve_with_profile, review_reject,
+};
 
 /// Default reason recorded when a reviewer rejects without typing one
 /// (matches the MCP `curated_proposal_decide` default).
 pub const DEFAULT_REJECT_REASON: &str = "Rejected during review";
 
-/// Reviewer identity: the operator's `USER`, or a stable fallback for
-/// headless environments without it.
+/// Reviewer identity: the operator's `USER` (`USERNAME` on Windows, which
+/// has no standard `USER`), or a stable fallback for headless environments
+/// with neither. A set-but-blank value is treated as unset — persisting an
+/// empty string would erase reviewer attribution just as silently as `NULL`.
 pub fn cli_reviewer() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "cli-operator".to_string())
+    ["USER", "USERNAME"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "cli-operator".to_string())
 }
 
 /// `ct proposals review` — walk the pending queue oldest-first, render one
 /// compact card per proposal, and read a decision from stdin:
 ///
-/// - `y` approve  (review_approve: entries stamp user_confirmed + reviewed_by)
+/// - `y` approve  (review_approve_with_profile: entries stamp user_confirmed + reviewed_by)
 /// - `n` reject   (review_reject with the default reason)
 /// - `d` show     (render the full detail card — the extended `show` render)
 /// - `s` skip     (leave pending, move to the next proposal; skipped ids are
 ///   remembered for this session so the loop cannot re-prompt on the same head)
 /// - `q` quit     (leave the remaining queue pending; exit 0)
 ///
-/// EOF is treated as `q`. Empty queue prints `0 pending` and exits 0 —
-/// review is a success even when there is nothing to do.
+/// EOF is treated as `q`. An empty queue prints `0 pending` and exits 0 —
+/// review is a success even when there is nothing to do. A queue emptied only
+/// by skips reports the skipped count instead (those rows are still pending).
 pub fn proposals_review_cmd() -> Result<()> {
     let paths = retrieval::resolve_brain_paths();
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
@@ -1417,7 +1429,17 @@ pub fn proposals_review_cmd() -> Result<()> {
             .iter()
             .find(|item| !skipped.contains(&item.proposal_id))
         else {
-            println!("0 pending");
+            // Distinguish "the queue is empty" from "every remaining proposal
+            // was skipped this session": the latter leaves rows pending in the
+            // database, so reporting `0 pending` there would be a lie.
+            if skipped.is_empty() {
+                println!("0 pending");
+            } else {
+                println!(
+                    "0 unskipped proposals left this session ({} skipped, still pending)",
+                    skipped.len()
+                );
+            }
             return Ok(());
         };
         let pid = head.proposal_id.clone();
@@ -1440,12 +1462,18 @@ pub fn proposals_review_cmd() -> Result<()> {
         };
         match decision.as_str() {
             "y" => {
-                let outcome = review_approve(&mut db.0, &pid, &reviewer)?;
-                print_review_outcome("approved", &outcome);
+                // Write-time entry embedding, best-effort and matching
+                // `approve_one_on`: without it an approved `fact_add` lands
+                // with a NULL blob and stays invisible to semantic retrieval
+                // until an unrelated sweep runs.
+                let embed_profile = retrieval::load_embed_profile(&paths.config_path).ok();
+                let outcome =
+                    review_approve_with_profile(&mut db.0, &pid, &reviewer, embed_profile)?;
+                print_review_outcome(&outcome);
             }
             "n" => {
                 let outcome = review_reject(&mut db.0, &pid, &reviewer, DEFAULT_REJECT_REASON)?;
-                print_review_outcome("rejected", &outcome);
+                print_review_outcome(&outcome);
             }
             "d" => {
                 let detail = get_proposal_detail(&db.0, &pid)?;
@@ -1483,9 +1511,13 @@ fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewIt
     }
 }
 
-fn print_review_outcome(verb: &str, outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
+/// Report the PERSISTED outcome, never the requested decision: an approval
+/// whose items hit the summary-update conflict path lands as `partial` (or
+/// `rejected`), and printing a hard-coded verb would contradict the database.
+fn print_review_outcome(outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
     println!(
-        "{verb} {}: committed={} conflicts={} reviewed_by={}",
+        "{} {}: committed={} conflicts={} reviewed_by={}",
+        outcome.status,
         outcome.proposal_id,
         outcome.committed,
         outcome.conflicts.len(),

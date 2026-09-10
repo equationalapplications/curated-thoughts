@@ -1177,35 +1177,25 @@ pub async fn dispatch_curated_proposals_list(
         );
     }
     let limit = p.limit.unwrap_or(50).clamp(1, 200);
-    let filter = crate::db::proposals::ProposalFilter {
-        status: Some(status.clone()),
-    };
-    let items = {
-        let conn = ctx.conn.lock().unwrap();
-        let mut all = crate::db::proposals::list_proposals(&conn, &filter)?;
-        all.truncate(limit);
-        all
-    };
-    // Map to the plan's MCP shape: proposal_id / proposed_name / kind /
-    // item_count / evidence_chunks / source_docs / created_at.
-    let items: Vec<serde_json::Value> = items
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "proposal_id": s.id,
-                "proposed_name": s.target_name,
-                "kind": s.kind,
-                "entity_id": s.entity_id,
-                "item_count": s.item_counts.total,
-                "evidence_chunks": s.item_counts.facts + s.item_counts.edges + s.item_counts.tasks,
-                "source_docs": s.source_doc_paths,
-                "created_at": s.created_at,
-                "age_secs": s.age_secs,
-                "model": s.model,
-            })
-        })
-        .collect();
-    let items = serde_json::Value::Array(items);
+    // `pending_review_queue` IS the plan's MCP shape (proposal_id /
+    // proposed_name / kind / item_count / evidence_chunks / source_docs /
+    // created_at) and is the same read the CLI review loop uses, so both
+    // surfaces report identical numbers under identical field names — in
+    // particular `evidence_chunks`, which is a SUM over each item's stored
+    // evidence array, NOT a count of items by type. Re-deriving the mapping
+    // here is what let the two drift.
+    //
+    // The read is synchronous SQLite (with a per-proposal source-docs query),
+    // so it runs on a blocking thread rather than on the Tokio worker.
+    let conn = ctx.conn.clone();
+    let queue_status = status.clone();
+    let rows = tokio::task::spawn_blocking(move || -> Result<_> {
+        let guard = conn.lock().unwrap();
+        crate::db::proposals_review::pending_review_queue(&guard, &queue_status, limit)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("curated_proposals_list task join error: {e}"))??;
+    let items = serde_json::to_value(rows)?;
     log_curated_access_rw(&ctx, "curated_proposals_list", None, "read").await?;
     Ok(items)
 }

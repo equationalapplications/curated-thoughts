@@ -9,13 +9,16 @@
 //! (`cmds.rs approve_one_on`) keeps its auto-approve semantics and does NOT
 //! route through this module.
 //!
-//! Embedding posture (stated, not solved): review_approve passes
-//! `embed_profile: None` — approved entries land NULL-embedded and the runtime
-//! `embed_sweep` fills them, per ResolveOptions' documented contract (same as
-//! `ct approve` today). Threading a profile is a non-goal.
+//! Embedding posture: [`review_approve_with_profile`] takes the same
+//! best-effort `embed_profile` that `ct approve` passes, so an approved
+//! `fact_add` is searchable immediately instead of waiting on a sweep. The
+//! bare [`review_approve`] keeps the `None` shorthand (entries land
+//! NULL-embedded and the runtime `embed_sweep` fills them, per
+//! ResolveOptions' documented contract) for callers with no profile in hand.
 
 use crate::db::commit::{resolve_proposal, ResolveOptions};
 use crate::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
+use crate::embedder::EmbedProfile;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -58,6 +61,24 @@ pub fn review_approve(
     proposal_id: &str,
     reviewed_by: &str,
 ) -> Result<ReviewOutcome> {
+    review_approve_with_profile(conn, proposal_id, reviewed_by, None)
+}
+
+/// [`review_approve`] with write-time entry embedding.
+///
+/// `embed_profile` is forwarded to the resolver exactly as `ct approve` does:
+/// best-effort, so a failed embed still commits the proposal and leaves the
+/// NULL blob for the runtime sweep. The CLI review loop passes `Some(..)` so
+/// approved facts are semantically searchable without waiting on a sweep. The
+/// MCP decide tool deliberately does NOT: its `with_rw` closure already holds
+/// the RW connection mutex, and a blocking embed round-trip under that lock is
+/// the exact starvation pattern the dispatcher's three-phase commits avoid.
+pub fn review_approve_with_profile(
+    conn: &mut Connection,
+    proposal_id: &str,
+    reviewed_by: &str,
+    embed_profile: Option<EmbedProfile>,
+) -> Result<ReviewOutcome> {
     let decisions = load_accept_all_decisions(conn, proposal_id)?;
     let result = resolve_proposal(
         conn,
@@ -67,6 +88,7 @@ pub fn review_approve(
         ResolveOptions {
             auto_approve: false,
             reviewed_by: Some(reviewed_by.to_string()),
+            embed_profile,
             ..Default::default()
         },
     )?;

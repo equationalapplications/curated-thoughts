@@ -364,18 +364,16 @@ fn migrate(conn: &Connection, vault_root: Option<String>, db_dir: Option<&Path>)
         // Human Verification Gate (hvg): add the nullable
         // `curated_proposals.reviewed_by` column. ALTER TABLE ADD COLUMN is
         // NOT idempotent (no IF NOT EXISTS), so unlike V19's
-        // WHERE-convergence this body cannot be safely re-run: the stamp is
-        // written only AFTER the ALTER lands, matching the V13
-        // "documents predates this migration" precedent. A crash between
-        // ALTER and stamp replays the statement on next open and fails with
-        // a loud duplicate-column error — preferred over a silent skip that
-        // would mask a half-applied migration.
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V21))?;
-
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (21)",
-            [],
-        )?;
+        // WHERE-convergence this body cannot be safely re-run. SQLite DDL is
+        // transactional, so the ALTER and its version stamp land in ONE
+        // transaction: a crash applies both or neither, and no open can ever
+        // find the column present with the version still at 20 (which would
+        // replay the ALTER and fail `AppDb::open` permanently with a
+        // duplicate-column error). No boot loop, no silent skip.
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nINSERT OR IGNORE INTO schema_version (version) VALUES (21);\nCOMMIT;",
+            MIGRATION_V21
+        ))?;
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)

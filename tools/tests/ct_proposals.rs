@@ -140,8 +140,9 @@ use tauri_app_lib::db::proposals::{
 const CLI_DEFAULT_REJECT_REASON: &str = "Rejected during review";
 
 /// The CLI reviewer identity fallback — `proposals_review_cmd` uses the
-/// `USER` env var, or "cli-operator" when unset. The review e2e runs strip
-/// `USER`, so this is also the value asserted against `reviewed_by`.
+/// `USER` env var (or `USERNAME`), and "cli-operator" when neither is set.
+/// The review e2e runs strip both, so this is also the value asserted
+/// against `reviewed_by`.
 const CLI_FALLBACK_REVIEWER: &str = "cli-operator";
 
 /// Seed a pending new_entity proposal with one anchored fact_add item via the
@@ -245,6 +246,10 @@ fn run_ct_with_stdin(dir: &Path, args: &[&str], input: &[u8]) -> Output {
         .env_remove("CURATED_BRAIN_DB")
         .env_remove("CURATED_BRAIN_CONFIG")
         .env_remove("USER")
+        // Windows has no standard `USER`; `cli_reviewer` falls back to
+        // `USERNAME` before "cli-operator", so the fallback assertion needs
+        // both stripped.
+        .env_remove("USERNAME")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
