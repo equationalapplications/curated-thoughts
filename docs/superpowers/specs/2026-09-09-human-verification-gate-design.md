@@ -1,7 +1,7 @@
 # Human verification gate for librarian synthesis (proposal review loop)
 
 **Date:** 2026-09-09
-**Status:** Draft rev 2 (GLM 5.3 frontier review folded: I-1–I-4, M-1–M-6, T-1–T-4)
+**Status:** Implemented 2026-09-10 (PR #201) — supersedes Draft rev 2 (GLM 5.3 frontier review folded: I-1–I-4, M-1–M-6, T-1–T-4)
 **Branch:** spec/human-verification-gate
 **Priority:** P1
 
