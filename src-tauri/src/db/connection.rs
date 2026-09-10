@@ -506,6 +506,17 @@ impl AppDb {
     }
 }
 
+/// Bring an ALREADY-OPEN database up to the current schema.
+///
+/// Exists for connections that must not create the database file (the `--mcp`
+/// server opens with `SQLITE_OPEN_READ_WRITE` and no `CREATE`), which
+/// therefore cannot route through [`AppDb::open_with_config`]. Runs the same
+/// migration ladder, minus the vault-root-dependent OKF step: `vault_root` is
+/// `None`, matching [`open_app_db`].
+pub fn migrate_open_db(conn: &Connection, db_dir: Option<&Path>) -> Result<()> {
+    migrate(conn, None, db_dir)
+}
+
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     migrate(&conn, None, None)?;
@@ -541,6 +552,42 @@ mod tests {
         // seconds/milliseconds units in `llm_wiki_edges.created_at`
         // (issue #191 spec §2.5).
         assert_eq!(max_version, 21);
+    }
+
+    /// `--mcp` has no other migration point: its read connection is read-only
+    /// and its lazy RW connection opens the file bare, so without an explicit
+    /// migration a brain.db left at an older version keeps failing every write
+    /// that touches a migration-added column (V21 `reviewed_by` is the first).
+    /// `migrate_open_db` is that point — it upgrades an already-open handle.
+    #[test]
+    fn migrate_open_db_upgrades_an_already_open_connection() {
+        let conn = open_in_memory().unwrap();
+        // Rewind to the pre-V21 shape (see the V17 rewind above for why the
+        // column must go with the stamp: V21's ALTER is not idempotent).
+        conn.execute_batch(
+            "ALTER TABLE curated_proposals DROP COLUMN reviewed_by;
+             DELETE FROM schema_version WHERE version >= 21;",
+        )
+        .unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('curated_proposals') WHERE name='reviewed_by'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 0, "test precondition: the column is gone");
+
+        migrate_open_db(&conn, None).unwrap();
+
+        let after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('curated_proposals') WHERE name='reviewed_by'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 1, "migrate_open_db must bring the schema forward");
     }
 
     /// Human Verification Gate (hvg): MIGRATION_V21 adds the nullable

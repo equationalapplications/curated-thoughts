@@ -1379,26 +1379,18 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
 // ---------------------------------------------------------------------------
 
 use tauri_app_lib::db::proposals_review::{
-    pending_review_queue, review_approve_with_profile, review_reject,
+    os_account, pending_review_queue, review_approve_with_profile, review_reject,
 };
 
-/// Default reason recorded when a reviewer rejects without typing one
-/// (matches the MCP `curated_proposal_decide` default).
-pub const DEFAULT_REJECT_REASON: &str = "Rejected during review";
+/// Default reason recorded when a reviewer rejects without typing one.
+/// Re-exported from the review core so the CLI and the MCP decide tool cannot
+/// drift to different wording for the same decision.
+pub use tauri_app_lib::db::proposals_review::DEFAULT_REJECT_REASON;
 
-/// Reviewer identity: the operator's `USER` (`USERNAME` on Windows, which
-/// has no standard `USER`), or a stable fallback for headless environments
-/// with neither. A set-but-blank value is treated as unset — persisting an
-/// empty string would erase reviewer attribution just as silently as `NULL`.
+/// Reviewer identity: the operator's OS account, or a stable fallback for
+/// headless environments that name none.
 pub fn cli_reviewer() -> String {
-    ["USER", "USERNAME"]
-        .iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_else(|| "cli-operator".to_string())
+    os_account().unwrap_or_else(|| "cli-operator".to_string())
 }
 
 /// `ct proposals review` — walk the pending queue oldest-first, render one
@@ -1467,21 +1459,22 @@ pub fn proposals_review_cmd() -> Result<()> {
                 // with a NULL blob and stays invisible to semantic retrieval
                 // until an unrelated sweep runs.
                 let embed_profile = retrieval::load_embed_profile(&paths.config_path).ok();
-                let outcome =
-                    review_approve_with_profile(&mut db.0, &pid, &reviewer, embed_profile)?;
-                print_review_outcome(&outcome);
-            }
-            "n" => {
-                let outcome = review_reject(&mut db.0, &pid, &reviewer, DEFAULT_REJECT_REASON)?;
-                print_review_outcome(&outcome);
-            }
-            "d" => {
-                let detail = get_proposal_detail(&db.0, &pid)?;
-                match detail {
-                    Some(detail) => print_proposal_detail(&detail),
-                    None => println!("(detail unavailable)"),
+                match review_approve_with_profile(&mut db.0, &pid, &reviewer, embed_profile) {
+                    Ok(outcome) => print_review_outcome(&outcome),
+                    Err(e) => report_decision_error(&pid, "approve", &e, &mut skipped),
                 }
             }
+            "n" => match review_reject(&mut db.0, &pid, &reviewer, DEFAULT_REJECT_REASON) {
+                Ok(outcome) => print_review_outcome(&outcome),
+                Err(e) => report_decision_error(&pid, "reject", &e, &mut skipped),
+            },
+            "d" => match get_proposal_detail(&db.0, &pid) {
+                Ok(Some(detail)) => print_proposal_detail(&detail),
+                Ok(None) => println!("(detail unavailable)"),
+                // A failed read must not end the session either — the queue
+                // head is still reviewable without its detail card.
+                Err(e) => println!("(detail unavailable: {e})"),
+            },
             "s" => {
                 skipped.insert(pid.clone());
                 println!("skipped {pid} (still pending)");
@@ -1493,6 +1486,24 @@ pub fn proposals_review_cmd() -> Result<()> {
             _ => unreachable!("decision validated above"),
         }
     }
+}
+
+/// Report a failed decision and advance past its proposal.
+///
+/// One proposal failing must not end the review session: a concurrent desktop
+/// or ingest process can resolve or supersede the queue head between the card
+/// being printed and the keypress landing, and the operator still has the rest
+/// of the queue to get through. The failed id joins the session's skip set so
+/// the loop moves on instead of re-prompting on a head it cannot resolve.
+fn report_decision_error(
+    proposal_id: &str,
+    action: &str,
+    err: &anyhow::Error,
+    skipped: &mut std::collections::HashSet<String>,
+) {
+    println!("could not {action} {proposal_id}: {err}");
+    println!("(left pending; moving on)");
+    skipped.insert(proposal_id.to_string());
 }
 
 fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewItem) {

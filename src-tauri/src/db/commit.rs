@@ -35,6 +35,28 @@ pub struct ResolveOptions {
     /// proposal row when a human resolves it. `None` on the auto path keeps
     /// the column NULL (characterized by the auto-approve test).
     pub reviewed_by: Option<String>,
+    /// Audit row written INSIDE the resolution transaction, so a curated tool's
+    /// mutation and its `curated_agent_log` row commit or roll back together
+    /// (spec §7 fail-closed audit). The `curated_*` write tools each log inside
+    /// their own transaction; a resolve reached from one of them must do the
+    /// same, or a crash between the two writes leaves a durable decision with
+    /// no record of who made it. `None` on paths that are not curated tool
+    /// calls (the desk, the CLI, the librarian) and log elsewhere or not at all.
+    pub audit: Option<ResolveAudit>,
+}
+
+/// One `curated_agent_log` row, written in the resolution transaction.
+///
+/// Plain data rather than a callback so [`ResolveOptions`] stays `Clone` +
+/// `Debug` and the audit cannot capture connection state.
+#[derive(Debug, Clone)]
+pub struct ResolveAudit {
+    /// Calling client label (`ToolDispatchContext::client`).
+    pub client: String,
+    /// Tool name recorded in the log (e.g. `curated_proposal_decide`).
+    pub tool: String,
+    /// `read` or `write` — the audit table CHECKs this.
+    pub operation: String,
 }
 
 /// A precomputed entry embedding together with the exact text it was derived
@@ -2321,6 +2343,20 @@ pub fn resolve_proposal(
         reject_reason,
         proposal_id,
     )?;
+
+    // Fail-closed audit (spec §7): the log row shares this transaction, so it
+    // is impossible to observe a resolved proposal with no record of who
+    // resolved it — and a failed audit insert aborts the resolution instead of
+    // committing it unlogged.
+    if let Some(audit) = options.audit.as_ref() {
+        crate::tool_dispatch::log_agent_access_checked(
+            &tx,
+            &audit.client,
+            &audit.tool,
+            Some(proposal_id),
+            &audit.operation,
+        )?;
+    }
 
     tx.commit()?;
 

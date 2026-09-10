@@ -407,6 +407,53 @@ fn review_command_skip_advances_to_next_proposal() {
 }
 
 #[test]
+fn review_command_survives_a_failed_decision_and_reviews_the_rest() {
+    let brain = tempdir().unwrap();
+    let dir = brain.path().to_path_buf();
+    let dir_str = dir.to_str().unwrap().to_string();
+    with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
+        init_brain_db(&dir);
+        insert_anchored_proposal(&dir, "prop-f1", 1_000);
+        insert_anchored_proposal(&dir, "prop-f2", 2_000);
+        // Strip the queue head's items behind the resolver's back — the shape
+        // an older binary (or a librarian bug) could leave in the database.
+        // Every decision on it now fails, which used to end the whole session
+        // via `?` and leave the rest of the queue unreviewed.
+        {
+            let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+            conn.execute(
+                "DELETE FROM curated_proposal_items WHERE proposal_id = 'prop-f1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"y\ny\n");
+        assert!(
+            out.status.success(),
+            "one failed decision must not fail the session: {} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("could not approve prop-f1"),
+            "the failure must be reported to the operator: {text}"
+        );
+        assert_eq!(
+            proposal_status(&dir, "prop-f1"),
+            "pending",
+            "the unresolvable proposal stays pending"
+        );
+        assert_eq!(
+            proposal_status(&dir, "prop-f2"),
+            "approved",
+            "the loop must advance and review the rest of the queue"
+        );
+    });
+}
+
+#[test]
 fn proposals_show_renders_evidence_quotes() {
     let brain = tempdir().unwrap();
     let dir = brain.path().to_path_buf();
