@@ -1543,11 +1543,13 @@ fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewIt
 /// whose items hit the summary-update conflict path lands as `partial` (or
 /// `rejected`), and printing a hard-coded verb would contradict the database.
 fn print_review_outcome(outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
-    // codeql[rust/cleartext-logging]: `reviewed_by` is the operator's own OS
-    // account echoed to that same operator's terminal — displaying reviewer
-    // attribution is the entire purpose of the Human Verification Gate
-    // (curated_proposals.reviewed_by), not a credential leak: no secret,
-    // token, or other account's data reaches this string.
+    // NOT a `// codeql[...]` suppression: inline suppression does NOT work
+    // for Rust (see ct.rs revoke_link — "do not re-add it"), and the CodeQL
+    // alert this statement raises is a known false positive to be dismissed
+    // post-merge, like wisdom.rs #8. Rationale for keeping the print:
+    // `reviewed_by` is the operator's own OS account echoed to that same
+    // operator's terminal — displaying reviewer attribution is the entire
+    // purpose of the Human Verification Gate (`curated_proposals.reviewed_by`).
     println!(
         "{} {}: committed={} conflicts={} reviewed_by={}",
         outcome.status,
