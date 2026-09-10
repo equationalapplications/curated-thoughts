@@ -1,3 +1,18 @@
+## [2.8.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.7.0...v2.8.0) (2026-09-10)
+
+### Features
+
+* **cli:** ct evidence regrade — idempotent manual V20 recovery ([#186](https://github.com/equationalapplications/curated-thoughts/issues/186) §2.4) ([8854c4b](https://github.com/equationalapplications/curated-thoughts/commit/8854c4b1212b5a31097c2e1116061ad000e6d279))
+* **commit:** phase2 insert-time skip+log gate for unanchored fact_add ([1b2acda](https://github.com/equationalapplications/curated-thoughts/commit/1b2acda84dfe22aeb5cbb45acc0aa243cab6a014))
+* **db:** evidence_regrade module with re-grade, export, gated purge ([#186](https://github.com/equationalapplications/curated-thoughts/issues/186) §2.4) ([6b87f0d](https://github.com/equationalapplications/curated-thoughts/commit/6b87f0df784dff2d2655e6f6448038b95634222f))
+* **db:** MIGRATION_V20 gate — one-pass re-grade, stamp, pins ([#186](https://github.com/equationalapplications/curated-thoughts/issues/186) §2.4) ([86561a2](https://github.com/equationalapplications/curated-thoughts/commit/86561a2468ba1850dc0085526afb23643c72bdb5))
+* **db:** revert phase1 unanchored heal carve-out ([#186](https://github.com/equationalapplications/curated-thoughts/issues/186) §2.3) ([06f8449](https://github.com/equationalapplications/curated-thoughts/commit/06f84490d78c454d059c5a1ef3bb6ab03f44baf7))
+
+### Bug Fixes
+
+* **commit:** review round-1 fixes for phase2 skip gate ([19138d6](https://github.com/equationalapplications/curated-thoughts/commit/19138d61f86fae41ec8717b727158763dd7160f1))
+* **db:** final-review fixes — fail-safe export errors, degenerate-none guard, export-dir name ([39f4139](https://github.com/equationalapplications/curated-thoughts/commit/39f4139a687d9a9cfefac43c8f4ca461729fe091))
+
 ## [2.7.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.6.2...v2.7.0) (2026-09-09)
 
 ### Features
