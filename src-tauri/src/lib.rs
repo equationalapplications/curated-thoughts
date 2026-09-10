@@ -1073,6 +1073,7 @@ fn start_file_watcher_inner(
                         conn,
                         notify::EventKind::Remove(notify::event::RemoveKind::Any),
                         std::path::Path::new(&path),
+                        Some(&target_canonical),
                     ) {
                         eprintln!("[reconcile] enqueue_vault_event (Remove) failed: {e}");
                     }
@@ -1103,6 +1104,7 @@ fn start_file_watcher_inner(
                             conn,
                             notify::EventKind::Create(notify::event::CreateKind::Any),
                             std::path::Path::new(&normalized),
+                            Some(&target_canonical),
                         ) {
                             eprintln!("[reconcile] enqueue_vault_event (Create) failed: {e}");
                         }
@@ -1160,6 +1162,9 @@ fn start_file_watcher_inner(
 
     let app = app.clone();
     let vault_for_watcher = target_canonical.clone();
+    // Owned copy for the event callback: `vault_for_watcher` is moved into
+    // `spawn_vault_watcher` itself.
+    let vault_root_for_events = target_canonical.clone();
     // Brain DB path for the per-event ephemeral WAL-mode connection.
     // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
     // during the (potentially slow) sha256 hash freezes the UI.
@@ -1220,9 +1225,12 @@ fn start_file_watcher_inner(
             Ok(k) => k,
             Err(()) => return,
         };
-        if let Err(e) =
-            enqueue_vault_event(&mut conn, event_kind, std::path::Path::new(&normalized))
-        {
+        if let Err(e) = enqueue_vault_event(
+            &mut conn,
+            event_kind,
+            std::path::Path::new(&normalized),
+            Some(vault_root_for_events.as_path()),
+        ) {
             eprintln!("[watch] enqueue_vault_event failed for {normalized}: {e}");
         }
         // conn drops here, releasing the WAL writer slot.

@@ -664,6 +664,10 @@ where
 /// 3. `canonical.starts_with(vault_root)` guard — rejects out-of-vault events.
 ///    The vault root is read from `CURATED_VAULT_ROOT`. If unset (the watcher
 ///    runs with it set; tests may not), the guard is skipped.
+/// 3b. Excluded-directory gate — rejects `.brain` and other EXCLUDED_DIRS
+///     content on the vault-RELATIVE virtual path. `vault_root` is the
+///     explicit root; `None` falls back to `CURATED_VAULT_ROOT`, which is
+///     the established mechanism for `ct watch`.
 /// 4. sha256 the bytes; upsert documents row with status='pending'.
 ///
 /// For Delete: skip step 4 (file is gone); DELETE the documents row.
@@ -672,8 +676,9 @@ pub fn enqueue_vault_event(
     conn: &mut Connection,
     event_kind: notify::EventKind,
     raw_path: &Path,
+    vault_root: Option<&Path>,
 ) -> Result<()> {
-    tauri_app_lib::db::queue::enqueue_vault_event(conn, event_kind, raw_path)
+    tauri_app_lib::db::queue::enqueue_vault_event(conn, event_kind, raw_path, vault_root)
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,7 +1191,9 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
                 notify::EventKind::Remove(notify::event::RemoveKind::Any)
             }
         };
-        if let Err(e) = enqueue_vault_event(&mut conn, event_kind, Path::new(path)) {
+        // `None`: `watch_run` requires CURATED_VAULT_ROOT (line 1086) and
+        // the env fallback is the established mechanism for `ct watch`.
+        if let Err(e) = enqueue_vault_event(&mut conn, event_kind, Path::new(path), None) {
             eprintln!("[watch] enqueue failed for {}: {}", path, e);
             return;
         }

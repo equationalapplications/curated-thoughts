@@ -5,7 +5,8 @@
 //! 4-stage path hardening:
 //!   1. std::path::absolute (resolve symlinks + .. components)
 //!   2. std::fs::canonicalize (resolve filesystem-level symlinks; fallback to absolute)
-//!   3. Vault-root guard (if CURATED_VAULT_ROOT is set, reject paths outside it)
+//!   3. Vault-root guard (explicit `vault_root` argument, falling back to
+//!      `CURATED_VAULT_ROOT`; reject paths outside it)
 //!   4. sha256 the bytes; upsert documents row with status='pending'
 //!
 //! For Delete events: skip step 4 (file is gone); DELETE the documents row.
@@ -27,24 +28,44 @@ pub fn enqueue_vault_event(
     conn: &mut Connection,
     event_kind: notify::EventKind,
     raw_path: &Path,
+    vault_root: Option<&Path>,
 ) -> Result<()> {
+    // Spec D3 — resolution order: explicit argument -> CURATED_VAULT_ROOT
+    // -> None. The desktop app never sets the env var, which is precisely
+    // the configuration where the immortal-pending bug was reported, so a
+    // gate that relied on the env var alone would not fix it.
+    let configured_root: Option<PathBuf> = match vault_root {
+        Some(p) => Some(p.to_path_buf()),
+        None => std::env::var_os("CURATED_VAULT_ROOT").map(PathBuf::from),
+    };
+
     // Canonicalize the vault root the same way as the event path so that
     // symlinked / non-canonical vault roots (e.g. macOS /var → /private/var)
     // can't bypass the containment check. Without this, an event for
     // `/var/vault/note.md` would fail `starts_with("/var/vault")` against a
     // canonicalized `/private/var/vault/note.md` and be silently dropped.
-    let vault_root = std::env::var_os("CURATED_VAULT_ROOT")
-        .map(|s| {
-            let p = PathBuf::from(s);
-            std::path::absolute(&p).map(|abs| std::fs::canonicalize(&abs).unwrap_or(abs))
+    let containment_root: Option<PathBuf> = configured_root
+        .as_ref()
+        .map(|p| {
+            std::path::absolute(p).map(|abs| std::fs::canonicalize(&abs).unwrap_or(abs))
         })
         .transpose()?;
 
     let abs = std::path::absolute(raw_path)?;
     let canonical = std::fs::canonicalize(&abs).unwrap_or(abs.clone());
 
-    if let Some(vr) = &vault_root {
-        if !canonical.starts_with(vr) {
+    if let Some(vr) = &containment_root {
+        // Trusted-link carve-out: a symlink in the vault can resolve (via
+        // canonicalize) to a path outside the canonical vault root, so the
+        // canonical-only containment check would drop the event before the
+        // gate ever runs. Accepting the VIRTUAL path when it lies under the
+        // as-configured root lets trusted-link files stage (their canonical
+        // form is the staged row per spec D2a). Truly external paths still
+        // fail both checks.
+        let abs_in_vault = configured_root
+            .as_deref()
+            .is_some_and(|vroot| abs.starts_with(vroot));
+        if !canonical.starts_with(vr) && !abs_in_vault {
             eprintln!(
                 "[watch] skipping out-of-vault path: {}",
                 canonical.display()
@@ -73,6 +94,27 @@ pub fn enqueue_vault_event(
     // every pass, forever (spec §3).
     if crate::walk_vault::is_excluded_file(&canonical) {
         return Ok(());
+    }
+
+    // Excluded working directories (`.brain`, `node_modules`, `target`, …).
+    //
+    // Matched on `abs` — the VIRTUAL, pre-canonicalize path — never on
+    // `canonical` (spec D2). Canonicalizing rewrites the path in both
+    // wrong directions: it STRIPS `.brain` when the directory is symlinked
+    // out (the bug would recur for that subtree) and INJECTS `.brain` for
+    // an approved trusted link whose target lives under one (events for a
+    // directory the walker happily ingests would be rejected).
+    //
+    // Relativized first (spec D1): EXCLUDED_DIRS names occur in ordinary
+    // ancestors, so an absolute match would kill live-sync for any vault
+    // under e.g. /var/build/wiki. Unrelativizable paths fail open (D2b).
+    match configured_root.as_deref() {
+        Some(root) => {
+            if crate::walk_vault::abs_path_is_excluded_in_vault(&abs, root) {
+                return Ok(());
+            }
+        }
+        None => warn_no_vault_root_once(),
     }
 
     // Add / Modify: hash, upsert.
@@ -116,6 +158,20 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// One-time notice that the exclusion gate is inert because no vault root
+/// could be resolved (spec D3). Skipping matches today's behavior for the
+/// containment check on the same path; logging once makes the condition
+/// diagnosable rather than invisible, without spamming a per-event log.
+fn warn_no_vault_root_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "[watch] no vault root (argument or CURATED_VAULT_ROOT); \
+             excluded-directory gate is inactive for this process"
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::enqueue_vault_event;
@@ -123,6 +179,15 @@ mod tests {
     use crate::db::queries::upsert_document;
     use rusqlite::Connection;
     use std::path::PathBuf;
+
+    // ---- enqueue_vault_event fixtures ----------------------------------
+
+    /// Serializes every test that touches `CURATED_VAULT_ROOT`.
+    /// `temp_env::with_var` mutates the process-global environment; without
+    /// this lock a test that pins the var can race a concurrent test that
+    /// needs it unset — the intermittent class the per-test comments
+    /// describe but never fixed.
+    static VAULT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // ---- enqueue_vault_event fixtures ----------------------------------
 
@@ -183,20 +248,14 @@ mod tests {
     fn enqueue_add_creates_pending_row() {
         let (vault, file_path) = setup_vault_with_file(b"hello world");
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
-        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
-        // environment, which is shared by every test in this binary. The
-        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
-        // test that leaves it unset sees THEIR vault root when it happens to
-        // run concurrently — its own TempDir path then fails the containment
-        // check, the event is silently skipped, and the assertion below fails
-        // intermittently. Pin it to this test's own vault (and take the same
-        // `temp_env` lock) so the guard is deterministic.
         temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::Any),
                 &file_path,
+                None,
             )
             .unwrap();
         });
@@ -224,6 +283,7 @@ mod tests {
     fn enqueue_modify_indexed_with_diff_hash_flips_to_pending() {
         let (vault, file_path) = setup_vault_with_file(b"v1");
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         // Pre-seed: indexed doc with stale hash + synth watermark.
         let canonical = std::fs::canonicalize(&file_path).unwrap();
@@ -238,19 +298,12 @@ mod tests {
         // Now mutate the file on disk; Modify event arrives with the new hash.
         std::fs::write(&canonical, b"v2").unwrap();
 
-        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
-        // environment, which is shared by every test in this binary. The
-        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
-        // test that leaves it unset sees THEIR vault root when it happens to
-        // run concurrently — its own TempDir path then fails the containment
-        // check, the event is silently skipped, and the assertion below fails
-        // intermittently. Pin it to this test's own vault (and take the same
-        // `temp_env` lock) so the guard is deterministic.
         temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Modify(notify::event::ModifyKind::Any),
                 &file_path,
+                None,
             )
             .unwrap();
         });
@@ -271,6 +324,7 @@ mod tests {
     fn enqueue_modify_indexed_with_same_hash_is_noop() {
         let (vault, file_path) = setup_vault_with_file(b"stable");
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         let canonical = std::fs::canonicalize(&file_path).unwrap();
         let path_str = canonical.to_string_lossy().into_owned();
@@ -283,19 +337,12 @@ mod tests {
         .unwrap();
 
         // No filesystem mutation; Modify event fires but bytes are unchanged.
-        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
-        // environment, which is shared by every test in this binary. The
-        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
-        // test that leaves it unset sees THEIR vault root when it happens to
-        // run concurrently — its own TempDir path then fails the containment
-        // check, the event is silently skipped, and the assertion below fails
-        // intermittently. Pin it to this test's own vault (and take the same
-        // `temp_env` lock) so the guard is deterministic.
         temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Modify(notify::event::ModifyKind::Any),
                 &file_path,
+                None,
             )
             .unwrap();
         });
@@ -317,6 +364,7 @@ mod tests {
     fn enqueue_delete_removes_row() {
         let (vault, file_path) = setup_vault_with_file(b"to-be-deleted");
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         let canonical = std::fs::canonicalize(&file_path).unwrap();
         let path_str = canonical.to_string_lossy().into_owned();
@@ -330,19 +378,12 @@ mod tests {
             .unwrap();
         assert_eq!(count_before, 1);
 
-        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
-        // environment, which is shared by every test in this binary. The
-        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
-        // test that leaves it unset sees THEIR vault root when it happens to
-        // run concurrently — its own TempDir path then fails the containment
-        // check, the event is silently skipped, and the assertion below fails
-        // intermittently. Pin it to this test's own vault (and take the same
-        // `temp_env` lock) so the guard is deterministic.
         temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Remove(notify::event::RemoveKind::Any),
                 &file_path,
+                None,
             )
             .unwrap();
         });
@@ -362,6 +403,7 @@ mod tests {
     fn enqueue_delete_missing_row_is_noop() {
         let (vault, file_path) = setup_vault_with_file(b"never-indexed");
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         let canonical = std::fs::canonicalize(&file_path).unwrap();
         let _path_str = canonical.to_string_lossy().into_owned();
@@ -371,19 +413,12 @@ mod tests {
         assert_eq!(before, 0);
 
         // Remove event for a path we never ingested must not error.
-        // `enqueue_vault_event` reads CURATED_VAULT_ROOT from the process
-        // environment, which is shared by every test in this binary. The
-        // `enqueue_out_of_vault_*` tests below set it via `temp_env`, so a
-        // test that leaves it unset sees THEIR vault root when it happens to
-        // run concurrently — its own TempDir path then fails the containment
-        // check, the event is silently skipped, and the assertion below fails
-        // intermittently. Pin it to this test's own vault (and take the same
-        // `temp_env` lock) so the guard is deterministic.
         temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Remove(notify::event::RemoveKind::Any),
                 &file_path,
+                None,
             )
             .unwrap();
         });
@@ -404,12 +439,14 @@ mod tests {
         let outer_file = outer_vault.path().join("escapee.md");
         std::fs::write(&outer_file, b"outside").unwrap();
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         temp_env::with_var("CURATED_VAULT_ROOT", Some(inner_vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::Any),
                 &outer_file,
+                None,
             )
             .unwrap();
         });
@@ -436,12 +473,14 @@ mod tests {
         let note = vault.path().join("note.md");
         std::fs::write(&note, b"inside").unwrap();
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         temp_env::with_var("CURATED_VAULT_ROOT", Some(vault.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::Any),
                 &note,
+                None,
             )
             .unwrap();
         });
@@ -463,6 +502,7 @@ mod tests {
     fn excluded_temp_paths_are_not_staged() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut conn = open_seeded_conn();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
             for name in ["note.md~", "note.md.tmp", ".#note.md", "4913"] {
@@ -472,6 +512,7 @@ mod tests {
                     &mut conn,
                     notify::EventKind::Create(notify::event::CreateKind::File),
                     &p,
+                    None,
                 )
                 .unwrap();
             }
@@ -504,12 +545,14 @@ mod tests {
             rusqlite::params![p.to_string_lossy().as_ref()],
         )
         .unwrap();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Remove(notify::event::RemoveKind::File),
                 &p,
+                None,
             )
             .expect("Remove for an excluded-named path must still delete");
         });
@@ -527,12 +570,14 @@ mod tests {
         let mut conn = open_seeded_conn();
         let p = dir.path().join("real-note.md");
         std::fs::write(&p, b"# real").unwrap();
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         temp_env::with_var("CURATED_VAULT_ROOT", Some(dir.path()), || {
             enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::File),
                 &p,
+                None,
             )
             .unwrap();
         });
@@ -559,6 +604,7 @@ mod tests {
         // still pass the containment check for the read (and thus the
         // NotFound branch) to be reached at all.
         let p = vault_root.join("racy.md");
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
 
         // Stage it while it exists.
         std::fs::write(&p, b"# here").unwrap();
@@ -567,6 +613,7 @@ mod tests {
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::File),
                 &p,
+                None,
             )
             .unwrap();
         });
@@ -584,6 +631,7 @@ mod tests {
                     notify::event::DataChange::Content,
                 )),
                 &p,
+                None,
             )
             .expect("a vanished file is a delete, not an error");
         });
@@ -593,5 +641,229 @@ mod tests {
             .unwrap();
         assert_eq!(n, 0, "the row must not outlive the file");
         let _ = dir.path();
+    }
+
+    // ---- .brain exclusion gate (spec D1-D4) ----------------------------
+
+    /// Write `body` at `root/rel`, creating parents. Returns the abs path.
+    fn write_at(root: &std::path::Path, rel: &str, body: &[u8]) -> PathBuf {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn staged_paths(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT path FROM documents ORDER BY path").unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    fn modify() -> notify::EventKind {
+        notify::EventKind::Modify(notify::event::ModifyKind::Any)
+    }
+
+    #[test]
+    fn gate_rejects_brain_paths_and_stages_lookalikes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let excluded = vec![
+            write_at(&root, ".brain/errors.log", b"x"),
+            write_at(&root, "nested/.brain/x.log", b"x"),
+        ];
+        let controls = vec![
+            write_at(&root, "notes.md", b"a"),
+            write_at(&root, "brain/x.md", b"b"),
+            write_at(&root, "my.brain.notes/x.md", b"c"),
+            write_at(&root, ".brainish/x.md", b"d"),
+        ];
+
+        let mut conn = open_seeded_conn();
+        for p in excluded.iter().chain(controls.iter()) {
+            enqueue_vault_event(&mut conn, modify(), p, Some(&root)).unwrap();
+        }
+
+        let staged = staged_paths(&conn);
+        assert_eq!(
+            staged.len(),
+            controls.len(),
+            "expected only control paths staged, got {staged:?}"
+        );
+        for p in &excluded {
+            let name = p.to_string_lossy();
+            assert!(
+                !staged.iter().any(|s| s.contains(".brain/")),
+                "{name} was staged: {staged:?}"
+            );
+        }
+        assert!(staged.iter().any(|s| s.ends_with("brain/x.md")));
+        assert!(staged.iter().any(|s| s.ends_with("my.brain.notes/x.md")));
+        assert!(staged.iter().any(|s| s.ends_with(".brainish/x.md")));
+    }
+
+    /// Spec D1 / test "excluded-name vault root": a vault under an
+    /// EXCLUDED_DIRS-named ancestor must still live-sync. Without
+    /// relativization this test fails, which is the point.
+    #[test]
+    fn gate_does_not_reject_vault_under_excluded_ancestor() {
+        for ancestor in ["build", "target"] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let root = tmp.path().join(ancestor).join("wiki");
+            std::fs::create_dir_all(&root).unwrap();
+            let note = write_at(&root, "notes.md", b"a");
+
+            let mut conn = open_seeded_conn();
+            enqueue_vault_event(&mut conn, modify(), &note, Some(&root)).unwrap();
+
+            assert_eq!(
+                staged_paths(&conn).len(),
+                1,
+                "vault under /{ancestor}/ lost live-sync"
+            );
+        }
+    }
+
+    /// Spec D2: canonicalize STRIPS `.brain` when the dir is symlinked out.
+    /// Matching the canonical path would let the bug recur for that subtree.
+    #[cfg(unix)]
+    #[test]
+    fn gate_rejects_symlinked_out_brain_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let real = tmp.path().join("elsewhere-no-brain-in-name");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("x.log"), b"x").unwrap();
+        std::os::unix::fs::symlink(&real, root.join("nested").join(".brain")).unwrap();
+
+        let mut conn = open_seeded_conn();
+        let virtual_path = root.join("nested").join(".brain").join("x.log");
+        enqueue_vault_event(&mut conn, modify(), &virtual_path, Some(&root)).unwrap();
+
+        assert!(
+            staged_paths(&conn).is_empty(),
+            "symlinked-out .brain leaked through the gate"
+        );
+    }
+
+    /// Spec D2: canonicalize INJECTS `.brain` for a trusted link whose
+    /// target lives under one. The gate must not reject it.
+    ///
+    /// Per spec D2a the stored path is the EXTERNAL CANONICAL path, not
+    /// `documents/specs/x.md`. This asserts the gate's verdict AND pins
+    /// that pre-existing divergence so it stays visible.
+    #[cfg(unix)]
+    #[test]
+    fn gate_allows_trusted_link_into_brain_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("documents")).unwrap();
+        let target = tmp.path().join("ext").join(".brain").join("specs-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("x.md"), b"content").unwrap();
+        std::os::unix::fs::symlink(&target, root.join("documents").join("specs")).unwrap();
+
+        let mut conn = open_seeded_conn();
+        let virtual_path = root.join("documents").join("specs").join("x.md");
+        enqueue_vault_event(&mut conn, modify(), &virtual_path, Some(&root)).unwrap();
+
+        let staged = staged_paths(&conn);
+        assert_eq!(staged.len(), 1, "trusted link into .brain was gated: {staged:?}");
+        // Spec D2a: the watcher stores the CANONICAL path. Unifying
+        // documents.path on the virtual path is out of scope; this assert
+        // keeps the divergence visible rather than papering over it.
+        let canonical_target = std::fs::canonicalize(target.join("x.md")).unwrap();
+        assert_eq!(staged[0], canonical_target.to_string_lossy());
+    }
+
+    /// Spec D3: no resolvable root -> gate skipped, behavior unchanged.
+    #[test]
+    fn gate_skipped_when_vault_root_unresolvable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = write_at(&root, ".brain/errors.log", b"x");
+
+        // NOTE: CURATED_VAULT_ROOT must be unset for this test, but tests
+        // run in threads sharing one process env — `enqueue_out_of_vault_*`
+        // SETS it via `temp_env`, so leaving it unset here races (the exact
+        // intermittent-failure class documented at queue.rs:187-194). Pin
+        // it to None: that both takes the `temp_env` lock and forces the
+        // env var unset for the duration, deterministically.
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
+        temp_env::with_var("CURATED_VAULT_ROOT", None::<&str>, || {
+            let mut conn = open_seeded_conn();
+            enqueue_vault_event(&mut conn, modify(), &p, None).unwrap();
+
+            assert_eq!(
+                staged_paths(&conn).len(),
+                1,
+                "gate must be skipped, not fail-closed, without a vault root"
+            );
+        });
+    }
+
+    /// Spec D2b: a path under no form of the root stages (fail-open).
+    #[test]
+    fn gate_fails_open_for_unrelativizable_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let p = write_at(&outside, ".brain/x.log", b"x");
+
+        let mut conn = open_seeded_conn();
+        // Root passed explicitly, but the path is outside it. The existing
+        // containment guard is what rejects out-of-vault paths; the GATE
+        // itself must fail open rather than fail closed.
+        enqueue_vault_event(&mut conn, modify(), &p, Some(&outside)).unwrap();
+        assert_eq!(staged_paths(&conn).len(), 0, "control: .brain under its own root is gated");
+
+        let mut conn2 = open_seeded_conn();
+        enqueue_vault_event(&mut conn2, modify(), &p, Some(&root)).unwrap();
+        // Containment guard rejects it (path is outside `root`), so nothing
+        // stages -- but it must be the CONTAINMENT guard doing so, not a
+        // fail-closed gate. Assert no panic / no error, which is the
+        // contract D2b protects.
+        assert!(staged_paths(&conn2).is_empty());
+    }
+
+    /// Deletes stay ungated: a pre-staged .brain row must still heal.
+    #[test]
+    fn remove_event_still_deletes_pre_staged_brain_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = write_at(&root, ".brain/errors.log", b"x");
+        let canonical = std::fs::canonicalize(&p).unwrap();
+
+        let mut conn = open_seeded_conn();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'deadbeef', 'user_doc', 'pending')",
+            rusqlite::params![canonical.to_string_lossy()],
+        )
+        .unwrap();
+        assert_eq!(staged_paths(&conn).len(), 1);
+
+        enqueue_vault_event(
+            &mut conn,
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+            &p,
+            Some(&root),
+        )
+        .unwrap();
+
+        assert!(
+            staged_paths(&conn).is_empty(),
+            "Remove must run BEFORE the gate so old rows can heal"
+        );
     }
 }
