@@ -203,6 +203,11 @@ enum ProposalsCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Interactive review of the pending queue (hvg): y approve / n reject /
+    /// d detail / s skip / q quit. Approved entries stamp user_confirmed +
+    /// reviewed_by; rejects record a reason. Nothing commits without an
+    /// explicit y — the human verification gate.
+    Review,
 }
 
 #[derive(Subcommand)]
@@ -285,6 +290,10 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
             ProposalsCmd::Show { id, json } => proposals_show(&id, json),
+            ProposalsCmd::Review => {
+                cli_common::proposals_review_cmd()?;
+                Ok(0)
+            }
         },
         Cmd::Approve {
             all,
@@ -400,7 +409,8 @@ fn proposals_list(json_mode: bool) -> Result<i32> {
 }
 
 /// `ct proposals show <id>` — full proposal detail. `--json` prints the
-/// ProposalDetail JSON verbatim; default renders a compact text summary.
+/// ProposalDetail JSON verbatim; default renders the detail card including
+/// each item's hydrated evidence (quote + line range + source doc path).
 /// Unknown id exits 2 per the no-results contract.
 fn proposals_show(id: &str, json_mode: bool) -> Result<i32> {
     let brain = cli_common::resolve()?;
@@ -411,18 +421,7 @@ fn proposals_show(id: &str, json_mode: bool) -> Result<i32> {
             if json_mode {
                 print_json(&detail);
             } else {
-                println!("{}\t{}", detail.id, detail.created_at);
-                for p in &detail.source_doc_paths {
-                    println!("source: {p}");
-                }
-                println!("{} item(s)", detail.items.len());
-                for item in &detail.items {
-                    println!(
-                        "  {}\t{}",
-                        item.id,
-                        serde_json::to_string(&item.payload).unwrap_or_else(|_| "<payload>".into())
-                    );
-                }
+                cli_common::print_proposal_detail(&detail);
             }
             Ok(0)
         }

@@ -1371,6 +1371,149 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
     Ok(0)
 }
 
+// ---------------------------------------------------------------------------
+// hvg Task 5: `ct proposals review` — the interactive review loop
+// ---------------------------------------------------------------------------
+
+use tauri_app_lib::db::proposals_review::{pending_review_queue, review_approve, review_reject};
+
+/// Default reason recorded when a reviewer rejects without typing one
+/// (matches the MCP `curated_proposal_decide` default).
+pub const DEFAULT_REJECT_REASON: &str = "Rejected during review";
+
+/// Reviewer identity: the operator's `USER`, or a stable fallback for
+/// headless environments without it.
+pub fn cli_reviewer() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "cli-operator".to_string())
+}
+
+/// `ct proposals review` — walk the pending queue oldest-first, render one
+/// compact card per proposal, and read a decision from stdin:
+///
+/// - `y` approve  (review_approve: entries stamp user_confirmed + reviewed_by)
+/// - `n` reject   (review_reject; default reason, or `r <text>` typed first)
+/// - `d` show     (render the full detail card — the extended `show` render)
+/// - `s` skip     (leave pending, move to the next proposal)
+/// - `q` quit     (leave the remaining queue pending; exit 0)
+///
+/// EOF is treated as `q`. Empty queue prints `0 pending` and exits 0 —
+/// review is a success even when there is nothing to do.
+pub fn proposals_review_cmd() -> Result<()> {
+    let paths = retrieval::resolve_brain_paths();
+    let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
+    let reviewer = cli_reviewer();
+    loop {
+        let queue = pending_review_queue(&db.0, "pending", 1_000)?;
+        let Some(head) = queue.first() else {
+            println!("0 pending");
+            return Ok(());
+        };
+        let pid = head.proposal_id.clone();
+        print_review_card(&db.0, head);
+        let decision = loop {
+            print!("Review {pid} [y/n/d/s/q]? ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line)? == 0 {
+                println!("(eof) leaving the remaining queue pending");
+                return Ok(());
+            }
+            match line.trim() {
+                "y" | "n" | "d" | "s" | "q" => break line.trim().to_string(),
+                other => {
+                    println!("unrecognized answer {other:?} — use y/n/d/s/q");
+                }
+            }
+        };
+        match decision.as_str() {
+            "y" => {
+                let outcome = review_approve(&mut db.0, &pid, &reviewer)?;
+                print_review_outcome("approved", &outcome);
+            }
+            "n" => {
+                let outcome = review_reject(&mut db.0, &pid, &reviewer, DEFAULT_REJECT_REASON)?;
+                print_review_outcome("rejected", &outcome);
+            }
+            "d" => {
+                let detail = get_proposal_detail(&db.0, &pid)?;
+                if let Some(detail) = detail {
+                    print_proposal_detail(&detail);
+                }
+            }
+            "s" => {
+                println!("skipped {pid} (still pending)");
+            }
+            "q" => {
+                println!("leaving the remaining queue pending");
+                return Ok(());
+            }
+            _ => unreachable!("decision validated above"),
+        }
+    }
+}
+
+fn print_review_card(conn: &rusqlite::Connection, item: &tauri_app_lib::db::proposals_review::PendingReviewItem) {
+    let _ = conn;
+    println!("================================================================");
+    println!("{}\t{}\t{}", item.proposal_id, item.kind, item.created_at);
+    println!(
+        "proposed_name: {}",
+        item.proposed_name.as_deref().unwrap_or("-")
+    );
+    println!(
+        "items: {}  evidence chunks: {}",
+        item.item_count, item.evidence_chunks
+    );
+    for doc in &item.source_docs {
+        println!("source: {doc}");
+    }
+}
+
+fn print_review_outcome(verb: &str, outcome: &tauri_app_lib::db::proposals_review::ReviewOutcome) {
+    println!(
+        "{verb} {}: committed={} conflicts={} reviewed_by={}",
+        outcome.proposal_id, outcome.committed, outcome.conflicts.len(), outcome.reviewed_by
+    );
+    for item_id in &outcome.conflicts {
+        println!("conflict: {item_id}");
+    }
+}
+
+/// Render a full [`tauri_app_lib::db::proposals::ProposalDetail`] — the
+/// extended card shared by `proposals show` (text mode) and the review
+/// loop's `d` verb. Per item: payload plus each hydrated evidence chunk's
+/// quote, line range and source doc path.
+pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDetail) {
+    println!("{}\t{}", detail.id, detail.created_at);
+    println!(
+        "kind: {}",
+        serde_json::to_value(detail.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{:?}", detail.kind))
+    );
+    println!("proposed_name: {}", detail.proposed_name.as_deref().unwrap_or("-"));
+    for p in &detail.source_doc_paths {
+        println!("source: {p}");
+    }
+    println!("{} item(s)", detail.items.len());
+    for item in &detail.items {
+        println!(
+            "  {}\t{}",
+            item.id,
+            serde_json::to_string(&item.payload).unwrap_or_else(|_| "<payload>".into())
+        );
+        for ev in &item.evidence {
+            match (&ev.start_line, &ev.end_line) {
+                (Some(s), Some(e)) => println!("    evidence: L{s}-{e} {}", ev.doc_path.as_deref().unwrap_or("(deleted source)")),
+                _ => println!("    evidence: {}", ev.doc_path.as_deref().unwrap_or("(deleted source)")),
+            }
+            println!("    quote: {}", ev.quote);
+        }
+    }
+}
+
 #[cfg(test)]
 use tempfile::TempDir;
 
