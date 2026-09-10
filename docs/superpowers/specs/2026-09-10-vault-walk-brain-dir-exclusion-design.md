@@ -47,9 +47,14 @@ verified 2026-09-10).
    `reconcile_vault` absence-driven delete arm in
    `src-tauri/src/reconcile.rs:42-151` heals them, its chunks cascade,
    and its "must not delete what it cannot match" tests pin the
-   behavior. The companion spec
-   (`curated-thoughts-integrations/2026-09-10-doctor-preflight-live-scope-design.md`)
-   is the authoritative statement of where reconcile runs from.
+   behavior. **rev-5 correction:** this paragraph originally cited
+   `curated-thoughts-integrations/2026-09-10-doctor-preflight-live-scope-design.md`
+   as "the authoritative statement of where reconcile runs from". That is
+   factually wrong — that spec covers the `ct_doctor.py check` `source_ref`
+   census and mentions neither reconcile nor `ct ingest`. Reconcile's call
+   sites are pinned in the watcher-walker spec, items 3–5, which also
+   supersedes the `ct ingest`-only cleanup contract with a desktop
+   self-heal.
 3. **Precedent check for future brain-location layouts:** the
    `folder_rules` table offers index/summarize/synthesize modes but no
    exclude mode; we deliberately do NOT extend folder_rules in this change
