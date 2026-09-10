@@ -190,7 +190,7 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
     // This must run BEFORE the ingest loop: a re-pointed row is already at
     // its new path when the loop reaches that file, so the unchanged-hash
     // check short-circuits instead of duplicating work.
-    match tauri_app_lib::reconcile::reconcile_vault(conn, &files) {
+    match tauri_app_lib::reconcile::reconcile_vault(conn, &files, &vault_root) {
         Ok(rec) => {
             for (old, new) in &rec.repointed {
                 println!("reconcile: moved {old} -> {new}");
