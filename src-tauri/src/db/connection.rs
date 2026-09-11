@@ -47,23 +47,31 @@ pub struct VaultRoots {
 /// Rewrite `documents.path` from canonical to virtual form (issue #204).
 ///
 /// For each `user_doc` row whose `path` starts with `<canonical_root>/`,
-/// replace the canonical-root prefix with `<configured_root>/`. Rows whose
-/// path is *outside* the canonical vault root are trusted-link phantoms (the
-/// watcher's pre-fix bug; reconcile.rs:74-77 documents the column as virtual)
-/// and are deleted — the walker already wrote the correct virtual-path row
-/// under the same `UNIQUE(path)` constraint, or will re-ingest on next pass.
+/// replace the canonical-root prefix with `<configured_root>/`. A `user_doc`
+/// row whose class-1 rewrite would COLLIDE with an existing walker-written
+/// row at the same virtual path is deleted rather than updated — the walker
+/// row carries the authoritative hash and synth watermark, the watcher's
+/// row is a duplicate phantom of the same bytes. (Plain UPDATE on collision
+/// would fail the UNIQUE(path) constraint.)
 ///
-/// A `user_doc` row whose class-1 rewrite would COLLIDE with an existing
-/// walker-written row at the same virtual path is deleted rather than
-/// updated — the walker row carries the authoritative hash and synth
-/// watermark, the watcher's row is a duplicate phantom of the same bytes.
-/// (Plain UPDATE on collision would fail the UNIQUE(path) constraint.)
+/// Orphan class-2 trusted-link phantoms — rows whose path is the canonical
+/// external target of a symlinked trusted link under the configured root —
+/// are deliberately NOT deleted. The original draft of this function had a
+/// Step 1 that deleted every `user_doc` row whose path did not start with
+/// EITHER prefix, but that predicate also catches rows from a relocated
+/// vault and rows under a phantom root. Per spec D2b ("Relativization
+/// failure is fail-open"), deleting rows we cannot place inside the vault
+/// is the same class of unrecoverable mistake the empty-walk guard exists
+/// to prevent. Step 2 above still handles the common case where both the
+/// watcher phantom and the walker row exist in the vault; orphan phantoms
+/// persist as dead rows until the user manually removes them.
 ///
 /// Restricted to `tier = 'user_doc'` for parity with reconcile.rs:83; wiki
 /// rows have no filesystem-path semantics and must never be touched.
 ///
-/// Idempotent: a second invocation finds zero rows matching either prefix
-/// (the rewrite already landed; the delete already ran) and reports zeros.
+/// Idempotent: a second invocation finds zero rows matching the canonical
+/// prefix (the rewrite already landed; the collision deletes already ran)
+/// and reports zeros.
 pub(crate) fn v22_unify_documents_path(
     conn: &Connection,
     configured_root: &str,
@@ -84,7 +92,12 @@ pub(crate) fn v22_unify_documents_path(
 
     let canonical_prefix = format!("{canonical_root}/");
     let configured_prefix = format!("{configured_root}/");
-    let prefix_len = canonical_prefix.len() as i64;
+    // SQLite's `substr()` counts UTF-8 CHARACTERS, not bytes — but
+    // `String::len()` returns byte length. A non-ASCII root
+    // (e.g. `/Users/josé/vault/`) would otherwise make the offsets land on
+    // the wrong code-unit and Step 1 / Step 3 misclassify or rewrite from
+    // the wrong offset. Use `chars().count()` for both prefixes.
+    let prefix_len = canonical_prefix.chars().count() as i64;
     let substr_start = prefix_len + 1;
 
     // BEGIN IMMEDIATE: same concurrent-migration guard as V21 (a desktop app
@@ -93,27 +106,30 @@ pub(crate) fn v22_unify_documents_path(
     // process runs the rewrite and the other no-ops into the version stamp).
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let result: Result<V22Report> = (|| {
-        // Step 1: delete class-2 phantoms — trusted-link targets whose path
-        // resolved to something OUTSIDE both the canonical vault root AND
-        // the configured vault root. Checking against both roots is what
-        // keeps the walker-written row (which lives at the configured_root,
-        // not the canonical_root) safe: a class-1 rewrite deletes the
-        // canonical-prefixed duplicate, but the virtual-path row that
-        // matches `substr(path, 1, ?) = configured_prefix` must survive.
-        // Must run BEFORE step 3 (the rewrite) so the rewrite doesn't
-        // accidentally pull a just-modified path into the phantom branch.
-        let deleted_phantoms = conn.execute(
-            "DELETE FROM documents
-              WHERE substr(path, 1, ?1) != ?2
-                AND substr(path, 1, ?3) != ?4
-                AND tier = 'user_doc'",
-            rusqlite::params![
-                prefix_len,
-                &canonical_prefix,
-                configured_prefix.len() as i64,
-                &configured_prefix
-            ],
-        )?;
+        // V22 deliberately has no "delete class-2 phantoms" branch.
+        //
+        // The original draft of Step 1 deleted every `user_doc` row whose
+        // `path` did not start with EITHER prefix. That predicate is a
+        // strict superset of the actual phantom set — it also catches:
+        //   * rows from a relocated vault (user moved `/old/vault` to
+        //     `/new/vault`; every `/old/vault/…` row matches nothing), and
+        //   * rows under a phantom root (`canonicalize_workspace_root`
+        //     falls back to the input on error, so `canonical == configured
+        //     == <non-existent string>` and every row matches nothing).
+        //
+        // Per spec D2b (docs/superpowers/specs/2026-09-10-watcher-walker-
+        // brain-dir-exclusion-design.md, "Relativization failure is
+        // fail-open"): "Deleting rows we cannot place inside the vault
+        // would be the same class of unrecoverable mistake the empty-walk
+        // guard exists to prevent."
+        //
+        // Orphan class-2 phantoms (rows whose path is the canonical external
+        // target of a trusted link but no matching walker-written virtual-
+        // path row exists yet) therefore persist as dead rows. Step 2
+        // below still deletes the more common shape — a watcher pre-fix
+        // canonical-path row whose rewrite would collide with an existing
+        // walker row — because in that case both rows ARE in the vault by
+        // construction and the watcher row is a known duplicate.
 
         // Step 2: delete class-1 rows that would COLLIDE with an existing
         // walker-written row at the same virtual path. The watcher row is a
@@ -164,7 +180,7 @@ pub(crate) fn v22_unify_documents_path(
 
         Ok(V22Report {
             rewritten,
-            deleted: deleted_collisions + deleted_phantoms,
+            deleted: deleted_collisions,
         })
     })();
     match result {
@@ -630,44 +646,59 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         // documents the column as virtual, so the watcher's row was a
         // divergent phantom. V22 rewrites class-1 rows
         // (canonical-root-prefixed) to the configured-root prefix in place
-        // and deletes class-2 rows (trusted-link phantoms whose path
-        // resolved outside both roots). Both branches restrict to
-        // `tier = 'user_doc'` for parity with reconcile.rs:83.
+        // and deletes class-1 rows whose rewrite would collide with an
+        // existing walker-written row at the same virtual path. Both
+        // branches restrict to `tier = 'user_doc'` for parity with
+        // reconcile.rs:83. Orphan class-2 trusted-link phantoms (rows
+        // whose path is outside both roots) are deliberately LEFT ALONE
+        // — see the doc-comment on `v22_unify_documents_path` and spec D2b.
         //
         // Vault-root requirement (user-approved Option A for the migration):
         // refuse to run without a resolved root, log a loud FATAL, and
         // do NOT stamp 22. The watcher keeps writing the divergent shape
-        // in the meantime; every subsequent open re-logs this WARN until
+        // in the meantime; every subsequent open re-logs this FATAL until
         // the user resolves the root and V22 runs. Refusing to stamp is
         // deliberate — it keeps the schema below 22 as a durable
         // "recovery pending" marker, matching the V20/V21 precedent where
         // an unfinished migration leaves a trail the next open can follow.
-        let Some(roots) = vault_root.as_ref() else {
-            eprintln!(
-                "[ct::repair FATAL] #204 V22 DEFERRED: vault root could not be \
-                 resolved (no VaultConfig root, no CURATED_VAULT_ROOT, no \
-                 --vault). V22 rewrites documents.path from canonical to \
-                 configured-root form and CANNOT run without a root — guessing \
-                 would silently corrupt the index. Set the vault root in \
-                 config.json (or pass --vault / CURATED_VAULT_ROOT) and reopen; \
-                 V22 lands on the next open."
-            );
-            // Skip the stamp: every open retries and re-warns until the user
-            // resolves the root. Subsequent migrations (V23+) check the
-            // schema_version gate and therefore stay blocked until V22 settles
-            // — matching the V20→V21 "recovery pending" pattern.
-            return Ok(());
-        };
-        let report = v22_unify_documents_path(conn, &roots.configured, &roots.canonical)?;
-        println!(
-            "[ct::repair] #204 V22: rewritten={} deleted={} (canonical-path phantoms \
-             unified to configured-root form)",
-            report.rewritten, report.deleted
-        );
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (22)",
-            [],
-        )?;
+        //
+        // IMPORTANT: this branch must NOT `return Ok(())` on the rootless
+        // path. Doing so skips everything below this `if` block: the V8
+        // event-taxonomy migration, the 90-day `curated_agent_log` prune,
+        // `CREATE INDEX IF NOT EXISTS idx_curated_agent_log_created_at`,
+        // `crate::db::schema_guard::verify_llm_wiki_schema(conn)`, and
+        // `warn_on_malformed_source_refs(conn)`. Every rootless open
+        // (`open_in_memory`, `migrate_open_db`, `open_app_db`, and the MCP
+        // server) would lose the schema guard — losing the startup check
+        // that previously rejected an incompatible `llm_wiki_entries` shape.
+        match vault_root.as_ref() {
+            None => {
+                eprintln!(
+                    "[ct::repair FATAL] #204 V22 DEFERRED: vault root could not be \
+                     resolved (no VaultConfig root, no CURATED_VAULT_ROOT, no \
+                     --vault). V22 rewrites documents.path from canonical to \
+                     configured-root form and CANNOT run without a root — guessing \
+                     would silently corrupt the index. Set the vault root in \
+                     config.json (or pass --vault / CURATED_VAULT_ROOT) and reopen; \
+                     V22 lands on the next open."
+                );
+                // Skip the V22 stamp only; the rest of `migrate()` must
+                // still run. Every open retries and re-warns until the
+                // user resolves the root.
+            }
+            Some(roots) => {
+                let report = v22_unify_documents_path(conn, &roots.configured, &roots.canonical)?;
+                println!(
+                    "[ct::repair] #204 V22: rewritten={} deleted={} (canonical-path \
+                     rows unified to configured-root form)",
+                    report.rewritten, report.deleted
+                );
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_version (version) VALUES (22)",
+                    [],
+                )?;
+            }
+        }
     }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
@@ -788,7 +819,10 @@ impl AppDb {
             .map(|root| {
                 let configured = root.to_string_lossy().to_string();
                 let canonical = canonicalize_workspace_root(&configured);
-                VaultRoots { configured, canonical }
+                VaultRoots {
+                    configured,
+                    canonical,
+                }
             });
         migrate(&conn, vault_roots.clone(), path.parent())?;
         if let Some(root) = vault_roots.as_ref() {
@@ -852,7 +886,10 @@ mod tests {
         // vault root, so V22 refuses to stamp and this assertion holds at
         // 21; the bound is exercised by the integration test that calls
         // `migrate(Some(VaultRoots))` directly.
-        assert_eq!(max_version, 21, "open_in_memory has no vault root, so V22 refuses to stamp and the schema caps at 21");
+        assert_eq!(
+            max_version, 21,
+            "open_in_memory has no vault root, so V22 refuses to stamp and the schema caps at 21"
+        );
     }
 
     /// `--mcp` has no other migration point: its read connection is read-only
@@ -2341,11 +2378,8 @@ mod tests {
         // has already stamped schema_version=22 over this conn, so we rewind
         // to v21 first (V22 only fires when MAX(version) < 22; for the unit
         // boundary this lets us invoke the helper directly).
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 22",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
              VALUES (?1, 'h-class1', 'user_doc', 'indexed')",
@@ -2389,13 +2423,21 @@ mod tests {
         assert!(id > 0, "rewritten row must keep its row id");
     }
 
-    /// Class 2: a `user_doc` row whose path is OUTSIDE the canonical vault
-    /// root (the trusted-link phantom the watcher staged in the bug) must
-    /// be deleted, not rewritten. The walker has either already written the
-    /// correct virtual-path row or will re-ingest on next pass; the
-    /// canonical-path duplicate is what D2a flagged as the divergent shape.
+    /// Class 2 orphan phantom (the trusted-link target the watcher staged
+    /// pre-fix when the canonical form resolved outside both roots) MUST
+    /// be left alone, not deleted. V22 deliberately has no "delete phantoms"
+    /// branch (the original draft's Step 1 also caught relocated-vault rows
+    /// and rows under a phantom root — D2b fail-open forbids the destructive
+    /// alternative).
+    ///
+    /// The phantom persists as a dead row: the walker will overwrite the
+    /// walker-written row at `<configured_root>/documents/specs/x.md` via
+    /// `UNIQUE(path)` on its next pass, but the external-canonical phantom
+    /// has no UNIQUE-partner and survives until manually removed. Step 2
+    /// covers the common case where BOTH the watcher phantom and the walker
+    /// row exist (see `v22_deletes_class1_row_that_collides_with_walker_written_row`).
     #[test]
-    fn v22_deletes_class2_phantom_rows_outside_canonical_root() {
+    fn v22_leaves_class2_phantom_row_alone_for_reconcile_or_manual_cleanup() {
         let conn = open_in_memory().unwrap();
         let canonical_root = "/private/var/vault";
         let configured_root = "/Users/kurt/vault";
@@ -2403,11 +2445,8 @@ mod tests {
         // documents/ — the watcher's pre-fix bug shape.
         let phantom_path = "/external/target/specs/x.md";
 
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 22",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
              VALUES (?1, 'h-phantom', 'user_doc', 'indexed')",
@@ -2416,7 +2455,10 @@ mod tests {
         .unwrap();
 
         let report = v22_unify_documents_path(&conn, configured_root, canonical_root).unwrap();
-        assert_eq!(report.deleted, 1, "trusted-link phantom must be deleted");
+        assert_eq!(
+            report.deleted, 0,
+            "V22 deliberately does not delete class-2 phantoms (D2b fail-open)"
+        );
         assert_eq!(report.rewritten, 0, "no class-1 row was seeded");
 
         let count: i64 = conn
@@ -2426,7 +2468,23 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0, "the phantom row must be gone after V22");
+        assert_eq!(
+            count, 1,
+            "the phantom row must be preserved after V22; D2b forbids deleting \
+             rows that cannot be relativized against either root"
+        );
+
+        let surviving_path: String = conn
+            .query_row(
+                "SELECT path FROM documents WHERE hash = 'h-phantom'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            surviving_path, phantom_path,
+            "the phantom's stored path must be untouched (no rewrite, no delete)"
+        );
     }
 
     /// Collision case: a class-1 row whose rewrite would land on a path
@@ -2444,11 +2502,8 @@ mod tests {
         let canonical_path = format!("{canonical_root}/notes.md");
         let configured_path = format!("{configured_root}/notes.md");
 
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 22",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
         // Watcher row (canonical path, the pre-fix bug shape).
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
@@ -2500,6 +2555,95 @@ mod tests {
         );
     }
 
+    /// Spec D2b row-side regression test for V22: a `user_doc` row from a
+    /// PRIOR vault location (the user moved their vault from
+    /// `/old/vault` to the currently-resolved roots and reopened before
+    /// re-ingesting) must be LEFT ALONE — not deleted, not rewritten, and
+    /// not cascaded into. Its attached chunks must also survive.
+    ///
+    /// D2b fail-open: "Deleting rows we cannot place inside the vault would
+    /// be the same class of unrecoverable mistake the empty-walk guard
+    /// exists to prevent." V22's original Step 1 deleted every `user_doc`
+    /// row whose path didn't match either prefix, which would nuke these
+    /// rows and their chunks. V22 has no Step 1 any more.
+    #[test]
+    fn v22_preserves_relocated_user_doc_row_with_chunk() {
+        let conn = open_in_memory().unwrap();
+        let canonical_root = "/private/var/vault";
+        let configured_root = "/Users/kurt/vault";
+        // Pre-relocation path: outside both current roots, no way to
+        // distinguish from a class-2 phantom by string alone. The fail-open
+        // rule says leave it.
+        let prior_vault_path = "/old/vault/notes.md";
+
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'h-relocated', 'user_doc', 'indexed')",
+            rusqlite::params![&prior_vault_path],
+        )
+        .unwrap();
+        let doc_id: i64 = conn
+            .query_row(
+                "SELECT id FROM documents WHERE hash = 'h-relocated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Attach a chunk so the cascade behavior is observable — if V22
+        // touched the row, the FK ON DELETE CASCADE would nuke this chunk.
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position) \
+             VALUES (?1, 'preserved', 0)",
+            rusqlite::params![doc_id],
+        )
+        .unwrap();
+
+        let report = v22_unify_documents_path(&conn, configured_root, canonical_root).unwrap();
+        assert_eq!(
+            report.rewritten, 0,
+            "no canonical-prefixed row was seeded; nothing to rewrite"
+        );
+        assert_eq!(
+            report.deleted, 0,
+            "D2b fail-open: rows outside both roots must NOT be deleted by V22"
+        );
+
+        // The document row survives intact, path unchanged.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the relocated row must survive V22 untouched");
+        let surviving_path: String = conn
+            .query_row("SELECT path FROM documents WHERE id = ?1", [doc_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            surviving_path, prior_vault_path,
+            "the relocated row's stored path must NOT be rewritten"
+        );
+
+        // The chunk must still be attached (no cascade fired).
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id = ?1",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chunk_count, 1,
+            "the relocated row's chunk must NOT cascade-delete — the row was \
+             preserved, so its children must be too"
+        );
+    }
+
     /// `tier = 'wiki'` rows must survive V22 untouched. Wiki entries have no
     /// filesystem-path semantics (the engine creates them from chunks; they
     /// can carry a `path` for cross-referencing, but never a canonical-root
@@ -2513,11 +2657,8 @@ mod tests {
         let configured_root = "/Users/kurt/vault";
         let wiki_path_under_canonical = format!("{canonical_root}/facts/engine-derives-this.md");
 
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 22",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
              VALUES (?1, 'h-wiki', 'wiki', 'indexed')",
@@ -2558,11 +2699,8 @@ mod tests {
         let configured_root = "/Users/kurt/vault";
         let seeded_path = format!("{canonical_root}/notes.md");
 
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 22",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status) \
              VALUES (?1, 'h-idem', 'user_doc', 'indexed')",
@@ -2623,11 +2761,8 @@ mod tests {
         let conn = open_in_memory().unwrap();
         // open_in_memory() runs every migration including V22 with no root
         // — rewind to v21 so the migrate() call below actually exercises V22.
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 22",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
         let canonical_root = "/private/var/vault";
         let configured_root = "/Users/kurt/vault";
         // Seed a row in the pre-fix canonical-path shape.
@@ -2649,11 +2784,7 @@ mod tests {
         .expect("migrate with resolvable vault root must succeed");
 
         let version: i64 = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 22, "V22 must be stamped when the migration runs");
 
@@ -2681,11 +2812,8 @@ mod tests {
         let conn = open_in_memory().unwrap();
         // open_in_memory() ran V1-V21 (the cap without a root). Rewind past
         // 21 to make the migrate(None) call actually reach V22.
-        conn.execute(
-            "DELETE FROM schema_version WHERE version >= 21",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 21", [])
+            .unwrap();
         let canonical_root = "/private/var/vault";
         let seeded_path = format!("{canonical_root}/notes.md");
         conn.execute(
@@ -2695,7 +2823,8 @@ mod tests {
         )
         .unwrap();
 
-        migrate(&conn, None::<VaultRoots>, None).expect("migrate must succeed even when V22 refuses");
+        migrate(&conn, None::<VaultRoots>, None)
+            .expect("migrate must succeed even when V22 refuses");
 
         let version: i64 = conn
             .query_row(

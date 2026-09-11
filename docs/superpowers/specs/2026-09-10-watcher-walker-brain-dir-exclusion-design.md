@@ -1,23 +1,36 @@
 # Watcher + walker: exclude `.brain` working directories from ingestion
 
 **Date:** 2026-09-10
-**Status:** Implemented (rev 7 — second Opus 5 review of rev 6 + plan addressed:
-desktop startup connection must set `PRAGMA foreign_keys=ON` explicitly
-(it bypasses `migrate()`, so the chunks cascade never fired there),
-relativization gained a canonicalize-the-input fallback (canonical root ×
-non-canonical event path), and the ancestor-vault test wording corrected
-to absolute paths. Rev 6 — Opus 5 review of rev 5 addressed: desktop purge
-root corrected from `raw_docs` to the vault root, D2's "one path space"
-claim narrowed to what `queue.rs` actually stores plus an explicit
-relativization-failure rule, reconcile pre-pass placed inside the existing
-transaction, item 5's rationale corrected, `DenyReason` variant pinned)
+**Status:** Implemented (rev 8 — `/fix-pr 206` review addressed: V22's
+original "delete class-2 phantoms" Step 1 removed because its predicate
+also caught relocated-vault rows and rows under a phantom root
+(`canonicalize_workspace_root` falls back to the input on error), which
+D2b fail-open forbids; V22's rootless branch no longer early-returns
+from `migrate()` and now skips only the V22 stamp so V8 event-taxonomy,
+log prune, schema guard, and `warn_on_malformed_source_refs` still run;
+`substr()` offsets in V22 use UTF-8 character counts not byte counts so
+non-ASCII roots classify and rewrite correctly. Rev 7 — second Opus 5
+review of rev 6 + plan addressed: desktop startup connection must set
+`PRAGMA foreign_keys=ON` explicitly (it bypasses `migrate()`, so the
+chunks cascade never fired there), relativization gained a
+canonicalize-the-input fallback (canonical root × non-canonical event
+path), and the ancestor-vault test wording corrected to absolute paths.
+Rev 6 — Opus 5 review of rev 5 addressed: desktop purge root corrected
+from `raw_docs` to the vault root, D2's "one path space" claim narrowed
+to what `queue.rs` actually stores plus an explicit relativization-
+failure rule, reconcile pre-pass placed inside the existing transaction,
+item 5's rationale corrected, `DenyReason` variant pinned)
 **Branch:** docs/spec-2026-09-10-vault-walk-brain-dir-exclusion
 **Priority:** Low (log noise; no data corruption)
 
 **D2a unified via issue #204 (2026-09-10).** The watcher's pre-fix canonical-
 path write is replaced by a virtual-path write; a one-shot V22 migration
-rewrites existing canonical-path rows in place and deletes the trusted-link
-phantoms the divergence created. See D2a below for the full wiring.
+rewrites existing canonical-path rows in place (Step 3 — class-1 rewrite)
+and deletes class-1 rows whose rewrite would collide with an existing
+walker-written row at the same virtual path (Step 2 — duplicate-phantom
+branch). Orphan class-2 trusted-link phantoms (rows whose stored path is
+outside both roots) are deliberately LEFT ALONE per D2b fail-open — see
+D2a below for the full wiring and the rationale.
 
 ## Problem
 
@@ -122,13 +135,37 @@ staged a row keyed by the external canonical path, which every subsequent
   the virtual path.
 * **Migration V22** (`src-tauri/src/db/schema.rs::MIGRATION_V22`, called from
   `db/connection.rs::v22_unify_documents_path`) rewrites existing
-  canonical-path rows to configured-root form in place and deletes trusted-link
-  phantoms (rows whose canonical path was outside the vault root — the
-  watcher's pre-fix bug shape). V22 is wrapped in `BEGIN IMMEDIATE`/`COMMIT`
-  and refuses to run without a resolved `VaultRoots`, in which case it logs
-  a loud FATAL and does NOT stamp `schema_version` — leaving the schema below
-  22 as a durable "recovery pending" marker that re-fires on every open
-  until the user resolves the root.
+  canonical-path rows to configured-root form in place (Step 3 — class-1
+  rewrite) and deletes class-1 rows whose rewrite would collide with an
+  existing walker-written row at the same virtual path (Step 2 — the
+  duplicate-phantom branch). Both branches restrict to `tier = 'user_doc'`
+  for parity with `reconcile.rs:83`. V22 is wrapped in
+  `BEGIN IMMEDIATE`/`COMMIT` and refuses to run without a resolved
+  `VaultRoots`, in which case it logs a loud FATAL and does NOT stamp
+  `schema_version` — leaving the schema below 22 as a durable "recovery
+  pending" marker that re-fires on every open until the user resolves the
+  root.
+
+  **V22 deliberately does NOT clean up orphan class-2 trusted-link
+  phantoms** (rows whose stored path is outside both roots because the
+  watcher pre-fix wrote the canonical external target of a symlinked
+  trusted link). Per D2b — "Deleting rows we cannot place inside the vault
+  would be the same class of unrecoverable mistake the empty-walk guard
+  exists to prevent" — such rows are LEFT ALONE. The original draft of
+  V22 had a "delete phantoms" branch (Step 1) keyed on
+  `substr(path, 1, ?) ∉ {canonical_prefix, configured_prefix}`, but that
+  predicate also catches rows from a relocated vault (the user moved
+  `/old/vault` to `/new/vault` and every `/old/vault/…` row matches
+  nothing) and rows under a phantom root (`canonicalize_workspace_root`
+  falls back to the input on error, so `canonical == configured ==
+  <non-existent string>` and every row matches nothing). Without a way to
+  distinguish a phantom from a relocated row by the path string alone, the
+  safe default is to leave both alone. Step 2 still handles the common
+  case where BOTH the watcher phantom and the walker-written row exist
+  (because in that case both rows ARE in the vault by construction). The
+  `v22_leaves_class2_phantom_row_alone_for_reconcile_or_manual_cleanup`
+  and `v22_preserves_relocated_user_doc_row_with_chunk` unit tests pin
+  this behavior.
 
 The D2 test below lands in the right path space after #204: it asserts both
 that the event is not gated AND that the staged row's `path` is the virtual
