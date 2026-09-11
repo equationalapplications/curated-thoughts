@@ -1,18 +1,36 @@
 # Watcher + walker: exclude `.brain` working directories from ingestion
 
 **Date:** 2026-09-10
-**Status:** Implemented (rev 7 — second Opus 5 review of rev 6 + plan addressed:
-desktop startup connection must set `PRAGMA foreign_keys=ON` explicitly
-(it bypasses `migrate()`, so the chunks cascade never fired there),
-relativization gained a canonicalize-the-input fallback (canonical root ×
-non-canonical event path), and the ancestor-vault test wording corrected
-to absolute paths. Rev 6 — Opus 5 review of rev 5 addressed: desktop purge
-root corrected from `raw_docs` to the vault root, D2's "one path space"
-claim narrowed to what `queue.rs` actually stores plus an explicit
-relativization-failure rule, reconcile pre-pass placed inside the existing
-transaction, item 5's rationale corrected, `DenyReason` variant pinned)
+**Status:** Implemented (rev 8 — `/fix-pr 206` review addressed: V22's
+original "delete class-2 phantoms" Step 1 removed because its predicate
+also caught relocated-vault rows and rows under a phantom root
+(`canonicalize_workspace_root` falls back to the input on error), which
+D2b fail-open forbids; V22's rootless branch no longer early-returns
+from `migrate()` and now skips only the V22 stamp so V8 event-taxonomy,
+log prune, schema guard, and `warn_on_malformed_source_refs` still run;
+`substr()` offsets in V22 use UTF-8 character counts not byte counts so
+non-ASCII roots classify and rewrite correctly. Rev 7 — second Opus 5
+review of rev 6 + plan addressed: desktop startup connection must set
+`PRAGMA foreign_keys=ON` explicitly (it bypasses `migrate()`, so the
+chunks cascade never fired there), relativization gained a
+canonicalize-the-input fallback (canonical root × non-canonical event
+path), and the ancestor-vault test wording corrected to absolute paths.
+Rev 6 — Opus 5 review of rev 5 addressed: desktop purge root corrected
+from `raw_docs` to the vault root, D2's "one path space" claim narrowed
+to what `queue.rs` actually stores plus an explicit relativization-
+failure rule, reconcile pre-pass placed inside the existing transaction,
+item 5's rationale corrected, `DenyReason` variant pinned)
 **Branch:** docs/spec-2026-09-10-vault-walk-brain-dir-exclusion
 **Priority:** Low (log noise; no data corruption)
+
+**D2a unified via issue #204 (2026-09-10).** The watcher's pre-fix canonical-
+path write is replaced by a virtual-path write; a one-shot V22 migration
+rewrites existing canonical-path rows in place (Step 3 — class-1 rewrite)
+and deletes class-1 rows whose rewrite would collide with an existing
+walker-written row at the same virtual path (Step 2 — duplicate-phantom
+branch). Orphan class-2 trusted-link phantoms (rows whose stored path is
+outside both roots) are deliberately LEFT ALONE per D2b fail-open — see
+D2a below for the full wiring and the rationale.
 
 ## Problem
 
@@ -96,33 +114,76 @@ non-canonical event path (symlinked ancestor). Canonicalizing the input
 cannot mask a genuinely symlinked-out `.brain`: the strip still misses
 once the link resolves, so D2's rejection behavior is unchanged.
 
-**D2a — The watcher does not currently store the virtual path, and this
-spec does not change that.** `enqueue_vault_event` writes
-`path_str = canonical.to_string_lossy()` (`queue.rs:56`), i.e. the
-*canonical* path, while `reconcile.rs:53-55` documents `documents.path` as
-the virtual path written by `tools/src/cmds.rs:217`. For ordinary
-non-symlinked content the two coincide — both walkers canonicalize their
-root — so the divergence is latent. It is real in exactly the case D2
-describes: a Modify under an approved `documents/specs` →
-`<external>/.brain/specs-target/` link stages a row keyed by the external
-canonical path, which every subsequent `reconcile_vault` pass then sees as
-vanished. Unifying the column on the virtual path is a data-migration-shaped
-change and is **out of scope here**; it is called out so the D2 test below
-is read correctly (it asserts the event is not *gated*, not that the row
-lands in the right path space) and so a reviewer does not read D2 as a claim
-that all three call sites already agree.
+**D2a — `documents.path` holds the virtual (configured-root-relative) path
+on every write boundary; unification landed in issue #204.** `enqueue_vault_event`
+now writes `path_str = abs.to_string_lossy()` (the VIRTUAL path, matching
+the walker's `ingest_document_virtual` at `tools/src/cmds.rs:217` and the
+documented contract at `reconcile.rs:74-77`). Pre-#204 the watcher wrote the
+canonical path (`canonical.to_string_lossy()`); the divergence was latent for
+non-symlinked content (where canonical and configured differ only when the
+vault root itself canonicalizes — macOS `/var` → `/private/var` is the only
+real-world case) but real for any vault with an approved `documents/specs` →
+`<external>/.brain/specs-target/` trusted link: a Modify under the symlink
+staged a row keyed by the external canonical path, which every subsequent
+`reconcile_vault` pass then saw as vanished.
+
+#204 ships two pieces, applied together:
+
+* **Watcher writes `abs`.** The containment check still uses both forms
+  (canonical-only would drop symlinked events before the gate runs; abs-only
+  would miss the `tmp.brain` case D2 calls out), but the staged row keys on
+  the virtual path.
+* **Migration V22** (`src-tauri/src/db/schema.rs::MIGRATION_V22`, called from
+  `db/connection.rs::v22_unify_documents_path`) rewrites existing
+  canonical-path rows to configured-root form in place (Step 3 — class-1
+  rewrite) and deletes class-1 rows whose rewrite would collide with an
+  existing walker-written row at the same virtual path (Step 2 — the
+  duplicate-phantom branch). Both branches restrict to `tier = 'user_doc'`
+  for parity with `reconcile.rs:83`. V22 is wrapped in
+  `BEGIN IMMEDIATE`/`COMMIT` and refuses to run without a resolved
+  `VaultRoots`, in which case it logs a loud FATAL and does NOT stamp
+  `schema_version` — leaving the schema below 22 as a durable "recovery
+  pending" marker that re-fires on every open until the user resolves the
+  root.
+
+  **V22 deliberately does NOT clean up orphan class-2 trusted-link
+  phantoms** (rows whose stored path is outside both roots because the
+  watcher pre-fix wrote the canonical external target of a symlinked
+  trusted link). Per D2b — "Deleting rows we cannot place inside the vault
+  would be the same class of unrecoverable mistake the empty-walk guard
+  exists to prevent" — such rows are LEFT ALONE. The original draft of
+  V22 had a "delete phantoms" branch (Step 1) keyed on
+  `substr(path, 1, ?) ∉ {canonical_prefix, configured_prefix}`, but that
+  predicate also catches rows from a relocated vault (the user moved
+  `/old/vault` to `/new/vault` and every `/old/vault/…` row matches
+  nothing) and rows under a phantom root (`canonicalize_workspace_root`
+  falls back to the input on error, so `canonical == configured ==
+  <non-existent string>` and every row matches nothing). Without a way to
+  distinguish a phantom from a relocated row by the path string alone, the
+  safe default is to leave both alone. Step 2 still handles the common
+  case where BOTH the watcher phantom and the walker-written row exist
+  (because in that case both rows ARE in the vault by construction). The
+  `v22_leaves_class2_phantom_row_alone_for_reconcile_or_manual_cleanup`
+  and `v22_preserves_relocated_user_doc_row_with_chunk` unit tests pin
+  this behavior.
+
+The D2 test below lands in the right path space after #204: it asserts both
+that the event is not gated AND that the staged row's `path` is the virtual
+form (`<configured>/documents/specs/x.md`), not the canonical external target.
 
 **D2b — Relativization failure is fail-open.** Both the watcher gate and
 the row-oriented predicates of items 3a/3b must handle a path that does not
-start with the vault root at all — a consequence of D2a for symlinked
-content, and possible for any row written by an older code path.
+start with the vault root at all — possible for any row written by an older
+code path (pre-#204 canonical-path rows that V22 had not yet rewritten, or
+rows pre-dating a vault-root relocation), and structurally for symlinked
+content where the canonical form points outside the vault.
 `rel_path_has_excluded_component` operates only on a successfully
 relativized path; when `strip_prefix` fails against **all** the attempts
 (as-configured root, canonical root, canonicalized input against the
-canonical root), the path is treated as **not
-excluded** (the event stages; the row is left alone). Deleting rows we
-cannot place inside the vault would be the same class of unrecoverable
-mistake the empty-walk guard exists to prevent.
+canonical root), the path is treated as **not excluded** (the event
+stages; the row is left alone). Deleting rows we cannot place inside the
+vault would be the same class of unrecoverable mistake the empty-walk
+guard exists to prevent.
 
 **D3 — The vault root must be known. Fail-closed on the gate, not on the
 bug.** `enqueue_vault_event` reads `CURATED_VAULT_ROOT` from the process
@@ -393,11 +454,12 @@ and `brain/` must all still ingest. Matching is `component == name` over
 - **Watcher regression — trusted link into a `.brain` target (D2,
   finding 4):** `documents/specs` → `<external>/.brain/specs-target/`;
   assert a Modify event for `documents/specs/x.md` **stages** — i.e. that
-  the gate does not reject it. Per D2a the staged row's `documents.path`
-  is the *external canonical* path, not `documents/specs/x.md`; the test
-  asserts the gate's verdict only and must not be read as asserting the
-  row lands in the walker's path space. Pin that explicitly by asserting
-  the stored path, so the pre-existing divergence stays visible rather
+  the gate does not reject it. Per D2a (post-#204) the staged row's
+  `documents.path` is the *virtual* path (`documents/specs/x.md`); the
+  external canonical form MUST NOT appear in `documents`, because that
+  was the pre-fix divergent phantom row. Pin the stored path explicitly
+  so the test asserts the row lands in the walker's path space and
+  catches any future regression that restores the canonical-path write.
   than being papered over by a green test.
 - **Watcher + purge regression — unrelativizable path (D2b):** an event
   whose `abs` starts with neither the as-configured nor the canonical vault
@@ -510,8 +572,9 @@ path-space / relativization / ordering / scope defects of round 4, and
 rev 5's wrong desktop-purge root, overstated path-space claim, unplaced
 pre-pass transaction and incorrect item-5 rationale are all resolved above.
 
-One thing is deliberately left unresolved and recorded rather than fixed:
-the watcher stores canonical paths while the walker stores virtual ones
-(D2a). It predates this spec, is invisible for non-symlinked content, and
-unifying the column is a migration-shaped change. It should be filed as a
-follow-up issue alongside the generalized extension-gate defect below.
+One thing is no longer unresolved: the watcher-stores-canonical-vs-walker-
+stores-virtual divergence (D2a) was unified in issue #204 — the watcher
+now writes the virtual path and migration V22 rewrites the legacy rows.
+See D2a below for the wiring; pre-fix divergence stays visible only in
+test history (the test that asserted canonical, pre-#204, was rewritten to
+assert virtual).
