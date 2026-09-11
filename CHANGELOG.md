@@ -1,3 +1,10 @@
+## [2.10.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.10.0...v2.10.1) (2026-09-11)
+
+### Bug Fixes
+
+* **db:** v22 review feedback — chars, rootless skip, drop step 1 ([6627619](https://github.com/equationalapplications/curated-thoughts/commit/6627619c6cd5308c7795e4a211afb606defb588f))
+* **watcher:** unify documents.path on the virtual form (issue [#204](https://github.com/equationalapplications/curated-thoughts/issues/204)) ([0941c36](https://github.com/equationalapplications/curated-thoughts/commit/0941c36ddd10695b04d8f11789657a536cfec96e))
+
 ## [2.10.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.9.0...v2.10.0) (2026-09-10)
 
 ### Features
