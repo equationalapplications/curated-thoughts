@@ -7,12 +7,12 @@ settings:
 overrides:
   undici@6: 6.28.0
   undici@7: 7.29.0
-  js-yaml: 4.3.1
+  js-yaml: 4.3.2
   postcss: 8.5.26
   brace-expansion@1: 1.1.18
   brace-expansion@5: 5.0.9
-  '@equationalapplications/core-llm-wiki': 7.1.0
-  '@equationalapplications/core-okf': 7.1.0
+  '@equationalapplications/core-llm-wiki': 7.1.1
+  '@equationalapplications/core-okf': 7.1.1
   '@tiptap/core': 3.30.6
   '@tiptap/extension-bold': 3.30.6
   '@tiptap/extension-bubble-menu': 3.30.6
@@ -41,17 +41,17 @@ importers:
         specifier: 0.54.0
         version: 0.54.0(@floating-ui/dom@1.8.0)(@types/hast@3.0.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(y-prosemirror@1.3.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30))(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       '@equationalapplications/core-llm-wiki':
-        specifier: 7.1.0
-        version: 7.1.0
+        specifier: 7.1.1
+        version: 7.1.1
       '@equationalapplications/react-llm-wiki':
-        specifier: 7.1.0
-        version: 7.1.0(react@19.2.8)
+        specifier: 7.1.1
+        version: 7.1.1(react@19.2.8)
       '@equationalapplications/schema-org-llm-wiki':
-        specifier: 7.1.0
-        version: 7.1.0
+        specifier: 7.1.1
+        version: 7.1.1
       '@equationalapplications/schema-software-org':
-        specifier: 7.1.0
-        version: 7.1.0
+        specifier: 7.1.1
+        version: 7.1.1
       '@mantine/core':
         specifier: 9.5.1
         version: 9.5.1(@mantine/hooks@9.5.1(react@19.2.8))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -283,26 +283,26 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@7.1.0':
-    resolution: {integrity: sha512-e2NOJ/jnCjLM2rYWrAM2YgExuG/u4a/sJku2LCj1TZbgFLjjUCqK4M20ZW6pDpLTPhR39Gucih45yFHLY77zLQ==}
+  '@equationalapplications/core-llm-wiki@7.1.1':
+    resolution: {integrity: sha512-iPYpwSCehwSsAM1wYVUTp+d29rd87psXY018PURsxXL3zYPYfAvRnJqDMC4G/UYzvDl0uYeu6T+OjHHcxXjlMA==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/core-okf@7.1.0':
-    resolution: {integrity: sha512-u8LPQKzgK7mWn52r20PY6oxEdm6fY9awddB25YRck8h57TugSy3ETqI5W45S6P5Iux2kntZLlOOPHVFOPv/vZw==}
+  '@equationalapplications/core-okf@7.1.1':
+    resolution: {integrity: sha512-aI8FTJ14WQ2AHgEvTIZoOJp9CDeuh1MTgMHIkUbS+YzkwJq3A+zrRDH9VYzed9u+EdCyrdb2jgyw5+iS2Lpmag==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@7.1.0':
-    resolution: {integrity: sha512-sTHabIlQGcspiGOEAqVE6w58oBiMJ9U5J6Zdn1dhOQ8xZFjUKQag7OGlAp1qOUgACIeo/SlCxcLE76o572ZrQQ==}
+  '@equationalapplications/react-llm-wiki@7.1.1':
+    resolution: {integrity: sha512-VKkuIg4QcFFSbilKIWvZreG2e5qth6a7pWv7CIcR121/Iw437wkR0otUU5uQu3OAPJVLOVM8qP0Fm+c+OQEY4g==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
 
-  '@equationalapplications/schema-org-llm-wiki@7.1.0':
-    resolution: {integrity: sha512-epHkdvNEJck3VjWm2u/QhaIESwjihmjc+KSqgk0rBqUQEAM4T6BHGOtdA5IYkSITjhgg574ePpJxY1uDBeY5DQ==}
+  '@equationalapplications/schema-org-llm-wiki@7.1.1':
+    resolution: {integrity: sha512-FwH48XEtvKPJ0MaRzm7unCxFWfg2v+o3oaeDVE23Kzbz4IkCNbVFV61PLNkIkdY7eYieveuceqT2Dam4vj4xZg==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/schema-software-org@7.1.0':
-    resolution: {integrity: sha512-QIy+BMooVmCVO9Wpp47S5+lEhrlC87qcY89jzEBiMEnaCXzFQSfino3x9pCpTs3NjqFlOIS/W8dwBm+iF06yVQ==}
+  '@equationalapplications/schema-software-org@7.1.1':
+    resolution: {integrity: sha512-maQeC/v5rYtdSvfmlurnFCPTeKeIpuOzl5rSqOuAjJwZbirQpQSecyuUWvZK8H5B1HQM8D7ePgsgr8RsmFSSeg==}
     engines: {node: '>=20'}
 
   '@eslint-community/eslint-utils@4.10.1':
@@ -529,42 +529,36 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-arm64-musl@1.2.5':
     resolution: {integrity: sha512-xMvZgnbZg4YVnR/AX2b3oOPDTFYJvUVaJg5FedA/LuvexAtXibZQej4cnTkw3rjsJ/ggUROB64TdtETiim+FYA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@rolldown/binding-linux-ppc64-gnu@1.2.5':
     resolution: {integrity: sha512-GRjeqTUDHTo5GwntsLaAMcBahG3nlpjftXWZLN73HiYQlhwEowvarFgQnRnQZtIp4keXX7quXFbG38uPZBa2EA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [ppc64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-s390x-gnu@1.2.5':
     resolution: {integrity: sha512-vLNTR45F2Uwc8AufkNXPmB4VliaXs+FvcheEogIzOXzO4l+LzieXF5A/TWxLy5HtqpsRCHUfd0lPVrrdgXdLHQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [s390x]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-x64-gnu@1.2.5':
     resolution: {integrity: sha512-Mgj59/HTuYeK9Gz2MA+mBWKnHsAgkBSec15ZMb1st3oIfFbX7gCjOae7GydHhzcyQi9Z/7M1QuN9bR3oFqF0jQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-x64-musl@1.2.5':
     resolution: {integrity: sha512-mY8AP0/ichsbhAxGnLa3d3+MwV0EfgrPND2bplI3Ym8T6R2pJ0N87bvrKVwNXmdy3jnr6eQBecdqx/HMknBmpA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@rolldown/binding-openharmony-arm64@1.2.5':
     resolution: {integrity: sha512-8SLssA2oweAxyRgDp789ACfRb/3P+zNRJpzZxSizxF9m8NUDQ4+3xjo8ttjhVGGw6Qxb70oZiEtIjaKikCO7Yw==}
@@ -684,35 +678,30 @@ packages:
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-arm64-musl@2.11.4':
     resolution: {integrity: sha512-v277UnT/fB64xAfSroL5N3Km3tLmvATWqJJw/wRI+g6o+HkeD0slyE7gOhNs1MbjE41R7bQOTxMVoL3aomUJmw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@tauri-apps/cli-linux-riscv64-gnu@2.11.4':
     resolution: {integrity: sha512-qqgNkQ2u1yZHxjhxsZaxUtRDW8dIqIYm33rx/mzwQv0SfY9x1B+iraj8vWeFiXjjSVVhEMepXSOts1TqPzvXNQ==}
     engines: {node: '>= 10'}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-x64-gnu@2.11.4':
     resolution: {integrity: sha512-2VRNWl84FOH0m2giiDkO2h0QXlcMJeX+zJDpI5kDIQAx6s+geF3v48F4DXfJez4GS/FdoDGnPnw1C2iYGbQ7bQ==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-x64-musl@2.11.4':
     resolution: {integrity: sha512-o9GyhYor/nc7xarmwDE3ka2szuW3uuZzXjHWh64Q8YX5AtSgxdQkFWzrY4O8KiGtVNvFBI14H3Q49Qj5TOIP/A==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@tauri-apps/cli-win32-arm64-msvc@2.11.4':
     resolution: {integrity: sha512-ld5Ehb598m0VkYyylRPNeCFsBe/km0jxis6KgMpl3IGY6I/i1RwQXO05I1AsXUXO2WC6AvB/Lw4qTf/asiuEiQ==}
@@ -1967,8 +1956,8 @@ packages:
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
-  js-yaml@4.3.1:
-    resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
+  js-yaml@4.3.2:
+    resolution: {integrity: sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==}
     hasBin: true
 
   jsdom@30.0.1:
@@ -2064,28 +2053,24 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   lightningcss-linux-arm64-musl@1.33.0:
     resolution: {integrity: sha512-yiO5ROMuYQgXbC60yjZU5CYSFZGKXL0HFATXt9mHJn1+zW55oCtMI9NfcVhYLMFDL7gV7oBPon/EmMMGg2OvtQ==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   lightningcss-linux-x64-gnu@1.33.0:
     resolution: {integrity: sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   lightningcss-linux-x64-musl@1.33.0:
     resolution: {integrity: sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   lightningcss-win32-arm64-msvc@1.33.0:
     resolution: {integrity: sha512-1K+MPfLSFVpphzpdbfkhlWk6wBrTObBzS2T6db10PNOZgR9GoVsAWzwNyuhUYYbTp23j+4RrncfujZ4uAzXvwA==}
@@ -3569,25 +3554,25 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@7.1.0':
+  '@equationalapplications/core-llm-wiki@7.1.1':
     dependencies:
-      '@equationalapplications/core-okf': 7.1.0
+      '@equationalapplications/core-okf': 7.1.1
       minisearch: 7.2.0
 
-  '@equationalapplications/core-okf@7.1.0': {}
+  '@equationalapplications/core-okf@7.1.1': {}
 
-  '@equationalapplications/react-llm-wiki@7.1.0(react@19.2.8)':
+  '@equationalapplications/react-llm-wiki@7.1.1(react@19.2.8)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.1.0
+      '@equationalapplications/core-llm-wiki': 7.1.1
       react: 19.2.8
 
-  '@equationalapplications/schema-org-llm-wiki@7.1.0':
+  '@equationalapplications/schema-org-llm-wiki@7.1.1':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.1.0
+      '@equationalapplications/core-llm-wiki': 7.1.1
 
-  '@equationalapplications/schema-software-org@7.1.0':
+  '@equationalapplications/schema-software-org@7.1.1':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.1.0
+      '@equationalapplications/core-llm-wiki': 7.1.1
 
   '@eslint-community/eslint-utils@4.10.1(eslint@9.39.4)':
     dependencies:
@@ -3620,7 +3605,7 @@ snapshots:
       globals: 14.0.0
       ignore: 5.3.2
       import-fresh: 3.3.1
-      js-yaml: 4.3.1
+      js-yaml: 4.3.2
       minimatch: 3.1.5
       strip-json-comments: 3.1.1
     transitivePeerDependencies:
@@ -4595,7 +4580,7 @@ snapshots:
     dependencies:
       env-paths: 2.2.1
       import-fresh: 3.3.1
-      js-yaml: 4.3.1
+      js-yaml: 4.3.2
       parse-json: 5.2.0
     optionalDependencies:
       typescript: 6.0.3
@@ -5404,7 +5389,7 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  js-yaml@4.3.1:
+  js-yaml@4.3.2:
     dependencies:
       argparse: 2.0.1
 
