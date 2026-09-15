@@ -1030,6 +1030,7 @@ fn curated_entity_names(
 }
 
 fn trigger_source_label(conn: &Connection, proposal_id: &str) -> Result<String> {
+    let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     let path: Option<String> = conn
         .query_row(
             "SELECT d.path
@@ -1042,7 +1043,7 @@ fn trigger_source_label(conn: &Connection, proposal_id: &str) -> Result<String> 
         )
         .optional()?;
     if let Some(p) = path {
-        return Ok(p.rsplit('/').next().unwrap_or(&p).to_string());
+        return Ok(basename(&p));
     }
     let fallback: Option<String> = conn
         .query_row(
@@ -1055,9 +1056,17 @@ fn trigger_source_label(conn: &Connection, proposal_id: &str) -> Result<String> 
             |r| r.get(0),
         )
         .optional()?;
-    Ok(fallback
-        .map(|p| p.rsplit('/').next().unwrap_or(&p).to_string())
-        .unwrap_or_else(|| "unknown source".into()))
+    if let Some(p) = fallback {
+        return Ok(basename(&p));
+    }
+    // Issue #211 spec D3: a source deleted while the proposal was pending is
+    // still named before giving up. The shared helper orders trigger first.
+    Ok(
+        crate::db::proposals::deleted_source_paths_for_proposal(conn, proposal_id)?
+            .first()
+            .map(|p| basename(p))
+            .unwrap_or_else(|| "unknown source".into()),
+    )
 }
 
 pub(crate) fn fact_title_from_body(body: &str) -> String {
@@ -5919,6 +5928,156 @@ mod tests {
                 "the wrong-sized batch must not pair a vector to this row"
             );
         });
+    }
+
+    // ── Issue #211: stranded proposals ─────────────────────────────────────
+
+    /// Spec test 9.
+    #[test]
+    fn trigger_source_label_names_a_deleted_trigger() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-label");
+        crate::db::proposals::test_support::delete_path(&mut conn, "/vault/documents/hvg.pdf");
+
+        assert_eq!(
+            trigger_source_label(&conn, "prop-label").unwrap(),
+            "hvg.pdf"
+        );
+    }
+
+    /// Spec test 8: reject on a stranded proposal.
+    #[test]
+    fn stranded_proposal_reject_resolves_rejected() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-strand-reject");
+        crate::db::proposals::test_support::delete_path(&mut conn, "/vault/documents/hvg.pdf");
+
+        let decisions: Vec<ItemDecision> = all_accept_decisions(&conn, "prop-strand-reject")
+            .into_iter()
+            .map(|d| ItemDecision {
+                decision: ItemDecisionKind::Reject,
+                ..d
+            })
+            .collect();
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-strand-reject",
+            &decisions,
+            Some("stale"),
+            ResolveOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.proposal_status, "rejected");
+    }
+
+    /// Spec test 8: approve on a stranded proposal skips the unanchored fact
+    /// and resolves `rejected` (Phase-2 gate + finalize_proposal_status).
+    #[test]
+    fn stranded_proposal_approve_skips_facts_and_resolves_rejected() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-strand-approve");
+        crate::db::proposals::test_support::delete_path(&mut conn, "/vault/documents/hvg.pdf");
+
+        let decisions = all_accept_decisions(&conn, "prop-strand-approve");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-strand-approve",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result.skipped_unanchored, 1);
+        assert_eq!(result.proposal_status, "rejected");
+        let entries: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(entries, 0, "nothing evidenced can be committed");
+    }
+
+    /// Seed a pending proposal whose single fact carries the real
+    /// `content_hash` of a chunk at `path`, then delete `path`.
+    fn seed_hashed_stranded_proposal(conn: &mut Connection, id: &str, path: &str, text: &str) {
+        let doc_id = seed_document(conn, path);
+        let hash = crate::db::chunk_hash::compute_chunk_hash(text, path, 0);
+        let chunk = Chunk {
+            text: text.into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        let chunk_id = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", &hash).unwrap();
+        let mut item = fact_item(&format!("item-{id}"), chunk_id, "A re-anchorable fact.");
+        item.evidence[0].content_hash = hash;
+        insert_test_proposal(conn, id, ProposalKind::NewEntity, None, vec![item], doc_id);
+        crate::db::proposals::test_support::delete_path(conn, path);
+    }
+
+    /// Insert a chunk for `text` at `path` with its real content hash.
+    fn ingest_text_at(conn: &Connection, path: &str, text: &str) {
+        let doc_id = seed_document(conn, path);
+        let chunk = Chunk {
+            text: text.into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        let hash = crate::db::chunk_hash::compute_chunk_hash(text, path, 0);
+        insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", &hash).unwrap();
+    }
+
+    /// Spec test 8: bytes restored at the ORIGINAL path re-anchor the evidence.
+    #[test]
+    fn stranded_evidence_reanchors_when_restored_at_the_original_path() {
+        let mut conn = open_in_memory().unwrap();
+        let path = "/vault/documents/anchor.md";
+        seed_hashed_stranded_proposal(&mut conn, "prop-restore", path, "anchored text");
+
+        ingest_text_at(&conn, path, "anchored text");
+
+        let decisions = all_accept_decisions(&conn, "prop-restore");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-restore",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.skipped_unanchored, 0);
+        assert_eq!(result.proposal_status, "approved");
+    }
+
+    /// Spec test 8: the same text at a DIFFERENT path hashes differently
+    /// (`content_hash` includes the doc path), so a move never re-anchors.
+    #[test]
+    fn stranded_evidence_does_not_reanchor_after_a_move() {
+        let mut conn = open_in_memory().unwrap();
+        seed_hashed_stranded_proposal(
+            &mut conn,
+            "prop-moved",
+            "/vault/documents/anchor.md",
+            "anchored text",
+        );
+
+        ingest_text_at(&conn, "/vault/documents/moved/anchor.md", "anchored text");
+
+        let decisions = all_accept_decisions(&conn, "prop-moved");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-moved",
+            &decisions,
+            None,
+            ResolveOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.skipped_unanchored, 1);
+        assert_eq!(result.proposal_status, "rejected");
     }
 }
 

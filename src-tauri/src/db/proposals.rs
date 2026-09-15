@@ -111,6 +111,7 @@ pub struct ProposalSummary {
     pub target_name: String,
     pub entity_id: Option<String>,
     pub source_doc_paths: Vec<String>,
+    pub deleted_source_paths: Vec<String>,
     pub item_counts: ProposalItemCounts,
     pub created_at: i64,
     pub age_secs: i64,
@@ -151,6 +152,7 @@ pub struct ProposalDetail {
     pub status: String,
     pub created_at: i64,
     pub source_doc_paths: Vec<String>,
+    pub deleted_source_paths: Vec<String>,
     pub items: Vec<ProposalItem>,
 }
 
@@ -366,6 +368,26 @@ pub(crate) fn source_paths_for_proposal(
     Ok(rows)
 }
 
+/// Paths of sources deleted while the proposal was pending (issue #211 spec
+/// D3), in the same order as `source_paths_for_proposal`: trigger first, then
+/// by path. Shared by the same surfaces for the same reason: one proposal must
+/// never report different sources on different surfaces.
+pub(crate) fn deleted_source_paths_for_proposal(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT doc_path
+         FROM curated_proposal_deleted_sources
+         WHERE proposal_id = ?1
+         ORDER BY CASE role WHEN 'trigger' THEN 0 ELSE 1 END, doc_path",
+    )?;
+    let rows = stmt
+        .query_map([proposal_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
+}
+
 fn item_counts_for_proposal(conn: &Connection, proposal_id: &str) -> Result<ProposalItemCounts> {
     let mut stmt = conn.prepare(
         "SELECT item_type, COUNT(*) FROM curated_proposal_items
@@ -434,6 +456,7 @@ pub fn list_proposals(conn: &Connection, filter: &ProposalFilter) -> Result<Vec<
             target_name,
             entity_id,
             source_doc_paths: source_paths_for_proposal(conn, &id)?,
+            deleted_source_paths: deleted_source_paths_for_proposal(conn, &id)?,
             item_counts: item_counts_for_proposal(conn, &id)?,
             created_at,
             age_secs: now.saturating_sub(created_at),
@@ -593,6 +616,7 @@ pub fn get_proposal_detail(conn: &Connection, proposal_id: &str) -> Result<Optio
         status,
         created_at,
         source_doc_paths: source_paths_for_proposal(conn, proposal_id)?,
+        deleted_source_paths: deleted_source_paths_for_proposal(conn, proposal_id)?,
         items,
     }))
 }
@@ -957,6 +981,58 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM curated_proposals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "nothing is written when the guard fires");
+    }
+
+    /// Spec tests 1–2 at the surface: live and deleted lists, trigger first.
+    #[test]
+    fn summary_and_detail_report_deleted_sources_trigger_first() {
+        use crate::db::proposals::test_support::delete_path;
+
+        let mut conn = open_in_memory().unwrap();
+        // The trigger sorts AFTER the evidence by path, so a path-only ORDER BY
+        // would fail the trigger-first assertion below.
+        let trigger = seed_document(&conn, "/vault/documents/z-trigger.md");
+        let evidence = seed_document(&conn, "/vault/documents/a-evidence.md");
+        let chunk_id = seed_chunk(&conn, trigger, "q");
+        insert_proposal(
+            &conn,
+            &sample_new_proposal("prop-del-src", "Delta"),
+            &[sample_fact_item("item-del-src", chunk_id, "q")],
+            &[
+                NewProposalSource {
+                    doc_id: trigger,
+                    role: ProposalSourceRole::Trigger,
+                },
+                NewProposalSource {
+                    doc_id: evidence,
+                    role: ProposalSourceRole::Evidence,
+                },
+            ],
+        )
+        .unwrap();
+
+        delete_path(&mut conn, "/vault/documents/a-evidence.md");
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert_eq!(
+            queue[0].source_doc_paths,
+            vec!["/vault/documents/z-trigger.md"]
+        );
+        assert_eq!(
+            queue[0].deleted_source_paths,
+            vec!["/vault/documents/a-evidence.md"]
+        );
+
+        delete_path(&mut conn, "/vault/documents/z-trigger.md");
+        let detail = get_proposal_detail(&conn, "prop-del-src").unwrap().unwrap();
+        assert!(detail.source_doc_paths.is_empty());
+        assert_eq!(
+            detail.deleted_source_paths,
+            vec![
+                "/vault/documents/z-trigger.md",
+                "/vault/documents/a-evidence.md"
+            ]
+        );
+        assert_eq!(detail.status, "pending");
     }
 }
 
