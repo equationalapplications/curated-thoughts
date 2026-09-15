@@ -959,3 +959,87 @@ mod tests {
         assert_eq!(n, 0, "nothing is written when the guard fires");
     }
 }
+
+/// Seeding and inspection helpers shared by every test that exercises
+/// document deletion (issue #211): queries, queue, reconcile, lib, commit,
+/// proposals_review. One copy so the fixture proposal shape cannot drift.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Insert a pending `new_entity` proposal with one `fact_add` item citing
+    /// `sources`. The proposed name embeds `id` so two fixtures never
+    /// supersede each other by accident.
+    pub(crate) fn seed_pending_proposal(
+        conn: &Connection,
+        id: &str,
+        sources: &[(i64, ProposalSourceRole)],
+    ) {
+        let sources: Vec<NewProposalSource> = sources
+            .iter()
+            .map(|(doc_id, role)| NewProposalSource {
+                doc_id: *doc_id,
+                role: *role,
+            })
+            .collect();
+        insert_proposal(
+            conn,
+            &NewProposal {
+                id: id.into(),
+                kind: ProposalKind::NewEntity,
+                entity_id: None,
+                proposed_name: Some(format!("Entity {id}")),
+                proposed_type: Some("concept".into()),
+                reasoning: None,
+                model: "test".into(),
+            },
+            &[NewProposalItem {
+                id: format!("{id}-item"),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({
+                    "body": "A fact.",
+                    "tags": [],
+                    "confidence": "inferred"
+                }),
+                evidence: vec![],
+            }],
+            &sources,
+        )
+        .unwrap();
+    }
+
+    /// `(doc_path, doc_hash, role)` rows recorded for `proposal_id`.
+    pub(crate) fn deleted_source_rows(
+        conn: &Connection,
+        proposal_id: &str,
+    ) -> Vec<(String, String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT doc_path, doc_hash, role FROM curated_proposal_deleted_sources
+                 WHERE proposal_id = ?1 ORDER BY doc_path",
+            )
+            .unwrap();
+        stmt.query_map([proposal_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    /// Delete `path` through the production helper and commit.
+    pub(crate) fn delete_path(conn: &mut Connection, path: &str) -> usize {
+        let tx = conn.transaction().unwrap();
+        let n = crate::db::queries::delete_document(&tx, path).unwrap();
+        tx.commit().unwrap();
+        n
+    }
+
+    pub(crate) fn status_of(conn: &Connection, proposal_id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM curated_proposals WHERE id = ?1",
+            [proposal_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+}
