@@ -29,8 +29,14 @@ interface Props {
   focusProposalId?: string;
 }
 
-function summarizeCommitResult(result: CommitResult): string | null {
+function summarizeCommitResult(result: CommitResult, approving: boolean): string | null {
   const issues: string[] = [];
+  // An approval whose every accepted item was skipped (issue #211 spec D3:
+  // a stranded proposal's facts have no live evidence) persists as
+  // `rejected`. Say so, or the card just vanishes as if approved.
+  if (approving && result.proposal_status === "rejected") {
+    issues.push("Nothing committed");
+  }
   if (result.proposal_status === "partial") {
     issues.push("Applied partially");
   }
@@ -201,7 +207,7 @@ export function ReviewMode({
     setBusy(true);
     try {
       const result = await commitProposal(proposal.id, detail, "accept");
-      const notice = summarizeCommitResult(result);
+      const notice = summarizeCommitResult(result, true);
       if (notice) setActionNotice(notice);
       const nextId = nextQueueSelectionId(sortedQueue, proposal.id);
       setSelectedId(nextId);
@@ -233,7 +239,7 @@ export function ReviewMode({
         "reject",
         trimmed || undefined,
       );
-      const notice = summarizeCommitResult(result);
+      const notice = summarizeCommitResult(result, false);
       if (notice) setActionNotice(notice);
       const nextId = nextQueueSelectionId(sortedQueue, proposal.id);
       setSelectedId(nextId);
@@ -294,6 +300,7 @@ export function ReviewMode({
       const failedIds = new Set<string>();
       let approvedCount = 0;
       let sawPartial = false;
+      let committedNothing = 0;
       let totalConflicts = 0;
       let totalDroppedEdges = 0;
 
@@ -313,6 +320,7 @@ export function ReviewMode({
           );
           approvedCount += 1;
           if (result.proposal_status === "partial") sawPartial = true;
+          if (result.proposal_status === "rejected") committedNothing += 1;
           totalConflicts += result.conflicts.length;
           totalDroppedEdges += result.dropped_edges.length;
         } catch {
@@ -334,6 +342,9 @@ export function ReviewMode({
       const noticeParts: string[] = [];
       if (approvedCount > 0) {
         noticeParts.push(`Approved ${approvedCount}`);
+      }
+      if (committedNothing > 0) {
+        noticeParts.push(`${committedNothing} committed nothing`);
       }
       if (sawPartial || totalConflicts > 0 || totalDroppedEdges > 0) {
         if (sawPartial) noticeParts.push("some partial");

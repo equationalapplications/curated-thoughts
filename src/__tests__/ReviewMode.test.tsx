@@ -259,6 +259,28 @@ test("approve invokes resolve_proposal_cmd and calls onAction", async () => {
   );
 });
 
+test("approve that commits nothing says so instead of vanishing silently", async () => {
+  // Issue #211 spec D3: approving a stranded proposal skips every fact, so
+  // the backend persists it as `rejected`.
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "resolve_proposal_cmd") {
+      return Promise.resolve({
+        committed: [],
+        conflicts: [],
+        dropped_edges: [],
+        proposal_status: "rejected",
+      });
+    }
+    return defaultInvoke(cmd, args);
+  });
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+  fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+  await waitFor(() => expect(onAction).toHaveBeenCalled());
+  expect(await screen.findByText("Nothing committed")).toBeInTheDocument();
+});
+
 test("keyboard a approves the selected proposal", async () => {
   const onAction = vi.fn();
   renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);

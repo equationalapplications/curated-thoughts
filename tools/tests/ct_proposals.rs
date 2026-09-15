@@ -510,3 +510,29 @@ fn proposals_show_reports_deleted_sources() {
         assert_eq!(v["deleted_source_paths"][0], "/vault/gone.md");
     });
 }
+
+/// Issue #211 spec D3: the full card (`show`, and the review loop's `d`
+/// verb) warns that approving a stranded proposal skips its facts — but only
+/// while the proposal is still pending, since resolved ones cannot be
+/// approved. The seeded proposals cite no live sources, so both are stranded.
+#[test]
+fn proposals_show_warns_on_stranded_pending_only() {
+    const WARNING: &str = "All sources deleted — approving will skip facts";
+    with_seeded_proposals(|dir| {
+        let pending = run_ct(dir, &["proposals", "show", "prop-a"]);
+        assert!(pending.status.success());
+        let text = String::from_utf8_lossy(&pending.stdout);
+        assert!(
+            text.contains(WARNING),
+            "stranded pending card must warn: {text}"
+        );
+
+        let resolved = run_ct(dir, &["proposals", "show", "prop-approved"]);
+        assert!(resolved.status.success());
+        let text = String::from_utf8_lossy(&resolved.stdout);
+        assert!(
+            !text.contains(WARNING),
+            "a resolved proposal cannot be approved, so no warning: {text}"
+        );
+    });
+}

@@ -1147,9 +1147,14 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
         // `ct evidence regrade`) never touch the V23 table and fail loudly
         // on error, so the watcher — the only caller that swallows
         // per-event errors — is the fix point.
-        tauri_app_lib::db::connection::migrate_open_db(&probe, None).map_err(|e| {
-            WatchError::Db(e.context("brain.db migration failed at watcher startup"))
-        })?;
+        //
+        // Pass the brain.db directory, never `None`: a watcher can be the
+        // first migrating open of an old brain, and `db_dir` gates the V18
+        // repair's `repair-export-186/` backup and the V20 regrade export.
+        // Same argument the MCP server passes (`mcp_server.rs`).
+        tauri_app_lib::db::connection::migrate_open_db(&probe, brain.db_path.parent()).map_err(
+            |e| WatchError::Db(e.context("brain.db migration failed at watcher startup")),
+        )?;
     }
 
     let lock = match VaultLock::acquire(&brain.brain_dir) {
@@ -1570,11 +1575,14 @@ fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewIt
     // alone — it also fires for pre-V23 proposals with no recorded names.
     // The operator must see the skip-facts consequence before choosing `y`.
     if item.source_docs.is_empty() {
-        println!(
-            "All sources deleted — approving will skip facts unless a source returns at its original path."
-        );
+        println!("{STRANDED_WARNING}");
     }
 }
+
+/// Spec D3 (#211) stranded-proposal warning. Same copy as the Review desk's
+/// `STRANDED_MARKER` (`src/lib/reviewQueue.ts`).
+const STRANDED_WARNING: &str =
+    "All sources deleted — approving will skip facts unless a source returns at its original path.";
 
 /// Report the PERSISTED outcome, never the requested decision: an approval
 /// whose items hit the summary-update conflict path lands as `partial` (or
@@ -1622,6 +1630,12 @@ pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDeta
     }
     for p in &detail.deleted_source_paths {
         println!("deleted source: {p}");
+    }
+    // Spec D3 (#211): the review loop's `d` verb reaches this card before
+    // `y`, so it repeats `print_review_card`'s warning. Only a pending
+    // proposal can still be approved; `show` also renders resolved ones.
+    if detail.status == "pending" && detail.source_doc_paths.is_empty() {
+        println!("{STRANDED_WARNING}");
     }
     println!("{} item(s)", detail.items.len());
     for item in &detail.items {
