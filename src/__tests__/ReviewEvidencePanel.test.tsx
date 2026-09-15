@@ -46,16 +46,59 @@ describe("ReviewEvidencePanel", () => {
     );
   });
 
-  it("shows placeholder when no source documents are cited", () => {
-    const empty = makeProposalSummary({
-      id: "prop_empty",
-      target_name: "Empty",
+  it("marks a stranded proposal and names its deleted sources", () => {
+    const stranded = makeProposalSummary({
+      id: "prop_stranded",
+      target_name: "Stranded",
       created_at: 1,
       source_doc_paths: [],
+      deleted_source_paths: ["documents/gone.md"],
     });
 
-    render(<ReviewEvidencePanel proposal={empty} />);
-    expect(screen.getByText(/no source documents cited/i)).toBeInTheDocument();
+    render(<ReviewEvidencePanel proposal={stranded} />);
+
+    expect(
+      screen.getByText(
+        "All sources deleted — approving will skip facts unless a source returns at its original path.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Source deleted: gone.md")).toHaveAttribute(
+      "title",
+      "documents/gone.md",
+    );
+    expect(screen.queryByRole("button", { name: /gone\.md/ })).toBeNull();
+    expect(screen.queryByText(/no source documents cited/i)).toBeNull();
+  });
+
+  it("marks a proposal stranded before deleted sources were recorded", () => {
+    const legacy = makeProposalSummary({
+      id: "prop_legacy",
+      target_name: "Legacy",
+      created_at: 1,
+      source_doc_paths: [],
+      deleted_source_paths: [],
+    });
+
+    render(<ReviewEvidencePanel proposal={legacy} />);
+
+    expect(screen.getByText(/^All sources deleted/)).toBeInTheDocument();
+    expect(screen.queryByText(/no source documents cited/i)).toBeNull();
+  });
+
+  it("lists a deleted source beside live ones without the stranded marker", () => {
+    const partial = makeProposalSummary({
+      id: "prop_partial",
+      target_name: "Partial",
+      created_at: 1,
+      source_doc_paths: ["documents/notes.md"],
+      deleted_source_paths: ["documents/old.md"],
+    });
+
+    render(<ReviewEvidencePanel proposal={partial} />);
+
+    expect(screen.getByRole("button", { name: "notes.md" })).toBeInTheDocument();
+    expect(screen.getByText("Source deleted: old.md")).toBeInTheDocument();
+    expect(screen.queryByText(/^All sources deleted/)).toBeNull();
   });
 
   it("shows chunk placeholder when chunks are unavailable", () => {

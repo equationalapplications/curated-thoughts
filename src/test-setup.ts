@@ -87,6 +87,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         status: "pending",
         created_at: 100,
         source_doc_paths: [],
+        deleted_source_paths: [],
         items: [
           {
             id: "item_1",

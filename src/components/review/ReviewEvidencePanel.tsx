@@ -1,4 +1,5 @@
 import type { ProposalItem, ProposalSummary } from "../../lib/tauri";
+import { STRANDED_MARKER } from "../../lib/reviewQueue";
 
 function sourceDocLabel(path: string): string {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? path;
@@ -18,6 +19,7 @@ export function ReviewEvidencePanel({
   onSourceClick,
 }: Props) {
   const sources = proposal.source_doc_paths;
+  const deletedSources = proposal.deleted_source_paths;
   const evidence = (items ?? []).flatMap((item) => item.evidence);
 
   return (
@@ -29,7 +31,7 @@ export function ReviewEvidencePanel({
 
       <section className="review-evidence-section">
         <h4 className="review-evidence-label">Sources</h4>
-        {sources.length > 0 ? (
+        {sources.length > 0 && (
           <ul className="review-evidence-sources">
             {sources.map((path) => (
               <li key={path}>
@@ -44,9 +46,19 @@ export function ReviewEvidencePanel({
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="review-evidence-placeholder">
-            No source documents cited.
+        )}
+        {deletedSources.length > 0 && (
+          <ul className="review-evidence-sources" aria-label="Deleted sources">
+            {deletedSources.map((path) => (
+              <li key={path} className="review-evidence-source-deleted" title={path}>
+                Source deleted: {sourceDocLabel(path)}
+              </li>
+            ))}
+          </ul>
+        )}
+        {sources.length === 0 && (
+          <p className="review-evidence-placeholder review-evidence-stranded">
+            {STRANDED_MARKER}
           </p>
         )}
       </section>
