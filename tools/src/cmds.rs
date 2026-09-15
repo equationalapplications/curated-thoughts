@@ -1590,6 +1590,9 @@ pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDeta
     for p in &detail.source_doc_paths {
         println!("source: {p}");
     }
+    for p in &detail.deleted_source_paths {
+        println!("deleted source: {p}");
+    }
     println!("{} item(s)", detail.items.len());
     for item in &detail.items {
         println!(
