@@ -1377,7 +1377,7 @@ mod unit_tests {
         let mut types: Vec<&str> = result.edges.iter().map(|e| e.edge_type.as_str()).collect();
         types.sort_unstable();
         assert_eq!(types, vec!["about", "owns", "worksFor"]);
-        assert_eq!(result.partitions_truncated, false);
+        assert!(!result.partitions_truncated);
         let by_type: HashMap<&str, &str> = result
             .edges
             .iter()
@@ -1463,7 +1463,7 @@ mod unit_tests {
         seed_edge(&conn, "ent_a", "nodeA", "n_a3", "owns");
         let result =
             wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
-        assert_eq!(result.partitions_truncated, true);
+        assert!(result.partitions_truncated);
         let partitions: HashSet<&str> = result.edges.iter().map(|e| e.entity_id.as_str()).collect();
         assert_eq!(partitions.len(), 8);
         assert!(partitions.contains("ent_a")); // 3 edges ranks first
@@ -1619,7 +1619,7 @@ mod unit_tests {
         }
         let result =
             wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
-        assert_eq!(result.truncated, true);
+        assert!(result.truncated);
         assert!(result.nodes.len() <= MAX_TRAVERSAL_NODES);
     }
 }

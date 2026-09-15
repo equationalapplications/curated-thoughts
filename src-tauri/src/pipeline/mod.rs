@@ -18,7 +18,7 @@ use std::sync::mpsc::SyncSender;
 use crate::chunker::{chunk_autodetect, should_ingest_extension, AstLang, ChunkStrategy};
 use crate::config::BrainConfig;
 use crate::db::queries::{
-    delete_document, delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
+    delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
     mark_document_error, mark_document_indexed, upsert_document,
 };
 use crate::embedder::{embed_batch, EmbedProfile};
@@ -37,7 +37,6 @@ pub enum PipelineJob {
         force: bool,
         count_pending: bool,
     },
-    Delete(String),
 }
 
 pub enum PipelineStatusEvent {
@@ -190,7 +189,6 @@ impl PipelineWorker {
         while let Some(job) = next_job.take().or_else(|| self.rx.recv().ok()) {
             let job_path = match &job {
                 PipelineJob::Ingest { path, .. } => path.clone(),
-                PipelineJob::Delete(path) => path.clone(),
             };
             // Epoch guard (spec §4.1): a superseded worker must not touch the
             // pending counter, the status channel, or the database. Check
@@ -262,39 +260,6 @@ impl PipelineWorker {
                                 write_error_log(vault_root.as_deref(), &msg);
                             }
                         }
-                    }
-                    PipelineJob::Delete(path) => {
-                        // Epoch guard inside catch_unwind: this arm returns `()`,
-                        // not `Ok(())`, because the closure is panicking-unwind-safe
-                        // and the outer driver loop is what owns the Result type.
-                        if !self.enter(Stage::Deleting, Some(&path)) {
-                            return;
-                        }
-                        // Remove shadow copy from .brain/converted/ (PDF/DOCX conversion artifact)
-                        if let Some(original) = std::path::Path::new(&path).file_stem() {
-                            let shadow_root = worker_vault_root.as_deref().or_else(|| {
-                                std::path::Path::new(&path)
-                                    .parent()
-                                    .and_then(|p| p.parent())
-                            });
-                            if let Some(vault_root) = shadow_root {
-                                let shadow = vault_root
-                                    .join(".brain")
-                                    .join("converted")
-                                    .join(format!("{}.md", original.to_string_lossy()));
-                                let _ = std::fs::remove_file(&shadow);
-                            }
-                        }
-                        if let Err(e) = delete_document(&conn, &path) {
-                            eprintln!("[pipeline] delete error {path}: {e}");
-                        }
-                        conn.execute(
-                            "UPDATE wiki_pages SET status = 'orphaned'
-                             WHERE status NOT IN ('rejected', 'orphaned')
-                             AND source_doc_ids LIKE ?1",
-                            [format!("%{}%", path)],
-                        )
-                        .ok();
                     }
                 }
             }));
@@ -952,7 +917,6 @@ mod tests {
     fn rechunk_does_not_count_pending_by_default() {
         match PipelineJob::rechunk("/vault/documents/note.md") {
             PipelineJob::Ingest { count_pending, .. } => assert!(!count_pending),
-            _ => panic!("expected PipelineJob::Ingest variant"),
         }
     }
 
@@ -960,7 +924,6 @@ mod tests {
     fn rechunk_for_reembed_counts_pending() {
         match PipelineJob::rechunk_for_reembed("/vault/documents/note.md") {
             PipelineJob::Ingest { count_pending, .. } => assert!(count_pending),
-            _ => panic!("expected PipelineJob::Ingest variant"),
         }
     }
 

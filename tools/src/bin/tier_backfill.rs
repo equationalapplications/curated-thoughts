@@ -62,7 +62,7 @@ fn main() -> Result<()> {
             ),
             None => println!("no marker: this would be run 1, using config default {tier:?}"),
         }
-        println!("\n{:<40} {}", "ENTRY ID", "TIER");
+        println!("\n{:<40} TIER", "ENTRY ID");
         for (id, t) in &plan {
             println!("{id:<40} {t}");
         }

@@ -84,10 +84,13 @@ jobs:
           mkdir -p src-tauri/binaries
           touch src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu
 
-      # Warn-only on purpose. Turning on `-D warnings` in the same change that
-      # introduces clippy would block the pipeline on an untriaged backlog of
-      # lints unrelated to whatever PR happens to be open. This makes the
-      # backlog visible; flipping it to blocking is tracked separately.
+      # Blocking: -D warnings escalates every clippy and rustc warning to an
+      # error. Rolling stable means a future Rust release can add a lint and
+      # fail CI with no repo change; the response is to fix the finding, or
+      # add a targeted #[allow(clippy::...)] with a reason comment when the
+      # lint is wrong for the code. Version pinning stays rejected (see
+      # 2026-09-04-ingest-integrity-wave-design.md §5). Spec:
+      # docs/superpowers/specs/2026-09-15-clippy-enforcement-design.md
       #
       # Must run after the placeholder step above: tauri-build validates the
       # externalBin paths unconditionally (not just under mcp-server), so the
@@ -95,9 +98,15 @@ jobs:
       # --features mcp-server though — clippy does not need the sidecar itself.
       # --features test-utils: the integration tests under --all-targets import
       # items gated behind that feature.
-      - name: Clippy (warn-only)
-        continue-on-error: true
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils -- -D warnings
+
+      # tools/ is a separate manifest the step above never covered. Its
+      # backlog was measured at one style lint before flipping (spec §3.4).
+      # Building it also re-lints the src-tauri lib as a path dependency
+      # without test-utils, which catches dead code the main flags hide.
+      - name: Clippy (tools)
+        run: cargo clippy --manifest-path tools/Cargo.toml --all-targets -- -D warnings
 
       - name: Tests + MCP integration
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1

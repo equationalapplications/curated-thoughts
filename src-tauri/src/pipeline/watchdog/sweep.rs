@@ -187,7 +187,6 @@ mod tests {
             .iter()
             .map(|j| match j {
                 PipelineJob::Ingest { path, .. } => path,
-                PipelineJob::Delete(path) => path,
             })
             .collect();
         assert_eq!(got, vec!["/a.md".to_string(), "/b.md".to_string()]);
@@ -211,7 +210,6 @@ mod tests {
             .iter()
             .map(|j| match j {
                 PipelineJob::Ingest { path, .. } => path,
-                PipelineJob::Delete(path) => path,
             })
             .collect();
         assert_eq!(got, vec!["/ok.md".to_string()]);
@@ -295,7 +293,6 @@ mod tests {
             .iter()
             .map(|j| match j {
                 PipelineJob::Ingest { path, force, .. } => (path, force),
-                PipelineJob::Delete(path) => (path, false),
             })
             .collect();
         assert_eq!(
