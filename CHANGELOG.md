@@ -1,3 +1,25 @@
+## [2.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.10.2...v2.11.0) (2026-09-15)
+
+### Features
+
+* **ct:** proposals show lists deleted sources ([c2510de](https://github.com/equationalapplications/curated-thoughts/commit/c2510de4923d1b1d16a7e8ec912175be011c5110)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **db:** delete_document records pending-proposal provenance in the caller's tx ([c8e929c](https://github.com/equationalapplications/curated-thoughts/commit/c8e929cdc7e9f530ad87d0e78d6224ffb186758f)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **db:** V23 deleted-source provenance table, never stamped past V22 ([2f09f18](https://github.com/equationalapplications/curated-thoughts/commit/2f09f183306381bdffdf75f4bd6117d004bf5861)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **proposals:** supersede a stranded proposal when its deleted trigger's bytes reappear ([77e5d76](https://github.com/equationalapplications/curated-thoughts/commit/77e5d768d03ba3110852015ea94a78ca05016385)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **review:** mark deleted and stranded sources in the Review desk ([ed35698](https://github.com/equationalapplications/curated-thoughts/commit/ed356981d129875e2c691e666935f0f2ad03d1d7)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **review:** surface deleted sources on proposals, review queue and commit label ([bffa076](https://github.com/equationalapplications/curated-thoughts/commit/bffa0760e74b0e6873ee40f80f8d36ce86ddba90)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+
+### Bug Fixes
+
+* **#211:** PR [#214](https://github.com/equationalapplications/curated-thoughts/issues/214) review wave — a11y header, watcher backup dir, stranded feedback ([d6e3deb](https://github.com/equationalapplications/curated-thoughts/commit/d6e3deb4a81b72d524acb63874f7ae02dec4496d)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211) [#186](https://github.com/equationalapplications/curated-thoughts/issues/186) [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **a11y:** regenerate docs/a11y/index.css for the [#211](https://github.com/equationalapplications/curated-thoughts/issues/211) review-desk markers ([92e3ea6](https://github.com/equationalapplications/curated-thoughts/commit/92e3ea6fa4e07beea2fe1a2df0177330434ce060))
+* **ct:** review card shows deleted sources and the stranded warning ([3e5b022](https://github.com/equationalapplications/curated-thoughts/commit/3e5b022e7a4cff1885ce003fc6ae89bcd322099b)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **queue:** record deleted sources on watcher Remove and vanished-file deletes ([001d69f](https://github.com/equationalapplications/curated-thoughts/commit/001d69f05b05b76e86e55eb3cf63b5a486463ed1)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **reconcile:** record deleted sources on vanished, excluded and .brain purges ([f6dcc71](https://github.com/equationalapplications/curated-thoughts/commit/f6dcc7133a6155592207bdd3065e214a4a1998de)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **reconcile:** startup excluded-row purge records deleted sources in one tx ([44d2297](https://github.com/equationalapplications/curated-thoughts/commit/44d22971620944b56a23ac23d8990a475f7864e5)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **tools:** migrate at the ct watch startup probe so deletes work on pre-V23 brains ([0791315](https://github.com/equationalapplications/curated-thoughts/commit/079131565a8e39c13dbebfe895f40c5ea46cd30f)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **vault:** keep pending proposals stranded with provenance on no-restore switch ([bbbcbea](https://github.com/equationalapplications/curated-thoughts/commit/bbbcbea857a64d621f53b8995a104e73686fdeef)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211) [#213](https://github.com/equationalapplications/curated-thoughts/issues/213)
+
 ## [2.10.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.10.1...v2.10.2) (2026-09-15)
 
 ### Bug Fixes
