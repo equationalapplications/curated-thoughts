@@ -7,6 +7,7 @@
 //!   2. std::fs::canonicalize (resolve filesystem-level symlinks; fallback to absolute)
 //!   3. Vault-root guard (explicit `vault_root` argument, falling back to
 //!      `CURATED_VAULT_ROOT`; reject paths outside it)
+//!      3b. Extension gate (`should_ingest_extension`, issue #203); Deletes bypass it
 //!   4. sha256 the bytes; upsert documents row with status='pending'
 //!
 //! For Delete events: skip step 4 (file is gone); DELETE the documents row.
@@ -99,6 +100,18 @@ pub fn enqueue_vault_event(
             "DELETE FROM documents WHERE path = ?1",
             rusqlite::params![&path_str],
         )?;
+        return Ok(());
+    }
+
+    // Issue #203: gate STAGING by extension, mirroring the walker
+    // (`collect_files`) and the pipeline's own early-return. A row for a
+    // non-ingestable file could never leave `pending`, so the supervisor
+    // sweep would re-enqueue it forever. Remove events above deliberately
+    // bypass this gate: a row staged before the gate existed must still be
+    // deletable when its file goes away. Read from `abs` (virtual path),
+    // the same path the walker and pipeline take the extension from.
+    let ext = abs.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !crate::chunker::should_ingest_extension(ext) {
         return Ok(());
     }
 
@@ -745,8 +758,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         let excluded = vec![
-            write_at(&root, ".brain/errors.log", b"x"),
-            write_at(&root, "nested/.brain/x.log", b"x"),
+            write_at(&root, ".brain/errors.md", b"x"),
+            write_at(&root, "nested/.brain/x.md", b"x"),
         ];
         let controls = [
             write_at(&root, "notes.md", b"a"),
@@ -810,11 +823,11 @@ mod tests {
         std::fs::create_dir_all(root.join("nested")).unwrap();
         let real = tmp.path().join("elsewhere-no-brain-in-name");
         std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join("x.log"), b"x").unwrap();
+        std::fs::write(real.join("x.md"), b"x").unwrap();
         std::os::unix::fs::symlink(&real, root.join("nested").join(".brain")).unwrap();
 
         let mut conn = open_seeded_conn();
-        let virtual_path = root.join("nested").join(".brain").join("x.log");
+        let virtual_path = root.join("nested").join(".brain").join("x.md");
         enqueue_vault_event(&mut conn, modify(), &virtual_path, Some(&root)).unwrap();
 
         assert!(
@@ -875,7 +888,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("vault");
         std::fs::create_dir_all(&root).unwrap();
-        let p = write_at(&root, ".brain/errors.log", b"x");
+        let p = write_at(&root, ".brain/errors.md", b"x");
 
         // NOTE: CURATED_VAULT_ROOT must be unset for this test, but tests
         // run in threads sharing one process env — `enqueue_out_of_vault_*`
@@ -904,7 +917,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let outside = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
-        let p = write_at(&outside, ".brain/x.log", b"x");
+        let p = write_at(&outside, ".brain/x.md", b"x");
 
         let mut conn = open_seeded_conn();
         // Root passed explicitly, but the path is outside it. The existing
@@ -959,6 +972,107 @@ mod tests {
         assert!(
             staged_paths(&conn).is_empty(),
             "Remove must run BEFORE the gate so old rows can heal"
+        );
+    }
+
+    // ---- issue #203: extension gate ------------------------------------
+
+    /// Spec tests 1, 3, 4, 5: non-ingestable files never stage; an
+    /// ingestable sibling in the same vault still does.
+    #[test]
+    fn extension_gate_rejects_non_ingestable_and_stages_control() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut conn = open_seeded_conn();
+        for rel in ["app.log", "SHOUT.LOG", "Makefile", "photo.png"] {
+            let p = write_at(&root, rel, b"x");
+            enqueue_vault_event(&mut conn, modify(), &p, Some(&root)).unwrap();
+        }
+        assert!(
+            staged_paths(&conn).is_empty(),
+            "non-ingestable extensions (incl. uppercase and extensionless) \
+             must not stage: {:?}",
+            staged_paths(&conn)
+        );
+
+        let md = write_at(&root, "note.md", b"y");
+        enqueue_vault_event(&mut conn, modify(), &md, Some(&root)).unwrap();
+        let abs = std::path::absolute(&md).unwrap();
+        assert_eq!(
+            staged_paths(&conn),
+            vec![abs.to_string_lossy().into_owned()]
+        );
+    }
+
+    /// Spec test 2: a row staged before the gate existed is still healed
+    /// by its Remove event.
+    #[test]
+    fn extension_gate_does_not_block_remove_of_pre_gate_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = write_at(&root, "app.log", b"x");
+        let abs = std::path::absolute(&p).unwrap();
+
+        let mut conn = open_seeded_conn();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'deadbeef', 'user_doc', 'pending')",
+            rusqlite::params![abs.to_string_lossy()],
+        )
+        .unwrap();
+
+        enqueue_vault_event(
+            &mut conn,
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+            &p,
+            Some(&root),
+        )
+        .unwrap();
+        assert!(staged_paths(&conn).is_empty(), "Remove must heal the row");
+    }
+
+    /// Spec test 6: the gate does not depend on vault-root resolution
+    /// (`ct watch` passes `None`; the desktop never sets the env var).
+    #[test]
+    fn extension_gate_active_without_vault_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = write_at(tmp.path(), "app.log", b"x");
+
+        let _env = VAULT_ENV_LOCK.lock().unwrap();
+        temp_env::with_var("CURATED_VAULT_ROOT", None::<&str>, || {
+            let mut conn = open_seeded_conn();
+            enqueue_vault_event(&mut conn, modify(), &p, None).unwrap();
+            assert!(staged_paths(&conn).is_empty());
+        });
+    }
+
+    /// Spec test 7: the gate runs before `std::fs::read`. Without it, the
+    /// read's NotFound arm would DELETE this seeded row; with it, the event
+    /// returns before any I/O and the row is untouched.
+    #[test]
+    fn extension_gate_precedes_file_read() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("gone.log"); // never written to disk
+        let abs = std::path::absolute(&p).unwrap();
+
+        let mut conn = open_seeded_conn();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'deadbeef', 'user_doc', 'pending')",
+            rusqlite::params![abs.to_string_lossy()],
+        )
+        .unwrap();
+
+        enqueue_vault_event(&mut conn, modify(), &p, Some(&root)).unwrap();
+        assert_eq!(
+            staged_paths(&conn),
+            vec![abs.to_string_lossy().into_owned()],
+            "gate must return before the NotFound delete arm"
         );
     }
 }
