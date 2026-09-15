@@ -447,6 +447,10 @@ fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
         return;
     };
     let log_path = vault.join(".brain").join("errors.log");
+    // Issue #211 spec D6 L1: vault setup no longer pre-creates `.brain`, and
+    // `OpenOptions::create` creates the file, not its parent. Same
+    // ignore-the-error pattern as `write_synthesis_error`.
+    let _ = std::fs::create_dir_all(vault.join(".brain"));
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -997,6 +1001,20 @@ mod tests {
         let id_a = entity_id_for_path("/Users/foo/Vault/src/db.rs", Some("/Users/foo/Vault"));
         let id_b = entity_id_for_path("/Users/foo/Vault/src/db.rs", Some("/Users/foo/Vault/"));
         assert_eq!(id_a, id_b);
+    }
+
+    /// Issue #211 spec D6 L1: nothing pre-creates `<vault>/.brain` any more,
+    /// and `OpenOptions::create` does not create parents.
+    #[test]
+    fn write_error_log_creates_a_missing_brain_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(!tmp.path().join(".brain").exists());
+
+        write_error_log(Some(tmp.path()), "boom");
+
+        let log = std::fs::read_to_string(tmp.path().join(".brain").join("errors.log"))
+            .expect("errors.log must be written even without a pre-created .brain");
+        assert!(log.contains("] boom"), "log line missing: {log}");
     }
 }
 

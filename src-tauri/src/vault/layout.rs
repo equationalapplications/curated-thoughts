@@ -26,8 +26,6 @@ pub fn create_vault_layout(vault_root: &Path) -> Result<()> {
 
     std::fs::create_dir_all(vault_root.join(crate::vault::safe_path::AGENTS_DEPOSIT_DIR))?;
 
-    std::fs::create_dir_all(vault_root.join(".brain").join("converted"))?;
-
     Ok(())
 }
 
@@ -46,7 +44,8 @@ mod tests {
         assert!(vault.join("immutable-source-files").is_dir());
         assert!(vault.join("wiki").is_dir());
         assert!(vault.join("immutable-source-files/agents").is_dir());
-        assert!(vault.join(".brain/converted").is_dir());
+        // Issue #211 spec D6 L1: the shadow-copy directory is dead.
+        assert!(!vault.join(".brain/converted").exists());
     }
 
     #[test]

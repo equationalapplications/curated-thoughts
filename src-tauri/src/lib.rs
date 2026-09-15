@@ -607,7 +607,6 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(root.join(AGENTS_DEPOSIT_DIR)).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1554,8 +1553,6 @@ async fn switch_vault(
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(new_root.join(AGENTS_DEPOSIT_DIR)).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(new_root.join(".brain").join("converted"))
-        .map_err(|e| e.to_string())?;
 
     {
         let mut g = watcher_started.0.lock().unwrap();
@@ -3443,10 +3440,6 @@ pub fn run() {
             eprintln!("warning: failed to create default vault immutable-source-files/agents: {e}");
             all_dirs_created = false;
         }
-        if let Err(e) = std::fs::create_dir_all(default_vault.join(".brain").join("converted")) {
-            eprintln!("warning: failed to create default vault .brain/converted: {e}");
-            all_dirs_created = false;
-        }
         if all_dirs_created {
             if let Some(vault_str) = default_vault.to_str() {
                 if let Err(e) = config.set_vault_path(vault_str) {
@@ -3468,11 +3461,6 @@ pub fn run() {
             }
             if let Err(e) = std::fs::create_dir_all(fallback_vault.join(AGENTS_DEPOSIT_DIR)) {
                 eprintln!("error: failed to create fallback vault subdir immutable-source-files/agents: {e}");
-                fallback_dirs_created = false;
-            }
-            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted"))
-            {
-                eprintln!("error: failed to create fallback vault subdir .brain/converted: {e}");
                 fallback_dirs_created = false;
             }
             if fallback_dirs_created {

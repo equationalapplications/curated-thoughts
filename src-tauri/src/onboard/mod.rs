@@ -303,7 +303,6 @@ mod tests {
                 assert!(vault.join("immutable-source-files").is_dir());
                 assert!(vault.join("wiki").is_dir());
                 assert!(vault.join("immutable-source-files/agents").is_dir());
-                assert!(vault.join(".brain/converted").is_dir());
             },
         );
     }
