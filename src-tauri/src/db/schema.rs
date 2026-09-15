@@ -465,6 +465,24 @@ pub const MIGRATION_V21: &str = "
 ALTER TABLE curated_proposals ADD COLUMN reviewed_by TEXT;
 ";
 
+/// V23 — deleted-source provenance for pending proposals (issue #211 spec D2).
+///
+/// Idempotent DDL executed on EVERY `migrate()` call, not gated on
+/// `version < 23`. The stamp is separate and gated on V22 having stamped:
+/// see the apply site in `connection.rs`.
+pub const DELETED_SOURCES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS curated_proposal_deleted_sources (
+    proposal_id TEXT    NOT NULL REFERENCES curated_proposals(id) ON DELETE CASCADE,
+    doc_path    TEXT    NOT NULL,
+    doc_hash    TEXT    NOT NULL,
+    role        TEXT    NOT NULL CHECK(role IN ('trigger','evidence')),
+    deleted_at  INTEGER NOT NULL,
+    PRIMARY KEY (proposal_id, doc_path)
+);
+CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
+    ON curated_proposal_deleted_sources(doc_hash);
+";
+
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
 ///
 /// The V16 CHECK is the database-level floor; this is the same set expressed
