@@ -7,6 +7,7 @@ export function makeProposalSummary(
     kind: "new_entity",
     entity_id: null,
     source_doc_paths: [],
+    deleted_source_paths: [],
     item_counts: {
       total: 1,
       facts: 1,
@@ -36,6 +37,7 @@ export function makeProposalDetail(
     status: "pending",
     created_at: summary.created_at,
     source_doc_paths: summary.source_doc_paths,
+    deleted_source_paths: summary.deleted_source_paths,
     items: [
       {
         id: "item_fact_1",

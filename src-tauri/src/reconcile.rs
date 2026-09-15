@@ -188,10 +188,7 @@ pub fn reconcile_vault(
     let tx = conn.unchecked_transaction()?;
 
     for (old_path, _) in &excluded {
-        tx.execute(
-            "DELETE FROM documents WHERE path = ?1",
-            rusqlite::params![old_path],
-        )?;
+        crate::db::queries::delete_document(&tx, old_path)?;
         outcome.deleted.push((*old_path).clone());
     }
 
@@ -214,10 +211,7 @@ pub fn reconcile_vault(
                 outcome.ambiguous.push((*old_path).clone());
             }
             None => {
-                tx.execute(
-                    "DELETE FROM documents WHERE path = ?1",
-                    rusqlite::params![old_path],
-                )?;
+                crate::db::queries::delete_document(&tx, old_path)?;
                 outcome.deleted.push((*old_path).clone());
             }
         }
@@ -231,10 +225,10 @@ pub fn reconcile_vault(
 /// component, and nothing else. Used only by the empty-walk branch.
 ///
 /// Wrapped in a transaction matching the main path so a mid-loop rusqlite
-/// error rolls back rather than leaving a half-deleted index. Chunk cleanup
-/// relies on `chunks.doc_id ON DELETE CASCADE`, which fires only with
-/// `PRAGMA foreign_keys=ON` — set in `db/connection.rs:35` for every
-/// connection opened through the standard path.
+/// error rolls back rather than leaving a half-deleted index. Each delete goes
+/// through `queries::delete_document`, which records pending-proposal
+/// provenance before `chunks.doc_id ON DELETE CASCADE` fires (foreign keys are
+/// on via `migrate()`, `db/connection.rs:220`, or the bundled SQLite default).
 fn purge_brain_rows(conn: &Connection, vault_root: &Path) -> Result<ReconcileOutcome> {
     let mut outcome = ReconcileOutcome::default();
 
@@ -253,12 +247,12 @@ fn purge_brain_rows(conn: &Connection, vault_root: &Path) -> Result<ReconcileOut
         return Ok(outcome);
     }
 
+    // `unchecked_transaction` because this function (like `reconcile_vault`)
+    // only holds `&Connection`; the checked `transaction()` needs `&mut`.
+    // Every statement inside propagates with `?`, so a dropped tx rolls back.
     let tx = conn.unchecked_transaction()?;
     for path in &doomed {
-        tx.execute(
-            "DELETE FROM documents WHERE path = ?1",
-            rusqlite::params![path],
-        )?;
+        crate::db::queries::delete_document(&tx, path)?;
         outcome.deleted.push(path.clone());
     }
     tx.commit()?;
@@ -713,5 +707,63 @@ mod tests {
 
         assert!(out.deleted.is_empty());
         assert_eq!(path_of(&conn, wiki_id), s(&wiki));
+    }
+
+    // ---- issue #211: deletion provenance (spec test 11) ----------------
+
+    use crate::db::proposals::test_support::{deleted_source_rows, seed_pending_proposal};
+    use crate::db::proposals::ProposalSourceRole::Trigger;
+
+    #[test]
+    fn vanished_delete_records_deleted_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let survivor = walked(tmp.path(), "kept.md", b"# kept");
+        let gone_path = s(&tmp.path().join("gone.md"));
+        let gone_id = seed_doc(&conn, &gone_path, &hash_of(b"# gone"), "user_doc", 1);
+        seed_pending_proposal(&conn, "prop-gone", &[(gone_id, Trigger)]);
+
+        reconcile_vault(&conn, &[survivor], tmp.path()).unwrap();
+
+        assert_eq!(
+            deleted_source_rows(&conn, "prop-gone"),
+            vec![(gone_path, hash_of(b"# gone"), "trigger".into())]
+        );
+    }
+
+    #[test]
+    fn excluded_prepass_delete_records_deleted_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let nm = s(&root.join("node_modules").join("x.md"));
+        let nm_id = seed_doc(&conn, &nm, "h-nm", "user_doc", 1);
+        seed_pending_proposal(&conn, "prop-nm", &[(nm_id, Trigger)]);
+        let keep = walked(&root, "notes.md", b"real");
+        seed_doc(
+            &conn,
+            &s(&keep.virtual_path),
+            &hash_of(b"real"),
+            "user_doc",
+            1,
+        );
+
+        reconcile_vault(&conn, std::slice::from_ref(&keep), &root).unwrap();
+
+        assert_eq!(deleted_source_rows(&conn, "prop-nm").len(), 1);
+    }
+
+    #[test]
+    fn empty_walk_brain_purge_records_deleted_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let brain = s(&root.join(".brain").join("errors.log"));
+        let brain_id = seed_doc(&conn, &brain, "h-brain", "user_doc", 1);
+        seed_pending_proposal(&conn, "prop-brain", &[(brain_id, Trigger)]);
+
+        reconcile_vault(&conn, &[], &root).unwrap();
+
+        assert_eq!(deleted_source_rows(&conn, "prop-brain").len(), 1);
     }
 }

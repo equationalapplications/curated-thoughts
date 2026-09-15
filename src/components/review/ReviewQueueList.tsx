@@ -1,5 +1,5 @@
 import type { ProposalSummary } from "../../lib/tauri";
-import { sortReviewQueue } from "../../lib/reviewQueue";
+import { STRANDED_MARKER, sortReviewQueue } from "../../lib/reviewQueue";
 
 function sourceLabel(path: string): string {
   return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? path;
@@ -68,6 +68,8 @@ export function ReviewQueueList({
       <ul className="review-queue-cards" aria-label="Review queue">
         {sorted.map((proposal) => {
           const sources = proposal.source_doc_paths.map(sourceLabel);
+          const deletedSources = proposal.deleted_source_paths.map(sourceLabel);
+          const stranded = proposal.source_doc_paths.length === 0;
           const active = selectedId === proposal.id;
           const checked = checkedIds.has(proposal.id);
 
@@ -101,6 +103,16 @@ export function ReviewQueueList({
                 {sources.length > 0 && (
                   <span className="review-queue-item-sources">
                     {sources.join(", ")}
+                  </span>
+                )}
+                {deletedSources.length > 0 && (
+                  <span className="review-queue-item-deleted">
+                    {deletedSources.map((name) => `Source deleted: ${name}`).join(", ")}
+                  </span>
+                )}
+                {stranded && (
+                  <span className="review-queue-item-stranded" title={STRANDED_MARKER}>
+                    All sources deleted
                   </span>
                 )}
               </button>

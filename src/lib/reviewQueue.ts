@@ -1,3 +1,7 @@
+/** Stranded-proposal marker copy (issue #211 spec D3). */
+export const STRANDED_MARKER =
+  "All sources deleted — approving will skip facts unless a source returns at its original path.";
+
 /** Oldest-first queue order (matches editorial desk default). */
 export function sortReviewQueue<T extends { id: string; created_at: number }>(
   queue: T[],

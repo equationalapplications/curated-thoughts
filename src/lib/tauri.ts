@@ -198,6 +198,7 @@ export interface ProposalSummary {
   target_name: string;
   entity_id?: string | null;
   source_doc_paths: string[];
+  deleted_source_paths: string[];
   item_counts: ProposalItemCounts;
   created_at: number;
   age_secs: number;
@@ -235,6 +236,7 @@ export interface ProposalDetail {
   status: string;
   created_at: number;
   source_doc_paths: string[];
+  deleted_source_paths: string[];
   items: ProposalItem[];
 }
 

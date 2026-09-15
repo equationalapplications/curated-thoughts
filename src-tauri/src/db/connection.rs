@@ -1,8 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
-    MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-    MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2, MIGRATION_V21,
-    MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    DELETED_SOURCES_DDL, MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13,
+    MIGRATION_V14, MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2,
+    MIGRATION_V21, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -701,6 +701,27 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         }
     }
 
+    // V23 — `curated_proposal_deleted_sources` (issue #211 spec D2).
+    //
+    // The DDL is ungated, like the curated_agent_log index below: every open,
+    // rooted or not, gets the table, so no delete path depends on V22's state.
+    // The STAMP is gated on V22 having stamped. `migrate()` gates on
+    // MAX(version), so stamping 23 while a rootless open has deferred V22
+    // would make every later rooted open skip V22 forever, and its FATAL
+    // re-warn with it.
+    conn.execute_batch(DELETED_SOURCES_DDL)?;
+    let stamped: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (23)",
+            [],
+        )?;
+    }
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -886,6 +907,9 @@ mod tests {
         // vault root, so V22 refuses to stamp and this assertion holds at
         // 21; the bound is exercised by the integration test that calls
         // `migrate(Some(VaultRoots))` directly.
+        // V23 (issue #211) creates `curated_proposal_deleted_sources` on
+        // every open but stamps only once V22 has, so a rootless open still
+        // caps at 21.
         assert_eq!(
             max_version, 21,
             "open_in_memory has no vault root, so V22 refuses to stamp and the schema caps at 21"
@@ -2786,7 +2810,10 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 22, "V22 must be stamped when the migration runs");
+        assert_eq!(
+            version, 23,
+            "V22 then V23 must be stamped when the migration runs"
+        );
 
         let rewritten_path: String = conn
             .query_row(
@@ -2850,5 +2877,86 @@ mod tests {
             still_canonical, seeded_path,
             "a deferred V22 must not modify the seeded row"
         );
+    }
+
+    /// Issue #211 spec D2: the deleted-sources table exists on EVERY open,
+    /// including rootless ones, without stamping 23 past a deferred V22.
+    #[test]
+    fn deleted_sources_table_exists_on_rootless_open_without_stamping_23() {
+        let conn = open_in_memory().unwrap();
+        let count = |kind: &str, name: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                rusqlite::params![kind, name],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count("table", "curated_proposal_deleted_sources"), 1);
+        assert_eq!(
+            count("index", "idx_curated_proposal_deleted_sources_hash"),
+            1
+        );
+
+        // Idempotent: a second pass must not fail on the existing table.
+        migrate(&conn, None::<VaultRoots>, None).expect("second migrate must succeed");
+
+        let v23: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version = 23",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            v23, 0,
+            "a rootless open must not stamp 23 while V22 is deferred"
+        );
+    }
+
+    /// Issue #211 spec D2 / Principle 4 regression: stamping 23 on a
+    /// rootless open would make every later rooted open read MAX = 23, skip
+    /// `if version < 22`, and never unify paths.
+    #[test]
+    fn v23_never_stamps_past_deferred_v22_so_a_later_rooted_open_still_unifies() {
+        // open_in_memory() is rootless: V22 deferred, MAX(version) = 21.
+        let conn = open_in_memory().unwrap();
+        let canonical_root = "/private/var/vault";
+        let configured_root = "/Users/kurt/vault";
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) \
+             VALUES (?1, 'h-v23', 'user_doc', 'indexed')",
+            rusqlite::params![format!("{canonical_root}/notes.md")],
+        )
+        .unwrap();
+
+        migrate(&conn, None::<VaultRoots>, None).expect("rootless migrate");
+        let max_version = |c: &Connection| -> i64 {
+            c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(max_version(&conn), 21, "rootless opens cap at 21");
+
+        migrate(
+            &conn,
+            Some(VaultRoots {
+                configured: configured_root.to_string(),
+                canonical: canonical_root.to_string(),
+            }),
+            None,
+        )
+        .expect("rooted migrate");
+
+        let path: String = conn
+            .query_row("SELECT path FROM documents WHERE hash = 'h-v23'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            path,
+            format!("{configured_root}/notes.md"),
+            "V22 must still run on the first rooted open"
+        );
+        assert_eq!(max_version(&conn), 23, "rooted open stamps 22 then 23");
     }
 }

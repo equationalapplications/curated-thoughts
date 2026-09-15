@@ -480,3 +480,59 @@ fn proposals_show_renders_evidence_quotes() {
         assert!(text.contains("/vault/anchor-doc.md"), "doc path: {text}");
     });
 }
+
+/// Issue #211 spec D3: `show` names sources deleted while the proposal was
+/// pending, in both text and JSON modes.
+#[test]
+fn proposals_show_reports_deleted_sources() {
+    with_seeded_proposals(|dir| {
+        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_deleted_sources
+                 (proposal_id, doc_path, doc_hash, role, deleted_at)
+             VALUES ('prop-a', '/vault/gone.md', 'h-gone', 'trigger', 1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let text_out = run_ct(dir, &["proposals", "show", "prop-a"]);
+        assert!(text_out.status.success());
+        let text = String::from_utf8_lossy(&text_out.stdout);
+        assert!(
+            text.contains("deleted source: /vault/gone.md"),
+            "text mode must list deleted sources: {text}"
+        );
+
+        let json_out = run_ct(dir, &["proposals", "show", "prop-a", "--json"]);
+        assert!(json_out.status.success());
+        let v: serde_json::Value = serde_json::from_slice(&json_out.stdout).unwrap();
+        assert_eq!(v["deleted_source_paths"][0], "/vault/gone.md");
+    });
+}
+
+/// Issue #211 spec D3: the full card (`show`, and the review loop's `d`
+/// verb) warns that approving a stranded proposal skips its facts — but only
+/// while the proposal is still pending, since resolved ones cannot be
+/// approved. The seeded proposals cite no live sources, so both are stranded.
+#[test]
+fn proposals_show_warns_on_stranded_pending_only() {
+    const WARNING: &str = "All sources deleted — approving will skip facts";
+    with_seeded_proposals(|dir| {
+        let pending = run_ct(dir, &["proposals", "show", "prop-a"]);
+        assert!(pending.status.success());
+        let text = String::from_utf8_lossy(&pending.stdout);
+        assert!(
+            text.contains(WARNING),
+            "stranded pending card must warn: {text}"
+        );
+
+        let resolved = run_ct(dir, &["proposals", "show", "prop-approved"]);
+        assert!(resolved.status.success());
+        let text = String::from_utf8_lossy(&resolved.stdout);
+        assert!(
+            !text.contains(WARNING),
+            "a resolved proposal cannot be approved, so no warning: {text}"
+        );
+    });
+}

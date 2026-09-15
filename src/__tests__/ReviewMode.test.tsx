@@ -1,6 +1,7 @@
-import { act, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, screen, fireEvent, waitFor, within, render } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { ReviewMode } from "../components/modes/ReviewMode";
+import { ReviewQueueList } from "../components/review/ReviewQueueList";
 import { renderWithTheme } from "./test-utils";
 import { ThemeProvider } from "../lib/ThemeContext";
 import {
@@ -256,6 +257,28 @@ test("approve invokes resolve_proposal_cmd and calls onAction", async () => {
       decisions: [{ item_id: `item_${PAGE.id}`, decision: "accept" }],
     }),
   );
+});
+
+test("approve that commits nothing says so instead of vanishing silently", async () => {
+  // Issue #211 spec D3: approving a stranded proposal skips every fact, so
+  // the backend persists it as `rejected`.
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "resolve_proposal_cmd") {
+      return Promise.resolve({
+        committed: [],
+        conflicts: [],
+        dropped_edges: [],
+        proposal_status: "rejected",
+      });
+    }
+    return defaultInvoke(cmd, args);
+  });
+  const onAction = vi.fn();
+  renderWithTheme(<ReviewMode queue={[PAGE]} onAction={onAction} vaultPath={VAULT} />);
+  await waitForProposalPreview();
+  fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+  await waitFor(() => expect(onAction).toHaveBeenCalled());
+  expect(await screen.findByText("Nothing committed")).toBeInTheDocument();
 });
 
 test("keyboard a approves the selected proposal", async () => {
@@ -657,4 +680,44 @@ test("batch approve continues after individual failures", async () => {
   expect(
     screen.getByRole("checkbox", { name: /select Older Entity/i }),
   ).toBeChecked();
+});
+
+describe("ReviewQueueList deleted-source markers", () => {
+  const noop = () => {};
+
+  it("marks stranded and partially deleted proposals", () => {
+    const stranded = makeProposalSummary({
+      id: "prop_stranded",
+      target_name: "Stranded Entity",
+      created_at: 10,
+      source_doc_paths: [],
+      deleted_source_paths: ["documents/gone.md"],
+    });
+    const partial = makeProposalSummary({
+      id: "prop_partial",
+      target_name: "Partial Entity",
+      created_at: 20,
+      source_doc_paths: ["documents/live.md"],
+      deleted_source_paths: ["documents/old.md"],
+    });
+
+    render(
+      <ReviewQueueList
+        queue={[stranded, partial]}
+        selectedId={null}
+        checkedIds={new Set()}
+        onSelect={noop}
+        onToggleChecked={noop}
+      />,
+    );
+
+    const strandedMarker = screen.getByText("All sources deleted");
+    expect(strandedMarker).toHaveAttribute(
+      "title",
+      "All sources deleted — approving will skip facts unless a source returns at its original path.",
+    );
+    expect(screen.getByText("Source deleted: gone.md")).toBeInTheDocument();
+    expect(screen.getByText("Source deleted: old.md")).toBeInTheDocument();
+    expect(screen.getAllByText("All sources deleted")).toHaveLength(1);
+  });
 });

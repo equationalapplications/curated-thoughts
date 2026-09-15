@@ -111,6 +111,7 @@ pub struct ProposalSummary {
     pub target_name: String,
     pub entity_id: Option<String>,
     pub source_doc_paths: Vec<String>,
+    pub deleted_source_paths: Vec<String>,
     pub item_counts: ProposalItemCounts,
     pub created_at: i64,
     pub age_secs: i64,
@@ -151,6 +152,7 @@ pub struct ProposalDetail {
     pub status: String,
     pub created_at: i64,
     pub source_doc_paths: Vec<String>,
+    pub deleted_source_paths: Vec<String>,
     pub items: Vec<ProposalItem>,
 }
 
@@ -202,11 +204,21 @@ fn supersede_stale_pending(
                  WHERE status = 'pending'
                    AND id != ?2
                    AND entity_id = ?3
-                   AND EXISTS (
-                     SELECT 1 FROM curated_proposal_sources s
-                     WHERE s.proposal_id = curated_proposals.id
-                       AND s.doc_id = ?4
-                       AND s.role = 'trigger'
+                   AND (
+                     EXISTS (
+                       SELECT 1 FROM curated_proposal_sources s
+                       WHERE s.proposal_id = curated_proposals.id
+                         AND s.doc_id = ?4
+                         AND s.role = 'trigger'
+                     )
+                     -- Issue #211 spec D4: identical bytes at a new path for
+                     -- the same target is a desktop move (Remove + Create).
+                     OR EXISTS (
+                       SELECT 1 FROM curated_proposal_deleted_sources ds
+                       WHERE ds.proposal_id = curated_proposals.id
+                         AND ds.role = 'trigger'
+                         AND ds.doc_hash = (SELECT hash FROM documents WHERE id = ?4)
+                     )
                    )",
                 params![now, new_id, entity_id, trigger_doc],
             )?;
@@ -223,11 +235,21 @@ fn supersede_stale_pending(
                    AND id != ?2
                    AND kind = 'new_entity'
                    AND proposed_name = ?3
-                   AND EXISTS (
-                     SELECT 1 FROM curated_proposal_sources s
-                     WHERE s.proposal_id = curated_proposals.id
-                       AND s.doc_id = ?4
-                       AND s.role = 'trigger'
+                   AND (
+                     EXISTS (
+                       SELECT 1 FROM curated_proposal_sources s
+                       WHERE s.proposal_id = curated_proposals.id
+                         AND s.doc_id = ?4
+                         AND s.role = 'trigger'
+                     )
+                     -- Issue #211 spec D4: identical bytes at a new path for
+                     -- the same target is a desktop move (Remove + Create).
+                     OR EXISTS (
+                       SELECT 1 FROM curated_proposal_deleted_sources ds
+                       WHERE ds.proposal_id = curated_proposals.id
+                         AND ds.role = 'trigger'
+                         AND ds.doc_hash = (SELECT hash FROM documents WHERE id = ?4)
+                     )
                    )",
                 params![now, new_id, proposed_name, trigger_doc],
             )?;
@@ -236,7 +258,9 @@ fn supersede_stale_pending(
     Ok(())
 }
 
-/// Insert proposal + items + sources atomically; supersede older pending for same target + trigger doc.
+/// Insert proposal + items + sources atomically; supersede older pending for
+/// the same target whose trigger is this doc, or whose deleted trigger had
+/// this doc's hash (a move, issue #211 spec D4).
 pub fn insert_proposal(
     conn: &Connection,
     proposal: &NewProposal,
@@ -366,6 +390,26 @@ pub(crate) fn source_paths_for_proposal(
     Ok(rows)
 }
 
+/// Paths of sources deleted while the proposal was pending (issue #211 spec
+/// D3), in the same order as `source_paths_for_proposal`: trigger first, then
+/// by path. Shared by the same surfaces for the same reason: one proposal must
+/// never report different sources on different surfaces.
+pub(crate) fn deleted_source_paths_for_proposal(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT doc_path
+         FROM curated_proposal_deleted_sources
+         WHERE proposal_id = ?1
+         ORDER BY CASE role WHEN 'trigger' THEN 0 ELSE 1 END, doc_path",
+    )?;
+    let rows = stmt
+        .query_map([proposal_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
+}
+
 fn item_counts_for_proposal(conn: &Connection, proposal_id: &str) -> Result<ProposalItemCounts> {
     let mut stmt = conn.prepare(
         "SELECT item_type, COUNT(*) FROM curated_proposal_items
@@ -434,6 +478,7 @@ pub fn list_proposals(conn: &Connection, filter: &ProposalFilter) -> Result<Vec<
             target_name,
             entity_id,
             source_doc_paths: source_paths_for_proposal(conn, &id)?,
+            deleted_source_paths: deleted_source_paths_for_proposal(conn, &id)?,
             item_counts: item_counts_for_proposal(conn, &id)?,
             created_at,
             age_secs: now.saturating_sub(created_at),
@@ -593,6 +638,7 @@ pub fn get_proposal_detail(conn: &Connection, proposal_id: &str) -> Result<Optio
         status,
         created_at,
         source_doc_paths: source_paths_for_proposal(conn, proposal_id)?,
+        deleted_source_paths: deleted_source_paths_for_proposal(conn, proposal_id)?,
         items,
     }))
 }
@@ -957,5 +1003,247 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM curated_proposals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "nothing is written when the guard fires");
+    }
+
+    /// Spec tests 1–2 at the surface: live and deleted lists, trigger first.
+    #[test]
+    fn summary_and_detail_report_deleted_sources_trigger_first() {
+        use crate::db::proposals::test_support::delete_path;
+
+        let mut conn = open_in_memory().unwrap();
+        // The trigger sorts AFTER the evidence by path, so a path-only ORDER BY
+        // would fail the trigger-first assertion below.
+        let trigger = seed_document(&conn, "/vault/documents/z-trigger.md");
+        let evidence = seed_document(&conn, "/vault/documents/a-evidence.md");
+        let chunk_id = seed_chunk(&conn, trigger, "q");
+        insert_proposal(
+            &conn,
+            &sample_new_proposal("prop-del-src", "Delta"),
+            &[sample_fact_item("item-del-src", chunk_id, "q")],
+            &[
+                NewProposalSource {
+                    doc_id: trigger,
+                    role: ProposalSourceRole::Trigger,
+                },
+                NewProposalSource {
+                    doc_id: evidence,
+                    role: ProposalSourceRole::Evidence,
+                },
+            ],
+        )
+        .unwrap();
+
+        delete_path(&mut conn, "/vault/documents/a-evidence.md");
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert_eq!(
+            queue[0].source_doc_paths,
+            vec!["/vault/documents/z-trigger.md"]
+        );
+        assert_eq!(
+            queue[0].deleted_source_paths,
+            vec!["/vault/documents/a-evidence.md"]
+        );
+
+        delete_path(&mut conn, "/vault/documents/z-trigger.md");
+        let detail = get_proposal_detail(&conn, "prop-del-src").unwrap().unwrap();
+        assert!(detail.source_doc_paths.is_empty());
+        assert_eq!(
+            detail.deleted_source_paths,
+            vec![
+                "/vault/documents/z-trigger.md",
+                "/vault/documents/a-evidence.md"
+            ]
+        );
+        assert_eq!(detail.status, "pending");
+    }
+
+    fn update_proposal(id: &str, entity_id: &str) -> NewProposal {
+        NewProposal {
+            id: id.into(),
+            kind: ProposalKind::UpdateEntity,
+            entity_id: Some(entity_id.into()),
+            proposed_name: None,
+            proposed_type: None,
+            reasoning: None,
+            model: "test-model".into(),
+        }
+    }
+
+    /// Insert `proposal` triggered by a new document at `path` with `hash`.
+    fn insert_triggered(conn: &Connection, proposal: &NewProposal, path: &str, hash: &str) {
+        let doc_id = upsert_document(conn, path, hash).unwrap();
+        let chunk_id = seed_chunk(conn, doc_id, "x");
+        insert_proposal(
+            conn,
+            proposal,
+            &[sample_fact_item(
+                &format!("{}-item", proposal.id),
+                chunk_id,
+                "x",
+            )],
+            &[NewProposalSource {
+                doc_id,
+                role: ProposalSourceRole::Trigger,
+            }],
+        )
+        .unwrap();
+    }
+
+    /// Spec test 6, new_entity arm.
+    #[test]
+    fn supersede_heals_a_move_for_new_entity() {
+        use crate::db::proposals::test_support::{delete_path, status_of};
+
+        let mut conn = open_in_memory().unwrap();
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p1", "Moved"),
+            "/vault/a.md",
+            "h-move",
+        );
+        delete_path(&mut conn, "/vault/a.md");
+
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p2", "Moved"),
+            "/vault/moved/a.md",
+            "h-move",
+        );
+
+        assert_eq!(status_of(&conn, "p1"), "superseded");
+        assert_eq!(status_of(&conn, "p2"), "pending");
+    }
+
+    /// Spec test 6, update_entity arm.
+    #[test]
+    fn supersede_heals_a_move_for_update_entity() {
+        use crate::db::proposals::test_support::{delete_path, status_of};
+
+        let mut conn = open_in_memory().unwrap();
+        insert_triggered(
+            &conn,
+            &update_proposal("u1", "ent-move"),
+            "/vault/b.md",
+            "h-move-u",
+        );
+        delete_path(&mut conn, "/vault/b.md");
+
+        insert_triggered(
+            &conn,
+            &update_proposal("u2", "ent-move"),
+            "/vault/moved/b.md",
+            "h-move-u",
+        );
+
+        assert_eq!(status_of(&conn, "u1"), "superseded");
+        assert_eq!(status_of(&conn, "u2"), "pending");
+    }
+
+    /// Spec test 7.
+    #[test]
+    fn different_content_at_a_new_path_does_not_supersede() {
+        use crate::db::proposals::test_support::{delete_path, status_of};
+
+        let mut conn = open_in_memory().unwrap();
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p1", "Edited"),
+            "/vault/c.md",
+            "h-before",
+        );
+        delete_path(&mut conn, "/vault/c.md");
+
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p2", "Edited"),
+            "/vault/moved/c.md",
+            "h-after",
+        );
+
+        assert_eq!(status_of(&conn, "p1"), "pending");
+    }
+}
+
+/// Seeding and inspection helpers shared by every test that exercises
+/// document deletion (issue #211): queries, queue, reconcile, lib, commit,
+/// proposals_review. One copy so the fixture proposal shape cannot drift.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Insert a pending `new_entity` proposal with one `fact_add` item citing
+    /// `sources`. The proposed name embeds `id` so two fixtures never
+    /// supersede each other by accident.
+    pub(crate) fn seed_pending_proposal(
+        conn: &Connection,
+        id: &str,
+        sources: &[(i64, ProposalSourceRole)],
+    ) {
+        let sources: Vec<NewProposalSource> = sources
+            .iter()
+            .map(|(doc_id, role)| NewProposalSource {
+                doc_id: *doc_id,
+                role: *role,
+            })
+            .collect();
+        insert_proposal(
+            conn,
+            &NewProposal {
+                id: id.into(),
+                kind: ProposalKind::NewEntity,
+                entity_id: None,
+                proposed_name: Some(format!("Entity {id}")),
+                proposed_type: Some("concept".into()),
+                reasoning: None,
+                model: "test".into(),
+            },
+            &[NewProposalItem {
+                id: format!("{id}-item"),
+                item_type: "fact_add".into(),
+                target_id: None,
+                payload: serde_json::json!({
+                    "body": "A fact.",
+                    "tags": [],
+                    "confidence": "inferred"
+                }),
+                evidence: vec![],
+            }],
+            &sources,
+        )
+        .unwrap();
+    }
+
+    /// `(doc_path, doc_hash, role)` rows recorded for `proposal_id`.
+    pub(crate) fn deleted_source_rows(
+        conn: &Connection,
+        proposal_id: &str,
+    ) -> Vec<(String, String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT doc_path, doc_hash, role FROM curated_proposal_deleted_sources
+                 WHERE proposal_id = ?1 ORDER BY doc_path",
+            )
+            .unwrap();
+        stmt.query_map([proposal_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    /// Delete `path` through the production helper and commit.
+    pub(crate) fn delete_path(conn: &mut Connection, path: &str) -> usize {
+        let tx = conn.transaction().unwrap();
+        let n = crate::db::queries::delete_document(&tx, path).unwrap();
+        tx.commit().unwrap();
+        n
+    }
+
+    pub(crate) fn status_of(conn: &Connection, proposal_id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM curated_proposals WHERE id = ?1",
+            [proposal_id],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 }

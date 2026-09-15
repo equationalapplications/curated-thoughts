@@ -59,6 +59,7 @@ pub struct PendingReviewItem {
     pub item_count: usize,
     pub evidence_chunks: usize,
     pub source_docs: Vec<String>,
+    pub deleted_source_docs: Vec<String>,
     pub created_at: i64,
 }
 
@@ -418,6 +419,8 @@ pub fn pending_review_queue(
     for row in rows {
         let (proposal_id, proposed_name, kind, created_at, item_count, evidence_chunks) = row?;
         let docs = crate::db::proposals::source_paths_for_proposal(conn, &proposal_id)?;
+        let deleted_docs =
+            crate::db::proposals::deleted_source_paths_for_proposal(conn, &proposal_id)?;
         out.push(PendingReviewItem {
             proposal_id,
             proposed_name,
@@ -425,6 +428,7 @@ pub fn pending_review_queue(
             item_count: item_count.max(0) as usize,
             evidence_chunks: evidence_chunks.max(0) as usize,
             source_docs: docs,
+            deleted_source_docs: deleted_docs,
             created_at,
         });
     }
@@ -943,5 +947,30 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// Spec test 17: the MCP review queue and the detail view report the same
+    /// deleted sources (shared helper, PR #201 finding 10).
+    #[test]
+    fn review_queue_and_detail_agree_on_deleted_sources() {
+        use crate::db::proposals::test_support::{delete_path, seed_pending_proposal};
+        use crate::db::proposals::ProposalSourceRole::{Evidence, Trigger};
+
+        let mut conn = open_in_memory().unwrap();
+        let trigger = upsert_document(&conn, "/vault/q-trigger.md", "h-qt").unwrap();
+        let evidence = upsert_document(&conn, "/vault/q-evidence.md", "h-qe").unwrap();
+        seed_pending_proposal(
+            &conn,
+            "prop-parity",
+            &[(trigger, Trigger), (evidence, Evidence)],
+        );
+        delete_path(&mut conn, "/vault/q-evidence.md");
+
+        let queue = pending_review_queue(&conn, "pending", 10).unwrap();
+        let detail = crate::db::proposals::get_proposal_detail(&conn, "prop-parity")
+            .unwrap()
+            .unwrap();
+        assert_eq!(queue[0].deleted_source_docs, vec!["/vault/q-evidence.md"]);
+        assert_eq!(queue[0].deleted_source_docs, detail.deleted_source_paths);
     }
 }

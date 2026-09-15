@@ -230,6 +230,8 @@ fn test_app_open_runs_v7_schema() {
     // (body in `evidence_regrade.rs`; no SQL migration constant).
     // Bumped from 20 to 21 by MIGRATION_V21, which adds the nullable
     // `curated_proposals.reviewed_by` column (Human Verification Gate).
+    // V23 (issue #211) adds `curated_proposal_deleted_sources` on every open
+    // but stamps only after V22, which rootless opens defer, so this stays 21.
     assert_eq!(max_version, 21);
 }
 

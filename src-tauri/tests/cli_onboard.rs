@@ -72,9 +72,10 @@ fn onboard_creates_vault_layout() {
         vault.join("immutable-source-files").join("agents").is_dir(),
         "immutable-source-files/agents/ created"
     );
+    // Issue #211 spec D6 L1: the shadow-copy directory is dead.
     assert!(
-        vault.join(".brain/converted").is_dir(),
-        ".brain/converted/ created"
+        !vault.join(".brain/converted").exists(),
+        ".brain/converted/ must not be created"
     );
 }
 

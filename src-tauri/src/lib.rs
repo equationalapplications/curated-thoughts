@@ -607,7 +607,6 @@ fn set_vault_path(path: String, state: State<VaultConfigState>) -> Result<(), St
         std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(root.join(AGENTS_DEPOSIT_DIR)).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(root.join(".brain").join("converted")).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -825,26 +824,33 @@ fn remove_sqlite_sidecars(db_path: &Path) {
 /// relativize and -- fail-open per spec D2b -- survive forever.
 ///
 /// Returns the number of rows deleted. Non-fatal on failure: the caller
-/// logs and the next launch retries.
-fn purge_excluded_rows(conn: &rusqlite::Connection, vault_root: &Path) -> rusqlite::Result<usize> {
+/// logs, the whole pass rolls back, and the next launch retries.
+fn purge_excluded_rows(
+    conn: &mut rusqlite::Connection,
+    vault_root: &Path,
+) -> anyhow::Result<usize> {
     let paths: Vec<String> = {
         let mut stmt = conn.prepare("SELECT path FROM documents WHERE tier = 'user_doc'")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
+    // One checked transaction around the loop: every delete records
+    // pending-proposal provenance first (issue #211 spec D5). All-or-nothing
+    // is safe because this heal retries on the next launch.
+    let tx = conn.transaction()?;
     let mut deleted = 0usize;
     for path in paths {
         if !crate::walk_vault::abs_path_is_excluded_in_vault(Path::new(&path), vault_root) {
             continue;
         }
-        conn.execute(
-            "DELETE FROM documents WHERE path = ?1",
-            rusqlite::params![&path],
-        )?;
-        eprintln!("[reconcile] purging excluded-directory row: {path}");
-        deleted += 1;
+        let n = crate::db::queries::delete_document(&tx, &path)?;
+        if n > 0 {
+            eprintln!("[reconcile] purging excluded-directory row: {path}");
+        }
+        deleted += n;
     }
+    tx.commit()?;
     Ok(deleted)
 }
 
@@ -865,24 +871,7 @@ mod excluded_row_purge_tests {
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).unwrap();
 
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE documents (
-                id     INTEGER PRIMARY KEY AUTOINCREMENT,
-                path   TEXT NOT NULL UNIQUE,
-                hash   TEXT NOT NULL,
-                tier   TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
-            );
-            CREATE TABLE chunks (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id     INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                chunk_text TEXT NOT NULL,
-                position   INTEGER NOT NULL
-            );
-            PRAGMA foreign_keys=ON;",
-        )
-        .unwrap();
+        let mut conn = crate::db::connection::open_in_memory().unwrap();
 
         let insert = |p: &std::path::Path, tier: &str| {
             conn.execute(
@@ -922,7 +911,7 @@ mod excluded_row_purge_tests {
         };
         assert_eq!(chunk_count(&conn), 5);
 
-        let n = purge_excluded_rows(&conn, &vault_root).unwrap();
+        let n = purge_excluded_rows(&mut conn, &vault_root).unwrap();
         assert_eq!(n, 2, "expected both .brain rows purged");
 
         let survivors: Vec<String> = {
@@ -943,6 +932,32 @@ mod excluded_row_purge_tests {
             chunk_count(&conn),
             3,
             "cascade must remove chunks of purged rows (foreign_keys=ON)"
+        );
+    }
+
+    /// Spec test 12: the heal records pending-proposal provenance and keeps
+    /// its count.
+    #[test]
+    fn desktop_purge_records_deleted_sources() {
+        use crate::db::proposals::test_support::{deleted_source_rows, seed_pending_proposal};
+        use crate::db::proposals::ProposalSourceRole::Trigger;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        let mut conn = crate::db::connection::open_in_memory().unwrap();
+
+        let brain = vault_root.join(".brain").join("errors.log");
+        let brain_str = brain.to_string_lossy().into_owned();
+        let doc_id = crate::db::upsert_document(&conn, &brain_str, "h-brain-log").unwrap();
+        seed_pending_proposal(&conn, "prop-purge", &[(doc_id, Trigger)]);
+
+        let n = purge_excluded_rows(&mut conn, &vault_root).unwrap();
+
+        assert_eq!(n, 1);
+        assert_eq!(
+            deleted_source_rows(&conn, "prop-purge"),
+            vec![(brain_str, "h-brain-log".into(), "trigger".into())]
         );
     }
 }
@@ -1541,8 +1556,6 @@ async fn switch_vault(
         std::fs::create_dir_all(new_root.join(subdir)).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(new_root.join(AGENTS_DEPOSIT_DIR)).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(new_root.join(".brain").join("converted"))
-        .map_err(|e| e.to_string())?;
 
     {
         let mut g = watcher_started.0.lock().unwrap();
@@ -3430,10 +3443,6 @@ pub fn run() {
             eprintln!("warning: failed to create default vault immutable-source-files/agents: {e}");
             all_dirs_created = false;
         }
-        if let Err(e) = std::fs::create_dir_all(default_vault.join(".brain").join("converted")) {
-            eprintln!("warning: failed to create default vault .brain/converted: {e}");
-            all_dirs_created = false;
-        }
         if all_dirs_created {
             if let Some(vault_str) = default_vault.to_str() {
                 if let Err(e) = config.set_vault_path(vault_str) {
@@ -3455,11 +3464,6 @@ pub fn run() {
             }
             if let Err(e) = std::fs::create_dir_all(fallback_vault.join(AGENTS_DEPOSIT_DIR)) {
                 eprintln!("error: failed to create fallback vault subdir immutable-source-files/agents: {e}");
-                fallback_dirs_created = false;
-            }
-            if let Err(e) = std::fs::create_dir_all(fallback_vault.join(".brain").join("converted"))
-            {
-                eprintln!("error: failed to create fallback vault subdir .brain/converted: {e}");
                 fallback_dirs_created = false;
             }
             if fallback_dirs_created {

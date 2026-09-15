@@ -48,7 +48,7 @@ enum ProbeKind {
     /// External HTTP dependency (`Embedding`, `Summarizing`). Probe the
     /// endpoint with a short timeout; strike on success only.
     Network,
-    /// Shared brain SQLite dependency (`Committing`, `Deleting`). Probe the
+    /// Shared brain SQLite dependency (`Committing`). Probe the
     /// diagnostic connection with a bounded busy timeout; on probe failure
     /// record an unattributed system strike rather than blame the path.
     SharedSqlite,
@@ -238,7 +238,7 @@ fn supervisor_loop(cfg: SupervisorConfig) {
     let _ = conn.busy_timeout(DIAG_BUSY_TIMEOUT);
 
     // Dedicated diagnostic connection so lock contention on the brain
-    // SQLite (most likely from the Committing/Deleting job the watchdog is
+    // SQLite (most likely from the Committing job the watchdog is
     // itself about to recover) cannot stall recovery. Bounded busy timeout
     // is non-negotiable: an unbounded insert would block recovery forever
     // (spec §3).

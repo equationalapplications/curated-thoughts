@@ -114,9 +114,47 @@ pub fn mark_document_error(conn: &Connection, doc_id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_document(conn: &Connection, path: &str) -> Result<()> {
-    conn.execute("DELETE FROM documents WHERE path = ?1", [path])?;
-    Ok(())
+/// Record the sources a document deletion is about to cascade away, for
+/// PENDING proposals only (issue #211 spec D2/D3). `$filter` is appended to
+/// the WHERE clause: `" AND d.path = ?1"` for one document, `""` for all.
+///
+/// At most one row per `(proposal_id, doc_path)` is selected because
+/// `documents.path` is UNIQUE and `curated_proposal_sources` is keyed
+/// `(proposal_id, doc_id)`. If either constraint is ever relaxed, this
+/// upsert must aggregate first or SQLite rejects the double update.
+///
+/// A macro, not `format!`, so both statements stay compile-time literals and
+/// the path-filtered form keeps using the `documents.path` index.
+macro_rules! record_deleted_sources_sql {
+    ($filter:literal) => {
+        concat!(
+            "INSERT INTO curated_proposal_deleted_sources
+                 (proposal_id, doc_path, doc_hash, role, deleted_at)
+             SELECT s.proposal_id, d.path, d.hash, s.role, unixepoch()
+               FROM curated_proposal_sources s
+               JOIN documents d         ON d.id = s.doc_id
+               JOIN curated_proposals p ON p.id = s.proposal_id
+              WHERE p.status = 'pending'",
+            $filter,
+            "
+             ON CONFLICT(proposal_id, doc_path) DO UPDATE SET
+                 doc_hash = excluded.doc_hash,
+                 role = excluded.role,
+                 deleted_at = excluded.deleted_at"
+        )
+    };
+}
+
+/// Delete one document row, first recording it as a deleted source on every
+/// pending proposal that cites it (issue #211 spec D3).
+///
+/// Takes `&Transaction` so the record and the delete commit or roll back
+/// together: a record for a document that still exists is a false flag, a
+/// delete with no record loses provenance. Returns the number of `documents`
+/// rows deleted (0 or 1).
+pub fn delete_document(tx: &rusqlite::Transaction<'_>, path: &str) -> Result<usize> {
+    tx.execute(record_deleted_sources_sql!(" AND d.path = ?1"), [path])?;
+    Ok(tx.execute("DELETE FROM documents WHERE path = ?1", [path])?)
 }
 
 pub fn count_indexed_documents(conn: &Connection) -> Result<i64> {
@@ -135,8 +173,16 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
     )?)
 }
 
+/// Empty the document layer for a vault switch without backup restore.
+///
+/// Issue #211 spec D7: pending proposals are KEPT, stranded, with every source
+/// recorded first. The brain is global (`~/.brain/brain.db`) and this
+/// function has cleared only the document layer since the V7 OKF migration,
+/// so approved entities and facts already survive a switch. Deleting only the
+/// pending layer would be a lopsided half-fix of that leak, tracked in #213.
 pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
+    tx.execute(record_deleted_sources_sql!(""), [])?;
     tx.execute_batch(
         "DELETE FROM curated_relationships;
          DELETE FROM embeddings;
@@ -281,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_delete_document_cascades() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let doc_id = upsert_document(&conn, "/docs/b.md", "hash2").unwrap();
         let chunk = crate::chunker::Chunk {
             text: "text".into(),
@@ -293,7 +339,9 @@ mod tests {
         };
         let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         insert_embedding(&conn, chunk_id, &[1.0_f32]).unwrap();
-        delete_document(&conn, "/docs/b.md").unwrap();
+        let tx = conn.transaction().unwrap();
+        delete_document(&tx, "/docs/b.md").unwrap();
+        tx.commit().unwrap();
 
         let doc = get_document_by_path(&conn, "/docs/b.md").unwrap();
         assert!(doc.is_none());
@@ -430,6 +478,153 @@ mod tests {
 }
 
 #[cfg(test)]
+mod deletion_provenance_tests {
+    use super::*;
+    use crate::chunker::{Chunk, ChunkStrategyTag};
+    use crate::db::connection::open_in_memory;
+    use crate::db::proposals::test_support::{
+        delete_path, deleted_source_rows, seed_pending_proposal, status_of,
+    };
+    use crate::db::proposals::ProposalSourceRole::{Evidence, Trigger};
+
+    fn live_source_count(conn: &Connection, proposal_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = ?1",
+            [proposal_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Spec test 1.
+    #[test]
+    fn single_source_strand_keeps_pending_and_records_the_trigger() {
+        let mut conn = open_in_memory().unwrap();
+        let doc = upsert_document(&conn, "/vault/a.md", "h-a").unwrap();
+        let chunk = Chunk {
+            text: "x".into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(&conn, doc, &chunk, 0, "tier_fact", "").unwrap();
+        seed_pending_proposal(&conn, "p1", &[(doc, Trigger)]);
+
+        assert_eq!(delete_path(&mut conn, "/vault/a.md"), 1);
+
+        assert_eq!(status_of(&conn, "p1"), "pending");
+        assert_eq!(live_source_count(&conn, "p1"), 0);
+        assert_eq!(
+            deleted_source_rows(&conn, "p1"),
+            vec![("/vault/a.md".into(), "h-a".into(), "trigger".into())]
+        );
+        let chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id = ?1",
+                [doc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(chunks, 0, "cascade must still remove chunks");
+    }
+
+    /// Spec test 2.
+    #[test]
+    fn partial_strand_records_only_the_deleted_evidence() {
+        let mut conn = open_in_memory().unwrap();
+        let trigger = upsert_document(&conn, "/vault/t.md", "h-t").unwrap();
+        let evidence = upsert_document(&conn, "/vault/e.md", "h-e").unwrap();
+        seed_pending_proposal(&conn, "p2", &[(trigger, Trigger), (evidence, Evidence)]);
+
+        delete_path(&mut conn, "/vault/e.md");
+
+        assert_eq!(live_source_count(&conn, "p2"), 1);
+        assert_eq!(
+            deleted_source_rows(&conn, "p2"),
+            vec![("/vault/e.md".into(), "h-e".into(), "evidence".into())]
+        );
+    }
+
+    /// Spec test 3.
+    #[test]
+    fn non_pending_proposals_get_no_record() {
+        let mut conn = open_in_memory().unwrap();
+        let doc = upsert_document(&conn, "/vault/hist.md", "h-hist").unwrap();
+        for (id, status) in [
+            ("p-approved", "approved"),
+            ("p-rejected", "rejected"),
+            ("p-superseded", "superseded"),
+        ] {
+            seed_pending_proposal(&conn, id, &[(doc, Trigger)]);
+            conn.execute(
+                "UPDATE curated_proposals SET status = ?1 WHERE id = ?2",
+                rusqlite::params![status, id],
+            )
+            .unwrap();
+        }
+
+        delete_path(&mut conn, "/vault/hist.md");
+
+        for id in ["p-approved", "p-rejected", "p-superseded"] {
+            assert!(
+                deleted_source_rows(&conn, id).is_empty(),
+                "{id} is historical and must not be flagged"
+            );
+        }
+    }
+
+    /// Spec test 4.
+    #[test]
+    fn dropped_transaction_rolls_back_both_statements() {
+        let mut conn = open_in_memory().unwrap();
+        let doc = upsert_document(&conn, "/vault/atomic.md", "h-atomic").unwrap();
+        seed_pending_proposal(&conn, "p4", &[(doc, Trigger)]);
+
+        {
+            let tx = conn.transaction().unwrap();
+            assert_eq!(delete_document(&tx, "/vault/atomic.md").unwrap(), 1);
+            // Dropped without commit: rusqlite rolls back.
+        }
+
+        assert!(get_document_by_path(&conn, "/vault/atomic.md")
+            .unwrap()
+            .is_some());
+        assert!(deleted_source_rows(&conn, "p4").is_empty());
+    }
+
+    /// Spec test 5.
+    #[test]
+    fn re_deleting_a_recreated_path_upserts_one_row_with_the_new_hash() {
+        let mut conn = open_in_memory().unwrap();
+        let first = upsert_document(&conn, "/vault/again.md", "h-1").unwrap();
+        seed_pending_proposal(&conn, "p5", &[(first, Trigger)]);
+        delete_path(&mut conn, "/vault/again.md");
+
+        let second = upsert_document(&conn, "/vault/again.md", "h-2").unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('p5', ?1, 'trigger')",
+            [second],
+        )
+        .unwrap();
+        delete_path(&mut conn, "/vault/again.md");
+
+        assert_eq!(
+            deleted_source_rows(&conn, "p5"),
+            vec![("/vault/again.md".into(), "h-2".into(), "trigger".into())]
+        );
+    }
+
+    #[test]
+    fn deleting_an_unknown_path_is_a_zero_count_no_op() {
+        let mut conn = open_in_memory().unwrap();
+        assert_eq!(delete_path(&mut conn, "/vault/never.md"), 0);
+    }
+}
+
+#[cfg(test)]
 mod clear_vault_tables_tests {
     use super::*;
     use crate::db::connection::open_in_memory;
@@ -451,6 +646,21 @@ mod clear_vault_tables_tests {
         };
         let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
+
+        // Spec test 13 (issue #211 D7): pending proposals survive a no-restore
+        // vault switch stranded, with provenance; historical ones are untouched.
+        use crate::db::proposals::test_support::{
+            deleted_source_rows, seed_pending_proposal, status_of,
+        };
+        use crate::db::proposals::ProposalSourceRole::Trigger;
+        seed_pending_proposal(&conn, "prop-switch-1", &[(doc_id, Trigger)]);
+        seed_pending_proposal(&conn, "prop-switch-2", &[(doc_id, Trigger)]);
+        seed_pending_proposal(&conn, "prop-switch-done", &[(doc_id, Trigger)]);
+        conn.execute(
+            "UPDATE curated_proposals SET status = 'approved' WHERE id = 'prop-switch-done'",
+            [],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('test', 'index', 0)",
@@ -486,6 +696,16 @@ mod clear_vault_tables_tests {
         assert_eq!(wiki_count, 0);
         assert_eq!(rule_count, 0);
         assert_eq!(rel_count, 0);
+
+        for id in ["prop-switch-1", "prop-switch-2"] {
+            assert_eq!(status_of(&conn, id), "pending", "{id} must stay pending");
+            assert_eq!(
+                deleted_source_rows(&conn, id),
+                vec![("/test/doc.md".into(), "abc123".into(), "trigger".into())],
+                "{id} must record its deleted source"
+            );
+        }
+        assert!(deleted_source_rows(&conn, "prop-switch-done").is_empty());
     }
 }
 
