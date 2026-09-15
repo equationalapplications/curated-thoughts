@@ -41,6 +41,11 @@ accumulates duplicate proposals when a file moves; no index corruption)
   - Minors: markers for proposals stranded before V23, the second review
     queue surface, test fixtures that lack the curated tables, and the two
     constraints the upsert depends on.
+  - **Amendment (during plan writing).** Approving a fully stranded
+    proposal commits no facts and resolves to `rejected`, because of the
+    Phase-2 unanchored gate. D3 documents this and adds it to the marker
+    copy; D7 no longer claims these proposals are approvable; test 8 pins
+    the outcome and the re-anchor path.
 
 ## Problem
 
@@ -290,6 +295,25 @@ same proposal should never report different sources on different surfaces
     no recorded names and still need the marker.
 - `trigger_source_label` (`commit.rs:1032`) falls back to the deleted
   trigger's basename before `"unknown source"`.
+
+**What approval does while stranded.** The Phase-2 strict gate skips every
+`fact_add` whose evidence anchors no live chunk (`evidence_has_live_chunk`,
+`commit.rs:628`, applied at `:1494`). Anchoring is by `content_hash` first,
+so evidence re-anchors once the same bytes are ingested again, at any path.
+Until then:
+- approving a fully stranded proposal whose items are all `fact_add`
+  returns `Ok` with `skipped_unanchored` equal to the item count;
+- `accepted_count` is 0, so `finalize_proposal_status` (`commit.rs:2173`)
+  resolves the proposal to **`rejected`**;
+- an entity shell the approval created is rolled back
+  (`commit.rs:2480-2500`).
+
+This is the correct outcome, because nothing evidenced can be committed.
+The reviewer should still not be surprised by it. The "All sources deleted"
+marker therefore carries the consequence in its copy: **"All sources
+deleted — approving will skip facts until a source is re-ingested."** The
+per-source marker needs no such note, because other live sources may still
+anchor the facts.
 - `list_proposals_for_document` is unchanged. A deleted document has no id
   to look up.
 
@@ -454,9 +478,11 @@ would stop SQLite using the `documents.path` index.
    updated. Since then a switch has carried vault A's approved knowledge
    into vault B.
 2. **Consistency.** A stranded proposal targets entities that survive the
-   switch, so it is still approvable. Deleting only the pending layer while
-   approved knowledge persists would be a lopsided half-fix of the leak in
-   (1).
+   switch. Deleting only the pending layer while approved knowledge
+   persists would be a lopsided half-fix of the leak in (1). Its facts,
+   though, are *not* committable while stranded (see D3, "What approval
+   does while stranded"). Keeping the proposal preserves the work until its
+   bytes return; it does not make it approvable today.
 3. **D1's principle.** Unreviewed work is never auto-disposed. A vault
    switch is not a decision about proposals.
 4. **Deletion is irreversible exactly where it matters.** The switch first
@@ -549,8 +575,14 @@ already use `open_in_memory` and need no fixture change.
    `update_entity` and `new_entity` arms.
 7. **Different content does not supersede.** Same as 6, but B has hash
    `h2`, so P1 stays `pending`.
-8. **Resolve still works.** `resolve_proposal` approve **and** reject both
-   succeed on an all-sources-deleted proposal (`commit.rs` tests).
+8. **Resolve on a stranded proposal (`commit.rs` tests).** On an
+   all-sources-deleted proposal with one `fact_add`:
+   - reject returns `Ok` and the status is `rejected`;
+   - approve returns `Ok` with `skipped_unanchored == 1`, the status is
+     `rejected`, and no `llm_wiki_entries` row is written;
+   - **re-anchor:** re-ingest a document whose chunk carries the evidence's
+     `content_hash`, then approve. The fact lands and the status is
+     `approved`.
 9. **Trigger label fallback.** `trigger_source_label` returns the deleted
    trigger's basename.
 10. **Queue path (`db/queue.rs` tests).** Remove and NotFound branches both
