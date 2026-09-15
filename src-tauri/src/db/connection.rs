@@ -1,9 +1,8 @@
 use crate::db::okf_ddl;
 use crate::db::schema::{
-    DELETED_SOURCES_DDL, MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
-    MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19,
-    MIGRATION_V2, MIGRATION_V21, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
-    MIGRATION_V9,
+    DELETED_SOURCES_DDL, MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13,
+    MIGRATION_V14, MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2,
+    MIGRATION_V21, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -2811,7 +2810,10 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 23, "V22 then V23 must be stamped when the migration runs");
+        assert_eq!(
+            version, 23,
+            "V22 then V23 must be stamped when the migration runs"
+        );
 
         let rewritten_path: String = conn
             .query_row(
@@ -2906,7 +2908,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v23, 0, "a rootless open must not stamp 23 while V22 is deferred");
+        assert_eq!(
+            v23, 0,
+            "a rootless open must not stamp 23 while V22 is deferred"
+        );
     }
 
     /// Issue #211 spec D2 / Principle 4 regression: stamping 23 on a
@@ -2943,11 +2948,9 @@ mod tests {
         .expect("rooted migrate");
 
         let path: String = conn
-            .query_row(
-                "SELECT path FROM documents WHERE hash = 'h-v23'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT path FROM documents WHERE hash = 'h-v23'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             path,

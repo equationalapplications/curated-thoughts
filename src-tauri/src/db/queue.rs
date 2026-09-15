@@ -1093,16 +1093,21 @@ mod tests {
         enqueue_vault_event(&mut conn, modify(), &p, Some(&root)).unwrap();
         let path_str = staged_paths(&conn).pop().expect("staged while present");
         let doc_id: i64 = conn
-            .query_row("SELECT id FROM documents WHERE path = ?1", [&path_str], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT id FROM documents WHERE path = ?1",
+                [&path_str],
+                |r| r.get(0),
+            )
             .unwrap();
         seed_pending_proposal(&conn, "prop-vanished", &[(doc_id, Trigger)]);
 
         std::fs::remove_file(&p).unwrap();
         enqueue_vault_event(&mut conn, modify(), &p, Some(&root)).unwrap();
 
-        assert!(staged_paths(&conn).is_empty(), "the row must not outlive the file");
+        assert!(
+            staged_paths(&conn).is_empty(),
+            "the row must not outlive the file"
+        );
         assert_eq!(deleted_source_rows(&conn, "prop-vanished").len(), 1);
     }
 }

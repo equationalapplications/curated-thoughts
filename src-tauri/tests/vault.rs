@@ -19,9 +19,10 @@ fn set_vault_path_creates_subdirs() {
         !vault.join("documents").exists(),
         "v2 vault creation must not create legacy documents/"
     );
+    // Issue #211 spec D6 L1: the shadow-copy directory is dead.
     assert!(
-        vault.join(".brain").join("converted").is_dir(),
-        ".brain/converted/ not created"
+        !vault.join(".brain").join("converted").exists(),
+        ".brain/converted/ must not be created"
     );
 }
 

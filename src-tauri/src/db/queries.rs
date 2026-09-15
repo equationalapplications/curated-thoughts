@@ -483,7 +483,7 @@ mod deletion_provenance_tests {
     use crate::chunker::{Chunk, ChunkStrategyTag};
     use crate::db::connection::open_in_memory;
     use crate::db::proposals::test_support::{
-        deleted_source_rows, delete_path, seed_pending_proposal, status_of,
+        delete_path, deleted_source_rows, seed_pending_proposal, status_of,
     };
     use crate::db::proposals::ProposalSourceRole::{Evidence, Trigger};
 
@@ -521,9 +521,11 @@ mod deletion_provenance_tests {
             vec![("/vault/a.md".into(), "h-a".into(), "trigger".into())]
         );
         let chunks: i64 = conn
-            .query_row("SELECT COUNT(*) FROM chunks WHERE doc_id = ?1", [doc], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id = ?1",
+                [doc],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(chunks, 0, "cascade must still remove chunks");
     }

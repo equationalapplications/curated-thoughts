@@ -740,7 +740,13 @@ mod tests {
         let nm_id = seed_doc(&conn, &nm, "h-nm", "user_doc", 1);
         seed_pending_proposal(&conn, "prop-nm", &[(nm_id, Trigger)]);
         let keep = walked(&root, "notes.md", b"real");
-        seed_doc(&conn, &s(&keep.virtual_path), &hash_of(b"real"), "user_doc", 1);
+        seed_doc(
+            &conn,
+            &s(&keep.virtual_path),
+            &hash_of(b"real"),
+            "user_doc",
+            1,
+        );
 
         reconcile_vault(&conn, std::slice::from_ref(&keep), &root).unwrap();
 

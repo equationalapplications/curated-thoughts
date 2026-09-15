@@ -1076,7 +1076,11 @@ mod tests {
         insert_proposal(
             conn,
             proposal,
-            &[sample_fact_item(&format!("{}-item", proposal.id), chunk_id, "x")],
+            &[sample_fact_item(
+                &format!("{}-item", proposal.id),
+                chunk_id,
+                "x",
+            )],
             &[NewProposalSource {
                 doc_id,
                 role: ProposalSourceRole::Trigger,
@@ -1091,10 +1095,20 @@ mod tests {
         use crate::db::proposals::test_support::{delete_path, status_of};
 
         let mut conn = open_in_memory().unwrap();
-        insert_triggered(&conn, &sample_new_proposal("p1", "Moved"), "/vault/a.md", "h-move");
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p1", "Moved"),
+            "/vault/a.md",
+            "h-move",
+        );
         delete_path(&mut conn, "/vault/a.md");
 
-        insert_triggered(&conn, &sample_new_proposal("p2", "Moved"), "/vault/moved/a.md", "h-move");
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p2", "Moved"),
+            "/vault/moved/a.md",
+            "h-move",
+        );
 
         assert_eq!(status_of(&conn, "p1"), "superseded");
         assert_eq!(status_of(&conn, "p2"), "pending");
@@ -1106,10 +1120,20 @@ mod tests {
         use crate::db::proposals::test_support::{delete_path, status_of};
 
         let mut conn = open_in_memory().unwrap();
-        insert_triggered(&conn, &update_proposal("u1", "ent-move"), "/vault/b.md", "h-move-u");
+        insert_triggered(
+            &conn,
+            &update_proposal("u1", "ent-move"),
+            "/vault/b.md",
+            "h-move-u",
+        );
         delete_path(&mut conn, "/vault/b.md");
 
-        insert_triggered(&conn, &update_proposal("u2", "ent-move"), "/vault/moved/b.md", "h-move-u");
+        insert_triggered(
+            &conn,
+            &update_proposal("u2", "ent-move"),
+            "/vault/moved/b.md",
+            "h-move-u",
+        );
 
         assert_eq!(status_of(&conn, "u1"), "superseded");
         assert_eq!(status_of(&conn, "u2"), "pending");
@@ -1121,10 +1145,20 @@ mod tests {
         use crate::db::proposals::test_support::{delete_path, status_of};
 
         let mut conn = open_in_memory().unwrap();
-        insert_triggered(&conn, &sample_new_proposal("p1", "Edited"), "/vault/c.md", "h-before");
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p1", "Edited"),
+            "/vault/c.md",
+            "h-before",
+        );
         delete_path(&mut conn, "/vault/c.md");
 
-        insert_triggered(&conn, &sample_new_proposal("p2", "Edited"), "/vault/moved/c.md", "h-after");
+        insert_triggered(
+            &conn,
+            &sample_new_proposal("p2", "Edited"),
+            "/vault/moved/c.md",
+            "h-after",
+        );
 
         assert_eq!(status_of(&conn, "p1"), "pending");
     }

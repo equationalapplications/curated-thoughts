@@ -1,7 +1,7 @@
 # Document deletion: preserve pending-proposal provenance + legacy cleanup
 
 **Date:** 2026-09-15
-**Status:** Approved (rev 3)
+**Status:** Implemented (rev 3)
 **Branch:** spec/211-deletion-side-effects
 **Issue:** #211
 **Priority:** Medium (Review desk loses the identity of deleted sources and
