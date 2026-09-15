@@ -363,10 +363,8 @@ pub(crate) const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
 
 /// Little-endian f32 bytes -> Vec<f32> (mirrors `search::bytes_to_f32`).
 fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
+    let (chunks, _) = bytes.as_chunks::<4>();
+    chunks.iter().map(|b| f32::from_le_bytes(*b)).collect()
 }
 
 /// Cosine similarity in [0-ish, 1], clamped; 0.0 on length mismatch/zero norm

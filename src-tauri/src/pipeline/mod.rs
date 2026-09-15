@@ -18,8 +18,8 @@ use std::sync::mpsc::SyncSender;
 use crate::chunker::{chunk_autodetect, should_ingest_extension, AstLang, ChunkStrategy};
 use crate::config::BrainConfig;
 use crate::db::queries::{
-    delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding, mark_document_error,
-    mark_document_indexed, upsert_document,
+    delete_document_chunks, get_document_by_path, insert_chunk, insert_embedding,
+    mark_document_error, mark_document_indexed, upsert_document,
 };
 use crate::embedder::{embed_batch, EmbedProfile};
 use crate::hasher::hash_bytes;
