@@ -320,7 +320,15 @@ marker therefore carries the consequence in its copy: **"All sources
 deleted — approving will skip facts unless a source returns at its original
 path."** The
 per-source marker needs no such note, because other live sources may still
-anchor the facts.
+anchor the facts. The stranded marker uses the error colour, not the neutral
+placeholder style, because it warns about what approval will do.
+
+This outcome is an engineering decision that protects data integrity: no
+unanchored fact is ever committed. It has not been UX-tested. A reviewer who
+clicks Approve and sees the proposal resolve to `rejected` may still be
+surprised, whatever the copy says. Product/design should review the flow
+after merge. Options include disabling Approve while the proposal is
+stranded, or relabelling it.
 - `list_proposals_for_document` is unchanged. A deleted document has no id
   to look up.
 
