@@ -10,7 +10,8 @@
 //!      3b. Extension gate (`should_ingest_extension`, issue #203); Deletes bypass it
 //!   4. sha256 the bytes; upsert documents row with status='pending'
 //!
-//! For Delete events: skip step 4 (file is gone); DELETE the documents row.
+//! For Delete events: skip step 4 (file is gone); delete the documents row via
+//! `queries::delete_document`, which first records pending-proposal provenance.
 //! chunks cascade-delete via FK ON DELETE CASCADE.
 //!
 //! Path stored in `documents.path` is the VIRTUAL form (`abs`, pre-
@@ -96,10 +97,10 @@ pub fn enqueue_vault_event(
     // scratch file's Remove event arrives. Exclusion only gates STAGING new
     // rows, not healing old ones.
     if matches!(event_kind, EventKind::Remove(_)) {
-        conn.execute(
-            "DELETE FROM documents WHERE path = ?1",
-            rusqlite::params![&path_str],
-        )?;
+        // Checked transaction: `conn` is `&mut` (issue #211 spec D5).
+        let tx = conn.transaction()?;
+        crate::db::queries::delete_document(&tx, &path_str)?;
+        tx.commit()?;
         return Ok(());
     }
 
@@ -153,10 +154,9 @@ pub fn enqueue_vault_event(
     let bytes = match std::fs::read(&canonical) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            conn.execute(
-                "DELETE FROM documents WHERE path = ?1",
-                rusqlite::params![&path_str],
-            )?;
+            let tx = conn.transaction()?;
+            crate::db::queries::delete_document(&tx, &path_str)?;
+            tx.commit()?;
             return Ok(());
         }
         Err(e) => {
@@ -218,45 +218,11 @@ mod tests {
 
     // ---- enqueue_vault_event fixtures ----------------------------------
 
-    /// Inline subset of MIGRATION_V1 + V11 sufficient for
-    /// `enqueue_vault_event` tests. Keeping the schema local avoids
-    /// coupling `queue` to the canonical `src-tauri/src/db/schema.rs`
-    /// (which is bigger and changes independently); the columns touched
-    /// by `enqueue_vault_event` plus the V11 watermark columns needed by
-    /// the dirty-doc selection tests are stable.
-    fn enqueue_test_schema_sql() -> &'static str {
-        "CREATE TABLE documents (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            path            TEXT    NOT NULL UNIQUE,
-            hash            TEXT    NOT NULL,
-            tier            TEXT    NOT NULL CHECK(tier IN ('user_doc', 'wiki')),
-            folder_rules_id INTEGER,
-            last_indexed    INTEGER,
-            status          TEXT    NOT NULL DEFAULT 'pending'
-                            CHECK(status IN ('pending', 'indexed', 'error', 'orphaned')),
-            synth_hash      TEXT,
-            synth_model     TEXT,
-            synth_at        INTEGER
-        );"
-    }
-
-    /// Open a fresh in-memory sqlite connection with only the columns
-    /// `enqueue_vault_event` touches applied. Using a raw (non-migrated)
-    /// connection avoids coupling the test to the canonical migration
-    /// stack; if the canonical schema changes the production upsert paths
-    /// still validate.
+    /// Open a fresh, fully migrated in-memory brain db. Deletes now record
+    /// pending-proposal provenance (issue #211), so a hand-rolled subset of
+    /// `documents` is no longer enough, and a partial copy of the curated
+    /// DDL would drift from the real one.
     fn open_seeded_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("open raw in-memory brain db");
-        conn.execute_batch(enqueue_test_schema_sql())
-            .expect("apply minimal documents schema");
-        conn
-    }
-
-    /// Touch the migrated in-memory schema via `open_in_memory()` (matches
-    /// the project style for src-tauri-side tests). Some tests don't need
-    /// the full migration stack; those use `open_seeded_conn()` instead.
-    #[allow(dead_code)]
-    fn open_migrated_conn() -> Connection {
         open_in_memory().expect("open migrated in-memory brain db")
     }
 
@@ -1074,5 +1040,69 @@ mod tests {
             vec![abs.to_string_lossy().into_owned()],
             "gate must return before the NotFound delete arm"
         );
+    }
+
+    // ---- issue #211: deletion provenance -------------------------------
+
+    /// Spec test 10, Remove branch.
+    #[test]
+    fn remove_event_records_deleted_source_for_pending_proposal() {
+        use crate::db::proposals::test_support::{deleted_source_rows, seed_pending_proposal};
+        use crate::db::proposals::ProposalSourceRole::Trigger;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = write_at(&root, "cited.md", b"cited");
+        let path_str = std::path::absolute(&p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut conn = open_seeded_conn();
+        let doc_id = upsert_document(&conn, &path_str, "h-cited").unwrap();
+        seed_pending_proposal(&conn, "prop-remove", &[(doc_id, Trigger)]);
+
+        enqueue_vault_event(
+            &mut conn,
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+            &p,
+            Some(&root),
+        )
+        .unwrap();
+
+        assert!(staged_paths(&conn).is_empty(), "Remove must delete the row");
+        assert_eq!(
+            deleted_source_rows(&conn, "prop-remove"),
+            vec![(path_str, "h-cited".into(), "trigger".into())]
+        );
+    }
+
+    /// Spec test 10, NotFound branch (a Modify for a file that vanished).
+    #[test]
+    fn vanished_file_records_deleted_source_for_pending_proposal() {
+        use crate::db::proposals::test_support::{deleted_source_rows, seed_pending_proposal};
+        use crate::db::proposals::ProposalSourceRole::Trigger;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // Canonicalized for the same reason as `vanished_file_is_treated_as_a_delete`.
+        let root = dir.path().canonicalize().unwrap();
+        let p = write_at(&root, "racy.md", b"# racy");
+
+        let mut conn = open_seeded_conn();
+        enqueue_vault_event(&mut conn, modify(), &p, Some(&root)).unwrap();
+        let path_str = staged_paths(&conn).pop().expect("staged while present");
+        let doc_id: i64 = conn
+            .query_row("SELECT id FROM documents WHERE path = ?1", [&path_str], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        seed_pending_proposal(&conn, "prop-vanished", &[(doc_id, Trigger)]);
+
+        std::fs::remove_file(&p).unwrap();
+        enqueue_vault_event(&mut conn, modify(), &p, Some(&root)).unwrap();
+
+        assert!(staged_paths(&conn).is_empty(), "the row must not outlive the file");
+        assert_eq!(deleted_source_rows(&conn, "prop-vanished").len(), 1);
     }
 }
