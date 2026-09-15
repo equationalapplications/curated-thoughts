@@ -1563,6 +1563,17 @@ fn print_review_card(item: &tauri_app_lib::db::proposals_review::PendingReviewIt
     for doc in &item.source_docs {
         println!("source: {doc}");
     }
+    for doc in &item.deleted_source_docs {
+        println!("deleted source: {doc}");
+    }
+    // Spec D3 (#211): the stranded condition is the empty LIVE source list
+    // alone — it also fires for pre-V23 proposals with no recorded names.
+    // The operator must see the skip-facts consequence before choosing `y`.
+    if item.source_docs.is_empty() {
+        println!(
+            "All sources deleted — approving will skip facts unless a source returns at its original path."
+        );
+    }
 }
 
 /// Report the PERSISTED outcome, never the requested decision: an approval
