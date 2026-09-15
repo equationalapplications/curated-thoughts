@@ -121,7 +121,17 @@ Add to the `queue.rs` test module, reusing its existing schema fixture:
    pins the gate ahead of `std::fs::read`. (Healing that row is
    reconcile's and Remove's job, D5.)
 
-Existing walker, queue, reconcile, and sweep suites stay green.
+Existing walker, queue, reconcile, and sweep suites stay green, with one
+required fixture change: four `.brain` exclusion tests in `queue.rs`
+(`gate_rejects_brain_paths_and_stages_lookalikes`,
+`gate_rejects_symlinked_out_brain_dir`,
+`gate_skipped_when_vault_root_unresolvable`,
+`gate_fails_open_for_unrelativizable_path`) use `.log` files. Under this
+gate those files are rejected by extension before the directory gate runs —
+one test would fail outright and three would pass without exercising the
+gate they were written for. They move to `.md` so each stays pinned to the
+directory gate. `remove_event_still_deletes_pre_staged_brain_row` keeps
+`.log` (Remove bypasses both gates).
 
 ## Out of scope
 
