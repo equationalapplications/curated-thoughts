@@ -31,8 +31,6 @@ pub fn budget_for(stage: Stage, profile: &EmbedProfile, gen_timeout_secs: u64) -
         // Per entity, not per flush batch (spec §2.2).
         Stage::Linking => 60,
         Stage::Committing => 60,
-        // Unindexed `LIKE` scan over wiki_pages (pipeline/mod.rs:229-256).
-        Stage::Deleting => 120,
     };
     Some(Duration::from_secs(secs))
 }
@@ -85,7 +83,6 @@ mod tests {
             Stage::Summarizing,
             Stage::Linking,
             Stage::Committing,
-            Stage::Deleting,
         ] {
             assert!(
                 budget_for(stage, &ollama(), 600).is_some(),

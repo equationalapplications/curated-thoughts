@@ -15,7 +15,6 @@ pub enum Stage {
     Summarizing = 5,
     Linking = 6,
     Committing = 7,
-    Deleting = 8,
 }
 
 impl Stage {
@@ -29,7 +28,6 @@ impl Stage {
             Stage::Summarizing => "summarizing",
             Stage::Linking => "linking",
             Stage::Committing => "committing",
-            Stage::Deleting => "deleting",
         }
     }
 
@@ -42,7 +40,6 @@ impl Stage {
             5 => Stage::Summarizing,
             6 => Stage::Linking,
             7 => Stage::Committing,
-            8 => Stage::Deleting,
             _ => Stage::Idle,
         }
     }
@@ -440,5 +437,11 @@ mod tests {
         assert!(!reporter.superseded());
         assert!(reporter.enter(Stage::Chunking, Some("/a.md")));
         assert_eq!(hb.snapshot().stage, Stage::Chunking);
+    }
+
+    /// Issue #211 spec D6 L2: the retired `Deleting = 8` decodes as `Idle`.
+    #[test]
+    fn retired_deleting_code_decodes_as_idle() {
+        assert_eq!(Stage::from_u8(8), Stage::Idle);
     }
 }

@@ -33,7 +33,7 @@ pub fn record_strike(conn: &Connection, path: &str) -> Result<i64> {
 
 /// Record an unattributed system strike. Used when the stall is caused by a
 /// shared local dependency (e.g. brain SQLite contention under
-/// `Committing`/`Deleting`) so that no innocent document inherits blame
+/// `Committing`) so that no innocent document inherits blame
 /// (spec §4.2). Returns the new system-wide strike count.
 pub fn record_system_strike(conn: &Connection) -> Result<i64> {
     conn.execute(
@@ -87,7 +87,7 @@ pub fn stage_has_network_dependency(stage: Stage) -> bool {
 /// Which stages share the brain SQLite as their dependency and therefore
 /// must probe it before attributing the stall to a path (spec §4.2).
 pub fn stage_uses_shared_sqlite(stage: Stage) -> bool {
-    matches!(stage, Stage::Committing | Stage::Deleting)
+    matches!(stage, Stage::Committing)
 }
 
 /// Rolling-window count of worker respawns.
@@ -201,7 +201,6 @@ mod tests {
             Stage::Chunking,
             Stage::Linking,
             Stage::Committing,
-            Stage::Deleting,
             Stage::Idle,
         ] {
             assert!(
