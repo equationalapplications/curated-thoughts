@@ -204,11 +204,21 @@ fn supersede_stale_pending(
                  WHERE status = 'pending'
                    AND id != ?2
                    AND entity_id = ?3
-                   AND EXISTS (
-                     SELECT 1 FROM curated_proposal_sources s
-                     WHERE s.proposal_id = curated_proposals.id
-                       AND s.doc_id = ?4
-                       AND s.role = 'trigger'
+                   AND (
+                     EXISTS (
+                       SELECT 1 FROM curated_proposal_sources s
+                       WHERE s.proposal_id = curated_proposals.id
+                         AND s.doc_id = ?4
+                         AND s.role = 'trigger'
+                     )
+                     -- Issue #211 spec D4: identical bytes at a new path for
+                     -- the same target is a desktop move (Remove + Create).
+                     OR EXISTS (
+                       SELECT 1 FROM curated_proposal_deleted_sources ds
+                       WHERE ds.proposal_id = curated_proposals.id
+                         AND ds.role = 'trigger'
+                         AND ds.doc_hash = (SELECT hash FROM documents WHERE id = ?4)
+                     )
                    )",
                 params![now, new_id, entity_id, trigger_doc],
             )?;
@@ -225,11 +235,21 @@ fn supersede_stale_pending(
                    AND id != ?2
                    AND kind = 'new_entity'
                    AND proposed_name = ?3
-                   AND EXISTS (
-                     SELECT 1 FROM curated_proposal_sources s
-                     WHERE s.proposal_id = curated_proposals.id
-                       AND s.doc_id = ?4
-                       AND s.role = 'trigger'
+                   AND (
+                     EXISTS (
+                       SELECT 1 FROM curated_proposal_sources s
+                       WHERE s.proposal_id = curated_proposals.id
+                         AND s.doc_id = ?4
+                         AND s.role = 'trigger'
+                     )
+                     -- Issue #211 spec D4: identical bytes at a new path for
+                     -- the same target is a desktop move (Remove + Create).
+                     OR EXISTS (
+                       SELECT 1 FROM curated_proposal_deleted_sources ds
+                       WHERE ds.proposal_id = curated_proposals.id
+                         AND ds.role = 'trigger'
+                         AND ds.doc_hash = (SELECT hash FROM documents WHERE id = ?4)
+                     )
                    )",
                 params![now, new_id, proposed_name, trigger_doc],
             )?;
@@ -238,7 +258,9 @@ fn supersede_stale_pending(
     Ok(())
 }
 
-/// Insert proposal + items + sources atomically; supersede older pending for same target + trigger doc.
+/// Insert proposal + items + sources atomically; supersede older pending for
+/// the same target whose trigger is this doc, or whose deleted trigger had
+/// this doc's hash (a move, issue #211 spec D4).
 pub fn insert_proposal(
     conn: &Connection,
     proposal: &NewProposal,
@@ -1033,6 +1055,78 @@ mod tests {
             ]
         );
         assert_eq!(detail.status, "pending");
+    }
+
+    fn update_proposal(id: &str, entity_id: &str) -> NewProposal {
+        NewProposal {
+            id: id.into(),
+            kind: ProposalKind::UpdateEntity,
+            entity_id: Some(entity_id.into()),
+            proposed_name: None,
+            proposed_type: None,
+            reasoning: None,
+            model: "test-model".into(),
+        }
+    }
+
+    /// Insert `proposal` triggered by a new document at `path` with `hash`.
+    fn insert_triggered(conn: &Connection, proposal: &NewProposal, path: &str, hash: &str) {
+        let doc_id = upsert_document(conn, path, hash).unwrap();
+        let chunk_id = seed_chunk(conn, doc_id, "x");
+        insert_proposal(
+            conn,
+            proposal,
+            &[sample_fact_item(&format!("{}-item", proposal.id), chunk_id, "x")],
+            &[NewProposalSource {
+                doc_id,
+                role: ProposalSourceRole::Trigger,
+            }],
+        )
+        .unwrap();
+    }
+
+    /// Spec test 6, new_entity arm.
+    #[test]
+    fn supersede_heals_a_move_for_new_entity() {
+        use crate::db::proposals::test_support::{delete_path, status_of};
+
+        let mut conn = open_in_memory().unwrap();
+        insert_triggered(&conn, &sample_new_proposal("p1", "Moved"), "/vault/a.md", "h-move");
+        delete_path(&mut conn, "/vault/a.md");
+
+        insert_triggered(&conn, &sample_new_proposal("p2", "Moved"), "/vault/moved/a.md", "h-move");
+
+        assert_eq!(status_of(&conn, "p1"), "superseded");
+        assert_eq!(status_of(&conn, "p2"), "pending");
+    }
+
+    /// Spec test 6, update_entity arm.
+    #[test]
+    fn supersede_heals_a_move_for_update_entity() {
+        use crate::db::proposals::test_support::{delete_path, status_of};
+
+        let mut conn = open_in_memory().unwrap();
+        insert_triggered(&conn, &update_proposal("u1", "ent-move"), "/vault/b.md", "h-move-u");
+        delete_path(&mut conn, "/vault/b.md");
+
+        insert_triggered(&conn, &update_proposal("u2", "ent-move"), "/vault/moved/b.md", "h-move-u");
+
+        assert_eq!(status_of(&conn, "u1"), "superseded");
+        assert_eq!(status_of(&conn, "u2"), "pending");
+    }
+
+    /// Spec test 7.
+    #[test]
+    fn different_content_at_a_new_path_does_not_supersede() {
+        use crate::db::proposals::test_support::{delete_path, status_of};
+
+        let mut conn = open_in_memory().unwrap();
+        insert_triggered(&conn, &sample_new_proposal("p1", "Edited"), "/vault/c.md", "h-before");
+        delete_path(&mut conn, "/vault/c.md");
+
+        insert_triggered(&conn, &sample_new_proposal("p2", "Edited"), "/vault/moved/c.md", "h-after");
+
+        assert_eq!(status_of(&conn, "p1"), "pending");
     }
 }
 
