@@ -2,7 +2,7 @@
  * Source of truth: src/index.css (kept byte-identical for the static
  * palette preview harness, which loads this copy without a bundler).
  * Regenerate after ANY change to src/index.css:
- *   cp src/index.css docs/a11y/index.css
+ * Last regenerated: 2026-09-15 @ #211 Task 10 review-desk markers. */
  * Last regenerated: 2026-08-31 @ phase-1 fix loop (incl. Task 3 primitives block). */
 /* ── Clanker-derived design tokens ─────────────────────────────────────── */
 :root {
@@ -1493,6 +1493,16 @@ body {
   font-size: 11px;
   opacity: 0.65;
 }
+.review-queue-item-deleted,
+.review-queue-item-stranded {
+  font-size: 11px;
+  color: var(--on-surface-var);
+  font-style: italic;
+}
+/* Stranded: approving will skip facts (issue #211 spec D3). */
+.review-queue-item-stranded {
+  color: var(--error);
+}
 .review-detail {
   flex: 1;
   min-width: 0;
@@ -1553,6 +1563,17 @@ body {
   color: var(--on-surface-var);
   margin: 0;
   line-height: 1.45;
+}
+.review-evidence-source-deleted {
+  font-size: 12px;
+  color: var(--on-surface-var);
+  font-style: italic;
+  padding: 2px 0;
+}
+/* Overrides the neutral placeholder colour: approving a stranded proposal
+   skips its facts, so the marker is a warning, not an empty state. */
+.review-evidence-stranded {
+  color: var(--error);
 }
 .review-evidence-reasoning {
   font-size: 13px;
