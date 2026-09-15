@@ -1,7 +1,7 @@
 # Watcher: gate `enqueue_vault_event` staging by ingestable extension
 
 **Date:** 2026-09-14
-**Status:** Approved design (rev 1) — not yet implemented
+**Status:** Implemented (rev 1)
 **Branch:** spec/watcher-extension-gate
 **Issue:** #203
 **Priority:** Low (sweep churn and log noise; no data corruption)
