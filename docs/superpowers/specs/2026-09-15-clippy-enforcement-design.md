@@ -73,12 +73,24 @@ DELETE the documents row").
 job; the pipeline consumer is tested dead weight one refactor away from a
 confusing CI break.
 
-**Discovered gap (follow-up issue, not this PR):** the orphaned worker arm
-(`pipeline/mod.rs:266`) contains the repo's **only** `.brain/converted/*.md`
-shadow-copy cleanup. Every other reference to that directory creates it
-(`lib.rs:610`, `vault/layout.rs:29`) or tests it. Shadow copies are therefore
-never removed when a document is deleted — a latent bug that predates this
-spec and must be fixed separately, in the DB-queue delete path.
+**Discovered gaps (follow-up issue, not this PR):** the orphaned worker arm
+(`pipeline/mod.rs:266`) performs two side effects that nothing on the live
+DB-queue delete path (`db/queue.rs`, the `EventKind::Remove` branch, which
+only runs `DELETE FROM documents`) replicates:
+
+1. **Shadow-copy cleanup.** The arm holds the repo's **only**
+   `.brain/converted/*.md` removal. Every other reference to that directory
+   creates it (`lib.rs:610`, `vault/layout.rs:29`) or tests it. Shadow copies
+   are therefore never removed when a document is deleted.
+2. **Wiki-page orphaning.** The arm sets `wiki_pages.status = 'orphaned'` for
+   pages whose `source_doc_ids` reference the deleted path. The only other
+   `'orphaned'` write to `wiki_pages` is a one-off migration
+   (`db/okf_migration.rs:129`). Wiki pages derived from a deleted document
+   therefore stay in their prior status. `tests/deletion.rs:116` asserted this
+   behavior, so it was intended, not incidental.
+
+Both are latent bugs that predate this spec (they have been unreachable since
+`2ed0acf`) and must be fixed separately, in the DB-queue delete path.
 
 ## §3 — Design
 
@@ -95,7 +107,8 @@ Delete all of:
 - the variant (`pipeline/mod.rs:40`) and its doc-era comments;
 - the two consumer arms — the path-extraction arm at `pipeline/mod.rs:193`
   and the worker arm at `pipeline/mod.rs:266` (including the shadow-copy
-  body — it is unreachable; the gap is tracked separately, §2.3);
+  and wiki-orphaning bodies — they are unreachable; the gaps are tracked
+  separately, §2.3);
 - the exhaustive-match arms in the sweep tests
   (`pipeline/watchdog/sweep.rs:190`, `:214`, `:298`) — the matches remain
   exhaustive over `Ingest` alone;
@@ -106,6 +119,11 @@ After removal, grep the crate for `PipelineJob::Delete` and `Stage::Deleting`
 stragglers in comments. `Stage::Deleting` itself is **kept**: the watchdog
 heartbeat parses it back from its discriminant (`heartbeat.rs:45,
 8 => Stage::Deleting`), so it stays constructed and warning-free.
+After this change no worker ever *enters* `Stage::Deleting`, so its budget
+(`budgets.rs:35`) and SQLite-probe classification (`recovery.rs:90`) become
+vestigial. They are kept deliberately to avoid churn in the watchdog's stage
+taxonomy and persisted heartbeat discriminants; the follow-up fix for §2.3 may
+re-enter the stage if it adds delete-path work.
 
 ### 3.3 CI step becomes blocking
 
@@ -145,13 +163,20 @@ No `continue-on-error`; same fix-forward runbook. Building `tools/` re-lints
 the src-tauri lib as a dependency — which is exactly what surfaced §2.3 — so
 3.2 must land in the same PR or this step fails.
 
+**Accepted CI cost:** the root `Cargo.toml` is a workspace
+(`members = ["src-tauri", "tools"]`), so both steps share `./target` and the
+single rust-cache entry. The tools step resolves src-tauri **without**
+`test-utils`, a different feature set from the first step, so the src-tauri
+lib compiles twice per run. That extra compile is the price of linting the
+production feature set and is accepted.
+
 ## §4 — Out of scope
 
 - `cargo fmt --check` gating (never asked for; separate decision).
 - Windows-target lints (CI clippy runs on ubuntu only).
-- Shadow-copy cleanup on document deletion — **file a follow-up issue**
-  describing the §2.3 gap and link it from the PR body (same pattern as
-  PR 4's AC6).
+- Shadow-copy cleanup and wiki-page orphaning on document deletion — **file a
+  follow-up issue** describing both §2.3 gaps and link it from the PR body
+  (same pattern as PR 4's AC6).
 
 ## §5 — Acceptance criteria
 
@@ -159,7 +184,8 @@ the src-tauri lib as a dependency — which is exactly what surfaced §2.3 — s
   --features test-utils -- -D warnings` exits 0 locally.
 - AC2: `cargo clippy --manifest-path tools/Cargo.toml --all-targets
   -- -D warnings` exits 0 locally.
-- AC3: `grep -r PipelineJob::Delete src-tauri/ tools/` returns nothing.
+- AC3: `grep -rn 'PipelineJob::Delete\|Delete(String)' src-tauri/src/
+  src-tauri/tests/ tools/src/` returns nothing.
 - AC4: `src-tauri/tests/deletion.rs` is gone; the full test suite passes
   without it (`cargo test --manifest-path src-tauri/Cargo.toml --features
   test-utils,mcp-server`).
@@ -167,11 +193,12 @@ the src-tauri lib as a dependency — which is exactly what surfaced §2.3 — s
   `-D warnings`; the warn-only comment block is gone.
 - AC6: The three `toolchain: stable` lines in `ci.yml`/`build.yml` are
   byte-identical to before (`git diff` proves it).
-- AC7: Follow-up issue for the shadow-copy gap is filed and linked in the
-  PR body.
+- AC7: Follow-up issue covering both §2.3 gaps (shadow-copy cleanup and
+  wiki-page orphaning) is filed and linked in the PR body.
 - AC8: All CI checks green on the PR tip SHA, verified via
   `gh pr view --json mergeable,mergeStateStatus` and check-runs on that SHA
-  (never via the PR body).
+  (never via the PR body). The clippy steps run inside the `rust-ubuntu` job,
+  so they surface as that job's check-run, not as check-runs of their own.
 
 ## §6 — Files
 
