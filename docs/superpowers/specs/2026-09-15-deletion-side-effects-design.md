@@ -45,7 +45,9 @@ accumulates duplicate proposals when a file moves; no index corruption)
     proposal commits no facts and resolves to `rejected`, because of the
     Phase-2 unanchored gate. D3 documents this and adds it to the marker
     copy; D7 no longer claims these proposals are approvable; test 8 pins
-    the outcome and the re-anchor path.
+    the outcome and the re-anchor path. Re-anchoring requires the same
+    virtual path, because the chunk `content_hash` includes it. That
+    corrects rev 2's move non-goal.
 
 ## Problem
 
@@ -298,9 +300,13 @@ same proposal should never report different sources on different surfaces
 
 **What approval does while stranded.** The Phase-2 strict gate skips every
 `fact_add` whose evidence anchors no live chunk (`evidence_has_live_chunk`,
-`commit.rs:628`, applied at `:1494`). Anchoring is by `content_hash` first,
-so evidence re-anchors once the same bytes are ingested again, at any path.
-Until then:
+`commit.rs:628`, applied at `:1494`). Anchoring is by `content_hash` first.
+That hash is `SHA-256(text || doc_path || position)`
+(`db/chunk_hash.rs:18`), and it includes the virtual path. Evidence
+therefore re-anchors only when the same bytes are ingested again **at the
+same path**: a file restored in place, or a vault switched back at the same
+root. A moved file never re-anchors its old proposal's evidence; D4
+supersedes that proposal instead. Until evidence re-anchors:
 - approving a fully stranded proposal whose items are all `fact_add`
   returns `Ok` with `skipped_unanchored` equal to the item count;
 - `accepted_count` is 0, so `finalize_proposal_status` (`commit.rs:2173`)
@@ -311,7 +317,8 @@ Until then:
 This is the correct outcome, because nothing evidenced can be committed.
 The reviewer should still not be surprised by it. The "All sources deleted"
 marker therefore carries the consequence in its copy: **"All sources
-deleted — approving will skip facts until a source is re-ingested."** The
+deleted — approving will skip facts unless a source returns at its original
+path."** The
 per-source marker needs no such note, because other live sources may still
 anchor the facts.
 - `list_proposals_for_document` is unchanged. A deleted document has no id
@@ -580,9 +587,12 @@ already use `open_in_memory` and need no fixture change.
    - reject returns `Ok` and the status is `rejected`;
    - approve returns `Ok` with `skipped_unanchored == 1`, the status is
      `rejected`, and no `llm_wiki_entries` row is written;
-   - **re-anchor:** re-ingest a document whose chunk carries the evidence's
-     `content_hash`, then approve. The fact lands and the status is
-     `approved`.
+   - **re-anchor at the same path:** re-create the document at the
+     original path with a chunk whose `content_hash` is
+     `compute_chunk_hash(text, original_path, 0)` (the evidence carries the
+     same hash), then approve. The fact lands and the status is `approved`.
+   - **no re-anchor after a move:** the same text at a different path
+     produces a different hash, and approve still resolves to `rejected`.
 9. **Trigger label fallback.** `trigger_source_label` returns the deleted
    trigger's basename.
 10. **Queue path (`db/queue.rs` tests).** Remove and NotFound branches both
@@ -640,9 +650,10 @@ Frontend: extend the `src/__tests__/fixtures/proposals.ts` fixtures with
   #213. It is not fixed.
 - **Bulk dismiss** for stranded proposals (D7 cost).
 - **Re-linking live sources on move.** D4 supersedes the duplicate; it does
-  not re-attach the old proposal to the new document. Per-chunk evidence
-  already re-resolves after re-ingest, because `hydrate_evidence` looks up
-  by `content_hash`.
+  not re-attach the old proposal to the new document. (rev 2 claimed that
+  per-chunk evidence re-resolves after a move. It does not: `content_hash`
+  includes the doc path, so it re-resolves only when a file is restored at
+  the same path.)
 - **Rename detection in the desktop watcher / startup reconcile** (making
   them re-point rows like `reconcile_vault`). This would remove the
   Remove+Create split at its source. It is larger and orthogonal.
