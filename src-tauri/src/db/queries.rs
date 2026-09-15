@@ -173,8 +173,16 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
     )?)
 }
 
+/// Empty the document layer for a vault switch without backup restore.
+///
+/// Issue #211 spec D7: pending proposals are KEPT, stranded, with every source
+/// recorded first. The brain is global (`~/.brain/brain.db`) and this
+/// function has cleared only the document layer since the V7 OKF migration,
+/// so approved entities and facts already survive a switch. Deleting only the
+/// pending layer would be a lopsided half-fix of that leak, tracked in #213.
 pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
+    tx.execute(record_deleted_sources_sql!(""), [])?;
     tx.execute_batch(
         "DELETE FROM curated_relationships;
          DELETE FROM embeddings;
@@ -637,6 +645,21 @@ mod clear_vault_tables_tests {
         let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
         insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
 
+        // Spec test 13 (issue #211 D7): pending proposals survive a no-restore
+        // vault switch stranded, with provenance; historical ones are untouched.
+        use crate::db::proposals::test_support::{
+            deleted_source_rows, seed_pending_proposal, status_of,
+        };
+        use crate::db::proposals::ProposalSourceRole::Trigger;
+        seed_pending_proposal(&conn, "prop-switch-1", &[(doc_id, Trigger)]);
+        seed_pending_proposal(&conn, "prop-switch-2", &[(doc_id, Trigger)]);
+        seed_pending_proposal(&conn, "prop-switch-done", &[(doc_id, Trigger)]);
+        conn.execute(
+            "UPDATE curated_proposals SET status = 'approved' WHERE id = 'prop-switch-done'",
+            [],
+        )
+        .unwrap();
+
         conn.execute(
             "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('test', 'index', 0)",
             [],
@@ -671,6 +694,16 @@ mod clear_vault_tables_tests {
         assert_eq!(wiki_count, 0);
         assert_eq!(rule_count, 0);
         assert_eq!(rel_count, 0);
+
+        for id in ["prop-switch-1", "prop-switch-2"] {
+            assert_eq!(status_of(&conn, id), "pending", "{id} must stay pending");
+            assert_eq!(
+                deleted_source_rows(&conn, id),
+                vec![("/test/doc.md".into(), "abc123".into(), "trigger".into())],
+                "{id} must record its deleted source"
+            );
+        }
+        assert!(deleted_source_rows(&conn, "prop-switch-done").is_empty());
     }
 }
 
