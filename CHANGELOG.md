@@ -1,3 +1,9 @@
+## [2.10.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.10.1...v2.10.2) (2026-09-15)
+
+### Bug Fixes
+
+* **watch:** gate enqueue_vault_event staging by ingestable extension ([#203](https://github.com/equationalapplications/curated-thoughts/issues/203)) ([fd3495e](https://github.com/equationalapplications/curated-thoughts/commit/fd3495ef38fdde93e3479ef1a944a10433a3eff3))
+
 ## [2.10.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.10.0...v2.10.1) (2026-09-11)
 
 ### Bug Fixes
