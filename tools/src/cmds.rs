@@ -1131,6 +1131,25 @@ fn run(opts: WatchOpts) -> Result<(), WatchError> {
                 anyhow::Error::new(e).context("brain.db schema probe failed at watcher startup"),
             )
         })?;
+        // Issue #211 (final-review finding): the per-event connections
+        // opened in the callback below are raw — `open_rw` never migrates,
+        // by design (cheap reopen per event). But their Remove/NotFound
+        // branches now run `queries::delete_document`, whose FIRST
+        // statement inserts into the V23 `curated_proposal_deleted_sources`
+        // table. On a brain.db last touched by a pre-V23 build that table
+        // doesn't exist yet, so the first Remove/vanished event after an
+        // upgrade would fail with "no such table" and the delete would be
+        // dropped until some migrating open touched the file. Run the
+        // rootless migrate on the probe connection: the V23 DDL is ungated
+        // (CREATE TABLE IF NOT EXISTS on every migrate), so it lands the
+        // table without needing a vault root — exactly the pattern the V23
+        // design prescribes. The other `open_rw` callers (`ct wiki forget`,
+        // `ct evidence regrade`) never touch the V23 table and fail loudly
+        // on error, so the watcher — the only caller that swallows
+        // per-event errors — is the fix point.
+        tauri_app_lib::db::connection::migrate_open_db(&probe, None).map_err(|e| {
+            WatchError::Db(e.context("brain.db migration failed at watcher startup"))
+        })?;
     }
 
     let lock = match VaultLock::acquire(&brain.brain_dir) {
