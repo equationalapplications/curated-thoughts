@@ -1,7 +1,7 @@
 # Document deletion: preserve pending-proposal provenance + legacy cleanup
 
 **Date:** 2026-09-15
-**Status:** Implemented (rev 3)
+**Status:** Implemented (rev 4)
 **Branch:** spec/211-deletion-side-effects
 **Issue:** #211
 **Priority:** Medium (Review desk loses the identity of deleted sources and
@@ -48,6 +48,16 @@ accumulates duplicate proposals when a file moves; no index corruption)
     the outcome and the re-anchor path. Re-anchoring requires the same
     virtual path, because the chunk `content_hash` includes it. That
     corrects rev 2's move non-goal.
+- **rev 4** records one supersession. Issue #213 decided per-vault-vs-global —
+  the question D7 explicitly deferred — and the answer is **per-vault**, so
+  D7's vault-switch stranding rule no longer holds: `clear_vault_tables` now
+  clears pending proposals along with the rest of the knowledge layer, and the
+  destruction is confirmed in the switch UI rather than being a silent side
+  effect. See
+  `docs/superpowers/specs/2026-09-15-issue213-per-vault-brain-design.md` D4.
+  **Everything else in this spec stands**: D3/D5 provenance recording on
+  single-document deletion, the V23 `curated_proposal_deleted_sources` table
+  and its grep pin all serve the document-deletion path and are unaffected.
 
 ## Problem
 
@@ -462,6 +472,12 @@ a new migration gated on the marker, which buys nothing. It stays a
 documented leftover. `clear_vault_tables` keeps deleting from it.
 
 ### D7 — Vault switch without restore keeps pending proposals, stranded
+
+> **SUPERSEDED for the vault-switch path (2026-09-15, by #213).** The
+> per-vault-vs-global question this section deferred has been answered:
+> per-vault. `clear_vault_tables` clears pending proposals with everything
+> else. This section's reasoning is retained for the record; do not implement
+> the stranding rule.
 
 `switch_vault` with `restore_backup = false` (or with no backup present)
 opens the brain database raw and calls `clear_vault_tables`
