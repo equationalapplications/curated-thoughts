@@ -1613,7 +1613,8 @@ async fn switch_vault(
             pending_config_align_to = Some(new_path.clone());
         } else {
             let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-            db::clear_vault_tables(&mut conn).map_err(|e| e.to_string())?;
+            db::clear_vault_tables(&mut conn, crate::pipeline::watchdog::heartbeat::now_ms())
+                .map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
         }
 

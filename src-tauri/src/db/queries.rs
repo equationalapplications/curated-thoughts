@@ -173,24 +173,87 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
     )?)
 }
 
-/// Empty the document layer for a vault switch without backup restore.
+/// Empty this vault's brain for a switch without backup restore.
 ///
-/// Issue #211 spec D7: pending proposals are KEPT, stranded, with every source
-/// recorded first. The brain is global (`~/.brain/brain.db`) and this
-/// function has cleared only the document layer since the V7 OKF migration,
-/// so approved entities and facts already survive a switch. Deleting only the
-/// pending layer would be a lopsided half-fix of that leak, tracked in #213.
-pub fn clear_vault_tables(conn: &mut Connection) -> anyhow::Result<()> {
+/// The brain database is global (`~/.brain/brain.db`) but the brain is
+/// **per-vault** (issue #213): a vault's knowledge is only what was created
+/// while it was active. This clears the knowledge layer and the document
+/// layer together, in one transaction, so vault A's entities, facts, edges,
+/// tasks and agent memories cannot surface in vault B.
+///
+/// `llm_wiki_entries` and `llm_wiki_tasks` are replicated, so each doomed row
+/// gets an `OutboxOperation::Delete` row — set-based, one statement per table,
+/// rather than the per-row `hard_delete_entries` ceremony, which would cost
+/// ~3 round trips per fact on the user-facing switch path. The payload is
+/// `{"id"}`: this is a hard delete, matching `hard_delete_entries` and
+/// `clear_entity_content`, not the archive convention's
+/// `{id, entity_id, deleted_at}`.
+///
+/// Nothing relies on `ON DELETE CASCADE`: the caller opens a raw connection
+/// that never sets `PRAGMA foreign_keys`, so cascades do not fire. Every
+/// delete is explicit, children before parents.
+///
+/// Supersedes issue #211 spec D7, which stranded pending proposals here —
+/// that decision was deferred to #213 and is now "per-vault", so proposals
+/// are cleared with everything else. The destruction is confirmed in the
+/// switch UI (spec D5), so it is not a silent side effect.
+pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
-    tx.execute(record_deleted_sources_sql!(""), [])?;
+
+    // Entries: replica Deletes first (the rows must still exist to select
+    // from), then their evidence, then the rows. No `deleted_at IS NULL`
+    // filter — an archived fact's Insert may already have drained, so the
+    // replica still needs an explicit Delete.
+    tx.execute(
+        "INSERT INTO llm_wiki_outbox
+             (id, entity_id, table_name, record_id, operation, payload, created_at)
+         SELECT 'out_' || lower(hex(randomblob(12))), entity_id, 'entries', id,
+                'DELETE', json_object('id', id), ?1
+         FROM llm_wiki_entries",
+        [now_ms],
+    )?;
+    tx.execute(
+        "DELETE FROM librarian_evidence
+          WHERE entry_id IN (SELECT id FROM llm_wiki_entries)",
+        [],
+    )?;
+    tx.execute("DELETE FROM llm_wiki_entries", [])?;
+
+    // Tasks, mirrored. No evidence table.
+    tx.execute(
+        "INSERT INTO llm_wiki_outbox
+             (id, entity_id, table_name, record_id, operation, payload, created_at)
+         SELECT 'out_' || lower(hex(randomblob(12))), entity_id, 'tasks', id,
+                'DELETE', json_object('id', id), ?1
+         FROM llm_wiki_tasks",
+        [now_ms],
+    )?;
+    tx.execute("DELETE FROM llm_wiki_tasks", [])?;
+
+    // Everything else per the D2 matrix. Edges are not replicated and every
+    // endpoint they could reference is doomed, so one unconditional sweep
+    // empties the table. Children before parents throughout.
     tx.execute_batch(
-        "DELETE FROM curated_relationships;
+        "DELETE FROM llm_wiki_edges;
+         DELETE FROM llm_wiki_events;
+         DELETE FROM llm_wiki_source_ref_index;
+         DELETE FROM llm_wiki_checkpoints;
+         DELETE FROM curated_agent_log;
+         DELETE FROM curated_entities;
+         DELETE FROM curated_proposal_items;
+         DELETE FROM curated_proposal_sources;
+         DELETE FROM curated_proposal_deleted_sources;
+         DELETE FROM curated_proposals;
+         DELETE FROM curated_relationships;
          DELETE FROM embeddings;
          DELETE FROM chunks;
+         DELETE FROM ingest_runs;
          DELETE FROM documents;
          DELETE FROM wiki_pages;
-         DELETE FROM folder_rules;",
+         DELETE FROM folder_rules;
+         DELETE FROM stall_strikes;",
     )?;
+
     tx.commit()?;
     Ok(())
 }
@@ -629,10 +692,20 @@ mod clear_vault_tables_tests {
     use super::*;
     use crate::db::connection::open_in_memory;
 
-    #[test]
-    fn clear_vault_tables_empties_all_vault_data() {
-        let mut conn = open_in_memory().unwrap();
-        upsert_document(&conn, "/test/doc.md", "abc123").unwrap();
+    const NOW: i64 = 1_726_000_000_000;
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("count {table}: {e}"))
+    }
+
+    /// Seed one row in every table the D2 matrix marks "clear", plus the
+    /// keep-row tables, plus a pre-existing undrained outbox Insert.
+    /// Includes ARCHIVED (soft-deleted) entry and task rows: the ceremony
+    /// must NOT filter on `deleted_at IS NULL` — an archived fact's Insert
+    /// may have drained long ago, so its replica still needs a Delete.
+    fn seed_full_vault(conn: &Connection) -> i64 {
+        upsert_document(conn, "/test/doc.md", "abc123").unwrap();
         let doc_id: i64 = conn
             .query_row("SELECT id FROM documents LIMIT 1", [], |r| r.get(0))
             .unwrap();
@@ -644,68 +717,308 @@ mod clear_vault_tables_tests {
             defined_symbol: None,
             strategy: crate::chunker::ChunkStrategyTag::Prose,
         };
-        let chunk_id = insert_chunk(&conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
-        insert_embedding(&conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
+        let chunk_id = insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
+        insert_embedding(conn, chunk_id, &[0.1_f32, 0.2, 0.3]).unwrap();
 
-        // Spec test 13 (issue #211 D7): pending proposals survive a no-restore
-        // vault switch stranded, with provenance; historical ones are untouched.
-        use crate::db::proposals::test_support::{
-            deleted_source_rows, seed_pending_proposal, status_of,
-        };
+        conn.execute(
+            "INSERT INTO ingest_runs (doc_id, run_at, outcome) VALUES (?1, 1, 'indexed')",
+            [doc_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+             VALUES ('test', 'index', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stall_strikes (path, strikes, last_ms) VALUES ('notes/a.md', 2, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, created_at, updated_at)
+             VALUES ('ent_a', 'Entity A', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        // Two live facts + one ARCHIVED fact, each with evidence.
+        for (id, deleted_at) in [
+            ("fact_live_1", None::<i64>),
+            ("fact_live_2", None),
+            ("fact_archived", Some(NOW - 1)),
+        ] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries
+                     (id, entity_id, title, body, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'ent_a', 'T', 'B', 1, 1, ?2)",
+                rusqlite::params![id, deleted_at],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+                 VALUES (?1, 'prop-1', '{}', 1)",
+                [id],
+            )
+            .unwrap();
+        }
+
+        // One live task + one ARCHIVED task.
+        for (id, deleted_at) in [("task_live", None::<i64>), ("task_archived", Some(NOW - 1))] {
+            conn.execute(
+                "INSERT INTO llm_wiki_tasks (id, entity_id, description, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'ent_a', 'do a thing', 1, 1, ?2)",
+                rusqlite::params![id, deleted_at],
+            )
+            .unwrap();
+        }
+
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_1', 'ent_a', 'fact_live_1', 'fact_live_2', 'relates_to', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('evt_1', 'ent_a', 'action', 'did a thing', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_source_ref_index (id, entity_id, source_hash, source_ref, created_at)
+             VALUES ('sri_1', 'ent_a', 'hash1', 'ref1', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_checkpoints (entity_id, heal_checkpoint, memory_checkpoint)
+             VALUES ('ent_a', 5, 5)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
+             VALUES ('claude', 'wiki_add_fact', 'write', 'ent_a', 'agent wrote a fact')",
+            [],
+        )
+        .unwrap();
+
+        use crate::db::proposals::test_support::seed_pending_proposal;
         use crate::db::proposals::ProposalSourceRole::Trigger;
-        seed_pending_proposal(&conn, "prop-switch-1", &[(doc_id, Trigger)]);
-        seed_pending_proposal(&conn, "prop-switch-2", &[(doc_id, Trigger)]);
-        seed_pending_proposal(&conn, "prop-switch-done", &[(doc_id, Trigger)]);
+        seed_pending_proposal(conn, "prop-switch-1", &[(doc_id, Trigger)]);
+
+        // Keep-rows.
         conn.execute(
-            "UPDATE curated_proposals SET status = 'approved' WHERE id = 'prop-switch-done'",
+            "INSERT INTO llm_wiki_meta (key, value) VALUES ('okf_migrated_at', '123')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+             VALUES ('tier_fact', 'strict', 1)",
             [],
         )
         .unwrap();
 
+        // A pre-existing undrained outbox Insert: must survive untouched and
+        // stay AHEAD of the Deletes this clear pushes.
         conn.execute(
-            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES ('test', 'index', 0)",
+            "INSERT INTO llm_wiki_outbox
+                 (id, entity_id, table_name, record_id, operation, payload, created_at)
+             VALUES ('out_preexisting000000000001', 'ent_a', 'entries', 'fact_live_1',
+                     'INSERT', '{\"id\":\"fact_live_1\"}', 1)",
             [],
         )
         .unwrap();
 
-        clear_vault_tables(&mut conn).unwrap();
+        doc_id
+    }
 
-        let doc_count: i64 = conn
-            .query_row("SELECT count(*) FROM documents", [], |r| r.get(0))
-            .unwrap();
-        let chunk_count: i64 = conn
-            .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))
-            .unwrap();
-        let embed_count: i64 = conn
-            .query_row("SELECT count(*) FROM embeddings", [], |r| r.get(0))
-            .unwrap();
-        let wiki_count: i64 = conn
-            .query_row("SELECT count(*) FROM wiki_pages", [], |r| r.get(0))
-            .unwrap();
-        let rule_count: i64 = conn
-            .query_row("SELECT count(*) FROM folder_rules", [], |r| r.get(0))
-            .unwrap();
-        let rel_count: i64 = conn
-            .query_row("SELECT count(*) FROM curated_relationships", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(doc_count, 0);
-        assert_eq!(chunk_count, 0);
-        assert_eq!(embed_count, 0);
-        assert_eq!(wiki_count, 0);
-        assert_eq!(rule_count, 0);
-        assert_eq!(rel_count, 0);
+    #[test]
+    fn clear_vault_tables_empties_every_clear_row_in_the_d2_matrix() {
+        let mut conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
 
-        for id in ["prop-switch-1", "prop-switch-2"] {
-            assert_eq!(status_of(&conn, id), "pending", "{id} must stay pending");
+        clear_vault_tables(&mut conn, NOW).unwrap();
+
+        for table in [
+            "documents",
+            "chunks",
+            "embeddings",
+            "curated_relationships",
+            "wiki_pages",
+            "folder_rules",
+            "ingest_runs",
+            "stall_strikes",
+            "curated_entities",
+            "llm_wiki_entries",
+            "librarian_evidence",
+            "llm_wiki_tasks",
+            "llm_wiki_edges",
+            "llm_wiki_events",
+            "llm_wiki_source_ref_index",
+            "llm_wiki_checkpoints",
+            "curated_agent_log",
+            "curated_proposals",
+            "curated_proposal_items",
+            "curated_proposal_sources",
+            "curated_proposal_deleted_sources",
+        ] {
             assert_eq!(
-                deleted_source_rows(&conn, id),
-                vec![("/test/doc.md".into(), "abc123".into(), "trigger".into())],
-                "{id} must record its deleted source"
+                count(&conn, table),
+                0,
+                "{table} must be empty after the clear"
             );
         }
-        assert!(deleted_source_rows(&conn, "prop-switch-done").is_empty());
+
+        // Keep-rows survive.
+        assert_eq!(count(&conn, "llm_wiki_meta"), 1, "meta marker must survive");
+        assert_eq!(
+            count(&conn, "llm_wiki_entity_manifests"),
+            1,
+            "ontology manifests must survive"
+        );
+        assert!(
+            count(&conn, "schema_version") > 0,
+            "schema watermark must survive"
+        );
+    }
+
+    #[test]
+    fn clear_vault_tables_pushes_one_delete_per_entry_and_task_including_archived() {
+        let mut conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+
+        clear_vault_tables(&mut conn, NOW).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, entity_id, table_name, record_id, operation, payload, created_at
+                   FROM llm_wiki_outbox ORDER BY created_at ASC, rowid ASC",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, String, String, String, String, i64)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
+        // Pre-existing undrained Insert stays first and untouched.
+        assert_eq!(rows[0].0, "out_preexisting000000000001");
+        assert_eq!(rows[0].4, "INSERT");
+
+        let deletes: Vec<_> = rows.iter().skip(1).collect();
+        assert_eq!(
+            deletes.len(),
+            5,
+            "3 entries (incl. archived) + 2 tasks (incl. archived)"
+        );
+
+        let entry_records: std::collections::BTreeSet<&str> = deletes
+            .iter()
+            .filter(|r| r.2 == "entries")
+            .map(|r| r.3.as_str())
+            .collect();
+        assert_eq!(
+            entry_records,
+            ["fact_archived", "fact_live_1", "fact_live_2"]
+                .into_iter()
+                .collect(),
+            "archived entries need Deletes too — their Insert may have drained"
+        );
+
+        let task_records: std::collections::BTreeSet<&str> = deletes
+            .iter()
+            .filter(|r| r.2 == "tasks")
+            .map(|r| r.3.as_str())
+            .collect();
+        assert_eq!(
+            task_records,
+            ["task_archived", "task_live"].into_iter().collect(),
+            "archived tasks need Deletes too"
+        );
+
+        for d in &deletes {
+            assert_eq!(d.4, "DELETE");
+            assert_eq!(d.1, "ent_a", "outbox is keyed on the row's own entity");
+            assert_eq!(d.6, NOW, "created_at must be the passed now_ms");
+            assert_eq!(
+                d.5,
+                format!("{{\"id\":\"{}\"}}", d.3),
+                "hard-delete payload is {{\"id\"}} only (spec D1.2)"
+            );
+            // Format must match generate_outbox_id(): out_ + 24 lowercase hex.
+            assert!(d.0.starts_with("out_"), "id {} must start with out_", d.0);
+            assert_eq!(d.0.len(), 28, "out_ + 24 hex chars");
+            assert!(
+                d.0[4..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "id {} must be lowercase hex",
+                d.0
+            );
+        }
+    }
+
+    #[test]
+    fn clear_vault_tables_rolls_back_leaving_no_outbox_rows() {
+        let mut conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+        // Induce a mid-ceremony failure AFTER the outbox inserts: the
+        // straight-delete batch names this table, so the statement errors.
+        conn.execute_batch("DROP TABLE folder_rules;").unwrap();
+
+        let err = clear_vault_tables(&mut conn, NOW);
+        assert!(err.is_err(), "the clear must fail, not silently skip");
+
+        assert_eq!(
+            count(&conn, "llm_wiki_outbox"),
+            1,
+            "rollback must leave only the pre-existing row — zero new Deletes"
+        );
+        assert_eq!(
+            count(&conn, "llm_wiki_entries"),
+            3,
+            "rollback must restore the entries"
+        );
+    }
+
+    #[test]
+    fn clear_vault_tables_is_idempotent() {
+        let mut conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+
+        clear_vault_tables(&mut conn, NOW).unwrap();
+        let after_first = count(&conn, "llm_wiki_outbox");
+        clear_vault_tables(&mut conn, NOW).unwrap();
+
+        assert_eq!(
+            count(&conn, "llm_wiki_outbox"),
+            after_first,
+            "second clear has nothing to delete, so pushes no new rows"
+        );
+        assert_eq!(count(&conn, "llm_wiki_entries"), 0);
+    }
+
+    #[test]
+    fn clear_vault_tables_on_empty_brain_writes_no_outbox_rows() {
+        let mut conn = open_in_memory().unwrap();
+
+        clear_vault_tables(&mut conn, NOW).unwrap();
+
+        assert_eq!(count(&conn, "llm_wiki_outbox"), 0);
     }
 }
 
