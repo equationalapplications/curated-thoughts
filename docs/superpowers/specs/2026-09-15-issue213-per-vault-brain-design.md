@@ -1,7 +1,7 @@
 # Per-vault brain: vault switch clears the knowledge layer atomically
 
 **Date:** 2026-09-15
-**Status:** Implemented (rev 4)
+**Status:** Implemented (rev 5)
 **Branch:** spec/213-per-vault-brain
 **Issue:** #213
 **Priority:** High (approved knowledge silently leaks across vaults into
@@ -19,7 +19,7 @@ back what was manually created. The mechanism is a logical clear inside
 the existing single-transaction `clear_vault_tables` — not a database
 file per vault. Per-vault *persistence* already exists via the backup
 mechanism: `<vault>/.brain/brain.db.bak` is a full snapshot, and the
-restore path replaces the whole `brain.db` file (`lib.rs:1611-1613`).
+restore path replaces the whole `brain.db` file (`lib.rs:1627-1631`).
 What has been broken since 2026-07-05 is per-vault *clearing*.
 
 `switch_vault` is the only runtime path that changes the active vault
@@ -69,7 +69,7 @@ configured. It never clears, and this spec leaves it alone.)
     re-pushes every undrained outbox row verbatim (D3).
   - **Capture window pinned (high).** Capture must run between
     `release_global_db_lock` (`lib.rs:1602`) and `remove_sqlite_sidecars`
-    (`lib.rs:1609`) — after sidecar removal a concurrent `--mcp`
+    (`lib.rs:1629`) — after sidecar removal a concurrent `--mcp`
     connection's un-checkpointed WAL rows are unreadable.
   - **Capture durability (high).** The captured state is persisted to a
     `brain.db.sync-capture` sidecar before the copy and consumed by a
@@ -88,7 +88,7 @@ configured. It never clears, and this spec leaves it alone.)
   - **Test seeds.** The acceptance test now seeds archived (soft-deleted)
     entry and task rows to pin that the ceremony has no
     `deleted_at IS NULL` filter.
-- **rev 4** (this document) folds in a self-review of rev 3. Four of its
+- **rev 4** folds in a self-review of rev 3. Four of its
   five findings were valid; one was rejected on the evidence:
   - **Re-push could deadlock the switch (high, fixed).** rev 3's
     verbatim re-push of captured undrained outbox rows ignored that
@@ -118,6 +118,44 @@ configured. It never clears, and this spec leaves it alone.)
     deletes use the richer shape. The clear is a hard delete, so
     `{"id"}` is correct and already reaches replicas via bundle
     imports. D1.2 records the distinction so it is not re-raised.
+- **rev 5** (this document) folds in the PR #215 review wave — five
+  findings on the restore path's durability, all against D3. Four
+  changed the mechanism; one was answered with an argument instead:
+  - **The database replacement was not crash-safe (fixed).**
+    `std::fs::copy(backup, brain.db)` truncates the live database
+    before writing, so an interrupted or short copy leaves a torn file
+    — and `recover_after_failed_switch_vault` opens that very path.
+    The restore now stages the backup beside the database and installs
+    it with one atomic rename: `brain.db` is either the old database or
+    the whole backup, never a partial one.
+  - **The capture sidecar was published before the install (fixed).**
+    The sidecar's presence means "a sync is owed", and it was created
+    before the copy. A copy that failed therefore left a sidecar beside
+    the *outgoing* database, and startup recovery would push Deletes
+    for records still live in the vault the user never left, dropping
+    them from the replica, then delete the capture a retried restore
+    needed. The capture is now written to an unpublished path and
+    renamed into place only after the install commits, so consumption
+    is gated on installation by construction.
+  - **The sidecar was not published atomically (fixed).** `fsync` does
+    not make a `write_all` all-or-nothing. Publishing is now a rename
+    of an already-fsynced file, with the containing directory fsynced,
+    so a reader never sees a partial capture.
+  - **Outbox re-push order was underspecified (fixed).** D3 preserved
+    `created_at` and asserted "original order", but the drain reads
+    `created_at ASC, rowid ASC`, so rows sharing a millisecond drain in
+    *insertion* order. An Insert/Delete pair for one record could
+    therefore reverse and resurrect a hard-deleted record on the
+    replica. D3 now pins the capture's `ORDER BY`, the sidecar's list
+    order, and reinsertion in that order, with a test on the
+    equal-millisecond pair.
+  - **Cross-process writer quiescence — answered, not changed.** The
+    review asked for a write barrier spanning capture through install,
+    because `release_global_db_lock` swaps only the desktop's own
+    handle while a headless `--mcp` process keeps its connection and
+    `ToolDispatchContext::with_rw` can write. The window is real; it
+    cannot diverge the replica. D3 carries the argument and the
+    residual.
 
 ## Problem
 
@@ -320,13 +358,29 @@ inside the transaction, so a mid-ceremony failure aborts with zero new
 outbox rows (`forget_rollback_leaves_no_outbox_rows`,
 `wiki_forget.rs:357-377`).
 
-**Restore path (new: the replica sync).** A restore is
-`std::fs::copy(backup, brain.db)` (`lib.rs:1611-1612`). The outbox lives
-inside that file, so without extra work the replica sees *nothing*: the
-outgoing vault's records are never deleted from the replica, the
-restored vault's records are never re-inserted, and any of the outgoing
-vault's events still undrained at copy time are destroyed with the old
-file. `switch_vault`'s restore branch therefore gains:
+**Restore path (new: the replica sync).** A restore replaces the whole
+`brain.db` file. The outbox lives inside that file, so without extra
+work the replica sees *nothing*: the outgoing vault's records are never
+deleted from the replica, the restored vault's records are never
+re-inserted, and any of the outgoing vault's events still undrained at
+copy time are destroyed with the old file.
+
+**The replacement is staged, not written in place.** A plain
+`std::fs::copy(backup, brain.db)` truncates the live database before it
+writes, so an interruption or a short write (disk full, I/O error, power
+loss) leaves a torn file — and the file it tears is the one
+`AppDb::open_with_config` opens next, and the one
+`recover_after_failed_switch_vault` opens if that fails. The backup is
+therefore copied to `brain.db.restore-incoming` beside the database and
+fsynced; then the outgoing `-wal`/`-shm` are removed (they describe the
+old file and must not be misread as the new one's); then the staged copy
+is installed with a single `std::fs::rename` onto `brain.db`, and the
+containing directory is fsynced so the new directory entry is durable.
+`brain.db` is thereafter only ever the old database or the whole backup,
+never a partial one, and a staging failure leaves the outgoing database
+untouched for the existing recovery to reopen.
+
+`switch_vault`'s restore branch therefore gains:
 
 1. **Capture (before the copy).** From the live database, via a
    short-lived read connection, read:
@@ -345,7 +399,7 @@ file. `switch_vault`'s restore branch therefore gains:
 
    **Timing is pinned:** the capture connection opens after
    `release_global_db_lock` has swapped in the stub (`lib.rs:1602`) and
-   **before** `remove_sqlite_sidecars` (`lib.rs:1609`) deletes `-wal`.
+   **before** `remove_sqlite_sidecars` (`lib.rs:1629`) deletes `-wal`.
    "Any time after the stub swap" is not good enough: a concurrent
    process — the headless `--mcp` server holds its own brain.db
    connection (the V21 concurrent-open case) — prevents the implicit
@@ -354,19 +408,79 @@ file. `switch_vault`'s restore branch therefore gains:
    capture after that point reads a stale main file and silently misses
    records.
 
+   **No cross-process write barrier spans capture → install, and none
+   is needed for the replica guarantee.** `release_global_db_lock`
+   swaps only the desktop's own `DbState` handle; a concurrent `--mcp`
+   server keeps its connection and can still write through
+   `ToolDispatchContext::with_rw` (`curated_proposal_decide` is one such
+   write), so a write landing between the capture and the install is
+   destroyed by the install without having been captured. That cannot
+   diverge the replica, because **nothing can drain during the window**:
+   the only drain path is `spawn_postgres_worker`, which lives in the
+   desktop process alone (`--mcp` has no outbox worker at all) and is
+   stopped before the capture and restarted after the sync. So for a
+   write in that window, either its record already existed at capture
+   time — in which case the captured `(id, entity_id)` pair still pushes
+   its `Delete` — or the record is new, its `Insert` never reached the
+   replica and never will, and its outbox row dies with the file it was
+   written to. Either way the replica's end state still matches the
+   restored file.
+
+   The residual is **local**, not replica-side: writes an `--mcp`
+   process makes in that window are lost. A restore destroys every other
+   write in that file by definition, and this window is a small tail of
+   a destruction the user asked for. A true barrier means a cross-process
+   write lock that every `--mcp` write path must respect — a change to
+   the concurrent-open contract itself, well outside #213 — so it stays
+   a follow-up rather than a hidden assumption.
+
    The capture is **persisted to a sidecar file next to the database**
-   (`brain.db.sync-capture`, JSON) and fsynced **before**
-   `std::fs::copy` runs. Holding it only in memory means a crash or a
-   failed sync after the copy permanently destroys the outgoing vault's
-   replica obligations — its rows no longer exist anywhere, and the
-   divergence is silent.
+   (`brain.db.sync-capture`, JSON) and fsynced **before** the install
+   runs. Holding it only in memory means a crash or a failed sync after
+   the install permanently destroys the outgoing vault's replica
+   obligations — its rows no longer exist anywhere, and the divergence
+   is silent.
+
+   **Writing it is atomic, and publishing it is gated on the install.**
+   Two properties, both load-bearing, neither provided by `fsync` alone:
+
+   - *Atomic publish.* `fsync` makes a completed write durable; it does
+     not make `write_all` all-or-nothing. A crash mid-write would leave
+     a truncated JSON file, and a reader that discards it discards the
+     outgoing vault's `Delete` events with it. The capture is therefore
+     written to `brain.db.sync-capture.pending`, fsynced, and only then
+     `rename`d onto `brain.db.sync-capture` with the directory fsynced.
+     Recovery reads only the published name, so it never sees a partial
+     capture.
+   - *Publish after install, never before.* The sidecar's presence is
+     the signal "a sync is owed on the restored file". Publishing it
+     before the install would strand that signal beside the **outgoing**
+     database whenever the install did not happen: startup recovery
+     would then push `Delete` events for records that are still live in
+     the vault the user never left — dropping them from the replica —
+     and would then delete the capture that a retried restore needs. The
+     rename therefore happens **after** the install commits, which gates
+     consumption on installation by construction; no phase flag can be
+     lost, because there is no second write to lose. An unpublished
+     capture left by a failed install is discarded, which costs nothing:
+     the install is atomic, so the outgoing database and every row the
+     capture described are still there for the next attempt.
 
 2. **Sync (after `AppDb::open_with_config` reopens the restored file,
    before the worker restart).** In one transaction on the reopened
    database, in this order:
    - re-push every captured undrained outbox row verbatim (original
-     `created_at` included, preserving intra-vault event order),
-     **skipping any id already present in the restored file's outbox**
+     `created_at` included), **in the drain's own order**: the capture
+     query reads `ORDER BY created_at ASC, rowid ASC` — exactly the
+     drain's ordering (`outbox/mod.rs:89`) — the sidecar stores the
+     result as an ordered list, and the re-push inserts in that list
+     order so the new rowids reproduce it. `created_at` alone is not
+     enough: rows sharing a millisecond are ordered only by `rowid`, so
+     an unordered re-push could put a record's `Insert` *after* its
+     `Delete` and resurrect a hard-deleted record on the replica. The
+     acceptance test pins this with an equal-millisecond
+     `Insert`/`Delete` pair. Re-pushes also **skip any id already
+     present in the restored file's outbox**
      (`INSERT OR IGNORE`, or an explicit `WHERE NOT EXISTS`).
      `llm_wiki_outbox.id` is `TEXT PRIMARY KEY` (`okf_ddl.rs:133`) and
      the same row id genuinely can be in both places: the outbox is
@@ -392,11 +506,17 @@ file. `switch_vault`'s restore branch therefore gains:
    the existing switch recovery **with the sidecar left in place**, and
    startup recovery finishes the job:
 
-**Crash recovery.** If the process dies between the copy and the sync
-commit — or the sync fails — the sidecar survives with the capture in
-it. Wherever the app reopens the brain (a check beside the switch path
-itself), a present `brain.db.sync-capture` triggers the same sync
-transaction, then deletes the sidecar. Re-running is safe: duplicated
+**Crash recovery.** If the process dies between the install and the
+sync commit — or the sync fails — the published sidecar survives with
+the capture in it. Wherever the app reopens the brain (a check beside
+the switch path itself), a present `brain.db.sync-capture` triggers the
+same sync transaction, then deletes the sidecar. Because the sidecar is
+published only after the install, its presence already means the
+restored file is the one on disk: recovery cannot mistake a restore that
+never happened for one that did, and never syncs against the outgoing
+database. A crash *before* the publish leaves only the pending file,
+which recovery ignores and the next restore overwrites; nothing is owed,
+because nothing was replaced. Re-running is safe: duplicated
 re-pushes are harmless because the replica already treats duplicate
 Inserts as idempotent re-assertions and Deletes of unknown ids as
 no-ops, and the drain order still converges to the same end state. The

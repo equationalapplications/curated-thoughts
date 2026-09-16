@@ -1,16 +1,25 @@
 //! Restore-path replica sync (issue #213 spec D3).
 //!
-//! A vault switch that restores a backup replaces `brain.db` wholesale with
-//! `std::fs::copy`. The outbox lives inside that file, so without extra work
-//! the replica sees nothing: the outgoing vault's records are never deleted
-//! from it, the restored vault's are never re-inserted, and any of the
-//! outgoing vault's events still undrained at copy time die with the old file.
+//! A vault switch that restores a backup replaces `brain.db` wholesale. The
+//! outbox lives inside that file, so without extra work the replica sees
+//! nothing: the outgoing vault's records are never deleted from it, the
+//! restored vault's are never re-inserted, and any of the outgoing vault's
+//! events still undrained at copy time die with the old file.
 //!
-//! The sequence is capture → copy → sync. The capture is persisted to a
-//! sidecar file BEFORE the copy, because holding it only in memory means a
-//! crash (or a failed sync) permanently destroys the outgoing vault's replica
-//! obligations — its rows no longer exist anywhere and the divergence is
-//! silent.
+//! The sequence is **capture → stage → install → publish → sync**:
+//!
+//! 1. `capture_to_sidecar` writes the replica's outstanding obligations to an
+//!    unpublished sidecar and fsyncs it. Holding the capture only in memory
+//!    means a crash (or a failed sync) permanently destroys those obligations
+//!    — the rows no longer exist anywhere and the divergence is silent.
+//! 2. `stage_backup` copies the backup to a temporary file beside the
+//!    database, so the database is never truncated mid-copy.
+//! 3. `commit_staged_backup` installs it with one atomic rename.
+//! 4. `publish_sidecar` renames the capture into the path crash recovery
+//!    watches — only now, because a capture consumed before the install would
+//!    be replayed against the *outgoing* database.
+//! 5. `sync` (or `run_pending`, at startup, after a crash) pushes the
+//!    obligations onto the restored file's outbox.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -44,10 +53,56 @@ pub struct CaptureState {
 }
 
 /// Where the capture lives between the copy and the sync.
+///
+/// Its mere presence is the signal that a sync is owed, so it is only ever
+/// created by an atomic rename (see `publish_sidecar`) and only ever renamed
+/// into place *after* the backup is installed (see `commit_staged_backup`).
 pub fn sidecar_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, ".sync-capture")
+}
+
+/// The unpublished capture, written before the install and renamed onto
+/// `sidecar_path` once the install has committed.
+pub fn pending_sidecar_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, ".sync-capture.pending")
+}
+
+/// The incoming database, staged beside `db_path` so the install is a rename.
+pub fn staged_backup_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, ".restore-incoming")
+}
+
+fn sibling(db_path: &Path, suffix: &str) -> PathBuf {
     let mut name = db_path.file_name().unwrap_or_default().to_os_string();
-    name.push(".sync-capture");
+    name.push(suffix);
     db_path.with_file_name(name)
+}
+
+/// fsync the directory holding `path`, so a rename into it survives a crash.
+///
+/// A rename is atomic with respect to readers the instant it returns, but the
+/// directory entry itself is not durable until its directory is synced. Best
+/// effort on the open: some platforms refuse `File::open` on a directory, and
+/// failing the whole restore over an unsyncable directory would be worse than
+/// the (already small) window this closes.
+fn fsync_parent_dir(path: &Path) -> Result<()> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    match std::fs::File::open(dir) {
+        Ok(f) => {
+            let _ = f.sync_all();
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+/// Rename `from` onto `to` and make the new directory entry durable.
+fn rename_durably(from: &Path, to: &Path) -> Result<()> {
+    std::fs::rename(from, to)
+        .with_context(|| format!("rename {} -> {}", from.display(), to.display()))?;
+    fsync_parent_dir(to)
 }
 
 fn pairs(conn: &Connection, table: &str) -> Result<Vec<(String, String)>> {
@@ -92,7 +147,7 @@ pub fn capture(conn: &Connection) -> Result<CaptureState> {
     })
 }
 
-/// Capture the live database and fsync it to the sidecar.
+/// Capture the live database and fsync it to the *pending* sidecar.
 ///
 /// **Timing is load-bearing.** Call this after `release_global_db_lock` has
 /// swapped in the stub and **before** `remove_sqlite_sidecars` deletes the
@@ -102,13 +157,24 @@ pub fn capture(conn: &Connection) -> Result<CaptureState> {
 /// last checkpoint exist only in the `-wal` that sidecar removal is about to
 /// delete. A capture after that point reads a stale main file and silently
 /// misses records.
+///
+/// The capture lands on `pending_sidecar_path`, invisible to `read_sidecar`,
+/// and is published only once the backup is installed. A capture published
+/// before the install would be consumed by startup recovery against the
+/// *outgoing* database — pushing Deletes for records that are still live in
+/// the vault the user is still in, and dropping them from the replica — and
+/// the obligations a retried restore needs would be gone.
+///
+/// A torn pending file can never be published: the publish happens later in
+/// the same run and only if this function returned `Ok`, and the next restore
+/// truncates the file before publishing it.
 pub fn capture_to_sidecar(db_path: &Path) -> Result<()> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("open {} for restore-sync capture", db_path.display()))?;
     let state = capture(&conn)?;
     drop(conn);
 
-    let path = sidecar_path(db_path);
+    let path = pending_sidecar_path(db_path);
     let json = serde_json::to_vec(&state).context("serialize restore-sync capture")?;
     let mut file =
         std::fs::File::create(&path).with_context(|| format!("create {}", path.display()))?;
@@ -117,10 +183,63 @@ pub fn capture_to_sidecar(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Make the pending capture visible to `read_sidecar`, atomically.
+///
+/// Call this **after** `commit_staged_backup` and before the sync. Until it
+/// runs there is nothing for crash recovery to find, which is the point: the
+/// sidecar's presence means "a backup is installed and its sync is owed".
+///
+/// Idempotent: no pending capture means nothing is owed — it was either
+/// published already or published and then synced — so an error path can retry
+/// this without inventing a failure.
+pub fn publish_sidecar(db_path: &Path) -> Result<()> {
+    let pending = pending_sidecar_path(db_path);
+    if !pending.exists() {
+        return Ok(());
+    }
+    rename_durably(&pending, &sidecar_path(db_path))
+}
+
+/// Drop an unpublished capture. Best effort; a stray pending file is inert
+/// and the next restore overwrites it.
+pub fn discard_pending_sidecar(db_path: &Path) {
+    let _ = std::fs::remove_file(pending_sidecar_path(db_path));
+}
+
+/// Copy `backup_path` to a temporary file beside `db_path` and fsync it.
+///
+/// Copying straight onto `db_path` truncates the live database first, so an
+/// interrupted or short copy leaves a torn file that the reopen (and the
+/// failed-switch recovery, which opens the same path) cannot use. Staging
+/// makes the install a rename: `db_path` is either the old database or the
+/// whole backup, never a partial one.
+pub fn stage_backup(backup_path: &Path, db_path: &Path) -> Result<PathBuf> {
+    let staged = staged_backup_path(db_path);
+    std::fs::copy(backup_path, &staged)
+        .with_context(|| format!("copy {} -> {}", backup_path.display(), staged.display()))?;
+    let file = std::fs::File::open(&staged)
+        .with_context(|| format!("reopen {} to fsync", staged.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync {}", staged.display()))?;
+    Ok(staged)
+}
+
+/// Install a staged backup over `db_path` with a single atomic rename.
+///
+/// The caller must have removed the outgoing database's `-wal`/`-shm` first:
+/// they belong to the old file and would be misread as this one's.
+pub fn commit_staged_backup(staged: &Path, db_path: &Path) -> Result<()> {
+    rename_durably(staged, db_path)
+}
+
 /// The pending capture, or `None` when there is nothing to finish.
 ///
-/// A sidecar that will not parse is treated as absent and removed: it can only
-/// come from a crash mid-write, and a half-written capture is not actionable.
+/// Only the published sidecar is read — never `pending_sidecar_path` — so a
+/// capture is consumed only after the backup it belongs to is installed.
+///
+/// A sidecar that will not parse is treated as absent and removed. Publishing
+/// is a rename of an already-fsynced file, so this should be unreachable; it
+/// stays because a half-written capture is not actionable either way.
 pub fn read_sidecar(db_path: &Path) -> Result<Option<CaptureState>> {
     let path = sidecar_path(db_path);
     let bytes = match std::fs::read(&path) {
@@ -153,6 +272,15 @@ pub fn sync(conn: &Connection, state: &CaptureState, now_ms: i64) -> Result<()> 
 
     // 1. Re-push undrained rows verbatim, preserving original created_at so
     //    intra-vault event order survives.
+    //
+    //    `created_at` alone does not pin the order. The drain reads
+    //    `ORDER BY created_at ASC, rowid ASC` (`outbox/mod.rs:89`), so rows
+    //    sharing a millisecond drain in insertion order — and an Insert that
+    //    drained after its record's Delete would resurrect a hard-deleted
+    //    record on the replica. `capture` therefore reads in exactly that
+    //    order, `CaptureState.outbox` is an ordered list, and this loop
+    //    reinserts in list order, so the new rowids reproduce the drain order
+    //    the outgoing vault had.
     //
     //    `INSERT OR IGNORE`, not a plain INSERT: `llm_wiki_outbox.id` is
     //    TEXT PRIMARY KEY, and the restored backup can already contain these
@@ -496,7 +624,27 @@ mod tests {
         drop(conn);
 
         capture_to_sidecar(&db_path).unwrap();
+        assert!(
+            pending_sidecar_path(&db_path).exists(),
+            "the capture lands on the pending path first"
+        );
+        assert!(
+            read_sidecar(&db_path).unwrap().is_none(),
+            "an unpublished capture must stay invisible to recovery"
+        );
+
+        publish_sidecar(&db_path).unwrap();
         assert!(sidecar_path(&db_path).exists());
+        assert!(
+            !pending_sidecar_path(&db_path).exists(),
+            "publishing moves the file, it does not copy it"
+        );
+        publish_sidecar(&db_path).unwrap();
+        assert!(
+            sidecar_path(&db_path).exists(),
+            "publishing twice is a no-op, not a failure — the switch's error \
+             path retries it"
+        );
 
         let restored = read_sidecar(&db_path).unwrap().expect("sidecar must parse");
         assert_eq!(restored.entries.len(), 2);
@@ -657,9 +805,11 @@ mod tests {
         drop(live);
         capture_to_sidecar(&db_path).unwrap();
 
-        // Simulate the copy: a different database now sits at db_path.
+        // Simulate the install: a different database now sits at db_path, and
+        // the capture is published only once it does.
         std::fs::remove_file(&db_path).unwrap();
         let restored = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        publish_sidecar(&db_path).unwrap();
 
         let did = run_pending(&restored, &db_path, 1000).unwrap();
         assert!(did, "a present sidecar means there is work to finish");
@@ -677,6 +827,101 @@ mod tests {
     }
 
     #[test]
+    fn staged_install_replaces_the_database_atomically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let backup_path = tmp.path().join("brain.db.bak");
+
+        // A live database with one marker row, and a backup with a different one.
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        seed(&live);
+        drop(live);
+        let backup = crate::db::connection::open_app_db(&backup_path, None).unwrap();
+        backup
+            .execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+                 VALUES ('fact_from_backup', 'ent_b', 'T', 'B', 1, 1)",
+                [],
+            )
+            .unwrap();
+        drop(backup);
+
+        let staged = stage_backup(&backup_path, &db_path).unwrap();
+        assert_eq!(staged, staged_backup_path(&db_path));
+        assert!(
+            db_path.exists(),
+            "staging must not touch the live database — a failure here has to \
+             leave a usable file behind for the failed-switch recovery"
+        );
+
+        commit_staged_backup(&staged, &db_path).unwrap();
+        assert!(
+            !staged.exists(),
+            "installing moves the staged file, it does not copy it"
+        );
+
+        let installed = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let ids: Vec<String> = installed
+            .prepare("SELECT id FROM llm_wiki_entries ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, ["fact_from_backup"], "the backup is what landed");
+    }
+
+    #[test]
+    fn capture_and_repush_preserve_drain_order_within_one_millisecond() {
+        // The wedge: an Insert and a Delete for the same record share a
+        // millisecond. `created_at` cannot order them, so only insertion order
+        // keeps the Delete behind the Insert — reverse them and the drain
+        // resurrects a hard-deleted record on the replica.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        for (id, op) in [
+            ("out_samems0000000000000001", "INSERT"),
+            ("out_samems0000000000000002", "DELETE"),
+        ] {
+            live.execute(
+                "INSERT INTO llm_wiki_outbox
+                     (id, entity_id, table_name, record_id, operation, payload, created_at)
+                 VALUES (?1, 'ent_a', 'entries', 'fact_same_ms', ?2, '{}', 70)",
+                rusqlite::params![id, op],
+            )
+            .unwrap();
+        }
+
+        let state = capture(&live).unwrap();
+        drop(live);
+        assert_eq!(
+            state
+                .outbox
+                .iter()
+                .map(|r| r.operation.as_str())
+                .collect::<Vec<_>>(),
+            ["INSERT", "DELETE"],
+            "capture reads in the drain's own `created_at ASC, rowid ASC` order"
+        );
+
+        std::fs::remove_file(&db_path).unwrap();
+        let restored = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        sync(&restored, &state, 1000).unwrap();
+
+        let drained: Vec<String> = outbox_rows(&restored)
+            .into_iter()
+            .filter(|r| r.2 == "fact_same_ms")
+            .map(|r| r.3)
+            .collect();
+        assert_eq!(
+            drained,
+            ["INSERT", "DELETE"],
+            "the re-push must reproduce the drain order, not just the timestamps"
+        );
+    }
+
+    #[test]
     fn run_pending_keeps_the_sidecar_when_the_sync_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("brain.db");
@@ -685,6 +930,7 @@ mod tests {
         seed(&live);
         drop(live);
         capture_to_sidecar(&db_path).unwrap();
+        publish_sidecar(&db_path).unwrap();
 
         // A database with no outbox table: the sync cannot commit.
         let broken = Connection::open_in_memory().unwrap();

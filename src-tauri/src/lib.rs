@@ -1601,6 +1601,10 @@ async fn switch_vault(
 
     let stub_path = release_global_db_lock(&db_state)?;
     let mut pending_config_align_to: Option<String> = None;
+    // Whether the restore already replaced `brain.db`. Once it has, an
+    // unpublished capture is the only record of what the replica is owed, so
+    // the error path must not throw it away.
+    let mut restore_installed = false;
 
     let switch_result = (|| -> Result<(), String> {
         let backup_path = new_root.join(".brain").join("brain.db.bak");
@@ -1618,12 +1622,28 @@ async fn switch_vault(
                 .map_err(|e| format!("restore-sync capture failed: {e}"))?;
         }
 
-        remove_sqlite_sidecars(&db_path);
-
         if will_restore {
-            std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
+            // Spec D3: stage the backup, then install it with one rename, so
+            // `db_path` is either the old database or the whole backup and
+            // never a torn copy that the reopen (or the failed-switch
+            // recovery, which opens this same path) cannot use. The `-wal`
+            // must go before the rename: it belongs to the outgoing file.
+            let staged = db::restore_sync::stage_backup(&backup_path, &db_path)
+                .map_err(|e| format!("staging the backup failed: {e}"))?;
+            remove_sqlite_sidecars(&db_path);
+            db::restore_sync::commit_staged_backup(&staged, &db_path)
+                .map_err(|e| format!("installing the backup failed: {e}"))?;
+            // Set before the publish: from here on the file on disk is the
+            // new vault's, so the error path must align the config with it
+            // however the rest of the switch goes.
+            restore_installed = true;
             pending_config_align_to = Some(new_path.clone());
+            // Only now is the capture publishable: a sidecar visible before
+            // the install would be replayed against the outgoing database.
+            db::restore_sync::publish_sidecar(&db_path)
+                .map_err(|e| format!("publishing the restore-sync capture failed: {e}"))?;
         } else {
+            remove_sqlite_sidecars(&db_path);
             let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
             db::clear_vault_tables(&mut conn, now).map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
@@ -1665,6 +1685,23 @@ async fn switch_vault(
 
     let mut recovery_reopened_db = false;
     if switch_result.is_err() {
+        // A capture that never got published belongs to a restore that never
+        // installed; drop it so it cannot be mistaken for pending work. If the
+        // install DID land, keep it: publishing it is all that stands between
+        // the replica and a silent divergence, and the next attempt can still
+        // find it. A published sidecar is untouched either way — startup
+        // recovery owes its sync. The staged copy is only ever useful to the
+        // attempt that made it.
+        if restore_installed {
+            if let Err(e) = db::restore_sync::publish_sidecar(&db_path) {
+                eprintln!(
+                    "[switch_vault] backup installed but its replica capture could not be published ({e}); the replica may diverge for the outgoing vault"
+                );
+            }
+        } else {
+            db::restore_sync::discard_pending_sidecar(&db_path);
+        }
+        let _ = std::fs::remove_file(db::restore_sync::staged_backup_path(&db_path));
         if let Some(ref p) = pending_config_align_to {
             if let Err(e) = vault_state.0.lock().unwrap().set_vault_path(p) {
                 eprintln!(

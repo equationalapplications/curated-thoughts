@@ -68,6 +68,8 @@ unit (§2.4) but none of which change behavior otherwise:
 - `src-tauri/src/db/edge_purge.rs` (2)
 - `src-tauri/src/db/wisdom.rs` (3)
 - `src-tauri/src/db/bundle_apply.rs` (4)
+- `src-tauri/src/db/queries.rs` (1 — the #213 `clear_vault_tables` D2 matrix
+  fixture)
 
 **This list is enforced.** `src-tauri/tests/edge_writer_gate.rs` scans the
 tree for `INSERT ... INTO llm_wiki_edges`, classifies each site as production
@@ -397,7 +399,8 @@ already owns the question:
 carry the guard. Every other insert site listed in §1.1 is a `#[cfg(test)]`
 fixture (re-audited against the §1.1 list: `lib.rs`, `wiki_graph.rs`,
 `connections.rs`, `bundle_io.rs`, `wisdom.rs`, `wiki_forget.rs`,
-`bundle_apply.rs` — every one inside a `#[cfg(test)] mod tests`).
+`bundle_apply.rs`, `queries.rs` — every one inside a `#[cfg(test)] mod
+tests`).
 
 The second writer is the edge loop in `apply_import`
 (`src-tauri/src/db/bundle_apply.rs`, production code — every other edge insert

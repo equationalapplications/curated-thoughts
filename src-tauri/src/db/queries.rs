@@ -775,9 +775,12 @@ mod clear_vault_tables_tests {
         }
 
         conn.execute(
+            // `created_at` is a millisecond value (>= SEC_VS_MS_THRESHOLD) per
+            // the edge-integrity spec §2.4: a seconds-scale fixture would mask
+            // a unit regression in a production writer.
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
-             VALUES ('edge_1', 'ent_a', 'fact_live_1', 'fact_live_2', 'relates_to', 1)",
-            [],
+             VALUES ('edge_1', 'ent_a', 'fact_live_1', 'fact_live_2', 'relates_to', ?1)",
+            [NOW],
         )
         .unwrap();
         conn.execute(
