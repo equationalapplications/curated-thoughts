@@ -18,6 +18,7 @@ pub mod proposals;
 pub mod proposals_review;
 pub mod queries;
 pub mod queue;
+pub mod restore_sync;
 pub mod review_shim;
 pub mod schema;
 pub mod schema_guard;
