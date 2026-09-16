@@ -1601,25 +1601,92 @@ async fn switch_vault(
 
     let stub_path = release_global_db_lock(&db_state)?;
     let mut pending_config_align_to: Option<String> = None;
+    // Whether the restore already replaced `brain.db`. Once it has, an
+    // unpublished capture is the only record of what the replica is owed, so
+    // the error path must not throw it away.
+    let mut restore_installed = false;
 
     let switch_result = (|| -> Result<(), String> {
         let backup_path = new_root.join(".brain").join("brain.db.bak");
         let has_backup = backup_path.exists();
+        let will_restore = restore_backup && has_backup;
+        let now = crate::pipeline::watchdog::heartbeat::now_ms();
 
-        remove_sqlite_sidecars(&db_path);
+        // Spec D3: capture what the replica still owes BEFORE the sidecars go.
+        // A concurrent --mcp connection blocks the implicit WAL checkpoint, so
+        // rows written since the last checkpoint live only in the -wal that
+        // `remove_sqlite_sidecars` is about to delete. Capturing after that
+        // reads a stale main file and silently misses records.
+        if will_restore {
+            db::restore_sync::capture_to_sidecar(&db_path)
+                .map_err(|e| format!("restore-sync capture failed: {e}"))?;
+        }
 
-        if restore_backup && has_backup {
-            std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
+        if will_restore {
+            // Spec D3: stage the backup, then install it with one rename, so
+            // `db_path` is either the old database or the whole backup and
+            // never a torn copy that the reopen (or the failed-switch
+            // recovery, which opens this same path) cannot use.
+            let staged = db::restore_sync::stage_backup(&backup_path, &db_path)
+                .map_err(|e| format!("staging the backup failed: {e}"))?;
+            // The marker is durable BEFORE anything destructive happens:
+            // crash recovery pairs it with the staged file to tell
+            // "committed" from "never happened" — the install rename
+            // consumes the staged file, so marker-present plus
+            // staged-absent is the only combination that can arise after
+            // the rename returned.
+            db::restore_sync::write_install_marker(&db_path)
+                .map_err(|e| format!("writing the install marker failed: {e}"))?;
+            // A concurrent --mcp connection blocks the WAL checkpoint on
+            // close, so committed rows can live only in the -wal that
+            // removal is about to delete. Keep a rollback copy: a failed
+            // install must reopen the outgoing database whole.
+            db::restore_sync::preserve_outgoing_wal(&db_path)
+                .map_err(|e| format!("preserving the outgoing -wal failed: {e}"))?;
+            remove_sqlite_sidecars(&db_path);
+            db::restore_sync::commit_staged_backup(&staged, &db_path)
+                .map_err(|e| format!("installing the backup failed: {e}"))?;
+            // The rename is the point of no return — set before the dir
+            // fsync below, which must not be mistaken for "the old database
+            // is still in place": from here on the file on disk is the new
+            // vault's, so the error path must align the config with it
+            // however the rest of the switch goes.
+            restore_installed = true;
             pending_config_align_to = Some(new_path.clone());
+            db::restore_sync::sync_install_dir(&db_path)
+                .map_err(|e| format!("fsyncing the installed database's directory failed: {e}"))?;
+            // Only now is the capture publishable: a sidecar visible before
+            // the install would be replayed against the outgoing database.
+            db::restore_sync::publish_sidecar(&db_path)
+                .map_err(|e| format!("publishing the restore-sync capture failed: {e}"))?;
+            // The install committed; the outgoing journal and the marker
+            // have both done their job.
+            db::restore_sync::discard_outgoing_wal(&db_path);
+            db::restore_sync::clear_install_marker(&db_path);
         } else {
+            // No file replacement happens here, so the journals are NOT
+            // removed: deleting the -wal would silently drop rows committed
+            // since the last checkpoint (a concurrent --mcp connection
+            // blocks the checkpoint on close) before clear_vault_tables can
+            // read them to build the replica's Delete events. Opening the
+            // connection recovers the -wal natively.
             let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-            db::clear_vault_tables(&mut conn).map_err(|e| e.to_string())?;
+            db::clear_vault_tables(&mut conn, now).map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
         }
 
         {
             let mut guard = db_state.0.lock().unwrap();
             *guard = AppDb::open_with_config(&db_path, &config_path).map_err(|e| e.to_string())?;
+        }
+
+        // Spec D3: sync on the reopened file, before the outbox worker
+        // restarts below. On failure the sidecar is kept and startup recovery
+        // finishes the job.
+        {
+            let guard = db_state.0.lock().unwrap();
+            db::restore_sync::run_pending(&guard.0, &db_path, now)
+                .map_err(|e| format!("restore-sync failed: {e}"))?;
         }
 
         {
@@ -1644,6 +1711,34 @@ async fn switch_vault(
 
     let mut recovery_reopened_db = false;
     if switch_result.is_err() {
+        // A capture that never got published belongs to a restore that never
+        // installed; drop it so it cannot be mistaken for pending work. If the
+        // install DID land, keep it: publishing it is all that stands between
+        // the replica and a silent divergence, and the next attempt can still
+        // find it. A published sidecar is untouched either way — startup
+        // recovery owes its sync. The staged copy is only ever useful to the
+        // attempt that made it.
+        if restore_installed {
+            // The rename already happened, so however the rest of the switch
+            // went the outgoing -wal must not come back and the capture is
+            // owed. A publish that already renamed but failed its directory
+            // fsync retries as a no-op here.
+            if let Err(e) = db::restore_sync::publish_sidecar(&db_path) {
+                eprintln!(
+                    "[switch_vault] backup installed but its replica capture could not be published ({e}); the replica may diverge for the outgoing vault"
+                );
+            }
+            db::restore_sync::discard_outgoing_wal(&db_path);
+        } else {
+            // The install never committed: the database at db_path is still
+            // the outgoing one, so give it back its -wal (committed rows may
+            // live only there) before the recovery reopen, and drop the
+            // capture and staged copy of a restore that never happened.
+            db::restore_sync::discard_pending_sidecar(&db_path);
+            db::restore_sync::restore_outgoing_wal(&db_path);
+            let _ = std::fs::remove_file(db::restore_sync::staged_backup_path(&db_path));
+        }
+        db::restore_sync::clear_install_marker(&db_path);
         if let Some(ref p) = pending_config_align_to {
             if let Err(e) = vault_state.0.lock().unwrap().set_vault_path(p) {
                 eprintln!(
@@ -3482,7 +3577,28 @@ pub fn run() {
         }
     }
 
+    // A vault switch that died mid-install leaves a marker beside the brain;
+    // resolve which side of the commit point the crash landed on BEFORE the
+    // brain is opened, so the database is never read with its -wal missing or
+    // an owed capture left unpublished. No marker is the normal case and
+    // costs one `stat`.
+    crate::db::restore_sync::reconcile_interrupted_install(&db_path);
     let db = AppDb::open_with_config(&db_path, &config_path).expect("failed to open database");
+    // A switch that crashed between the backup copy and its replica sync left
+    // a capture sidecar behind; finish it now. No sidecar is the normal case
+    // and costs one `stat`. A failure here keeps the sidecar for the next
+    // start rather than dropping the outgoing vault's replica deletes.
+    match crate::db::restore_sync::run_pending(
+        &db.0,
+        &db_path,
+        crate::pipeline::watchdog::heartbeat::now_ms(),
+    ) {
+        Ok(true) => {
+            eprintln!("[startup] finished a pending restore-sync from an interrupted vault switch")
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("[startup] pending restore-sync failed, will retry next start: {e}"),
+    }
     // Phase 9: one-time content_hash migration gate. The V9 schema adds
     // the column; this returns true on the first start after the schema
     // ships. The actual data migration is dispatched in the setup

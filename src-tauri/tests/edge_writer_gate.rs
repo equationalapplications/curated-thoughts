@@ -50,6 +50,7 @@ const EXPECTED_FIXTURE_COUNTS: &[(&str, usize)] = &[
     ("src/db/edge_purge.rs", 2),
     ("src/db/bundle_io.rs", 2),
     ("src/db/evidence_regrade.rs", 1),
+    ("src/db/queries.rs", 1),
     ("src/db/wiki_forget.rs", 1),
     ("src/db/wisdom.rs", 3),
     ("src/lib.rs", 3),
