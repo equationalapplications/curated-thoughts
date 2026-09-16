@@ -1605,22 +1605,42 @@ async fn switch_vault(
     let switch_result = (|| -> Result<(), String> {
         let backup_path = new_root.join(".brain").join("brain.db.bak");
         let has_backup = backup_path.exists();
+        let will_restore = restore_backup && has_backup;
+        let now = crate::pipeline::watchdog::heartbeat::now_ms();
+
+        // Spec D3: capture what the replica still owes BEFORE the sidecars go.
+        // A concurrent --mcp connection blocks the implicit WAL checkpoint, so
+        // rows written since the last checkpoint live only in the -wal that
+        // `remove_sqlite_sidecars` is about to delete. Capturing after that
+        // reads a stale main file and silently misses records.
+        if will_restore {
+            db::restore_sync::capture_to_sidecar(&db_path)
+                .map_err(|e| format!("restore-sync capture failed: {e}"))?;
+        }
 
         remove_sqlite_sidecars(&db_path);
 
-        if restore_backup && has_backup {
+        if will_restore {
             std::fs::copy(&backup_path, &db_path).map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
         } else {
             let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-            db::clear_vault_tables(&mut conn, crate::pipeline::watchdog::heartbeat::now_ms())
-                .map_err(|e| e.to_string())?;
+            db::clear_vault_tables(&mut conn, now).map_err(|e| e.to_string())?;
             pending_config_align_to = Some(new_path.clone());
         }
 
         {
             let mut guard = db_state.0.lock().unwrap();
             *guard = AppDb::open_with_config(&db_path, &config_path).map_err(|e| e.to_string())?;
+        }
+
+        // Spec D3: sync on the reopened file, before the outbox worker
+        // restarts below. On failure the sidecar is kept and startup recovery
+        // finishes the job.
+        {
+            let guard = db_state.0.lock().unwrap();
+            db::restore_sync::run_pending(&guard.0, &db_path, now)
+                .map_err(|e| format!("restore-sync failed: {e}"))?;
         }
 
         {
@@ -3484,6 +3504,21 @@ pub fn run() {
     }
 
     let db = AppDb::open_with_config(&db_path, &config_path).expect("failed to open database");
+    // A switch that crashed between the backup copy and its replica sync left
+    // a capture sidecar behind; finish it now. No sidecar is the normal case
+    // and costs one `stat`. A failure here keeps the sidecar for the next
+    // start rather than dropping the outgoing vault's replica deletes.
+    match crate::db::restore_sync::run_pending(
+        &db.0,
+        &db_path,
+        crate::pipeline::watchdog::heartbeat::now_ms(),
+    ) {
+        Ok(true) => {
+            eprintln!("[startup] finished a pending restore-sync from an interrupted vault switch")
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("[startup] pending restore-sync failed, will retry next start: {e}"),
+    }
     // Phase 9: one-time content_hash migration gate. The V9 schema adds
     // the column; this returns true on the first start after the schema
     // ships. The actual data migration is dispatched in the setup

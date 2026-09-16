@@ -206,6 +206,29 @@ pub fn sync(conn: &Connection, state: &CaptureState, now_ms: i64) -> Result<()> 
     Ok(())
 }
 
+/// Finish a restore's replica sync if one is pending.
+///
+/// Returns `Ok(false)` when there is no sidecar — the overwhelmingly common
+/// case, so this is cheap to call unconditionally at startup. On success the
+/// sidecar is deleted; on failure it is **kept**, so the next startup retries
+/// rather than silently dropping the outgoing vault's replica obligations.
+pub fn run_pending(conn: &Connection, db_path: &Path, now_ms: i64) -> Result<bool> {
+    let Some(state) = read_sidecar(db_path)? else {
+        return Ok(false);
+    };
+    sync(conn, &state, now_ms).context("restore-sync after backup restore")?;
+    let path = sidecar_path(db_path);
+    if let Err(e) = std::fs::remove_file(&path) {
+        // The sync committed; a leftover sidecar only costs one redundant
+        // (idempotent) replay next start.
+        eprintln!(
+            "[restore_sync] sync committed but sidecar {} could not be removed: {e}",
+            path.display()
+        );
+    }
+    Ok(true)
+}
+
 fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, entity_id, title, body, tags, confidence, source_type, source_hash,
@@ -621,5 +644,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(repushed, 1, "verbatim re-pushes never duplicate");
+    }
+
+    #[test]
+    fn run_pending_finishes_an_interrupted_switch_then_clears_the_sidecar() {
+        // The crash: capture written, copy done, sync never ran.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        seed(&live);
+        drop(live);
+        capture_to_sidecar(&db_path).unwrap();
+
+        // Simulate the copy: a different database now sits at db_path.
+        std::fs::remove_file(&db_path).unwrap();
+        let restored = crate::db::connection::open_app_db(&db_path, None).unwrap();
+
+        let did = run_pending(&restored, &db_path, 1000).unwrap();
+        assert!(did, "a present sidecar means there is work to finish");
+        assert!(
+            !sidecar_path(&db_path).exists(),
+            "sidecar is deleted once the sync commits"
+        );
+        assert!(
+            outbox_rows(&restored).iter().any(|r| r.2 == "fact_gone"),
+            "the forgotten record's Delete survived the crash"
+        );
+
+        let again = run_pending(&restored, &db_path, 1000).unwrap();
+        assert!(!again, "second run is a no-op — nothing pending");
+    }
+
+    #[test]
+    fn run_pending_keeps_the_sidecar_when_the_sync_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        seed(&live);
+        drop(live);
+        capture_to_sidecar(&db_path).unwrap();
+
+        // A database with no outbox table: the sync cannot commit.
+        let broken = Connection::open_in_memory().unwrap();
+
+        assert!(run_pending(&broken, &db_path, 1000).is_err());
+        assert!(
+            sidecar_path(&db_path).exists(),
+            "a failed sync must NOT drop the capture — recovery retries it"
+        );
     }
 }
