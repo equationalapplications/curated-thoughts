@@ -1,3 +1,9 @@
+## [2.12.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.12.0...v2.12.1) (2026-09-16)
+
+### Bug Fixes
+
+* **deps:** align tauri-plugin-notification crate to 2.4.0 with the npm package ([4cae6e6](https://github.com/equationalapplications/curated-thoughts/commit/4cae6e6bfb67579477885b5e67c0213a55cf19f7)), closes [#209](https://github.com/equationalapplications/curated-thoughts/issues/209) [post-#215](https://github.com/equationalapplications/post-/issues/215)
+
 ## [2.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.11.0...v2.12.0) (2026-09-16)
 
 ### Features
