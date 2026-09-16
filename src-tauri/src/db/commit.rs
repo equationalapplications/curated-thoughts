@@ -517,11 +517,32 @@ pub fn delete_librarian_evidence(conn: &Connection, entry_ids: &[String]) -> Res
     if entry_ids.is_empty() {
         return Ok(0);
     }
-    let placeholders: String = std::iter::repeat_n("?", entry_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("DELETE FROM librarian_evidence WHERE entry_id IN ({placeholders})");
-    let removed = conn.execute(&sql, rusqlite::params_from_iter(entry_ids.iter()))?;
+    // Bounded batches: one `IN (...)` over every doomed id blows past
+    // SQLITE_LIMIT_VARIABLE_NUMBER (32,766 by default) on a large forget and
+    // fails the whole transaction. Same chunk shape as
+    // `purge_edges_for_hard_deleted`, but additionally clamped to what THIS
+    // connection allows — the limit is per-connection, and tests lower it.
+    //
+    // SAFETY: `sqlite3_limit` with a negative value queries without mutating;
+    // `conn.handle()` is valid for the borrow of `conn`.
+    let conn_limit = unsafe {
+        rusqlite::ffi::sqlite3_limit(
+            conn.handle(),
+            rusqlite::ffi::SQLITE_LIMIT_VARIABLE_NUMBER,
+            -1,
+        )
+    };
+    let chunk_size = crate::db::edge_purge::BATCH_PURGE_CHUNK
+        .min(usize::try_from(conn_limit).unwrap_or(1).max(1));
+
+    let mut removed = 0;
+    for chunk in entry_ids.chunks(chunk_size) {
+        let placeholders: String = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM librarian_evidence WHERE entry_id IN ({placeholders})");
+        removed += conn.execute(&sql, rusqlite::params_from_iter(chunk.iter()))?;
+    }
     Ok(removed)
 }
 
@@ -2657,6 +2678,46 @@ mod tests {
         let removed = delete_librarian_evidence(&conn, &["fact_r".to_string()]).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(evidence_json_for_entry(&conn, "fact_r").unwrap(), None);
+    }
+
+    #[test]
+    fn delete_librarian_evidence_chunks_past_the_variable_limit() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        // Lower SQLite's variable limit so the test does not need 32k rows.
+        // 999 is SQLITE_LIMIT_VARIABLE_NUMBER's historical default.
+        unsafe {
+            rusqlite::ffi::sqlite3_limit(
+                conn.handle(),
+                rusqlite::ffi::SQLITE_LIMIT_VARIABLE_NUMBER,
+                50,
+            );
+        }
+
+        let mut ids = Vec::new();
+        for i in 0..200 {
+            let id = format!("fact_limit_{i:04}");
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+                 VALUES (?1, 'ent_limit', 't', 'b', 1, 1)",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+                 VALUES (?1, 'prop_limit', '{}', 1)",
+                [&id],
+            )
+            .unwrap();
+            ids.push(id);
+        }
+
+        let removed = delete_librarian_evidence(&conn, &ids).unwrap();
+        assert_eq!(removed, 200, "every evidence row must be deleted");
+
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM librarian_evidence", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

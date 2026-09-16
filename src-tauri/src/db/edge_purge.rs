@@ -77,7 +77,7 @@ pub fn endpoint_is_live(conn: &Connection, id: &str) -> Result<bool> {
 /// Max entry ids bound into one batch purge statement. Each id is bound twice
 /// (one IN clause per endpoint column), so 2 * this must stay under SQLite's
 /// SQLITE_MAX_VARIABLE_NUMBER (32766 on the bundled build).
-const BATCH_PURGE_CHUNK: usize = 8000;
+pub(crate) const BATCH_PURGE_CHUNK: usize = 8000;
 
 /// Delete every edge whose endpoint `entry_id` is dead in every valid home,
 /// even when the OTHER endpoint is still alive.
