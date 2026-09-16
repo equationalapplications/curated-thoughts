@@ -48,8 +48,10 @@ export function useVaultSwitcher(vaultPath: string) {
     }
 
     const backupChoice = await message(
-      "Back up your current index before switching?\n\n" +
-        `This saves your indexed data to ${backupHintPath} so it can be restored if you switch back.`,
+      "Back up this vault's index and knowledge base before switching?\n\n" +
+        `This saves the index AND the knowledge base — entities, facts, tasks, ` +
+        `agent memories and manual edits — to ${backupHintPath}, so it can be ` +
+        `brought back if you switch back.`,
       {
         title: "Switch vault",
         kind: "info",
@@ -62,6 +64,31 @@ export function useVaultSwitcher(vaultPath: string) {
     );
     if (backupChoice === "Cancel") return;
 
+    // The brain is per-vault (#213): switching without a backup permanently
+    // destroys this vault's knowledge. Gate it explicitly — and do it here,
+    // before the restore prompt and regardless of whether the target vault
+    // has a backup, because a restore also overwrites the current brain with
+    // no fresh backup of it.
+    if (backupChoice === "No") {
+      const confirmed = await message(
+        "Continuing permanently deletes this vault's entire knowledge base: " +
+          "every approved entity, fact, edge and task, all pending proposals, " +
+          "and all agent memories and manual edits.\n\n" +
+          "Re-indexing your documents will not bring back agent memories or " +
+          "manual edits. This cannot be undone.",
+        {
+          title: "Destroy this vault's knowledge?",
+          kind: "warning",
+          buttons: {
+            yes: "Switch without backup",
+            no: "Go back",
+            cancel: "Go back",
+          },
+        },
+      );
+      if (confirmed !== "Yes") return;
+    }
+
     setSwitching(true);
     try {
       if (backupChoice === "Yes") {
@@ -71,7 +98,9 @@ export function useVaultSwitcher(vaultPath: string) {
       let restore = false;
       if (hasBackup) {
         const r = await message(
-          "Found a previous index backup for this vault. Restore it?\n\n" +
+          "Found a previous backup for this vault. Restore it?\n\n" +
+            "This brings back the knowledge base saved in that backup — not " +
+            "just the document index.\n\n" +
             "(Documents changed since the backup will be re-indexed.)",
           {
             title: "Restore backup?",
