@@ -1,3 +1,19 @@
+## [2.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.11.0...v2.12.0) (2026-09-16)
+
+### Features
+
+* **db:** capture replica obligations before a restore overwrites brain.db ([6885493](https://github.com/equationalapplications/curated-thoughts/commit/6885493a1107a47df1819420eb047faaa5e8f201))
+* **db:** clear the knowledge layer on vault switch ([#213](https://github.com/equationalapplications/curated-thoughts/issues/213)) ([251d04d](https://github.com/equationalapplications/curated-thoughts/commit/251d04dccbc64d0ae3ff3950498258a61a651576)), closes [#211](https://github.com/equationalapplications/curated-thoughts/issues/211)
+* **db:** sync the replica across a backup restore ([d683082](https://github.com/equationalapplications/curated-thoughts/commit/d6830820346994942b732fe380c9f008184afcd7))
+* **ui:** confirm before a vault switch destroys the knowledge base ([4365d36](https://github.com/equationalapplications/curated-thoughts/commit/4365d367d83448bf117eebff194e67d99e2c8cac))
+* **vault:** run the restore-path replica sync, crash-safe ([2ab459c](https://github.com/equationalapplications/curated-thoughts/commit/2ab459cba6f012a136b095b2bf42938a423b4b74))
+
+### Bug Fixes
+
+* **db:** chunk delete_librarian_evidence past SQLite's variable limit ([8f17d3c](https://github.com/equationalapplications/curated-thoughts/commit/8f17d3c904c207c4c78bf08100363bdf68f9c390))
+* **vault:** keep the outgoing WAL, gate crash recovery on an install marker ([faab4fc](https://github.com/equationalapplications/curated-thoughts/commit/faab4fc79fb71a5bb3fff44224b35bf15c81e0a2)), closes [#215](https://github.com/equationalapplications/curated-thoughts/issues/215)
+* **vault:** make the restore path crash-safe and its capture install-gated ([b2c37e7](https://github.com/equationalapplications/curated-thoughts/commit/b2c37e7b7655c3706cdf4fe1a1fd6e7ae3deacb7)), closes [#215](https://github.com/equationalapplications/curated-thoughts/issues/215) [#213](https://github.com/equationalapplications/curated-thoughts/issues/213)
+
 ## [2.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.10.2...v2.11.0) (2026-09-15)
 
 ### Features
