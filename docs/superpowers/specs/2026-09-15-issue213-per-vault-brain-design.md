@@ -1,7 +1,7 @@
 # Per-vault brain: vault switch clears the knowledge layer atomically
 
 **Date:** 2026-09-15
-**Status:** Draft (rev 4)
+**Status:** Implemented (rev 4)
 **Branch:** spec/213-per-vault-brain
 **Issue:** #213
 **Priority:** High (approved knowledge silently leaks across vaults into
