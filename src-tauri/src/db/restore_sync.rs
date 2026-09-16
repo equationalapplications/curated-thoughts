@@ -6,7 +6,8 @@
 //! restored vault's are never re-inserted, and any of the outgoing vault's
 //! events still undrained at copy time die with the old file.
 //!
-//! The sequence is **capture → stage → install → publish → sync**:
+//! The sequence is **capture → stage → mark → preserve → install → publish →
+//! sync**:
 //!
 //! 1. `capture_to_sidecar` writes the replica's outstanding obligations to an
 //!    unpublished sidecar and fsyncs it. Holding the capture only in memory
@@ -14,12 +15,25 @@
 //!    — the rows no longer exist anywhere and the divergence is silent.
 //! 2. `stage_backup` copies the backup to a temporary file beside the
 //!    database, so the database is never truncated mid-copy.
-//! 3. `commit_staged_backup` installs it with one atomic rename.
-//! 4. `publish_sidecar` renames the capture into the path crash recovery
+//! 3. `write_install_marker` records — durably, and before anything
+//!    destructive happens — that an install is in flight. Crash recovery
+//!    pairs the marker with the staged file to tell "committed" from "never
+//!    happened": the install rename consumes the staged file, so
+//!    marker-present + staged-absent is the one combination that can only
+//!    arise after the rename returned.
+//! 4. `preserve_outgoing_wal` copies the outgoing `-wal` to a rollback-only
+//!    name before the sidecars are removed, so a failed or interrupted
+//!    install can put the outgoing database back whole.
+//! 5. `commit_staged_backup` installs the staged copy with one atomic
+//!    rename — the point of no return — and `sync_install_dir` makes the new
+//!    directory entry durable afterwards.
+//! 6. `publish_sidecar` renames the capture into the path crash recovery
 //!    watches — only now, because a capture consumed before the install would
 //!    be replayed against the *outgoing* database.
-//! 5. `sync` (or `run_pending`, at startup, after a crash) pushes the
-//!    obligations onto the restored file's outbox.
+//! 7. `sync` (or `run_pending`, at startup, after a crash) pushes the
+//!    obligations onto the restored file's outbox. A crash anywhere in
+//!    between is untangled by `reconcile_interrupted_install`, which runs
+//!    before the brain is opened at startup.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -72,6 +86,21 @@ pub fn staged_backup_path(db_path: &Path) -> PathBuf {
     sibling(db_path, ".restore-incoming")
 }
 
+/// The install marker: written after the backup is staged and before anything
+/// destructive happens, removed once the switch settles. Its presence next to
+/// an ABSENT staged file is the only combination that means the install
+/// committed — the install rename consumes the staged file, so every earlier
+/// crash point still has it.
+pub fn install_marker_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, ".restore-installing")
+}
+
+/// The outgoing database's `-wal`, copied aside under a rollback-only name
+/// before the sidecars are removed.
+fn outgoing_wal_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, "-wal.outgoing")
+}
+
 fn sibling(db_path: &Path, suffix: &str) -> PathBuf {
     let mut name = db_path.file_name().unwrap_or_default().to_os_string();
     name.push(suffix);
@@ -81,24 +110,37 @@ fn sibling(db_path: &Path, suffix: &str) -> PathBuf {
 /// fsync the directory holding `path`, so a rename into it survives a crash.
 ///
 /// A rename is atomic with respect to readers the instant it returns, but the
-/// directory entry itself is not durable until its directory is synced. Best
-/// effort on the open: some platforms refuse `File::open` on a directory, and
-/// failing the whole restore over an unsyncable directory would be worse than
-/// the (already small) window this closes.
+/// directory entry itself is not durable until its directory is synced.
+/// Failures propagate — reporting a durable rename that was not one would be
+/// worse than failing. The one exception is platforms without directory-fsync
+/// support, where this is a documented no-op.
 fn fsync_parent_dir(path: &Path) -> Result<()> {
     let Some(dir) = path.parent() else {
         return Ok(());
     };
-    match std::fs::File::open(dir) {
-        Ok(f) => {
-            let _ = f.sync_all();
-            Ok(())
-        }
-        Err(_) => Ok(()),
+    #[cfg(windows)]
+    {
+        // `File::open` on a directory needs backup semantics on Windows and
+        // the platform has no directory fsync anyway. The rename that
+        // precedes this call is still atomic there; only its durability
+        // across a power cut is weaker.
+        let _ = dir;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let f =
+            std::fs::File::open(dir).with_context(|| format!("open {} to fsync", dir.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", dir.display()))
     }
 }
 
 /// Rename `from` onto `to` and make the new directory entry durable.
+///
+/// A directory-fsync failure is always *post*-rename — `to` already holds the
+/// content — so callers must read an error here as "done, but not yet known
+/// durable", never as "nothing happened".
 fn rename_durably(from: &Path, to: &Path) -> Result<()> {
     std::fs::rename(from, to)
         .with_context(|| format!("rename {} -> {}", from.display(), to.display()))?;
@@ -166,8 +208,9 @@ pub fn capture(conn: &Connection) -> Result<CaptureState> {
 /// the obligations a retried restore needs would be gone.
 ///
 /// A torn pending file can never be published: the publish happens later in
-/// the same run and only if this function returned `Ok`, and the next restore
-/// truncates the file before publishing it.
+/// the same run and only if this function returned `Ok`, and a crash before
+/// that point is untangled at startup by `reconcile_interrupted_install`,
+/// which discards a pending capture whose install never committed.
 pub fn capture_to_sidecar(db_path: &Path) -> Result<()> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("open {} for restore-sync capture", db_path.display()))?;
@@ -191,7 +234,10 @@ pub fn capture_to_sidecar(db_path: &Path) -> Result<()> {
 ///
 /// Idempotent: no pending capture means nothing is owed — it was either
 /// published already or published and then synced — so an error path can retry
-/// this without inventing a failure.
+/// this without inventing a failure. That covers the one failure mode this can
+/// report after the fact: a directory-fsync error post-rename, where the
+/// capture is already visible at the final path and only its durability is in
+/// doubt.
 pub fn publish_sidecar(db_path: &Path) -> Result<()> {
     let pending = pending_sidecar_path(db_path);
     if !pending.exists() {
@@ -224,12 +270,94 @@ pub fn stage_backup(backup_path: &Path, db_path: &Path) -> Result<PathBuf> {
     Ok(staged)
 }
 
+/// Record, durably and before anything destructive happens, that an install
+/// is in flight. See [`install_marker_path`] for how recovery reads it.
+pub fn write_install_marker(db_path: &Path) -> Result<()> {
+    let marker = install_marker_path(db_path);
+    std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
+    let f = std::fs::File::open(&marker)
+        .with_context(|| format!("reopen {} to fsync", marker.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync {}", marker.display()))?;
+    fsync_parent_dir(&marker)
+}
+
+/// Remove the install marker. Best effort; a stray marker with no staged file
+/// and no pending capture is inert — recovery reads it as "committed" and
+/// finds nothing left to do.
+pub fn clear_install_marker(db_path: &Path) {
+    let _ = std::fs::remove_file(install_marker_path(db_path));
+}
+
+/// Copy the outgoing `-wal` to a rollback-only name before the sidecars are
+/// removed.
+///
+/// The restore path deletes `-wal`/`-shm` because they belong to the outgoing
+/// file and would be misread as the replacement's. But a concurrent `--mcp`
+/// connection blocks the implicit checkpoint on close — the same reason the
+/// capture runs before removal — so committed rows can live ONLY in that
+/// `-wal`. Deleting the only copy would make a failed install unrecoverable:
+/// the old main file would reopen without them. The `-shm` needs no copy; it
+/// is a rebuildable index.
+pub fn preserve_outgoing_wal(db_path: &Path) -> Result<()> {
+    let wal = sibling(db_path, "-wal");
+    if !wal.exists() {
+        return Ok(());
+    }
+    let kept = outgoing_wal_path(db_path);
+    std::fs::copy(&wal, &kept)
+        .with_context(|| format!("copy {} -> {}", wal.display(), kept.display()))?;
+    let f = std::fs::File::open(&kept)
+        .with_context(|| format!("reopen {} to fsync", kept.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync {}", kept.display()))?;
+    fsync_parent_dir(&kept)
+}
+
+/// Put a preserved `-wal` back after an install that did NOT commit: the
+/// database at `db_path` is still the outgoing one, and its committed rows may
+/// exist only in the preserved copy. If a `-wal` is already back at the
+/// original name the copy is redundant and dropped instead.
+pub fn restore_outgoing_wal(db_path: &Path) {
+    let kept = outgoing_wal_path(db_path);
+    if !kept.exists() {
+        return;
+    }
+    let wal = sibling(db_path, "-wal");
+    if !wal.exists() && std::fs::rename(&kept, &wal).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(&kept);
+}
+
+/// Drop the preserved `-wal`: the install committed, so the outgoing journal
+/// describes a database that no longer exists at `db_path`.
+pub fn discard_outgoing_wal(db_path: &Path) {
+    let _ = std::fs::remove_file(outgoing_wal_path(db_path));
+}
+
 /// Install a staged backup over `db_path` with a single atomic rename.
+///
+/// The rename is the point of no return and the **only** thing this does: the
+/// moment it returns `Ok`, the file at `db_path` is the replacement, even if
+/// the directory fsync that follows ([`sync_install_dir`]) then fails. That is
+/// why the fsync is a separate call — the caller must be able to record
+/// "installed" between the two, without a fsync failure making the error path
+/// forget the database was already replaced.
 ///
 /// The caller must have removed the outgoing database's `-wal`/`-shm` first:
 /// they belong to the old file and would be misread as this one's.
 pub fn commit_staged_backup(staged: &Path, db_path: &Path) -> Result<()> {
-    rename_durably(staged, db_path)
+    std::fs::rename(staged, db_path)
+        .with_context(|| format!("rename {} -> {}", staged.display(), db_path.display()))
+}
+
+/// Make the install's new directory entry durable. Separate from
+/// [`commit_staged_backup`] by design (see its doc): the rename already
+/// happened, so a failure here must not be mistaken for "the old database is
+/// still in place".
+pub fn sync_install_dir(db_path: &Path) -> Result<()> {
+    fsync_parent_dir(db_path)
 }
 
 /// The pending capture, or `None` when there is nothing to finish.
@@ -355,6 +483,52 @@ pub fn run_pending(conn: &Connection, db_path: &Path, now_ms: i64) -> Result<boo
         );
     }
     Ok(true)
+}
+
+/// Resolve a vault switch that died mid-install, BEFORE anything opens the
+/// brain.
+///
+/// The marker plus the staged file reconstruct which side of the commit point
+/// the crash landed on, because the install rename consumes the staged file:
+///
+/// | marker | staged  | meaning                                             |
+/// |--------|---------|-----------------------------------------------------|
+/// | yes    | absent  | the rename returned — **committed**. Publish the    |
+/// |        |         | pending capture so `run_pending` (which the caller   |
+/// |        |         | runs next) finishes the sync, and drop the preserved |
+/// |        |         | outgoing `-wal`.                                    |
+/// | yes    | present | the rename never ran — **nothing was replaced**.    |
+/// |        |         | Put the preserved `-wal` back, and drop the capture  |
+/// |        |         | and staged copy: they belong to a restore that never |
+/// |        |         | happened.                                           |
+/// | no     | —       | the crash predates the marker, so nothing destructive|
+/// |        |         | had begun; clear any strays.                        |
+///
+/// Idempotent, and cheap in the common case: one `stat` that finds no marker.
+pub fn reconcile_interrupted_install(db_path: &Path) {
+    let marker = install_marker_path(db_path);
+    if !marker.exists() {
+        // A crash this early left at most stray artifacts; the outgoing
+        // database is untouched.
+        discard_pending_sidecar(db_path);
+        let _ = std::fs::remove_file(staged_backup_path(db_path));
+        return;
+    }
+    if !staged_backup_path(db_path).exists() {
+        // Committed: the rename consumed the staged file.
+        discard_outgoing_wal(db_path);
+        if let Err(e) = publish_sidecar(db_path) {
+            eprintln!(
+                "[restore_sync] install committed but its capture could not be \
+                 published ({e}); the replica may diverge for the outgoing vault"
+            );
+        }
+    } else {
+        restore_outgoing_wal(db_path);
+        discard_pending_sidecar(db_path);
+        let _ = std::fs::remove_file(staged_backup_path(db_path));
+    }
+    let _ = std::fs::remove_file(&marker);
 }
 
 fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
@@ -940,5 +1114,124 @@ mod tests {
             sidecar_path(&db_path).exists(),
             "a failed sync must NOT drop the capture — recovery retries it"
         );
+    }
+
+    #[test]
+    fn reconcile_publishes_a_pending_capture_whose_install_committed() {
+        // The crash: marker written, staged file consumed by the install
+        // rename, process died before the publish. Without reconciliation
+        // startup would ignore the pending capture and the next restore
+        // would overwrite it — the outgoing vault's replica obligations
+        // lost forever.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        seed(&live);
+        drop(live);
+        capture_to_sidecar(&db_path).unwrap();
+        assert!(pending_sidecar_path(&db_path).exists());
+
+        // Simulate the committed install's leftovers: no staged file (the
+        // rename consumed it), a marker, and a preserved outgoing -wal.
+        std::fs::write(install_marker_path(&db_path), b"").unwrap();
+        std::fs::write(outgoing_wal_path(&db_path), b"stale wal").unwrap();
+
+        reconcile_interrupted_install(&db_path);
+
+        assert!(
+            sidecar_path(&db_path).exists(),
+            "the owed capture must become visible to run_pending"
+        );
+        assert!(!pending_sidecar_path(&db_path).exists());
+        assert!(
+            !outgoing_wal_path(&db_path).exists(),
+            "the outgoing -wal describes a database that is no longer at db_path"
+        );
+        assert!(!install_marker_path(&db_path).exists());
+    }
+
+    #[test]
+    fn reconcile_rolls_back_an_install_that_never_committed() {
+        // The crash: marker written, -wal preserved, sidecars removed, staged
+        // copy on disk — but the install rename never ran, so brain.db is
+        // still the outgoing database and its committed rows may live only
+        // in the preserved -wal.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        seed(&live);
+        drop(live);
+        capture_to_sidecar(&db_path).unwrap();
+
+        let wal = sibling(&db_path, "-wal");
+        std::fs::write(&wal, b"journal with committed rows").unwrap();
+        std::fs::write(staged_backup_path(&db_path), b"staged").unwrap();
+        write_install_marker(&db_path).unwrap();
+        preserve_outgoing_wal(&db_path).unwrap();
+        assert!(outgoing_wal_path(&db_path).exists());
+        std::fs::remove_file(&wal).unwrap(); // sidecar removal
+
+        reconcile_interrupted_install(&db_path);
+
+        assert_eq!(
+            std::fs::read(&wal).unwrap(),
+            b"journal with committed rows",
+            "the outgoing database gets its journal back whole"
+        );
+        assert!(!outgoing_wal_path(&db_path).exists());
+        assert!(
+            !pending_sidecar_path(&db_path).exists(),
+            "the capture belongs to a restore that never happened"
+        );
+        assert!(!sidecar_path(&db_path).exists());
+        assert!(!staged_backup_path(&db_path).exists());
+        assert!(!install_marker_path(&db_path).exists());
+    }
+
+    #[test]
+    fn reconcile_clears_strays_when_the_crash_predates_the_marker() {
+        // The crash: capture written, staged copy half-written, marker never
+        // reached the disk. Nothing was replaced; nothing is owed.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+
+        std::fs::write(pending_sidecar_path(&db_path), b"{}").unwrap();
+        std::fs::write(staged_backup_path(&db_path), b"partial").unwrap();
+
+        reconcile_interrupted_install(&db_path);
+
+        assert!(!pending_sidecar_path(&db_path).exists());
+        assert!(!staged_backup_path(&db_path).exists());
+        assert!(!sidecar_path(&db_path).exists());
+        assert!(!install_marker_path(&db_path).exists());
+    }
+
+    #[test]
+    fn preserved_outgoing_wal_restores_only_when_the_original_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let wal = sibling(&db_path, "-wal");
+
+        // No -wal to preserve: a no-op, not an error.
+        preserve_outgoing_wal(&db_path).unwrap();
+        assert!(!outgoing_wal_path(&db_path).exists());
+
+        std::fs::write(&wal, b"w").unwrap();
+        preserve_outgoing_wal(&db_path).unwrap();
+        assert_eq!(std::fs::read(outgoing_wal_path(&db_path)).unwrap(), b"w");
+
+        // Original gone -> the copy goes back under the real name.
+        std::fs::remove_file(&wal).unwrap();
+        restore_outgoing_wal(&db_path);
+        assert!(wal.exists());
+        assert!(!outgoing_wal_path(&db_path).exists());
+
+        // Original present again -> the copy is redundant and dropped.
+        std::fs::write(outgoing_wal_path(&db_path), b"w").unwrap();
+        restore_outgoing_wal(&db_path);
+        assert!(wal.exists());
+        assert!(!outgoing_wal_path(&db_path).exists());
     }
 }

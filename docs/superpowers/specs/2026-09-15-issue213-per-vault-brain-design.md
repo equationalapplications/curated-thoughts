@@ -1,7 +1,7 @@
 # Per-vault brain: vault switch clears the knowledge layer atomically
 
 **Date:** 2026-09-15
-**Status:** Implemented (rev 5)
+**Status:** Implemented (rev 6)
 **Branch:** spec/213-per-vault-brain
 **Issue:** #213
 **Priority:** High (approved knowledge silently leaks across vaults into
@@ -156,6 +156,37 @@ configured. It never clears, and this spec leaves it alone.)
     `ToolDispatchContext::with_rw` can write. The window is real; it
     cannot diverge the replica. D3 carries the argument and the
     residual.
+
+- **rev 6** folds in a second PR #215 review wave — four findings, all
+  on the restore path's durability:
+  - **The outgoing `-wal` was destroyed before the install was certain
+    (fixed).** `remove_sqlite_sidecars` deleted the only copy of
+    committed rows a concurrent `--mcp` connection could have left
+    there, before the install rename — so a failed install reopened the
+    old main file without them. The `-wal` is now copied to a
+    rollback-only name first and put back when the install does not
+    commit. A checkpoint was the alternative and stays rejected: a
+    concurrent reader blocks it (rev 3's own capture-window argument).
+  - **A crash between the install and the publish stranded the capture
+    (fixed).** Startup read only the published sidecar, so the pending
+    capture was ignored and the next restore would overwrite it — the
+    outgoing vault's replica obligations lost. An install marker now
+    pairs with the staged file to reconstruct which side of the commit
+    point a crash landed on (the rename consumes the staged file), and
+    startup reconciliation publishes the pending capture exactly when
+    the install committed, rolling the `-wal` back when it did not.
+  - **Directory-fsync failures were swallowed (fixed).** A failed
+    `fsync` after a rename reported success, so an install or publish
+    could claim a durability it did not have. Failures now propagate,
+    with the fsync split out of the install rename so the switch records
+    "installed" between the two and a post-rename fsync failure cannot
+    be mistaken for "the old database is still in place".
+  - **The no-restore path deleted the journals for no reason (fixed).**
+    It never replaces the file, so removing the `-wal` there only
+    silently dropped rows committed since the last checkpoint before
+    `clear_vault_tables` could read them to build the replica's Delete
+    events. The removal is gone; opening the connection recovers the
+    `-wal` natively.
 
 ## Problem
 
@@ -372,13 +403,32 @@ loss) leaves a torn file — and the file it tears is the one
 `AppDb::open_with_config` opens next, and the one
 `recover_after_failed_switch_vault` opens if that fails. The backup is
 therefore copied to `brain.db.restore-incoming` beside the database and
-fsynced; then the outgoing `-wal`/`-shm` are removed (they describe the
-old file and must not be misread as the new one's); then the staged copy
-is installed with a single `std::fs::rename` onto `brain.db`, and the
-containing directory is fsynced so the new directory entry is durable.
-`brain.db` is thereafter only ever the old database or the whole backup,
-never a partial one, and a staging failure leaves the outgoing database
-untouched for the existing recovery to reopen.
+fsynced; an install marker (`brain.db.restore-installing`) is then
+written and fsynced — before anything destructive happens (see crash
+recovery below for how it is read); the outgoing `-wal` is copied to a
+rollback-only name (`brain.db-wal.outgoing`) and fsynced — a concurrent
+`--mcp` connection blocks the implicit WAL checkpoint on close, so
+committed rows can live only in that `-wal`, and deleting the only copy
+before the install is certain would make a failed install unrecoverable
+(checkpointing was the alternative and stays rejected for exactly the
+reason rev 3 pinned the capture window: a concurrent reader blocks it);
+then the outgoing `-wal`/`-shm` are removed (they describe the old file
+and must not be misread as the new one's); then the staged copy is
+installed with a single `std::fs::rename` onto `brain.db` — the point of
+no return — and the containing directory is fsynced so the new directory
+entry is durable, with the fsync deliberately separate from the rename
+so its failure cannot be mistaken for "the old database is still in
+place". `brain.db` is thereafter only ever the old database or the whole
+backup, never a partial one; a staging failure leaves the outgoing
+database untouched, and a failed or interrupted install puts the
+preserved `-wal` back, so the existing recovery reopens the outgoing
+database whole.
+
+The no-restore path never replaces the file, so it removes no journals
+at all: deleting the `-wal` there would silently drop rows committed
+since the last checkpoint before `clear_vault_tables` could read them to
+build the replica's Delete events. Opening the connection recovers the
+`-wal` natively.
 
 `switch_vault`'s restore branch therefore gains:
 
@@ -514,9 +564,18 @@ same sync transaction, then deletes the sidecar. Because the sidecar is
 published only after the install, its presence already means the
 restored file is the one on disk: recovery cannot mistake a restore that
 never happened for one that did, and never syncs against the outgoing
-database. A crash *before* the publish leaves only the pending file,
-which recovery ignores and the next restore overwrites; nothing is owed,
-because nothing was replaced. Re-running is safe: duplicated
+database. A crash *before* the publish — and anywhere else in the
+install — is untangled at startup, before the brain is opened, from the
+install marker: the marker is written after the backup is staged and
+before anything destructive happens, and the install rename consumes the
+staged file, so marker-present plus staged-absent is the only
+combination that can arise after the rename returned. Startup
+reconciliation therefore publishes (and `run_pending` then consumes) a
+pending capture exactly when the install committed; when it did not, it
+puts the preserved outgoing `-wal` back under its real name and drops
+the capture and the staged copy — nothing is owed, because nothing was
+replaced — leaving the outgoing database whole. Re-running is safe:
+duplicated
 re-pushes are harmless because the replica already treats duplicate
 Inserts as idempotent re-assertions and Deletes of unknown ids as
 no-ops, and the drain order still converges to the same end state. The
