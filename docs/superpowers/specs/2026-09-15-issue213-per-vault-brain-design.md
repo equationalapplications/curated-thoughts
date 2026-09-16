@@ -1,7 +1,7 @@
 # Per-vault brain: vault switch clears the knowledge layer atomically
 
 **Date:** 2026-09-15
-**Status:** Draft (rev 3)
+**Status:** Draft (rev 4)
 **Branch:** spec/213-per-vault-brain
 **Issue:** #213
 **Priority:** High (approved knowledge silently leaks across vaults into
@@ -57,8 +57,7 @@ configured. It never clears, and this spec leaves it alone.)
   - `set_vault_path` boundary documented; `curated_agent_log`
     non-interference claim moved from assertion to a plan verification
     task.
-- **rev 3** (this document) folds in a second review wave (9 verified
-  findings):
+- **rev 3** folds in a second review wave (9 verified findings):
   - **`curated_agent_log` leak found (high).** The rev 2 keep-row's
     deferred reader check found a reader: the table feeds the Unified
     Timeline (`db/events.rs:98`) with no vault scoping, rendered in the
@@ -89,6 +88,36 @@ configured. It never clears, and this spec leaves it alone.)
   - **Test seeds.** The acceptance test now seeds archived (soft-deleted)
     entry and task rows to pin that the ceremony has no
     `deleted_at IS NULL` filter.
+- **rev 4** (this document) folds in a self-review of rev 3. Four of its
+  five findings were valid; one was rejected on the evidence:
+  - **Re-push could deadlock the switch (high, fixed).** rev 3's
+    verbatim re-push of captured undrained outbox rows ignored that
+    `llm_wiki_outbox.id` is `TEXT PRIMARY KEY` and that a restored
+    backup can already contain the very rows being re-pushed. The
+    collision would fail the sync, retain the sidecar, and leave
+    startup recovery looping on the same failing `INSERT`. D3 now
+    skips ids already present in the restored outbox.
+  - **False precedent (fixed).** rev 3 cited `clear_entity_content` as
+    already using the set-based outbox shape; it pushes per-row in a
+    Rust loop (`bundle_apply.rs:765-788`) and only its *deletes* are
+    set-based. D1.1 no longer claims a precedent it does not have.
+  - **False ordering invariant (fixed).** rev 3 justified the drain
+    order with "B was active only after the restore"; because the
+    outbox survives no-restore switches, the live file can carry
+    undrained rows inherited from an earlier vault, which are older
+    than the backup. D3 re-derives the ordering from the dedupe
+    instead, which is both true and simpler.
+  - **Sidecar bound misstated (fixed).** "At most one captured row per
+    replicated record" is wrong — one record can have an undrained
+    Insert *and* Update. The bound is the outbox's size.
+  - **Task Delete payload — finding rejected.** The review held that
+    `{"id"}` invents a shape, citing the golden fixture's
+    `{id, entity_id, deleted_at}`. In fact two conventions ship today:
+    hard deletes use `{"id"}` (`hard_delete_entries`;
+    `clear_entity_content` for **both** entries and tasks), archive/soft
+    deletes use the richer shape. The clear is a hard delete, so
+    `{"id"}` is correct and already reaches replicas via bundle
+    imports. D1.2 records the distinction so it is not re-raised.
 
 ## Problem
 
@@ -155,9 +184,13 @@ New body, in order:
    trips per fact (outbox insert, entry delete, then chunked sweeps)
    inside the single transaction the user is staring at a "switching"
    screen during. A 20k-fact brain would cost 40k+ round trips. The
-   whole vault is doomed, so the clear uses the set-based shape
-   `clear_entity_content` already uses per entity
-   (`bundle_apply.rs:760-814`), applied vault-wide:
+   whole vault is doomed, so the clear goes set-based. The *deletes*
+   follow `clear_entity_content`'s per-entity shape
+   (`bundle_apply.rs:792-801`); the outbox `INSERT … SELECT` is **new
+   here** — no existing caller pushes outbox rows set-based
+   (`clear_entity_content` still loops in Rust at
+   `bundle_apply.rs:765-788`), so the format-match test below is what
+   holds it to the helper's output rather than an existing precedent:
 
    ```sql
    INSERT INTO llm_wiki_outbox
@@ -185,6 +218,21 @@ New body, in order:
    `DELETE FROM llm_wiki_tasks`, minus the evidence delete. Tasks have
    no evidence table. Archived tasks are included, same rule as
    entries.
+
+   **On the `{"id"}` Delete payload.** Two Delete payload conventions
+   exist in production and this spec deliberately picks the first:
+   *hard* deletes carry `{"id"}` only (`hard_delete_entries`,
+   `commit.rs:564`; `clear_entity_content` for **both** entries and
+   tasks, `bundle_apply.rs:766-787`), while *archive/soft* deletes
+   carry `{id, entity_id, deleted_at}` (`commit_fact_archive`,
+   `commit.rs:1815`; `wisdom.rs:401`) — the shape the package's own
+   repositories emit and the golden fixture pins
+   (`task_delete_payload`, `outbox_format.rs:196`). The clear is a hard
+   delete, so `{"id"}` is the right convention: `entity_id` is already
+   a top-level outbox column, and a `deleted_at` tombstone timestamp is
+   meaningless for a row being removed outright. Bundle imports have
+   shipped `{"id"}` task Deletes since the import path existed, so the
+   replica contract already tolerates them.
 3. **Edge sweep.** `DELETE FROM llm_wiki_edges` unconditionally. Every
    endpoint the edges could reference is doomed, so this sweep alone
    empties the table; with entries deleted set-based, the ceremony's
@@ -317,7 +365,22 @@ file. `switch_vault`'s restore branch therefore gains:
    before the worker restart).** In one transaction on the reopened
    database, in this order:
    - re-push every captured undrained outbox row verbatim (original
-     `created_at` included, preserving intra-vault event order);
+     `created_at` included, preserving intra-vault event order),
+     **skipping any id already present in the restored file's outbox**
+     (`INSERT OR IGNORE`, or an explicit `WHERE NOT EXISTS`).
+     `llm_wiki_outbox.id` is `TEXT PRIMARY KEY` (`okf_ddl.rs:133`) and
+     the same row id genuinely can be in both places: the outbox is
+     never truncated across a no-restore switch (D2), and
+     `backup_vault_db` snapshots the whole file, so a backup taken
+     while the replica was unreachable carries undrained rows that are
+     still in the live file when that backup is later restored. A
+     verbatim re-push would then violate the primary key, fail the sync
+     transaction, retain the sidecar, and leave startup recovery
+     re-running the identical failing `INSERT` forever — the switch
+     would never converge, in exactly the undrained-rows-plus-restore
+     scenario this step exists for. Skipping loses nothing: a matching
+     id *is* the same event, already queued in the restored file, and
+     it drains on its own;
    - push `Delete` events for every captured `(id, entity_id)` pair;
    - push `Insert` events for every entry and task row now present in
      the restored file, using the existing full-payload builders
@@ -337,18 +400,30 @@ transaction, then deletes the sidecar. Re-running is safe: duplicated
 re-pushes are harmless because the replica already treats duplicate
 Inserts as idempotent re-assertions and Deletes of unknown ids as
 no-ops, and the drain order still converges to the same end state. The
-sidecar is bounded — at most one captured row per replicated record —
-not a growth path.
+sidecar is bounded by the outbox's current size plus one pair per
+replicated record — a record with an undrained Insert *and* Update
+contributes two captured rows, so it is not one row per record — and is
+deleted on commit, so it is not a growth path.
 
 Ordering argument: the restored file's own undrained events (vault A's
 state at backup time) carry the oldest `created_at` and drain first;
-then B's re-pushed undrained events in their original relative order —
-all newer than the backup, since B was active only after the restore
-that created them; then, at the switch's `now_ms`, B's captured
-Deletes and A's re-asserted Inserts. B's record ids and A's are
-disjoint (LLM-generated ids), so the interleaving is conflict-free and
-the replica's end state matches the restored file, with B's pending
-deletes — including forgets of already-deleted records — preserved.
+then the re-pushed undrained events in their original relative order;
+then, at the switch's `now_ms`, the captured Deletes and A's
+re-asserted Inserts.
+
+The middle phase is newer than the backup **because of the dedupe, not
+because of who wrote it**: every row present in the live file at backup
+time is in the backup, so a captured row absent from the restored
+outbox can only have been created after the snapshot. (The earlier
+justification — "B was active only after the restore that created
+them" — was wrong: because the outbox is never truncated across a
+no-restore switch, the live file can carry undrained rows *inherited*
+from an earlier vault in the lineage, which are older than B's backup.
+Those are precisely the rows the dedupe skips, since the backup
+contains them too.) Record ids across vaults are disjoint
+(LLM-generated), so the interleaving is conflict-free and the replica's
+end state matches the restored file, with pending deletes — including
+forgets of already-deleted records — preserved.
 
 This sync runs regardless of whether a replica is configured — the rows
 sit in the outbox and drain only if the worker is running.
@@ -487,6 +562,14 @@ restores what it contains — that is what backups mean.)
   copy done, sync never run. Reopen with the sidecar present, run the
   recovery path, assert the sync events land, the sidecar is deleted,
   and a second recovery run is a no-op (idempotent).
+- **Re-push collision test.** The scenario that would otherwise wedge
+  the switch permanently: capture a set of undrained outbox rows, then
+  run the sync against a "restored" file whose outbox **already
+  contains some of those exact row ids**. Assert the sync commits (no
+  `UNIQUE constraint failed` on `llm_wiki_outbox.id`), each colliding
+  id appears exactly once with the restored file's copy intact, and the
+  non-colliding captured rows are all present. Without the D3 dedupe
+  this test fails closed — which is the point.
 - **Idempotency.** `clear_vault_tables` twice in a row succeeds with
   identical end state.
 - **Empty brain.** Clear on a fresh, migrated database succeeds and
