@@ -4,6 +4,7 @@ pub mod chunk_hash;
 pub mod commit;
 pub mod connection;
 pub mod connections;
+pub mod drafts;
 pub mod ddl_compat;
 pub mod edge_purge;
 pub mod entities;

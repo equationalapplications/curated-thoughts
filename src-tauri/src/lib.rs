@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod doctor;
+mod drafts_api;
 pub mod embed_sweep;
 pub mod embedder;
 mod entities_api;
@@ -3995,6 +3996,7 @@ pub fn run() {
             proposals_api::list_proposals_cmd,
             proposals_api::get_proposal_detail_cmd,
             proposals_api::resolve_proposal_cmd,
+            drafts_api::promote_draft_cmd,
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
