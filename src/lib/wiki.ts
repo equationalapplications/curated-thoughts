@@ -1,4 +1,4 @@
-import { createWiki, WikiBusyError, type WikiDiagnostic, type WikiOptions } from "@equationalapplications/react-llm-wiki";
+import { createWiki, WikiBusyError, type WikiDiagnostic, type WikiLintReport, type WikiOptions } from "@equationalapplications/react-llm-wiki";
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
@@ -145,9 +145,12 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
       // `off` does not classify facts and the engine reports `remaining === 0`
       // immediately; skip the loop to avoid the no-op round-trip.
       if (mode !== "off") {
+        // Always the generative path: backfill only scans untyped facts and
+        // classifier mode proposes no edges, so a switch must use 'llm' to
+        // rebuild manifest edges (spec §5.3 rev 2).
         let remaining = Infinity;
         while (remaining > 0) {
-          const result = await wiki.runOntologyBackfill(entityId);
+          const result = await wiki.runOntologyBackfill(entityId, { classifier: "llm" });
           remaining = result.remaining;
         }
       }
@@ -172,7 +175,7 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
         if (priorMode !== "off") {
           let remaining = Infinity;
           while (remaining > 0) {
-            const result = await wiki.runOntologyBackfill(entityId);
+            const result = await wiki.runOntologyBackfill(entityId, { classifier: "llm" });
             remaining = result.remaining;
           }
         }
@@ -209,6 +212,39 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
       sweepErr,
     );
   }
+}
+
+/** Read-only lint report for every seeded tier (spec CT-REQ-LINT-01). */
+export async function lintSeededTiers(): Promise<Array<{ entityId: string; report: WikiLintReport }>> {
+  await _workspaceIdInflight;
+  const out: Array<{ entityId: string; report: WikiLintReport }> = [];
+  for (const entityId of seededOntologyEntityIds()) {
+    out.push({ entityId, report: await wiki.lint(entityId) });
+  }
+  return out;
+}
+
+/**
+ * Type the untyped-fact backlog Rust ingest leaves behind (spec §5.3 rev 2).
+ * `classifier: 'auto'` uses the Jev classifier when one is wired in and falls
+ * back to the generative path otherwise. A pass that types nothing stops the
+ * tier's loop: low-confidence facts are cooldown-stamped and would spin.
+ */
+export async function typeUntypedFacts(): Promise<{ typed: number; remaining: number }> {
+  await _workspaceIdInflight;
+  let typed = 0;
+  let remaining = 0;
+  for (const entityId of seededOntologyEntityIds()) {
+    for (;;) {
+      const result = await wiki.runOntologyBackfill(entityId, { classifier: "auto" });
+      typed += result.typed;
+      if (result.remaining === 0 || result.typed === 0) {
+        remaining += result.remaining;
+        break;
+      }
+    }
+  }
+  return { typed, remaining };
 }
 
 export async function initWorkspaceId(vaultPath: string): Promise<void> {

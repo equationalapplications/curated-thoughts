@@ -6,6 +6,7 @@ import {
   forgetWikiSource,
 } from '../../lib/tauri';
 import { useWikiStatus } from '../../hooks/useWikiStatus';
+import { HealthReportPanel } from './HealthReportPanel';
 import { DraftsPanel } from './DraftsPanel';
 
 export function MaintenanceDashboard() {
@@ -115,6 +116,7 @@ export function MaintenanceDashboard() {
       </div>
 
       <DraftsPanel />
+      <HealthReportPanel />
     </div>
   );
 }

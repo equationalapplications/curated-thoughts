@@ -126,4 +126,15 @@ describe('applyOntologyChange', () => {
       expect(call[2]).toEqual({ mode: 'strict' }); // schema-software-org's mode
     }
   });
+
+  it('always backfills with the generative path so a switch extracts edges', async () => {
+    // Entering this test, the cached selection is still 'schema-software-org'
+    // (the previous test rejects and never updates the cached selection),
+    // so switch to a different selection to make this a real transition.
+    await applyOntologyChange('schema-org');
+    expect(runOntologyBackfill.mock.calls.length).toBeGreaterThan(0);
+    for (const call of runOntologyBackfill.mock.calls) {
+      expect(call[1]).toEqual({ classifier: 'llm' });
+    }
+  });
 });
