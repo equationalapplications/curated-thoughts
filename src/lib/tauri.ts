@@ -568,6 +568,9 @@ export const runWikiReembed = (): Promise<number> => invoke('run_wiki_reembed');
 export const forgetWikiSource = (sourcePath: string): Promise<void> =>
   invoke('run_wiki_forget', { sourcePath });
 
+export const promoteDraft = (entryId: string, entityId: string): Promise<void> =>
+  invoke('promote_draft_cmd', { entryId, entityId });
+
 export interface CloudBridgeStatus {
   configured: boolean;
   connection_status:

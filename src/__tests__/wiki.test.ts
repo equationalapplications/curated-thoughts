@@ -90,6 +90,7 @@ describe('tieredRead', () => {
           tier_wisdom: 1.0,
           'tier_working::abc123deadbeef01': 0.6,
         },
+        excludeDrafts: false,
       }
     );
   });
@@ -240,6 +241,16 @@ describe('tieredRead', () => {
       expect.any(Array),
       'test query',
       expect.objectContaining({ graphExpansion: { hops: 1 } })
+    );
+  });
+
+  it('passes excludeDrafts: false explicitly', async () => {
+    await tieredRead('test query');
+    const readMock = vi.mocked(wiki.read);
+    expect(readMock).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      'test query',
+      expect.objectContaining({ excludeDrafts: false }),
     );
   });
 

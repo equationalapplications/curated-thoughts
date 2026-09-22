@@ -6,6 +6,7 @@ import {
   forgetWikiSource,
 } from '../../lib/tauri';
 import { useWikiStatus } from '../../hooks/useWikiStatus';
+import { DraftsPanel } from './DraftsPanel';
 
 export function MaintenanceDashboard() {
   const wikiStatus = useWikiStatus();
@@ -112,6 +113,8 @@ export function MaintenanceDashboard() {
           Re-chunks and re-embeds all tiers. Required after switching embedding models.
         </p>
       </div>
+
+      <DraftsPanel />
     </div>
   );
 }

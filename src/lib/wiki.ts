@@ -415,6 +415,8 @@ export async function tieredRead(
         tier_wisdom:   1.0,
         [_workspaceId]: 0.6,
       },
+      // Drafts stay visible (spec CT-REQ-DRAFT-01); explicit so the choice is reviewable.
+      excludeDrafts: false,
       // graphExpansion passed through; handled by host-app layer when supported
       ...(opts.graphExpansion !== undefined && { graphExpansion: opts.graphExpansion }),
     } as Parameters<typeof wiki.read>[2] & { graphExpansion?: GraphExpansionOptions }
