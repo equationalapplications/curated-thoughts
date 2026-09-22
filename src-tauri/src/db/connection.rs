@@ -749,6 +749,9 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
          ON curated_agent_log(created_at);",
     )?;
 
+    // core-llm-wiki 7.7 engine migration V12, mirrored for Rust-first opens.
+    crate::db::okf_ddl::apply_llm_wiki_v12_edge_index(conn)?;
+
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
     // Startup canary: report JSON-shaped but unparseable `source_ref` values.
@@ -2958,5 +2961,39 @@ mod tests {
             "V22 must still run on the first rooted open"
         );
         assert_eq!(max_version(&conn), 23, "rooted open stamps 22 then 23");
+    }
+
+    fn edge_index_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = 'llm_wiki_edges'
+                   AND name NOT LIKE 'sqlite_autoindex%'
+                 ORDER BY name",
+            )
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn llm_wiki_v12_edge_index_replaces_legacy_index_on_open() {
+        let conn = open_in_memory().unwrap();
+        // Simulate a pre-7.7 brain: legacy single-column index only.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_edges_entity_id_idx;
+             CREATE INDEX IF NOT EXISTS llm_wiki_edges_entity_idx ON llm_wiki_edges(entity_id);",
+        )
+        .unwrap();
+        assert_eq!(edge_index_names(&conn), vec!["llm_wiki_edges_entity_idx"]);
+
+        migrate_open_db(&conn, None).unwrap();
+        assert_eq!(edge_index_names(&conn), vec!["llm_wiki_edges_entity_id_idx"]);
+
+        // Idempotent: a second open changes nothing.
+        migrate_open_db(&conn, None).unwrap();
+        assert_eq!(edge_index_names(&conn), vec!["llm_wiki_edges_entity_id_idx"]);
     }
 }

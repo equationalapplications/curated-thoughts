@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// Pinned `package.json` dependency — keep in sync with `@equationalapplications/core-llm-wiki`.
-pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.1.1";
+pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.7.4";
 
 struct TableExpectation {
     name: &'static str,
