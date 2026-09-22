@@ -70,6 +70,8 @@ export function useWikiStatus(): WikiStatus {
     healing: false,
     pruning: false,
     forgetting: false,
+    diagnosticErrors: 0,
+    diagnosticWarnings: 0,
     busy: false,
     activeJob: 'idle',
     activeJobLabel: null,
@@ -110,6 +112,8 @@ export function useWikiStatus(): WikiStatus {
           healing: normalized.healing ?? prev.healing,
           pruning: normalized.pruning ?? prev.pruning,
           forgetting: normalized.forgetting ?? prev.forgetting,
+          diagnosticErrors: normalized.diagnosticErrors ?? prev.diagnosticErrors ?? 0,
+          diagnosticWarnings: normalized.diagnosticWarnings ?? prev.diagnosticWarnings ?? 0,
         };
         const activeJob = getActiveJob(payload);
         const ingestBusy = isIngestBusy(payload.ingest);

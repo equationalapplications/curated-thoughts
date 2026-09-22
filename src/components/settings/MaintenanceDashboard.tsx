@@ -47,6 +47,10 @@ export function MaintenanceDashboard() {
           ? `Background job active: ${statusLabel}. Please wait…`
           : 'No active wiki jobs. Maintenance commands are available.'}
       </p>
+      <p className="maintenance-description">
+        Engine diagnostics since launch: {wikiStatus.diagnosticErrors ?? 0} errors,{' '}
+        {wikiStatus.diagnosticWarnings ?? 0} warnings (details in the app log).
+      </p>
 
       <div className="maintenance-actions">
         <button

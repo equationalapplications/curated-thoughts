@@ -32,6 +32,8 @@ describe('useWikiStatus', () => {
       healing: false,
       pruning: false,
       forgetting: false,
+      diagnosticErrors: 0,
+      diagnosticWarnings: 0,
       busy: false,
       activeJob: 'idle',
       activeJobLabel: null,
@@ -61,6 +63,8 @@ describe('useWikiStatus', () => {
       healing: false,
       pruning: false,
       forgetting: false,
+      diagnosticErrors: 0,
+      diagnosticWarnings: 0,
       busy: true,
       activeJob: 'ingesting',
       activeJobLabel: 'Ingesting',
@@ -88,6 +92,8 @@ describe('useWikiStatus', () => {
       healing: true,
       pruning: false,
       forgetting: false,
+      diagnosticErrors: 0,
+      diagnosticWarnings: 0,
       busy: true,
       activeJob: 'healing',
       activeJobLabel: 'Healing',
@@ -196,5 +202,18 @@ describe('useWikiStatus', () => {
     await waitFor(() => {
       expect(result.current.busy).toBe(false);
     });
+  });
+
+  it('carries diagnostic counts from the status event and keeps them on partial events', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      capturedCallback?.({ payload: { diagnosticErrors: 2, diagnosticWarnings: 5 } });
+    });
+    expect(result.current.diagnosticErrors).toBe(2);
+    expect(result.current.diagnosticWarnings).toBe(5);
+    await act(async () => {
+      capturedCallback?.({ payload: { librarian: true } });
+    });
+    expect(result.current.diagnosticErrors).toBe(2);
   });
 });

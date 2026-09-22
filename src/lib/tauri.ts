@@ -549,6 +549,8 @@ export interface WikiStatusPayload {
   healing: boolean;
   pruning: boolean;
   forgetting: boolean;
+  diagnosticErrors?: number;
+  diagnosticWarnings?: number;
 }
 
 export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {

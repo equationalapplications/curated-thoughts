@@ -1,4 +1,4 @@
-import { createWiki, WikiBusyError, type WikiOptions } from "@equationalapplications/react-llm-wiki";
+import { createWiki, WikiBusyError, type WikiDiagnostic, type WikiOptions } from "@equationalapplications/react-llm-wiki";
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
@@ -265,7 +265,22 @@ export async function ingestDocumentByPath(
   return wiki.ingestDocument(entityId, params);
 }
 
-function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): WikiOptions & Record<string, unknown> {
+/**
+ * Engine `onDiagnostic` hook (spec CT-REQ-DIAG-01). Must never throw: an
+ * IPC failure is logged and dropped so a diagnostic can never affect the
+ * operation that emitted it.
+ */
+export function forwardWikiDiagnostic(diagnostic: WikiDiagnostic): void {
+  try {
+    invoke("record_wiki_diagnostic", { diagnostic }).catch((err: unknown) => {
+      console.warn("[wiki] diagnostic forward failed:", err);
+    });
+  } catch (err) {
+    console.warn("[wiki] diagnostic forward failed:", err);
+  }
+}
+
+export function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): WikiOptions & Record<string, unknown> {
   return {
     llmProvider: {
       async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
@@ -305,6 +320,7 @@ function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): W
     onRetrievalFallback: (err: Error) => {
       console.warn("[wiki] embed unavailable, using keyword search:", err.message);
     },
+    onDiagnostic: forwardWikiDiagnostic,
     graphAdapter: tauriGraphAdapter,
   } as WikiOptions & Record<string, unknown>;
 }

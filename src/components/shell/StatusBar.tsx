@@ -106,6 +106,17 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
             title={healthTitle("Embeddings", embedding)}
           />
         </button>
+        {(wikiStatus.diagnosticErrors ?? 0) > 0 && (
+          <button
+            type="button"
+            className="status-bar-diagnostics"
+            onClick={onOpenActivity}
+            title={`${wikiStatus.diagnosticErrors} wiki engine errors since launch`}
+            aria-label={`${wikiStatus.diagnosticErrors} wiki engine errors since launch`}
+          >
+            ⚠ {wikiStatus.diagnosticErrors}
+          </button>
+        )}
         <button
           type="button"
           className="status-bar-privacy"

@@ -32,7 +32,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useWikiStatus } from '../hooks/useWikiStatus';
 import { VaultPanel } from '../components/settings/VaultPanel';
-import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki, setupWiki } from '../lib/wiki';
+import { initWorkspaceId, getWorkspaceId, tieredRead, startAutoHeal, getEntityRoutingForPath, wiki, setupWiki, forwardWikiDiagnostic, makeWikiOptions } from '../lib/wiki';
 import { runWikiReindex } from '../lib/tauri';
 
 describe('initWorkspaceId', () => {
@@ -324,5 +324,48 @@ describe('runWikiReindex', () => {
     const result = await runWikiReindex();
     expect(invoke).toHaveBeenCalledWith('run_wiki_reindex');
     expect(result).toBe(7);
+  });
+});
+
+describe('onDiagnostic forwarding', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const diagnostic = {
+    code: 'embedding_failed',
+    severity: 'warn',
+    operation: 'ontologyBackfill',
+    trigger: 'call',
+    entityId: 'tier_fact',
+    at: 1758000000000,
+    message: 'Embedding failed.',
+  } as const;
+
+  it('makeWikiOptions wires onDiagnostic to forwardWikiDiagnostic', () => {
+    const opts = makeWikiOptions(false, 'schema-org');
+    expect(opts.onDiagnostic).toBe(forwardWikiDiagnostic);
+  });
+
+  it('forwards to record_wiki_diagnostic', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    forwardWikiDiagnostic(diagnostic as never);
+    expect(invoke).toHaveBeenCalledWith('record_wiki_diagnostic', { diagnostic });
+  });
+
+  it('never throws when the IPC call rejects', async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('ipc down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => forwardWikiDiagnostic(diagnostic as never)).not.toThrow();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(warn).toHaveBeenCalledWith('[wiki] diagnostic forward failed:', expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it('never throws when invoke throws synchronously', () => {
+    vi.mocked(invoke).mockImplementationOnce(() => {
+      throw new Error('no bridge');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => forwardWikiDiagnostic(diagnostic as never)).not.toThrow();
+    warn.mockRestore();
   });
 });
