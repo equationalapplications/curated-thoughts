@@ -1,7 +1,7 @@
 # core-llm-wiki 7.7.4 adoption and pattern integration
 
 **Date:** 2026-09-22
-**Status:** Draft rev 1 — awaiting user review
+**Status:** rev 2 — approved rev 1 + §5.3 classifier-use-site fix (2026-09-22)
 **Branch:** `feat/llm-wiki-7-7-adoption` (spec + plan + implementation ride one branch and one PR)
 **Upstream:** expo-llm-wiki `v7.7.4` (`4ea9924`); upstream design for grounding/diagnostics/classifier: `docs/superpowers/specs/2026-09-21-grounding-diagnostics-classifier-design.md`
 
@@ -113,6 +113,8 @@ privacy modes.
   3. Append `{ "by": "human:local", "at": <ISO-8601 now> }` to `okf_verified`
      (JSON array, existing entries preserved). `human:local` is a fixed actor
      string; upstream derives `human-reviewed` from the `human:` prefix.
+     Like core's `writeOkfTrust`, also set `last_verified_by = 'human:local'`
+     and `last_verified_at = <now, epoch ms>`.
   4. Push an `OutboxOperation::Update` row via `push_entries_outbox` with the
      payload built by `wiki_fact_outbox_payload` from the post-update row, so
      replicas receive the new `lifecycle_status` and `okf_verified`.
@@ -178,11 +180,22 @@ follows upstream's documented adapter (core README, "Classifier mode").
   decision at `createWiki` time. The wiki instance is rebuilt on classifier
   config change or privacy mode change, using the same generation-counter
   pattern as the `outbox-worker-started`/`-stopped` listeners in `setupWiki`.
-- `applyOntologyChange`: after the existing per-tier backfill loop finishes, if
-  classifier mode was active, run one more loop per tier with
-  `runOntologyBackfill(entityId, { classifier: 'llm' })` so edges are still
-  extracted after a schema switch. That extra pass is inside the existing
-  try/rollback scope.
+- **Schema switch stays generative.** `applyOntologyChange` (forward loop and
+  rollback loop) calls `runOntologyBackfill(entityId, { classifier: 'llm' })`
+  explicitly, so a switch always extracts manifest edges. Rationale (rev 2):
+  backfill scans only `okf_type IS NULL` facts and classifier mode proposes no
+  edges, so a classifier pass followed by an `'llm'` pass would find nothing
+  left to scan and add zero edges.
+- **Classifier use site: "Type untyped facts" action.** The engine never
+  auto-runs backfill and CT's Rust ingest leaves facts untyped, so the backlog
+  grows between schema switches. MaintenanceDashboard gets a "Type untyped
+  facts" button that, for each seeded tier, loops
+  `runOntologyBackfill(entityId, { classifier: 'auto' })` until `remaining` is 0
+  (or a pass makes no progress: `typed === 0 && remaining > 0` stops the loop,
+  since low-confidence facts are cooldown-stamped and would otherwise spin).
+  With no classifier available, `'auto'` falls back to the generative path, so
+  the button works either way. It sits next to the Health report's
+  `untypedFacts` count and is disabled while any wiki job is busy.
 
 ### 5.4 Settings UI
 
@@ -226,8 +239,10 @@ Recorded here so no one assumes the protection exists:
 - `onDiagnostic` survives a rejected `invoke`.
 - Drafts and Health report panels render counts and pagination, and promote calls
   `promote_draft_cmd`, never `wiki.promoteDraft`.
-- `applyOntologyChange` runs the `{ classifier: 'llm' }` pass only when
-  classifier mode is active.
+- `applyOntologyChange` passes `{ classifier: 'llm' }` on every backfill call
+  (forward and rollback).
+- "Type untyped facts" loops `{ classifier: 'auto' }` per tier until
+  `remaining === 0`, and stops on a no-progress pass.
 
 ## Risks
 
