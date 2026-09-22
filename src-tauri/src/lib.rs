@@ -4039,6 +4039,10 @@ pub fn run() {
             vault_write_note,
             vault_upsert_index_entry,
             record_wiki_diagnostic,
+            inference::classifier::classify,
+            inference::classifier::classifier_status,
+            inference::classifier::get_classifier_config,
+            inference::classifier::set_classifier_config,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");
