@@ -148,7 +148,24 @@ pub fn write_classifier_config(
     cfg: &ClassifierConfig,
     secrets: &dyn ClassifierSecretStore,
 ) -> Result<()> {
-    validate(cfg)?;
+    // The explicit "Clear stored token" payload (Some("")) must reach the
+    // keyring delete arm below even though a keyless config never passes
+    // `validate` for CloudflareJev: keyless is a legitimate saved state
+    // (`status` reports the classifier unavailable), so validate a
+    // placeholder-key view for that one intent. Every other shape rule —
+    // account_id, url scheme, confidence, timeout — still applies.
+    let clear_view;
+    let to_validate = match cfg.api_key.as_deref() {
+        Some("") => {
+            clear_view = ClassifierConfig {
+                api_key: Some("clear-intent".into()),
+                ..cfg.clone()
+            };
+            &clear_view
+        }
+        _ => cfg,
+    };
+    validate(to_validate)?;
     match cfg.api_key.as_deref() {
         // Explicit empty string from the panel ("Clear stored token").
         Some("") => secrets.delete()?,
@@ -847,6 +864,54 @@ mod tests {
         assert!(validate(&cfg).is_err());
         cfg.api_key = Some("tok".into());
         assert!(validate(&cfg).is_ok());
+    }
+
+    /// Regression (2026-09-22 code review): the "Clear stored token" payload
+    /// (`Some("")`) on a CloudflareJev config used to fail `validate` before
+    /// it could reach the keyring delete arm, making the panel's clear button
+    /// a hard error on that provider.
+    #[test]
+    fn explicit_empty_string_clears_cloudflare_stored_key() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        std::fs::write(&paths.config_path, "{}").unwrap();
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
+
+        let seeded = ClassifierConfig {
+            provider: ClassifierProviderKind::CloudflareJev,
+            account_id: Some("abc123".into()),
+            api_key: Some("tok".into()),
+            ..Default::default()
+        };
+        write_classifier_config(&paths, &seeded, &store).unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
+
+        // The panel's "Clear stored token" sends the whole config back with
+        // api_key: Some("") — this used to bail in validate() above.
+        let cleared = ClassifierConfig {
+            api_key: Some("".into()),
+            ..seeded.clone()
+        };
+        write_classifier_config(&paths, &cleared, &store).unwrap();
+        assert_eq!(store.get().unwrap(), None);
+        let round = read_classifier_config(&paths, &store).unwrap();
+        assert!(!round.has_api_key);
+
+        // The clear intent does not bypass provider shape rules: a
+        // malformed account_id still fails validation alongside the clear.
+        let bad = ClassifierConfig {
+            account_id: Some("bad id!".into()),
+            api_key: Some("".into()),
+            ..seeded.clone()
+        };
+        assert!(write_classifier_config(&paths, &bad, &store).is_err());
     }
 
     #[test]

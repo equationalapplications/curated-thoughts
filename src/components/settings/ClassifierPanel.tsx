@@ -53,16 +53,15 @@ export function ClassifierPanel() {
     };
   }, []);
 
-  async function save() {
+  // Shared persist path for both save affordances. api_key semantics on
+  // the wire:
+  //   Some(newKey) -> store/replace in keychain
+  //   Some("")     -> delete keychain entry
+  //   null         -> leave keychain alone (user didn't touch the field)
+  async function persistConfig(apiKeyPayload: string | null) {
     setStatus('saving');
     setError(null);
-    const trimmed = apiKey.trim();
     try {
-      // api_key semantics on the wire:
-      //   Some(newKey) -> store/replace in keychain
-      //   Some("")     -> delete keychain entry
-      //   null         -> leave keychain alone (user didn't touch the field)
-      const apiKeyPayload = trimmed ? trimmed : null;
       await setClassifierConfig({
         provider,
         url: provider === 'jev_http' ? url.trim() : null,
@@ -72,7 +71,7 @@ export function ClassifierPanel() {
         timeout_secs: timeoutSecs,
       });
       // Optimistic local view: reflect what the keychain should now hold.
-      setHasApiKey(Boolean(trimmed));
+      setHasApiKey(Boolean(apiKeyPayload));
       setApiKey('');
       setStatus('saved');
     } catch (err) {
@@ -81,26 +80,13 @@ export function ClassifierPanel() {
     }
   }
 
-  async function clearStoredKey() {
-    setStatus('saving');
-    setError(null);
-    try {
-      await setClassifierConfig({
-        provider,
-        url: provider === 'jev_http' ? url.trim() : null,
-        account_id: provider === 'cloudflare_jev' ? accountId.trim() : null,
-        // Some("") -> delete keychain entry.
-        api_key: '',
-        min_confidence: minConfidence,
-        timeout_secs: timeoutSecs,
-      });
-      setHasApiKey(false);
-      setApiKey('');
-      setStatus('saved');
-    } catch (err) {
-      setError(String(err));
-      setStatus('idle');
-    }
+  function save() {
+    return persistConfig(apiKey.trim() || null);
+  }
+
+  function clearStoredKey() {
+    // Some("") -> delete keychain entry.
+    return persistConfig('');
   }
 
   const loading = status === 'loading';

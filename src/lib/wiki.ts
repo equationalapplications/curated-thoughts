@@ -460,7 +460,7 @@ export async function setupWiki() {
     await rebuildWiki();
   };
   const classifierUnlisten = await listen<void>('classifier-config-changed', onClassifierInputsChanged);
-  const privacyUnlisten = await listen('privacy-mode-changed', onClassifierInputsChanged);
+  const privacyUnlisten = await listen<void>('privacy-mode-changed', onClassifierInputsChanged);
 
   _outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
   let newWiki;
