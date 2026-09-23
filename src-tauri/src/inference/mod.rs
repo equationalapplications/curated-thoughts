@@ -1,3 +1,5 @@
+pub mod classifier;
+pub mod classifier_secrets;
 pub mod config;
 pub mod sidecar;
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   subscribeEntityStatus,
+  getWikiStatus,
   type IngestHealth,
   type WikiStatusEventPayload,
   type WikiStatusPayload,
@@ -70,6 +71,8 @@ export function useWikiStatus(): WikiStatus {
     healing: false,
     pruning: false,
     forgetting: false,
+    diagnosticErrors: 0,
+    diagnosticWarnings: 0,
     busy: false,
     activeJob: 'idle',
     activeJobLabel: null,
@@ -77,6 +80,15 @@ export function useWikiStatus(): WikiStatus {
 
   useEffect(() => {
     let cleanup: (() => void) | null = null;
+    let cancelled = false;
+    // Race sentinel: if a `wiki-status-change` event applies before the
+    // `getWikiStatus()` snapshot resolves, drop the snapshot so it cannot
+    // overwrite newer event state (CodeRabbit review PRRT_kwDOSVmXas6k-qeG).
+    // `latestEventRev` advances on every applied event; `snapshotRev` is
+    // captured at the moment the snapshot resolves. The snapshot only
+    // applies when no event has arrived in between.
+    let latestEventRev = 0;
+    let snapshotRev = 0;
 
     const normalizePayload = (
       payload: WikiStatusEventPayload,
@@ -86,7 +98,57 @@ export function useWikiStatus(): WikiStatus {
       pruning: payload.pruning ?? payload.prune,
     });
 
+    const applyPayload = (next: WikiStatusPayload) => {
+      const activeJob = getActiveJob(next);
+      const ingestBusy = isIngestBusy(next.ingest);
+      setStatus({
+        ...next,
+        busy:
+          ingestBusy ||
+          next.librarian ||
+          next.healing ||
+          next.pruning ||
+          next.forgetting,
+        activeJob,
+        activeJobLabel: jobLabels[activeJob],
+      });
+    };
+
+    // Snapshot the counters the engine has already accumulated during
+    // `setupWiki` — the listener below is not installed until after this
+    // resolves, so events emitted in that window would otherwise be lost
+    // (CodeRabbit review of the 7.7.4 adoption PR).
+    getWikiStatus()
+      .then((snapshot) => {
+        if (cancelled) return;
+        // Mark the snapshot's arrival moment. If any event was already
+        // applied (`latestEventRev > 0`), the snapshot is older than the
+        // event state — drop it to avoid rolling the UI backwards.
+        if (latestEventRev > snapshotRev) return;
+        snapshotRev = latestEventRev;
+        applyPayload({
+          ingest: snapshot.ingest,
+          ingestStage: snapshot.ingestStage ?? null,
+          ingestSubject: snapshot.ingestSubject ?? null,
+          librarian: snapshot.librarian,
+          healing: snapshot.healing,
+          pruning: snapshot.pruning,
+          forgetting: snapshot.forgetting,
+          diagnosticErrors: snapshot.diagnosticErrors ?? 0,
+          diagnosticWarnings: snapshot.diagnosticWarnings ?? 0,
+        });
+      })
+      .catch((err: unknown) => {
+        // A failed snapshot must not block event subscription — log and
+        // continue so a transient IPC error doesn't leave the hook stuck.
+        console.warn('[useWikiStatus] snapshot failed:', err);
+      });
+
     subscribeEntityStatus((e) => {
+      if (cancelled) return;
+      // An event has been observed; mark it so any later-arriving snapshot
+      // is recognized as stale and dropped by the check above.
+      latestEventRev += 1;
       setStatus((prev) => {
         const normalized = normalizePayload(e.payload);
         // Use explicit undefined checks so a `null` from the backend
@@ -110,6 +172,8 @@ export function useWikiStatus(): WikiStatus {
           healing: normalized.healing ?? prev.healing,
           pruning: normalized.pruning ?? prev.pruning,
           forgetting: normalized.forgetting ?? prev.forgetting,
+          diagnosticErrors: normalized.diagnosticErrors ?? prev.diagnosticErrors ?? 0,
+          diagnosticWarnings: normalized.diagnosticWarnings ?? prev.diagnosticWarnings ?? 0,
         };
         const activeJob = getActiveJob(payload);
         const ingestBusy = isIngestBusy(payload.ingest);
@@ -127,6 +191,10 @@ export function useWikiStatus(): WikiStatus {
       });
     })
       .then((unlisten) => {
+        if (cancelled) {
+          unlisten();
+          return;
+        }
         cleanup = unlisten;
       })
       .catch((error) => {
@@ -134,6 +202,7 @@ export function useWikiStatus(): WikiStatus {
       });
 
     return () => {
+      cancelled = true;
       cleanup?.();
     };
   }, []);

@@ -549,6 +549,8 @@ export interface WikiStatusPayload {
   healing: boolean;
   pruning: boolean;
   forgetting: boolean;
+  diagnosticErrors?: number;
+  diagnosticWarnings?: number;
 }
 
 export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {
@@ -560,11 +562,45 @@ export const subscribeEntityStatus = (
   callback: (event: { payload: WikiStatusEventPayload }) => void,
 ): Promise<UnlistenFn> => listen<WikiStatusEventPayload>('wiki-status-change', callback);
 
+/// Snapshot of the current wiki status. Used by hooks that subscribe to
+/// `wiki-status-change` so they hydrate counters the engine already
+/// accumulated during `setupWiki`, before the listener was installed.
+export const getWikiStatus = (): Promise<WikiStatusPayload> => invoke<WikiStatusPayload>('get_wiki_status');
+
 export const runWikiHeal = (): Promise<void> => invoke('run_wiki_heal');
 export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');
 export const runWikiReembed = (): Promise<number> => invoke('run_wiki_reembed');
 export const forgetWikiSource = (sourcePath: string): Promise<void> =>
   invoke('run_wiki_forget', { sourcePath });
+
+export const promoteDraft = (entryId: string, entityId: string): Promise<void> =>
+  invoke('promote_draft_cmd', { entryId, entityId });
+
+export type ClassifierProviderKind = 'unconfigured' | 'jev_http' | 'cloudflare_jev';
+
+export interface ClassifierConfig {
+  provider: ClassifierProviderKind;
+  url?: string | null;
+  account_id?: string | null;
+  /** Credential-presence indicator. The actual key lives in the OS keychain
+   * and is never sent over IPC (CT-REQ-CLASS-01 §5.2). */
+  has_api_key?: boolean;
+  /** Save payload only: when set, replaces the keyring value (non-empty
+   * string) or deletes it (""). Omit or null to leave the keyring alone. */
+  api_key?: string | null;
+  min_confidence?: number | null;
+  timeout_secs?: number | null;
+}
+
+export interface ClassifierStatus {
+  available: boolean;
+  min_confidence: number;
+}
+
+export const getClassifierConfig = (): Promise<ClassifierConfig> => invoke('get_classifier_config');
+export const setClassifierConfig = (config: ClassifierConfig): Promise<void> =>
+  invoke('set_classifier_config', { config });
+export const getClassifierStatus = (): Promise<ClassifierStatus> => invoke('classifier_status');
 
 export interface CloudBridgeStatus {
   configured: boolean;

@@ -11,8 +11,8 @@ overrides:
   postcss: 8.5.26
   brace-expansion@1: 1.1.18
   brace-expansion@5: 5.0.9
-  '@equationalapplications/core-llm-wiki': 7.1.1
-  '@equationalapplications/core-okf': 7.1.1
+  '@equationalapplications/core-llm-wiki': 7.7.4
+  '@equationalapplications/core-okf': 7.7.4
   '@tiptap/core': 3.30.6
   '@tiptap/extension-bold': 3.30.6
   '@tiptap/extension-bubble-menu': 3.30.6
@@ -41,17 +41,17 @@ importers:
         specifier: 0.54.0
         version: 0.54.0(@floating-ui/dom@1.8.0)(@types/hast@3.0.5)(@types/react-dom@19.2.5(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(y-prosemirror@1.3.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30))(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       '@equationalapplications/core-llm-wiki':
-        specifier: 7.1.1
-        version: 7.1.1
+        specifier: 7.7.4
+        version: 7.7.4
       '@equationalapplications/react-llm-wiki':
-        specifier: 7.1.1
-        version: 7.1.1(react@19.2.8)
+        specifier: 7.7.4
+        version: 7.7.4(react@19.2.8)
       '@equationalapplications/schema-org-llm-wiki':
-        specifier: 7.1.1
-        version: 7.1.1
+        specifier: 7.7.4
+        version: 7.7.4
       '@equationalapplications/schema-software-org':
-        specifier: 7.1.1
-        version: 7.1.1
+        specifier: 7.7.4
+        version: 7.7.4
       '@mantine/core':
         specifier: 9.6.0
         version: 9.6.0(@mantine/hooks@9.6.0(react@19.2.8))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -283,26 +283,26 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@7.1.1':
-    resolution: {integrity: sha512-iPYpwSCehwSsAM1wYVUTp+d29rd87psXY018PURsxXL3zYPYfAvRnJqDMC4G/UYzvDl0uYeu6T+OjHHcxXjlMA==}
+  '@equationalapplications/core-llm-wiki@7.7.4':
+    resolution: {integrity: sha512-8S79HX2kCV3mZfIO2RjqjVBL+eTj9hWmAwLC0tvjkWc33AlrgQQIz3agW8yAI4Nzs80/B7eO5Qo/tGsor6t1AQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/core-okf@7.1.1':
-    resolution: {integrity: sha512-aI8FTJ14WQ2AHgEvTIZoOJp9CDeuh1MTgMHIkUbS+YzkwJq3A+zrRDH9VYzed9u+EdCyrdb2jgyw5+iS2Lpmag==}
+  '@equationalapplications/core-okf@7.7.4':
+    resolution: {integrity: sha512-7N2+d709mBjwOyVVqUl9jcnGac8isR0hJxq4fbP60tMwuV0vt3rc+akQXyyMLgnAmxAo9DRZ4F0gT7hVjXOwxQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@7.1.1':
-    resolution: {integrity: sha512-VKkuIg4QcFFSbilKIWvZreG2e5qth6a7pWv7CIcR121/Iw437wkR0otUU5uQu3OAPJVLOVM8qP0Fm+c+OQEY4g==}
+  '@equationalapplications/react-llm-wiki@7.7.4':
+    resolution: {integrity: sha512-GijwYxcjDxNYdiYeHY6p4tkaBBzqqZINjVNt7fpeITl9Pn1k/72hEW7GI1lGDMtucqW3O59yT5IoiZyqyRGIug==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
 
-  '@equationalapplications/schema-org-llm-wiki@7.1.1':
-    resolution: {integrity: sha512-FwH48XEtvKPJ0MaRzm7unCxFWfg2v+o3oaeDVE23Kzbz4IkCNbVFV61PLNkIkdY7eYieveuceqT2Dam4vj4xZg==}
+  '@equationalapplications/schema-org-llm-wiki@7.7.4':
+    resolution: {integrity: sha512-SmRhVrvhYrFOA8kiIzxyLv5NlqCVfRahpwp2OCD/nJUdESI3C8SO3uxCKEb4hPVkbEn92MxtBQnOol8Os4msiQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/schema-software-org@7.1.1':
-    resolution: {integrity: sha512-maQeC/v5rYtdSvfmlurnFCPTeKeIpuOzl5rSqOuAjJwZbirQpQSecyuUWvZK8H5B1HQM8D7ePgsgr8RsmFSSeg==}
+  '@equationalapplications/schema-software-org@7.7.4':
+    resolution: {integrity: sha512-AL2j/VUregoLzIVwEAWf4czY2KTXUcUBlHl/yK2araphs5ULVFSUwgb+SviRaRLAPqi89RiGhuL6M2jeCnOZwQ==}
     engines: {node: '>=20'}
 
   '@eslint-community/eslint-utils@4.10.1':
@@ -3569,25 +3569,25 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@7.1.1':
+  '@equationalapplications/core-llm-wiki@7.7.4':
     dependencies:
-      '@equationalapplications/core-okf': 7.1.1
+      '@equationalapplications/core-okf': 7.7.4
       minisearch: 7.2.0
 
-  '@equationalapplications/core-okf@7.1.1': {}
+  '@equationalapplications/core-okf@7.7.4': {}
 
-  '@equationalapplications/react-llm-wiki@7.1.1(react@19.2.8)':
+  '@equationalapplications/react-llm-wiki@7.7.4(react@19.2.8)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.1.1
+      '@equationalapplications/core-llm-wiki': 7.7.4
       react: 19.2.8
 
-  '@equationalapplications/schema-org-llm-wiki@7.1.1':
+  '@equationalapplications/schema-org-llm-wiki@7.7.4':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.1.1
+      '@equationalapplications/core-llm-wiki': 7.7.4
 
-  '@equationalapplications/schema-software-org@7.1.1':
+  '@equationalapplications/schema-software-org@7.7.4':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.1.1
+      '@equationalapplications/core-llm-wiki': 7.7.4
 
   '@eslint-community/eslint-utils@4.10.1(eslint@9.39.4)':
     dependencies:

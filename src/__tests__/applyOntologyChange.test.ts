@@ -36,11 +36,14 @@ vi.mock('../hooks/useWikiStatus', () => ({
   useWikiStatus: vi.fn(),
 }));
 
-import { initWorkspaceId, applyOntologyChange } from '../lib/wiki';
+import { initWorkspaceId, applyOntologyChange, __resetOntologySelectionForTests } from '../lib/wiki';
 
 describe('applyOntologyChange', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    // Reset the module-level cached selection so each test starts from a
+    // known baseline instead of inheriting whatever the previous test left.
+    __resetOntologySelectionForTests();
     await initWorkspaceId('/Users/foo/Vault');
   });
 
@@ -71,7 +74,11 @@ describe('applyOntologyChange', () => {
   });
 
   it('passes the published manifest with strict mode for schema selections', async () => {
-    await applyOntologyChange('schema-org');
+    // beforeEach resets _ontologySelection to 'schema-org' (the default),
+    // so this test must use a different schema selection to be a real
+    // transition. We use 'schema-software-org' which also has strict mode
+    // and a non-empty manifest, exercising the same code path.
+    await applyOntologyChange('schema-software-org');
     const firstCall = setOntologyManifest.mock.calls[0];
     expect(firstCall?.[1]).not.toEqual({ node_types: [], edge_types: [] });
     expect(firstCall?.[2]).toEqual({ mode: 'strict' });
@@ -124,6 +131,17 @@ describe('applyOntologyChange', () => {
     expect(rolledBackEntities).toEqual(['tier_fact', 'tier_wisdom']);
     for (const call of rollbackCalls) {
       expect(call[2]).toEqual({ mode: 'strict' }); // schema-software-org's mode
+    }
+  });
+
+  it('always backfills with the generative path so a switch extracts edges', async () => {
+    // Independent of prior tests: beforeEach resets _ontologySelection, so
+    // a switch from the default 'schema-org' to 'schema-software-org' is
+    // always a real transition that exercises the backfill loop.
+    await applyOntologyChange('schema-software-org');
+    expect(runOntologyBackfill.mock.calls.length).toBeGreaterThan(0);
+    for (const call of runOntologyBackfill.mock.calls) {
+      expect(call[1]).toEqual({ classifier: 'llm' });
     }
   });
 });

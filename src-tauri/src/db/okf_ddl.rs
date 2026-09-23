@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS llm_wiki_edges (
   UNIQUE(entity_id, source_id, target_id, edge_type)
 );
 
-CREATE INDEX IF NOT EXISTS llm_wiki_edges_entity_idx ON llm_wiki_edges(entity_id);
+CREATE INDEX IF NOT EXISTS llm_wiki_edges_entity_id_idx ON llm_wiki_edges(entity_id, id);
 
 CREATE TABLE IF NOT EXISTS llm_wiki_events (
   id TEXT PRIMARY KEY,
@@ -216,5 +216,21 @@ pub fn migration_v7_sql() -> String {
         "{}{}\nINSERT OR IGNORE INTO schema_version (version) VALUES (7);",
         LLM_WIKI_PACKAGE_DDL.trim(),
         CURATED_TABLES_DDL.trim(),
+    )
+}
+
+/// Mirror of core-llm-wiki engine migration V12 (7.7.1): replace the
+/// single-column `edges(entity_id)` index with the composite
+/// `edges(entity_id, id)` index used by `lint()` keyset paging.
+///
+/// Runs on every Rust open so a brain first opened by the CLI/MCP binaries —
+/// before any TS `setup()` — gets the same index shape. Create-before-drop
+/// keeps `llm_wiki_edges` covered by an `entity_id` index throughout; both
+/// statements are idempotent, so running after the engine's own V12 is a
+/// no-op.
+pub fn apply_llm_wiki_v12_edge_index(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS llm_wiki_edges_entity_id_idx ON llm_wiki_edges(entity_id, id);
+         DROP INDEX IF EXISTS llm_wiki_edges_entity_idx;",
     )
 }

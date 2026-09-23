@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod doctor;
+mod drafts_api;
 pub mod embed_sweep;
 pub mod embedder;
 mod entities_api;
@@ -34,6 +35,7 @@ pub mod trusted_links;
 pub mod vault;
 pub mod walk_vault;
 pub mod watcher;
+pub mod wiki_diagnostics;
 pub mod wiki_graph;
 
 use crate::embedder::embed_batch;
@@ -131,6 +133,7 @@ struct WikiStatusFlags {
     healing: bool,
     pruning: bool,
     forgetting: bool,
+    diagnostics: wiki_diagnostics::DiagnosticCounts,
 }
 
 fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
@@ -144,6 +147,8 @@ fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
             "healing": current.healing,
             "pruning": current.pruning,
             "forgetting": current.forgetting,
+            "diagnosticErrors": current.diagnostics.errors,
+            "diagnosticWarnings": current.diagnostics.warnings,
         }),
     );
 }
@@ -1706,6 +1711,10 @@ async fn switch_vault(
 
         let _ = app.emit("vault-switched", &new_path);
 
+        update_wiki_status(&app, &status_state, |flags| {
+            flags.diagnostics = Default::default();
+        });
+
         Ok(())
     })();
 
@@ -2224,6 +2233,54 @@ async fn run_wiki_prune(
     });
 
     result
+}
+
+/// Engine `onDiagnostic` sink (spec CT-REQ-DIAG-01). Logs the diagnostic and
+/// bumps the per-severity counts carried on `wiki-status-change`.
+#[tauri::command]
+fn record_wiki_diagnostic(
+    app: AppHandle,
+    status_state: State<'_, WikiStatusState>,
+    diagnostic: wiki_diagnostics::WikiDiagnostic,
+) {
+    eprintln!("{}", wiki_diagnostics::log_line(&diagnostic));
+    update_wiki_status(&app, &status_state, |flags| {
+        flags.diagnostics.record(&diagnostic.severity);
+    });
+}
+
+/// Snapshot of the current `WikiStatusFlags`. The frontend calls this on
+/// mount so a hook that subscribes to `wiki-status-change` sees the same
+/// counters the engine has already accumulated during `setupWiki` (the
+/// listener is not installed yet at that point — see `useWikiStatus`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WikiStatusSnapshot {
+    ingest: String,
+    ingest_stage: Option<String>,
+    ingest_subject: Option<String>,
+    librarian: bool,
+    healing: bool,
+    pruning: bool,
+    forgetting: bool,
+    diagnostic_errors: u32,
+    diagnostic_warnings: u32,
+}
+
+#[tauri::command]
+fn get_wiki_status(status_state: State<'_, WikiStatusState>) -> WikiStatusSnapshot {
+    let flags = status_state.0.lock().unwrap();
+    WikiStatusSnapshot {
+        ingest: flags.ingest.health.as_str().to_string(),
+        ingest_stage: flags.ingest.stage.clone(),
+        ingest_subject: flags.ingest.subject.clone(),
+        librarian: flags.librarian,
+        healing: flags.healing,
+        pruning: flags.pruning,
+        forgetting: flags.forgetting,
+        diagnostic_errors: flags.diagnostics.errors,
+        diagnostic_warnings: flags.diagnostics.warnings,
+    }
 }
 
 #[tauri::command]
@@ -3973,6 +4030,7 @@ pub fn run() {
             proposals_api::list_proposals_cmd,
             proposals_api::get_proposal_detail_cmd,
             proposals_api::resolve_proposal_cmd,
+            drafts_api::promote_draft_cmd,
             get_folder_rules,
             set_folder_rule,
             delete_folder_rule,
@@ -4014,6 +4072,12 @@ pub fn run() {
             ack_pending_config_malformed,
             vault_write_note,
             vault_upsert_index_entry,
+            record_wiki_diagnostic,
+            get_wiki_status,
+            inference::classifier::classify,
+            inference::classifier::classifier_status,
+            inference::classifier::get_classifier_config,
+            inference::classifier::set_classifier_config,
         ])
         .run(tauri::generate_context!())
         .expect("error running Tauri application");

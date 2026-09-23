@@ -1,11 +1,11 @@
-import { createWiki, WikiBusyError, type WikiOptions } from "@equationalapplications/react-llm-wiki";
+import { createWiki, WikiBusyError, type ClassifyRequest, type ClassifyResponse, type WikiDiagnostic, type WikiLintReport, type WikiOptions } from "@equationalapplications/react-llm-wiki";
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
-import { getOntologySelection, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
+import { getClassifierStatus, getOntologySelection, type ClassifierStatus, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
 import { manifestFor, modeFor, ontologyConfigFor } from "./ontology";
 import { seedManifestsIfAbsent } from "./ontologySeed";
 
@@ -145,9 +145,21 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
       // `off` does not classify facts and the engine reports `remaining === 0`
       // immediately; skip the loop to avoid the no-op round-trip.
       if (mode !== "off") {
+        // Always the generative path: backfill only scans untyped facts and
+        // classifier mode proposes no edges, so a switch must use 'llm' to
+        // rebuild manifest edges (spec §5.3 rev 2).
         let remaining = Infinity;
         while (remaining > 0) {
-          const result = await wiki.runOntologyBackfill(entityId);
+          const result = await wiki.runOntologyBackfill(entityId, { classifier: "llm" });
+          // No-progress guard: a pass that types 0 while work remains would
+          // spin forever. Surface it so the caller can roll back / retry
+          // instead of silently looping until the engine hits a timeout.
+          if (result.typed === 0 && result.remaining > 0) {
+            throw new Error(
+              `[applyOntologyChange] ontology backfill made no progress for ${entityId}: ` +
+                `typed=0, remaining=${result.remaining}`,
+            );
+          }
           remaining = result.remaining;
         }
       }
@@ -172,7 +184,17 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
         if (priorMode !== "off") {
           let remaining = Infinity;
           while (remaining > 0) {
-            const result = await wiki.runOntologyBackfill(entityId);
+            const result = await wiki.runOntologyBackfill(entityId, { classifier: "llm" });
+            // Same no-progress guard as the forward path: a rollback that
+            // types nothing while work remains means the prior manifest can
+            // not be restored either. Log and let the outer catch record the
+            // inconsistency rather than spinning forever.
+            if (result.typed === 0 && result.remaining > 0) {
+              throw new Error(
+                `[applyOntologyChange] rollback backfill made no progress for ${entityId}: ` +
+                  `typed=0, remaining=${result.remaining}`,
+              );
+            }
             remaining = result.remaining;
           }
         }
@@ -209,6 +231,39 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
       sweepErr,
     );
   }
+}
+
+/** Read-only lint report for every seeded tier (spec CT-REQ-LINT-01). */
+export async function lintSeededTiers(): Promise<Array<{ entityId: string; report: WikiLintReport }>> {
+  await _workspaceIdInflight;
+  const out: Array<{ entityId: string; report: WikiLintReport }> = [];
+  for (const entityId of seededOntologyEntityIds()) {
+    out.push({ entityId, report: await wiki.lint(entityId) });
+  }
+  return out;
+}
+
+/**
+ * Type the untyped-fact backlog Rust ingest leaves behind (spec §5.3 rev 2).
+ * `classifier: 'auto'` uses the Jev classifier when one is wired in and falls
+ * back to the generative path otherwise. A pass that types nothing stops the
+ * tier's loop: low-confidence facts are cooldown-stamped and would spin.
+ */
+export async function typeUntypedFacts(): Promise<{ typed: number; remaining: number }> {
+  await _workspaceIdInflight;
+  let typed = 0;
+  let remaining = 0;
+  for (const entityId of seededOntologyEntityIds()) {
+    for (;;) {
+      const result = await wiki.runOntologyBackfill(entityId, { classifier: "auto" });
+      typed += result.typed;
+      if (result.remaining === 0 || result.typed === 0) {
+        remaining += result.remaining;
+        break;
+      }
+    }
+  }
+  return { typed, remaining };
 }
 
 export async function initWorkspaceId(vaultPath: string): Promise<void> {
@@ -265,7 +320,33 @@ export async function ingestDocumentByPath(
   return wiki.ingestDocument(entityId, params);
 }
 
-function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): WikiOptions & Record<string, unknown> {
+/**
+ * Engine `onDiagnostic` hook (spec CT-REQ-DIAG-01). Must never throw: an
+ * IPC failure is logged and dropped so a diagnostic can never affect the
+ * operation that emitted it.
+ */
+export function forwardWikiDiagnostic(diagnostic: WikiDiagnostic): void {
+  try {
+    invoke("record_wiki_diagnostic", { diagnostic }).catch((err: unknown) => {
+      console.warn("[wiki] diagnostic forward failed:", err);
+    });
+  } catch (err) {
+    console.warn("[wiki] diagnostic forward failed:", err);
+  }
+}
+
+export function makeWikiOptions(
+  enableOutbox: boolean,
+  selection: OntologySelection,
+  classifier: ClassifierStatus = CLASSIFIER_OFF,
+): WikiOptions & Record<string, unknown> {
+  // Seed only the stable tiers here. `setupWiki()` runs before
+  // `initWorkspaceId` resolves, so `getWorkspaceId()` is still the
+  // `tier_working::default` placeholder — passing it to
+  // `ontologyConfigFor` would write a manifest for an entity no data
+  // ever lands in. The real workspace tier is seeded by
+  // `initWorkspaceId` once its id is known (see comment above).
+  const ontology = ontologyConfigFor(selection, ['tier_fact', 'tier_wisdom']);
   return {
     llmProvider: {
       async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
@@ -286,25 +367,24 @@ function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): W
       async embed(text: string): Promise<number[]> {
         return invoke<number[]>("embed_text", { text });
       },
+      // Spec CT-REQ-CLASS-01: present only when a classifier is configured
+      // and the privacy mode allows it; capability alone never changes core.
+      ...(classifier.available && {
+        classify: (request: ClassifyRequest) => invoke<ClassifyResponse>("classify", { request }),
+      }),
     },
     config: {
       hybridWeight: 0.7,
       preFilterLimit: 50,
-      // Seed only the stable tiers here. `setupWiki()` runs before
-      // `initWorkspaceId` resolves, so `getWorkspaceId()` is still the
-      // `tier_working::default` placeholder — passing it to
-      // `ontologyConfigFor` would write a manifest for an entity no data
-      // ever lands in. The real workspace tier is seeded by
-      // `initWorkspaceId` once its id is known (see comment above).
-      ontology: ontologyConfigFor(selection, [
-        'tier_fact',
-        'tier_wisdom',
-      ]),
+      ontology: classifier.available
+        ? { ...ontology, backfillClassifier: "auto", classifyMinConfidence: classifier.min_confidence }
+        : ontology,
       ...(enableOutbox && { enableOutbox: true }),
     },
     onRetrievalFallback: (err: Error) => {
       console.warn("[wiki] embed unavailable, using keyword search:", err.message);
     },
+    onDiagnostic: forwardWikiDiagnostic,
     graphAdapter: tauriGraphAdapter,
   } as WikiOptions & Record<string, unknown>;
 }
@@ -314,47 +394,78 @@ function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): W
 // Desktop-first vault.
 let _ontologySelection: OntologySelection = 'schema-org';
 
+/**
+ * Test-only: reset the cached selection to its compiled default so suites
+ * can rely on a known starting state. Production code must not call this.
+ */
+export function __resetOntologySelectionForTests(): void {
+  _ontologySelection = 'schema-org';
+}
+
+const CLASSIFIER_OFF: ClassifierStatus = { available: false, min_confidence: 0.5 };
+let _classifier: ClassifierStatus = CLASSIFIER_OFF;
+let _outboxEnabled = false;
+let _wikiUpdateGeneration = 0;
+
+async function readClassifierStatus(): Promise<ClassifierStatus> {
+  const s = await getClassifierStatus().catch(() => null);
+  return s && typeof s.available === "boolean" ? s : CLASSIFIER_OFF;
+}
+
 // Initialized in setupWiki(). The live binding is updated before the app renders,
 // so all callers that access `wiki` after setupWiki() resolves see the correct instance.
-export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
+export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection, CLASSIFIER_OFF));
+
+/**
+ * Rebuild the engine with the current outbox/ontology/classifier state and
+ * publish it. The generation counter drops a rebuild superseded by a newer
+ * one (same contract the outbox listeners had inline).
+ */
+async function rebuildWiki(): Promise<void> {
+  const gen = ++_wikiUpdateGeneration;
+  const updatedWiki = createWiki(
+    tauriWikiAdapter,
+    makeWikiOptions(_outboxEnabled, _ontologySelection, _classifier),
+  );
+  await updatedWiki.setup();
+  if (gen !== _wikiUpdateGeneration) return;
+  wiki = updatedWiki;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('wiki-updated'));
+  }
+}
 
 export async function setupWiki() {
   // A rejected read must surface — silently defaulting to `schema-org`
   // would seed strict manifests even when the persisted selection is
   // `off` or `emergent`, leaving typed data misclassified.
   _ontologySelection = await getOntologySelection();
+  _classifier = await readClassifierStatus();
+  const genAtStart = _wikiUpdateGeneration;
 
   // Register worker lifecycle listeners before running the initial wiki setup.
   // This prevents a race where the worker starts or stops during setup and the
   // module keeps a stale wiki instance based on the earlier outbox status value.
-  let wikiUpdateGeneration = 0;
-
   const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
-    const gen = ++wikiUpdateGeneration;
-    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true, _ontologySelection));
-    await updatedWiki.setup();
-    if (gen !== wikiUpdateGeneration) return;
-    wiki = updatedWiki;
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event('wiki-updated'));
-    }
+    _outboxEnabled = true;
+    await rebuildWiki();
   });
-
   const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
-    const gen = ++wikiUpdateGeneration;
-    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
-    await updatedWiki.setup();
-    if (gen !== wikiUpdateGeneration) return;
-    wiki = updatedWiki;
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event('wiki-updated'));
-    }
+    _outboxEnabled = false;
+    await rebuildWiki();
   });
+  // Classifier availability depends on both its config and the privacy mode.
+  const onClassifierInputsChanged = async () => {
+    _classifier = await readClassifierStatus();
+    await rebuildWiki();
+  };
+  const classifierUnlisten = await listen<void>('classifier-config-changed', onClassifierInputsChanged);
+  const privacyUnlisten = await listen<void>('privacy-mode-changed', onClassifierInputsChanged);
 
-  const effectiveOutboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
+  _outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
   let newWiki;
   try {
-    newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(effectiveOutboxEnabled, _ontologySelection));
+    newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(_outboxEnabled, _ontologySelection, _classifier));
     await newWiki.setup();
   } catch (e) {
     // No fallback to an untyped engine: running untyped is indistinguishable
@@ -364,7 +475,7 @@ export async function setupWiki() {
       `Knowledge schema "${_ontologySelection}" failed to load: ${detail}`,
     );
   }
-  if (wikiUpdateGeneration === 0) {
+  if (_wikiUpdateGeneration === genAtStart) {
     wiki = newWiki;
   }
 
@@ -383,6 +494,8 @@ export async function setupWiki() {
   // Store unlisten if you need cleanup; for now the listeners live for the session.
   void startedUnlisten;
   void stoppedUnlisten;
+  void classifierUnlisten;
+  void privacyUnlisten;
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */
@@ -399,6 +512,8 @@ export async function tieredRead(
         tier_wisdom:   1.0,
         [_workspaceId]: 0.6,
       },
+      // Drafts stay visible (spec CT-REQ-DRAFT-01); explicit so the choice is reviewable.
+      excludeDrafts: false,
       // graphExpansion passed through; handled by host-app layer when supported
       ...(opts.graphExpansion !== undefined && { graphExpansion: opts.graphExpansion }),
     } as Parameters<typeof wiki.read>[2] & { graphExpansion?: GraphExpansionOptions }
