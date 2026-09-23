@@ -571,6 +571,27 @@ export const forgetWikiSource = (sourcePath: string): Promise<void> =>
 export const promoteDraft = (entryId: string, entityId: string): Promise<void> =>
   invoke('promote_draft_cmd', { entryId, entityId });
 
+export type ClassifierProviderKind = 'unconfigured' | 'jev_http' | 'cloudflare_jev';
+
+export interface ClassifierConfig {
+  provider: ClassifierProviderKind;
+  url?: string | null;
+  account_id?: string | null;
+  api_key?: string | null;
+  min_confidence?: number | null;
+  timeout_secs?: number | null;
+}
+
+export interface ClassifierStatus {
+  available: boolean;
+  min_confidence: number;
+}
+
+export const getClassifierConfig = (): Promise<ClassifierConfig> => invoke('get_classifier_config');
+export const setClassifierConfig = (config: ClassifierConfig): Promise<void> =>
+  invoke('set_classifier_config', { config });
+export const getClassifierStatus = (): Promise<ClassifierStatus> => invoke('classifier_status');
+
 export interface CloudBridgeStatus {
   configured: boolean;
   connection_status:

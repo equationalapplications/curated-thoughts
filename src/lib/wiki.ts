@@ -1,11 +1,11 @@
-import { createWiki, WikiBusyError, type WikiDiagnostic, type WikiLintReport, type WikiOptions } from "@equationalapplications/react-llm-wiki";
+import { createWiki, WikiBusyError, type ClassifyRequest, type ClassifyResponse, type WikiDiagnostic, type WikiLintReport, type WikiOptions } from "@equationalapplications/react-llm-wiki";
 import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
-import { getOntologySelection, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
+import { getClassifierStatus, getOntologySelection, type ClassifierStatus, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
 import { manifestFor, modeFor, ontologyConfigFor } from "./ontology";
 import { seedManifestsIfAbsent } from "./ontologySeed";
 
@@ -316,7 +316,18 @@ export function forwardWikiDiagnostic(diagnostic: WikiDiagnostic): void {
   }
 }
 
-export function makeWikiOptions(enableOutbox: boolean, selection: OntologySelection): WikiOptions & Record<string, unknown> {
+export function makeWikiOptions(
+  enableOutbox: boolean,
+  selection: OntologySelection,
+  classifier: ClassifierStatus = CLASSIFIER_OFF,
+): WikiOptions & Record<string, unknown> {
+  // Seed only the stable tiers here. `setupWiki()` runs before
+  // `initWorkspaceId` resolves, so `getWorkspaceId()` is still the
+  // `tier_working::default` placeholder — passing it to
+  // `ontologyConfigFor` would write a manifest for an entity no data
+  // ever lands in. The real workspace tier is seeded by
+  // `initWorkspaceId` once its id is known (see comment above).
+  const ontology = ontologyConfigFor(selection, ['tier_fact', 'tier_wisdom']);
   return {
     llmProvider: {
       async generateText({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }) {
@@ -337,20 +348,18 @@ export function makeWikiOptions(enableOutbox: boolean, selection: OntologySelect
       async embed(text: string): Promise<number[]> {
         return invoke<number[]>("embed_text", { text });
       },
+      // Spec CT-REQ-CLASS-01: present only when a classifier is configured
+      // and the privacy mode allows it; capability alone never changes core.
+      ...(classifier.available && {
+        classify: (request: ClassifyRequest) => invoke<ClassifyResponse>("classify", { request }),
+      }),
     },
     config: {
       hybridWeight: 0.7,
       preFilterLimit: 50,
-      // Seed only the stable tiers here. `setupWiki()` runs before
-      // `initWorkspaceId` resolves, so `getWorkspaceId()` is still the
-      // `tier_working::default` placeholder — passing it to
-      // `ontologyConfigFor` would write a manifest for an entity no data
-      // ever lands in. The real workspace tier is seeded by
-      // `initWorkspaceId` once its id is known (see comment above).
-      ontology: ontologyConfigFor(selection, [
-        'tier_fact',
-        'tier_wisdom',
-      ]),
+      ontology: classifier.available
+        ? { ...ontology, backfillClassifier: "auto", classifyMinConfidence: classifier.min_confidence }
+        : ontology,
       ...(enableOutbox && { enableOutbox: true }),
     },
     onRetrievalFallback: (err: Error) => {
@@ -366,47 +375,70 @@ export function makeWikiOptions(enableOutbox: boolean, selection: OntologySelect
 // Desktop-first vault.
 let _ontologySelection: OntologySelection = 'schema-org';
 
+const CLASSIFIER_OFF: ClassifierStatus = { available: false, min_confidence: 0.5 };
+let _classifier: ClassifierStatus = CLASSIFIER_OFF;
+let _outboxEnabled = false;
+let _wikiUpdateGeneration = 0;
+
+async function readClassifierStatus(): Promise<ClassifierStatus> {
+  const s = await getClassifierStatus().catch(() => null);
+  return s && typeof s.available === "boolean" ? s : CLASSIFIER_OFF;
+}
+
 // Initialized in setupWiki(). The live binding is updated before the app renders,
 // so all callers that access `wiki` after setupWiki() resolves see the correct instance.
-export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
+export let wiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection, CLASSIFIER_OFF));
+
+/**
+ * Rebuild the engine with the current outbox/ontology/classifier state and
+ * publish it. The generation counter drops a rebuild superseded by a newer
+ * one (same contract the outbox listeners had inline).
+ */
+async function rebuildWiki(): Promise<void> {
+  const gen = ++_wikiUpdateGeneration;
+  const updatedWiki = createWiki(
+    tauriWikiAdapter,
+    makeWikiOptions(_outboxEnabled, _ontologySelection, _classifier),
+  );
+  await updatedWiki.setup();
+  if (gen !== _wikiUpdateGeneration) return;
+  wiki = updatedWiki;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('wiki-updated'));
+  }
+}
 
 export async function setupWiki() {
   // A rejected read must surface — silently defaulting to `schema-org`
   // would seed strict manifests even when the persisted selection is
   // `off` or `emergent`, leaving typed data misclassified.
   _ontologySelection = await getOntologySelection();
+  _classifier = await readClassifierStatus();
+  const genAtStart = _wikiUpdateGeneration;
 
   // Register worker lifecycle listeners before running the initial wiki setup.
   // This prevents a race where the worker starts or stops during setup and the
   // module keeps a stale wiki instance based on the earlier outbox status value.
-  let wikiUpdateGeneration = 0;
-
   const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
-    const gen = ++wikiUpdateGeneration;
-    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(true, _ontologySelection));
-    await updatedWiki.setup();
-    if (gen !== wikiUpdateGeneration) return;
-    wiki = updatedWiki;
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event('wiki-updated'));
-    }
+    _outboxEnabled = true;
+    await rebuildWiki();
   });
-
   const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
-    const gen = ++wikiUpdateGeneration;
-    const updatedWiki = createWiki(tauriWikiAdapter, makeWikiOptions(false, _ontologySelection));
-    await updatedWiki.setup();
-    if (gen !== wikiUpdateGeneration) return;
-    wiki = updatedWiki;
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event('wiki-updated'));
-    }
+    _outboxEnabled = false;
+    await rebuildWiki();
   });
+  // Classifier availability depends on both its config and the privacy mode.
+  const onClassifierInputsChanged = async () => {
+    _classifier = await readClassifierStatus();
+    await rebuildWiki();
+  };
+  const classifierUnlisten = await listen<void>('classifier-config-changed', onClassifierInputsChanged);
+  const privacyUnlisten = await listen('privacy-mode-changed', onClassifierInputsChanged);
 
-  const effectiveOutboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
+  _outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
   let newWiki;
   try {
-    newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(effectiveOutboxEnabled, _ontologySelection));
+    newWiki = createWiki(tauriWikiAdapter, makeWikiOptions(_outboxEnabled, _ontologySelection, _classifier));
     await newWiki.setup();
   } catch (e) {
     // No fallback to an untyped engine: running untyped is indistinguishable
@@ -416,7 +448,7 @@ export async function setupWiki() {
       `Knowledge schema "${_ontologySelection}" failed to load: ${detail}`,
     );
   }
-  if (wikiUpdateGeneration === 0) {
+  if (_wikiUpdateGeneration === genAtStart) {
     wiki = newWiki;
   }
 
@@ -435,6 +467,8 @@ export async function setupWiki() {
   // Store unlisten if you need cleanup; for now the listeners live for the session.
   void startedUnlisten;
   void stoppedUnlisten;
+  void classifierUnlisten;
+  void privacyUnlisten;
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */

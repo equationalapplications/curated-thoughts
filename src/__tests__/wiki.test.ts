@@ -380,3 +380,26 @@ describe('onDiagnostic forwarding', () => {
     warn.mockRestore();
   });
 });
+
+describe('makeWikiOptions classifier wiring', () => {
+  it('omits classify and backfillClassifier when unavailable', () => {
+    const opts = makeWikiOptions(false, 'schema-org', { available: false, min_confidence: 0.5 });
+    expect('classify' in opts.llmProvider).toBe(false);
+    expect(opts.config?.ontology?.backfillClassifier).toBeUndefined();
+  });
+
+  it('wires classify and auto backfill with min confidence when available', async () => {
+    const opts = makeWikiOptions(false, 'schema-org', { available: true, min_confidence: 0.7 });
+    expect(opts.config?.ontology?.backfillClassifier).toBe('auto');
+    expect(opts.config?.ontology?.classifyMinConfidence).toBe(0.7);
+    vi.mocked(invoke).mockResolvedValueOnce({ answers: {} });
+    const request = { state: 's', questions: {} };
+    await opts.llmProvider.classify!(request);
+    expect(invoke).toHaveBeenCalledWith('classify', { request });
+  });
+
+  it('defaults to classifier off', () => {
+    const opts = makeWikiOptions(false, 'schema-org');
+    expect('classify' in opts.llmProvider).toBe(false);
+  });
+});

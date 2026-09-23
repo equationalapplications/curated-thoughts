@@ -6,6 +6,7 @@ import { FolderRulesPanel } from "./FolderRulesPanel";
 import { MaintenanceDashboard } from "./MaintenanceDashboard";
 import { GenerationPanel } from "./GenerationPanel";
 import { EmbeddingPanel } from "./EmbeddingPanel";
+import { ClassifierPanel } from "./ClassifierPanel";
 import { OntologyPanel } from "./OntologyPanel";
 import { PrivacyPanel } from "./PrivacyPanel";
 import { VaultPanel } from "./VaultPanel";
@@ -97,6 +98,7 @@ export function SettingsScreen({ vaultPath, initialTab, onRerunWizard }: Props) 
           <>
             <GenerationPanel />
             <EmbeddingPanel />
+            <ClassifierPanel />
           </>
         )}
         {tab === "librarian" && <FolderRulesPanel />}
