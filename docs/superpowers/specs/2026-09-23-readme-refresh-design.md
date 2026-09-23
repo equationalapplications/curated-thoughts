@@ -78,6 +78,7 @@ executed; "Read" means the claim was checked in source.
 | I21 | Neither `docs/superpowers/specs/curated-thoughts-mcp-coding-spec.md` (no HVG tools, no `graph_neighbors`) nor `docs/mcp-write-tools-okf-frontmatter.md` ("v0.1", 2 tools) is a current tool inventory | grep | Read |
 | I22 | `mcp_integration` tests return early (pass, 0.00s) unless `CURATED_MCP_INTEGRATION_TESTS=1`; with it set, 4/4 pass in 4.7s | `src-tauri/tests/mcp_integration.rs:5,151-154` | Ran |
 | I23 | `bulk_reindex -- --dry-run` parses and opens the brain; on a synthetic empty brain it stops at the V22 vault-root guard (expected), so a full run needs a real configured brain | run output | Ran |
+| I24 | Release-sidecar notes carried over from the prior README: the sidecar name must differ from the package name (Tauri rule), tracing goes to stderr with protocol traffic on stdout, and on Windows the console stays attached in `--mcp` mode, so an agent-spawned sidecar can flash a console window | `5eab8fa` (PR #67: "tauri forbids sidecar = package name"); `src-tauri/src/mcp_server.rs:311-314`; `src-tauri/src/main.rs:1-3,23` (console hidden only in GUI mode) | Read |
 
 ## Phase 2 — README revision
 
@@ -95,7 +96,7 @@ Every Problem-table row maps to a README section below.
 | Key Features: MCP Agent Server | Full server (read + write, including wisdom CRUD and proposal decisions) vs read-only dev server (I4) | #185, #201 |
 | Key Features: Offline-first | Keep; cross-partition traversal gets its own sentence tied to `wiki_traverse_graph` (I17) | #190/#197 |
 | Local Development | Add the fresh-clone sidecar-placeholder step (I9) | — |
-| MCP Agent Server (detailed) | Fix the dev build to the app binary + `--mcp` (I3, I7); list both servers' tools inline (I5, I6); env vars (I15); remove the stale inventory pointer (I21) | #185, #190, #201 |
+| MCP Agent Server (detailed) | Fix the dev build to the app binary + `--mcp` (I3, I7); list both servers' tools inline (I5, I6); env vars (I15); remove the stale inventory pointer here and in Project Structure (I21); sidecar notes (I24) | #185, #190, #201 |
 | CLI Tools & Testing | Fix `-p` to `curated-thoughts-tools` (I2); correct the `ct` verb list (I10-I14); add the integration-test opt-in variable (I22) | #186, #201 |
 | Related Packages | Keep (I19) | — |
 
@@ -149,3 +150,7 @@ Merge with a regular merge commit (no squash).
   consider renaming the read-only tools-crate binary.
 - A setup script (or `build.rs` fallback) for the fresh-clone sidecar
   placeholder (I9).
+- `ct watch`'s missing-root error says "(or pass --vault)", but `ct watch` has
+  no `--vault` flag (`tools/src/cmds.rs:1092`; `ct watch --vault` → "unexpected
+  argument"). Fix the message; the README correctly documents only
+  `CURATED_VAULT_ROOT` (I14).
