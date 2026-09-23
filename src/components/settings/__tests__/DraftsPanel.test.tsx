@@ -6,10 +6,14 @@ import type { WikiFact } from '@equationalapplications/react-llm-wiki';
 
 type DraftsPage = { facts: WikiFact[]; nextCursor: string | null };
 
+// `vi.fn()` with no type argument infers a callable signature that flows
+// through `mockImplementationOnce` cleanly. We type the variables with
+// `any`-casts on the assignment so strict-mode tsc doesn't reject the
+// deferred Promise resolvers below.
 const { listDrafts, enginePromoteDraft, promoteDraft } = vi.hoisted(() => ({
-  listDrafts: vi.fn<(entityId: string, opts?: { limit?: number; cursor?: string }) => Promise<DraftsPage>>(),
+  listDrafts: vi.fn(),
   enginePromoteDraft: vi.fn(),
-  promoteDraft: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  promoteDraft: vi.fn(),
 }));
 
 vi.mock('../../../lib/wiki', () => ({
@@ -31,6 +35,7 @@ describe('DraftsPanel', () => {
         ? { facts: [fact('f1', 'Deploy runs on Fridays')], nextCursor: 'c1' }
         : { facts: [], nextCursor: null },
     );
+    promoteDraft.mockResolvedValue(undefined);
   });
 
   it('lists drafts per seeded tier', async () => {
@@ -66,12 +71,9 @@ describe('DraftsPanel', () => {
   });
 
   it('disables the per-fact Promote button while its promote is in flight', async () => {
-    let resolvePromote: (() => void) | null = null;
+    const deferred: { resolve?: () => void } = {};
     promoteDraft.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          resolvePromote = () => resolve();
-        }),
+      () => new Promise<void>((resolve) => { deferred.resolve = resolve; }),
     );
     render(<DraftsPanel />);
     const promoteBtn = await screen.findByRole('button', { name: 'Promote Deploy runs on Fridays' });
@@ -86,19 +88,16 @@ describe('DraftsPanel', () => {
 
     // Resolving the in-flight request re-enables the button (then removes the
     // row, so the assertion switches to the disappearing element).
-    resolvePromote?.();
+    deferred.resolve?.();
     await waitFor(() => expect(screen.queryByText('Deploy runs on Fridays')).not.toBeInTheDocument());
   });
 
   it('disables the per-tier Load more button while its pagination is in flight', async () => {
     listDrafts.mockImplementationOnce(async () => ({ facts: [fact('f1', 'First')], nextCursor: 'c1' }))
       .mockImplementationOnce(async () => ({ facts: [], nextCursor: null }));
-    let resolveMore: ((page: DraftsPage) => void) | null = null;
+    const deferred: { resolve?: (page: DraftsPage) => void } = {};
     listDrafts.mockImplementationOnce(
-      () =>
-        new Promise<DraftsPage>((resolve) => {
-          resolveMore = (page) => resolve(page);
-        }),
+      () => new Promise<DraftsPage>((resolve) => { deferred.resolve = resolve; }),
     );
     render(<DraftsPanel />);
     const moreBtn = await screen.findByRole('button', { name: 'Load more drafts for tier_fact' });
@@ -109,7 +108,7 @@ describe('DraftsPanel', () => {
     // Only the initial load (×2 tiers) + the one loadMore must have happened.
     expect(listDrafts.mock.calls.filter((c) => 'cursor' in (c[1] ?? {}))).toHaveLength(1);
 
-    resolveMore?.({ facts: [fact('f2', 'Second')], nextCursor: null });
+    deferred.resolve?.({ facts: [fact('f2', 'Second')], nextCursor: null });
     await waitFor(() => expect(screen.getByText('Second')).toBeInTheDocument());
   });
 });

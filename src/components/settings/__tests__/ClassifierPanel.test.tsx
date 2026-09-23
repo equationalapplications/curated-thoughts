@@ -2,11 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-type Cfg = Awaited<ReturnType<typeof import('../../../lib/tauri').getClassifierConfig>>;
-
+// `vi.fn()` with no explicit type argument lets `mockImplementationOnce`
+// accept a `(...) => Promise<T>` without strict-mode tsc collapsing the
+// callback to `never`. We assert on `mock.calls` directly when needed.
 const { getClassifierConfig, setClassifierConfig, usePrivacyMode } = vi.hoisted(() => ({
-  getClassifierConfig: vi.fn<() => Promise<Cfg>>(),
-  setClassifierConfig: vi.fn<(config: Cfg) => Promise<void>>().mockResolvedValue(undefined),
+  getClassifierConfig: vi.fn(),
+  setClassifierConfig: vi.fn(),
   usePrivacyMode: vi.fn(() => ({ mode: 'ephemeral' })),
 }));
 vi.mock('../../../lib/tauri', () => ({ getClassifierConfig, setClassifierConfig }));
@@ -19,6 +20,7 @@ describe('ClassifierPanel', () => {
     vi.clearAllMocks();
     usePrivacyMode.mockReturnValue({ mode: 'ephemeral' });
     getClassifierConfig.mockResolvedValue({ provider: 'unconfigured' });
+    setClassifierConfig.mockResolvedValue(undefined);
   });
 
   it('discloses that fact text leaves the device', async () => {
@@ -73,11 +75,12 @@ describe('ClassifierPanel', () => {
   });
 
   it('disables controls until the initial getClassifierConfig resolves', async () => {
-    let resolveConfig: ((v: unknown) => void) | null = null;
-    getClassifierConfig.mockReturnValue(
-      new Promise((resolve) => {
-        resolveConfig = resolve;
-      }),
+    let resolveConfig: ((v: Cfg) => void) | null = null;
+    getClassifierConfig.mockImplementationOnce(
+      () =>
+        new Promise<Cfg>((resolve) => {
+          resolveConfig = resolve;
+        }),
     );
     render(<ClassifierPanel />);
     const providerSelect = screen.getByLabelText('Classifier provider');
