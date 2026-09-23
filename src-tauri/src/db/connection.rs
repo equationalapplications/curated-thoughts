@@ -2990,10 +2990,16 @@ mod tests {
         assert_eq!(edge_index_names(&conn), vec!["llm_wiki_edges_entity_idx"]);
 
         migrate_open_db(&conn, None).unwrap();
-        assert_eq!(edge_index_names(&conn), vec!["llm_wiki_edges_entity_id_idx"]);
+        assert_eq!(
+            edge_index_names(&conn),
+            vec!["llm_wiki_edges_entity_id_idx"]
+        );
 
         // Idempotent: a second open changes nothing.
         migrate_open_db(&conn, None).unwrap();
-        assert_eq!(edge_index_names(&conn), vec!["llm_wiki_edges_entity_id_idx"]);
+        assert_eq!(
+            edge_index_names(&conn),
+            vec!["llm_wiki_edges_entity_id_idx"]
+        );
     }
 }

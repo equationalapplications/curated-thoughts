@@ -114,7 +114,9 @@ pub fn read_classifier_config(paths: &BrainPaths) -> Result<ClassifierConfig> {
         .cloned()
     {
         None => Ok(ClassifierConfig::default()),
-        Some(v) => serde_json::from_value(v).context("classifier block in config.json is malformed"),
+        Some(v) => {
+            serde_json::from_value(v).context("classifier block in config.json is malformed")
+        }
     }
 }
 
@@ -190,7 +192,10 @@ pub fn to_jev_questions(questions: &BTreeMap<String, ClassifierQuestion>) -> Val
     for (key, q) in questions {
         let mut obj = Map::new();
         match q {
-            ClassifierQuestion::Choice { options, instructions } => {
+            ClassifierQuestion::Choice {
+                options,
+                instructions,
+            } => {
                 obj.insert("type".into(), json!("choice"));
                 if let Some(i) = instructions {
                     obj.insert("instructions".into(), json!(i));
@@ -199,7 +204,10 @@ pub fn to_jev_questions(questions: &BTreeMap<String, ClassifierQuestion>) -> Val
                     options.iter().map(|o| (o.clone(), json!(o))).collect();
                 obj.insert("criteria".into(), Value::Object(criteria));
             }
-            ClassifierQuestion::Score { levels, instructions } => {
+            ClassifierQuestion::Score {
+                levels,
+                instructions,
+            } => {
                 obj.insert("type".into(), json!("score"));
                 if let Some(i) = instructions {
                     obj.insert("instructions".into(), json!(i));
@@ -322,7 +330,9 @@ pub async fn classify_with(
     }
     let url = endpoint(cfg)?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(cfg.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)))
+        .timeout(Duration::from_secs(
+            cfg.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+        ))
         .build()?;
     let mut rb = client.post(&url).json(&request_body(cfg, req));
     if let Some(key) = cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
@@ -333,7 +343,10 @@ pub async fn classify_with(
     if !status.is_success() {
         bail!("classifier HTTP {status}");
     }
-    let body: Value = resp.json().await.context("classifier response is not JSON")?;
+    let body: Value = resp
+        .json()
+        .await
+        .context("classifier response is not JSON")?;
     from_jev_response(&req.questions, &body)
 }
 
@@ -379,7 +392,10 @@ pub fn get_classifier_config() -> Result<ClassifierConfig, String> {
 }
 
 #[tauri::command]
-pub fn set_classifier_config(config: ClassifierConfig, app: tauri::AppHandle) -> Result<(), String> {
+pub fn set_classifier_config(
+    config: ClassifierConfig,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     use tauri::Emitter;
     let (_, paths) = current_brain();
     write_classifier_config(&paths, &config).map_err(|e| e.to_string())?;
@@ -420,9 +436,18 @@ mod tests {
         }))
         .unwrap();
         let q = to_jev_questions(&req.questions);
-        assert_eq!(q["a"], json!({ "type": "choice", "instructions": "pick", "criteria": { "X": "X", "Y": "Y" } }));
-        assert_eq!(q["b"], json!({ "type": "score", "criteria": ["low", "high"] }));
-        assert_eq!(q["c"], json!({ "type": "noul", "instructions": "is it?", "criteria": { "true": "Yes", "false": "No" } }));
+        assert_eq!(
+            q["a"],
+            json!({ "type": "choice", "instructions": "pick", "criteria": { "X": "X", "Y": "Y" } })
+        );
+        assert_eq!(
+            q["b"],
+            json!({ "type": "score", "criteria": ["low", "high"] })
+        );
+        assert_eq!(
+            q["c"],
+            json!({ "type": "noul", "instructions": "is it?", "criteria": { "true": "Yes", "false": "No" } })
+        );
     }
 
     #[test]
@@ -439,7 +464,9 @@ mod tests {
             endpoint(&cfg).unwrap(),
             "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run"
         );
-        assert!(request_body(&jev_cfg("https://x"), &choice_req()).get("model").is_none());
+        assert!(request_body(&jev_cfg("https://x"), &choice_req())
+            .get("model")
+            .is_none());
     }
 
     #[test]
@@ -505,8 +532,14 @@ mod tests {
         assert!(!is_available(&cfg, PrivacyMode::Strict));
         assert!(is_available(&cfg, PrivacyMode::Ephemeral));
         assert!(is_available(&cfg, PrivacyMode::Connected));
-        assert!(!is_available(&ClassifierConfig::default(), PrivacyMode::Connected));
-        assert_eq!(status(&cfg, PrivacyMode::Connected).min_confidence, DEFAULT_MIN_CONFIDENCE);
+        assert!(!is_available(
+            &ClassifierConfig::default(),
+            PrivacyMode::Connected
+        ));
+        assert_eq!(
+            status(&cfg, PrivacyMode::Connected).min_confidence,
+            DEFAULT_MIN_CONFIDENCE
+        );
     }
 
     #[tokio::test]
@@ -526,7 +559,9 @@ mod tests {
         let mock = server
             .mock("POST", "/")
             .match_header("authorization", "Bearer k")
-            .match_body(mockito::Matcher::PartialJson(json!({ "state": "Alice is a person." })))
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "state": "Alice is a person." }),
+            ))
             .with_header("content-type", "application/json")
             .with_body(
                 json!({ "model": "jev-1.13.0", "answers": { "okf_type": {
@@ -537,9 +572,13 @@ mod tests {
             )
             .create_async()
             .await;
-        let out = classify_with(&jev_cfg(&server.url()), PrivacyMode::Connected, &choice_req())
-            .await
-            .unwrap();
+        let out = classify_with(
+            &jev_cfg(&server.url()),
+            PrivacyMode::Connected,
+            &choice_req(),
+        )
+        .await
+        .unwrap();
         mock.assert_async().await;
         assert!(matches!(
             out.answers.get("okf_type"),
@@ -550,10 +589,18 @@ mod tests {
     #[tokio::test]
     async fn http_error_status_is_an_error() {
         let mut server = mockito::Server::new_async().await;
-        server.mock("POST", "/").with_status(503).create_async().await;
-        let err = classify_with(&jev_cfg(&server.url()), PrivacyMode::Connected, &choice_req())
-            .await
-            .unwrap_err();
+        server
+            .mock("POST", "/")
+            .with_status(503)
+            .create_async()
+            .await;
+        let err = classify_with(
+            &jev_cfg(&server.url()),
+            PrivacyMode::Connected,
+            &choice_req(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("503"), "{err}");
     }
 
@@ -567,7 +614,10 @@ mod tests {
         };
         std::fs::write(&paths.config_path, r#"{"someFutureKey": {"keep": true}}"#).unwrap();
 
-        assert_eq!(read_classifier_config(&paths).unwrap(), ClassifierConfig::default());
+        assert_eq!(
+            read_classifier_config(&paths).unwrap(),
+            ClassifierConfig::default()
+        );
 
         let cfg = ClassifierConfig {
             provider: ClassifierProviderKind::CloudflareJev,
@@ -579,7 +629,8 @@ mod tests {
         write_classifier_config(&paths, &cfg).unwrap();
         assert_eq!(read_classifier_config(&paths).unwrap(), cfg);
 
-        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
         assert_eq!(raw["someFutureKey"], json!({ "keep": true }));
         assert_eq!(raw["classifier"]["provider"], "cloudflare_jev");
     }

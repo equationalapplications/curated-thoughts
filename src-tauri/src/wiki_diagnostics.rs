@@ -80,7 +80,13 @@ mod tests {
         c.record("warn");
         c.record("warn");
         c.record("info");
-        assert_eq!(c, DiagnosticCounts { errors: 1, warnings: 2 });
+        assert_eq!(
+            c,
+            DiagnosticCounts {
+                errors: 1,
+                warnings: 2
+            }
+        );
     }
 
     #[test]

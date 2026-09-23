@@ -31,7 +31,12 @@ impl std::fmt::Display for PromoteDraftError {
 
 impl std::error::Error for PromoteDraftError {}
 
-pub fn promote_draft(conn: &Connection, entry_id: &str, entity_id: &str, now_ms: i64) -> Result<()> {
+pub fn promote_draft(
+    conn: &Connection,
+    entry_id: &str,
+    entity_id: &str,
+    now_ms: i64,
+) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
     let status: Option<String> = tx
@@ -121,7 +126,14 @@ pub fn promote_draft(conn: &Connection, entry_id: &str, entity_id: &str, now_ms:
         },
     )?;
 
-    push_entries_outbox(&tx, entity_id, entry_id, OutboxOperation::Update, payload, now_ms)?;
+    push_entries_outbox(
+        &tx,
+        entity_id,
+        entry_id,
+        OutboxOperation::Update,
+        payload,
+        now_ms,
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -148,11 +160,17 @@ mod tests {
 
     fn outbox_rows(conn: &Connection, record_id: &str) -> Vec<(String, String, serde_json::Value)> {
         let mut stmt = conn
-            .prepare("SELECT table_name, operation, payload FROM llm_wiki_outbox WHERE record_id = ?1")
+            .prepare(
+                "SELECT table_name, operation, payload FROM llm_wiki_outbox WHERE record_id = ?1",
+            )
             .unwrap();
         stmt.query_map([record_id], |r| {
             let payload: String = r.get(2)?;
-            Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&payload).unwrap()))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                serde_json::from_str(&payload).unwrap(),
+            ))
         })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -178,7 +196,11 @@ mod tests {
             .unwrap();
         assert_eq!(status, "stable");
         let verified: serde_json::Value = serde_json::from_str(&verified).unwrap();
-        assert_eq!(verified.as_array().unwrap().len(), 2, "existing entry preserved");
+        assert_eq!(
+            verified.as_array().unwrap().len(),
+            2,
+            "existing entry preserved"
+        );
         assert_eq!(verified[1]["by"], LOCAL_REVIEWER);
         assert_eq!(verified[1]["at"], "2025-09-22T00:13:20.000Z");
         assert_eq!(by, LOCAL_REVIEWER);
@@ -204,9 +226,16 @@ mod tests {
         seed(&conn, "fact_del", "tier_fact", "draft", Some(150));
         seed(&conn, "fact_other", "tier_wisdom", "draft", None);
 
-        for (id, entity) in [("nope", "tier_fact"), ("fact_del", "tier_fact"), ("fact_other", "tier_fact")] {
+        for (id, entity) in [
+            ("nope", "tier_fact"),
+            ("fact_del", "tier_fact"),
+            ("fact_other", "tier_fact"),
+        ] {
             let err = promote_draft(&conn, id, entity, NOW).unwrap_err();
-            assert_eq!(err.downcast_ref::<PromoteDraftError>(), Some(&PromoteDraftError::NotFound));
+            assert_eq!(
+                err.downcast_ref::<PromoteDraftError>(),
+                Some(&PromoteDraftError::NotFound)
+            );
             assert!(outbox_rows(&conn, id).is_empty());
         }
     }
@@ -219,9 +248,20 @@ mod tests {
         let err = promote_draft(&conn, "fact_s", "tier_fact", NOW).unwrap_err();
         assert_eq!(err.to_string(), "not_draft");
         let verified: String = conn
-            .query_row("SELECT okf_verified FROM llm_wiki_entries WHERE id='fact_s'", [], |r| r.get(0))
+            .query_row(
+                "SELECT okf_verified FROM llm_wiki_entries WHERE id='fact_s'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&verified).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&verified)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(outbox_rows(&conn, "fact_s").is_empty());
     }
 }
