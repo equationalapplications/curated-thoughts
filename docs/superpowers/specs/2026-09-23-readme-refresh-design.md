@@ -94,7 +94,8 @@ Every Problem-table row maps to a README section below.
 | Key Features: Wiki maintenance | Drafts panel, lint health report, "Type untyped facts" (UI only, I8) | #219 |
 | Key Features: Backup, restore & vault switching | Restore syncs the replica; vault switch clears the knowledge layer after a confirmation | #213 |
 | Key Features: MCP Agent Server | Full server (read + write, including wisdom CRUD and proposal decisions) vs read-only dev server (I4) | #185, #201 |
-| Key Features: Offline-first | Keep; cross-partition traversal gets its own sentence tied to `wiki_traverse_graph` (I17) | #190/#197 |
+| Key Features: Offline-first | Keep as-is | — |
+| Key Features: Cross-Partition Wiki Graph | New short subsection tied to `wiki_traverse_graph`, including the top-8 partition cap (I17) | #190/#197 |
 | Local Development | Add the fresh-clone sidecar-placeholder step (I9) | — |
 | MCP Agent Server (detailed) | Fix the dev build to the app binary + `--mcp` (I3, I7); list both servers' tools inline (I5, I6); env vars (I15); remove the stale inventory pointer here and in Project Structure (I21); sidecar notes (I24) | #185, #190, #201 |
 | CLI Tools & Testing | Fix `-p` to `curated-thoughts-tools` (I2); correct the `ct` verb list (I10-I14); add the integration-test opt-in variable (I22) | #186, #201 |
@@ -130,7 +131,8 @@ Every Problem-table row maps to a README section below.
 Docs-only diff: one review pass plus the bot review. Before merging, a normal
 commit on the branch sets Status to `Implemented (PR #N)`. A merge commit
 cannot carry content changes, so the flip cannot happen in the merge itself.
-Merge with a regular merge commit (no squash).
+Merge with a regular merge commit, not squash or rebase, so the spec and
+review-fix commits stay in `main`'s history (this repo's standing rule).
 
 ## Risks
 
@@ -154,3 +156,23 @@ Merge with a regular merge commit (no squash).
   no `--vault` flag (`tools/src/cmds.rs:1092`; `ct watch --vault` → "unexpected
   argument"). Fix the message; the README correctly documents only
   `CURATED_VAULT_ROOT` (I14).
+- `pipeline::watchdog::heartbeat::tests::seqlock_holds_under_concurrent_transitions`
+  is timing-sensitive: it failed `rust-macos` on this docs-only PR (3904/5000
+  even-seq reads against a 90% floor, CI run 35887223463). Make it
+  deterministic or relax the threshold.
+
+## Revision log
+
+- **rev 1** (first push of this branch; that commit was rewritten into
+  `5031197` when its authorship was fixed): problem, section treatment,
+  acceptance criteria, status Draft.
+- **rev 2** (`5031197`): folded in the spec review (wrong PR/version
+  references, missing capabilities, the two-MCP-server split, the
+  nonexistent tool-inventory doc, the merge-time status flip, references to
+  rules that don't exist in the repo) and the PR-bot review (Phase 2 now covers
+  every Problem row; criterion 2 now requires execution). Added the Phase 1
+  inventory (I1-I23) and follow-ups. Status Approved.
+- **rev 2.1** (`9fef52b`, `653970a`, this commit): I24 (sidecar notes),
+  I11/I17 corrections from CodeRabbit, the `--vault` and flaky-test
+  follow-ups, the Phase 2 row for the Cross-Partition Wiki Graph subsection,
+  the reason for the merge style, and this log.
