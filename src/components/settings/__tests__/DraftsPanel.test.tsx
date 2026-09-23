@@ -60,4 +60,53 @@ describe('DraftsPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Promote Deploy runs on Fridays' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('not_draft');
   });
+
+  it('disables the per-fact Promote button while its promote is in flight', async () => {
+    let resolvePromote: (() => void) | null = null;
+    promoteDraft.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolvePromote = resolve;
+      }),
+    );
+    render(<DraftsPanel />);
+    const promoteBtn = await screen.findByRole('button', { name: 'Promote Deploy runs on Fridays' });
+
+    // First click starts the in-flight request and disables the button.
+    await userEvent.click(promoteBtn);
+    expect(promoteBtn).toBeDisabled();
+
+    // A second click while still in flight must not issue a duplicate request.
+    await userEvent.click(promoteBtn).catch(() => undefined);
+    expect(promoteDraft).toHaveBeenCalledTimes(1);
+
+    // Resolving the in-flight request re-enables the button (then removes the
+    // row, so the assertion switches to the disappearing element).
+    resolvePromote?.();
+    await waitFor(() => expect(screen.queryByText('Deploy runs on Fridays')).not.toBeInTheDocument());
+  });
+
+  it('disables the per-tier Load more button while its pagination is in flight', async () => {
+    listDrafts.mockImplementationOnce(async () => ({ facts: [fact('f1', 'First')], nextCursor: 'c1' }))
+      .mockImplementationOnce(async () => ({ facts: [], nextCursor: null }));
+    let resolveMore: (() => void) | null = null;
+    listDrafts.mockImplementationOnce(
+      () =>
+        new Promise<{ facts: typeof import('@equationalapplications/react-llm-wiki').WikiFact[]; nextCursor: string | null }>(
+          (resolve) => {
+            resolveMore = () => resolve({ facts: [fact('f2', 'Second')], nextCursor: null });
+          },
+        ),
+    );
+    render(<DraftsPanel />);
+    const moreBtn = await screen.findByRole('button', { name: 'Load more drafts for tier_fact' });
+
+    await userEvent.click(moreBtn);
+    expect(moreBtn).toBeDisabled();
+    await userEvent.click(moreBtn).catch(() => undefined);
+    // Only the initial load (×2 tiers) + the one loadMore must have happened.
+    expect(listDrafts.mock.calls.filter((c) => 'cursor' in (c[1] ?? {}))).toHaveLength(1);
+
+    resolveMore?.();
+    await waitFor(() => expect(screen.getByText('Second')).toBeInTheDocument());
+  });
 });

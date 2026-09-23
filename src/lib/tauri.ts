@@ -562,6 +562,11 @@ export const subscribeEntityStatus = (
   callback: (event: { payload: WikiStatusEventPayload }) => void,
 ): Promise<UnlistenFn> => listen<WikiStatusEventPayload>('wiki-status-change', callback);
 
+/// Snapshot of the current wiki status. Used by hooks that subscribe to
+/// `wiki-status-change` so they hydrate counters the engine already
+/// accumulated during `setupWiki`, before the listener was installed.
+export const getWikiStatus = (): Promise<WikiStatusPayload> => invoke<WikiStatusPayload>('get_wiki_status');
+
 export const runWikiHeal = (): Promise<void> => invoke('run_wiki_heal');
 export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');
 export const runWikiReembed = (): Promise<number> => invoke('run_wiki_reembed');
@@ -577,7 +582,9 @@ export interface ClassifierConfig {
   provider: ClassifierProviderKind;
   url?: string | null;
   account_id?: string | null;
-  api_key?: string | null;
+  /** Credential-presence indicator. The actual key lives in the OS keychain
+   * and is never sent over IPC (CT-REQ-CLASS-01 §5.2). */
+  has_api_key?: boolean;
   min_confidence?: number | null;
   timeout_secs?: number | null;
 }

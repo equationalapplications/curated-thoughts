@@ -2249,6 +2249,40 @@ fn record_wiki_diagnostic(
     });
 }
 
+/// Snapshot of the current `WikiStatusFlags`. The frontend calls this on
+/// mount so a hook that subscribes to `wiki-status-change` sees the same
+/// counters the engine has already accumulated during `setupWiki` (the
+/// listener is not installed yet at that point — see `useWikiStatus`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WikiStatusSnapshot {
+    ingest: String,
+    ingest_stage: Option<String>,
+    ingest_subject: Option<String>,
+    librarian: bool,
+    healing: bool,
+    pruning: bool,
+    forgetting: bool,
+    diagnostic_errors: u32,
+    diagnostic_warnings: u32,
+}
+
+#[tauri::command]
+fn get_wiki_status(status_state: State<'_, WikiStatusState>) -> WikiStatusSnapshot {
+    let flags = status_state.0.lock().unwrap();
+    WikiStatusSnapshot {
+        ingest: flags.ingest.health.as_str().to_string(),
+        ingest_stage: flags.ingest.stage.clone(),
+        ingest_subject: flags.ingest.subject.clone(),
+        librarian: flags.librarian,
+        healing: flags.healing,
+        pruning: flags.pruning,
+        forgetting: flags.forgetting,
+        diagnostic_errors: flags.diagnostics.errors,
+        diagnostic_warnings: flags.diagnostics.warnings,
+    }
+}
+
 #[tauri::command]
 async fn run_wiki_forget(
     app: AppHandle,
@@ -4039,6 +4073,7 @@ pub fn run() {
             vault_write_note,
             vault_upsert_index_entry,
             record_wiki_diagnostic,
+            get_wiki_status,
             inference::classifier::classify,
             inference::classifier::classifier_status,
             inference::classifier::get_classifier_config,

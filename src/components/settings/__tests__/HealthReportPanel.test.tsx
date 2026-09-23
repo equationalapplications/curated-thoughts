@@ -30,7 +30,8 @@ describe('HealthReportPanel', () => {
     expect(lintSeededTiers).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: 'Run health report' }));
     expect(await screen.findByText('tier_fact')).toBeInTheDocument();
-    expect(screen.getByText('Untyped facts').nextSibling).toHaveTextContent('9');
+    // Anchored so a future '19' or '90' won't match by accident.
+    expect(screen.getByText('Untyped facts').nextSibling).toHaveTextContent(/^9$/);
     expect(screen.getByText(/e1, e2/)).toBeInTheDocument();
   });
 

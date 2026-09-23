@@ -151,6 +151,15 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
         let remaining = Infinity;
         while (remaining > 0) {
           const result = await wiki.runOntologyBackfill(entityId, { classifier: "llm" });
+          // No-progress guard: a pass that types 0 while work remains would
+          // spin forever. Surface it so the caller can roll back / retry
+          // instead of silently looping until the engine hits a timeout.
+          if (result.typed === 0 && result.remaining > 0) {
+            throw new Error(
+              `[applyOntologyChange] ontology backfill made no progress for ${entityId}: ` +
+                `typed=0, remaining=${result.remaining}`,
+            );
+          }
           remaining = result.remaining;
         }
       }
@@ -176,6 +185,16 @@ export async function applyOntologyChange(next: OntologySelection): Promise<void
           let remaining = Infinity;
           while (remaining > 0) {
             const result = await wiki.runOntologyBackfill(entityId, { classifier: "llm" });
+            // Same no-progress guard as the forward path: a rollback that
+            // types nothing while work remains means the prior manifest can
+            // not be restored either. Log and let the outer catch record the
+            // inconsistency rather than spinning forever.
+            if (result.typed === 0 && result.remaining > 0) {
+              throw new Error(
+                `[applyOntologyChange] rollback backfill made no progress for ${entityId}: ` +
+                  `typed=0, remaining=${result.remaining}`,
+              );
+            }
             remaining = result.remaining;
           }
         }
@@ -374,6 +393,14 @@ export function makeWikiOptions(
 // its own default during --onboard, so an unreadable config here means a
 // Desktop-first vault.
 let _ontologySelection: OntologySelection = 'schema-org';
+
+/**
+ * Test-only: reset the cached selection to its compiled default so suites
+ * can rely on a known starting state. Production code must not call this.
+ */
+export function __resetOntologySelectionForTests(): void {
+  _ontologySelection = 'schema-org';
+}
 
 const CLASSIFIER_OFF: ClassifierStatus = { available: false, min_confidence: 0.5 };
 let _classifier: ClassifierStatus = CLASSIFIER_OFF;

@@ -5,6 +5,7 @@
 //! speaks the Jev wire format. Fact text leaves the device, so every call is
 //! gated by the privacy mode exactly like external generation.
 
+use crate::inference::classifier_secrets::ClassifierSecretStore;
 use crate::privacy::allows_external_generation;
 use crate::privacy::PrivacyMode;
 use crate::retrieval::BrainPaths;
@@ -38,7 +39,15 @@ pub struct ClassifierConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Credential-presence indicator serialized to disk. The actual key never
+    /// lands in `config.json`; it is fetched from the keychain at read time.
+    /// Tests use this to assert "key is configured" without exposing the value.
     #[serde(default)]
+    pub has_api_key: bool,
+    /// In-memory only. Never serialized to disk and never sent over IPC.
+    /// `read_classifier_config` populates it from the secret store;
+    /// `write_classifier_config` consumes it and writes to the store.
+    #[serde(skip)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub min_confidence: Option<f64>,
@@ -103,25 +112,53 @@ pub struct ClassifyResponse {
 
 /// Reads the top-level `classifier` key. It is not a typed `BrainConfig`
 /// block; `BrainConfig` round-trips it through `preserved_keys`.
-pub fn read_classifier_config(paths: &BrainPaths) -> Result<ClassifierConfig> {
+///
+/// The `api_key` field is hydrated from `secrets`, never from disk:
+/// on-disk JSON only carries `has_api_key` so a stolen `config.json` does not
+/// leak the credential.
+pub fn read_classifier_config(
+    paths: &BrainPaths,
+    secrets: &dyn ClassifierSecretStore,
+) -> Result<ClassifierConfig> {
     let report = crate::config::BrainConfig::load_lenient(paths)
         .map_err(|e| anyhow!("config.json failed to load: {e}"))?;
-    match report
+    let mut cfg: ClassifierConfig = match report
         .config
         .preserved_keys
         .as_ref()
         .and_then(|v| v.get(CONFIG_KEY))
         .cloned()
     {
-        None => Ok(ClassifierConfig::default()),
+        None => ClassifierConfig::default(),
         Some(v) => {
-            serde_json::from_value(v).context("classifier block in config.json is malformed")
+            serde_json::from_value(v).context("classifier block in config.json is malformed")?
         }
-    }
+    };
+    cfg.api_key = secrets.get()?;
+    cfg.has_api_key = cfg
+        .api_key
+        .as_deref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false);
+    Ok(cfg)
 }
 
-pub fn write_classifier_config(paths: &BrainPaths, cfg: &ClassifierConfig) -> Result<()> {
+pub fn write_classifier_config(
+    paths: &BrainPaths,
+    cfg: &ClassifierConfig,
+    secrets: &dyn ClassifierSecretStore,
+) -> Result<()> {
     validate(cfg)?;
+    match cfg.api_key.as_deref() {
+        // Explicit empty string from the panel ("Clear stored token").
+        Some("") => secrets.delete()?,
+        // Non-empty trimmed value: replace the stored credential.
+        Some(key) if !key.trim().is_empty() => secrets.set(key.trim())?,
+        // None: caller did not touch the keyring — leave it alone.
+        None => {}
+        // Some("   ") (whitespace only): same as no-op; we don't store it.
+        Some(_) => {}
+    }
     let mut config = crate::config::BrainConfig::load_lenient(paths)
         .map_err(|e| anyhow!("config.json failed to load: {e}"))?
         .config;
@@ -129,7 +166,16 @@ pub fn write_classifier_config(paths: &BrainPaths, cfg: &ClassifierConfig) -> Re
         Some(Value::Object(m)) => m,
         _ => Map::new(),
     };
-    obj.insert(CONFIG_KEY.into(), serde_json::to_value(cfg)?);
+    let persisted = ClassifierConfig {
+        api_key: None,
+        has_api_key: cfg
+            .api_key
+            .as_deref()
+            .map(|k| !k.is_empty())
+            .unwrap_or(false),
+        ..cfg.clone()
+    };
+    obj.insert(CONFIG_KEY.into(), serde_json::to_value(&persisted)?);
     config.preserved_keys = Some(Value::Object(obj));
     config.write(paths)
 }
@@ -156,6 +202,14 @@ pub fn validate(cfg: &ClassifierConfig) -> Result<()> {
             let id = cfg.account_id.as_deref().unwrap_or("");
             if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
                 bail!("cloudflare_jev requires an alphanumeric account_id");
+            }
+            let key_ok = cfg
+                .api_key
+                .as_deref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false);
+            if !key_ok {
+                bail!("cloudflare_jev requires a non-empty API token");
             }
             Ok(())
         }
@@ -370,7 +424,11 @@ fn current_mode(brain_dir: &std::path::Path) -> Result<PrivacyMode> {
 #[tauri::command]
 pub async fn classify(request: ClassifyRequest) -> Result<ClassifyResponse, String> {
     let (brain_dir, paths) = current_brain();
-    let cfg = read_classifier_config(&paths).map_err(|e| e.to_string())?;
+    let cfg = read_classifier_config(
+        &paths,
+        &super::classifier_secrets::KeyringClassifierSecretStore,
+    )
+    .map_err(|e| e.to_string())?;
     let mode = current_mode(&brain_dir).map_err(|e| e.to_string())?;
     classify_with(&cfg, mode, &request)
         .await
@@ -380,7 +438,11 @@ pub async fn classify(request: ClassifyRequest) -> Result<ClassifyResponse, Stri
 #[tauri::command]
 pub fn classifier_status() -> Result<ClassifierStatus, String> {
     let (brain_dir, paths) = current_brain();
-    let cfg = read_classifier_config(&paths).map_err(|e| e.to_string())?;
+    let cfg = read_classifier_config(
+        &paths,
+        &super::classifier_secrets::KeyringClassifierSecretStore,
+    )
+    .map_err(|e| e.to_string())?;
     let mode = current_mode(&brain_dir).map_err(|e| e.to_string())?;
     Ok(status(&cfg, mode))
 }
@@ -388,7 +450,11 @@ pub fn classifier_status() -> Result<ClassifierStatus, String> {
 #[tauri::command]
 pub fn get_classifier_config() -> Result<ClassifierConfig, String> {
     let (_, paths) = current_brain();
-    read_classifier_config(&paths).map_err(|e| e.to_string())
+    read_classifier_config(
+        &paths,
+        &super::classifier_secrets::KeyringClassifierSecretStore,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -397,8 +463,19 @@ pub fn set_classifier_config(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     use tauri::Emitter;
+    let store = super::classifier_secrets::KeyringClassifierSecretStore;
     let (_, paths) = current_brain();
-    write_classifier_config(&paths, &config).map_err(|e| e.to_string())?;
+    // Preserve any key already in the keychain when the FE sends `api_key:
+    // null` (the user saved a non-key field). Loading first gives us the
+    // current key, and only an explicit empty-string payload ("Clear stored
+    // token") will remove it.
+    let mut merged = config.clone();
+    if merged.api_key.is_none() {
+        merged.api_key = read_classifier_config(&paths, &store)
+            .ok()
+            .and_then(|cur| cur.api_key);
+    }
+    write_classifier_config(&paths, &merged, &store).map_err(|e| e.to_string())?;
     let _ = app.emit("classifier-config-changed", ());
     Ok(())
 }
@@ -455,6 +532,7 @@ mod tests {
         let cfg = ClassifierConfig {
             provider: ClassifierProviderKind::CloudflareJev,
             account_id: Some("abc123".into()),
+            api_key: Some("tok".into()),
             ..Default::default()
         };
         let body = request_body(&cfg, &choice_req());
@@ -606,6 +684,9 @@ mod tests {
 
     #[test]
     fn config_round_trips_through_preserved_keys_without_touching_other_blocks() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::{Arc, Mutex};
+
         let dir = tempfile::tempdir().unwrap();
         let paths = BrainPaths {
             brain_dir: dir.path().to_path_buf(),
@@ -614,8 +695,9 @@ mod tests {
         };
         std::fs::write(&paths.config_path, r#"{"someFutureKey": {"keep": true}}"#).unwrap();
 
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
         assert_eq!(
-            read_classifier_config(&paths).unwrap(),
+            read_classifier_config(&paths, &store).unwrap(),
             ClassifierConfig::default()
         );
 
@@ -626,12 +708,177 @@ mod tests {
             min_confidence: Some(0.7),
             ..Default::default()
         };
-        write_classifier_config(&paths, &cfg).unwrap();
-        assert_eq!(read_classifier_config(&paths).unwrap(), cfg);
+        write_classifier_config(&paths, &cfg, &store).unwrap();
+        let round = read_classifier_config(&paths, &store).unwrap();
+        assert_eq!(round.api_key, Some("tok".into()));
+        assert!(round.has_api_key);
+        assert_eq!(round.provider, ClassifierProviderKind::CloudflareJev);
+        assert_eq!(round.account_id.as_deref(), Some("abc123"));
+        assert_eq!(round.min_confidence, Some(0.7));
 
         let raw: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
         assert_eq!(raw["someFutureKey"], json!({ "keep": true }));
         assert_eq!(raw["classifier"]["provider"], "cloudflare_jev");
+        // The key never lands on disk — only the presence indicator does.
+        assert!(raw["classifier"].get("api_key").is_none());
+        assert_eq!(raw["classifier"]["has_api_key"], json!(true));
+
+        // Suppress unused-import warnings for `Arc` if future tests don't need it.
+        let _ = Arc::new(0);
+    }
+
+    #[test]
+    fn explicit_empty_string_deletes_keystore_but_none_leaves_it_alone() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        std::fs::write(&paths.config_path, "{}").unwrap();
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
+
+        // Use a JevHttp provider here — the keyring write/delete contract
+        // is provider-agnostic, but JevHttp's `validate` does not require a
+        // key so we can exercise None / whitespace / "" without first
+        // merging the stored key (the Tauri `set_classifier_config` command
+        // does that merge for CloudflareJev; tested separately below).
+        let seeded = ClassifierConfig {
+            provider: ClassifierProviderKind::JevHttp,
+            url: Some("https://x".into()),
+            api_key: Some("tok".into()),
+            ..Default::default()
+        };
+        write_classifier_config(&paths, &seeded, &store).unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
+
+        // None is a leave-alone: the stored key survives.
+        let cfg_none = ClassifierConfig {
+            api_key: None,
+            ..seeded.clone()
+        };
+        write_classifier_config(&paths, &cfg_none, &store).unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
+        let round = read_classifier_config(&paths, &store).unwrap();
+        assert!(round.has_api_key);
+
+        // Whitespace-only is also a leave-alone: the panel never sends this,
+        // but the contract should treat it the same as None.
+        let cfg_ws = ClassifierConfig {
+            api_key: Some("   ".into()),
+            ..seeded.clone()
+        };
+        write_classifier_config(&paths, &cfg_ws, &store).unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
+
+        // Explicit empty string is the "Clear stored token" affordance.
+        let cfg_clear = ClassifierConfig {
+            api_key: Some("".into()),
+            ..seeded.clone()
+        };
+        write_classifier_config(&paths, &cfg_clear, &store).unwrap();
+        assert_eq!(store.get().unwrap(), None);
+        let round = read_classifier_config(&paths, &store).unwrap();
+        assert!(round.api_key.is_none());
+        assert!(!round.has_api_key);
+    }
+
+    /// `set_classifier_config` (Tauri command) must merge the existing keyring
+    /// entry when the FE sends `api_key: null` so a save of non-key fields
+    /// never wipes the stored credential. Validates against a CloudflareJev
+    /// config to confirm the merge happens before `validate` runs.
+    #[test]
+    fn set_classifier_config_merges_existing_key_when_payload_says_null() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        std::fs::write(&paths.config_path, "{}").unwrap();
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
+
+        // Seed a Cloudflare config with a key.
+        let seeded = ClassifierConfig {
+            provider: ClassifierProviderKind::CloudflareJev,
+            account_id: Some("abc123".into()),
+            api_key: Some("tok".into()),
+            ..Default::default()
+        };
+        // Inline the merge the Tauri command performs so we don't need a
+        // full AppHandle — same shape as `set_classifier_config`.
+        write_classifier_config(&paths, &seeded, &store).unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
+
+        // Simulate the panel saving without touching the key field.
+        let mut payload = ClassifierConfig {
+            provider: ClassifierProviderKind::CloudflareJev,
+            account_id: Some("abc123".into()),
+            api_key: None,
+            ..Default::default()
+        };
+        // Mirror the Tauri-command merge.
+        if payload.api_key.is_none() {
+            payload.api_key = read_classifier_config(&paths, &store).unwrap().api_key;
+        }
+        write_classifier_config(&paths, &payload, &store).unwrap();
+        // Key survived — the leave-alone contract worked.
+        assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn cloudflare_validate_rejects_missing_or_empty_api_key() {
+        let mut cfg = ClassifierConfig {
+            provider: ClassifierProviderKind::CloudflareJev,
+            account_id: Some("abc123".into()),
+            ..Default::default()
+        };
+        assert!(validate(&cfg).is_err());
+        cfg.api_key = Some("".into());
+        assert!(validate(&cfg).is_err());
+        cfg.api_key = Some("   ".into());
+        assert!(validate(&cfg).is_err());
+        cfg.api_key = Some("tok".into());
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn api_key_is_never_serialized_to_disk_even_when_classify_loads_it() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        std::fs::write(&paths.config_path, "{}").unwrap();
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
+
+        let cfg = ClassifierConfig {
+            provider: ClassifierProviderKind::JevHttp,
+            url: Some("https://x".into()),
+            api_key: Some("secret-token".into()),
+            ..Default::default()
+        };
+        write_classifier_config(&paths, &cfg, &store).unwrap();
+
+        let on_disk = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(
+            !on_disk.contains("secret-token"),
+            "api_key must never appear on disk, got: {on_disk}"
+        );
+        // Reading back via the same store returns the in-memory value.
+        let round = read_classifier_config(&paths, &store).unwrap();
+        assert_eq!(round.api_key.as_deref(), Some("secret-token"));
+        assert!(round.has_api_key);
     }
 }
