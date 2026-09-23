@@ -31,7 +31,7 @@ export function OkfInteropBar({ onImported }: Props) {
     setNotice(null);
     const dest = await save({
       defaultPath: "brain-okf.zip",
-      filters: [{ name: "OKF bundle", extensions: ["zip"] }],
+      filters: [{ name: "OKF bundle", extensions: ["zip", "okf"] }],
     });
     if (!dest) return;
     setBusy(true);
@@ -49,7 +49,7 @@ export function OkfInteropBar({ onImported }: Props) {
     setNotice(null);
     const src = await open({
       multiple: false,
-      filters: [{ name: "OKF bundle", extensions: ["zip"] }],
+      filters: [{ name: "OKF bundle", extensions: ["zip", "okf"] }],
     });
     if (typeof src !== "string") return;
     setBusy(true);
