@@ -1,7 +1,7 @@
 # README Refresh — Design Spec
 
 **Date:** 2026-09-23
-**Status:** Approved — rev 2.4 (2026-09-23)
+**Status:** Implemented (PR #224) — rev 2.5 (2026-09-23)
 **Type:** Docs-only
 **PR:** #224 (`docs/readme-refresh-2026-09`; carries spec + implementation)
 
@@ -90,7 +90,7 @@ executed; "Read" means the claim was checked in source.
 | I30 | Rust tracks the rolling `stable` channel; `rust-toolchain.toml` only adds clippy and rustfmt | `rust-toolchain.toml` | Read |
 | I31 | Release bundles for macOS (universal), Linux and Windows are published on the Releases page on `v*` tags (not drafts) | `.github/workflows/build.yml:19-26,142-152`; README badges | Read |
 | I32 | The vault pipeline embeds via the configured `EmbedProfile` — default `Local` is a local Ollama model (`nomic-embed-code`) called over `POST {base}/api/embed`; `External` is OpenAI-compatible. Fastembed (MiniLM-L6-V2) is only the UI-side embedder (setup wizard `init_fastembed` / `embed_text` for wiki `llmProvider.embed`) | `src-tauri/src/embedder/mod.rs:163-169,197-204,214`; `src-tauri/src/embedder/ollama.rs:219-232`; `src-tauri/src/lib.rs:2560-2582`; `ct search` stderr: "defaulting to Local { model: \"nomic-embed-code\" }" then Ollama connection refused | Ran/Read |
-| I33 | Vault layout v2: `immutable-source-files/` (plus the `immutable-source-files/agents/` deposit) and a writable `wiki/`; a v1 vault's `documents/` folder is migrated on startup/switch (migration blocks only if both exist); the watcher/reconcile documents root is `<vault>/immutable-source-files/`; write operations are restricted to `wiki/` and the agents deposit | `src-tauri/src/vault/safe_path.rs:33-41`; `src-tauri/src/vault/layout.rs:13-27`; `src-tauri/src/lib.rs:1151-1152,1558`; `src-tauri/src/vault/config.rs` (`migrate_vault`) | Read |
+| I33 | Vault layout v2: `immutable-source-files/` (plus the `immutable-source-files/agents/` deposit) and a writable `wiki/`; a v1 vault's `documents/` folder is migrated on startup/switch (migration blocks only if both exist); the watcher/reconcile documents root is `<vault>/immutable-source-files/`; write operations are restricted to `wiki/` and the agents deposit | `src-tauri/src/vault/safe_path.rs:33-45`; `src-tauri/src/vault/layout.rs:13-27`; `src-tauri/src/lib.rs:1151-1152,1558`; `src-tauri/src/vault/config.rs` (`migrate_vault`); `src-tauri/src/okf/write.rs:228` | Read |
 | I34 | Wiki notes are real OKF `.md` files under `<vault>/wiki/`, written through the If-Match write path (strict frontmatter fence, `updated_at` staleness token); there is no automatic SQLite→`.md` export | `src-tauri/src/okf/write.rs:35-90,100-110`; `src-tauri/tests/mcp_integration.rs` write roundtrip asserts sha256 matches disk bytes (ran green in the Task-1 pass) | Ran/Read |
 | I35 | The vault's `.brain/` folder holds runtime state — `errors.log`, `.brain/proposed` staging, `brain.db.bak` backups — and is excluded from the ingest walk/watcher (`BRAIN_DIR_NAME` + symlink-out guard) | `src-tauri/src/pipeline/mod.rs:449-453`; `src-tauri/src/vault/safe_path.rs:40-41`; `src/hooks/useVaultSwitcher.ts:14-18`; `src-tauri/src/walk_vault.rs:22,75-97` | Read |
 | I36 | The brain is per-vault (#213): switching offers a backup of index + knowledge base, then requires explicit confirmation that continuing without one permanently deletes the knowledge base | `src/hooks/useVaultSwitcher.ts:50-90`; `src-tauri/src/lib.rs:1510` (`switch_vault`) | Read |
@@ -227,3 +227,11 @@ review-fix commits stay in `main`'s history (this repo's standing rule).
   supported formats, BYOI wiring, and the skip-unchanged reindex rationale).
   Phase 2 rows affected: "Offline-first | Keep as-is" is superseded for the
   one sentence above.
+- **rev 2.5**: acceptance criteria verified at the PR tip — every command block executed
+  per criterion 2 (evidence: task report in the SDD workspace at push time; tools/list
+  16/7 exact, frontend 83 files/524 tests, integration 4/4, I9 failure reproduced then
+  restored). Criterion-1 audit outcome: 7 distinct README claim corrections (the rev 2.4
+  entry and its commit message said "four" — that undercounted; the six changed lines in
+  `2dd9d54` plus the task-review fix in `29e9fa5` cover seven distinct claims). One
+  task-review fix: the immutable-vault bullet now names the agent-deposit carve-out
+  (`immutable-source-files/agents/`) per `safe_path.rs`. Status → Implemented (PR #224).
