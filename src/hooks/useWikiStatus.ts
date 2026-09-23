@@ -81,6 +81,14 @@ export function useWikiStatus(): WikiStatus {
   useEffect(() => {
     let cleanup: (() => void) | null = null;
     let cancelled = false;
+    // Race sentinel: if a `wiki-status-change` event applies before the
+    // `getWikiStatus()` snapshot resolves, drop the snapshot so it cannot
+    // overwrite newer event state (CodeRabbit review PRRT_kwDOSVmXas6k-qeG).
+    // `latestEventRev` advances on every applied event; `snapshotRev` is
+    // captured at the moment the snapshot resolves. The snapshot only
+    // applies when no event has arrived in between.
+    let latestEventRev = 0;
+    let snapshotRev = 0;
 
     const normalizePayload = (
       payload: WikiStatusEventPayload,
@@ -113,6 +121,11 @@ export function useWikiStatus(): WikiStatus {
     getWikiStatus()
       .then((snapshot) => {
         if (cancelled) return;
+        // Mark the snapshot's arrival moment. If any event was already
+        // applied (`latestEventRev > 0`), the snapshot is older than the
+        // event state — drop it to avoid rolling the UI backwards.
+        if (latestEventRev > snapshotRev) return;
+        snapshotRev = latestEventRev;
         applyPayload({
           ingest: snapshot.ingest,
           ingestStage: snapshot.ingestStage ?? null,
@@ -133,6 +146,9 @@ export function useWikiStatus(): WikiStatus {
 
     subscribeEntityStatus((e) => {
       if (cancelled) return;
+      // An event has been observed; mark it so any later-arriving snapshot
+      // is recognized as stale and dropped by the check above.
+      latestEventRev += 1;
       setStatus((prev) => {
         const normalized = normalizePayload(e.payload);
         // Use explicit undefined checks so a `null` from the backend

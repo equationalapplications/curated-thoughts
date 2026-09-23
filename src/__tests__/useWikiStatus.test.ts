@@ -1,9 +1,10 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import type { WikiStatusEventPayload } from '../lib/tauri';
+import type { WikiStatusEventPayload, WikiStatusPayload } from '../lib/tauri';
 
 type EventCallback = (e: { payload: WikiStatusEventPayload }) => void;
 let capturedCallback: EventCallback | null = null;
+let pendingSnapshot: { resolve?: (v: WikiStatusPayload) => void } = {};
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockImplementation(
@@ -14,11 +15,24 @@ vi.mock('@tauri-apps/api/event', () => ({
   ),
 }));
 
+vi.mock('../lib/tauri', () => ({
+  subscribeEntityStatus: vi.fn().mockImplementation(
+    (cb: EventCallback) => {
+      capturedCallback = cb;
+      return Promise.resolve(() => { capturedCallback = null; });
+    },
+  ),
+  getWikiStatus: vi.fn().mockImplementation(
+    () => new Promise<WikiStatusPayload>((resolve) => { pendingSnapshot.resolve = resolve; }),
+  ),
+}));
+
 import { useWikiStatus } from '../hooks/useWikiStatus';
 
 describe('useWikiStatus', () => {
   beforeEach(() => {
     capturedCallback = null;
+    pendingSnapshot = {};
     vi.clearAllMocks();
   });
 
@@ -215,5 +229,70 @@ describe('useWikiStatus', () => {
       capturedCallback?.({ payload: { librarian: true } });
     });
     expect(result.current.diagnosticErrors).toBe(2);
+  });
+
+  it('does not let a late getWikiStatus snapshot overwrite newer event state', async () => {
+    // Race: event arrives while the snapshot RPC is still in flight.
+    // The hook must keep the event's state and ignore the snapshot, since
+    // the snapshot was captured before the event was emitted (CodeRabbit
+    // review PRRT_kwDOSVmXas6k-qeG).
+    const { result } = renderHook(() => useWikiStatus());
+
+    // Event wins first.
+    await act(async () => {
+      capturedCallback?.({
+        payload: {
+          ingest: 'working',
+          ingestStage: 'Embedding',
+          ingestSubject: '/note.md',
+          librarian: false,
+          healing: false,
+          pruning: false,
+          forgetting: false,
+          diagnosticErrors: 4,
+          diagnosticWarnings: 1,
+        },
+      });
+    });
+    expect(result.current.ingest).toBe('working');
+    expect(result.current.diagnosticErrors).toBe(4);
+
+    // Now resolve the snapshot with OLDER counters — must be ignored.
+    await act(async () => {
+      pendingSnapshot.resolve?.({
+        ingest: 'idle',
+        ingestStage: null,
+        ingestSubject: null,
+        librarian: false,
+        healing: false,
+        pruning: false,
+        forgetting: false,
+        diagnosticErrors: 0,
+        diagnosticWarnings: 0,
+      });
+    });
+    // Event state preserved.
+    expect(result.current.ingest).toBe('working');
+    expect(result.current.diagnosticErrors).toBe(4);
+  });
+
+  it('applies the getWikiStatus snapshot when no event has fired yet', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      pendingSnapshot.resolve?.({
+        ingest: 'degraded',
+        ingestStage: null,
+        ingestSubject: null,
+        librarian: true,
+        healing: false,
+        pruning: false,
+        forgetting: false,
+        diagnosticErrors: 7,
+        diagnosticWarnings: 3,
+      });
+    });
+    expect(result.current.ingest).toBe('degraded');
+    expect(result.current.librarian).toBe(true);
+    expect(result.current.diagnosticErrors).toBe(7);
   });
 });
