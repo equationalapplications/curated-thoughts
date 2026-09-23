@@ -1,7 +1,7 @@
 # README Refresh — Design Spec
 
 **Date:** 2026-09-23
-**Status:** Approved — rev 2.3 (2026-09-23)
+**Status:** Approved — rev 2.4 (2026-09-23)
 **Type:** Docs-only
 **PR:** #224 (`docs/readme-refresh-2026-09`; carries spec + implementation)
 
@@ -52,7 +52,8 @@ to newcomers and contributors.
 ## Phase 1 — Inventory (verification gate) — DONE
 
 Rows I1–I23 were verified at base commit `05c0b2d`; rows I24–I31 were added
-and verified during PR review. "Ran" means the command or binary was
+and verified during PR review; rows I32–I39 were added during the Task-1
+execution pass at the PR tip (`4b73545`). "Ran" means the command or binary was
 executed; "Read" means the claim was checked in source.
 
 | # | Claim / fact | Evidence | How |
@@ -88,6 +89,14 @@ executed; "Read" means the claim was checked in source.
 | I29 | `ct watch --json --once` prints `start` / `shutdown` JSON lines on stdout; `--once-timeout` defaults to 60s | run against a scratch brain + vault; `ct watch --help` | Ran |
 | I30 | Rust tracks the rolling `stable` channel; `rust-toolchain.toml` only adds clippy and rustfmt | `rust-toolchain.toml` | Read |
 | I31 | Release bundles for macOS (universal), Linux and Windows are published on the Releases page on `v*` tags (not drafts) | `.github/workflows/build.yml:19-26,142-152`; README badges | Read |
+| I32 | The vault pipeline embeds via the configured `EmbedProfile` — default `Local` is a local Ollama model (`nomic-embed-code`) called over `POST {base}/api/embed`; `External` is OpenAI-compatible. Fastembed (MiniLM-L6-V2) is only the UI-side embedder (setup wizard `init_fastembed` / `embed_text` for wiki `llmProvider.embed`) | `src-tauri/src/embedder/mod.rs:163-169,197-204,214`; `src-tauri/src/embedder/ollama.rs:219-232`; `src-tauri/src/lib.rs:2560-2582`; `ct search` stderr: "defaulting to Local { model: \"nomic-embed-code\" }" then Ollama connection refused | Ran/Read |
+| I33 | Vault layout v2: `immutable-source-files/` (plus the `immutable-source-files/agents/` deposit) and a writable `wiki/`; a v1 vault's `documents/` folder is migrated on startup/switch (migration blocks only if both exist); the watcher/reconcile documents root is `<vault>/immutable-source-files/`; write operations are restricted to `wiki/` and the agents deposit | `src-tauri/src/vault/safe_path.rs:33-41`; `src-tauri/src/vault/layout.rs:13-27`; `src-tauri/src/lib.rs:1151-1152,1558`; `src-tauri/src/vault/config.rs` (`migrate_vault`) | Read |
+| I34 | Wiki notes are real OKF `.md` files under `<vault>/wiki/`, written through the If-Match write path (strict frontmatter fence, `updated_at` staleness token); there is no automatic SQLite→`.md` export | `src-tauri/src/okf/write.rs:35-90,100-110`; `src-tauri/tests/mcp_integration.rs` write roundtrip asserts sha256 matches disk bytes (ran green in the Task-1 pass) | Ran/Read |
+| I35 | The vault's `.brain/` folder holds runtime state — `errors.log`, `.brain/proposed` staging, `brain.db.bak` backups — and is excluded from the ingest walk/watcher (`BRAIN_DIR_NAME` + symlink-out guard) | `src-tauri/src/pipeline/mod.rs:449-453`; `src-tauri/src/vault/safe_path.rs:40-41`; `src/hooks/useVaultSwitcher.ts:14-18`; `src-tauri/src/walk_vault.rs:22,75-97` | Read |
+| I36 | The brain is per-vault (#213): switching offers a backup of index + knowledge base, then requires explicit confirmation that continuing without one permanently deletes the knowledge base | `src/hooks/useVaultSwitcher.ts:50-90`; `src-tauri/src/lib.rs:1510` (`switch_vault`) | Read |
+| I37 | The ingest watcher accepts PDF (`pdf_extract`), DOCX (zip/XML), and plain-text formats read directly (`.md`) | `src-tauri/src/pipeline/mod.rs:371-389` | Read |
+| I38 | BYOI wiring: generation is a sidecar model or an external OpenAI-compatible endpoint; the app exposes `generate_text` (and `embed_text`) as Tauri commands; the frontend runs the wiki logic on `@equationalapplications/react-llm-wiki` | `src-tauri/src/onboard/mod.rs:96-115`; `src-tauri/src/lib.rs:43,3994`; `package.json:48` | Read |
+| I39 | The ingest pipeline skips re-chunking when a document's content hash is unchanged (`force` re-runs); `bulk_reindex` exists to re-chunk/re-embed every indexed `user_doc` after chunk-strategy or embedding-model upgrades without mutating files on disk | `src-tauri/src/pipeline/mod.rs:31`; `tools/src/bin/bulk_reindex.rs:1-3` | Read |
 
 ## Phase 2 — README revision
 
@@ -201,3 +210,20 @@ review-fix commits stay in `main`'s history (this repo's standing rule).
   "MCP decide" are spelled out in Phase 2, and the revision-log hashes are
   resolved. One README addition: a Getting-started pointer to Releases with
   the first-run loop, backed by I31 and a new Phase 2 row.
+- **rev 2.4** (Task-1 verification pass at `4b73545`): acceptance-criterion 2
+  executed at the tip — the I9 fresh-clone failure reproduced verbatim and
+  the build proceeding after the placeholder was restored; both `tools/list`
+  sets re-verified (16 and 7, exact match); `bulk_reindex --dry-run` stopped
+  at the V22 vault-root guard as documented; frontend gates 83 files / 524
+  tests; integration tests 4/4. The criterion-1 audit found four claims with
+  no inventory row (two of them contradicted by the code): the watcher
+  "embeds with Fastembed" (actually the `EmbedProfile`, default local
+  Ollama), "exportable as true `.md` files" (notes are written, not
+  exported), the `documents/` vault-folder name (v2 layout renames it to
+  `immutable-source-files/`), and Offline-first's unconditional
+  "strictly on your machine". The README fixes those four spots, and rows
+  I32–I39 were added with evidence (embedding profiles, v2 vault layout,
+  OKF note writes, vault `.brain/` contents, the per-vault switch flow,
+  supported formats, BYOI wiring, and the skip-unchanged reindex rationale).
+  Phase 2 rows affected: "Offline-first | Keep as-is" is superseded for the
+  one sentence above.
