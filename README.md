@@ -21,8 +21,8 @@ Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/kar
 Curated Thoughts models AI memory biologically, moving information from raw input to crystallized knowledge:
 
 1. **Working Memory (The Context):** The active UI state, conversation history, and current focus window. Fast, highly relevant, but volatile.
-2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop supported files into the vault, the watcher chunks them and embeds them locally with Fastembed into `brain.db` (SQLite) in your brain directory. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
-3. **Semantic Memory (The LLM Wiki):** The long-term truth. The system actively condenses raw facts into a curated, interlinked web of concepts and entities. This acts as a semantic wiki stored natively in SQLite (exportable as true `.md` files), allowing the LLM to naturally read, link, and traverse relationships.
+2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop supported files into the vault, the watcher chunks them and embeds them with your configured embedding profile — a local Ollama model by default — into `brain.db` (SQLite) in your brain directory. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
+3. **Semantic Memory (The LLM Wiki):** The long-term truth. The system actively condenses raw facts into a curated, interlinked web of concepts and entities. This acts as a semantic wiki stored natively in SQLite, with wiki notes readable and writable as real `.md` files in your vault's `wiki/` folder, allowing the LLM to naturally read, link, and traverse relationships.
 
 Nothing reaches the long-term wiki without passing the **human-verification gate**: the librarian's wiki proposals land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)).
 
@@ -32,9 +32,9 @@ Nothing reaches the long-term wiki without passing the **human-verification gate
 
 The app strictly separates your source material from the generated AI memory, managed entirely by a background Rust engine called the **Active Librarian**.
 
-- **`documents/` (The Immutable Vault):** Your source of truth. The local file watcher monitors this directory for PDFs, DOCX, and MD files. The UI never writes to this folder.
+- **`immutable-source-files/` (The Immutable Vault):** Your source of truth. The local file watcher monitors this folder for PDFs, DOCX, and MD files. The app never writes here — its write tools are restricted to the writable `wiki/` folder, where wiki notes live as `.md` files. (A vault from the older layout still has `documents/`; it is migrated to `immutable-source-files/` on first run.)
 - **The Review Queue (Human-in-the-Loop):** The Active Librarian synthesizes new episodic data and proposes interconnected wiki pages. Nothing is committed to long-term memory until you approve, edit, or reject it — in the Review desk, headlessly with `ct proposals review` / `ct approve`, or through the MCP `curated_proposal_decide` tool. When a source document is deleted, each proposal built from it records which sources were deleted, and the Review desk marks those deleted and stranded sources.
-- **`.brain/` (The Mutable State):** The namespace-safe local storage containing the SQLite databases. This houses the embedded chunk rows (Episodic) and the generated Markdown wiki pages (Semantic), alongside your configuration files. The vault walker and file watcher never ingest a `.brain/` directory. Backup and restore are crash-safe: a restore captures the knowledge replica's obligations before overwriting `brain.db` and re-syncs the replica afterward.
+- **`.brain/` (The Mutable State):** The knowledge base itself lives in `brain.db` (SQLite) in your brain home — `~/.brain` unless `CURATED_BRAIN_DIR` is set — alongside your `config.json`. The vault's own `.brain/` folder holds runtime state: the ingest error log, pending-proposal staging, and `brain.db` backups. The vault walker and file watcher never ingest a `.brain/` directory. Backup and restore are crash-safe: a restore captures the knowledge replica's obligations before overwriting `brain.db` and re-syncs the replica afterward.
 
 The repo is a single Cargo workspace with two packages: `curated-thoughts` in `src-tauri/` (the desktop app, whose binary doubles as the full MCP server) and `curated-thoughts-tools` in `tools/` (the `ct` headless CLI and helper binaries), sharing the same database layer.
 
@@ -63,13 +63,13 @@ Proposals are gated, not automatic. Approve or reject wiki changes from the UI R
 
 ### Backup, Restore & Vault Switching
 - **Restore is crash-safe.** The knowledge replica's pending changes are captured before `brain.db` is replaced and re-synced afterward; if the app is interrupted mid-restore, it finishes or rolls back the install on the next launch.
-- **Switching vaults discards the wiki built from the current vault**, since that wiki only makes sense against its source vault. The app asks for confirmation first.
+- **Switching vaults discards the knowledge layer built from the current vault** — the wiki, agent memories, and manual edits are per-vault. The app offers to back the current brain up first, and asks for explicit confirmation before a switch that would destroy it.
 
 ### Unified MCP Agent Server
 Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide brain. The app binary doubles as a standard **stdio Model Context Protocol (MCP) server** (`--mcp`). Hook it into any MCP-compliant client — Claude Desktop, Cursor, or your IDE's agent — and the agent sees your vault as native tools: read tools for recall, search and graph traversal, plus write tools for vault notes, agent wisdom entries and proposal decisions. A separate read-only server can be built for development (see [MCP Agent Server](#-mcp-agent-server)).
 
 ### Offline-First & Privacy Native
-All parsing, chunking, local embeddings (Fastembed), and SQLite metadata operations happen strictly on your machine.
+Parsing, chunking, and SQLite storage run entirely on your machine, and so do embeddings by default: the vault pipeline embeds with a local Ollama model, and the UI initializes a local Fastembed model for wiki-side embeddings. External endpoints are used only where you configure them (see [BYOI](#bring-your-own-inference-byoi)).
 
 ### Cross-Partition Wiki Graph
 An agent walking the wiki graph isn't confined to one namespace. `wiki_traverse_graph` with an `entityId` keeps the walk in that namespace; without one, it ranks namespaces by matching-edge count, walks the top eight, and tells you when it cut more.
