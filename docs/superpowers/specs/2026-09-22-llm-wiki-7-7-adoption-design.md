@@ -1,7 +1,7 @@
 # core-llm-wiki 7.7.4 adoption and pattern integration
 
 **Date:** 2026-09-22
-**Status:** rev 2 — approved rev 1 + §5.3 classifier-use-site fix (2026-09-22)
+**Status:** Implemented on `feat/llm-wiki-7-7-adoption` (rev 2) — pending PR review
 **Branch:** `feat/llm-wiki-7-7-adoption` (spec + plan + implementation ride one branch and one PR)
 **Upstream:** expo-llm-wiki `v7.7.4` (`4ea9924`); upstream design for grounding/diagnostics/classifier: `docs/superpowers/specs/2026-09-21-grounding-diagnostics-classifier-design.md`
 
