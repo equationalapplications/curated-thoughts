@@ -75,17 +75,14 @@ describe('ClassifierPanel', () => {
   });
 
   it('disables controls until the initial getClassifierConfig resolves', async () => {
-    let resolveConfig: ((v: Cfg) => void) | null = null;
+    const deferred: { resolve?: (cfg: { provider: 'unconfigured' }) => void } = {};
     getClassifierConfig.mockImplementationOnce(
-      () =>
-        new Promise<Cfg>((resolve) => {
-          resolveConfig = resolve;
-        }),
+      () => new Promise<{ provider: 'unconfigured' }>((resolve) => { deferred.resolve = resolve; }),
     );
     render(<ClassifierPanel />);
     const providerSelect = screen.getByLabelText('Classifier provider');
     expect(providerSelect).toBeDisabled();
-    resolveConfig?.({ provider: 'unconfigured' });
+    deferred.resolve?.({ provider: 'unconfigured' });
     await waitFor(() => expect(providerSelect).not.toBeDisabled());
   });
 
