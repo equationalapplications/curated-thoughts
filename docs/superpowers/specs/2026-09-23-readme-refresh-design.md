@@ -79,6 +79,12 @@ executed; "Read" means the claim was checked in source.
 | I22 | `mcp_integration` tests return early (pass, 0.00s) unless `CURATED_MCP_INTEGRATION_TESTS=1`; with it set, 4/4 pass in 4.7s | `src-tauri/tests/mcp_integration.rs:5,151-154` | Ran |
 | I23 | `bulk_reindex -- --dry-run` parses and opens the brain; on a synthetic empty brain it stops at the V22 vault-root guard (expected), so a full run needs a real configured brain | run output | Ran |
 | I24 | Release-sidecar notes carried over from the prior README: the sidecar name must differ from the package name (Tauri rule), tracing goes to stderr with protocol traffic on stdout, and on Windows the console stays attached in `--mcp` mode, so an agent-spawned sidecar can flash a console window | `5eab8fa` (PR #67: "tauri forbids sidecar = package name"); `src-tauri/src/mcp_server.rs:311-314`; `src-tauri/src/main.rs:1-3,23` (console hidden only in GUI mode) | Read |
+| I25 | Draft promotion is a direct user action, not a proposal: it records reviewer `human:local` (trust tier `human-reviewed`) and pushes an outbox row in one transaction | `src-tauri/src/db/drafts.rs:1-15` | Read |
+| I26 | The health report is read-only and counts dangling edges, manifest violations, untyped facts, drafts and unverified inferred facts | `src/components/settings/HealthReportPanel.tsx:5-16` | Read |
+| I27 | Restore recovery: an install marker plus the staged file let the next launch tell a finished install from one that never happened; the outgoing WAL is kept for rollback | `src-tauri/src/db/restore_sync.rs:1-30` | Read |
+| I28 | Deleted-source provenance is stored per proposal (`curated_proposal_deleted_sources`), and the Review desk marks deleted and stranded sources | `src-tauri/src/db/schema.rs:474-480`; CHANGELOG 2.11.0 (`ed35698`) | Read |
+| I29 | `ct watch --json --once` prints `start` / `shutdown` JSON lines on stdout; `--once-timeout` defaults to 60s | run against a scratch brain + vault; `ct watch --help` | Ran |
+| I30 | Rust tracks the rolling `stable` channel; `rust-toolchain.toml` only adds clippy and rustfmt | `rust-toolchain.toml` | Read |
 
 ## Phase 2 — README revision
 
@@ -176,3 +182,10 @@ review-fix commits stay in `main`'s history (this repo's standing rule).
   I11/I17 corrections from CodeRabbit, the `--vault` and flaky-test
   follow-ups, the Phase 2 row for the Cross-Partition Wiki Graph subsection,
   the reason for the merge style, and this log.
+- **rev 2.2**: README wording pass from a readability review (bullets,
+  concrete UI locations, the error you see if you skip the placeholder
+  step). Several suggested phrasings added claims the code doesn't support
+  (drafts going through the proposal gate, a "default" classifier, deleted
+  documents' chunks staying traceable, an auto-installed pinned toolchain).
+  Those were corrected against the code, and the claims that remain are
+  backed by new rows I25-I30.

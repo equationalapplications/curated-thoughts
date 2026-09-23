@@ -19,10 +19,10 @@ Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/kar
 Curated Thoughts models AI memory biologically, moving information from raw input to crystallized knowledge:
 
 1. **Working Memory (The Context):** The active UI state, conversation history, and current focus window. Fast, highly relevant, but volatile.
-2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop files into the vault, they are immediately chunked and embedded via local Fastembed into SQLite. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
+2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop supported files into the vault, the watcher chunks them and embeds them locally with Fastembed into `brain.db` (SQLite) in your brain directory. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
 3. **Semantic Memory (The LLM Wiki):** The long-term truth. The system actively condenses raw facts into a curated, interlinked web of concepts and entities. This acts as a semantic wiki stored natively in SQLite (exportable as true `.md` files), allowing the LLM to naturally read, link, and traverse relationships.
 
-Nothing reaches the long-term wiki without passing the **human-verification gate**: the librarian's wiki proposals land in a review queue, and only your explicit approval commits them (see [Key Features](#-key-features)).
+Nothing reaches the long-term wiki without passing the **human-verification gate**: the librarian's wiki proposals land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)).
 
 ---
 
@@ -31,7 +31,7 @@ Nothing reaches the long-term wiki without passing the **human-verification gate
 The app strictly separates your source material from the generated AI memory, managed entirely by a background Rust engine called the **Active Librarian**.
 
 - **`documents/` (The Immutable Vault):** Your source of truth. The local file watcher monitors this directory for PDFs, DOCX, and MD files. The UI never writes to this folder.
-- **The Review Queue (Human-in-the-Loop):** The Active Librarian synthesizes new episodic data and proposes interconnected wiki pages. Humans must approve or edit these proposals before they are committed to long-term memory — from the Review desk in the UI, the `ct proposals review` CLI, or the MCP proposal tools. When a source document is deleted, its provenance is recorded so pending and committed wiki content stays traceable to (or is marked stranded from) what it was built from.
+- **The Review Queue (Human-in-the-Loop):** The Active Librarian synthesizes new episodic data and proposes interconnected wiki pages. Nothing is committed to long-term memory until you approve, edit, or reject it — in the Review desk, headlessly with `ct proposals review` / `ct approve`, or through the MCP `curated_proposal_decide` tool. When a source document is deleted, each proposal built from it records which sources were deleted, and the Review desk marks those deleted and stranded sources.
 - **`.brain/` (The Mutable State):** The namespace-safe local storage containing the SQLite databases. This houses the embedded chunk rows (Episodic) and the generated Markdown wiki pages (Semantic), alongside your configuration files. The vault walker and file watcher never ingest a `.brain/` directory. Backup and restore are crash-safe: a restore captures the knowledge replica's obligations before overwriting `brain.db` and re-syncs the replica afterward.
 
 The repo is a single Cargo workspace with two packages: `curated-thoughts` in `src-tauri/` (the desktop app, whose binary doubles as the full MCP server) and `curated-thoughts-tools` in `tools/` (the `ct` headless CLI and helper binaries), sharing the same database layer.
@@ -41,25 +41,36 @@ The repo is a single Cargo workspace with two packages: `curated-thoughts` in `s
 ## ⚡ Key Features
 
 ### Bring Your Own Inference (BYOI)
-The memory system seamlessly routes generation to your preferred engine. Spin up a local sidecar (like Ollama/Llama) for full offline privacy, or connect to external OpenAI-compatible APIs for heavy lifting. The frontend handles the wiki logic while the app supplies the `generateText` function. An optional Jev classifier (Cloudflare Workers AI or any Jev-compatible endpoint) can type facts faster and more cheaply than your generation model when you run "Type untyped facts". It is off until you pick a provider in Settings → Models, is blocked in Strict privacy mode, and sends fact titles and bodies to the endpoint you configure.
+The memory system seamlessly routes generation to your preferred engine. Spin up a local sidecar (like Ollama/Llama) for full offline privacy, or connect to external OpenAI-compatible APIs for heavy lifting. The frontend handles the wiki logic while the app supplies the `generateText` function. 
+
+An optional **Jev classifier** — a dedicated fact-typing model, served by Cloudflare Workers AI (`typesafe/jev`) or any Jev-compatible endpoint — can type facts faster and more cheaply than your generation model when you click **Type untyped facts** in Settings → Maintenance:
+
+- Off until you pick a provider in Settings → Models.
+- Blocked in Strict privacy mode.
+- Sends fact titles and bodies to the endpoint you configure.
 
 ### Human-in-the-Loop Verification
 Proposals are gated, not automatic. Approve or reject wiki changes from the UI Review desk, interactively with `ct proposals review`, or in bulk with `ct approve`, or programmatically through the MCP `curated_proposal_decide` tool — every decision is stamped with who reviewed it. Librarian evidence that no longer anchors to a source chunk is re-graded (exported, then purged) by a one-time migration; `ct evidence regrade --yes` re-runs that pass on demand.
 
 ### Wiki Maintenance
-**Settings → Maintenance** lists wiki drafts you can **Promote** into the wiki, runs a lint **health report**, and offers **Type untyped facts**, which assigns ontology types to facts that have none.
+**Settings → Maintenance** lets you:
+
+- **Promote** draft facts into the wiki. Your click is recorded as a human review.
+- **Run health report** — a read-only count of dangling edges, manifest violations, untyped facts, drafts, and unverified inferred facts.
+- **Type untyped facts** — assign ontology types to facts that have none, using the Jev classifier if one is configured (see [BYOI](#bring-your-own-inference-byoi)), otherwise your generation model.
 
 ### Backup, Restore & Vault Switching
-Restoring a backup is crash-safe and keeps the knowledge replica in sync. Switching to a different vault clears the knowledge layer (the wiki built from the old vault) — the app asks for confirmation first.
+- **Restore is crash-safe.** The knowledge replica's pending changes are captured before `brain.db` is replaced and re-synced afterward; if the app is interrupted mid-restore, it finishes or rolls back the install on the next launch.
+- **Switching vaults discards the wiki built from the current vault**, since that wiki only makes sense against its source vault. The app asks for confirmation first.
 
 ### Unified MCP Agent Server
-Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide brain. The app binary doubles as a standard **stdio Model Context Protocol (MCP) server** (`--mcp`). You can hook this vault directly into MCP-compliant clients (like Claude Desktop or Cursor), giving your favorite agents native access to your immutable documents, Fastembed RAG search, and the wiki layer — read tools for recall, search and graph traversal, plus write tools for vault notes, agent wisdom entries and proposal decisions. A separate read-only server is available for development (see [MCP Agent Server](#-mcp-agent-server)).
+Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide brain. The app binary doubles as a standard **stdio Model Context Protocol (MCP) server** (`--mcp`). Hook it into any MCP-compliant client — Claude Desktop, Cursor, or your IDE's agent — and the agent sees your vault as native tools: read tools for recall, search and graph traversal, plus write tools for vault notes, agent wisdom entries and proposal decisions. A separate read-only server can be built for development (see [MCP Agent Server](#-mcp-agent-server)).
 
 ### Offline-First & Privacy Native
 All parsing, chunking, local embeddings (Fastembed), and SQLite metadata operations happen strictly on your machine.
 
 ### Cross-Partition Wiki Graph
-Wiki relationships are traversable across namespaces: `wiki_traverse_graph` scopes a walk to one namespace when given an `entityId`, and, when it is omitted, discovers edges across up to eight namespaces — those with the most matching edges (the result flags when more were cut).
+An agent walking the wiki graph isn't confined to one namespace. `wiki_traverse_graph` with an `entityId` keeps the walk in that namespace; without one, it ranks namespaces by matching-edge count, walks the top eight, and tells you when it cut more.
 
 ---
 
@@ -67,10 +78,13 @@ Wiki relationships are traversable across namespaces: `wiki_traverse_graph` scop
 
 ### Install & Run
 
-On a fresh clone, Tauri's build script requires the MCP sidecar path to exist before any Rust build (including `pnpm tauri dev`). Create an empty placeholder once:
+**Prerequisites:** [Rust via rustup](https://rustup.rs) (stable channel; `rust-toolchain.toml` adds clippy and rustfmt) and [pnpm](https://pnpm.io).
+
+On a fresh clone, Tauri's build script requires the MCP sidecar path to exist before any Rust build (including `pnpm tauri dev`). If you skip this, the build fails with ``resource path `binaries/curated-thoughts-mcp-<host-triple>` doesn't exist``. Create an empty placeholder once:
 
 ```bash
 mkdir -p src-tauri/binaries
+# rustc -vV prints "host: <triple>"; sed keeps just the triple.
 touch "src-tauri/binaries/curated-thoughts-mcp-$(rustc -vV | sed -n 's/^host: //p')"
 # On Windows, append .exe to the placeholder name.
 ```
@@ -121,7 +135,7 @@ The repo builds two **stdio** [Model Context Protocol](https://modelcontextproto
 
 The source of truth for both lists is the `#[tool(name = …)]` attributes in `src-tauri/src/mcp_server.rs` and `tools/src/bin/curated_thoughts_mcp.rs`.
 
-### Build the Server
+### Build from Source
 
 From the repository root (after the placeholder step in [Install & Run](#install--run)):
 
@@ -175,12 +189,10 @@ Release bundles include the full server as a sidecar. Point any MCP client at:
 <install-dir>/curated-thoughts-mcp --mcp
 ```
 
-(The sidecar is the app binary, copied under the name `curated-thoughts-mcp` because Tauri requires a sidecar's
-name to differ from the Cargo package name. Don't confuse it with the read-only dev server of the same name.
-The server speaks stdio only —
-tracing goes to stderr, protocol traffic on stdout. Known limitation on
-Windows: agent-spawned sidecars may briefly flash a console window unless the
-client passes `CREATE_NO_WINDOW`.)
+> **Note:**
+> - **Naming:** the sidecar is the app binary, copied under the name `curated-thoughts-mcp` because Tauri requires a sidecar's name to differ from the Cargo package name. Don't confuse it with the read-only dev server of the same name.
+> - **Streams:** stdio only — protocol traffic on stdout, tracing on stderr.
+> - **Windows:** an agent-spawned sidecar may briefly flash a console window unless the client passes `CREATE_NO_WINDOW`.
 
 ---
 
@@ -209,7 +221,12 @@ ct approve <proposal-id>               # approve without the interactive loop
 ct approve --all --yes                 #   ...or every pending proposal at once
 ct evidence regrade --yes              # re-run the V20 evidence re-grade (idempotent)
 ct trust [--list] [--revoke <path>]    # manage symlinks the ingest walker may follow
-CURATED_VAULT_ROOT=/path/to/vault ct watch [--once] [--json]   # vault watcher daemon
+```
+
+`ct watch` is the one long-running command: a foreground daemon that watches the vault and requires `CURATED_VAULT_ROOT`. Add `--json` for one JSON event per line on stdout, or `--once` to exit after a bounded window (default 60s, set with `--once-timeout`):
+
+```bash
+CURATED_VAULT_ROOT=/path/to/vault ct watch --json
 ```
 
 ### Bulk Re-index (`bulk_reindex` CLI)
@@ -231,7 +248,7 @@ CURATED_EMBED_STUB=constant8 cargo run --release -p curated-thoughts-tools --bin
 
 ### Integration Tests
 
-End-to-end test spawns the app binary with **`--mcp`** and speaks MCP over stdin/stdout (uses **`CURATED_EMBED_STUB`**). The tests skip silently unless **`CURATED_MCP_INTEGRATION_TESTS=1`** is set:
+End-to-end tests spawn the app binary with **`--mcp`** and speak MCP over stdin/stdout. They are **opt-in**: without **`CURATED_MCP_INTEGRATION_TESTS=1`** they return early and report as passed (in 0.00s) without testing anything. They set **`CURATED_EMBED_STUB`**, so no real embedding model is loaded:
 
 ```bash
 CURATED_MCP_INTEGRATION_TESTS=1 cargo test -p curated-thoughts --features mcp-server --test mcp_integration
