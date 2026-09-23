@@ -12,6 +12,8 @@ Curated Thoughts is a privacy-first, local-first desktop second brain built with
 
 Inspired by [Andrej Karpathy's LLM Wiki memory spec](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) and powered by `@equationalapplications/react-llm-wiki`, this app is not just a file browser or a basic RAG tool. It is a **cognitive architecture** designed to help local LLMs build compounding, structured memory over time.
 
+**Get it:** download the latest installers for macOS, Linux, or Windows from the [Releases page](https://github.com/equationalapplications/curated-thoughts/releases). Then drop PDFs, DOCX, or MD files into your vault — the watcher indexes them and the librarian proposes wiki pages that wait for your approval in the Review desk.
+
 ---
 
 ## 🧠 The Three-Tier Memory System

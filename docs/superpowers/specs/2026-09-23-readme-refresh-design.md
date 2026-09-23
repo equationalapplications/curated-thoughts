@@ -1,10 +1,9 @@
 # README Refresh — Design Spec
 
 **Date:** 2026-09-23
-**Status:** Approved — rev 2 (2026-09-23). Rev 2 folds in the spec review and
-the PR-bot review; the Phase 1 inventory below is its output.
+**Status:** Approved — rev 2.3 (2026-09-23)
 **Type:** Docs-only
-**PR:** docs/readme-refresh-2026-09 (this PR carries spec + implementation)
+**PR:** #224 (`docs/readme-refresh-2026-09`; carries spec + implementation)
 
 ## Problem
 
@@ -35,9 +34,11 @@ to newcomers and contributors.
 
 1. Every factual claim in the README verified against the code at the spec's
    base commit (05c0b2d) — no claim survives on memory alone.
-2. Feature surface (CLI verbs, both MCP servers' tools, verification gate,
-   classifier, drafts/lint) represented accurately at a new-user level of
-   detail.
+2. Reader outcomes. After reading the README alone, a new user can get the
+   app (Releases) and follow the first-run loop — drop files in the vault,
+   watcher ingests, librarian proposes, Review desk approves — and a
+   developer can build from a fresh clone, run both MCP servers, and run
+   the test suites.
 3. Architecture section reflects the current workspace layout and the current
    memory-model vocabulary the app itself uses in its UI.
 
@@ -50,7 +51,8 @@ to newcomers and contributors.
 
 ## Phase 1 — Inventory (verification gate) — DONE
 
-Each row was checked at 05c0b2d. "Ran" means the command or binary was
+Rows I1–I23 were verified at base commit `05c0b2d`; rows I24–I31 were added
+and verified during PR review. "Ran" means the command or binary was
 executed; "Read" means the claim was checked in source.
 
 | # | Claim / fact | Evidence | How |
@@ -85,18 +87,21 @@ executed; "Read" means the claim was checked in source.
 | I28 | Deleted-source provenance is stored per proposal (`curated_proposal_deleted_sources`), and the Review desk marks deleted and stranded sources | `src-tauri/src/db/schema.rs:474-480`; CHANGELOG 2.11.0 (`ed35698`) | Read |
 | I29 | `ct watch --json --once` prints `start` / `shutdown` JSON lines on stdout; `--once-timeout` defaults to 60s | run against a scratch brain + vault; `ct watch --help` | Ran |
 | I30 | Rust tracks the rolling `stable` channel; `rust-toolchain.toml` only adds clippy and rustfmt | `rust-toolchain.toml` | Read |
+| I31 | Release bundles for macOS (universal), Linux and Windows are published on the Releases page on `v*` tags (not drafts) | `.github/workflows/build.yml:19-26,142-152`; README badges | Read |
 
 ## Phase 2 — README revision
 
-Every Problem-table row maps to a README section below.
+The table below maps every Problem-table row to the README section that
+covers it.
 
 | Section | Treatment | Covers |
 |---|---|---|
 | Badges / header | Keep as-is | — |
-| Three-Tier Memory System | Keep structure; mention the human-verification gate as the only path into tier 3 | #201 |
+| Getting started (new block after the intro) | Download pointer to Releases + the first-run loop in two lines; the loop restates Architecture-section claims already in the README | I31 |
+| Three-Tier Memory System | Keep structure; mention the human-verification gate as the only path into the Semantic tier (the wiki) | #201 |
 | Architecture & Data Flow | Review-queue bullet: deleted-source provenance; `.brain/` bullet: excluded from the walk, crash-safe restore; workspace bullet names both packages (I1) | #205, #211, #213 |
 | Key Features: BYOI | Keep; describe the optional classifier accurately (I16) | #219 |
-| Key Features: Human-in-the-loop verification | Review desk, `ct proposals review`, `ct approve`, MCP decide; mention evidence regrade as the provenance-recovery path | #201, #186 |
+| Key Features: Human-in-the-loop verification | Review desk, `ct proposals review`, `ct approve`, the `curated_proposals_list` / `curated_proposal_decide` MCP tools; mention evidence regrade as the provenance-recovery path | #201, #186 |
 | Key Features: Wiki maintenance | Drafts panel, lint health report, "Type untyped facts" (UI only, I8) | #219 |
 | Key Features: Backup, restore & vault switching | Restore syncs the replica; vault switch clears the knowledge layer after a confirmation | #213 |
 | Key Features: MCP Agent Server | Full server (read + write, including wisdom CRUD and proposal decisions) vs read-only dev server (I4) | #185, #201 |
@@ -135,7 +140,7 @@ Every Problem-table row maps to a README section below.
 ## Phase 3 — Review & merge
 
 Docs-only diff: one review pass plus the bot review. Before merging, a normal
-commit on the branch sets Status to `Implemented (PR #N)`. A merge commit
+commit on the branch sets Status to `Implemented (PR #224)`. A merge commit
 cannot carry content changes, so the flip cannot happen in the merge itself.
 Merge with a regular merge commit, not squash or rebase, so the spec and
 review-fix commits stay in `main`'s history (this repo's standing rule).
@@ -178,14 +183,21 @@ review-fix commits stay in `main`'s history (this repo's standing rule).
   rules that don't exist in the repo) and the PR-bot review (Phase 2 now covers
   every Problem row; criterion 2 now requires execution). Added the Phase 1
   inventory (I1-I23) and follow-ups. Status Approved.
-- **rev 2.1** (`9fef52b`, `653970a`, this commit): I24 (sidecar notes),
+- **rev 2.1** (`9fef52b`, `653970a`, `c1c408e`): I24 (sidecar notes),
   I11/I17 corrections from CodeRabbit, the `--vault` and flaky-test
   follow-ups, the Phase 2 row for the Cross-Partition Wiki Graph subsection,
   the reason for the merge style, and this log.
-- **rev 2.2**: README wording pass from a readability review (bullets,
+- **rev 2.2** (`3137a7b`): README wording pass from a readability review (bullets,
   concrete UI locations, the error you see if you skip the placeholder
   step). Several suggested phrasings added claims the code doesn't support
   (drafts going through the proposal gate, a "default" classifier, deleted
   documents' chunks staying traceable, an auto-installed pinned toolchain).
   Those were corrected against the code, and the claims that remain are
   backed by new rows I25-I30.
+- **rev 2.3**: wording-only polish from a self-review of the spec — Status
+  names the current revision, the Phase 1 intro splits base-verified rows
+  (I1–I23) from PR-review rows (I24–I31), Goal 2 is rewritten as reader
+  outcomes, PR #224 is named in the header and Phase 3, "tier 3" and
+  "MCP decide" are spelled out in Phase 2, and the revision-log hashes are
+  resolved. One README addition: a Getting-started pointer to Releases with
+  the first-run loop, backed by I31 and a new Phase 2 row.
