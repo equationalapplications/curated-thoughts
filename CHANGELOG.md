@@ -1,3 +1,23 @@
+## [2.13.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.12.1...v2.13.0) (2026-09-23)
+
+### Features
+
+* **classifier:** privacy-gated Jev classify bridge with Cloudflare preset ([3d30dbf](https://github.com/equationalapplications/curated-thoughts/commit/3d30dbfed306b7447a08f691ab9429984b46da11))
+* **classifier:** wire Jev classify into the engine and add Settings panel ([2e7d697](https://github.com/equationalapplications/curated-thoughts/commit/2e7d69723899276b65e03a54364ea596185f30d4))
+* **drafts:** drafts panel with Rust-side promotion; explicit excludeDrafts ([93eb238](https://github.com/equationalapplications/curated-thoughts/commit/93eb238619da082cc4303092beb141affd9b8dd9))
+* **drafts:** promote drafts in Rust with trust append and outbox row ([1fcd3c1](https://github.com/equationalapplications/curated-thoughts/commit/1fcd3c10a02bcc290cba5012f1426990f3ea7c2c))
+* **wiki:** forward engine onDiagnostic reports to Rust and surface counts ([0da2492](https://github.com/equationalapplications/curated-thoughts/commit/0da2492b103d53e18158a9c38995aefee0a0ebf8))
+* **wiki:** lint health report, Type untyped facts action, LLM-only schema-switch backfill ([f885055](https://github.com/equationalapplications/curated-thoughts/commit/f885055e2e0c585362f074e3cc839f9ea25a7517))
+
+### Bug Fixes
+
+* **ci:** relax vi.fn() typing in DraftsPanel/ClassifierPanel tests ([ec284c9](https://github.com/equationalapplications/curated-thoughts/commit/ec284c9a9595089d6526647c6cde517bbf97ff2b))
+* **ci:** remove stale Cfg type ref in ClassifierPanel test ([c3293f4](https://github.com/equationalapplications/curated-thoughts/commit/c3293f48cd932b0dcc6b20d5048ddbd56c670889))
+* **ci:** TypeScript strict-mode issues in review follow-up ([dd2c53d](https://github.com/equationalapplications/curated-thoughts/commit/dd2c53d8166b5a82d85b1f01b7f283cfe1c6be38))
+* **review:** address /code-review high findings on llm-wiki 7.7.4 adoption ([029cf08](https://github.com/equationalapplications/curated-thoughts/commit/029cf08998feafafc38f029acccff9f6d84bd894))
+* **review:** address 9 CodeRabbit findings on llm-wiki 7.7.4 adoption ([acbdde0](https://github.com/equationalapplications/curated-thoughts/commit/acbdde000701798d2f59e323f72ecb661a379f69))
+* **wiki:** useWikiStatus snapshot-vs-event race (CodeRabbit follow-up) ([f3dd907](https://github.com/equationalapplications/curated-thoughts/commit/f3dd9071fc4fafa6f9a8ab7fa9f321a7c033a25f))
+
 ## [2.12.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.12.0...v2.12.1) (2026-09-16)
 
 ### Bug Fixes
