@@ -24,7 +24,7 @@ Curated Thoughts models AI memory biologically, moving information from raw inpu
 2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop supported files into the vault, the watcher chunks them and embeds them with your configured embedding profile — a local Ollama model by default — into `brain.db` (SQLite) in your brain directory. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
 3. **Semantic Memory (The LLM Wiki):** The long-term truth. The system actively condenses raw facts into a curated, interlinked web of concepts and entities. This acts as a semantic wiki stored natively in SQLite, with wiki notes readable and writable as real `.md` files in your vault's `wiki/` folder, allowing the LLM to naturally read, link, and traverse relationships.
 
-Nothing reaches the long-term wiki without passing the **human-verification gate**: the librarian's wiki proposals land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)).
+The librarian's wiki proposals reach the long-term wiki only through the **human-verification gate**: they land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)). The exception is direct agent wisdom: the MCP wisdom write tools record your agent's entries straight into the wiki as user-stated, confirmed facts, without the proposal gate (see [MCP Agent Server](#-mcp-agent-server)).
 
 ---
 
@@ -134,6 +134,8 @@ The repo builds two **stdio** [Model Context Protocol](https://modelcontextproto
 **Full server tools:** `vault_semantic_search`, `vault_related_chunks`, `wiki_search`, `wiki_context`, `wiki_get_ontology`, `wiki_traverse_graph`, `curated_recall_context`, `curated_get_wiki_entry`, `curated_search_code`, `curated_proposals_list` (read); `vault_write_note`, `vault_upsert_index_entry`, `curated_add_wisdom`, `curated_update_wisdom`, `curated_archive_wisdom`, `curated_proposal_decide` (write).
 
 **Read-only dev server tools:** `vault_semantic_search`, `vault_related_chunks`, `curated_recall_context`, `curated_get_wiki_entry`, `curated_search_code`, `graph_neighbors`, `curated_superpowers_setup`.
+
+**Direct wisdom writes:** the wisdom write tools skip the proposal gate — `curated_add_wisdom` records your agent's entry in the wiki immediately as user-stated, confirmed.
 
 The source of truth for both lists is the `#[tool(name = …)]` attributes in `src-tauri/src/mcp_server.rs` and `tools/src/bin/curated_thoughts_mcp.rs`.
 

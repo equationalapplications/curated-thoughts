@@ -1,7 +1,7 @@
 # README Refresh — Design Spec
 
 **Date:** 2026-09-23
-**Status:** Implemented (PR #224) — rev 2.5 (2026-09-23)
+**Status:** Implemented (PR #224) — rev 2.6 (2026-09-23)
 **Type:** Docs-only
 **PR:** #224 (`docs/readme-refresh-2026-09`; carries spec + implementation)
 
@@ -53,7 +53,8 @@ to newcomers and contributors.
 
 Rows I1–I23 were verified at base commit `05c0b2d`; rows I24–I31 were added
 and verified during PR review; rows I32–I39 were added during the Task-1
-execution pass at the PR tip (`4b73545`). "Ran" means the command or binary was
+execution pass at the PR tip (`4b73545`); row I40 was added during the
+review-fix pass (rev 2.6). "Ran" means the command or binary was
 executed; "Read" means the claim was checked in source.
 
 | # | Claim / fact | Evidence | How |
@@ -97,6 +98,7 @@ executed; "Read" means the claim was checked in source.
 | I37 | The ingest watcher accepts PDF (`pdf_extract`), DOCX (zip/XML), and plain-text formats read directly (`.md`) | `src-tauri/src/pipeline/mod.rs:371-389` | Read |
 | I38 | BYOI wiring: generation is a sidecar model or an external OpenAI-compatible endpoint; the app exposes `generate_text` (and `embed_text`) as Tauri commands; the frontend runs the wiki logic on `@equationalapplications/react-llm-wiki` | `src-tauri/src/onboard/mod.rs:96-115`; `src-tauri/src/lib.rs:43,3994`; `package.json:48` | Read |
 | I39 | The ingest pipeline skips re-chunking when a document's content hash is unchanged (`force` re-runs); `bulk_reindex` exists to re-chunk/re-embed every indexed `user_doc` after chunk-strategy or embedding-model upgrades without mutating files on disk | `src-tauri/src/pipeline/mod.rs:31`; `tools/src/bin/bulk_reindex.rs:1-3` | Read |
+| I40 | Direct wisdom writes bypass the proposal gate: `curated_add_wisdom` inserts into `llm_wiki_entries` with confidence `confirmed`, source_type `user_stated`, NULL source_ref — no proposal, no reviewer, only a fail-closed agent-access audit row; the human-verification path is proposal approval, where `resolve_proposal` → `commit_fact_add` inserts into the same table with source_type `user_confirmed` and a recorded `reviewed_by` | `src-tauri/src/db/wisdom.rs:122-143`; `src-tauri/src/tool_dispatch.rs:964-993`; `src-tauri/src/db/commit.rs:1546-1565,2341-2345,2399`; `src-tauri/src/mcp_server.rs:220-221` | Read |
 
 ## Phase 2 — README revision
 
@@ -107,13 +109,13 @@ covers it.
 |---|---|---|
 | Badges / header | Keep as-is | — |
 | Getting started (new block after the intro) | Download pointer to Releases + the first-run loop in two lines; the loop restates Architecture-section claims already in the README | I31 |
-| Three-Tier Memory System | Keep structure; mention the human-verification gate as the only path into the Semantic tier (the wiki) | #201 |
+| Three-Tier Memory System | Keep structure; describe proposal approval as the human-verification path into the Semantic tier (the wiki), and document direct `curated_add_wisdom` writes separately — user-stated entries outside the gate (see the MCP row) | #201, #185 |
 | Architecture & Data Flow | Review-queue bullet: deleted-source provenance; `.brain/` bullet: excluded from the walk, crash-safe restore; workspace bullet names both packages (I1) | #205, #211, #213 |
 | Key Features: BYOI | Keep; describe the optional classifier accurately (I16) | #219 |
 | Key Features: Human-in-the-loop verification | Review desk, `ct proposals review`, `ct approve`, the `curated_proposals_list` / `curated_proposal_decide` MCP tools; mention evidence regrade as the provenance-recovery path | #201, #186 |
 | Key Features: Wiki maintenance | Drafts panel, lint health report, "Type untyped facts" (UI only, I8) | #219 |
 | Key Features: Backup, restore & vault switching | Restore syncs the replica; vault switch clears the knowledge layer after a confirmation | #213 |
-| Key Features: MCP Agent Server | Full server (read + write, including wisdom CRUD and proposal decisions) vs read-only dev server (I4) | #185, #201 |
+| Key Features: MCP Agent Server | Full server (read + write, including wisdom CRUD — direct writes outside the proposal gate (I40) — and proposal decisions) vs read-only dev server (I4) | #185, #201 |
 | Key Features: Offline-first | Keep as-is | — |
 | Key Features: Cross-Partition Wiki Graph | New short subsection tied to `wiki_traverse_graph`, including the top-8 partition cap (I17) | #190/#197 |
 | Local Development | Add the fresh-clone sidecar-placeholder step (I9) | — |
@@ -235,3 +237,12 @@ review-fix commits stay in `main`'s history (this repo's standing rule).
   `2dd9d54` plus the task-review fix in `29e9fa5` cover seven distinct claims). One
   task-review fix: the immutable-vault bullet now names the agent-deposit carve-out
   (`immutable-source-files/agents/`) per `safe_path.rs`. Status → Implemented (PR #224).
+- **rev 2.6**: review fix (CodeRabbit thread on PR #224, Phase 2 Three-Tier row).
+  The README's "nothing reaches the long-term wiki without the human-verification
+  gate" was an absolute claim the code contradicts: `curated_add_wisdom` writes
+  straight into `llm_wiki_entries` as `confirmed`/`user_stated` with no proposal
+  and no reviewer (`wisdom.rs:138-143`, `tool_dispatch.rs:964-993`); only proposal
+  approval records `reviewed_by`/`user_confirmed` (`commit.rs:1546-1565`, `:2399`).
+  The gate claim is scoped to the librarian's proposals, the MCP section names the
+  direct wisdom-write exception, the Phase 2 Three-Tier and MCP rows are reworded
+  per the suggestion, and row I40 carries the evidence (file:line).
