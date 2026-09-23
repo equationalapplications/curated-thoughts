@@ -59,7 +59,7 @@ Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide b
 All parsing, chunking, local embeddings (Fastembed), and SQLite metadata operations happen strictly on your machine.
 
 ### Cross-Partition Wiki Graph
-Wiki relationships are traversable across namespaces: `wiki_traverse_graph` scopes a walk to one namespace when given an `entityId`, and discovers edges across all of them when it is omitted.
+Wiki relationships are traversable across namespaces: `wiki_traverse_graph` scopes a walk to one namespace when given an `entityId`, and, when it is omitted, discovers edges across up to eight namespaces — those with the most matching edges (the result flags when more were cut).
 
 ---
 
@@ -198,12 +198,15 @@ ct status                              # vault + database summary
 ct search <query>                      # semantic search over indexed chunks
 ct recall <prompt>                     # recall context (chunks + wiki entries)
 ct code <query>                        # search code chunks
-ct graph <symbol> [--dir callers|callees|both] [--hops N]   # code call-graph lookups
-ct wiki list|get|forget|sweep          # inspect and curate the wiki layer
+ct graph <symbol> --dir callers --hops 2   # code call-graph lookups (--dir: callers, callees, both)
+ct wiki list                           # inspect and curate the wiki layer;
+                                       #   also: wiki get, wiki forget, wiki sweep
 ct ingest --yes                        # (re-)ingest the vault
 ct librarian run --yes                 # run a synthesis pass on demand
-ct proposals list|show|review          # the human-verification gate, headless
-ct approve <proposal-id> | --all --yes # approve without the interactive loop
+ct proposals review                    # the human-verification gate, headless;
+                                       #   also: proposals list, proposals show
+ct approve <proposal-id>               # approve without the interactive loop
+ct approve --all --yes                 #   ...or every pending proposal at once
 ct evidence regrade --yes              # re-run the V20 evidence re-grade (idempotent)
 ct trust [--list] [--revoke <path>]    # manage symlinks the ingest walker may follow
 CURATED_VAULT_ROOT=/path/to/vault ct watch [--once] [--json]   # vault watcher daemon

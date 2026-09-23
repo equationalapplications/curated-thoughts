@@ -65,13 +65,13 @@ executed; "Read" means the claim was checked in source.
 | I8 | No MCP server exposes drafts or lint tools; drafts and lint health are UI-only (`DraftsPanel.tsx`, `HealthReportPanel.tsx`) | I5/I6 lists; `src/components/settings/` | Ran/Read |
 | I9 | Fresh clone: every cargo build touching `curated-thoughts` fails until a placeholder `src-tauri/binaries/curated-thoughts-mcp-<host-triple>` exists (the directory is gitignored except `.gitignore`) | build error `resource path … doesn't exist`; `.github/workflows/ci.yml:78-86` | Ran |
 | I10 | `ct` verbs: `status search recall code graph wiki{list,get,forget,sweep} evidence{regrade} proposals{list,show,review} approve ingest librarian{run} trust watch` | `target/debug/ct --help` + subcommand help | Ran |
-| I11 | `ct graph <SYMBOL>` walks code-symbol callers/callees (`--dir callees|callers|both`, `--hops`), not the wiki graph | `ct graph --help` | Ran |
+| I11 | `ct graph <SYMBOL>` walks code-symbol callers/callees (`--dir` takes `callees`, `callers` or `both`; `--hops`), not the wiki graph | `ct graph --help` | Ran |
 | I12 | `ct evidence regrade --yes` re-runs the V20 unanchored-evidence re-grade (export + purge), idempotent | `ct evidence regrade --help`; CHANGELOG 2.8.0 | Ran |
 | I13 | `ct approve [PROPOSAL_ID] [--all] [--yes]` approves without the interactive loop | `ct approve --help` | Ran |
 | I14 | `ct watch` requires `CURATED_VAULT_ROOT` | `tools/src/cmds.rs:1091-1095` | Read |
 | I15 | Env vars `CURATED_BRAIN_DIR`, `CURATED_BRAIN_DB`, `CURATED_BRAIN_CONFIG` are honored by both servers; missing `brain.db` is a startup error | both binaries' stderr on an empty dir | Ran |
 | I16 | Jev classifier: optional, used only by "Type untyped facts" in Maintenance; provider defaults to None; sends fact titles and bodies to the endpoint; blocked in Strict privacy; never proposes relationships | `src/components/settings/ClassifierPanel.tsx:10,96-127` | Read |
-| I17 | `wiki_traverse_graph` walks all namespaces when `entityId` is omitted (cross-partition) | `src-tauri/src/mcp_server.rs:109-110` | Read |
+| I17 | `wiki_traverse_graph` walks across namespaces when `entityId` is omitted (cross-partition), keeping the top 8 ranked by matching-edge count and flagging the cut (`partitions_truncated`) | `src-tauri/src/mcp_server.rs:109-110`; `src-tauri/src/wiki_graph.rs:12-16,898-906` | Read |
 | I18 | `pnpm typecheck`, `pnpm lint`, `pnpm test` exist and pass | `package.json:36-41`; run: 83 files / 524 tests pass | Ran |
 | I19 | `@equationalapplications/{react,expo,core}-llm-wiki` exist on npm (7.7.4) | `npm view` | Ran |
 | I20 | Workspace-layout drift after PR #165 was already fixed by 14a26eb (`--manifest-path` forms still work); the remaining drift is I2/I3 | `git show 05c0b2d:README.md` | Read |
