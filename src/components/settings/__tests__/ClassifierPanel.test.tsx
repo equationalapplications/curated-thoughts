@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+type Cfg = Awaited<ReturnType<typeof import('../../../lib/tauri').getClassifierConfig>>;
+
 const { getClassifierConfig, setClassifierConfig, usePrivacyMode } = vi.hoisted(() => ({
-  getClassifierConfig: vi.fn(),
-  setClassifierConfig: vi.fn().mockResolvedValue(undefined),
+  getClassifierConfig: vi.fn<() => Promise<Cfg>>(),
+  setClassifierConfig: vi.fn<(config: Cfg) => Promise<void>>().mockResolvedValue(undefined),
   usePrivacyMode: vi.fn(() => ({ mode: 'ephemeral' })),
 }));
 vi.mock('../../../lib/tauri', () => ({ getClassifierConfig, setClassifierConfig }));

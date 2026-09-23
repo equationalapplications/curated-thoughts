@@ -585,6 +585,9 @@ export interface ClassifierConfig {
   /** Credential-presence indicator. The actual key lives in the OS keychain
    * and is never sent over IPC (CT-REQ-CLASS-01 §5.2). */
   has_api_key?: boolean;
+  /** Save payload only: when set, replaces the keyring value (non-empty
+   * string) or deletes it (""). Omit or null to leave the keyring alone. */
+  api_key?: string | null;
   min_confidence?: number | null;
   timeout_secs?: number | null;
 }

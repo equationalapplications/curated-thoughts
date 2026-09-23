@@ -91,20 +91,18 @@ export function useWikiStatus(): WikiStatus {
     });
 
     const applyPayload = (next: WikiStatusPayload) => {
-      setStatus((prev) => {
-        const activeJob = getActiveJob(next);
-        const ingestBusy = isIngestBusy(next.ingest);
-        return {
-          ...next,
-          busy:
-            ingestBusy ||
-            next.librarian ||
-            next.healing ||
-            next.pruning ||
-            next.forgetting,
-          activeJob,
-          activeJobLabel: jobLabels[activeJob],
-        };
+      const activeJob = getActiveJob(next);
+      const ingestBusy = isIngestBusy(next.ingest);
+      setStatus({
+        ...next,
+        busy:
+          ingestBusy ||
+          next.librarian ||
+          next.healing ||
+          next.pruning ||
+          next.forgetting,
+        activeJob,
+        activeJobLabel: jobLabels[activeJob],
       });
     };
 
