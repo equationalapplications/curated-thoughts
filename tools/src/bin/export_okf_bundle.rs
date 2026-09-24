@@ -119,8 +119,21 @@ fn main() -> Result<()> {
     }
 
     // Write to a temp sibling, verify, then atomically publish. A failure at
-    // any point leaves the previous backup untouched.
+    // any point leaves the previous backup untouched. The temp file is
+    // pre-created 0o600 (umask-independent) so the rename can never widen the
+    // permissions of an existing 0o600 backup; the bundle is unredacted.
     let tmp = dest.with_extension("zip.partial");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+    }
     write_bundle_zip(&tmp, &files).with_context(|| format!("writing {}", tmp.display()))?;
 
     // Round-trip: parse the written bundle back through the real reader.
