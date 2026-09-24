@@ -338,10 +338,7 @@ pub fn heal_run() -> Result<()> {
     // across repeated invocations. Mirrors the watcher probe's
     // `migrate_open_db` pattern (cmds.rs ~line 1190, same review finding
     // applied there for the V23 repair).
-    tauri_app_lib::db::connection::migrate_open_db(
-        &conn,
-        brain.paths.db_path.parent(),
-    )?;
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
     // The `vault` parameter is unused by the core today, but pass the
     // CONFIGURED VAULT ROOT (not the brain dir) so a future grounding check
     // that reads it sees the same directory the GUI scheduler passes
