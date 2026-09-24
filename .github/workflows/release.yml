@@ -71,6 +71,12 @@ jobs:
         if: steps.release_guard.outputs.should_release == 'true'
         run: pnpm install --frozen-lockfile
 
+      - name: Snapshot tags on HEAD before release
+        id: pre_tags
+        if: steps.release_guard.outputs.should_release == 'true'
+        run: |
+          echo "tags=$(git tag --points-at HEAD --list 'v[0-9]*' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
       - name: Run semantic-release
         id: release
         if: steps.release_guard.outputs.should_release == 'true'
@@ -79,16 +85,34 @@ jobs:
         run: pnpm exec semantic-release
 
       # Failure-path fallback for the tag: if a late phase of semantic-release
-      # (e.g. @semantic-release/github publish) failed, the tag is already on
-      # HEAD while successCmd never ran, so steps.release.outputs.tag is
-      # empty. Resolve the tag from git so dispatch-build still fires. On a
-      # no-release run HEAD carries no v* tag and this stays empty (checkout
-      # is fetch-depth: 0, so all tags are present locally).
+      # failed after the tag push (e.g. @semantic-release/github publish),
+      # successCmd never ran, so steps.release.outputs.tag is empty. Resolve
+      # the tag from git so dispatch-build still fires.
+      #
+      # Strictly scoped (Opus delta r1 M1): runs ONLY when the
+      # semantic-release step itself failed, and only claims a v* tag that
+      # (a) is new since the pre-release snapshot — a tag that existed on HEAD
+      # before the run belongs to a human tag-push, whose build already ran
+      # via build.yml's tag trigger, and re-dispatching it would cancel that
+      # in-flight build through the shared concurrency group — and (b) exists
+      # on origin (semantic-release creates the tag locally before pushing;
+      # an unpushed tag would make `gh workflow run --ref` fail).
       - name: Resolve release tag from git (failure-path fallback)
         id: tag_fallback
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.release.outcome == 'failure' }}
+        env:
+          PRE_TAGS: ${{ steps.pre_tags.outputs.tags }}
         run: |
-          TAG="$(git tag --points-at HEAD | grep '^v' | tail -1 || true)"
+          TAG="$(git tag --points-at HEAD --list 'v[0-9]*' --sort=-v:refname | head -1 || true)"
+          if [ -z "$TAG" ]; then
+            echo "no v* tag on HEAD; nothing to fall back to"
+          elif echo " ${PRE_TAGS} " | grep -q " $TAG "; then
+            echo "$TAG already existed before this run (manual tag-push); not claiming it"
+            TAG=""
+          elif ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            echo "$TAG is not on origin (tag push failed?); not dispatching a build for it"
+            TAG=""
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # Dispatches the Build workflow at the published release tag. The tag push
@@ -96,12 +120,13 @@ jobs:
   # downstream workflows (GitHub's anti-recursion guard), but a
   # workflow_dispatch sent with GITHUB_TOKEN explicitly does.
   #
-  # Gate: !cancelled() (not success) on purpose — @semantic-release/github's
-  # success step (issue/PR comments, labels) runs AFTER the tag and Release
-  # already exist; if it fails, the release still happened and the build must
-  # still be dispatched. The tag output is only ever written by successCmd,
-  # which semantic-release runs only after a release is actually published.
-  #
+  # Gate: !cancelled() (not success) on purpose — a late failure inside
+  # semantic-release after publication (e.g. @semantic-release/github
+  # commenting in success, or publish failing post-tag-push) must not lose
+  # the build. The tag output has two sources: successCmd (normal path —
+  # semantic-release runs it only after a release is actually published) and
+  # the tag_fallback step above (failure path only — a *new* v* tag on HEAD,
+  # verified present on origin, from a failed semantic-release run).
   # actions: write lives on this job alone so the semantic-release plugin
   # process never holds it (it can cancel/rerun workflows, delete logs).
   dispatch-build:

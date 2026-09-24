@@ -115,12 +115,19 @@ jobs:
 ```
 
 The `tag_fallback` step (implementation detail, see release.yml): a
-`!cancelled()`-gated step after semantic-release that resolves a `v*` tag
-pointing at HEAD via `git tag --points-at`. It covers the failure path where
-a late semantic-release phase failed after the tag push: `successCmd` never
-ran, but the tag exists on the checked-out HEAD (checkout is `fetch-depth:
-0`, which fetches all tags), so the dispatch still fires. On no-release runs
-HEAD carries no `v*` tag and the fallback stays empty.
+failure-path-only step that resolves the tag from git when the
+semantic-release step itself failed. It is scoped by three guards so it can
+never claim a tag it shouldn't (Opus delta r1 M1): it runs only on
+`steps.release.outcome == 'failure'`; it only claims a `v*` tag that is
+**new** since a pre-release snapshot of HEAD's tags — a tag that already
+existed belongs to a human tag-push whose build ran via the tag trigger, and
+re-dispatching it would cancel that in-flight build through `build.yml`'s
+`build-${{ github.ref }}` concurrency group — and it only claims a tag that
+**exists on origin** (semantic-release creates the tag locally before
+pushing; an unpushed tag would fail `gh workflow run --ref`). The checkout
+is `fetch-depth: 0`, so all tags are present locally for both checks.
+Normal no-release runs (nothing to release, or guard-skip) have no *new*
+`v*` tag and fall through empty.
 
 Design notes (from review):
 
@@ -161,13 +168,15 @@ Design notes (from review):
     workflow shows green. No workflow wiring can close that; the watch point
     moves to `build.yml` runs. This replaces the earlier overstatement that
     "the gap can never silently reappear."
-  - ~~A failed **publish** inside `@semantic-release/github` (Release
-    creation itself) leaves the tag pushed but `success` never runs: no
-    dispatch.~~ **Mitigated in code** (implementation r2): the
-    `tag_fallback` step resolves the tag from git on that path, so the
-    dispatch fires; tauri-action then creates the missing Release when it
-    uploads the assets. The failure is still loud (the Release run goes red)
-    but the build is no longer lost.
+  - **Partially mitigated in code** (implementation r2, tightened in r3): a
+    failed **publish** *after the tag push* is covered by the scoped
+    `tag_fallback` step, so the dispatch fires and tauri-action creates the
+    missing Release when it uploads. NOT covered (correctly): a failure in
+    `@semantic-release/git`'s commit/tag push, or between the two pushes —
+    those leave a release commit on `main` with no tag, where no build is
+    possible; semantic-release's own retry-on-next-merge behavior or a
+    manual `gh workflow run build.yml --ref <tag>` (after pushing the tag)
+    is the remedy. The failure is always loud (the Release run goes red).
 
 ### 3. `.github/workflows/build.yml` — document, don't remove, the tag trigger
 
@@ -182,16 +191,19 @@ semantic-release) never fire this trigger; the automatic path is the
    an automatic Build run whose ref is the tag → all 7 platform assets on the
    Release — with **no manual step**.
 2. A `main` push that produces **no release** triggers no Build dispatch, via
-   **all three** no-release paths: (a) the release-guard step skips
+   **all** no-release paths: (a) the release-guard step skips
    semantic-release entirely (HEAD ≠ origin/main), (b) semantic-release runs
-   and finds nothing to release, and (c) on a no-release HEAD the
-   `tag_fallback` step finds no `v*` tag pointing at HEAD. In all three,
-   `needs.release.outputs.tag` is empty and `dispatch-build` skips.
-3. A late failure inside semantic-release *after* publication (e.g.
-   `@semantic-release/github` commenting fails in success, or publish fails
-   after the tag push) still results in the Build dispatch firing — via
-   `successCmd` output on the first path and via `tag_fallback` on the second
-   (Opus MAJOR 1 / MINOR 4).
+   and finds nothing to release, and (c) a manually tagged main commit's
+   Release run — the fallback does not claim the pre-existing tag (it is in
+   the pre-release snapshot, and the semantic-release step did not fail), so
+   the human tag-push build is never duplicated or cancelled (Opus delta r1
+   M1/M2). In all of these, `needs.release.outputs.tag` is empty and
+   `dispatch-build` skips.
+3. A late failure inside semantic-release *after* publication still results
+   in the Build dispatch firing — via `successCmd` output when the failure is
+   in a later success step (e.g. `@semantic-release/github` commenting), and
+   via the scoped `tag_fallback` when publish fails after the tag push
+   (Opus MAJOR 1 / MINOR 4; delta r1 M1).
 4. A tag pushed manually by Kurt still triggers `build.yml` via the existing
    tag trigger.
 5. Static checks (runnable as written):
