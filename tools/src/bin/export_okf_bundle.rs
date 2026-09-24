@@ -113,10 +113,18 @@ fn main() -> Result<()> {
         );
     }
 
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
+    let dest_dir = if dest
+        .parent()
+        .map(|p| p.as_os_str().is_empty())
+        .unwrap_or(true)
+    {
+        std::path::PathBuf::from(".")
+    } else {
+        dest.parent().unwrap().to_path_buf()
+    };
+
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("creating {}", dest_dir.display()))?;
 
     // Write to a temp sibling, verify, then atomically publish. A failure at
     // any point leaves the previous backup untouched. The temp file is
@@ -136,6 +144,13 @@ fn main() -> Result<()> {
     }
     write_bundle_zip(&tmp, &files).with_context(|| format!("writing {}", tmp.display()))?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", tmp.display()))?;
+    }
+
     // Round-trip: parse the written bundle back through the real reader.
     let reparsed =
         read_bundle_source(&tmp).with_context(|| format!("re-reading {}", tmp.display()))?;
@@ -146,12 +161,10 @@ fn main() -> Result<()> {
 
     #[cfg(unix)]
     {
-        if let Some(parent) = dest.parent() {
-            let dir = std::fs::File::open(parent)
-                .with_context(|| format!("opening {}", parent.display()))?;
-            dir.sync_all()
-                .with_context(|| format!("syncing {}", parent.display()))?;
-        }
+        let dir = std::fs::File::open(&dest_dir)
+            .with_context(|| format!("opening {}", dest_dir.display()))?;
+        dir.sync_all()
+            .with_context(|| format!("syncing {}", dest_dir.display()))?;
     }
 
     let digest = sha256_hex(&dest)?;
