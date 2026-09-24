@@ -1505,15 +1505,13 @@ fn start_file_watcher_inner(
         let event_kind = match &event {
             VaultEvent::Added(_) => {
                 update_wiki_status_from_app(&app_for_events, |flags| {
-                    flags.ingest.health =
-                        pipeline::watchdog::PipelineHealth::Working;
+                    flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
                 });
                 Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
             }
             VaultEvent::Modified(_) => {
                 update_wiki_status_from_app(&app_for_events, |flags| {
-                    flags.ingest.health =
-                        pipeline::watchdog::PipelineHealth::Working;
+                    flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
                 });
                 Ok(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             }
@@ -1936,9 +1934,7 @@ async fn switch_vault(
             monitor.clone(),
             status_state.clone(),
         ) {
-            eprintln!(
-                "[switch_vault] failed to restart file watcher after successful switch: {e}"
-            );
+            eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
             // Escalate per spec §4: eprintln alone is silent in production.
             // Persist the failure + degrade the status so it is loud.
             latch_watcher_degraded(&app, &format!("restart after switch failed: {e}"));
