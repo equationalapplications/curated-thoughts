@@ -47,11 +47,27 @@ fn sha256_hex(path: &Path) -> Result<String> {
 }
 
 fn main() -> Result<()> {
-    let home = dirs::home_dir().context("cannot resolve $HOME; pass an explicit dest")?;
-    let dest = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("brain-okf.zip"));
+    let dest = match std::env::args().nth(1) {
+        Some(arg) => {
+            if arg == "--help" || arg == "-h" {
+                eprintln!("usage: export_okf_bundle [dest.zip]");
+                eprintln!();
+                eprintln!("Exports the whole brain as an OKF 0.2 bundle.");
+                eprintln!("Defaults to $HOME/brain-okf.zip. Honors CURATED_BRAIN_* env vars.");
+                std::process::exit(0);
+            }
+            if arg.starts_with('-') {
+                eprintln!("error: unknown flag {arg}");
+                eprintln!("usage: export_okf_bundle [dest.zip]");
+                std::process::exit(2);
+            }
+            PathBuf::from(arg)
+        }
+        None => {
+            let home = dirs::home_dir().context("cannot resolve $HOME; pass an explicit dest")?;
+            home.join("brain-okf.zip")
+        }
+    };
 
     let brain = curated_thoughts_tools::paths::resolve_brain_paths();
     let conn =
