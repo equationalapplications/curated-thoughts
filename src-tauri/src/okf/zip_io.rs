@@ -87,7 +87,13 @@ pub fn write_bundle_zip(dest: &Path, files: &[OkfFile]) -> Result<()> {
         writer.start_file(&f.path, options)?;
         writer.write_all(f.content.as_bytes())?;
     }
-    writer.finish()?;
+    // zip 8.6: `finish()` returns Result<W, ZipWriterResult> handing back the
+    // inner File, so we sync it directly (no drop-then-reopen fallback needed).
+    let file = writer
+        .finish()
+        .with_context(|| format!("finishing {}", dest.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing {}", dest.display()))?;
     Ok(())
 }
 

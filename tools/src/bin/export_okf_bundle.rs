@@ -131,6 +131,16 @@ fn main() -> Result<()> {
     std::fs::rename(&tmp, &dest)
         .with_context(|| format!("publishing {} over {}", tmp.display(), dest.display()))?;
 
+    #[cfg(unix)]
+    {
+        if let Some(parent) = dest.parent() {
+            let dir = std::fs::File::open(parent)
+                .with_context(|| format!("opening {}", parent.display()))?;
+            dir.sync_all()
+                .with_context(|| format!("syncing {}", parent.display()))?;
+        }
+    }
+
     let digest = sha256_hex(&dest)?;
     println!(
         "exported entities={} files={} sha256={} path={}",
