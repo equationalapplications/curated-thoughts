@@ -106,7 +106,7 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
             title={healthTitle("Embeddings", embedding)}
           />
         </button>
-        {wikiStatus.watcherHealth === 'degraded' && (
+        {wikiStatus.watcherHealth === "degraded" && (
           <button
             type="button"
             className="status-bar-diagnostics"

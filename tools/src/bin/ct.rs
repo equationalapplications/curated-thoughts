@@ -334,9 +334,12 @@ fn run(cmd: Cmd) -> Result<i32> {
                 // (same gate shape as `Ingest`, ct.rs:303-318). Spec §6
                 // also asks for the live-row count the pass WOULD
                 // evaluate; a count failure falls back to "?" rather than
-                // masking the refusal itself.
+                // masking the refusal itself. The open MUST be read-only
+                // (round-2 M1): a default `Connection::open` would CREATE
+                // brain.db on a fresh brain, making the refusal path a
+                // write.
                 let db_path = tauri_app_lib::retrieval::resolve_brain_paths().db_path;
-                let live = rusqlite::Connection::open(&db_path)
+                let live = tauri_app_lib::retrieval::open_brain_readonly(&db_path)
                     .ok()
                     .and_then(|conn| {
                         conn.query_row(

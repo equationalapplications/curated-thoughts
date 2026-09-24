@@ -108,6 +108,34 @@ fn heal_without_yes_exits_one_naming_db_and_does_not_mutate() {
 }
 
 #[test]
+fn heal_refusal_does_not_create_brain_db_on_a_fresh_brain() {
+    // Round-2 M1 (Opus review of PR #228): the refusal's row count opened
+    // brain.db with default flags, CREATING it on a fresh brain — the
+    // refusal path must never write. The count falls back to "?" when the
+    // db does not exist (read-only open fails).
+    let brain = tempdir().unwrap();
+    let dir = brain.path().to_path_buf();
+    let dir_str = dir.to_str().unwrap().to_string();
+    with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
+        let out = run_ct(&dir, &["heal"]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "refusal must exit 1 even with no brain.db"
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("? live librarian_inferred row"),
+            "count must fall back to ? when the db is absent: {err}"
+        );
+        assert!(
+            !dir.join("brain.db").exists(),
+            "the refusal path must NOT create brain.db"
+        );
+    });
+}
+
+#[test]
 fn heal_with_yes_heals_purges_and_prints_summary_json() {
     with_seeded_heal_brain(|dir| {
         let out = run_ct(dir, &["heal", "--yes"]);

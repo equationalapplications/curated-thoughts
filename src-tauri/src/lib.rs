@@ -158,35 +158,30 @@ fn clear_watcher_degraded(app: &AppHandle) {
 /// in the same wall-clock second as a clean tick is still seen (m4), and
 /// a consumed error never re-trips on later ticks (M1).
 ///
-/// The returned `Option` is `Some(degraded_now)` when the tick has a
-/// verdict to act on and `None` when there is no handle to inspect
-/// (treated as "never armed" per spec §2). `new_seen_error` hands back
-/// the consumed timestamp so the caller can update its latch even when
-/// the verdict is clean.
+/// The returned `degraded_now` is `true` when the tick must be latched
+/// degraded (armed_at == 0, dead watcher, a NEW notify error, or no handle
+/// at all — which spec §2 treats as "never armed") and `false` on a clean
+/// tick. `new_seen_error` hands back the consumed timestamp so the caller
+/// can update its latch even when the verdict is clean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MonitorTick {
-    degraded_now: Option<bool>,
+    degraded_now: bool,
     new_seen_error: u64,
 }
 
-fn monitor_tick_verdict(
-    tick: Option<(u64, u64, bool)>,
-    last_seen_error_secs: u64,
-    degraded: bool,
-) -> MonitorTick {
+fn monitor_tick_verdict(tick: Option<(u64, u64, bool)>, last_seen_error_secs: u64) -> MonitorTick {
     let Some((armed_at, last_error_at, alive)) = tick else {
         // No registered handle: degraded by definition; nothing new consumed.
         return MonitorTick {
-            degraded_now: Some(true),
+            degraded_now: true,
             new_seen_error: last_seen_error_secs,
         };
     };
     let new_seen_error = last_error_at.max(last_seen_error_secs);
     let is_degraded =
         armed_at == 0 || !alive || (last_error_at != 0 && last_error_at > last_seen_error_secs);
-    let _ = degraded; // caller compares its latch to `is_degraded` for transitions
     MonitorTick {
-        degraded_now: Some(is_degraded),
+        degraded_now: is_degraded,
         new_seen_error,
     }
 }
@@ -202,6 +197,14 @@ fn monitor_tick_verdict(
 /// (`last_seen_error_secs`), not the last clean tick, so an error recorded
 /// in the same wall-clock second as a clean tick is not silently dropped
 /// (m4) and a later clean tick can clear the latch.
+///
+/// Caveat (round-2 m5): the thread's `degraded` latch is its own view. If
+/// OTHER code sets `WatcherHealth::Degraded` while the thread sees a healthy
+/// handle, the thread will not clear it (its transition gate never fires) —
+/// and vice versa, a thread clear can stomp a caller latch. Today's call
+/// order makes this unreachable (callers latch only on failures that also
+/// leave the handle dead/absent), so it stays a documented invariant rather
+/// than shared state.
 fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_thread = cancel.clone();
@@ -256,12 +259,9 @@ fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
             // Pure verdict (unit-tested below): degrades on armed_at==0,
             // dead watcher, or a NEW error; consumes the error timestamp so
             // a later clean tick clears the latch (M1/m4).
-            let verdict = monitor_tick_verdict(tick, last_seen_error_secs, degraded);
+            let verdict = monitor_tick_verdict(tick, last_seen_error_secs);
             last_seen_error_secs = verdict.new_seen_error;
-            let Some(now_degraded) = verdict.degraded_now else {
-                continue;
-            };
-            if now_degraded {
+            if verdict.degraded_now {
                 if !degraded {
                     degraded = true;
                     let reason = match tick {
@@ -1031,14 +1031,13 @@ mod watcher_monitor_verdict_tests {
     /// thread can clear its latch.
     #[test]
     fn consumed_error_does_not_retrip_on_later_ticks() {
-        let first = monitor_tick_verdict(Some((50, 100, true)), 0, false);
-        assert_eq!(first.degraded_now, Some(true), "new error degrades");
+        let first = monitor_tick_verdict(Some((50, 100, true)), 0);
+        assert!(first.degraded_now, "new error degrades");
         assert_eq!(first.new_seen_error, 100);
 
-        let second = monitor_tick_verdict(Some((50, 100, true)), first.new_seen_error, true);
-        assert_eq!(
-            second.degraded_now,
-            Some(false),
+        let second = monitor_tick_verdict(Some((50, 100, true)), first.new_seen_error);
+        assert!(
+            !second.degraded_now,
             "the same error must not re-trip after being consumed"
         );
         assert_eq!(second.new_seen_error, 100);
@@ -1051,8 +1050,8 @@ mod watcher_monitor_verdict_tests {
     fn same_second_error_is_still_seen() {
         // Clean tick at t=200; error also stamped t=200 arrives before the
         // next tick. `last_error_at (200) > last_seen_error_secs (0)` — seen.
-        let v = monitor_tick_verdict(Some((150, 200, true)), 0, false);
-        assert_eq!(v.degraded_now, Some(true));
+        let v = monitor_tick_verdict(Some((150, 200, true)), 0);
+        assert!(v.degraded_now);
         assert_eq!(v.new_seen_error, 200);
     }
 
@@ -1061,16 +1060,15 @@ mod watcher_monitor_verdict_tests {
     /// thread's latch says degraded (the caller clears on transition).
     #[test]
     fn armed_zero_degrades_and_dead_degrades_and_healthy_is_clean() {
-        let never_armed = monitor_tick_verdict(Some((0, 0, true)), 0, false);
-        assert_eq!(never_armed.degraded_now, Some(true));
+        let never_armed = monitor_tick_verdict(Some((0, 0, true)), 0);
+        assert!(never_armed.degraded_now);
 
-        let dead = monitor_tick_verdict(Some((50, 0, false)), 0, false);
-        assert_eq!(dead.degraded_now, Some(true));
+        let dead = monitor_tick_verdict(Some((50, 0, false)), 0);
+        assert!(dead.degraded_now);
 
-        let healthy = monitor_tick_verdict(Some((50, 0, true)), 0, true);
-        assert_eq!(
-            healthy.degraded_now,
-            Some(false),
+        let healthy = monitor_tick_verdict(Some((50, 0, true)), 0);
+        assert!(
+            !healthy.degraded_now,
             "healthy tick must be clean so the latch can clear"
         );
     }
@@ -1079,8 +1077,8 @@ mod watcher_monitor_verdict_tests {
     /// degraded — and consumes nothing.
     #[test]
     fn missing_handle_reads_as_never_armed() {
-        let v = monitor_tick_verdict(None, 77, false);
-        assert_eq!(v.degraded_now, Some(true));
+        let v = monitor_tick_verdict(None, 77);
+        assert!(v.degraded_now);
         assert_eq!(v.new_seen_error, 77, "nothing new consumed");
     }
 
@@ -1088,8 +1086,8 @@ mod watcher_monitor_verdict_tests {
     /// episode, not a stuck latch).
     #[test]
     fn newer_error_after_consumed_one_retrips() {
-        let v = monitor_tick_verdict(Some((50, 300, true)), 100, true);
-        assert_eq!(v.degraded_now, Some(true));
+        let v = monitor_tick_verdict(Some((50, 300, true)), 100);
+        assert!(v.degraded_now);
         assert_eq!(v.new_seen_error, 300);
     }
 }
@@ -1279,445 +1277,461 @@ fn start_file_watcher_inner(
         h.stop();
     }
 
-    let old_heal_scheduler = {
-        let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
-        scheduler_guard.take()
-    };
-    if let Some((sender, handle)) = old_heal_scheduler {
-        drop(sender);
-        let _ = handle.join();
-    }
-
-    let status_rx = {
-        let mut guard = pipeline.0.lock().unwrap();
-        let tuple = guard
-            .as_mut()
-            .ok_or_else(|| "pipeline not running".to_string())?;
-        tuple.status_rx.take()
-    };
-
-    if let Some(status_rx) = status_rx {
-        let app_handle = app.clone();
-        std::thread::spawn(move || {
-            for event in status_rx {
-                let PipelineStatusEvent::PendingCount(count) = event;
-                update_wiki_status_from_app(&app_handle, |flags| {
-                    // The supervisor's on_health callback owns the
-                    // Stalled/Degraded latches; this listener only refreshes
-                    // the worker-derived stage/subject from the pending count
-                    // and avoids overwriting health while latched
-                    // (CodeRabbit review PRRT_kwDOSVmXas6d28dc).
-                    if !matches!(
-                        flags.ingest.health,
-                        pipeline::watchdog::PipelineHealth::Stalled
-                            | pipeline::watchdog::PipelineHealth::Degraded
-                    ) {
-                        flags.ingest.health = if count > 0 {
-                            pipeline::watchdog::PipelineHealth::Working
-                        } else {
-                            pipeline::watchdog::PipelineHealth::Idle
-                        };
-                    }
-                });
-            }
-        });
-    }
-
-    {
-        let (tx, heartbeat) = {
-            let guard = pipeline.0.lock().unwrap();
-            match guard.as_ref() {
-                Some(t) => (t.tx.clone(), t.heartbeat.clone()),
-                None => return Err("pipeline not running".to_string()),
-            }
+    // Round-2 M2 (Opus review of PR #228): from this point on, NO watcher
+    // and NO monitor are running. Every failure exit below must (a) latch
+    // degraded and (b) restart the monitor, or the app is silently watchless
+    // with status "working" — the exact incident class this PR exists to
+    // kill (the vault-lock failure is the live case: another process holds
+    // the lock, nothing runs, nothing says so). The closure keeps those
+    // exits on ONE path instead of four scattered `?` returns.
+    let outcome = (|| -> Result<(), String> {
+        let old_heal_scheduler = {
+            let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
+            scheduler_guard.take()
         };
-        let brain_paths = crate::retrieval::resolve_brain_paths();
-        let report =
-            crate::config::BrainConfig::load_lenient(&brain_paths).map_err(|e| e.to_string())?;
-        let profile = report.config.embed_profile.clone().unwrap_or_default();
-        let gen_timeout_secs = 600; // matches librarian/synthesis.rs default
+        if let Some((sender, handle)) = old_heal_scheduler {
+            drop(sender);
+            let _ = handle.join();
+        }
 
-        let app_handle = app.clone();
-        let stop = Arc::new(AtomicBool::new(false));
-        // on_replace_worker: actually rebuild the channel and spawn a fresh
-        // worker, then publish the new sender so every producer — and the
-        // supervisor's own sweep — stops writing into the queue the
-        // abandoned worker still owns
-        // (CodeRabbit review PRRT_kwDOSVmXas6d28dw / PRRT_kwDOSVmXas6d3ZYn).
-        let replace_app = app.clone();
-        let join = pipeline::watchdog::spawn_supervisor(pipeline::watchdog::SupervisorConfig {
-            db_path: brain_paths.db_path.clone(),
-            heartbeat: heartbeat.clone(),
-            tx,
-            profile,
-            gen_timeout_secs,
-            stop: stop.clone(),
-            on_health: Box::new(move |update| {
-                update_wiki_status_from_app(&app_handle, |flags| {
-                    flags.ingest.health = update.health;
-                    flags.ingest.stage = update.stage.map(|s| s.as_str().to_string());
-                    flags.ingest.subject = update.subject;
-                });
-            }),
-            on_replace_worker: Box::new(move || {
-                let holder = replace_app.try_state::<PipelineHolder>()?;
-                let mut guard = match holder.0.lock() {
-                    Ok(g) => g,
-                    // A panicking producer poisoned the holder; recovering the
-                    // sender from it would be worse than parking in degraded.
-                    Err(e) => {
-                        eprintln!("[watchdog] pipeline holder poisoned: {e}");
-                        return None;
-                    }
-                };
-                let handle = guard.as_mut()?;
-                let new_tx = handle.respawn_worker();
-                eprintln!("[watchdog] replacement pipeline worker spawned");
-                Some(new_tx)
-            }),
-        });
-        // Stash the supervisor's stop flag + join handle so the next
-        // `switch_vault` (or another watcher start) can signal and join
-        // before spawning a new supervisor
-        // (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
-        if let Some(sup_state) = app.try_state::<WatchdogSupervisor>() {
-            let prev = sup_state
-                .0
-                .lock()
-                .unwrap()
-                .replace(WatchdogSupervisorHandle {
-                    stop: stop.clone(),
-                    join,
-                });
-            if let Some(prev) = prev {
-                prev.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = prev.join.join();
+        let status_rx = {
+            let mut guard = pipeline.0.lock().unwrap();
+            let tuple = guard
+                .as_mut()
+                .ok_or_else(|| "pipeline not running".to_string())?;
+            tuple.status_rx.take()
+        };
+
+        if let Some(status_rx) = status_rx {
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                for event in status_rx {
+                    let PipelineStatusEvent::PendingCount(count) = event;
+                    update_wiki_status_from_app(&app_handle, |flags| {
+                        // The supervisor's on_health callback owns the
+                        // Stalled/Degraded latches; this listener only refreshes
+                        // the worker-derived stage/subject from the pending count
+                        // and avoids overwriting health while latched
+                        // (CodeRabbit review PRRT_kwDOSVmXas6d28dc).
+                        if !matches!(
+                            flags.ingest.health,
+                            pipeline::watchdog::PipelineHealth::Stalled
+                                | pipeline::watchdog::PipelineHealth::Degraded
+                        ) {
+                            flags.ingest.health = if count > 0 {
+                                pipeline::watchdog::PipelineHealth::Working
+                            } else {
+                                pipeline::watchdog::PipelineHealth::Idle
+                            };
+                        }
+                    });
+                }
+            });
+        }
+
+        {
+            let (tx, heartbeat) = {
+                let guard = pipeline.0.lock().unwrap();
+                match guard.as_ref() {
+                    Some(t) => (t.tx.clone(), t.heartbeat.clone()),
+                    None => return Err("pipeline not running".to_string()),
+                }
+            };
+            let brain_paths = crate::retrieval::resolve_brain_paths();
+            let report = crate::config::BrainConfig::load_lenient(&brain_paths)
+                .map_err(|e| e.to_string())?;
+            let profile = report.config.embed_profile.clone().unwrap_or_default();
+            let gen_timeout_secs = 600; // matches librarian/synthesis.rs default
+
+            let app_handle = app.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            // on_replace_worker: actually rebuild the channel and spawn a fresh
+            // worker, then publish the new sender so every producer — and the
+            // supervisor's own sweep — stops writing into the queue the
+            // abandoned worker still owns
+            // (CodeRabbit review PRRT_kwDOSVmXas6d28dw / PRRT_kwDOSVmXas6d3ZYn).
+            let replace_app = app.clone();
+            let join = pipeline::watchdog::spawn_supervisor(pipeline::watchdog::SupervisorConfig {
+                db_path: brain_paths.db_path.clone(),
+                heartbeat: heartbeat.clone(),
+                tx,
+                profile,
+                gen_timeout_secs,
+                stop: stop.clone(),
+                on_health: Box::new(move |update| {
+                    update_wiki_status_from_app(&app_handle, |flags| {
+                        flags.ingest.health = update.health;
+                        flags.ingest.stage = update.stage.map(|s| s.as_str().to_string());
+                        flags.ingest.subject = update.subject;
+                    });
+                }),
+                on_replace_worker: Box::new(move || {
+                    let holder = replace_app.try_state::<PipelineHolder>()?;
+                    let mut guard = match holder.0.lock() {
+                        Ok(g) => g,
+                        // A panicking producer poisoned the holder; recovering the
+                        // sender from it would be worse than parking in degraded.
+                        Err(e) => {
+                            eprintln!("[watchdog] pipeline holder poisoned: {e}");
+                            return None;
+                        }
+                    };
+                    let handle = guard.as_mut()?;
+                    let new_tx = handle.respawn_worker();
+                    eprintln!("[watchdog] replacement pipeline worker spawned");
+                    Some(new_tx)
+                }),
+            });
+            // Stash the supervisor's stop flag + join handle so the next
+            // `switch_vault` (or another watcher start) can signal and join
+            // before spawning a new supervisor
+            // (CodeRabbit review PRRT_kwDOSVmXas6d28dj).
+            if let Some(sup_state) = app.try_state::<WatchdogSupervisor>() {
+                let prev = sup_state
+                    .0
+                    .lock()
+                    .unwrap()
+                    .replace(WatchdogSupervisorHandle {
+                        stop: stop.clone(),
+                        join,
+                    });
+                if let Some(prev) = prev {
+                    prev.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = prev.join.join();
+                }
             }
         }
-    }
 
-    let raw_docs = target_canonical.join(crate::vault::safe_path::IMMUTABLE_DIR);
-    let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
+        let raw_docs = target_canonical.join(crate::vault::safe_path::IMMUTABLE_DIR);
+        let documents_root = std::fs::canonicalize(&raw_docs).unwrap_or(raw_docs.clone());
 
-    {
-        // Open a fresh WAL-mode connection for the reconcile pass instead of
-        // holding `db_state.0.lock()` across the (potentially slow) sha256
-        // hashing. This keeps the UI's long-lived connection free to read
-        // while the reconcile writes. See spec §11 mutex trap.
-        //
-        // If the connection open fails (e.g. fresh install with no brain.db
-        // yet), log and skip the reconcile pass — but DO continue to spawn the
-        // watcher below, which will catch new events as they arrive.
-        //
-        // Use the shared `retrieval::resolve_brain_paths()` so desktop and
-        // `ct watch` agree on the brain path (see CodeRabbit review on
-        // PR #96 — previously this constructed the path inline via
-        // `dirs::home_dir().join(".brain")` which silently diverged from
-        // the canonical resolver when `CURATED_BRAIN_DIR` was set).
-        let brain_db_path = retrieval::resolve_brain_paths().db_path;
-        // Open a fresh WAL-mode connection for the reconcile pass (spec §11
-        // mutex trap — keeps the UI's long-lived `DbState` connection free
-        // to read while we hash and upsert).
-        //
-        // If the open fails (e.g. fresh install with no `brain.db` yet), log
-        // and skip the reconcile — but DO continue so the watcher spawn below
-        // still runs and catches new events as they arrive.
-        let mut conn_opt: Option<rusqlite::Connection> =
-            match rusqlite::Connection::open(&brain_db_path) {
-                Ok(c) => {
-                    // Busy-timeout pragma (CodeRabbit review on PR #96):
-                    // the reconcile writer participates in WAL mode,
-                    // but `ct watch`'s per-event connection also opens
-                    // RW against the same DB. Without a timeout,
-                    // contention with a checkpoint or another writer
-                    // fails instantly with SQLITE_BUSY. 5s matches
-                    // `tauri_app_lib::db::AppDb`'s default.
-                    if let Err(e) = c.busy_timeout(std::time::Duration::from_secs(5)) {
-                        eprintln!("[reconcile] failed to set busy_timeout: {e}");
-                        // Non-fatal: continue without the pragma.
+        {
+            // Open a fresh WAL-mode connection for the reconcile pass instead of
+            // holding `db_state.0.lock()` across the (potentially slow) sha256
+            // hashing. This keeps the UI's long-lived connection free to read
+            // while the reconcile writes. See spec §11 mutex trap.
+            //
+            // If the connection open fails (e.g. fresh install with no brain.db
+            // yet), log and skip the reconcile pass — but DO continue to spawn the
+            // watcher below, which will catch new events as they arrive.
+            //
+            // Use the shared `retrieval::resolve_brain_paths()` so desktop and
+            // `ct watch` agree on the brain path (see CodeRabbit review on
+            // PR #96 — previously this constructed the path inline via
+            // `dirs::home_dir().join(".brain")` which silently diverged from
+            // the canonical resolver when `CURATED_BRAIN_DIR` was set).
+            let brain_db_path = retrieval::resolve_brain_paths().db_path;
+            // Open a fresh WAL-mode connection for the reconcile pass (spec §11
+            // mutex trap — keeps the UI's long-lived `DbState` connection free
+            // to read while we hash and upsert).
+            //
+            // If the open fails (e.g. fresh install with no `brain.db` yet), log
+            // and skip the reconcile — but DO continue so the watcher spawn below
+            // still runs and catches new events as they arrive.
+            let mut conn_opt: Option<rusqlite::Connection> =
+                match rusqlite::Connection::open(&brain_db_path) {
+                    Ok(c) => {
+                        // Busy-timeout pragma (CodeRabbit review on PR #96):
+                        // the reconcile writer participates in WAL mode,
+                        // but `ct watch`'s per-event connection also opens
+                        // RW against the same DB. Without a timeout,
+                        // contention with a checkpoint or another writer
+                        // fails instantly with SQLITE_BUSY. 5s matches
+                        // `tauri_app_lib::db::AppDb`'s default.
+                        if let Err(e) = c.busy_timeout(std::time::Duration::from_secs(5)) {
+                            eprintln!("[reconcile] failed to set busy_timeout: {e}");
+                            // Non-fatal: continue without the pragma.
+                        }
+                        // PRAGMA foreign_keys is per-connection and this
+                        // connection bypasses migrate() (spec 3b): without
+                        // this, `chunks`' ON DELETE CASCADE never fires and
+                        // both purges below orphan chunk rows.
+                        if let Err(e) = c.execute_batch("PRAGMA foreign_keys=ON;") {
+                            eprintln!("[reconcile] failed to enable foreign_keys: {e}");
+                        }
+                        Some(c)
                     }
-                    // PRAGMA foreign_keys is per-connection and this
-                    // connection bypasses migrate() (spec 3b): without
-                    // this, `chunks`' ON DELETE CASCADE never fires and
-                    // both purges below orphan chunk rows.
-                    if let Err(e) = c.execute_batch("PRAGMA foreign_keys=ON;") {
-                        eprintln!("[reconcile] failed to enable foreign_keys: {e}");
-                    }
-                    Some(c)
-                }
-                Err(e) => {
-                    eprintln!(
+                    Err(e) => {
+                        eprintln!(
                     "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
                 );
-                    None
-                }
-            };
-
-        // Purge documents rows whose backing file no longer exists on disk.
-        // Each per-row query failure is logged and skipped — we do NOT
-        // abort the reconcile pass on a single bad row, otherwise a
-        // single corrupt DB row would silently disable vault reconcile
-        // (CodeRabbit review on PR #96).
-        if let Some(conn) = conn_opt.as_mut() {
-            // Self-heal: drop rows the pipeline can never ingest. Runs
-            // BEFORE the existence-based purge below because those files
-            // still exist on disk -- `.brain/errors.log` is actively
-            // appended -- so the existence check would never catch them
-            // (spec item 3b).
-            match purge_excluded_rows(conn, &target_canonical) {
-                Ok(0) => {}
-                Ok(n) => eprintln!("[reconcile] purged {n} excluded-directory row(s)"),
-                Err(e) => eprintln!("[reconcile] excluded-row purge failed: {e}"),
-            }
-
-            let db_paths: Vec<String> = match conn
-                .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
-                .and_then(|mut stmt| {
-                    let mut rows = stmt.query([])?;
-                    let mut v = Vec::new();
-                    while let Some(row) = rows.next()? {
-                        v.push(row.get::<_, String>(0)?);
+                        None
                     }
-                    Ok::<_, rusqlite::Error>(v)
-                }) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
+                };
+
+            // Purge documents rows whose backing file no longer exists on disk.
+            // Each per-row query failure is logged and skipped — we do NOT
+            // abort the reconcile pass on a single bad row, otherwise a
+            // single corrupt DB row would silently disable vault reconcile
+            // (CodeRabbit review on PR #96).
+            if let Some(conn) = conn_opt.as_mut() {
+                // Self-heal: drop rows the pipeline can never ingest. Runs
+                // BEFORE the existence-based purge below because those files
+                // still exist on disk -- `.brain/errors.log` is actively
+                // appended -- so the existence check would never catch them
+                // (spec item 3b).
+                match purge_excluded_rows(conn, &target_canonical) {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("[reconcile] purged {n} excluded-directory row(s)"),
+                    Err(e) => eprintln!("[reconcile] excluded-row purge failed: {e}"),
+                }
+
+                let db_paths: Vec<String> = match conn
+                    .prepare("SELECT path FROM documents WHERE tier = 'user_doc'")
+                    .and_then(|mut stmt| {
+                        let mut rows = stmt.query([])?;
+                        let mut v = Vec::new();
+                        while let Some(row) = rows.next()? {
+                            v.push(row.get::<_, String>(0)?);
+                        }
+                        Ok::<_, rusqlite::Error>(v)
+                    }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
                         "[reconcile] skipping path purge — SELECT path FROM documents failed: {e}"
                     );
-                    Vec::new()
-                }
-            };
-            for path in db_paths {
-                if !std::path::Path::new(&path).exists() {
-                    eprintln!("[reconcile] purging deleted file from index: {}", path);
-                    if let Err(e) = enqueue_vault_event(
-                        conn,
-                        notify::EventKind::Remove(notify::event::RemoveKind::Any),
-                        std::path::Path::new(&path),
-                        Some(&target_canonical),
-                    ) {
-                        eprintln!("[reconcile] enqueue_vault_event (Remove) failed: {e}");
+                        Vec::new()
                     }
-                }
-            }
-
-            if raw_docs.exists() {
-                for entry in walkdir::WalkDir::new(&raw_docs)
-                    .min_depth(1)
-                    .into_iter()
-                    // Same exclusion the vault walker applies, so one notion
-                    // of "excluded" governs every traversal and the descent
-                    // cost disappears. Relativized against the vault root,
-                    // never matched absolute (spec D1). The `raw_docs` root
-                    // itself is never tested: `min_depth(1)` already skips
-                    // it, and `filter_entry` at depth 0 would short-circuit
-                    // the whole walk.
-                    .filter_entry(|e| {
-                        e.depth() == 0
-                            || !crate::walk_vault::abs_path_is_excluded_in_vault(
-                                e.path(),
-                                &target_canonical,
-                            )
-                    })
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                {
-                    let ext = entry
-                        .path()
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-                    if should_ingest_extension(ext) {
-                        let normalized = std::fs::canonicalize(entry.path())
-                            .unwrap_or_else(|_| entry.path().to_path_buf())
-                            .to_string_lossy()
-                            .into_owned();
-                        update_wiki_status(app, &status_state, |flags| {
-                            flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
-                        });
+                };
+                for path in db_paths {
+                    if !std::path::Path::new(&path).exists() {
+                        eprintln!("[reconcile] purging deleted file from index: {}", path);
                         if let Err(e) = enqueue_vault_event(
                             conn,
-                            notify::EventKind::Create(notify::event::CreateKind::Any),
-                            std::path::Path::new(&normalized),
+                            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+                            std::path::Path::new(&path),
                             Some(&target_canonical),
                         ) {
-                            eprintln!("[reconcile] enqueue_vault_event (Create) failed: {e}");
+                            eprintln!("[reconcile] enqueue_vault_event (Remove) failed: {e}");
+                        }
+                    }
+                }
+
+                if raw_docs.exists() {
+                    for entry in walkdir::WalkDir::new(&raw_docs)
+                        .min_depth(1)
+                        .into_iter()
+                        // Same exclusion the vault walker applies, so one notion
+                        // of "excluded" governs every traversal and the descent
+                        // cost disappears. Relativized against the vault root,
+                        // never matched absolute (spec D1). The `raw_docs` root
+                        // itself is never tested: `min_depth(1)` already skips
+                        // it, and `filter_entry` at depth 0 would short-circuit
+                        // the whole walk.
+                        .filter_entry(|e| {
+                            e.depth() == 0
+                                || !crate::walk_vault::abs_path_is_excluded_in_vault(
+                                    e.path(),
+                                    &target_canonical,
+                                )
+                        })
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().is_file())
+                    {
+                        let ext = entry
+                            .path()
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        if should_ingest_extension(ext) {
+                            let normalized = std::fs::canonicalize(entry.path())
+                                .unwrap_or_else(|_| entry.path().to_path_buf())
+                                .to_string_lossy()
+                                .into_owned();
+                            update_wiki_status(app, &status_state, |flags| {
+                                flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
+                            });
+                            if let Err(e) = enqueue_vault_event(
+                                conn,
+                                notify::EventKind::Create(notify::event::CreateKind::Any),
+                                std::path::Path::new(&normalized),
+                                Some(&target_canonical),
+                            ) {
+                                eprintln!("[reconcile] enqueue_vault_event (Create) failed: {e}");
+                            }
                         }
                     }
                 }
             }
+            // `conn_opt` drops here, releasing the WAL writer slot.
         }
-        // `conn_opt` drops here, releasing the WAL writer slot.
-    }
 
-    // Acquire the vault lock. This function is called from TWO outer
-    // entrypoints:
-    //   1. `start_file_watcher` (Tauri command) — no upstream lock.
-    //   2. `switch_vault` — acquires the lock at its own line ~1077
-    //      BEFORE the teardown block (CodeRabbit review on PR #96
-    //      pass 3, comment #11). That outer acquire is the FAIL-FAST
-    //      gate that protects the watcher from being torn down while a
-    //      headless `ct watch` holds the lock.
-    //
-    // The double-acquire here is intentional and harmless: `flock` is
-    // per-file-descriptor on Linux (and per-handle on Windows), so the
-    // same process acquiring the same lock file from two `OpenOptions`
-    // handles produces two independent locks. Both release on drop. The
-    // `WatcherHandle` returned below stores THIS lock (the inner one),
-    // so its drop releases the inner lock; the outer lock in `switch_vault`
-    // drops when that function returns.
-    //
-    // ...[truncated]
+        // Acquire the vault lock. This function is called from TWO outer
+        // entrypoints:
+        //   1. `start_file_watcher` (Tauri command) — no upstream lock.
+        //   2. `switch_vault` — acquires the lock at its own line ~1077
+        //      BEFORE the teardown block (CodeRabbit review on PR #96
+        //      pass 3, comment #11). That outer acquire is the FAIL-FAST
+        //      gate that protects the watcher from being torn down while a
+        //      headless `ct watch` holds the lock.
+        //
+        // The double-acquire here is intentional and harmless: `flock` is
+        // per-file-descriptor on Linux (and per-handle on Windows), so the
+        // same process acquiring the same lock file from two `OpenOptions`
+        // handles produces two independent locks. Both release on drop. The
+        // `WatcherHandle` returned below stores THIS lock (the inner one),
+        // so its drop releases the inner lock; the outer lock in `switch_vault`
+        // drops when that function returns.
+        //
+        // ...[truncated]
 
-    let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
-    let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
-    *scheduler_guard = Some((heal_tx.clone(), heal_thread));
+        let (heal_tx, heal_thread) = spawn_heal_scheduler(app.clone());
+        let mut scheduler_guard = heal_scheduler.0.lock().unwrap();
+        *scheduler_guard = Some((heal_tx.clone(), heal_thread));
 
-    // Resolve the brain DB path for the per-event ephemeral WAL-mode
-    // connection (line 910 below). The vault lock was already acquired
-    // at the top of this function — see the double-acquire rationale in
-    // the block comment above. (CodeRabbit review on PR #96 pass 3.)
-    let brain_paths = retrieval::resolve_brain_paths();
-    let brain_db_path = brain_paths.db_path.clone();
+        // Resolve the brain DB path for the per-event ephemeral WAL-mode
+        // connection (line 910 below). The vault lock was already acquired
+        // at the top of this function — see the double-acquire rationale in
+        // the block comment above. (CodeRabbit review on PR #96 pass 3.)
+        let brain_paths = retrieval::resolve_brain_paths();
+        let brain_db_path = brain_paths.db_path.clone();
 
-    // Acquire the vault lock for the WatcherHandle. The outer lock in
-    // `switch_vault` is the FAIL-FAST gate that prevents tearing down
-    // the old watcher when a headless `ct watch` holds the lock (see
-    // CodeRabbit review on PR #96 pass 3, comment #11). This inner
-    // lock is owned by the returned `WatcherHandle` and released when
-    // `WatcherHandle::stop` runs. Same-process double-flock is harmless
-    // (flock is per-fd); see the detailed rationale in the block comment
-    // above the `start_file_watcher_inner` function.
-    let vault_lock = VaultLock::acquire(&brain_paths.brain_dir).map_err(|e| {
-        format!(
-            "failed to acquire vault lock for {:?}: {e}",
-            brain_paths.brain_dir
-        )
-    })?;
+        // Acquire the vault lock for the WatcherHandle. The outer lock in
+        // `switch_vault` is the FAIL-FAST gate that prevents tearing down
+        // the old watcher when a headless `ct watch` holds the lock (see
+        // CodeRabbit review on PR #96 pass 3, comment #11). This inner
+        // lock is owned by the returned `WatcherHandle` and released when
+        // `WatcherHandle::stop` runs. Same-process double-flock is harmless
+        // (flock is per-fd); see the detailed rationale in the block comment
+        // above the `start_file_watcher_inner` function.
+        let vault_lock = VaultLock::acquire(&brain_paths.brain_dir).map_err(|e| {
+            format!(
+                "failed to acquire vault lock for {:?}: {e}",
+                brain_paths.brain_dir
+            )
+        })?;
 
-    let app_for_events = app.clone();
-    // Separate clone for the monitor spawn / degraded-clear after
-    // registration (the events clone is moved into the watcher closure).
-    let app_handle_for_monitor = app.clone();
-    let vault_for_watcher = target_canonical.clone();
-    // Owned copy for the event callback: `vault_for_watcher` is moved into
-    // `spawn_vault_watcher` itself.
-    let vault_root_for_events = target_canonical.clone();
-    // Brain DB path for the per-event ephemeral WAL-mode connection.
-    // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
-    // during the (potentially slow) sha256 hash freezes the UI.
-    let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
-        let _ = app_for_events.emit("vault-event", &event);
-        let path_str = match &event {
-            VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
-        };
-        let canonical =
-            std::fs::canonicalize(path_str).unwrap_or_else(|_| std::path::PathBuf::from(path_str));
-        if !canonical.starts_with(&documents_root) {
-            return;
-        }
-        let normalized = canonical.to_string_lossy().into_owned();
-        // Open a fresh WAL-mode connection per event. WAL mode allows
-        // concurrent reader + writer, so the UI's long-lived connection in
-        // `DbState` keeps reading while we hash and upsert here.
-        let conn_result = rusqlite::Connection::open(&brain_db_path);
-        let mut conn = match conn_result {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "[watch] failed to open brain.db at {brain_db_path:?}: {e}; event dropped: {normalized}"
-                );
+        let app_for_events = app.clone();
+        // Separate clone for the monitor spawn / degraded-clear after
+        // registration (the events clone is moved into the watcher closure).
+        let app_handle_for_monitor = app.clone();
+        let vault_for_watcher = target_canonical.clone();
+        // Owned copy for the event callback: `vault_for_watcher` is moved into
+        // `spawn_vault_watcher` itself.
+        let vault_root_for_events = target_canonical.clone();
+        // Brain DB path for the per-event ephemeral WAL-mode connection.
+        // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
+        // during the (potentially slow) sha256 hash freezes the UI.
+        let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
+            let _ = app_for_events.emit("vault-event", &event);
+            let path_str = match &event {
+                VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
+            };
+            let canonical = std::fs::canonicalize(path_str)
+                .unwrap_or_else(|_| std::path::PathBuf::from(path_str));
+            if !canonical.starts_with(&documents_root) {
                 return;
             }
-        };
-        // Busy-timeout pragma (CodeRabbit review on PR #96):
-        // without this, transient contention with a WAL checkpoint
-        // or another writer instantly fails with SQLITE_BUSY. 5s
-        // matches `tauri_app_lib::db::AppDb`'s default and the
-        // `ct watch` side (`tools/src/write.rs::open_rw`).
-        if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
-            eprintln!("[watch] failed to set busy_timeout: {e}");
-            // Non-fatal: continue.
-        }
-        let event_kind = match &event {
-            VaultEvent::Added(_) => {
-                update_wiki_status_from_app(&app_for_events, |flags| {
-                    flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
-                });
-                Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
+            let normalized = canonical.to_string_lossy().into_owned();
+            // Open a fresh WAL-mode connection per event. WAL mode allows
+            // concurrent reader + writer, so the UI's long-lived connection in
+            // `DbState` keeps reading while we hash and upsert here.
+            let conn_result = rusqlite::Connection::open(&brain_db_path);
+            let mut conn = match conn_result {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                    "[watch] failed to open brain.db at {brain_db_path:?}: {e}; event dropped: {normalized}"
+                );
+                    return;
+                }
+            };
+            // Busy-timeout pragma (CodeRabbit review on PR #96):
+            // without this, transient contention with a WAL checkpoint
+            // or another writer instantly fails with SQLITE_BUSY. 5s
+            // matches `tauri_app_lib::db::AppDb`'s default and the
+            // `ct watch` side (`tools/src/write.rs::open_rw`).
+            if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+                eprintln!("[watch] failed to set busy_timeout: {e}");
+                // Non-fatal: continue.
             }
-            VaultEvent::Modified(_) => {
-                update_wiki_status_from_app(&app_for_events, |flags| {
-                    flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
-                });
-                Ok(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            let event_kind = match &event {
+                VaultEvent::Added(_) => {
+                    update_wiki_status_from_app(&app_for_events, |flags| {
+                        flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
+                    });
+                    Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
+                }
+                VaultEvent::Modified(_) => {
+                    update_wiki_status_from_app(&app_for_events, |flags| {
+                        flags.ingest.health = pipeline::watchdog::PipelineHealth::Working;
+                    });
+                    Ok(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                }
+                VaultEvent::Deleted(_) => {
+                    let _ = heal_tx.send(());
+                    Ok(notify::EventKind::Remove(notify::event::RemoveKind::Any))
+                }
+            };
+            let event_kind = match event_kind {
+                Ok(k) => k,
+                Err(()) => return,
+            };
+            if let Err(e) = enqueue_vault_event(
+                &mut conn,
+                event_kind,
+                std::path::Path::new(&normalized),
+                Some(vault_root_for_events.as_path()),
+            ) {
+                eprintln!("[watch] enqueue_vault_event failed for {normalized}: {e}");
             }
-            VaultEvent::Deleted(_) => {
-                let _ = heal_tx.send(());
-                Ok(notify::EventKind::Remove(notify::event::RemoveKind::Any))
-            }
+            // conn drops here, releasing the WAL writer slot.
+        });
+        // Spawn-failure latch (spec §2): the incident class is a watcher that
+        // silently doesn't exist, so before returning the error we latch
+        // degraded (errors.log + status) so the failure is loud and persistent
+        // even when this caller only `eprintln!`s it (e.g. the switch_vault
+        // restart paths).
+        //
+        // The monitor is (re)started BEFORE the early returns below — spec §2
+        // "Spawn failure": the monitor still starts. With the change-only gate
+        // it re-asserts exactly once at its first tick; the DURABLE recovery
+        // channel for a webview that subscribes later is the `get_wiki_status`
+        // snapshot, which reads the latched flag. (Round-2 m2: reworded — the
+        // original "later re-assert" overstated the tick behavior.)
+        let handle = match handle {
+            Ok(h) => h.with_lock(vault_lock),
+            // Latch + monitor restart happen once at the wrapper (round-2 m1:
+            // latching here AND there wrote the same failure twice).
+            Err(e) => return Err(e.to_string()),
         };
-        let event_kind = match event_kind {
-            Ok(k) => k,
-            Err(()) => return,
-        };
-        if let Err(e) = enqueue_vault_event(
-            &mut conn,
-            event_kind,
-            std::path::Path::new(&normalized),
-            Some(vault_root_for_events.as_path()),
-        ) {
-            eprintln!("[watch] enqueue_vault_event failed for {normalized}: {e}");
-        }
-        // conn drops here, releasing the WAL writer slot.
-    });
-    // Spawn-failure latch (spec §2): the incident class is a watcher that
-    // silently doesn't exist, so before returning the error we latch
-    // degraded (errors.log + status) so the failure is loud and persistent
-    // even when this caller only `eprintln!`s it (e.g. the switch_vault
-    // restart paths).
-    //
-    // The monitor is (re)started BEFORE the early returns below — spec §2
-    // "Spawn failure": the monitor still starts and its ticks re-assert the
-    // latched state, so a degradation emitted before the webview subscribes
-    // is recovered by the snapshot + a later re-assert, not lost.
-    let handle = match handle {
-        Ok(h) => h.with_lock(vault_lock),
-        Err(e) => {
-            latch_watcher_degraded(app, &format!("spawn_vault_watcher failed: {e}"));
-            replace_monitor(&monitor, app);
-            return Err(e.to_string());
-        }
-    };
 
-    let mut watcher_guard = watcher_started.0.lock().unwrap();
-    let still_canonical = match canonical_vault_from_config(&vault_state) {
-        Ok(p) => p,
-        Err(e) => {
+        let mut watcher_guard = watcher_started.0.lock().unwrap();
+        let still_canonical = match canonical_vault_from_config(&vault_state) {
+            Ok(p) => p,
+            Err(e) => {
+                drop(watcher_guard);
+                handle.stop();
+                return Err(e);
+            }
+        };
+        if still_canonical != target_canonical {
             drop(watcher_guard);
             handle.stop();
-            replace_monitor(&monitor, app);
-            return Err(e);
+            return Ok(());
         }
-    };
-    if still_canonical != target_canonical {
-        drop(watcher_guard);
-        handle.stop();
-        replace_monitor(&monitor, app);
-        return Ok(());
-    }
 
-    if let Some((_p, old)) = watcher_guard.take() {
-        old.stop();
+        if let Some((_p, old)) = watcher_guard.take() {
+            old.stop();
+        }
+        // Registration succeeded: (re)arm the periodic self-check monitor and
+        // clear any stale degraded latch from a previous generation (recovery
+        // clears the latch, spec §2).
+        replace_monitor(&monitor, &app_handle_for_monitor);
+        clear_watcher_degraded(&app_handle_for_monitor);
+        *watcher_guard = Some((still_canonical, handle));
+        Ok(())
+    })();
+
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            latch_watcher_degraded(app, &format!("watcher start failed: {e}"));
+            replace_monitor(&monitor, app);
+            Err(e)
+        }
     }
-    // Registration succeeded: (re)arm the periodic self-check monitor and
-    // clear any stale degraded latch from a previous generation (recovery
-    // clears the latch, spec §2).
-    replace_monitor(&monitor, &app_handle_for_monitor);
-    clear_watcher_degraded(&app_handle_for_monitor);
-    *watcher_guard = Some((still_canonical, handle));
-    Ok(())
 }
 
 /// Stop any monitor in `monitor` and spawn a fresh one owned by `app`.
