@@ -1,31 +1,69 @@
 //! `export_okf_bundle` — headless OKF bundle export of the whole brain.
 //!
-//! Nightly-backup companion to the GUI's `okf_export_bundle_cmd`: same
+//! Nightly-backup companion to the GUI's `okf_export_bundle_cmd`: the same
 //! `load_export_entities` + `write_bundle_with_profile` code path (v0.2,
-//! profile `llm-wiki/2`), so the output is byte-compatible with what the
-//! desktop app writes. Read-only against the live DB — safe to run while
-//! the app is open (WAL readers don't block writers).
+//! profile `llm-wiki/2`), so the bundle content matches what the desktop app
+//! writes — except that, being read-only against the live DB, it records no
+//! `exported` event rows. All load queries run inside one deferred
+//! transaction, so the snapshot is consistent even if the app writes while
+//! the export runs (WAL readers never block writers). The zip is written to a
+//! temp file and renamed into place only after the write AND a full
+//! parse-back self-check succeed, so a failed run never destroys the
+//! previous backup. The self-check enforces the same import limits the
+//! reader applies (`MAX_ZIP_ENTRIES` / `MAX_TOTAL_BYTES`), so an oversized
+//! brain fails loudly here instead of producing a nightly backup that
+//! import would refuse to restore.
 //!
 //! Usage: `export_okf_bundle <dest.zip>` (defaults to `$HOME/brain-okf.zip`).
 //! Prints `exported entities=<n> files=<n> sha256=<hex> path=<p>` on success.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use tauri_app_lib::okf::bundle_read::parse_bundle;
 use tauri_app_lib::okf::bundle_write::write_bundle_with_profile;
 use tauri_app_lib::okf::types::{LLM_WIKI_PROFILE_V2, OKF_VERSION_V2};
-use tauri_app_lib::okf::zip_io::write_bundle_zip;
+use tauri_app_lib::okf::zip_io::{read_bundle_source, write_bundle_zip};
+
+fn sha256_hex(path: &Path) -> Result<String> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("hashing {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).context("reading while hashing")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
 
 fn main() -> Result<()> {
+    let home = dirs::home_dir().context("cannot resolve $HOME; pass an explicit dest")?;
     let dest = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("brain-okf.zip"));
+        .unwrap_or_else(|| home.join("brain-okf.zip"));
 
     let brain = curated_thoughts_tools::paths::resolve_brain_paths();
     let conn =
         Connection::open_with_flags(&brain.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("opening brain db at {}", brain.db_path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("setting busy timeout")?;
+
+    // One deferred transaction = one consistent snapshot across the entity
+    // list and every per-entity fact/task/edge/event query that follows.
+    conn.execute_batch("BEGIN DEFERRED")
+        .context("beginning export snapshot")?;
 
     let entities = tauri_app_lib::db::bundle_io::load_export_entities(&conn, None)
         .context("loading entities for export")?;
@@ -37,24 +75,47 @@ fn main() -> Result<()> {
     let files = write_bundle_with_profile(&entities, LLM_WIKI_PROFILE_V2, OKF_VERSION_V2)
         .map_err(|e| anyhow::anyhow!(e))?;
     let file_count = files.len();
+    conn.execute_batch("COMMIT")
+        .context("committing snapshot")?;
+
+    // Self-check BEFORE publishing: same entry-count / decompressed-size
+    // caps the import reader enforces, so a backup that would be refused on
+    // restore fails here instead.
+    let total_bytes: u64 = files.iter().map(|f| f.content.len() as u64).sum();
+    if file_count > tauri_app_lib::okf::zip_io::MAX_ZIP_ENTRIES {
+        bail!(
+            "export would produce {file_count} files; import cap is {} — \
+             bundle would not be restorable",
+            tauri_app_lib::okf::zip_io::MAX_ZIP_ENTRIES
+        );
+    }
+    if total_bytes > tauri_app_lib::okf::zip_io::MAX_TOTAL_BYTES {
+        bail!(
+            "export would produce {total_bytes} decompressed bytes; import cap is {} — \
+             bundle would not be restorable",
+            tauri_app_lib::okf::zip_io::MAX_TOTAL_BYTES
+        );
+    }
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    write_bundle_zip(&dest, &files).with_context(|| format!("writing {}", dest.display()))?;
 
-    // Digest for the watchdog log so each night's artifact is verifiable.
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(&dest)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let digest: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    // Write to a temp sibling, verify, then atomically publish. A failure at
+    // any point leaves the previous backup untouched.
+    let tmp = dest.with_extension("zip.partial");
+    write_bundle_zip(&tmp, &files).with_context(|| format!("writing {}", tmp.display()))?;
 
+    // Round-trip: parse the written bundle back through the real reader.
+    let reparsed =
+        read_bundle_source(&tmp).with_context(|| format!("re-reading {}", tmp.display()))?;
+    parse_bundle(&reparsed).context("round-trip parse of the written bundle failed")?;
+
+    std::fs::rename(&tmp, &dest)
+        .with_context(|| format!("publishing {} over {}", tmp.display(), dest.display()))?;
+
+    let digest = sha256_hex(&dest)?;
     println!(
         "exported entities={} files={} sha256={} path={}",
         entity_count,
