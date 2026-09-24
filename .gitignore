@@ -28,9 +28,10 @@ tools/.fastembed_cache/
 *.sln
 *.sw?
 
-# Superpowers planning (work-in-progress)
+# Superpowers planning (work-in-progress). Plans are committed per Kurt's
+# 2026-09-24 directive so remote machines can share them; they are ephemeral
+# and may be deleted later.
 .superpowers/
-docs/superpowers/plans/
 
 # Git worktrees
 .worktrees/
