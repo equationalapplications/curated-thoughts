@@ -330,14 +330,10 @@ pub fn heal_run() -> Result<()> {
     let mut conn = crate::write::open_rw(&brain)?;
     let vault = retrieval::resolve_brain_paths().brain_dir;
     let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
-    println!(
-        "{}",
-        serde_json::json!({
-            "evaluated": summary.evaluated,
-            "soft_deleted": summary.soft_deleted,
-            "edges_purged": summary.edges_purged,
-        })
-    );
+    // Serialize the struct directly (m2): `HealSummary` derives `Serialize`,
+    // so the stdout contract stays tied to the struct instead of a
+    // hand-built field list that can drift from it.
+    println!("{}", serde_json::to_string(&summary)?);
     Ok(())
 }
 

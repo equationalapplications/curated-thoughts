@@ -16,9 +16,11 @@ mod common;
 use common::init_brain_db;
 
 /// Seed one live ungrounded `librarian_inferred` entry (legacy path ref to a
-/// document that does not exist in `documents`), one edge to a partner that
-/// is already soft-deleted (purgeable per the partner-alive retention rule),
-/// and one edge whose partner is alive (must survive).
+/// document that does not exist in `documents`), one pre-soft-deleted dead
+/// partner row, and two edges on the ungrounded row: one to the dead partner
+/// (`edge_doomed`, purgeable per the partner-alive retention rule) and one
+/// self-edge (`edge_self`, purged too — the heal's own soft-delete makes that
+/// endpoint dead within the same transaction).
 fn seed_heal_fixture(dir: &std::path::Path) {
     let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
     conn.execute(
@@ -169,5 +171,43 @@ fn heal_with_yes_heals_purges_and_prints_summary_json() {
             )
             .unwrap();
         assert_eq!(events, 1, "one healed event for the affected entity");
+    });
+}
+
+#[test]
+fn heal_with_yes_on_clean_brain_exits_zero_with_zero_summary() {
+    // M4 (Opus review of PR #228): the nothing-to-do case must be exit 0
+    // with a zeroed summary — a no-op heal is a SUCCESS, not an error.
+    let brain = tempdir().unwrap();
+    let dir = brain.path().to_path_buf();
+    let dir_str = dir.to_str().unwrap().to_string();
+    with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
+        init_brain_db(&dir);
+        let out = run_ct(&dir, &["heal", "--yes"]);
+        assert!(
+            out.status.success(),
+            "clean-brain heal must exit 0, got {} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let summary: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("stdout must be a single JSON object ({e}): {stdout}"));
+        assert_eq!(summary["evaluated"], 0, "{summary}");
+        assert_eq!(summary["soft_deleted"], 0, "{summary}");
+        assert_eq!(summary["edges_purged"], 0, "{summary}");
+    });
+}
+
+#[test]
+fn heal_refusal_reports_the_live_row_count_it_would_evaluate() {
+    // Spec §6: the refusal names the db path AND the live-row count (m1).
+    with_seeded_heal_brain(|dir| {
+        let out = run_ct(dir, &["heal"]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("1 live librarian_inferred row"),
+            "refusal must include the evaluated-row count: {err}"
+        );
     });
 }

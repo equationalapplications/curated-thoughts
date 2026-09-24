@@ -2,12 +2,18 @@
 //! wiki entries whose `source_ref` is demonstrably ungrounded, purge their
 //! edges, and write `healed` events.
 //!
-//! Connection-only by design: the GUI heal scheduler, the Tauri maintenance
-//! commands, and the headless `ct heal` CLI must all drive the exact same
-//! write path, so nothing here may touch Tauri state, `AppDb`, or the vault
-//! config. `vault` rides along in the signature for call-site parity (the
-//! existence check is purely DB-driven via
-//! `source_ref_is_still_grounded`); it is intentionally unused.
+//! Connection-only by design: the GUI heal scheduler and the headless
+//! `ct heal` CLI must drive the exact same write path, so nothing here may
+//! touch Tauri state, `AppDb`, or the vault config. `vault` rides along in
+//! the signature for call-site parity (the existence check is purely
+//! DB-driven via `source_ref_is_still_grounded`); it is intentionally
+//! unused.
+//!
+//! Callers today: `heal_invalid_sources` (lib.rs, the scheduler thread) and
+//! `ct heal` (tools/src/cmds.rs). The GUI "Heal Database" button
+//! (`run_wiki_heal`) still calls `heal_lost_librarian_inferred`, NOT this
+//! core — consolidating that button onto this path is deliberate follow-up
+//! work, not an oversight (m8, Opus review of PR #228).
 
 use std::path::PathBuf;
 

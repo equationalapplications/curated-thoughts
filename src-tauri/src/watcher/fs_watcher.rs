@@ -82,9 +82,14 @@ impl WatcherHandle {
     /// dead). This counts the whole process's inotify fds, so it is a lower
     /// bound: it can never false-negative the incident signature, though in
     /// principle another inotify user could mask a death (no other inotify
-    /// user exists in the tree today). Other platforms: always `true` — no
-    /// OS signal is available there, so the `last_error_at` latch is the
-    /// portable signal.
+    /// user exists in the tree today). Caveat (m5, Opus review of PR
+    /// #228): linked libraries — GTK/GIO/WebKitGTK — could open their own
+    /// inotify fds and mask a death the same way; incident data shows they
+    /// hold none today, but if a future dependency starts doing so the
+    /// remedy is a baseline count captured before `watch()` arms, compared
+    /// per tick, not a widening of this scan. Other platforms: always
+    /// `true` — no OS signal is available there, so the `last_error_at`
+    /// latch is the portable signal.
     pub fn is_alive(&self) -> bool {
         #[cfg(target_os = "linux")]
         {

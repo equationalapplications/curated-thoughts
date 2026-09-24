@@ -106,7 +106,10 @@ struct WatcherMonitorHandle {
 impl WatcherMonitorHandle {
     /// Signal the monitor to exit and give it a bounded window (spec §2:
     /// on timeout abandon — safe because a wedged monitor that eventually
-    /// wakes re-resolves state per tick and finds no handle to check).
+    /// wakes re-resolves state per tick and, after `replace_monitor` has
+    /// swapped in the new generation, no longer finds the stale handle it
+    /// was inspecting — worst case it logs one latched line alongside the
+    /// new monitor before exiting; the spec accepts that window).
     fn stop(self) {
         self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         let finished =
@@ -145,17 +148,72 @@ fn clear_watcher_degraded(app: &AppHandle) {
     });
 }
 
+/// Verdict for one monitor tick, pure so the latch semantics (spec §2 +
+/// Opus review M1/m4) are unit-testable without an AppHandle, a notify
+/// backend, or wall-clock sleeps: feed it the tick plate and the latches
+/// the thread carries, get back what to do.
+///
+/// `last_seen_error_secs` is the highest error timestamp already judged —
+/// comparing against IT (not the last clean tick) means an error recorded
+/// in the same wall-clock second as a clean tick is still seen (m4), and
+/// a consumed error never re-trips on later ticks (M1).
+///
+/// The returned `Option` is `Some(degraded_now)` when the tick has a
+/// verdict to act on and `None` when there is no handle to inspect
+/// (treated as "never armed" per spec §2). `new_seen_error` hands back
+/// the consumed timestamp so the caller can update its latch even when
+/// the verdict is clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorTick {
+    degraded_now: Option<bool>,
+    new_seen_error: u64,
+}
+
+fn monitor_tick_verdict(
+    tick: Option<(u64, u64, bool)>,
+    last_seen_error_secs: u64,
+    degraded: bool,
+) -> MonitorTick {
+    let Some((armed_at, last_error_at, alive)) = tick else {
+        // No registered handle: degraded by definition; nothing new consumed.
+        return MonitorTick {
+            degraded_now: Some(true),
+            new_seen_error: last_seen_error_secs,
+        };
+    };
+    let new_seen_error = last_error_at.max(last_seen_error_secs);
+    let is_degraded =
+        armed_at == 0 || !alive || (last_error_at != 0 && last_error_at > last_seen_error_secs);
+    let _ = degraded; // caller compares its latch to `is_degraded` for transitions
+    MonitorTick {
+        degraded_now: Some(is_degraded),
+        new_seen_error,
+    }
+}
+
 /// Spawn the periodic self-check thread. First tick after 5s (quick
 /// detection of the never-armed incident class), then every 60s.
+///
+/// Latch discipline (Opus review of PR #228, M1/M2): the thread tracks its
+/// own `degraded` state and only appends to errors.log / emits a status
+/// change **on a transition** — a persistent problem writes one line per
+/// episode, not one per tick, and a recovery is actually observable. The
+/// error disjunct compares against the *consumed* error timestamp
+/// (`last_seen_error_secs`), not the last clean tick, so an error recorded
+/// in the same wall-clock second as a clean tick is not silently dropped
+/// (m4) and a later clean tick can clear the latch.
 fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_thread = cancel.clone();
     let join = std::thread::spawn(move || {
-        // Unix-secs of the last clean tick. A `last_error_at` strictly
-        // greater than this means a NEW notify error occurred since we
+        // Highest `last_error_at` value this loop has already judged. A
+        // strictly newer value means a NEW notify error occurred since we
         // last looked (spec §2 tick-latch disjunct). Starts at 0 so an
         // error recorded before the first tick still trips.
-        let mut last_clean_tick_secs: u64 = 0;
+        let mut last_seen_error_secs: u64 = 0;
+        // Degraded latch: only act on transitions (spec §2 "once per
+        // transition"); a clean tick while already working is a no-op.
+        let mut degraded = false;
         let mut first = true;
         loop {
             let wait = if first {
@@ -195,34 +253,41 @@ fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
                 })
             });
 
-            let Some((armed_at, last_error_at, alive)) = tick else {
-                // No watcher registered at all: the spawner latches
-                // degraded on spawn failure, and the early-return path
-                // reinstates untouched, so a tick that finds None here
-                // just idles — there is nothing to inspect.
+            // Pure verdict (unit-tested below): degrades on armed_at==0,
+            // dead watcher, or a NEW error; consumes the error timestamp so
+            // a later clean tick clears the latch (M1/m4).
+            let verdict = monitor_tick_verdict(tick, last_seen_error_secs, degraded);
+            last_seen_error_secs = verdict.new_seen_error;
+            let Some(now_degraded) = verdict.degraded_now else {
                 continue;
             };
-            if armed_at == 0 {
-                latch_watcher_degraded(&app, "watcher never armed (armed_at == 0)");
+            if now_degraded {
+                if !degraded {
+                    degraded = true;
+                    let reason = match tick {
+                        None => "watcher monitor found no registered handle".to_string(),
+                        Some((armed_at, _, alive)) => {
+                            if armed_at == 0 {
+                                "watcher never armed (armed_at == 0)".to_string()
+                            } else if !alive {
+                                "watcher not alive (no inotify fd under /proc/self/fd)".to_string()
+                            } else {
+                                "notify event loop recorded an error since the last tick"
+                                    .to_string()
+                            }
+                        }
+                    };
+                    latch_watcher_degraded(&app, &reason);
+                }
                 continue;
             }
-            if !alive {
-                latch_watcher_degraded(
-                    &app,
-                    "watcher not alive (no inotify fd under /proc/self/fd)",
-                );
-                continue;
+            // Clean tick: clear the latch only on the degraded → working
+            // transition (M2: a clean tick while already working must not
+            // emit anything).
+            if degraded {
+                degraded = false;
+                clear_watcher_degraded(&app);
             }
-            if last_error_at != 0 && last_error_at > last_clean_tick_secs {
-                latch_watcher_degraded(
-                    &app,
-                    "notify event loop recorded an error since the last clean tick",
-                );
-                continue;
-            }
-            // Clean tick: clear any degraded latch and record the plate.
-            last_clean_tick_secs = watcher::unix_secs_now();
-            clear_watcher_degraded(&app);
         }
     });
     WatcherMonitorHandle { cancel, join }
@@ -957,6 +1022,79 @@ fn purge_excluded_rows(
 }
 
 #[cfg(test)]
+mod watcher_monitor_verdict_tests {
+    use super::monitor_tick_verdict;
+
+    /// M1 regression: a consumed error must NOT re-trip on later ticks.
+    /// Tick 1 sees error@100 (degraded, consumes 100); tick 2 sees the same
+    /// last_error_at=100 — no NEW error — so the verdict is clean and the
+    /// thread can clear its latch.
+    #[test]
+    fn consumed_error_does_not_retrip_on_later_ticks() {
+        let first = monitor_tick_verdict(Some((50, 100, true)), 0, false);
+        assert_eq!(first.degraded_now, Some(true), "new error degrades");
+        assert_eq!(first.new_seen_error, 100);
+
+        let second = monitor_tick_verdict(Some((50, 100, true)), first.new_seen_error, true);
+        assert_eq!(
+            second.degraded_now,
+            Some(false),
+            "the same error must not re-trip after being consumed"
+        );
+        assert_eq!(second.new_seen_error, 100);
+    }
+
+    /// m4 regression: an error recorded in the SAME wall-clock second as a
+    /// clean tick used to be dropped by a strict `>` against the tick time.
+    /// The consumed-timestamp comparison sees it.
+    #[test]
+    fn same_second_error_is_still_seen() {
+        // Clean tick at t=200; error also stamped t=200 arrives before the
+        // next tick. `last_error_at (200) > last_seen_error_secs (0)` — seen.
+        let v = monitor_tick_verdict(Some((150, 200, true)), 0, false);
+        assert_eq!(v.degraded_now, Some(true));
+        assert_eq!(v.new_seen_error, 200);
+    }
+
+    /// Spec §2 disjuncts: armed_at == 0 degrades; a dead watcher degrades;
+    /// an armed+alive watcher with no new error is clean even when the
+    /// thread's latch says degraded (the caller clears on transition).
+    #[test]
+    fn armed_zero_degrades_and_dead_degrades_and_healthy_is_clean() {
+        let never_armed = monitor_tick_verdict(Some((0, 0, true)), 0, false);
+        assert_eq!(never_armed.degraded_now, Some(true));
+
+        let dead = monitor_tick_verdict(Some((50, 0, false)), 0, false);
+        assert_eq!(dead.degraded_now, Some(true));
+
+        let healthy = monitor_tick_verdict(Some((50, 0, true)), 0, true);
+        assert_eq!(
+            healthy.degraded_now,
+            Some(false),
+            "healthy tick must be clean so the latch can clear"
+        );
+    }
+
+    /// Spec §2: a missing registered handle reads as "never armed" —
+    /// degraded — and consumes nothing.
+    #[test]
+    fn missing_handle_reads_as_never_armed() {
+        let v = monitor_tick_verdict(None, 77, false);
+        assert_eq!(v.degraded_now, Some(true));
+        assert_eq!(v.new_seen_error, 77, "nothing new consumed");
+    }
+
+    /// A strictly newer error after a consumed one re-trips (second
+    /// episode, not a stuck latch).
+    #[test]
+    fn newer_error_after_consumed_one_retrips() {
+        let v = monitor_tick_verdict(Some((50, 300, true)), 100, true);
+        assert_eq!(v.degraded_now, Some(true));
+        assert_eq!(v.new_seen_error, 300);
+    }
+}
+
+#[cfg(test)]
 mod excluded_row_purge_tests {
     use super::purge_excluded_rows;
 
@@ -1539,10 +1677,16 @@ fn start_file_watcher_inner(
     // degraded (errors.log + status) so the failure is loud and persistent
     // even when this caller only `eprintln!`s it (e.g. the switch_vault
     // restart paths).
+    //
+    // The monitor is (re)started BEFORE the early returns below — spec §2
+    // "Spawn failure": the monitor still starts and its ticks re-assert the
+    // latched state, so a degradation emitted before the webview subscribes
+    // is recovered by the snapshot + a later re-assert, not lost.
     let handle = match handle {
         Ok(h) => h.with_lock(vault_lock),
         Err(e) => {
             latch_watcher_degraded(app, &format!("spawn_vault_watcher failed: {e}"));
+            replace_monitor(&monitor, app);
             return Err(e.to_string());
         }
     };
@@ -1553,12 +1697,14 @@ fn start_file_watcher_inner(
         Err(e) => {
             drop(watcher_guard);
             handle.stop();
+            replace_monitor(&monitor, app);
             return Err(e);
         }
     };
     if still_canonical != target_canonical {
         drop(watcher_guard);
         handle.stop();
+        replace_monitor(&monitor, app);
         return Ok(());
     }
 
@@ -1568,10 +1714,21 @@ fn start_file_watcher_inner(
     // Registration succeeded: (re)arm the periodic self-check monitor and
     // clear any stale degraded latch from a previous generation (recovery
     // clears the latch, spec §2).
-    *monitor.0.lock().unwrap() = Some(spawn_watcher_monitor(app_handle_for_monitor.clone()));
+    replace_monitor(&monitor, &app_handle_for_monitor);
     clear_watcher_degraded(&app_handle_for_monitor);
     *watcher_guard = Some((still_canonical, handle));
     Ok(())
+}
+
+/// Stop any monitor in `monitor` and spawn a fresh one owned by `app`.
+/// Extracted so every lifecycle path of `start_file_watcher_inner` (success
+/// AND the failure early-returns, spec §2 "the monitor still starts") uses
+/// one orderly stop-old-then-spawn-new sequence.
+fn replace_monitor(monitor: &State<'_, WatcherMonitor>, app: &AppHandle) {
+    if let Some(old_monitor) = monitor.0.lock().unwrap().take() {
+        old_monitor.stop();
+    }
+    *monitor.0.lock().unwrap() = Some(spawn_watcher_monitor(app.clone()));
 }
 /// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).

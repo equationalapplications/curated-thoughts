@@ -48,6 +48,7 @@ describe('useWikiStatus', () => {
       forgetting: false,
       diagnosticErrors: 0,
       diagnosticWarnings: 0,
+      watcherHealth: 'working',
       busy: false,
       activeJob: 'idle',
       activeJobLabel: null,
@@ -79,6 +80,7 @@ describe('useWikiStatus', () => {
       forgetting: false,
       diagnosticErrors: 0,
       diagnosticWarnings: 0,
+      watcherHealth: 'working',
       busy: true,
       activeJob: 'ingesting',
       activeJobLabel: 'Ingesting',
@@ -108,6 +110,7 @@ describe('useWikiStatus', () => {
       forgetting: false,
       diagnosticErrors: 0,
       diagnosticWarnings: 0,
+      watcherHealth: 'working',
       busy: true,
       activeJob: 'healing',
       activeJobLabel: 'Healing',
@@ -154,6 +157,79 @@ describe('useWikiStatus', () => {
     expect(result.current.healing).toBe(true);
     expect(result.current.pruning).toBe(false);
     expect(result.current.busy).toBe(true);
+  });
+
+  it('propagates watcherHealth degraded from a wiki-status-change event (B1 regression)', async () => {
+    // Opus review of PR #228, B1: the hook dropped `watcherHealth` on both
+    // the snapshot and event paths, so the StatusBar/MaintenanceDashboard
+    // degraded warnings could never render. The event path must carry the
+    // field through to state.
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'idle', watcherHealth: 'degraded' },
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.watcherHealth).toBe('degraded');
+    });
+  });
+
+  it('keeps the prior watcherHealth when an event omits the field', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      capturedCallback?.({
+        payload: { ingest: 'idle', watcherHealth: 'degraded' },
+      });
+    });
+    await act(async () => {
+      // Backend only emits full payloads, but a partial must not reset the
+      // latch to `working` by accident.
+      capturedCallback?.({ payload: { ingest: 'idle' } });
+    });
+    expect(result.current.watcherHealth).toBe('degraded');
+  });
+
+  it('defaults watcherHealth to working when the backend omits it', async () => {
+    // Older backend / snapshot without the field: no signal ≠ known-bad.
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      pendingSnapshot.resolve?.({
+        ingest: 'idle',
+        ingestStage: null,
+        ingestSubject: null,
+        librarian: false,
+        healing: false,
+        pruning: false,
+        forgetting: false,
+        diagnosticErrors: 0,
+        diagnosticWarnings: 0,
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.watcherHealth).toBe('working');
+    });
+  });
+
+  it('applies watcherHealth degraded from the getWikiStatus snapshot', async () => {
+    const { result } = renderHook(() => useWikiStatus());
+    await act(async () => {
+      pendingSnapshot.resolve?.({
+        ingest: 'idle',
+        ingestStage: null,
+        ingestSubject: null,
+        librarian: false,
+        healing: false,
+        pruning: false,
+        forgetting: false,
+        diagnosticErrors: 0,
+        diagnosticWarnings: 0,
+        watcherHealth: 'degraded',
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.watcherHealth).toBe('degraded');
+    });
   });
 
   it('reports degraded ingest so the UI can show a banner instead of a spinner', async () => {

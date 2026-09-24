@@ -1,6 +1,5 @@
 pub mod fs_watcher;
 pub use fs_watcher::spawn_vault_watcher;
-pub use fs_watcher::unix_secs_now;
 #[allow(unused_imports)]
 pub use fs_watcher::VaultEvent;
 #[allow(unused_imports)]

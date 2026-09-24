@@ -73,6 +73,7 @@ export function useWikiStatus(): WikiStatus {
     forgetting: false,
     diagnosticErrors: 0,
     diagnosticWarnings: 0,
+    watcherHealth: 'working',
     busy: false,
     activeJob: 'idle',
     activeJobLabel: null,
@@ -136,6 +137,8 @@ export function useWikiStatus(): WikiStatus {
           forgetting: snapshot.forgetting,
           diagnosticErrors: snapshot.diagnosticErrors ?? 0,
           diagnosticWarnings: snapshot.diagnosticWarnings ?? 0,
+          // Older backends omit the field → 'working' (no signal ≠ known-bad).
+          watcherHealth: snapshot.watcherHealth ?? 'working',
         });
       })
       .catch((err: unknown) => {
@@ -174,6 +177,7 @@ export function useWikiStatus(): WikiStatus {
           forgetting: normalized.forgetting ?? prev.forgetting,
           diagnosticErrors: normalized.diagnosticErrors ?? prev.diagnosticErrors ?? 0,
           diagnosticWarnings: normalized.diagnosticWarnings ?? prev.diagnosticWarnings ?? 0,
+          watcherHealth: normalized.watcherHealth ?? prev.watcherHealth ?? 'working',
         };
         const activeJob = getActiveJob(payload);
         const ingestBusy = isIngestBusy(payload.ingest);

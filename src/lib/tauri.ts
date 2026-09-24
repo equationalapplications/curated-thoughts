@@ -22,7 +22,8 @@ export const getVaultLayout = (): Promise<{
   };
 }> => invoke("get_vault_layout");
 
-export const checkOllama = (): Promise<OllamaStatus> => invoke("check_ollama");
+export const checkOllama = (): Promise<OllamaStatus> =>
+  invoke("check_ollama");
 
 export const listLocalModels = (): Promise<string[]> =>
   invoke("list_local_models");
@@ -33,7 +34,8 @@ export const pullModel = (modelId: string): Promise<void> =>
 export const startFileWatcher = (): Promise<void> =>
   invoke("start_file_watcher");
 
-export const runWikiReindex = (): Promise<number> => invoke("run_wiki_reindex");
+export const runWikiReindex = (): Promise<number> =>
+  invoke("run_wiki_reindex");
 
 export const startOllamaServer = (): Promise<void> =>
   invoke("start_ollama_server");
@@ -65,10 +67,8 @@ export const resolveChunkOverlay = (
 /** Phase 8 Plan B: fetch the raw text of the chunk identified by
  * `(path, hash)` for the source-peek panel. Resolves `null` when the
  * hash no longer resolves ("source moved"); rejects on backend failure. */
-export const fetchChunkContent = (
-  path: string,
-  hash: string,
-): Promise<string | null> => invoke("fetch_chunk_content", { path, hash });
+export const fetchChunkContent = (path: string, hash: string): Promise<string | null> =>
+  invoke("fetch_chunk_content", { path, hash });
 
 /** Phase 9: gate query for the one-time chunk-hash migration. Returns
  * `true` while at least one chunk row lacks `content_hash` (i.e. the
@@ -115,9 +115,8 @@ export interface ConfigMalformedPayload {
  * successfully rendering the payload — CodeRabbit #21, PR #120. The
  * earlier destructive `takePendingConfigMalformed` dropped the payload
  * whenever cleanup ran before the IPC `.then` resolved. */
-export const peekPendingConfigMalformed =
-  (): Promise<ConfigMalformedPayload | null> =>
-    invoke("peek_pending_config_malformed");
+export const peekPendingConfigMalformed = (): Promise<ConfigMalformedPayload | null> =>
+  invoke("peek_pending_config_malformed");
 
 /** Clears the stashed `config-malformed` payload after the caller has
  * successfully rendered it — pairs with `peekPendingConfigMalformed`.
@@ -164,20 +163,13 @@ export interface SearchResult {
   entity_id?: string;
 }
 
-export const searchVault = (
-  query: string,
-  limit = 10,
-): Promise<SearchResult[]> => invoke("search_vault", { query, limit });
+export const searchVault = (query: string, limit = 10): Promise<SearchResult[]> =>
+  invoke("search_vault", { query, limit });
 
-export const getRelatedChunks = (
-  docPath: string,
-  limit = 5,
-): Promise<SearchResult[]> => invoke("get_related_chunks", { docPath, limit });
+export const getRelatedChunks = (docPath: string, limit = 5): Promise<SearchResult[]> =>
+  invoke("get_related_chunks", { docPath, limit });
 
-export const getStructuralNeighbors = (
-  docPath: string,
-  maxHops = 2,
-): Promise<SearchResult[]> =>
+export const getStructuralNeighbors = (docPath: string, maxHops = 2): Promise<SearchResult[]> =>
   invoke("get_structural_neighbors", { docPath, maxHops });
 
 export interface VaultFile {
@@ -261,14 +253,10 @@ export interface CommitResult {
   proposal_status: string;
 }
 
-export const listProposals = (filter?: {
-  status?: string;
-}): Promise<ProposalSummary[]> =>
+export const listProposals = (filter?: { status?: string }): Promise<ProposalSummary[]> =>
   invoke("list_proposals_cmd", { filter: filter ?? {} });
 
-export const getProposalDetail = (
-  proposalId: string,
-): Promise<ProposalDetail | null> =>
+export const getProposalDetail = (proposalId: string): Promise<ProposalDetail | null> =>
   invoke("get_proposal_detail_cmd", { proposalId });
 
 export const resolveProposal = (
@@ -284,8 +272,7 @@ export const resolveProposal = (
     autoApprove: autoApprove ?? false,
   });
 
-export type EntitySort =
-  "updated_desc" | "name_asc" | "name_desc" | "created_desc";
+export type EntitySort = "updated_desc" | "name_asc" | "name_desc" | "created_desc";
 
 export interface EntityListFilter {
   entity_type?: string | null;
@@ -396,7 +383,8 @@ export const createEntity = (input: CreateEntityInput): Promise<EntityDetail> =>
 export const updateEntitySummary = (
   entityId: string,
   summary: string,
-): Promise<void> => invoke("update_entity_summary_cmd", { entityId, summary });
+): Promise<void> =>
+  invoke("update_entity_summary_cmd", { entityId, summary });
 
 export const archiveEntity = (entityId: string): Promise<void> =>
   invoke("archive_entity_cmd", { entityId });
@@ -421,38 +409,24 @@ export interface EntityConnections {
   backlinks: EntityBacklink[];
 }
 
-export const getEntityConnections = (
-  entityId: string,
-): Promise<EntityConnections> =>
+export const getEntityConnections = (entityId: string): Promise<EntityConnections> =>
   invoke("get_entity_connections_cmd", { entityId });
 
-export const addEntityFact = (
-  entityId: string,
-  body: string,
-): Promise<EntityFact> => invoke("add_entity_fact_cmd", { entityId, body });
+export const addEntityFact = (entityId: string, body: string): Promise<EntityFact> =>
+  invoke("add_entity_fact_cmd", { entityId, body });
 
 export const updateEntityFact = (
   entityId: string,
   factId: string,
   body: string,
-): Promise<void> =>
-  invoke("update_entity_fact_cmd", { entityId, factId, body });
+): Promise<void> => invoke("update_entity_fact_cmd", { entityId, factId, body });
 
-export const archiveEntityFact = (
-  entityId: string,
-  factId: string,
-): Promise<void> => invoke("archive_entity_fact_cmd", { entityId, factId });
+export const archiveEntityFact = (entityId: string, factId: string): Promise<void> =>
+  invoke("archive_entity_fact_cmd", { entityId, factId });
 
 export type TimelineKind =
-  | "synthesized"
-  | "approved"
-  | "rejected"
-  | "healed"
-  | "imported"
-  | "exported"
-  | "agent_access"
-  | "ingested"
-  | "other";
+  | "synthesized" | "approved" | "rejected" | "healed"
+  | "imported" | "exported" | "agent_access" | "ingested" | "other";
 
 export interface TimelineEvent {
   id: string;
@@ -495,17 +469,14 @@ export interface TaskRow {
 export const listTasks = (
   status?: "pending" | "done",
   includeArchived?: boolean,
-): Promise<TaskRow[]> => invoke("list_tasks_cmd", { status, includeArchived });
+): Promise<TaskRow[]> =>
+  invoke("list_tasks_cmd", { status, includeArchived });
 
-export const createTask = (
-  entityId: string,
-  description: string,
-): Promise<TaskRow> => invoke("create_task_cmd", { entityId, description });
+export const createTask = (entityId: string, description: string): Promise<TaskRow> =>
+  invoke("create_task_cmd", { entityId, description });
 
-export const setTaskStatus = (
-  taskId: string,
-  status: "pending" | "done",
-): Promise<void> => invoke("set_task_status_cmd", { taskId, status });
+export const setTaskStatus = (taskId: string, status: "pending" | "done"): Promise<void> =>
+  invoke("set_task_status_cmd", { taskId, status });
 
 export const archiveTask = (taskId: string): Promise<void> =>
   invoke("archive_task_cmd", { taskId });
@@ -523,7 +494,7 @@ export const getFolderRules = (): Promise<FolderRule[]> =>
 export const setFolderRule = (
   folderPath: string,
   librarianMode: string,
-  autoApprove: boolean,
+  autoApprove: boolean
 ): Promise<void> =>
   invoke("set_folder_rule", { folderPath, librarianMode, autoApprove });
 
@@ -536,17 +507,17 @@ export const saveWikiPage = (path: string, content: string): Promise<void> =>
 export const deleteVaultFile = (path: string): Promise<void> =>
   invoke("delete_vault_file", { path });
 
-export const switchVault = (
-  newPath: string,
-  restoreBackup: boolean,
-): Promise<void> => invoke("switch_vault", { newPath, restoreBackup });
+export const switchVault = (newPath: string, restoreBackup: boolean): Promise<void> =>
+  invoke("switch_vault", { newPath, restoreBackup });
 
-export const backupVaultDb = (): Promise<string> => invoke("backup_vault_db");
+export const backupVaultDb = (): Promise<string> =>
+  invoke("backup_vault_db");
 
 export const checkVaultBackup = (path: string): Promise<boolean> =>
   invoke("check_vault_backup", { path });
 
-export const revealVault = (): Promise<void> => invoke("reveal_vault");
+export const revealVault = (): Promise<void> =>
+  invoke("reveal_vault");
 
 export interface NeighborRow {
   chunk_id: number;
@@ -558,17 +529,17 @@ export const getChunkIdsForWikiEntry = (
   entryId: string,
   entityId: string,
 ): Promise<number[]> =>
-  invoke("get_chunk_ids_for_wiki_entry", { entryId, entityId });
+  invoke('get_chunk_ids_for_wiki_entry', { entryId, entityId });
 
 export const getImpactRadius = (
   rootChunkId: number,
   entityId: string,
-  direction: "callers" | "callees" | "both",
+  direction: 'callers' | 'callees' | 'both',
   maxHops: number,
 ): Promise<NeighborRow[]> =>
-  invoke("get_impact_radius", { rootChunkId, entityId, direction, maxHops });
+  invoke('get_impact_radius', { rootChunkId, entityId, direction, maxHops });
 
-export type IngestHealth = "idle" | "working" | "stalled" | "degraded";
+export type IngestHealth = 'idle' | 'working' | 'stalled' | 'degraded';
 
 export interface WikiStatusPayload {
   ingest: IngestHealth;
@@ -584,7 +555,7 @@ export interface WikiStatusPayload {
    * armed and alive at the last monitor tick; 'degraded' = never armed,
    * died, or recorded a notify error. Absent on older backends → treated
    * as 'working' (no signal ≠ known-bad). */
-  watcherHealth?: "working" | "degraded";
+  watcherHealth?: 'working' | 'degraded';
 }
 
 export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {
@@ -594,28 +565,23 @@ export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {
 
 export const subscribeEntityStatus = (
   callback: (event: { payload: WikiStatusEventPayload }) => void,
-): Promise<UnlistenFn> =>
-  listen<WikiStatusEventPayload>("wiki-status-change", callback);
+): Promise<UnlistenFn> => listen<WikiStatusEventPayload>('wiki-status-change', callback);
 
 /// Snapshot of the current wiki status. Used by hooks that subscribe to
 /// `wiki-status-change` so they hydrate counters the engine already
 /// accumulated during `setupWiki`, before the listener was installed.
-export const getWikiStatus = (): Promise<WikiStatusPayload> =>
-  invoke<WikiStatusPayload>("get_wiki_status");
+export const getWikiStatus = (): Promise<WikiStatusPayload> => invoke<WikiStatusPayload>('get_wiki_status');
 
-export const runWikiHeal = (): Promise<void> => invoke("run_wiki_heal");
-export const runWikiPrune = (): Promise<void> => invoke("run_wiki_prune");
-export const runWikiReembed = (): Promise<number> => invoke("run_wiki_reembed");
+export const runWikiHeal = (): Promise<void> => invoke('run_wiki_heal');
+export const runWikiPrune = (): Promise<void> => invoke('run_wiki_prune');
+export const runWikiReembed = (): Promise<number> => invoke('run_wiki_reembed');
 export const forgetWikiSource = (sourcePath: string): Promise<void> =>
-  invoke("run_wiki_forget", { sourcePath });
+  invoke('run_wiki_forget', { sourcePath });
 
-export const promoteDraft = (
-  entryId: string,
-  entityId: string,
-): Promise<void> => invoke("promote_draft_cmd", { entryId, entityId });
+export const promoteDraft = (entryId: string, entityId: string): Promise<void> =>
+  invoke('promote_draft_cmd', { entryId, entityId });
 
-export type ClassifierProviderKind =
-  "unconfigured" | "jev_http" | "cloudflare_jev";
+export type ClassifierProviderKind = 'unconfigured' | 'jev_http' | 'cloudflare_jev';
 
 export interface ClassifierConfig {
   provider: ClassifierProviderKind;
@@ -636,37 +602,35 @@ export interface ClassifierStatus {
   min_confidence: number;
 }
 
-export const getClassifierConfig = (): Promise<ClassifierConfig> =>
-  invoke("get_classifier_config");
+export const getClassifierConfig = (): Promise<ClassifierConfig> => invoke('get_classifier_config');
 export const setClassifierConfig = (config: ClassifierConfig): Promise<void> =>
-  invoke("set_classifier_config", { config });
-export const getClassifierStatus = (): Promise<ClassifierStatus> =>
-  invoke("classifier_status");
+  invoke('set_classifier_config', { config });
+export const getClassifierStatus = (): Promise<ClassifierStatus> => invoke('classifier_status');
 
 export interface CloudBridgeStatus {
   configured: boolean;
   connection_status:
-    | "disconnected"
-    | "connecting"
-    | "authenticating"
-    | "connected"
-    | "reconnecting"
-    | "auth_rejected";
+    | 'disconnected'
+    | 'connecting'
+    | 'authenticating'
+    | 'connected'
+    | 'reconnecting'
+    | 'auth_rejected';
 }
 
 export const setCloudBridgePairingToken = (token: string): Promise<void> =>
-  invoke("set_cloud_bridge_pairing_token", { token });
+  invoke('set_cloud_bridge_pairing_token', { token });
 
 export const clearCloudBridgePairingToken = (): Promise<void> =>
-  invoke("clear_cloud_bridge_pairing_token");
+  invoke('clear_cloud_bridge_pairing_token');
 
 export const getCloudBridgeStatus = (): Promise<CloudBridgeStatus> =>
-  invoke("get_cloud_bridge_status");
+  invoke('get_cloud_bridge_status');
 
 export const retryCloudBridgeNow = (): Promise<void> =>
-  invoke("retry_cloud_bridge_now");
+  invoke('retry_cloud_bridge_now');
 
-export type PrivacyMode = "strict" | "ephemeral" | "connected";
+export type PrivacyMode = 'strict' | 'ephemeral' | 'connected';
 
 export interface PrivacyState {
   mode: PrivacyMode;
@@ -680,28 +644,28 @@ export interface SetPrivacyModeResult {
   state: PrivacyState;
 }
 
-export const getPrivacyMode = (): Promise<PrivacyState> =>
-  invoke("get_privacy_mode");
+export const getPrivacyMode = (): Promise<PrivacyState> => invoke('get_privacy_mode');
 
-export const setPrivacyMode = (
-  mode: PrivacyMode,
-): Promise<SetPrivacyModeResult> => invoke("set_privacy_mode", { mode });
+export const setPrivacyMode = (mode: PrivacyMode): Promise<SetPrivacyModeResult> =>
+  invoke('set_privacy_mode', { mode });
 
 export const acknowledgeMigrationDisclosure = (): Promise<void> =>
-  invoke("acknowledge_migration_disclosure");
+  invoke('acknowledge_migration_disclosure');
 
 export const acknowledgeEphemeralDisclosure = (): Promise<void> =>
-  invoke("acknowledge_ephemeral_disclosure");
+  invoke('acknowledge_ephemeral_disclosure');
 
 export type OntologySelection =
-  "schema-org" | "schema-software-org" | "emergent" | "off";
+  | 'schema-org'
+  | 'schema-software-org'
+  | 'emergent'
+  | 'off';
 
 export const getOntologySelection = (): Promise<OntologySelection> =>
-  invoke("get_ontology_selection");
+  invoke('get_ontology_selection');
 
-export const setOntologySelection = (
-  selection: OntologySelection,
-): Promise<void> => invoke("set_ontology_selection", { selection });
+export const setOntologySelection = (selection: OntologySelection): Promise<void> =>
+  invoke('set_ontology_selection', { selection });
 
 /** A symlink under documents/ that resolves outside the vault and is not yet
  * approved by the trusted-links ledger. The Desktop review surface renders
@@ -712,13 +676,13 @@ export interface PendingLink {
 }
 
 export const listPendingLinks = (): Promise<PendingLink[]> =>
-  invoke("list_pending_links");
+  invoke('list_pending_links');
 
 export const approveLink = (link: string): Promise<void> =>
-  invoke("approve_link", { link });
+  invoke('approve_link', { link });
 
 export const revokeLink = (link: string): Promise<void> =>
-  invoke("revoke_link", { link });
+  invoke('revoke_link', { link });
 
 export interface OkfExportSummary {
   path: string;
