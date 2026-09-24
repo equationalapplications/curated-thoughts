@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use tauri_app_lib::okf::bundle_read::parse_bundle;
 use tauri_app_lib::okf::bundle_write::write_bundle_with_profile;
 use tauri_app_lib::okf::types::{LLM_WIKI_PROFILE_V2, OKF_VERSION_V2};
-use tauri_app_lib::okf::zip_io::{read_bundle_source, write_bundle_zip};
+use tauri_app_lib::okf::zip_io::{read_bundle_source, write_bundle_zip_into};
 
 fn sha256_hex(path: &Path) -> Result<String> {
     let mut file =
@@ -135,20 +135,30 @@ fn main() -> Result<()> {
     let tmp = dest.with_extension("zip.partial");
     let _ = std::fs::remove_file(&tmp); // stale partial: ignore NotFound
     #[cfg(unix)]
-    {
+    let handle = {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
-    }
+            .with_context(|| format!("creating {}", tmp.display()))?
+    };
     #[cfg(not(unix))]
+    let handle = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+
+    // Write through the held handle — the bundle never touches a re-opened,
+    // path-addressable target (CR round-4: no symlink/path-swap window).
+    #[cfg(unix)]
     {
-        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        use std::os::unix::fs::PermissionsExt;
+        handle.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    write_bundle_zip(&tmp, &files).with_context(|| format!("writing {}", tmp.display()))?;
+    write_bundle_zip_into(handle, &files).with_context(|| format!("writing {}", tmp.display()))?;
 
     #[cfg(unix)]
     {

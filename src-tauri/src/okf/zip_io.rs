@@ -80,6 +80,16 @@ fn read_bundle_zip(path: &Path) -> Result<Vec<OkfFile>> {
 
 pub fn write_bundle_zip(dest: &Path, files: &[OkfFile]) -> Result<()> {
     let file = File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
+    write_bundle_zip_into(file, files).with_context(|| format!("writing {}", dest.display()))
+}
+
+/// Write the bundle to an already-open handle. The exporter uses this so the
+/// exclusive 0o600 temp file it created is written through the held handle —
+/// the bundle bytes are never written to a path that could be swapped.
+pub fn write_bundle_zip_into<W: std::io::Write + std::io::Seek + 'static>(
+    file: W,
+    files: &[OkfFile],
+) -> Result<()> {
     let mut writer = zip::ZipWriter::new(file);
     // Fixed mtime (2026-01-01 00:00:00 UTC) so identical content produces
     // byte-identical archives — required for nightly-backup change detection.
@@ -92,12 +102,20 @@ pub fn write_bundle_zip(dest: &Path, files: &[OkfFile]) -> Result<()> {
         writer.write_all(f.content.as_bytes())?;
     }
     // zip 8.6: `finish()` returns Result<W, ZipWriterResult> handing back the
-    // inner File, so we sync it directly (no drop-then-reopen fallback needed).
-    let file = writer
+    // inner writer W. Syncing requires a real File, so the generic writer is
+    // downcast via its Any impl when it is one (the exporter and this fn's
+    // path-based wrapper both pass std::fs::File). Non-File writers skip fsync.
+    let mut file = writer
         .finish()
-        .with_context(|| format!("finishing {}", dest.display()))?;
-    file.sync_all()
-        .with_context(|| format!("syncing {}", dest.display()))?;
+        .with_context(|| "finishing bundle".to_string())?;
+    file.flush().context("flushing bundle")?;
+    {
+        use std::any::Any;
+        let any: &mut dyn Any = &mut file;
+        if let Some(f) = any.downcast_mut::<std::fs::File>() {
+            f.sync_all().context("syncing bundle")?;
+        }
+    }
     Ok(())
 }
 
@@ -168,7 +186,11 @@ mod tests {
             }
             hasher.update(&buf[..n]);
         }
-        Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        Ok(hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
     }
 
     #[test]
