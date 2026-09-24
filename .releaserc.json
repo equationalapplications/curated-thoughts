@@ -49,7 +49,8 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "node scripts/update-versions.cjs ${nextRelease.version}"
+        "prepareCmd": "node scripts/update-versions.cjs ${nextRelease.version}",
+        "successCmd": "echo \"tag=${nextRelease.gitTag}\" >> \"$GITHUB_OUTPUT\""
       }
     ],
     [

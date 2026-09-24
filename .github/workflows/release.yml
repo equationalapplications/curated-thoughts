@@ -14,6 +14,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag || steps.tag_fallback.outputs.tag }}
     concurrency:
       group: release-main
       cancel-in-progress: false
@@ -69,8 +71,86 @@ jobs:
         if: steps.release_guard.outputs.should_release == 'true'
         run: pnpm install --frozen-lockfile
 
+      - name: Snapshot tags on HEAD before release
+        id: pre_tags
+        if: steps.release_guard.outputs.should_release == 'true'
+        run: |
+          echo "tags=$(git tag --points-at HEAD --list 'v[0-9]*' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
       - name: Run semantic-release
+        id: release
         if: steps.release_guard.outputs.should_release == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm exec semantic-release
+
+      # Failure-path fallback for the tag: if a late phase of semantic-release
+      # failed after the tag push (e.g. @semantic-release/github publish),
+      # successCmd never ran, so steps.release.outputs.tag is empty. Resolve
+      # the tag from git so dispatch-build still fires.
+      #
+      # Strictly scoped (Opus delta r1 M1): runs ONLY when the
+      # semantic-release step itself failed, and only claims a v* tag that
+      # (a) is new since the pre-release snapshot — a tag that existed on HEAD
+      # before the run belongs to a human tag-push, whose build already ran
+      # via build.yml's tag trigger, and re-dispatching it would cancel that
+      # in-flight build through the shared concurrency group — and (b) exists
+      # on origin (semantic-release creates the tag locally before pushing;
+      # an unpushed tag would make `gh workflow run --ref` fail).
+      - name: Resolve release tag from git (failure-path fallback)
+        id: tag_fallback
+        if: ${{ !cancelled() && steps.release.outcome == 'failure' }}
+        env:
+          PRE_TAGS: ${{ steps.pre_tags.outputs.tags }}
+        run: |
+          TAG="$(git tag --points-at HEAD --list 'v[0-9]*' --sort=-v:refname | head -1 || true)"
+          if [ -z "$TAG" ]; then
+            echo "no v* tag on HEAD; nothing to fall back to"
+          elif echo " ${PRE_TAGS} " | grep -qF -- " $TAG "; then
+            echo "$TAG already existed before this run (manual tag-push); not claiming it"
+            TAG=""
+          else
+            # `|| rc=$?` is required: the runner uses GitHub's default
+            # `bash -e {0}` (adding `shell: bash` gives stricter `-eo
+            # pipefail`, never looser), and a bare failing command would
+            # abort the script before rc is captured.
+            rc=0
+            git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "$TAG is not on origin (tag push failed?); not dispatching a build for it"
+              TAG=""
+            elif [ "$rc" -ne 0 ]; then
+              echo "git ls-remote failed (rc=$rc — network/auth?), refusing to guess; failing loudly instead of silently dropping the build" >&2
+              exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  # Dispatches the Build workflow at the published release tag. The tag push
+  # itself cannot trigger build.yml: tags pushed with GITHUB_TOKEN never fire
+  # downstream workflows (GitHub's anti-recursion guard), but a
+  # workflow_dispatch sent with GITHUB_TOKEN explicitly does.
+  #
+  # Gate: !cancelled() (not success) on purpose — a late failure inside
+  # semantic-release after publication (e.g. @semantic-release/github
+  # commenting in success, or publish failing post-tag-push) must not lose
+  # the build. The tag output has two sources: successCmd (normal path —
+  # semantic-release runs it only after a release is actually published) and
+  # the tag_fallback step above (failure path only — a *new* v* tag on HEAD,
+  # verified present on origin, from a failed semantic-release run).
+  #
+  # actions: write lives on this job alone so the semantic-release plugin
+  # process never holds it (it can cancel/rerun workflows, delete logs).
+  dispatch-build:
+    needs: release
+    if: ${{ !cancelled() && needs.release.outputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger Build workflow at the release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh workflow run build.yml --ref "$TAG"
