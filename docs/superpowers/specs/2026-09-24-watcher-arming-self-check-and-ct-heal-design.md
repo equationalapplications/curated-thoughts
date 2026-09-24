@@ -122,10 +122,12 @@ reusing the `PipelineHealth` vocabulary
   alive; `stalled` = armed but a notify error was consumed since the last
   clean tick; `degraded` = not armed / fd probe says dead.
 - Frontend: `useWikiStatus` (src/hooks/useWikiStatus.ts) already receives the
-  snapshot + change events; StatusBar (src/components/StatusBar.tsx:22-41,
+  snapshot + change events; StatusBar
+  (src/components/shell/StatusBar.tsx:22-41,
   95-107) gains a loud watcher label mirroring the existing
   `degraded`/`stalled` ingest strings; MaintenanceDashboard
-  (src/components/MaintenanceDashboard.tsx:13) surfaces the same field. The
+  (src/components/settings/MaintenanceDashboard.tsx:13) surfaces the same
+  field. The
   snapshot backfill command (lib.rs:~2253) carries the new field so a
   mid-degradation mount shows it immediately — same shape as the PR #219
   `record_wiki_diagnostic` counts.
@@ -171,6 +173,14 @@ New module `src-tauri/src/db/heal.rs` (sibling to the existing
 - Config/vault resolution identical to the other write commands
   (`CURATED_BRAIN_DB` / `CURATED_BRAIN_CONFIG` / `CURATED_BRAIN_DIR`,
   tools/src/paths.rs).
+- Concurrent-writer safety: `write::open_rw` already sets
+  `PRAGMA busy_timeout = 5000` (tools/src/write.rs:57-71), so a `ct heal`
+  racing the desktop app's WAL writer retries transient locks rather than
+  failing; the heal pass itself is already transactional per entry
+  (unchecked_transaction, lib.rs:468-476). A simultaneous GUI heal run is
+  idempotent-safe (both passes select the same live rows; a row
+  already soft-deleted by the other pass drops out of the second pass's
+  selection) — documented here, no new locking machinery.
 - Stdout contract: one line of summary JSON
   (`{"evaluated":N,"soft_deleted":N,"edges_purged":N}`) so the nightly cron
   can log machine-readable verdicts instead of deriving them from SQL.
