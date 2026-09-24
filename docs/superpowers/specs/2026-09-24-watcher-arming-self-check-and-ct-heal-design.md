@@ -119,8 +119,10 @@ Lifecycle rules on every path of `start_file_watcher_inner`:
 - **Spawn failure:** latch degraded immediately (errors.log append +
   `update_wiki_status_from_app`) before returning — the incident class is a
   startup failure, so the signal must not wait for the first tick. The
-  monitor still starts; `armed_at = 0` makes its first tick re-assert the
-  latched state.
+  monitor still starts; if `WatcherStarted` holds no handle at all (spawn
+  failed before any handle existed), the first tick reads the missing handle
+  as `armed_at == 0` and re-asserts the already-latched state — no handle is
+  required for the check to fire.
 
 Per-tick behavior (first tick at +5 s, then every 60 s):
 
@@ -132,7 +134,9 @@ Per-tick behavior (first tick at +5 s, then every 60 s):
   residual is rare double-logging while an abandoned monitor drains, accepted
   here because monitor stops are 2 s-bounded joins that essentially always
   finish.
-- If the current handle reports `armed_at == 0` or `!is_alive()`, latch
+- If the current handle reports `armed_at == 0` or `!is_alive()` — or
+  `last_error_at` was bumped since the last clean tick (the notify-error
+  disjunct from §3's degraded definition) — latch
   degraded (once per transition) and:
   - append a line to `<vault>/.brain/errors.log` via a new appender following
     the `write_error_log` pattern (src-tauri/src/pipeline/mod.rs:448-470,
@@ -173,8 +177,9 @@ would make StatusBar imply recovery that never comes. So:
 
 ### 4. Loud spawn failures at all three call sites (src-tauri)
 
-The `switch_vault` restart path (lib.rs:1793-1797) and recovery branch
-(lib.rs:1492-1496) upgrade from bare `eprintln!` to the same errors.log
+The `switch_vault` restart path and recovery branch (restart `if-let` begins
+at lib.rs:1793, its `eprintln!` at 1802; recovery branch at 1492, its
+`eprintln!` at 1501) upgrade from bare `eprintln!` to the same errors.log
 append + `update_wiki_status_from_app` degradation as §2, then continue (the
 vault switch itself still succeeds; the watcher failure is reported, not
 fatal to the switch).
