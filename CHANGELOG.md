@@ -1,3 +1,21 @@
+## [2.14.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.13.0...v2.14.0) (2026-09-24)
+
+### Features
+
+* **okf:** pin zip entry mtimes for byte-deterministic bundles ([2912361](https://github.com/equationalapplications/curated-thoughts/commit/291236170bbef77ab34bcdd42730974bf3b1bbfd))
+* **tools:** add headless export_okf_bundle for nightly backups ([389ee13](https://github.com/equationalapplications/curated-thoughts/commit/389ee13e5021344c61d9a0c92a34705bbbee92ac))
+
+### Bug Fixes
+
+* **okf:** accept .okf bundles in import/export dialog filters ([dafc3bf](https://github.com/equationalapplications/curated-thoughts/commit/dafc3bfdf658c465eaf709bad23671150ce47fdd))
+* **okf:** fsync bundle before rename and parent dir after (CR 4088815428) ([bc5aa95](https://github.com/equationalapplications/curated-thoughts/commit/bc5aa9539ea95a5f5e876d1f2ecbc1f6696b6133))
+* **okf:** Opus final-pass polish — entity order tiebreaker, digest from verified bytes, context hygiene ([3e57e5c](https://github.com/equationalapplications/curated-thoughts/commit/3e57e5ccb67ef2987d0de0c2844e7601471da175))
+* **okf:** write bundle through held 0o600 handle; no path re-open (CR round-4) ([8ff08c9](https://github.com/equationalapplications/curated-thoughts/commit/8ff08c9fdf7d2b87d1d456862723eb2eff73b5f5))
+* **tools:** create export temp file 0o600 so rename never widens backup perms (CR 4088815424) ([3bc73c7](https://github.com/equationalapplications/curated-thoughts/commit/3bc73c7b5e16f9126b1cbe6de190d0ff9f7c298e))
+* **tools:** create_new exclusive 0o600 temp so bundle never exists wide (CR 4089129047) ([47ae0f1](https://github.com/equationalapplications/curated-thoughts/commit/47ae0f1308b909044cdb17ef085de09e581bb1d0))
+* **tools:** enforce 0o600 on published export and normalize empty dest parent (CR 4088929994, 4088929987) ([3a343f8](https://github.com/equationalapplications/curated-thoughts/commit/3a343f849638ad013bede30a35dc1904833c517c))
+* **tools:** resolve $HOME only for the default export path (CR 4088815418) ([9c96592](https://github.com/equationalapplications/curated-thoughts/commit/9c96592534fb49a72448f9d59c8f6098533483dd))
+
 ## [2.13.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.12.1...v2.13.0) (2026-09-23)
 
 ### Features
