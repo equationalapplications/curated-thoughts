@@ -1,5 +1,8 @@
 import { useIndexingStatus } from "../../hooks/useIndexingStatus";
-import { useProviderHealth, type HealthState } from "../../hooks/useProviderHealth";
+import {
+  useProviderHealth,
+  type HealthState,
+} from "../../hooks/useProviderHealth";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { useVaultSwitcher } from "../../hooks/useVaultSwitcher";
 import { useWikiStatus } from "../../hooks/useWikiStatus";
@@ -41,7 +44,10 @@ function librarianLabel(
   return "Idle";
 }
 
-function healthTitle(kind: "Generation" | "Embeddings", state: HealthState): string {
+function healthTitle(
+  kind: "Generation" | "Embeddings",
+  state: HealthState,
+): string {
   const labels: Record<HealthState, string> = {
     ok: "ready",
     loading: "starting",
@@ -65,6 +71,8 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
   const { generation, embedding } = useProviderHealth();
   const { mode: privacyMode } = usePrivacyMode();
   const { changeVault, switching } = useVaultSwitcher(vaultPath);
+
+  const watcherDegraded = wikiStatus.watcherHealth === "degraded";
 
   const librarianText = librarianLabel(
     indexed,
@@ -106,6 +114,17 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
             title={healthTitle("Embeddings", embedding)}
           />
         </button>
+        {watcherDegraded && (
+          <button
+            type="button"
+            className="status-bar-diagnostics"
+            onClick={onOpenActivity}
+            title="Vault watcher degraded — file changes are NOT being ingested. Details in .brain/errors.log."
+            aria-label="Vault watcher degraded — file changes are not being ingested"
+          >
+            ⚠ Watcher degraded
+          </button>
+        )}
         {(wikiStatus.diagnosticErrors ?? 0) > 0 && (
           <button
             type="button"

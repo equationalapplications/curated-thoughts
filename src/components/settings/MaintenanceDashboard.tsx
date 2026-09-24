@@ -1,31 +1,31 @@
-import { useState } from 'react';
+import { useState } from "react";
 import {
   runWikiHeal,
   runWikiPrune,
   runWikiReembed,
   forgetWikiSource,
-} from '../../lib/tauri';
-import { useWikiStatus } from '../../hooks/useWikiStatus';
-import { HealthReportPanel } from './HealthReportPanel';
-import { DraftsPanel } from './DraftsPanel';
+} from "../../lib/tauri";
+import { useWikiStatus } from "../../hooks/useWikiStatus";
+import { HealthReportPanel } from "./HealthReportPanel";
+import { DraftsPanel } from "./DraftsPanel";
 
 export function MaintenanceDashboard() {
   const wikiStatus = useWikiStatus();
   const isSystemBusy = wikiStatus.busy;
-  const statusLabel = wikiStatus.activeJobLabel ?? 'Idle';
+  const statusLabel = wikiStatus.activeJobLabel ?? "Idle";
   const [lastError, setLastError] = useState<string | null>(null);
-  const [forgetPath, setForgetPath] = useState('');
+  const [forgetPath, setForgetPath] = useState("");
 
-  async function runCommand(command: 'heal' | 'prune' | 'reembed' | 'forget') {
+  async function runCommand(command: "heal" | "prune" | "reembed" | "forget") {
     setLastError(null);
     try {
-      if (command === 'heal') {
+      if (command === "heal") {
         await runWikiHeal();
-      } else if (command === 'prune') {
+      } else if (command === "prune") {
         await runWikiPrune();
-      } else if (command === 'forget') {
+      } else if (command === "forget") {
         await forgetWikiSource(forgetPath.trim());
-        setForgetPath('');
+        setForgetPath("");
       } else {
         await runWikiReembed();
       }
@@ -47,18 +47,24 @@ export function MaintenanceDashboard() {
       <p className="maintenance-status" aria-live="polite">
         {isSystemBusy
           ? `Background job active: ${statusLabel}. Please wait…`
-          : 'No active wiki jobs. Maintenance commands are available.'}
+          : "No active wiki jobs. Maintenance commands are available."}
       </p>
       <p className="maintenance-description">
-        Engine diagnostics since launch: {wikiStatus.diagnosticErrors ?? 0} errors,{' '}
-        {wikiStatus.diagnosticWarnings ?? 0} warnings (details in the app log).
+        Engine diagnostics since launch: {wikiStatus.diagnosticErrors ?? 0}{" "}
+        errors, {wikiStatus.diagnosticWarnings ?? 0} warnings (details in the
+        app log).
+      </p>
+      <p className="maintenance-description" aria-live="polite">
+        {wikiStatus.watcherHealth === "degraded"
+          ? "⚠ Vault watcher degraded: the watcher is not armed or has stopped, so file changes are NOT being ingested. Details in .brain/errors.log."
+          : "Vault watcher: working (armed and alive at the last self-check)."}
       </p>
 
       <div className="maintenance-actions">
         <button
           type="button"
           disabled={isSystemBusy}
-          onClick={() => runCommand('heal')}
+          onClick={() => runCommand("heal")}
         >
           Heal Database
         </button>
@@ -69,16 +75,18 @@ export function MaintenanceDashboard() {
         <button
           type="button"
           disabled={isSystemBusy}
-          onClick={() => runCommand('prune')}
+          onClick={() => runCommand("prune")}
         >
           Prune Trash
         </button>
         <p className="maintenance-description">
-          Permanently deletes inferred entries soft-deleted more than 7 days ago.
+          Permanently deletes inferred entries soft-deleted more than 7 days
+          ago.
           <strong> This cannot be undone.</strong>
         </p>
         <p className="maintenance-description">
-          Automatic prune runs daily to keep inferred trash from growing unbounded.
+          Automatic prune runs daily to keep inferred trash from growing
+          unbounded.
         </p>
 
         <label htmlFor="forget-path" className="maintenance-label">
@@ -95,7 +103,7 @@ export function MaintenanceDashboard() {
         <button
           type="button"
           disabled={isSystemBusy || !forgetPath.trim()}
-          onClick={() => runCommand('forget')}
+          onClick={() => runCommand("forget")}
         >
           Forget Source
         </button>
@@ -106,12 +114,13 @@ export function MaintenanceDashboard() {
         <button
           type="button"
           disabled={isSystemBusy}
-          onClick={() => runCommand('reembed')}
+          onClick={() => runCommand("reembed")}
         >
           Full Re-index
         </button>
         <p className="maintenance-description">
-          Re-chunks and re-embeds all tiers. Required after switching embedding models.
+          Re-chunks and re-embeds all tiers. Required after switching embedding
+          models.
         </p>
       </div>
 
