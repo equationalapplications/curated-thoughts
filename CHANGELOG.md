@@ -1,3 +1,17 @@
+## [2.15.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.14.0...v2.15.0) (2026-09-24)
+
+### Features
+
+* **ci:** auto-dispatch Build workflow after semantic-release publishes ([#207](https://github.com/equationalapplications/curated-thoughts/issues/207)) ([f8d624c](https://github.com/equationalapplications/curated-thoughts/commit/f8d624c73f5ba2a4f8dcf5c2fb9c8298b3e1b37f))
+
+### Bug Fixes
+
+* **ci:** capture ls-remote rc under bash -e (delta r3 M1) ([69481d1](https://github.com/equationalapplications/curated-thoughts/commit/69481d1ca728693b8139204c8655c4b13d077309))
+* **ci:** git-based tag fallback so a failed publish still dispatches the build ([fe5e703](https://github.com/equationalapplications/curated-thoughts/commit/fe5e70380491529d309a82ff38e950d4067c77ec))
+* **ci:** keep ls-remote stderr for debuggable loud-failure path (delta r4) ([e9e9e74](https://github.com/equationalapplications/curated-thoughts/commit/e9e9e749501b4ea678029ae9666f43fb324c5e4d))
+* **ci:** rc-aware origin check, fixed-string tag match (delta r2 minors) ([6feea9a](https://github.com/equationalapplications/curated-thoughts/commit/6feea9af582bd9d0038be913d59bf27a32acaf24))
+* **ci:** scope tag fallback to failed releases with new, pushed tags only ([f439881](https://github.com/equationalapplications/curated-thoughts/commit/f4398813bd2c8d4991e0e950181383827c0e41f4))
+
 ## [2.14.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.13.0...v2.14.0) (2026-09-24)
 
 ### Features
