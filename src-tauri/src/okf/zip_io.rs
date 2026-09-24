@@ -105,9 +105,7 @@ pub fn write_bundle_zip_into<W: std::io::Write + std::io::Seek + 'static>(
     // inner writer W. Syncing requires a real File, so the generic writer is
     // downcast via its Any impl when it is one (the exporter and this fn's
     // path-based wrapper both pass std::fs::File). Non-File writers skip fsync.
-    let mut file = writer
-        .finish()
-        .with_context(|| "finishing bundle".to_string())?;
+    let mut file = writer.finish().context("finishing bundle")?;
     file.flush().context("flushing bundle")?;
     {
         use std::any::Any;

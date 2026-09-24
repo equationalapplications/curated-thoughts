@@ -14,7 +14,7 @@ pub fn load_export_entities(
 ) -> Result<Vec<ExportEntity>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, summary FROM curated_entities
-         WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE",
+         WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, id",
     )?;
     let rows: Vec<(String, String, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?

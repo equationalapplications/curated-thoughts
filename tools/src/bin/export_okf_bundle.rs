@@ -156,7 +156,9 @@ fn main() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        handle.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        handle
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting handle for {}", tmp.display()))?;
     }
     write_bundle_zip_into(handle, &files).with_context(|| format!("writing {}", tmp.display()))?;
 
@@ -167,10 +169,13 @@ fn main() -> Result<()> {
             .with_context(|| format!("restricting {}", tmp.display()))?;
     }
 
-    // Round-trip: parse the written bundle back through the real reader.
+    // Round-trip: parse the written bundle back through the real reader, and
+    // hash those exact verified bytes (Opus final pass: tie the reported
+    // digest to what was checked, not to a post-rename re-open).
     let reparsed =
         read_bundle_source(&tmp).with_context(|| format!("re-reading {}", tmp.display()))?;
     parse_bundle(&reparsed).context("round-trip parse of the written bundle failed")?;
+    let digest = sha256_hex(&tmp)?;
 
     std::fs::rename(&tmp, &dest)
         .with_context(|| format!("publishing {} over {}", tmp.display(), dest.display()))?;
@@ -183,7 +188,6 @@ fn main() -> Result<()> {
             .with_context(|| format!("syncing {}", dest_dir.display()))?;
     }
 
-    let digest = sha256_hex(&dest)?;
     println!(
         "exported entities={} files={} sha256={} path={}",
         entity_count,
