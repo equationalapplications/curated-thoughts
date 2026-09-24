@@ -57,6 +57,6 @@ All addressed in commit 0c1a223.
   thread to WikiStatusState locking per tick for a case that cannot occur.
 
 - **m6 (quote style nit in StatusBar.tsx) — FIXED.** Single → double quotes
-  to match the file. (Round-3 m3: yes, this is an unrelated-formatting
-  change inside the round-2 fix commit — it is the direct remediation of
-  round-1's m6 and is called out here as its own line item.)
+  to match the file. (The note about this being an unrelated-formatting
+  change inside the round-2 fix commit lives in the round-3 dispositions
+  file.)

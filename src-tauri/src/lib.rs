@@ -198,13 +198,16 @@ fn monitor_tick_verdict(tick: Option<(u64, u64, bool)>, last_seen_error_secs: u6
 /// in the same wall-clock second as a clean tick is not silently dropped
 /// (m4) and a later clean tick can clear the latch.
 ///
-/// Caveat (round-2 m5): the thread's `degraded` latch is its own view. If
-/// OTHER code sets `WatcherHealth::Degraded` while the thread sees a healthy
-/// handle, the thread will not clear it (its transition gate never fires) —
-/// and vice versa, a thread clear can stomp a caller latch. Today's call
-/// order makes this unreachable (callers latch only on failures that also
-/// leave the handle dead/absent), so it stays a documented invariant rather
-/// than shared state.
+/// Caveat (round-2 m5, reworded round-4 m2): the thread's `degraded` latch
+/// is its own view. A caller latch (the start wrapper's, on any Err) CAN
+/// outlive this thread's healthy first tick — e.g. the second
+/// `canonical_vault_from_config` fails after a concurrent start has already
+/// registered a live handle: the wrapper latches Degraded, and a fresh
+/// monitor seeing a healthy handle never transitions, so the status stays
+/// Degraded until the next start/restart. That is ACCEPTED: the next vault
+/// operation clears it, the alternative (per-tick `WikiStatusState` reads)
+/// couples the thread to the status lock, and the stale-Degraded window is
+/// bounded by the next user-visible watcher action.
 fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_thread = cancel.clone();
@@ -1710,15 +1713,20 @@ fn start_file_watcher_inner(
         if still_canonical != target_canonical {
             // A concurrent switch superseded this generation: the newer
             // `start_file_watcher_inner` owns the (watcher, monitor) pair
-            // from here. We stopped ITS monitor at the top of this
-            // function, so restart one before returning — round-3 M1
-            // (Opus review): this is an `Ok` exit, the wrapper's Err-only
-            // handling does not cover it, and leaving zero monitors
-            // running was a closure-refactor regression (round 1 had
-            // `replace_monitor` here).
+            // from here and installs its own monitor at registration
+            // (round-3 M1: leaving zero monitors on this Ok exit was a
+            // closure-refactor regression). Round-4 m1: spawn ONLY if the
+            // slot is still empty — unconditionally replacing here would
+            // (a) race B's install, and (b) start a monitor whose 5s first
+            // tick can fire "no registered handle" into errors.log while
+            // B's reconcile (which can run minutes) is still going.
             drop(watcher_guard);
             handle.stop();
-            replace_monitor(&monitor, app);
+            let mut guard = monitor.0.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(spawn_watcher_monitor(app.clone()));
+            }
+            drop(guard);
             return Ok(());
         }
 
@@ -1749,10 +1757,22 @@ fn start_file_watcher_inner(
 /// AND the failure early-returns, spec §2 "the monitor still starts") uses
 /// one orderly stop-old-then-spawn-new sequence.
 fn replace_monitor(monitor: &State<'_, WatcherMonitor>, app: &AppHandle) {
-    if let Some(old_monitor) = monitor.0.lock().unwrap().take() {
+    // Atomic swap (round-4 M1): install the new handle while holding the
+    // lock in ONE critical section, and only then stop the old handle
+    // outside the lock (its join can wait up to 2s). The take-then-install
+    // sequencing left a window where a concurrent start could install M2
+    // into the empty slot and have it silently dropped by this call's
+    // install — `WatcherMonitorHandle` has no Drop, so M2 would keep
+    // running for the life of the process (duplicate errors.log lines,
+    // duelling degraded latches).
+    let old_monitor = monitor
+        .0
+        .lock()
+        .unwrap()
+        .replace(spawn_watcher_monitor(app.clone()));
+    if let Some(old_monitor) = old_monitor {
         old_monitor.stop();
     }
-    *monitor.0.lock().unwrap() = Some(spawn_watcher_monitor(app.clone()));
 }
 /// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
