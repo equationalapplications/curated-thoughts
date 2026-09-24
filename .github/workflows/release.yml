@@ -106,12 +106,19 @@ jobs:
           TAG="$(git tag --points-at HEAD --list 'v[0-9]*' --sort=-v:refname | head -1 || true)"
           if [ -z "$TAG" ]; then
             echo "no v* tag on HEAD; nothing to fall back to"
-          elif echo " ${PRE_TAGS} " | grep -q " $TAG "; then
+          elif echo " ${PRE_TAGS} " | grep -qF -- " $TAG "; then
             echo "$TAG already existed before this run (manual tag-push); not claiming it"
             TAG=""
-          elif ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
-            echo "$TAG is not on origin (tag push failed?); not dispatching a build for it"
-            TAG=""
+          else
+            git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "$TAG is not on origin (tag push failed?); not dispatching a build for it"
+              TAG=""
+            elif [ "$rc" -ne 0 ]; then
+              echo "git ls-remote failed (rc=$rc — network/auth?), refusing to guess; failing loudly instead of silently dropping the build" >&2
+              exit 1
+            fi
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -127,6 +134,7 @@ jobs:
   # semantic-release runs it only after a release is actually published) and
   # the tag_fallback step above (failure path only — a *new* v* tag on HEAD,
   # verified present on origin, from a failed semantic-release run).
+  #
   # actions: write lives on this job alone so the semantic-release plugin
   # process never holds it (it can cancel/rerun workflows, delete logs).
   dispatch-build:

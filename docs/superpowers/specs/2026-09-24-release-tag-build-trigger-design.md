@@ -172,11 +172,15 @@ Design notes (from review):
     failed **publish** *after the tag push* is covered by the scoped
     `tag_fallback` step, so the dispatch fires and tauri-action creates the
     missing Release when it uploads. NOT covered (correctly): a failure in
-    `@semantic-release/git`'s commit/tag push, or between the two pushes —
-    those leave a release commit on `main` with no tag, where no build is
-    possible; semantic-release's own retry-on-next-merge behavior or a
-    manual `gh workflow run build.yml --ref <tag>` (after pushing the tag)
-    is the remedy. The failure is always loud (the Release run goes red).
+    `@semantic-release/git`'s release-commit push, in semantic-release core's
+    tag push (core, not the git plugin, creates and pushes the tag), or
+    between the two pushes — those leave a release commit on `main` with no
+    tag, where no build is possible. **Remedy: push the tag manually, then
+    `gh workflow run build.yml --ref <tag>`.** (The next real merge usually
+    recovers on its own — semantic-release re-derives the version from the
+    last tag — but the orphaned release commit has already bumped
+    `package.json`/`CHANGELOG.md`, so the result can be confusing; prefer the
+    manual fix.) The failure is always loud (the Release run goes red).
 
 ### 3. `.github/workflows/build.yml` — document, don't remove, the tag trigger
 
