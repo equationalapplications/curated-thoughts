@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-24
 - **Issue:** equationalapplications/curated-thoughts#207
-- **Status:** Approved by Kurt 2026-09-24; implemented in PR #227 (Opus r1 approve-with-changes findings folded in; GLM pass approved)
+- **Status:** Approved by Kurt 2026-09-24; implemented in PR #227. Reviews: Opus spec r1 (approve-with-changes → folded in), GLM spec pass (approved → folded in), Opus implementation r1 (**approve with nits**, 0 BLOCKER / 0 MAJOR → all 6 spec-accuracy nits folded in this revision). Verification state: static checks + template probe done in-PR; behavioral checks (first auto-dispatched release, no-release paths, failed-success-step path) verified live on the next real releases.
 - **Risk tier:** Low — no app code; elevated `actions: write` is confined to a dedicated dispatch job with no code checkout (see §2)
 
 ## Problem
@@ -25,7 +25,7 @@ notices and manually runs `gh workflow run build.yml --ref <tag>`.
 ## Root cause (verified)
 
 - `release.yml` sets `GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` for
-  semantic-release (release.yml:75), which pushes the release commit and tag.
+  semantic-release (release.yml:78), which pushes the release commit and tag.
 - GitHub docs ("Triggering a workflow"): events triggered by `GITHUB_TOKEN`
   **will not create a new workflow run**, with named exceptions. The exception
   this design relies on, stated exactly: **`workflow_dispatch` events sent
@@ -34,7 +34,7 @@ notices and manually runs `gh workflow run build.yml --ref <tag>`.
   exempt from the guard *in general* — only when the dispatch is what the
   `GITHUB_TOKEN` sent.
 - Therefore the tag `push` event is dropped and `build.yml`'s tag trigger
-  (.github/workflows/build.yml:4-6) never starts for release tags. The tag
+  (.github/workflows/build.yml:4-11) never starts for release tags. The tag
   trigger remains valid only for tags pushed by a human credential.
 
 ## Decision
@@ -74,10 +74,14 @@ The **tag is taken from `nextRelease.gitTag`** rather than reconstructed as
 `v${version}`, so the dispatch keeps working even if `tagFormat` is ever
 changed from the default. (Opus flagged the `${nextRelease.X}` vs
 `${nextRelease.variables.X}` template spelling as worth double-checking at
-implementation time; the GLM probe exercised the installed plugin's template
-rendering and found `${nextRelease.gitTag}` renders correctly — the
-implementer should still assert the rendered string equals `v<version>` in a
-dry run.)
+implementation time; verified against the installed plugin stack —
+`@semantic-release/exec` renders commands with lodash-es `template`
+(lib/exec.js:11) and `${nextRelease.gitTag}` renders the real tag (offline
+probe: renders `v9.9.9` for version `9.9.9`; core sets `gitTag` via
+`makeTag(options.tagFormat, version)`, semantic-release index.js:186).
+Note: a dry-run assertion is impossible — `success` steps are dropped
+entirely under `--dry-run` — so end-to-end verification is the first real
+release (acceptance criterion 1).)
 
 ### 2. `.github/workflows/release.yml` — dispatch the build from a dedicated least-privilege job
 
@@ -112,35 +116,49 @@ jobs:
 
 Design notes (from review):
 
-- **`!cancelled()` is load-bearing, not cosmetic.** Plugin success steps run in
-  listed order: `exec` (writes the output) *before* `@semantic-release/github`
-  (comments on issues/PRs, adds labels). If that later commenting fails,
-  semantic-release exits non-zero **after** the tag and Release already exist.
-  With a plain `needs.release.result == 'success'` gate the dispatch would be
-  skipped and the zero-asset Release would recur — the exact bug we are
-  fixing. With `!cancelled() && tag != ''` the dispatch still fires, because
-  the output's existence already proves the tag was pushed and the Release
-  published (the tag push happens before the success phase; verified in
-  semantic-release core, index.js:208-218, and get-config.js default
-  `tagFormat: v${version}`). Implementation must verify that a job-level `if`
-  with `!cancelled()` actually permits running when `needs.release` fails but
-  its outputs still map — if GitHub's semantics are stricter than expected,
-  fall back to `if: always() && needs.release.outputs.tag != ''` and re-verify
-  (this is the Opus MAJOR; do not silently drop it).
+- **`!cancelled()` is load-bearing, not cosmetic.** Plugin `success` steps all
+  run under a settle-all pipeline (`pipelineConfig: () => ({ settleAll: true })`
+  in semantic-release's plugin definitions), so `successCmd` runs even when
+  another success step fails, and errors are collected afterward. If
+  `@semantic-release/github`'s commenting fails, semantic-release exits
+  non-zero **after** the tag and Release already exist. With a plain
+  `needs.release.result == 'success'` gate the dispatch would be skipped and
+  the zero-asset Release would recur — the exact bug we are fixing. With
+  `!cancelled() && tag != ''` the dispatch still fires, because the output's
+  existence already proves the tag was pushed and the Release published (the
+  tag push happens before the publish/success phases; verified in
+  semantic-release core, index.js:207-212, and get-config.js default
+  `tagFormat: v${version}`). Implementation-time verification duty (Opus r1
+  MAJOR 1), discharged as follows: GitHub evaluates a job's `outputs` mapping
+  when the job *concludes*, regardless of success or failure (expressions doc:
+  `needs.<job_id>.outputs` — "the set of outputs of a job in the reusable
+  workflow", defined for concluded jobs; `!cancelled()` is GitHub's documented
+  recommended gate for "run regardless of success or failure"), so the failed-
+  release-with-tag case reaches `dispatch-build` with the tag set. The
+  behavioral case (failed github-plugin success step still dispatching) is
+  deferred to first occurrence; if it ever misbehaves, the documented fallback
+  is `if: always() && needs.release.outputs.tag != ''`.
 - `GH_REPO` is set explicitly so the step does not depend on a checkout's git
   remote — this job has no checkout at all.
 - The two jobs cannot race the `release-main` concurrency group
   (`cancel-in-progress: false` serializes releases). If a manual
   `gh workflow run build.yml` is in flight when the automatic dispatch lands,
   both runs share `build.yml`'s `build-${{ github.ref }}` group with
-  `cancel-in-progress: true` (build.yml:11) — one cancels the other, which is
+  `cancel-in-progress: true` (build.yml:14-16) — one cancels the other, which is
   benign: no duplicate asset uploads, and tauri-action uploads to the same
   existing Release.
-- **Residual risk (accepted):** a *successful* dispatch followed by a
-  *failed* Build run (e.g. a flaky macOS matrix leg) still yields a zero-asset
-  Release while the Release workflow shows green. No workflow wiring can close
-  that; the watch point moves to `build.yml` runs. This replaces the earlier
-  overstatement that "the gap can never silently reappear."
+- **Residual risks (accepted):**
+  - A *successful* dispatch followed by a *failed* Build run (e.g. a flaky
+    macOS matrix leg) still yields a zero-asset Release while the Release
+    workflow shows green. No workflow wiring can close that; the watch point
+    moves to `build.yml` runs. This replaces the earlier overstatement that
+    "the gap can never silently reappear."
+  - A failed **publish** inside `@semantic-release/github` (Release creation
+    itself) leaves the tag pushed but `success` never runs: no dispatch. The
+    tag also stays un-built until a manual `gh workflow run build.yml
+    --ref <tag>` — which also heals the release, since tauri-action creates
+    the missing Release when it uploads. Same manual remedy as before the
+    fix, strictly narrower blast radius.
 
 ### 3. `.github/workflows/build.yml` — document, don't remove, the tag trigger
 
