@@ -91,6 +91,142 @@ struct PipelineHolder(Mutex<PipelineHolderInner>);
 struct WatcherStarted(Mutex<Option<(PathBuf, WatcherHandle)>>);
 struct HealScheduler(Mutex<Option<(Sender<()>, std::thread::JoinHandle<()>)>>);
 struct WikiStatusState(Mutex<WikiStatusFlags>);
+/// Periodic watcher self-check monitor (spec 2026-09-24 §2): cancel flag +
+/// join handle, owned by `start_file_watcher_inner` the same way the
+/// watchdog supervisor is. One monitor runs per armed watcher; the monitor
+/// resolves the live handle and vault per tick and latches degraded when the
+/// watcher never armed, died (no Linux inotify fd), or recorded a notify
+/// error since the last clean tick.
+struct WatcherMonitor(Mutex<Option<WatcherMonitorHandle>>);
+struct WatcherMonitorHandle {
+    cancel: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<()>,
+}
+
+impl WatcherMonitorHandle {
+    /// Signal the monitor to exit and give it a bounded window (spec §2:
+    /// on timeout abandon — safe because a wedged monitor that eventually
+    /// wakes re-resolves state per tick and finds no handle to check).
+    fn stop(self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        let finished =
+            crate::pipeline::watchdog::join_with_timeout(self.join, Duration::from_secs(2));
+        if !finished {
+            eprintln!("[watcher-monitor] monitor thread did not exit within 2s; abandoning it");
+        }
+    }
+}
+
+/// Latch degraded watcher health + append to the vault's errors.log (spec
+/// §2: same write_error_log pattern as pipeline/mod.rs, spec §4: errors.log
+/// is the persistent, loud surface the status event cannot guarantee).
+fn latch_watcher_degraded(app: &AppHandle, reason: &str) {
+    let vault = app
+        .try_state::<VaultConfigState>()
+        .and_then(|vs| {
+            let guard = vs.0.lock().ok()?;
+            guard.get_vault_path().ok().flatten()
+        })
+        .map(PathBuf::from);
+    pipeline::write_error_log(
+        vault.as_deref(),
+        &format!("[watcher-monitor] degraded: {reason}"),
+    );
+    update_wiki_status_from_app(app, |flags| {
+        flags.watcher_health = WatcherHealth::Degraded;
+    });
+}
+
+/// Clear the degraded latch (recovery: monitor tick saw an armed, live,
+/// error-free watcher again, or a fresh watcher just armed successfully).
+fn clear_watcher_degraded(app: &AppHandle) {
+    update_wiki_status_from_app(app, |flags| {
+        flags.watcher_health = WatcherHealth::Working;
+    });
+}
+
+/// Spawn the periodic self-check thread. First tick after 5s (quick
+/// detection of the never-armed incident class), then every 60s.
+fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_thread = cancel.clone();
+    let join = std::thread::spawn(move || {
+        // Unix-secs of the last clean tick. A `last_error_at` strictly
+        // greater than this means a NEW notify error occurred since we
+        // last looked (spec §2 tick-latch disjunct). Starts at 0 so an
+        // error recorded before the first tick still trips.
+        let mut last_clean_tick_secs: u64 = 0;
+        let mut first = true;
+        loop {
+            let wait = if first {
+                first = false;
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(60)
+            };
+            // Sleep in short slices so cancel is honored promptly.
+            let deadline = std::time::Instant::now() + wait;
+            while std::time::Instant::now() < deadline {
+                if cancel_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            if cancel_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            // Per-tick live resolution (spec §2): re-read both states so a
+            // vault switch mid-sleep can never make us inspect a stale pair.
+            let Some(watcher_state) = app.try_state::<WatcherStarted>() else {
+                return;
+            };
+            // Per-tick verdict computed while briefly holding the watcher
+            // lock: armed_at / last_error_at loads + the /proc fd scan are
+            // all sub-millisecond, and latching happens outside the guard.
+            // (WatcherHandle is not Clone — the thread join handle cannot be
+            // — so the monitor inspects in place instead of snapshotting.)
+            let tick = watcher_state.0.lock().ok().and_then(|g| {
+                g.as_ref().map(|(_p, h)| {
+                    (
+                        h.armed_at.load(std::sync::atomic::Ordering::SeqCst),
+                        h.last_error_at.load(std::sync::atomic::Ordering::SeqCst),
+                        h.is_alive(),
+                    )
+                })
+            });
+
+            let Some((armed_at, last_error_at, alive)) = tick else {
+                // No watcher registered at all: the spawner latches
+                // degraded on spawn failure, and the early-return path
+                // reinstates untouched, so a tick that finds None here
+                // just idles — there is nothing to inspect.
+                continue;
+            };
+            if armed_at == 0 {
+                latch_watcher_degraded(&app, "watcher never armed (armed_at == 0)");
+                continue;
+            }
+            if !alive {
+                latch_watcher_degraded(
+                    &app,
+                    "watcher not alive (no inotify fd under /proc/self/fd)",
+                );
+                continue;
+            }
+            if last_error_at != 0 && last_error_at > last_clean_tick_secs {
+                latch_watcher_degraded(
+                    &app,
+                    "notify event loop recorded an error since the last clean tick",
+                );
+                continue;
+            }
+            // Clean tick: clear any degraded latch and record the plate.
+            last_clean_tick_secs = watcher::unix_secs_now();
+            clear_watcher_degraded(&app);
+        }
+    });
+    WatcherMonitorHandle { cancel, join }
+}
 /// Active watchdog supervisor: stop flag + JoinHandle. `switch_vault` and
 /// repeated `start_file_watcher` calls set the flag and join the handle
 /// before spawning a new supervisor so old supervisors cannot keep writing
@@ -127,6 +263,26 @@ struct IngestStatus {
     subject: Option<String>,
 }
 
+/// Health of the vault watcher, carried on `wiki-status-change` +
+/// `get_wiki_status` (spec 2026-09-24 §3). `working` = armed and alive at
+/// the last monitor tick (or monitor not yet started); `degraded` = the
+/// monitor (or a spawn failure) observed never-armed / dead / erroring.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum WatcherHealth {
+    #[default]
+    Working,
+    Degraded,
+}
+
+impl WatcherHealth {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WatcherHealth::Working => "working",
+            WatcherHealth::Degraded => "degraded",
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct WikiStatusFlags {
     ingest: IngestStatus,
@@ -135,6 +291,7 @@ struct WikiStatusFlags {
     pruning: bool,
     forgetting: bool,
     diagnostics: wiki_diagnostics::DiagnosticCounts,
+    watcher_health: WatcherHealth,
 }
 
 fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
@@ -150,6 +307,7 @@ fn emit_wiki_status(app: &AppHandle, current: &WikiStatusFlags) {
             "forgetting": current.forgetting,
             "diagnosticErrors": current.diagnostics.errors,
             "diagnosticWarnings": current.diagnostics.warnings,
+            "watcherHealth": current.watcher_health.as_str(),
         }),
     );
 }
@@ -942,6 +1100,7 @@ fn canonical_vault_from_config(vault_state: &VaultConfigState) -> Result<PathBuf
         .map_err(|e| format!("failed to canonicalize configured vault: {}", e))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_file_watcher_inner(
     app: &AppHandle,
     pipeline: State<'_, PipelineHolder>,
@@ -949,6 +1108,7 @@ fn start_file_watcher_inner(
     vault_state: State<'_, VaultConfigState>,
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
+    monitor: State<'_, WatcherMonitor>,
     status_state: State<'_, WikiStatusState>,
 ) -> Result<(), String> {
     let target_canonical = canonical_vault_from_config(&vault_state)?;
@@ -957,6 +1117,10 @@ fn start_file_watcher_inner(
         let mut watcher_guard = watcher_started.0.lock().unwrap();
         if let Some((prev_path, handle)) = watcher_guard.take() {
             if prev_path == target_canonical {
+                // Early-return path (spec §2): the existing handle AND its
+                // monitor are reinstated untouched — nothing is stopped,
+                // nothing is restarted, no tick can fire against a stale
+                // handle.
                 *watcher_guard = Some((prev_path, handle));
                 return Ok(());
             }
@@ -965,6 +1129,13 @@ fn start_file_watcher_inner(
             None
         }
     };
+
+    // Real start/switch (spec §2): stop the OLD MONITOR FIRST (cancel +
+    // 2s bounded join; on timeout abandon), then the old watcher, then
+    // spawn both anew.
+    if let Some(old_monitor) = monitor.0.lock().unwrap().take() {
+        old_monitor.stop();
+    }
 
     if let Some(h) = old_handle_to_stop {
         h.stop();
@@ -1287,7 +1458,10 @@ fn start_file_watcher_inner(
         )
     })?;
 
-    let app = app.clone();
+    let app_for_events = app.clone();
+    // Separate clone for the monitor spawn / degraded-clear after
+    // registration (the events clone is moved into the watcher closure).
+    let app_handle_for_monitor = app.clone();
     let vault_for_watcher = target_canonical.clone();
     // Owned copy for the event callback: `vault_for_watcher` is moved into
     // `spawn_vault_watcher` itself.
@@ -1296,7 +1470,7 @@ fn start_file_watcher_inner(
     // Spec §11 mutex trap: do NOT touch `db_state.0` here — holding the lock
     // during the (potentially slow) sha256 hash freezes the UI.
     let handle = spawn_vault_watcher(vault_for_watcher, move |event| {
-        let _ = app.emit("vault-event", &event);
+        let _ = app_for_events.emit("vault-event", &event);
         let path_str = match &event {
             VaultEvent::Added(p) | VaultEvent::Modified(p) | VaultEvent::Deleted(p) => p,
         };
@@ -1330,14 +1504,14 @@ fn start_file_watcher_inner(
         }
         let event_kind = match &event {
             VaultEvent::Added(_) => {
-                update_wiki_status_from_app(&app, |flags| {
+                update_wiki_status_from_app(&app_for_events, |flags| {
                     flags.ingest.health =
                         pipeline::watchdog::PipelineHealth::Working;
                 });
                 Ok(notify::EventKind::Create(notify::event::CreateKind::Any))
             }
             VaultEvent::Modified(_) => {
-                update_wiki_status_from_app(&app, |flags| {
+                update_wiki_status_from_app(&app_for_events, |flags| {
                     flags.ingest.health =
                         pipeline::watchdog::PipelineHealth::Working;
                 });
@@ -1361,9 +1535,19 @@ fn start_file_watcher_inner(
             eprintln!("[watch] enqueue_vault_event failed for {normalized}: {e}");
         }
         // conn drops here, releasing the WAL writer slot.
-    })
-    .map_err(|e| e.to_string())?
-    .with_lock(vault_lock);
+    });
+    // Spawn-failure latch (spec §2): the incident class is a watcher that
+    // silently doesn't exist, so before returning the error we latch
+    // degraded (errors.log + status) so the failure is loud and persistent
+    // even when this caller only `eprintln!`s it (e.g. the switch_vault
+    // restart paths).
+    let handle = match handle {
+        Ok(h) => h.with_lock(vault_lock),
+        Err(e) => {
+            latch_watcher_degraded(app, &format!("spawn_vault_watcher failed: {e}"));
+            return Err(e.to_string());
+        }
+    };
 
     let mut watcher_guard = watcher_started.0.lock().unwrap();
     let still_canonical = match canonical_vault_from_config(&vault_state) {
@@ -1383,10 +1567,14 @@ fn start_file_watcher_inner(
     if let Some((_p, old)) = watcher_guard.take() {
         old.stop();
     }
+    // Registration succeeded: (re)arm the periodic self-check monitor and
+    // clear any stale degraded latch from a previous generation (recovery
+    // clears the latch, spec §2).
+    *monitor.0.lock().unwrap() = Some(spawn_watcher_monitor(app_handle_for_monitor.clone()));
+    clear_watcher_degraded(&app_handle_for_monitor);
     *watcher_guard = Some((still_canonical, handle));
     Ok(())
 }
-
 /// Best-effort restore of DB handle, pipeline, file watcher, and outbox worker after a failed `switch_vault`.
 /// Returns whether `db_state` was successfully reopened on `db_path` (so temp stub files are safe to delete).
 #[allow(clippy::too_many_arguments)]
@@ -1398,6 +1586,7 @@ fn recover_after_failed_switch_vault(
     vault_state: State<'_, VaultConfigState>,
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
+    monitor: State<'_, WatcherMonitor>,
     status_state: State<'_, WikiStatusState>,
     _outbox_state: State<'_, OutboxWorkerState>,
 ) -> bool {
@@ -1435,9 +1624,15 @@ fn recover_after_failed_switch_vault(
         vault_state.clone(),
         watcher_started.clone(),
         heal_scheduler.clone(),
+        monitor.clone(),
         status_state.clone(),
     ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
+        // Escalate per spec §4: recovery only eprintlns, so persist the
+        // failure + degrade the status (the inner spawn-failure latch
+        // cannot fire when the pipeline is missing, which is the common
+        // reason this recovery path fails).
+        latch_watcher_degraded(app, &format!("recovery restart failed: {e}"));
     }
     // NOTE: worker spawn moved to switch_vault recovery branch to avoid
     // duplicate workers after failed switch.
@@ -1455,6 +1650,7 @@ async fn switch_vault(
     pipeline: State<'_, PipelineHolder>,
     watcher_started: State<'_, WatcherStarted>,
     heal_scheduler: State<'_, HealScheduler>,
+    monitor: State<'_, WatcherMonitor>,
     status_state: State<'_, WikiStatusState>,
     outbox_state: State<'_, OutboxWorkerState>,
 ) -> Result<(), String> {
@@ -1706,6 +1902,7 @@ async fn switch_vault(
             vault_state.clone(),
             watcher_started.clone(),
             heal_scheduler.clone(),
+            monitor.clone(),
             status_state.clone(),
             outbox_state.clone(),
         );
@@ -1736,9 +1933,15 @@ async fn switch_vault(
             vault_state.clone(),
             watcher_started.clone(),
             heal_scheduler.clone(),
+            monitor.clone(),
             status_state.clone(),
         ) {
-            eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
+            eprintln!(
+                "[switch_vault] failed to restart file watcher after successful switch: {e}"
+            );
+            // Escalate per spec §4: eprintln alone is silent in production.
+            // Persist the failure + degrade the status so it is loud.
+            latch_watcher_degraded(&app, &format!("restart after switch failed: {e}"));
         }
     } else if recovery_reopened_db {
         spawn_outbox_worker_if_configured(
@@ -1803,6 +2006,7 @@ fn reveal_vault(vault_state: State<VaultConfigState>) -> Result<(), String> {
 // ── Watcher + pipeline ────────────────────────────────────────────────────────
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn start_file_watcher(
     app: AppHandle,
     pipeline: State<PipelineHolder>,
@@ -1810,6 +2014,7 @@ fn start_file_watcher(
     vault_state: State<VaultConfigState>,
     watcher_started: State<WatcherStarted>,
     heal_scheduler: State<HealScheduler>,
+    monitor: State<WatcherMonitor>,
     status_state: State<WikiStatusState>,
 ) -> Result<(), String> {
     start_file_watcher_inner(
@@ -1819,6 +2024,7 @@ fn start_file_watcher(
         vault_state.clone(),
         watcher_started.clone(),
         heal_scheduler.clone(),
+        monitor.clone(),
         status_state.clone(),
     )
 }
@@ -2204,6 +2410,7 @@ struct WikiStatusSnapshot {
     forgetting: bool,
     diagnostic_errors: u32,
     diagnostic_warnings: u32,
+    watcher_health: String,
 }
 
 #[tauri::command]
@@ -2219,6 +2426,7 @@ fn get_wiki_status(status_state: State<'_, WikiStatusState>) -> WikiStatusSnapsh
         forgetting: flags.forgetting,
         diagnostic_errors: flags.diagnostics.errors,
         diagnostic_warnings: flags.diagnostics.warnings,
+        watcher_health: flags.watcher_health.as_str().to_string(),
     }
 }
 
@@ -3910,6 +4118,7 @@ pub fn run() {
         .manage(WikiStatusState(Mutex::new(WikiStatusFlags::default())))
         .manage(InferenceState(Mutex::new(GenerationProvider::Unconfigured)))
         .manage(WatcherStarted(Mutex::new(None)))
+        .manage(WatcherMonitor(Mutex::new(None)))
         .manage(HealScheduler(Mutex::new(None)))
         .manage(WatchdogSupervisor(Mutex::new(None)))
         .manage(PendingConfigMalformed(Mutex::new(None)))

@@ -442,7 +442,7 @@ fn xml_text_content(xml: &str) -> String {
     result
 }
 
-fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
+pub(crate) fn write_error_log(vault_path: Option<&std::path::Path>, msg: &str) {
     let Some(vault) = vault_path else {
         return;
     };

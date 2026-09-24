@@ -25,7 +25,7 @@ pub enum VaultEvent {
 
 /// Unix-secs "now" helper for the arming/error latches (`0` on clock
 /// failure — which reads as "never" to every consumer, the safe direction).
-fn unix_secs_now() -> u64 {
+pub fn unix_secs_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
