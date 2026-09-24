@@ -360,7 +360,8 @@ Use the GH GraphQL mutation `resolveReviewThread` for thread IDs on comments `40
 
 - [ ] **Step 4: Clippy gate**
 
-Run: `cargo clippy -p curated-thoughts-tools --bin export_okf_bundle 2>&1 | grep -c "^warning\|^error"` (expect 0) — repo enforces clippy clean.
+Run: `cargo clippy -p curated-thoughts-tools --bin export_okf_bundle -- -D warnings`
+Expected: exits 0, no output — repo enforces clippy clean.
 
 - [ ] **Step 5: Push and confirm CI green; report ready-to-merge**
 
