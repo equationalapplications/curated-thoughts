@@ -15,7 +15,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.release.outputs.tag }}
+      tag: ${{ steps.release.outputs.tag || steps.tag_fallback.outputs.tag }}
     concurrency:
       group: release-main
       cancel-in-progress: false
@@ -77,6 +77,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm exec semantic-release
+
+      # Failure-path fallback for the tag: if a late phase of semantic-release
+      # (e.g. @semantic-release/github publish) failed, the tag is already on
+      # HEAD while successCmd never ran, so steps.release.outputs.tag is
+      # empty. Resolve the tag from git so dispatch-build still fires. On a
+      # no-release run HEAD carries no v* tag and this stays empty (checkout
+      # is fetch-depth: 0, so all tags are present locally).
+      - name: Resolve release tag from git (failure-path fallback)
+        id: tag_fallback
+        if: ${{ !cancelled() }}
+        run: |
+          TAG="$(git tag --points-at HEAD | grep '^v' | tail -1 || true)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # Dispatches the Build workflow at the published release tag. The tag push
   # itself cannot trigger build.yml: tags pushed with GITHUB_TOKEN never fire
