@@ -124,7 +124,11 @@ existed belongs to a human tag-push whose build ran via the tag trigger, and
 re-dispatching it would cancel that in-flight build through `build.yml`'s
 `build-${{ github.ref }}` concurrency group — and it only claims a tag that
 **exists on origin** (semantic-release creates the tag locally before
-pushing; an unpushed tag would fail `gh workflow run --ref`). The checkout
+pushing; an unpushed tag would fail `gh workflow run --ref`). That origin
+check has three outcomes: exit code 2 (ref not found) → skip the dispatch
+and log "tag push failed?"; any other non-zero code (network/auth trouble)
+→ fail the step loudly rather than silently dropping the build; success →
+claim the tag. The checkout
 is `fetch-depth: 0`, so all tags are present locally for both checks.
 Normal no-release runs (nothing to release, or guard-skip) have no *new*
 `v*` tag and fall through empty.

@@ -110,8 +110,10 @@ jobs:
             echo "$TAG already existed before this run (manual tag-push); not claiming it"
             TAG=""
           else
-            git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1
-            rc=$?
+            # `|| rc=$?` is required: the runner uses `bash -e`, and a bare
+            # failing command would abort the script before rc is captured.
+            rc=0
+            git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1 || rc=$?
             if [ "$rc" -eq 2 ]; then
               echo "$TAG is not on origin (tag push failed?); not dispatching a build for it"
               TAG=""
