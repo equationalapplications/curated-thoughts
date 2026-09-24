@@ -1428,36 +1428,37 @@ fn start_file_watcher_inner(
             // If the open fails (e.g. fresh install with no `brain.db` yet), log
             // and skip the reconcile — but DO continue so the watcher spawn below
             // still runs and catches new events as they arrive.
-            let mut conn_opt: Option<rusqlite::Connection> =
-                match rusqlite::Connection::open(&brain_db_path) {
-                    Ok(c) => {
-                        // Busy-timeout pragma (CodeRabbit review on PR #96):
-                        // the reconcile writer participates in WAL mode,
-                        // but `ct watch`'s per-event connection also opens
-                        // RW against the same DB. Without a timeout,
-                        // contention with a checkpoint or another writer
-                        // fails instantly with SQLITE_BUSY. 5s matches
-                        // `tauri_app_lib::db::AppDb`'s default.
-                        if let Err(e) = c.busy_timeout(std::time::Duration::from_secs(5)) {
-                            eprintln!("[reconcile] failed to set busy_timeout: {e}");
-                            // Non-fatal: continue without the pragma.
-                        }
-                        // PRAGMA foreign_keys is per-connection and this
-                        // connection bypasses migrate() (spec 3b): without
-                        // this, `chunks`' ON DELETE CASCADE never fires and
-                        // both purges below orphan chunk rows.
-                        if let Err(e) = c.execute_batch("PRAGMA foreign_keys=ON;") {
-                            eprintln!("[reconcile] failed to enable foreign_keys: {e}");
-                        }
-                        Some(c)
+            let mut conn_opt: Option<rusqlite::Connection> = match rusqlite::Connection::open(
+                &brain_db_path,
+            ) {
+                Ok(c) => {
+                    // Busy-timeout pragma (CodeRabbit review on PR #96):
+                    // the reconcile writer participates in WAL mode,
+                    // but `ct watch`'s per-event connection also opens
+                    // RW against the same DB. Without a timeout,
+                    // contention with a checkpoint or another writer
+                    // fails instantly with SQLITE_BUSY. 5s matches
+                    // `tauri_app_lib::db::AppDb`'s default.
+                    if let Err(e) = c.busy_timeout(std::time::Duration::from_secs(5)) {
+                        eprintln!("[reconcile] failed to set busy_timeout: {e}");
+                        // Non-fatal: continue without the pragma.
                     }
-                    Err(e) => {
-                        eprintln!(
-                    "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
-                );
-                        None
+                    // PRAGMA foreign_keys is per-connection and this
+                    // connection bypasses migrate() (spec 3b): without
+                    // this, `chunks`' ON DELETE CASCADE never fires and
+                    // both purges below orphan chunk rows.
+                    if let Err(e) = c.execute_batch("PRAGMA foreign_keys=ON;") {
+                        eprintln!("[reconcile] failed to enable foreign_keys: {e}");
                     }
-                };
+                    Some(c)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[reconcile] skipping reconcile pass — failed to open {brain_db_path:?}: {e}"
+                    );
+                    None
+                }
+            };
 
             // Purge documents rows whose backing file no longer exists on disk.
             // Each per-row query failure is logged and skipped — we do NOT
@@ -1489,8 +1490,8 @@ fn start_file_watcher_inner(
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!(
-                        "[reconcile] skipping path purge — SELECT path FROM documents failed: {e}"
-                    );
+                            "[reconcile] skipping path purge — SELECT path FROM documents failed: {e}"
+                        );
                         Vec::new()
                     }
                 };
@@ -1632,8 +1633,8 @@ fn start_file_watcher_inner(
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!(
-                    "[watch] failed to open brain.db at {brain_db_path:?}: {e}; event dropped: {normalized}"
-                );
+                        "[watch] failed to open brain.db at {brain_db_path:?}: {e}; event dropped: {normalized}"
+                    );
                     return;
                 }
             };
@@ -1707,8 +1708,17 @@ fn start_file_watcher_inner(
             }
         };
         if still_canonical != target_canonical {
+            // A concurrent switch superseded this generation: the newer
+            // `start_file_watcher_inner` owns the (watcher, monitor) pair
+            // from here. We stopped ITS monitor at the top of this
+            // function, so restart one before returning — round-3 M1
+            // (Opus review): this is an `Ok` exit, the wrapper's Err-only
+            // handling does not cover it, and leaving zero monitors
+            // running was a closure-refactor regression (round 1 had
+            // `replace_monitor` here).
             drop(watcher_guard);
             handle.stop();
+            replace_monitor(&monitor, app);
             return Ok(());
         }
 
@@ -1797,11 +1807,10 @@ fn recover_after_failed_switch_vault(
         status_state.clone(),
     ) {
         eprintln!("[switch_vault] recovery: failed to restart file watcher: {e}");
-        // Escalate per spec §4: recovery only eprintlns, so persist the
-        // failure + degrade the status (the inner spawn-failure latch
-        // cannot fire when the pipeline is missing, which is the common
-        // reason this recovery path fails).
-        latch_watcher_degraded(app, &format!("recovery restart failed: {e}"));
+        // Escalation (errors.log + degraded status + monitor restart) is
+        // owned by `start_file_watcher_inner`'s wrapper, which latches on
+        // every Err — callers must NOT latch again (round-3 m1: the same
+        // failure was being written to errors.log up to three times).
     }
     // NOTE: worker spawn moved to switch_vault recovery branch to avoid
     // duplicate workers after failed switch.
@@ -2106,9 +2115,8 @@ async fn switch_vault(
             status_state.clone(),
         ) {
             eprintln!("[switch_vault] failed to restart file watcher after successful switch: {e}");
-            // Escalate per spec §4: eprintln alone is silent in production.
-            // Persist the failure + degrade the status so it is loud.
-            latch_watcher_degraded(&app, &format!("restart after switch failed: {e}"));
+            // Escalation (errors.log + degraded status + monitor restart)
+            // is owned by `start_file_watcher_inner`'s wrapper (round-3 m1).
         }
     } else if recovery_reopened_db {
         spawn_outbox_worker_if_configured(

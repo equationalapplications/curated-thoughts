@@ -337,7 +337,10 @@ fn run(cmd: Cmd) -> Result<i32> {
                 // masking the refusal itself. The open MUST be read-only
                 // (round-2 M1): a default `Connection::open` would CREATE
                 // brain.db on a fresh brain, making the refusal path a
-                // write.
+                // write. Note: on a WAL-mode brain.db whose `-shm` sidecar
+                // is missing or unwritable, the read-only open itself can
+                // fail — the count then shows "?" on a populated brain,
+                // which is the documented fallback, not a bug (round-3 m4).
                 let db_path = tauri_app_lib::retrieval::resolve_brain_paths().db_path;
                 let live = tauri_app_lib::retrieval::open_brain_readonly(&db_path)
                     .ok()
