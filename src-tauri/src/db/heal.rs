@@ -67,22 +67,47 @@ pub fn heal_invalid_sources_conn(conn: &mut Connection, _vault: PathBuf) -> Resu
     let mut healed_by_entity: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (rowid, source_ref, entity_id, entry_id) in entries {
+        // Atomicity fix (/fix-pr PRRT_kwDOSVmXas6lvgTv): wrap the grounding
+        // check, soft-delete, and edge cascade in a single BEGIN IMMEDIATE
+        // transaction. The Immediate mode acquires the RESERVED lock up-front
+        // so a concurrent writer (e.g. an `ingest` deleting the underlying
+        // document) can't race the read-then-write window, and a concurrent
+        // heal (GUI scheduler thread + headless `ct heal`) can't both decide
+        // to soft-delete the same row. The UPDATE is conditional on the row
+        // still being live AND still carrying the same source_ref we just
+        // read, so a row that was already soft-deleted (or whose source_ref
+        // changed) is skipped without double-counting.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Shared consumer helper (`source_ref_is_still_grounded`): handles
         // both the legacy vault-relative path shape and the JSON
         // evidence-blob shape; treats empty / unparseable / DB-error values
         // as still-grounded (defensive — see its docs).
-        if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            let tx = conn.unchecked_transaction()?;
-            tx.execute(
-                "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
-                rusqlite::params![crate::db::commit::ms_now(), rowid],
+        if !crate::db::commit::source_ref_is_still_grounded(&tx, &source_ref) {
+            let changed = tx.execute(
+                "UPDATE llm_wiki_entries
+                 SET deleted_at = ?1
+                 WHERE rowid = ?2
+                   AND deleted_at IS NULL
+                   AND source_ref = ?3",
+                rusqlite::params![crate::db::commit::ms_now(), rowid, source_ref],
             )?;
+            if changed == 0 {
+                // Row was already soft-deleted (or its source_ref changed)
+                // between the SELECT above and the tx open — nothing to
+                // cascade, nothing to count. Commit the empty tx and move on.
+                tx.commit()?;
+                continue;
+            }
             // Capture the cascade count so the summary reports what the
             // heal actually purged (spec §5 — previously discarded).
             summary.edges_purged += crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)?;
             tx.commit()?;
             *healed_by_entity.entry(entity_id).or_insert(0) += 1;
             summary.soft_deleted += 1;
+        } else {
+            // Grounded: release the IMMEDIATE lock so the next iteration can
+            // open its own tx without contention.
+            tx.commit()?;
         }
     }
 

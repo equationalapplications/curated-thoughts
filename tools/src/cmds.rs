@@ -328,6 +328,20 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 pub fn heal_run() -> Result<()> {
     let brain = crate::write::resolve()?;
     let mut conn = crate::write::open_rw(&brain)?;
+    // `/fix-pr` PRRT_kwDOSVmXas6lvgUV: `open_rw` is migration-free by design
+    // (it is the cheap-per-event connection the watcher uses), but `heal_run`
+    // is a one-shot CLI entry point that runs SELECTs against tables the
+    // headless binary may be the FIRST thing to open after a schema bump.
+    // Bring the DB up to the current schema on the same connection — the
+    // migrate is ungated (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT
+    // EXISTS) so it's a no-op on an already-current brain and idempotent
+    // across repeated invocations. Mirrors the watcher probe's
+    // `migrate_open_db` pattern (cmds.rs ~line 1190, same review finding
+    // applied there for the V23 repair).
+    tauri_app_lib::db::connection::migrate_open_db(
+        &conn,
+        brain.paths.db_path.parent(),
+    )?;
     // The `vault` parameter is unused by the core today, but pass the
     // CONFIGURED VAULT ROOT (not the brain dir) so a future grounding check
     // that reads it sees the same directory the GUI scheduler passes

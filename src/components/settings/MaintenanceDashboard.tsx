@@ -55,8 +55,8 @@ export function MaintenanceDashboard() {
       </p>
       <p className="maintenance-description" aria-live="polite">
         {wikiStatus.watcherHealth === 'degraded'
-          ? '⚠ Vault watcher degraded: the watcher is not armed or has stopped, so file changes are NOT being ingested. Details in .brain/errors.log.'
-          : 'Vault watcher: working (armed and alive at the last self-check).'}
+          ? '⚠ Vault watcher degraded: a notify error was recorded or the watcher failed its liveness check, so file changes may be missed. Details in .brain/errors.log.'
+          : 'Vault watcher: no degradation reported at the last self-check.'}
       </p>
 
       <div className="maintenance-actions">

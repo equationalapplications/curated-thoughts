@@ -36,8 +36,13 @@ All findings addressed in commit e2ec63b.
   idling, matching the spec's "missing handle reads as armed_at == 0".
 - **M4 (missing tests)** — FIXED.
   - Monitor tick test: `watcher_monitor_verdict_tests` (5 unit tests over
-    the pure verdict fn — covers "force armed_at = 0 / new error → latched
-    exactly once" semantics plus consumption/re-trip).
+    the pure verdict fn — covers the disjuncts and consumption/re-trip
+    contract: `armed_at == 0` degrades, a dead watcher degrades, a healthy
+    tick is clean, a consumed error does not re-trip, and a strictly newer
+    error after a consumed one does). The tests assert verdicts and the
+    returned `new_seen_error` timestamp; the side-effect contract
+    (transition-gated latch and one-line errors.log) lives in the monitor
+    thread that consumes the verdict, not in the pure function.
   - `ct heal --yes` nothing-to-do case:
     `heal_with_yes_on_clean_brain_exits_zero_with_zero_summary` in
     `tools/tests/ct_heal.rs` (exit 0, `{"evaluated":0,"soft_deleted":0,
