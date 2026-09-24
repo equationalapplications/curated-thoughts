@@ -242,6 +242,20 @@ cargo run -p curated-thoughts-tools --bin bulk_reindex -- --dry-run
 cargo run -p curated-thoughts-tools --bin bulk_reindex --
 ```
 
+### OKF Bundle Import/Export
+
+The brain round-trips through OKF bundles (OKF v0.2, `llm-wiki/2` profile). In the GUI, the OKF bar in **Brain** mode has **Export brain as OKF bundle** / **Import bundle** buttons; they write and read zip bundles (`.zip` or `.okf`), and import shows a preview with merge/replace/clone modes before anything is applied.
+
+For scripting and backups, the `tools` package builds a headless exporter that runs the same load + write code as the GUI (read-only against the database, so it is safe to run while the app is open — all queries share one consistent snapshot, and no `exported` event rows are recorded):
+
+```bash
+cargo build --release -p curated-thoughts-tools --bin export_okf_bundle
+target/release/export_okf_bundle ~/backups/brain-okf.zip
+# exported entities=452 files=3032 sha256=… path=/home/…/brain-okf.zip
+```
+
+`export_okf_bundle [dest]` defaults to `~/brain-okf.zip` and honors the same `CURATED_BRAIN_*` variables as the rest of the `tools` package. It writes to a temp file, parse-checks the result against the same import limits the reader enforces, and only then atomically replaces the destination — so a failed run never destroys the previous backup. It is what powers the nightly `backups/okf/brain-okf.zip` commit in the equational-wiki backup cron. Note that the bundle is a **full, unredacted copy** of the brain — including soft-deleted facts — so only commit it to a private repo.
+
 ### Semantic Search Profiling
 
 To measure mean query latency vs. chunk count (e.g., before adopting sqlite-vec / ANN):

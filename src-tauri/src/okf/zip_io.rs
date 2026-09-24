@@ -80,14 +80,40 @@ fn read_bundle_zip(path: &Path) -> Result<Vec<OkfFile>> {
 
 pub fn write_bundle_zip(dest: &Path, files: &[OkfFile]) -> Result<()> {
     let file = File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
+    write_bundle_zip_into(file, files).with_context(|| format!("writing {}", dest.display()))
+}
+
+/// Write the bundle to an already-open handle. The exporter uses this so the
+/// exclusive 0o600 temp file it created is written through the held handle —
+/// the bundle bytes are never written to a path that could be swapped.
+pub fn write_bundle_zip_into<W: std::io::Write + std::io::Seek + 'static>(
+    file: W,
+    files: &[OkfFile],
+) -> Result<()> {
     let mut writer = zip::ZipWriter::new(file);
+    // Fixed mtime (2026-01-01 00:00:00 UTC) so identical content produces
+    // byte-identical archives — required for nightly-backup change detection.
+    let fixed = zip::DateTime::from_date_and_time(2026, 1, 1, 0, 0, 0).unwrap_or_default();
     let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(fixed);
     for f in files {
         writer.start_file(&f.path, options)?;
         writer.write_all(f.content.as_bytes())?;
     }
-    writer.finish()?;
+    // zip 8.6: `finish()` returns Result<W, ZipWriterResult> handing back the
+    // inner writer W. Syncing requires a real File, so the generic writer is
+    // downcast via its Any impl when it is one (the exporter and this fn's
+    // path-based wrapper both pass std::fs::File). Non-File writers skip fsync.
+    let mut file = writer.finish().context("finishing bundle")?;
+    file.flush().context("flushing bundle")?;
+    {
+        use std::any::Any;
+        let any: &mut dyn Any = &mut file;
+        if let Some(f) = any.downcast_mut::<std::fs::File>() {
+            f.sync_all().context("syncing bundle")?;
+        }
+    }
     Ok(())
 }
 
@@ -125,6 +151,44 @@ mod tests {
         std::fs::write(dir.path().join("entities/demo/log.md"), "").unwrap();
         let files = read_bundle_source(dir.path()).unwrap();
         assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn zip_bytes_deterministic() {
+        let files = vec![OkfFile {
+            path: "index.md".into(),
+            content: "---\nokf_version: 0.2\n---\n".into(),
+        }];
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.zip");
+        let b = dir.path().join("b.zip");
+        write_bundle_zip(&a, &files).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write_bundle_zip(&b, &files).unwrap();
+        let ha = sha256_hex_file(&a).unwrap();
+        let hb = sha256_hex_file(&b).unwrap();
+        assert_eq!(ha, hb, "identical inputs must produce identical zip bytes");
+    }
+
+    // 64KiB-chunked sha256 helper local to the tests module
+    fn sha256_hex_file(path: &std::path::Path) -> anyhow::Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read as _;
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
     }
 
     #[test]
