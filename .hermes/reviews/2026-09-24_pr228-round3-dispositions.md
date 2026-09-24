@@ -15,11 +15,6 @@ Addressed in commit b268826.
 
 ## MINOR
 
-- **m3-note (cross-ref, moved here per round-4 m3):** the round-2 m6 fix
-  (StatusBar quote flip) was an unrelated-formatting change inside the
-  round-2 fix commit — it is the direct remediation of round-1's m6 and is
-  itemized here to keep the audit trail tidy.
-
 - **m1 (same failure logged up to 3x: wrapper + callers + fresh-monitor
   first tick) — FIXED (callers).** Both caller-side
   `latch_watcher_degraded` calls (`recover_after_failed_switch_vault`,
@@ -40,9 +35,11 @@ Addressed in commit b268826.
   against this function is clean. ACCEPTED with rationale rather than
   reverted — reverting would reintroduce the round-2 M2 bug.
 
-- **m3 (StatusBar quote flip not itemized in dispositions) — FIXED.**
-  Round-2 dispositions file now carries an explicit line item for it
-  (round-3 m3 cross-reference added).
+- **m3 (StatusBar quote flip not itemized in dispositions) — FIXED.** The
+  note about the StatusBar quote flip being an unrelated-formatting change
+  inside the round-2 fix commit — the direct remediation of round-1's m6 —
+  is itemized at the top of this file's MINOR section (round-4 m3 asked
+  for exactly this placement).
 
 - **m4 (WAL/-shm read-only-open caveat undocumented) — FIXED.**
   `tools/src/bin/ct.rs` refusal comment now states that on a WAL-mode

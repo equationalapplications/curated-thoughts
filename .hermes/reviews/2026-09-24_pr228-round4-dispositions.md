@@ -1,7 +1,7 @@
 # Opus review round 4 (PR #228, b268826) — dispositions
 
 Round-4 verdict was "Changes requested": 1 MAJOR (M1), 5 MINOR (m1-m5).
-Addressed in commit <this commit>.
+Addressed in commit 577c2a4.
 
 ## MAJOR
 

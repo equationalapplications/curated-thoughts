@@ -219,7 +219,14 @@ fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
         let mut last_seen_error_secs: u64 = 0;
         // Degraded latch: only act on transitions (spec §2 "once per
         // transition"); a clean tick while already working is a no-op.
-        let mut degraded = false;
+        // Starts as `None` ("unknown"): the FIRST tick always publishes its
+        // verdict — a healthy first tick actively clears any stale caller
+        // latch (round-5 m2: a same-vault `start_file_watcher` early-return
+        // touches neither monitor nor status, so without this the wrapper's
+        // Degraded could outlive it indefinitely), and a degraded first
+        // tick logs once (the spec §2 re-assert) instead of being swallowed
+        // by a pre-seeded `false`.
+        let mut degraded: Option<bool> = None;
         let mut first = true;
         loop {
             let wait = if first {
@@ -265,8 +272,8 @@ fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
             let verdict = monitor_tick_verdict(tick, last_seen_error_secs);
             last_seen_error_secs = verdict.new_seen_error;
             if verdict.degraded_now {
-                if !degraded {
-                    degraded = true;
+                if degraded != Some(true) {
+                    degraded = Some(true);
                     let reason = match tick {
                         None => "watcher monitor found no registered handle".to_string(),
                         Some((armed_at, _, alive)) => {
@@ -285,10 +292,13 @@ fn spawn_watcher_monitor(app: AppHandle) -> WatcherMonitorHandle {
                 continue;
             }
             // Clean tick: clear the latch only on the degraded → working
-            // transition (M2: a clean tick while already working must not
-            // emit anything).
-            if degraded {
-                degraded = false;
+            // transition, or on the very first tick while the state is
+            // still unknown (round-5 m2: the first tick ALWAYS publishes so
+            // a stale caller latch cannot outlive the monitor's first
+            // healthy verdict; M2: a clean tick while already working must
+            // not emit anything).
+            if degraded != Some(false) {
+                degraded = Some(false);
                 clear_watcher_degraded(&app);
             }
         }
@@ -1272,7 +1282,10 @@ fn start_file_watcher_inner(
     // Real start/switch (spec §2): stop the OLD MONITOR FIRST (cancel +
     // 2s bounded join; on timeout abandon), then the old watcher, then
     // spawn both anew.
-    if let Some(old_monitor) = monitor.0.lock().unwrap().take() {
+    // Round-5 m4: take() must not hold the MutexGuard across `stop()` (its
+    // join can block up to 2s); bind first, drop the guard, then stop.
+    let old_monitor = monitor.0.lock().unwrap().take();
+    if let Some(old_monitor) = old_monitor {
         old_monitor.stop();
     }
 
@@ -1715,11 +1728,15 @@ fn start_file_watcher_inner(
             // `start_file_watcher_inner` owns the (watcher, monitor) pair
             // from here and installs its own monitor at registration
             // (round-3 M1: leaving zero monitors on this Ok exit was a
-            // closure-refactor regression). Round-4 m1: spawn ONLY if the
-            // slot is still empty — unconditionally replacing here would
-            // (a) race B's install, and (b) start a monitor whose 5s first
-            // tick can fire "no registered handle" into errors.log while
-            // B's reconcile (which can run minutes) is still going.
+            // closure-refactor regression). Spawn ONLY if the slot is still
+            // empty (round-4 m1 / round-5 m1): unconditionally replacing
+            // here would race B's install, and while B is mid-reconcile the
+            // slot is empty anyway — so this monitor's 5s first tick CAN
+            // still fire "no registered handle" into errors.log and latch
+            // Degraded until B registers. Accepted: the window is one line
+            // per overlapping start, self-clears on B's success, and NOT
+            // spawning would leave zero monitors if no follow-up start ever
+            // comes.
             drop(watcher_guard);
             handle.stop();
             let mut guard = monitor.0.lock().unwrap();
@@ -1755,7 +1772,10 @@ fn start_file_watcher_inner(
 /// Stop any monitor in `monitor` and spawn a fresh one owned by `app`.
 /// Extracted so every lifecycle path of `start_file_watcher_inner` (success
 /// AND the failure early-returns, spec §2 "the monitor still starts") uses
-/// one orderly stop-old-then-spawn-new sequence.
+/// one orderly sequence. Order (round-5 m3): spawn-new FIRST while holding
+/// the lock, swap, release, THEN stop-old — so for a sub-second window two
+/// monitors overlap; that is harmless (the new one's first tick is 5s away,
+/// the old one exits within ~200ms of its cancel flag).
 fn replace_monitor(monitor: &State<'_, WatcherMonitor>, app: &AppHandle) {
     // Atomic swap (round-4 M1): install the new handle while holding the
     // lock in ONE critical section, and only then stop the old handle
