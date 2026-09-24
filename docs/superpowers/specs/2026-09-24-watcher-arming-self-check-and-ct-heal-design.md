@@ -1,7 +1,10 @@
 # Watcher-arming self-check + headless `ct heal` — design spec
 
 - Date: 2026-09-24
-- Status: Draft (spec review)
+- Status: Draft — revised post-review (GLM 5.3 spec review 2026-09-24,
+  verdict "changes requested"; all 6 Important + 5 Minor findings addressed
+  in this revision; delta note sent back to the reviewer for convergence
+  check)
 - Branch: `feat/watcher-arming-self-check-and-ct-heal`
 - Related backlog item: Sep 14 re-scoped P1 "add a first-class watcher-armed
   check and a headless heal trigger" (supersedes "Do 1" loop-step retirement)
@@ -29,8 +32,8 @@ The code enables both failure modes:
   backend just idles the 150 ms `recv_timeout` loop forever.
 - Of the three spawn call sites, only the `start_file_watcher` Tauri command
   returns the error to the frontend (lib.rs:1867-1885); `switch_vault`'s
-  restart and its recovery branch only `eprintln!` (lib.rs:1793-1797,
-  1492-1496). There is no persistent, loud, or pollable signal anywhere.
+  restart and its recovery branch only `eprintln!` (eprintlns at lib.rs:1802
+  and 1501). There is no persistent, loud, or pollable signal anywhere.
 - Heal is GUI-only. The heal pass lives in private, Tauri-`State`-bound
   functions in src-tauri/src/lib.rs (`heal_invalid_sources`, lib.rs:417-500;
   scheduler thread `spawn_heal_scheduler`, lib.rs:502-538, 3 s debounce), and
@@ -56,7 +59,7 @@ owner of that signal.
 ## Non-goals
 
 - No change to heal's contract: it evaluates only live `librarian_inferred`
-  rows (lib.rs:435-456 selection unchanged), soft-deletes ungrounded rows,
+  rows (lib.rs:438-442 selection unchanged), soft-deletes ungrounded rows,
   purges edges, and writes `healed` events. No new purge behaviors.
 - No replacement of the pipeline watchdog (src-tauri/src/pipeline/watchdog/)
   or the reconcile startup sweep (src-tauri/src/reconcile.rs:50).
@@ -83,8 +86,13 @@ owner of that signal.
   silently dropped).
 - `pub fn is_alive(&self) -> bool` — Linux: at least one entry under
   `/proc/self/fd` whose target contains `inotify` (cheap `readlink` scan,
-  matching the incident evidence source); other platforms: `true` (no OS
-  signal available; the event-loop error latch above is the signal).
+  matching the incident evidence source). Scope note: this counts the whole
+  process's inotify fds, so it is a lower bound — it can never
+  false-negative the incident signature (0 fds = backend closed = dead),
+  but in principle another inotify user could mask a death with a
+  false-alive; no other inotify user exists in the tree today; other
+  platforms: `true` (no OS signal available; the event-loop error latch
+  above is the signal).
 
 No synthetic probe file at startup: ops data shows staging latency spans 1 s
 to ~7 min under librarian scan-debounce, so a bounded probe is either slow or
@@ -93,15 +101,43 @@ incident signature exactly (0 fds = dead watcher, twice confirmed).
 
 ### 2. Periodic watcher self-check (src-tauri)
 
-A lightweight monitor thread, spawned adjacent to the HealScheduler setup
-(lib.rs:3974 setup region) and stopped/restarted by `switch_vault` alongside
-the watcher itself via `WatcherHandle`:
+A lightweight monitor thread whose lifecycle is owned by
+`start_file_watcher_inner` — the same function that owns the watcher and the
+heal scheduler (spawned at lib.rs:1325) — NOT by `WatcherHandle` (which would
+couple fs_watcher types to lib.rs state). A new
+`WatcherMonitor(Mutex<Option<MonitorHandle>>)` Tauri state, managed alongside
+`WatcherStarted`, holds `{ cancel: Arc<AtomicBool>, join: JoinHandle<()> }`.
 
-- Every 60 s: if `handle.is_alive()` is false, or `armed_at == 0`, latch a
-  degraded state (once per transition, not per tick) and:
+Lifecycle rules on every path of `start_file_watcher_inner`:
+
+- **Early return (same vault, lib.rs:1013-1019):** the existing handle and
+  monitor are reinstated untouched — nothing is stopped, nothing is
+  restarted, no tick can fire against a stale handle.
+- **Real start/switch:** stop the old monitor first (cancel flag +
+  `join_with_timeout` 2 s; on timeout, abandon — safe by the probe rule
+  below), then the old watcher, then spawn both anew.
+- **Spawn failure:** latch degraded immediately (errors.log append +
+  `update_wiki_status_from_app`) before returning — the incident class is a
+  startup failure, so the signal must not wait for the first tick. The
+  monitor still starts; `armed_at = 0` makes its first tick re-assert the
+  latched state.
+
+Per-tick behavior (first tick at +5 s, then every 60 s):
+
+- The monitor holds an `AppHandle` clone (like the heal scheduler thread)
+  and resolves the CURRENT watcher handle (via `WatcherStarted`) and CURRENT
+  vault path (via `VaultConfigState`) at each tick — never a captured pair.
+  This makes an abandoned monitor harmless: it probes the truth about the
+  current watcher and appends to the current vault's errors.log. The only
+  residual is rare double-logging while an abandoned monitor drains, accepted
+  here because monitor stops are 2 s-bounded joins that essentially always
+  finish.
+- If the current handle reports `armed_at == 0` or `!is_alive()`, latch
+  degraded (once per transition) and:
   - append a line to `<vault>/.brain/errors.log` via a new appender following
     the `write_error_log` pattern (src-tauri/src/pipeline/mod.rs:448-470,
-    same `[<unix-secs>] <msg>` format, same IO-error tolerance);
+    same `[<unix-secs>] <msg>` format, same IO-error tolerance; on an
+    unconfigured vault the append no-ops exactly like `write_error_log`);
   - bump the wiki-status flags via `update_wiki_status_from_app`
     (lib.rs:300-302) so the existing `wiki-status-change` event
     (lib.rs:141-154) carries it to the UI.
@@ -113,14 +149,17 @@ the watcher itself via `WatcherHandle`:
 
 ### 3. Watcher health surfaces in the UI (src-tauri + frontend)
 
-Extend `WikiStatusFlags` (lib.rs:133-140) with a watcher-health field —
-reusing the `PipelineHealth` vocabulary
-(src-tauri/src/pipeline/watchdog/mod.rs:150-166: `Working`/`Stalled`/
-`Degraded`) rather than inventing states:
+Extend `WikiStatusFlags` (lib.rs:133-140) with a watcher-health field.
+Deliberately NOT the full `PipelineHealth` vocabulary
+(src-tauri/src/pipeline/watchdog/mod.rs:150-166): its `Stalled` means a
+supervised pipeline stage trip with recovery machinery behind it; a
+transient notify error carries no such machinery, and reusing the string
+would make StatusBar imply recovery that never comes. So:
 
-- `watcherHealth: "working" | "stalled" | "degraded"` — `working` = armed and
-  alive; `stalled` = armed but a notify error was consumed since the last
-  clean tick; `degraded` = not armed / fd probe says dead.
+- `watcherHealth: "working" | "degraded"` — `working` = armed and alive;
+  `degraded` = not armed, fd probe dead, OR a notify error was consumed
+  since the last clean tick (the transient/steady distinction lives in the
+  errors.log lines and the degraded latch, not in a third UI state).
 - Frontend: `useWikiStatus` (src/hooks/useWikiStatus.ts) already receives the
   snapshot + change events; StatusBar
   (src/components/shell/StatusBar.tsx:22-41,
@@ -149,12 +188,16 @@ New module `src-tauri/src/db/heal.rs` (sibling to the existing
   Result<HealSummary>` — the body of `heal_invalid_sources`
   (lib.rs:417-500) with the `State` extraction hoisted to callers. `HealSummary`
   = `{ evaluated: usize, soft_deleted: usize, edges_purged: usize }`.
+  NOTE: `edges_purged` requires capturing `purge_edges_for_entry`'s `usize`
+  return (edge_purge.rs:94), currently discarded at lib.rs:474 — capture it
+  into the summary; behavior-neutral, otherwise the CLI's stdout contract
+  undercounts.
 - `lib.rs::heal_invalid_sources` becomes a thin wrapper: resolve
   `DbState`/`VaultConfigState`, open the connection, delegate, keep the
   existing `update_wiki_status_from_app` healing-flag choreography
   (lib.rs:527-533) in the scheduler thread. Behavior identical; the
   HealScheduler debounce is untouched.
-- `heal_lost_librarian_inferred` (lib.rs:1987-2043) is left alone in this PR
+- `heal_lost_librarian_inferred` (lib.rs:1987-2036) is left alone in this PR
   except for a follow-up comment: it overlaps but has a different
   selection/reachability contract; unifying it is a future cleanup, not a
   behavior change smuggled into this one.
@@ -180,7 +223,10 @@ New module `src-tauri/src/db/heal.rs` (sibling to the existing
   (unchecked_transaction, lib.rs:468-476). A simultaneous GUI heal run is
   idempotent-safe (both passes select the same live rows; a row
   already soft-deleted by the other pass drops out of the second pass's
-  selection) — documented here, no new locking machinery.
+  selection) — documented here, no new locking machinery. Expected cosmetic
+  artifact: two concurrent passes can each write a `healed` event for the
+  same entity (each snapshots its selection before the other's soft-delete
+  commits); duplicate events are accepted and noted for the cron's reader.
 - Stdout contract: one line of summary JSON
   (`{"evaluated":N,"soft_deleted":N,"edges_purged":N}`) so the nightly cron
   can log machine-readable verdicts instead of deriving them from SQL.
@@ -192,9 +238,13 @@ src-tauri (must compile under `--features test-utils` for clippy and
 single-threaded execution):
 
 - fs_watcher.rs tests (existing pattern: TempDir + mpsc sink,
-  fs_watcher.rs:215-290): arming sets `armed_at`; notify-error consumption
-  bumps `last_error_at` (inject via a channel closed mid-test);
-  `is_alive()` true after a healthy spawn on Linux.
+  fs_watcher.rs:215-290): arming sets `armed_at`; `is_alive()` true after a
+  healthy spawn on Linux. For the notify-error path, do NOT inject via
+  channel tricks (dropping the notify sender yields `Disconnected`, not an
+  `Err` item — the loop would break, not record): extract the error-handling
+  into a small `record_watcher_error(&last_error_at, &err)` free function
+  called from the `Ok(Err(e))` arm and unit-test that function directly; the
+  loop wiring stays a one-liner.
 - Heal core tests (new `db/heal.rs` test mod, connection-only like the
   reconcile suite's table-driven style, reconcile.rs:329-586): grounded row
   survives; ungrounded row soft-deleted with edges purged and a `healed`
@@ -225,6 +275,11 @@ CI impact: none new — both crates' existing feature sets cover the above.
 - `WikiStatusFlags` grows a field — a serialization addition to the
   `wiki-status-change` payload; frontend consumers are additive readers, so
   no versioning concern.
-- The monitor thread must be stopped and joined on `switch_vault` (same
-  discipline as the watcher handle) or it will probe a stale vault path.
-  Handled in §2.
+- Monitor lifecycle is fully specified in §2: owned by
+  `start_file_watcher_inner` (not `WatcherHandle`), reinstated untouched on
+  the same-vault early return (lib.rs:1013-1019), stopped with a 2 s bounded
+  join on real switches, and harmless even if abandoned (it probes the
+  current handle and vault per tick). Shutdown: the monitor holds an
+  `AppHandle` clone and never exits on app teardown — process exit reaps it;
+  the final tick cannot misfire because it reads live state, and no
+  degradation it latches after teardown is observable. Accepted.
