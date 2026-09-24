@@ -35,7 +35,8 @@ pub struct HealSummary {
 /// Heal every live `librarian_inferred` entry on `conn`.
 ///
 /// Selection and grounding policy are unchanged from the original
-/// `heal_invalid_sources` (lib.rs:417-500): only rows with
+/// `heal_invalid_sources` (lib.rs, the original GUI-scheduler pass): only
+/// rows with
 /// `deleted_at IS NULL AND source_ref IS NOT NULL AND source_type =
 /// 'librarian_inferred'` are evaluated; a row is soft-deleted only when
 /// `source_ref_is_still_grounded` says the reference is *demonstrably*

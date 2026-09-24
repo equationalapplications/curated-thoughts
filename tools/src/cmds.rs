@@ -328,7 +328,19 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 pub fn heal_run() -> Result<()> {
     let brain = crate::write::resolve()?;
     let mut conn = crate::write::open_rw(&brain)?;
-    let vault = retrieval::resolve_brain_paths().brain_dir;
+    // The `vault` parameter is unused by the core today, but pass the
+    // CONFIGURED VAULT ROOT (not the brain dir) so a future grounding check
+    // that reads it sees the same directory the GUI scheduler passes
+    // (final fresh-eyes review, m2).
+    let vault = {
+        let cfg =
+            tauri_app_lib::vault::VaultConfig::new(retrieval::resolve_brain_paths().config_path);
+        cfg.get_vault_path()
+            .ok()
+            .flatten()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| retrieval::resolve_brain_paths().brain_dir)
+    };
     let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
     // Serialize the struct directly (m2): `HealSummary` derives `Serialize`,
     // so the stdout contract stays tied to the struct instead of a

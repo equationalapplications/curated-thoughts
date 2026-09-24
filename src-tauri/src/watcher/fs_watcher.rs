@@ -91,6 +91,15 @@ impl WatcherHandle {
     /// `true` — no OS signal is available there, so the `last_error_at`
     /// latch is the portable signal.
     pub fn is_alive(&self) -> bool {
+        // Cross-platform thread-liveness first (final fresh-eyes review,
+        // M1): the event-loop thread owning the notify watcher dying
+        // (callback panic, `Disconnected` break) kills the watcher on EVERY
+        // platform, and `last_error_at` never sees it. `is_finished()` is
+        // the exact signal; the fd scan below stays as the Linux-only
+        // backend-death check on top.
+        if self.join.is_finished() {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         {
             let fd_dir = "/proc/self/fd";

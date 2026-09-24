@@ -702,7 +702,21 @@ fn spawn_heal_scheduler(app: AppHandle) -> (Sender<()>, std::thread::JoinHandle<
             update_wiki_status_from_app(&app, |flags| {
                 flags.healing = true;
             });
-            let _ = heal_invalid_sources(&db_state, &vault_state);
+            // Final fresh-eyes review, m5: the summary and errors are no
+            // longer silently discarded — a failed heal pass is exactly the
+            // kind of silent no-op the Sep 10-13 incident was made of.
+            match heal_invalid_sources(&db_state, &vault_state) {
+                Ok(summary) if summary.soft_deleted > 0 => {
+                    eprintln!(
+                        "[heal] scheduler: evaluated {} live row(s), soft-deleted {}, purged {} edge(s)",
+                        summary.evaluated, summary.soft_deleted, summary.edges_purged
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[heal] scheduler: heal pass failed: {e}");
+                }
+            }
             update_wiki_status_from_app(&app, |flags| {
                 flags.healing = false;
             });
@@ -1921,6 +1935,18 @@ async fn switch_vault(
             h.stop();
         }
     }
+    // Final fresh-eyes review, m1: stop the monitor HERE too, before the
+    // long teardown (pipeline join ≤10s, outbox stop, restore/clear, DB
+    // reopen). Leaving it running meant a 60s tick landing in that window
+    // saw no registered watcher and wrote a false "no registered handle"
+    // line to errors.log + flipped the UI to Degraded. Restart and recovery
+    // both respawn it via `start_file_watcher_inner`.
+    {
+        let mut g = monitor.0.lock().unwrap();
+        if let Some(old_monitor) = g.take() {
+            old_monitor.stop();
+        }
+    }
 
     {
         let mut g = pipeline.0.lock().unwrap();
@@ -2354,9 +2380,10 @@ fn heal_lost_librarian_inferred(
     // the existence check. Kept in the signature so existing call sites
     // continue to compile unchanged. Follow-up note: this sibling heal
     // pass is deliberately untouched by the heal-core extraction
-    // (`db::heal::heal_invalid_sources_conn`) — it runs in the same
-    // `run_wiki_heal` command but serves the GUI-only entry point; headless
-    // `ct heal` covers the invalid-source pass only.
+    // (`db::heal::heal_invalid_sources_conn`) — `run_wiki_heal` (the GUI
+    // "Heal Database" button) calls THIS pass only; `heal_invalid_sources`
+    // runs from the scheduler thread and headless `ct heal` covers the
+    // invalid-source pass (final fresh-eyes review, m3).
     let entries: Vec<(i64, String, String)> = {
         let mut stmt = conn
             .prepare(
