@@ -315,6 +315,33 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Heal
+// ---------------------------------------------------------------------------
+
+/// `ct heal` body (spec 2026-09-24 §6): run the invalid-source heal core over
+/// the brain DB through the SAME `db::heal::heal_invalid_sources_conn` the GUI
+/// scheduler uses, then print the summary as a single JSON object on stdout.
+/// The write gate lives in the caller (bin/ct.rs), mirroring `Ingest`.
+///
+/// Concurrency: `open_rw` sets a 5s busy timeout, matching every other
+/// concurrent-writer participant (desktop per-event connections, watchdog).
+pub fn heal_run() -> Result<()> {
+    let brain = crate::write::resolve()?;
+    let mut conn = crate::write::open_rw(&brain)?;
+    let vault = retrieval::resolve_brain_paths().brain_dir;
+    let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "evaluated": summary.evaluated,
+            "soft_deleted": summary.soft_deleted,
+            "edges_purged": summary.edges_purged,
+        })
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Librarian
 // ---------------------------------------------------------------------------
 

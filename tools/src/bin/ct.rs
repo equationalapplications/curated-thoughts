@@ -91,6 +91,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LibrarianCmd,
     },
+    /// Soft-delete wiki entries whose source references are demonstrably
+    /// ungrounded (write; requires --yes).
+    Heal {
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Approve, list, or revoke symlinks the ingest walker may follow.
     Trust {
         /// Vault-relative path of the symlink, e.g. `documents/specs`.
@@ -320,6 +327,21 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Heal { yes } => {
+            if !yes {
+                // Path-only resolution so a fresh brain (no brain.db yet)
+                // can still print the refusal with the planned db path
+                // (same gate shape as `Ingest`, ct.rs:303-318).
+                let db_path = tauri_app_lib::retrieval::resolve_brain_paths().db_path;
+                eprintln!(
+                    "refusing: `ct heal` would soft-delete ungrounded wiki entries in {} (a write). Pass --yes to proceed.",
+                    db_path.display()
+                );
+                return Ok(1);
+            }
+            cli_common::heal_run()?;
+            Ok(0)
+        }
         Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {
             once,
