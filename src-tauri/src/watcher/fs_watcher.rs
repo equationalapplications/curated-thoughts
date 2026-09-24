@@ -546,10 +546,7 @@ mod tests {
         );
         record_watcher_error(
             &last_error_at,
-            &notify::Error::io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "test notify error",
-            )),
+            &notify::Error::io(std::io::Error::other("test notify error")),
         );
         let bumped = last_error_at.load(std::sync::atomic::Ordering::SeqCst);
         assert!(

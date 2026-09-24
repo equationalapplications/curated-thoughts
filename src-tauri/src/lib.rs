@@ -46,6 +46,7 @@ use crate::inference::{
 use crate::vault::safe_path::AGENTS_DEPOSIT_DIR;
 use chunker::should_ingest_extension;
 use cloud_bridge::pairing::PairingTokenStore;
+use db::heal::HealSummary;
 use db::queue::enqueue_vault_event;
 use db::AppDb;
 use outbox::{
@@ -414,7 +415,10 @@ fn normalize_path_argument_to_vault_relative(
     }
 }
 
-fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> Result<(), String> {
+fn heal_invalid_sources(
+    db_state: &DbState,
+    vault_state: &VaultConfigState,
+) -> Result<HealSummary, String> {
     let vault = vault_state
         .0
         .lock()
@@ -427,76 +431,11 @@ fn heal_invalid_sources(db_state: &DbState, vault_state: &VaultConfigState) -> R
     // are now driven by `source_ref_is_still_grounded`, which checks the
     // `documents.path` and `chunks.id` tables — the vault_root is not
     // consulted on disk any more.
-    let _vault_root = std::path::PathBuf::from(&vault);
+    let vault_root = std::path::PathBuf::from(&vault);
 
-    let guard = db_state.0.lock().unwrap();
-    let conn = &guard.0;
-
-    let entries: Vec<(i64, String, String, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT e.rowid, e.source_ref, e.entity_id, e.id
-                 FROM llm_wiki_entries e
-                 WHERE e.deleted_at IS NULL
-                   AND e.source_ref IS NOT NULL
-                   AND e.source_type = 'librarian_inferred'",
-            )
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        let mut v = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            v.push((
-                row.get::<_, i64>(0).map_err(|e| e.to_string())?,
-                row.get::<_, String>(1).map_err(|e| e.to_string())?,
-                row.get::<_, String>(2).map_err(|e| e.to_string())?,
-                row.get::<_, String>(3).map_err(|e| e.to_string())?,
-            ));
-        }
-        v
-    };
-
-    let mut healed_by_entity: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for (rowid, source_ref, entity_id, entry_id) in entries {
-        // Bug A + B fix: use the shared consumer helper
-        // (`source_ref_is_still_grounded`) instead of `safe_vault_path`.
-        // The legacy producer wrote a vault-relative path; the post-c30f141
-        // producer writes a JSON blob. The helper handles both and treats
-        // empty / unparseable values as still-grounded (defensive — see
-        // its docs).
-        if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            tx.execute(
-                "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
-                rusqlite::params![crate::db::commit::ms_now(), rowid],
-            )
-            .map_err(|e| e.to_string())?;
-            crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)
-                .map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
-            *healed_by_entity.entry(entity_id).or_insert(0) += 1;
-        }
-    }
-
-    // Write healed events for entities that had entries repaired
-    if !healed_by_entity.is_empty() {
-        let (_, now_ms) = crate::db::commit::now_timestamps();
-        for (entity_id, n) in healed_by_entity {
-            conn.execute(
-                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
-                 VALUES (?1, ?2, 'healed', ?3, NULL, ?4)",
-                rusqlite::params![
-                    crate::db::commit::generate_llm_id("evt_"),
-                    entity_id,
-                    format!("Healed {n} invalid source reference(s)"),
-                    now_ms,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(())
+    let mut guard = db_state.0.lock().unwrap();
+    let conn = &mut guard.0;
+    crate::db::heal::heal_invalid_sources_conn(conn, vault_root).map_err(|e| e.to_string())
 }
 
 fn spawn_heal_scheduler(app: AppHandle) -> (Sender<()>, std::thread::JoinHandle<()>) {
