@@ -128,19 +128,25 @@ fn main() -> Result<()> {
 
     // Write to a temp sibling, verify, then atomically publish. A failure at
     // any point leaves the previous backup untouched. The temp file is
-    // pre-created 0o600 (umask-independent) so the rename can never widen the
-    // permissions of an existing 0o600 backup; the bundle is unredacted.
+    // created EXCLUSIVELY (any stale partial from an interrupted run is
+    // removed first) with 0o600, so the unredacted bundle never exists under
+    // wide permissions — not even during the write — and the rename can
+    // never widen the permissions of an existing 0o600 backup.
     let tmp = dest.with_extension("zip.partial");
+    let _ = std::fs::remove_file(&tmp); // stale partial: ignore NotFound
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     }
     write_bundle_zip(&tmp, &files).with_context(|| format!("writing {}", tmp.display()))?;
 
