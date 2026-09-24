@@ -2137,7 +2137,11 @@ fn heal_lost_librarian_inferred(
     // (`source_ref_is_still_grounded`) which handles both legacy path and
     // JSON shapes, so the on-disk `vault_root` no longer participates in
     // the existence check. Kept in the signature so existing call sites
-    // continue to compile unchanged.
+    // continue to compile unchanged. Follow-up note: this sibling heal
+    // pass is deliberately untouched by the heal-core extraction
+    // (`db::heal::heal_invalid_sources_conn`) — it runs in the same
+    // `run_wiki_heal` command but serves the GUI-only entry point; headless
+    // `ct heal` covers the invalid-source pass only.
     let entries: Vec<(i64, String, String)> = {
         let mut stmt = conn
             .prepare(
