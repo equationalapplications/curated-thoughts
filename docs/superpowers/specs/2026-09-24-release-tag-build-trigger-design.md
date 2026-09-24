@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-24
 - **Issue:** equationalapplications/curated-thoughts#207
-- **Status:** Draft (spec stage) — revised after Opus review r1 (approve-with-changes; all findings folded in) and a GLM 5.3 pass (approved, minors folded in)
+- **Status:** Approved by Kurt 2026-09-24; implemented in PR #227 (Opus r1 approve-with-changes findings folded in; GLM pass approved)
 - **Risk tier:** Low — no app code; elevated `actions: write` is confined to a dedicated dispatch job with no code checkout (see §2)
 
 ## Problem

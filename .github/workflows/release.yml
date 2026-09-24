@@ -14,6 +14,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
     concurrency:
       group: release-main
       cancel-in-progress: false
@@ -70,7 +72,35 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run semantic-release
+        id: release
         if: steps.release_guard.outputs.should_release == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm exec semantic-release
+
+  # Dispatches the Build workflow at the published release tag. The tag push
+  # itself cannot trigger build.yml: tags pushed with GITHUB_TOKEN never fire
+  # downstream workflows (GitHub's anti-recursion guard), but a
+  # workflow_dispatch sent with GITHUB_TOKEN explicitly does.
+  #
+  # Gate: !cancelled() (not success) on purpose — @semantic-release/github's
+  # success step (issue/PR comments, labels) runs AFTER the tag and Release
+  # already exist; if it fails, the release still happened and the build must
+  # still be dispatched. The tag output is only ever written by successCmd,
+  # which semantic-release runs only after a release is actually published.
+  #
+  # actions: write lives on this job alone so the semantic-release plugin
+  # process never holds it (it can cancel/rerun workflows, delete logs).
+  dispatch-build:
+    needs: release
+    if: ${{ !cancelled() && needs.release.outputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger Build workflow at the release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh workflow run build.yml --ref "$TAG"
