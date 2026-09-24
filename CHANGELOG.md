@@ -1,3 +1,9 @@
+## [2.15.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.15.0...v2.15.1) (2026-09-24)
+
+### Bug Fixes
+
+* **test:** load jest-dom vitest matchers for vitest 5 assertion types ([c1148b0](https://github.com/equationalapplications/curated-thoughts/commit/c1148b0a98df2c2d0c743cb575ce5b92b05d47b7))
+
 ## [2.15.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.14.0...v2.15.0) (2026-09-24)
 
 ### Features
