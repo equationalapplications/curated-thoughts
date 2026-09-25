@@ -1,7 +1,7 @@
 // verify-sidecar-lib.mjs — pure library. NO process.exit here: vitest
 // imports this module, and verifyFile returns results instead of exiting
 // (the CLI owns exit behavior). Spec §1 as amended (Opus M1/M3, GLM).
-import { stat, open } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import path from 'node:path';
 
 export const MIN_SIZE = 1024 * 1024; // 1 MiB
@@ -44,28 +44,35 @@ export function resolveSidecarPath({ envTriple, hostTriple, repoRoot, binariesDi
 }
 
 export async function verifyFile(filePath, { isWindowsTarget = false } = {}) {
-  let st;
+  let handle;
   try {
-    st = await stat(filePath); // stat NOT lstat: follow symlinks (GLM case)
+    // Open FIRST, then fstat the open descriptor: size/mode/head are read
+    // from the same file object, so no stat→open race (CodeQL js/file-system-race).
+    handle = await open(filePath, 'r'); // open follows symlinks (GLM case)
   } catch (err) {
-    return { ok: false, reason: `cannot stat: ${err.message}` };
+    return { ok: false, reason: `cannot open: ${err.message}` };
   }
-  if (!st.isFile()) {
-    return { ok: false, reason: `not a regular file` };
-  }
-  let head;
   try {
-    const handle = await open(filePath, 'r');
+    let st;
+    try {
+      st = await handle.stat();
+    } catch (err) {
+      return { ok: false, reason: `cannot stat: ${err.message}` };
+    }
+    if (!st.isFile()) {
+      return { ok: false, reason: `not a regular file` };
+    }
+    let head;
     try {
       const buf = Buffer.alloc(4);
       await handle.read(buf, 0, 4, 0);
       head = [...buf];
-    } finally {
-      await handle.close();
+    } catch (err) {
+      return { ok: false, reason: `cannot read: ${err.message}` };
     }
-  } catch (err) {
-    return { ok: false, reason: `cannot read: ${err.message}` };
+    const result = checkSidecarBinary({ size: st.size, mode: st.mode, head, isWindowsTarget });
+    return result.ok ? { ok: true, size: st.size } : result;
+  } finally {
+    await handle.close();
   }
-  const result = checkSidecarBinary({ size: st.size, mode: st.mode, head, isWindowsTarget });
-  return result.ok ? { ok: true, size: st.size } : result;
 }
