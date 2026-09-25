@@ -1,3 +1,9 @@
+## [2.19.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.18.0...v2.19.0) (2026-09-25)
+
+### Features
+
+* **startup:** log unparsable-note scan results once at app startup ([a2d4e68](https://github.com/equationalapplications/curated-thoughts/commit/a2d4e680e599c490537f21330121f40eee466179))
+
 ## [2.18.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.17.0...v2.18.0) (2026-09-25)
 
 ### Features
