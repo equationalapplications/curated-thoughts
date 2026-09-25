@@ -4,12 +4,16 @@
 #   (no arg = newest .deb in src-tauri/target/release/bundle/deb/)
 set -euo pipefail
 
-DEB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src-tauri/target/release/bundle/deb"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEB_DIRS=("$REPO_ROOT/target/release/bundle/deb" "$REPO_ROOT/src-tauri/target/release/bundle/deb")
 DEB="${1:-}"
 if [[ -z "$DEB" ]]; then
-  DEB=$(ls -t "$DEB_DIR"/*.deb 2>/dev/null | head -1 || true)
+  for dir in "${DEB_DIRS[@]}"; do
+    DEB=$(ls -t "$dir"/*.deb 2>/dev/null | head -1 || true)
+    [[ -n "$DEB" ]] && break
+  done
   if [[ -z "$DEB" ]]; then
-    echo "ERROR: no .deb found in $DEB_DIR — run 'pnpm tauri build --bundles deb' first" >&2
+    echo "ERROR: no .deb found under ${DEB_DIRS[*]} — run 'pnpm tauri build --bundles deb' first" >&2
     exit 1
   fi
 fi
