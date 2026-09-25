@@ -7,6 +7,7 @@
     "beforeDevCommand": "pnpm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm run build",
+    "beforeBundleCommand": "node scripts/verify-sidecar.mjs",
     "frontendDist": "../dist"
   },
   "app": {

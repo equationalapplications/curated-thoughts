@@ -45,7 +45,7 @@ Artifacts available on [Releases page](https://github.com/equationalapplications
 ## Before Submitting
 
 1. Run tests: `pnpm test`
-2. Build locally: `pnpm run tauri build`
+2. Build locally: `scripts/build-local-bundle.sh` (Linux/macOS; Windows: repeat `build.yml`'s "Build MCP sidecar" step by hand)
 3. Verify commit message format
 4. One feature or fix per commit (or group logically related changes)
 
