@@ -1,7 +1,7 @@
 # vault_write_note frontmatter quoting: fix false "Stale update" lockouts (issue #231)
 
 **Date:** 2026-09-25
-**Status:** Draft
+**Status:** Implemented 2026-09-25 (PR #232) — spec approved by Kurt; Opus impl review + fix rounds converged
 **Branch:** fix/issue-231-yaml-quoting
 **Priority:** High — recurring agent-facing write path; third observed occurrence of the same class (2026-08-29, 2026-09-02, 2026-09-25)
 

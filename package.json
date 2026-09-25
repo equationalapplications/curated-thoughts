@@ -12,7 +12,7 @@
       "brace-expansion@1": "1.1.18",
       "brace-expansion@5": "5.0.9",
       "@equationalapplications/core-llm-wiki": "7.7.4",
-      "@equationalapplications/core-okf": "7.7.4",
+      "@equationalapplications/core-okf": "7.7.5",
       "@tiptap/core": "3.30.6",
       "@tiptap/extension-bold": "3.30.6",
       "@tiptap/extension-bubble-menu": "3.30.6",

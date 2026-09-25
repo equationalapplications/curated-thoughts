@@ -12,7 +12,7 @@ overrides:
   brace-expansion@1: 1.1.18
   brace-expansion@5: 5.0.9
   '@equationalapplications/core-llm-wiki': 7.7.4
-  '@equationalapplications/core-okf': 7.7.4
+  '@equationalapplications/core-okf': 7.7.5
   '@tiptap/core': 3.30.6
   '@tiptap/extension-bold': 3.30.6
   '@tiptap/extension-bubble-menu': 3.30.6
@@ -287,8 +287,8 @@ packages:
     resolution: {integrity: sha512-8S79HX2kCV3mZfIO2RjqjVBL+eTj9hWmAwLC0tvjkWc33AlrgQQIz3agW8yAI4Nzs80/B7eO5Qo/tGsor6t1AQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/core-okf@7.7.4':
-    resolution: {integrity: sha512-7N2+d709mBjwOyVVqUl9jcnGac8isR0hJxq4fbP60tMwuV0vt3rc+akQXyyMLgnAmxAo9DRZ4F0gT7hVjXOwxQ==}
+  '@equationalapplications/core-okf@7.7.5':
+    resolution: {integrity: sha512-Flk1hSiNUBwcZsDA+SuM+KK451ZoWzh3/f8x8retfE4URr9K1+/qBz4zHC3Aha2yitaUa5T/EUAytI+fCGhnbg==}
     engines: {node: '>=20'}
 
   '@equationalapplications/react-llm-wiki@7.7.4':
@@ -3555,10 +3555,10 @@ snapshots:
 
   '@equationalapplications/core-llm-wiki@7.7.4':
     dependencies:
-      '@equationalapplications/core-okf': 7.7.4
+      '@equationalapplications/core-okf': 7.7.5
       minisearch: 7.2.0
 
-  '@equationalapplications/core-okf@7.7.4': {}
+  '@equationalapplications/core-okf@7.7.5': {}
 
   '@equationalapplications/react-llm-wiki@7.7.4(react@19.2.8)':
     dependencies:
