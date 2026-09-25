@@ -901,15 +901,15 @@ fn vault_write_note(
 async fn scan_unparsable_notes(
     vault_root_state: State<'_, VaultConfigState>,
 ) -> Result<Vec<okf::repair_scan::UnparsableNote>, String> {
-    // Async per Tauri conventions: the recursive walk must not block the
-    // main thread. `State` borrows are not Send, so grab what we need and
-    // run the walk on a blocking-friendly task.
+    // Async per Tauri conventions: `spawn_blocking` keeps the recursive
+    // directory walk (blocking filesystem I/O, potentially thousands of
+    // entries) OFF the async executor thread so it never stalls other
+    // commands on the same runtime.
     let vault_root = vault_root_from_state(&vault_root_state)?;
-    let hits = tokio::task::spawn_blocking(move || {
-        okf::repair_scan::scan_unparsable_notes(&vault_root)
-    })
-    .await
-    .map_err(|e| format!("scan_unparsable_notes join error: {e}"))?;
+    let hits =
+        tokio::task::spawn_blocking(move || okf::repair_scan::scan_unparsable_notes(&vault_root))
+            .await
+            .map_err(|e| format!("scan_unparsable_notes join error: {e}"))?;
     tracing::info!("scan_unparsable_notes: {} unparsable note(s)", hits.len());
     Ok(hits)
 }

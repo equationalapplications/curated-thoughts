@@ -130,6 +130,11 @@ pub(crate) fn read_existing_token(content: &str) -> Result<String, TokenReadErro
 /// within the 64-line cap. `str::lines()` handles `\r\n` line endings
 /// (it strips a trailing `\r`), so CRLF notes collect identically to LF
 /// notes; the closing fence must be the EXACT line `---`.
+///
+/// The `take(64)` cap is INTENTIONAL and applies to BOTH paths: the guard in
+/// `check_round_trip` and the token reader share this one fence view, so a
+/// fence that never closes within 64 frontmatter lines is "no fence"
+/// everywhere (`existing_unparsable:no_fence`), never a partial parse.
 fn collect_frontmatter_fence(content: &str) -> Option<String> {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
@@ -425,24 +430,23 @@ fn map_safe_err_note(e: SafePathError) -> WriteNoteError {
 ///    frontmatter keys exactly. `OkfFrontmatter` has no `deny_unknown_fields`,
 ///    so check 1 alone would silently drop unknown keys; this catches
 ///    injected keys in the rendered output.
+/// 3. Editability check — `read_existing_token` on the WHOLE document must
+///    succeed, so a note that renders to something its own token reader
+///    cannot read back is refused pre-write rather than bricking the file.
+///    The fence view is collected with the same `collect_frontmatter_fence`
+///    helper (incl. the 64-line cap) the token reader uses.
 ///
 /// Any mismatch aborts the write with `WriteNoteError::InvalidFrontmatter`.
 fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(), WriteNoteError> {
-    // Strip the `---` fences: serde_yaml rejects multi-document input
-    // (same approach as the tests' `extract_fm` helper).
-    let mut lines = document.lines();
-    if lines.next() != Some("---") {
-        return Err(WriteNoteError::InvalidFrontmatter(
-            "round_trip: missing frontmatter fence".to_string(),
-        ));
-    }
-    let fenced: String = lines
-        .take_while(|l| l != &"---")
-        .fold(String::new(), |mut acc, l| {
-            acc.push_str(l);
-            acc.push('\n');
-            acc
-        });
+    // Fence-view parity (issue #231 review): collect the fence with the SAME
+    // helper the token reader uses — `take(64)` cap, exact `---` closing
+    // line, CRLF via `lines()` — so the guard can never accept a fence view
+    // that a later `read_existing_token` would disagree with.
+    let fenced = collect_frontmatter_fence(document).ok_or_else(|| {
+        // Same condition the token reader maps to NoFence, same error string:
+        // one fence condition, one contract error on both call sites.
+        WriteNoteError::InvalidFrontmatter("existing_unparsable:no_fence".to_string())
+    })?;
 
     // Check 2 — rendered key set must EQUAL the known key set exactly
     // (catches unknown-key injection the typed struct silently drops, AND
@@ -467,18 +471,20 @@ fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(),
         rendered_keys.push(key_str.to_string());
     }
     rendered_keys.sort();
+    // Pre-sorted ascending (issue #231 review bonus): the exact-set zip below
+    // compares against this order directly, so the literal must never be
+    // reshuffled without keeping it sorted.
     const KNOWN_KEYS: [&str; 8] = [
+        "created_at",
+        "entity_type",
         "okf_version",
         "profile",
-        "title",
-        "entity_type",
-        "tags",
-        "created_at",
-        "updated_at",
         "supersedes",
+        "tags",
+        "title",
+        "updated_at",
     ];
-    let mut known_sorted: Vec<&str> = KNOWN_KEYS.to_vec();
-    known_sorted.sort_unstable();
+    let known_sorted: &[&str] = &KNOWN_KEYS;
     // Both directions: no unknown key, no missing key (exact set equality;
     // serde skips `tags`/`updated_at`/`supersedes` when absent, so normalize
     // the expected set the same way the renderer does).
@@ -498,8 +504,24 @@ fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(),
             .any(|(a, b)| a != b)
     {
         return Err(WriteNoteError::InvalidFrontmatter(format!(
-            "round_trip: unknown frontmatter key — rendered key set {rendered_keys:?} does not equal expected set {expected_keys:?}"
+            "round_trip: key set mismatch — expected: {expected_keys:?}, got: {rendered_keys:?}"
         )));
+    }
+
+    // Hardening (issue #231 review): the note we are about to write MUST be
+    // readable back by the SAME token reader the next edit will use, to the
+    // SAME token. With shared fence views this is unreachable when checks
+    // 1–2 pass (defense-in-depth pinning the invariant), but a future edit
+    // that breaks parity fails here instead of bricking the file.
+    let read_back = read_existing_token(document).map_err(|e| {
+        WriteNoteError::InvalidFrontmatter(format!(
+            "round_trip: written note would be uneditable: {e}"
+        ))
+    })?;
+    if Some(&read_back) != effective_fm.updated_at.as_ref() {
+        return Err(WriteNoteError::InvalidFrontmatter(
+            "round_trip: written note would be uneditable: token mismatch".to_string(),
+        ));
     }
 
     // Check 1 — typed round-trip with empty-tags normalization on both sides.
@@ -1481,9 +1503,14 @@ mod tests {
         let mut rendered = render_frontmatter(&m);
         rendered.insert_str(rendered.len() - 4, "injected_key: pwned\n");
         let err = check_round_trip(&m, &rendered).unwrap_err();
+        // MINOR-4 (issue #231 review): both mismatch directions now share one
+        // neutral message — distinguish the unknown-key case by the GOT set
+        // carrying the injected key the EXPECTED set lacks.
         assert!(
-            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("unknown frontmatter key")),
-            "got: {err:?}"
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg)
+                if msg.contains("round_trip: key set mismatch")
+                    && msg.contains("injected_key")),
+            "unknown-key injection must be rejected with expected/got sets, got: {err:?}"
         );
     }
 
@@ -1513,9 +1540,61 @@ mod tests {
         // Drop the `profile:` line; the fence stays intact.
         rendered = rendered.replace("profile: llm-wiki/1\n", "");
         let err = check_round_trip(&m, &rendered).unwrap_err();
+        // MINOR-4: distinguish the missing-key direction by the EXPECTED set
+        // still containing `profile` while the GOT set does not.
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg)
+                if msg.contains("round_trip: key set mismatch")
+                    && msg.contains(r#"expected: ["created_at", "entity_type", "okf_version", "profile", "tags", "title"]"#)
+                    && msg.contains(r#"got: ["created_at", "entity_type", "okf_version", "tags", "title"]"#)),
+            "missing key must be rejected with expected/got sets, got: {err:?}"
+        );
+    }
+
+    /// MINOR-1 (issue #231 review) — the guard uses the SAME fence view as
+    /// the token reader, and hardening: a document whose fence is intact but
+    /// whose token the reader cannot recover must be refused pre-write
+    /// ("written note would be uneditable"), not written to disk bricked.
+    #[test]
+    fn roundtrip_guard_rejects_note_with_unrecoverable_token() {
+        let m = fm("T3 UnrecoverableToken", None);
+        // Hand-built document (the guard takes the document as a param, so
+        // this is directly testable): fence intact, but `updated_at` is a
+        // sequence node — the strict parse of `updated_at` as a string fails
+        // and the tolerant fallback sees no column-0 `updated_at:` scalar
+        // line, so the token reader returns NoToken. The renderer cannot
+        // produce this; the point is that even a synthetic document whose
+        // token the reader cannot recover is refused pre-write, never
+        // written to disk uneditable.
+        let mut doc = render_frontmatter(&m);
+        doc.insert_str(doc.len() - 4, "updated_at:\n  - 2026-09-25T01:00:00Z\n");
+        // Prove the precondition: the token reader really cannot read this
+        // document back.
+        assert!(read_existing_token(&doc).is_err());
+        let err = check_round_trip(&m, &doc).unwrap_err();
         assert!(
             matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("round_trip")),
-            "missing key must be rejected, got: {err}"
+            "unreadable-back document must be rejected pre-write, got: {err}"
+        );
+    }
+
+    /// MINOR-3 (issue #231 review) — the `take(64)` fence cap is intentional
+    /// and applies to BOTH paths: a fence with MORE than 64 frontmatter
+    /// lines never closes within the cap, so the guard sees "no fence" and
+    /// refuses with `existing_unparsable:no_fence` instead of parsing a
+    /// partial view.
+    #[test]
+    fn roundtrip_guard_refuses_fence_over_64_lines_as_no_fence() {
+        let m = fm("T3 FenceOver64", None);
+        let mut doc = String::from("---\n");
+        for i in 0..70 {
+            doc.push_str(&format!("extra_key_{i}: value_{i}\n"));
+        }
+        doc.push_str("---\nbody\n");
+        let err = check_round_trip(&m, &doc).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref detail) if detail == "existing_unparsable:no_fence"),
+            ">64-line fence must be refused as no_fence, got: {err}"
         );
     }
 
