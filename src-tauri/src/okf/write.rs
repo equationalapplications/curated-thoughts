@@ -444,20 +444,30 @@ fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(),
             acc
         });
 
-    // Check 2 — rendered key set must match the known key set exactly
-    // (catches unknown-key injection the typed struct silently drops).
+    // Check 2 — rendered key set must EQUAL the known key set exactly
+    // (catches unknown-key injection the typed struct silently drops, AND
+    // missing keys from a tampered render). Any rendered key that is not a
+    // string (e.g. `1: x` parses an integer key) is rejected outright — the
+    // renderer only ever emits string keys, so a non-string key is injection.
     let parsed_yaml: serde_yaml::Value = serde_yaml::from_str(&fenced).map_err(|e| {
         WriteNoteError::InvalidFrontmatter(format!("round_trip: yaml parse failed: {}", e))
     })?;
-    let rendered_keys = parsed_yaml
-        .as_mapping()
-        .map(|m| {
-            m.keys()
-                .filter_map(|k| k.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let known_keys = [
+    let mapping = parsed_yaml.as_mapping().ok_or_else(|| {
+        WriteNoteError::InvalidFrontmatter(
+            "round_trip: rendered frontmatter is not a mapping".to_string(),
+        )
+    })?;
+    let mut rendered_keys: Vec<String> = Vec::with_capacity(mapping.len());
+    for key in mapping.keys() {
+        let Some(key_str) = key.as_str() else {
+            return Err(WriteNoteError::InvalidFrontmatter(format!(
+                "round_trip: non-string frontmatter key in rendered output: {key:?}"
+            )));
+        };
+        rendered_keys.push(key_str.to_string());
+    }
+    rendered_keys.sort();
+    const KNOWN_KEYS: [&str; 8] = [
         "okf_version",
         "profile",
         "title",
@@ -467,13 +477,29 @@ fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(),
         "updated_at",
         "supersedes",
     ];
-    for key in &rendered_keys {
-        if !known_keys.contains(&key.as_str()) {
-            return Err(WriteNoteError::InvalidFrontmatter(format!(
-                "round_trip: unknown frontmatter key in rendered output: {}",
-                key
-            )));
-        }
+    let mut known_sorted: Vec<&str> = KNOWN_KEYS.to_vec();
+    known_sorted.sort_unstable();
+    // Both directions: no unknown key, no missing key (exact set equality;
+    // serde skips `tags`/`updated_at`/`supersedes` when absent, so normalize
+    // the expected set the same way the renderer does).
+    let expected_keys: Vec<&str> = known_sorted
+        .iter()
+        .copied()
+        .filter(|k| {
+            !((*k == "tags" && effective_fm.tags.as_ref().is_none_or(|t| t.is_empty()))
+                || (*k == "updated_at" && effective_fm.updated_at.is_none())
+                || (*k == "supersedes" && effective_fm.supersedes.is_none()))
+        })
+        .collect();
+    if rendered_keys.len() != expected_keys.len()
+        || rendered_keys
+            .iter()
+            .zip(expected_keys.iter())
+            .any(|(a, b)| a != b)
+    {
+        return Err(WriteNoteError::InvalidFrontmatter(format!(
+            "round_trip: unknown frontmatter key — rendered key set {rendered_keys:?} does not equal expected set {expected_keys:?}"
+        )));
     }
 
     // Check 1 — typed round-trip with empty-tags normalization on both sides.
@@ -1453,11 +1479,43 @@ mod tests {
         // plan specifies); write_note() composes it pre-write.
         let m = fm("T3 Injected", None);
         let mut rendered = render_frontmatter(&m);
-        rendered.insert_str(rendered.len() - 1, "injected_key: pwned\n");
+        rendered.insert_str(rendered.len() - 4, "injected_key: pwned\n");
         let err = check_round_trip(&m, &rendered).unwrap_err();
         assert!(
             matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("unknown frontmatter key")),
             "got: {err:?}"
+        );
+    }
+
+    /// MINOR-5 (issue #231 review) — the key-set check is an EXACT set
+    /// comparison, both directions, and rejects ANY rendered key that is not
+    /// a string (e.g. `1: x` renders a non-string key that the old
+    /// `filter_map(as_str)` silently dropped).
+    #[test]
+    fn roundtrip_guard_rejects_non_string_key_injection() {
+        let m = fm("T3 NonStringKey", None);
+        let mut rendered = render_frontmatter(&m);
+        // Insert `1: x` before the closing fence (last 4 chars = "---\n").
+        rendered.insert_str(rendered.len() - 4, "1: x\n");
+        let err = check_round_trip(&m, &rendered).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("round_trip")),
+            "non-string key injection must be rejected, got: {err}"
+        );
+    }
+
+    /// MINOR-5 — exact key-set comparison: a MISSING known key must also be
+    /// rejected (set equality, not subset).
+    #[test]
+    fn roundtrip_guard_rejects_missing_required_key() {
+        let m = fm("T3 MissingKey", None);
+        let mut rendered = render_frontmatter(&m);
+        // Drop the `profile:` line; the fence stays intact.
+        rendered = rendered.replace("profile: llm-wiki/1\n", "");
+        let err = check_round_trip(&m, &rendered).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("round_trip")),
+            "missing key must be rejected, got: {err}"
         );
     }
 
