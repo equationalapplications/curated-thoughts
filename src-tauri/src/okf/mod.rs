@@ -14,6 +14,7 @@ pub mod log_md;
 pub mod markdown_links;
 pub mod path_allowlist;
 pub mod related_section;
+pub mod repair_scan;
 pub mod sanitize;
 pub mod task_file;
 pub mod timefmt;

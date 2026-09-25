@@ -55,7 +55,7 @@ fn render_document(frontmatter: &OkfFrontmatter, body: &str) -> String {
 
 /// Why an existing note's If-Match token could not be read.
 #[derive(Debug)]
-enum TokenReadError {
+pub(crate) enum TokenReadError {
     /// No `---` fence found within the 64-line collection cap.
     NoFence,
     /// Fence found but no usable `updated_at:` token line.
@@ -83,7 +83,7 @@ impl std::fmt::Display for TokenReadError {
 /// at column 0; exactly one occurrence; quotes stripped; RFC 3339 required.
 /// ONE function serves enforce_staleness AND prev_token so the two can
 /// never disagree (differential test in Task 7).
-fn read_existing_token(content: &str) -> Result<String, TokenReadError> {
+pub(crate) fn read_existing_token(content: &str) -> Result<String, TokenReadError> {
     let Some((inner, _)) = content
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---"))
