@@ -142,6 +142,18 @@ One-time, REPORT-only (never silently heals): scan `wiki/` and
 parse, listing path + failure class. Exposed as a Tauri command + log line
 on startup after this version's first run. No auto-rewrites.
 
+**IMPLEMENTED (2026-09-25, follow-up branch
+`feat/startup-unparsable-notes-log`):** the Tauri command shipped in PR
+#232; the deferred startup log line is now a fire-and-forget
+`tauri::async_runtime::spawn` in the app setup closure
+(`src-tauri/src/lib.rs`): it reads the configured vault root off
+`VaultConfigState` (skipping silently when no vault is configured), runs
+`okf::repair_scan::scan_unparsable_notes` via `tokio::task::spawn_blocking`,
+and emits a single `tracing::info!` with the hit count and path+reason list.
+Any error is swallowed to `tracing::warn!` — startup is never delayed or
+failed by the scan. (Visible only where a tracing subscriber exists, i.e.
+the `mcp-server` build — owner-accepted.)
+
 ### 6. `core-okf` frontend parity (Kurt Q4=1: full coverage)
 
 `@equationalapplications/core-okf` (source: `expo-llm-wiki`

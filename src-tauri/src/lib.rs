@@ -4357,6 +4357,58 @@ pub fn run() {
                     }
                 });
 
+                // Spec §5 (2026-09-25 follow-up branch): one startup log line
+                // reporting the report-only unparsable-note scan
+                // (`okf::repair_scan::scan_unparsable_notes`, PR #232).
+                // Fire-and-forget: the recursive walk runs off the setup path
+                // via spawn_blocking and NEVER delays or fails startup — any
+                // error is swallowed to a `tracing::warn!`.
+                let app_handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let vault_root = {
+                        let vault_state = app_handle.state::<VaultConfigState>();
+                        let Ok(guard) = vault_state.0.lock() else {
+                            tracing::warn!(
+                                "startup unparsable-notes scan skipped: vault config lock poisoned"
+                            );
+                            return;
+                        };
+                        match guard.get_vault_path() {
+                            Ok(Some(path)) => std::path::PathBuf::from(path),
+                            // Fresh install, vault not configured yet: there
+                            // is nothing to scan — not an error.
+                            Ok(None) => return,
+                            Err(e) => {
+                                tracing::warn!("startup unparsable-notes scan skipped: {e}");
+                                return;
+                            }
+                        }
+                    };
+                    let hits = tokio::task::spawn_blocking(move || {
+                        okf::repair_scan::scan_unparsable_notes(&vault_root)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("startup unparsable-notes scan join error: {e}");
+                        Vec::new()
+                    });
+                    tracing::info!(
+                        "startup scan_unparsable_notes: {} unparsable note(s){}",
+                        hits.len(),
+                        if hits.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                ": {}",
+                                hits.iter()
+                                    .map(|h| format!("{} ({})", h.path, h.reason))
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            )
+                        }
+                    );
+                });
+
                 Ok(())
             }
         })
