@@ -183,6 +183,14 @@ the current table — the extension is for the new escapes only.)
 - Adoption path for hand-written no-fence notes (stay refused over MCP).
 - Any change to the shared `needs_quoting`/`quote_string`/`serialize_*`
   helpers.
+- **CANCELLED: the `curated-thoughts-integrations` "safe title convention
+  (`title` ≤ 65 chars)" docs note** (proposed in the #231 follow-up comment of
+  2026-09-25T14:06Z, per external review). Length was proven irrelevant — the
+  boundary was an artifact of the reporter's colon-bearing test titles. After
+  this fix, quoting makes any title length parse correctly; documenting a
+  65-char limit would enshrine a false constraint. The integrations' real
+  guidance, if any, is to quote nothing and let the write path handle it —
+  which needs no docs change.
 
 ## Open questions
 
