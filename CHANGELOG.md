@@ -1,3 +1,23 @@
+## [2.16.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.15.1...v2.16.0) (2026-09-25)
+
+### Features
+
+* **db:** extract heal core to db::heal::heal_invalid_sources_conn ([9638677](https://github.com/equationalapplications/curated-thoughts/commit/963867749ca26063d027569143317476ca031dde))
+* **tools:** ct heal subcommand with --yes write gate + summary JSON ([c25cd61](https://github.com/equationalapplications/curated-thoughts/commit/c25cd6178ab0e9ef7bb7d06b0c2dcc96f4d34adc))
+* **ui:** surface watcherHealth in StatusBar and MaintenanceDashboard ([5555e58](https://github.com/equationalapplications/curated-thoughts/commit/5555e584cd0f14eb7a6872f140596326cb991e52))
+* **watcher:** arm/liveness state on WatcherHandle + record_watcher_error seam ([bd24875](https://github.com/equationalapplications/curated-thoughts/commit/bd248753cae5a4d1b1763b30043dd0a2a8fdd4ad))
+* **watcher:** periodic self-check monitor + degraded latch + watcherHealth on wiki status ([fd7903c](https://github.com/equationalapplications/curated-thoughts/commit/fd7903c862492fd0fdd87d4a3fd467d528e50a42))
+
+### Bug Fixes
+
+* **watcher/heal:** address /fix-pr PR [#228](https://github.com/equationalapplications/curated-thoughts/issues/228) review threads ([ba41653](https://github.com/equationalapplications/curated-thoughts/commit/ba4165304772e43ddd87b064e33601ec6ce686eb))
+* **watcher:** address Opus review round 1 — B1 UI drop + M1-M3 monitor discipline ([e2ec63b](https://github.com/equationalapplications/curated-thoughts/commit/e2ec63bd0acc0d8cf9cf5bcf7e3194356cc00350))
+* **watcher:** fresh-eyes pass — join-based liveness, teardown stops monitor, heal summary logged ([d45718b](https://github.com/equationalapplications/curated-thoughts/commit/d45718bae238ca434f2da978425779210975e44e))
+* **watcher:** round-2 review — refusal opens RO, one exit path latches+restarts monitor ([0c1a223](https://github.com/equationalapplications/curated-thoughts/commit/0c1a2234fc429665d3157b98ad7036cff665d79e))
+* **watcher:** round-3 review — vault-changed Ok exit restarts monitor; callers stop double-latching ([b268826](https://github.com/equationalapplications/curated-thoughts/commit/b26882684954a6d4ebaa0047daa79e6ddbe57edc))
+* **watcher:** round-4 review — atomic replace_monitor; superseded exit spawns only if empty ([577c2a4](https://github.com/equationalapplications/curated-thoughts/commit/577c2a495681c06d29f55cc03f0910c7d7afbb04))
+* **watcher:** round-5 nits — first-tick always publishes; docs/audit trail corrections ([34ab002](https://github.com/equationalapplications/curated-thoughts/commit/34ab0023c25b4141bbfefd0a006ac626658c3566))
+
 ## [2.15.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.15.0...v2.15.1) (2026-09-24)
 
 ### Bug Fixes
