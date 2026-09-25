@@ -138,6 +138,12 @@ mod tests {
         let outside = tmp.path().join("documents");
         std::fs::create_dir_all(&outside).unwrap();
         let broken = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Broken\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n";
+        // NOTE (controller, after initially "correcting" this): a colon-title
+        // fixture would NOT be reported here — it fails strict parse but the
+        // tolerant fallback recovers its token, i.e. it heals on the next
+        // edit. This scan reports only notes that fail BOTH paths. That is
+        // the designed semantics (see module doc), verified with a serde_yaml
+        // probe before restoring the child's original fixture.
         std::fs::write(agents.join("broken-agent.md"), broken).unwrap();
         // outside the scan roots: must NOT be reported
         std::fs::write(outside.join("broken-outside.md"), broken).unwrap();
@@ -146,7 +152,7 @@ mod tests {
         let hits = scan_unparsable_notes(tmp.path());
         assert_eq!(hits.len(), 1, "got: {hits:?}");
         assert!(hits[0].path.ends_with("broken-agent.md"));
-        assert_eq!(hits[0].reason, "existing_unparsable:no_token");
+        assert_eq!(hits[0].reason, "existing_unparsable:parse");
     }
 
     #[test]
