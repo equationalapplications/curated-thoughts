@@ -14,11 +14,27 @@ if [[ -z "$DEB" ]]; then
     [[ -n "$DEB" ]] && break
   done
   if [[ -z "$DEB" ]]; then
-    echo "ERROR: no .deb found under ${DEB_DIRS[*]} — run 'pnpm tauri build --bundles deb' first" >&2
+    echo "ERROR: no .deb found under ${DEB_DIRS[*]} — run scripts/build-local-bundle.sh deb first" >&2
     exit 1
   fi
 fi
 [[ -f "$DEB" ]] || { echo "ERROR: $DEB not found" >&2; exit 1; }
+
+# Sidecar gate: refuse a .deb whose packaged sidecar is a placeholder/broken
+# (spec §4; reuses the repo verifier so the rules cannot drift).
+TMP_EXTRACT="$(mktemp -d)"
+trap 'rm -rf "$TMP_EXTRACT"' EXIT
+dpkg-deb -x "$DEB" "$TMP_EXTRACT"
+SIDECAR="$TMP_EXTRACT/usr/bin/curated-thoughts-mcp"
+if [[ ! -e "$SIDECAR" ]]; then
+  echo "ERROR: refusing to install: no sidecar in $DEB" >&2
+  exit 1
+fi
+command -v node >/dev/null 2>&1 || { echo "ERROR: node is required for the sidecar gate but was not found in PATH" >&2; exit 1; }
+node "$REPO_ROOT/scripts/verify-sidecar.mjs" "$SIDECAR" || {
+  echo "ERROR: refusing to install: broken sidecar in $DEB" >&2
+  exit 1
+}
 
 echo "== Installing $(basename "$DEB") =="
 echo "   current: $(dpkg-query -W -f='${Version}' curated-thoughts 2>/dev/null || echo 'not installed')"
