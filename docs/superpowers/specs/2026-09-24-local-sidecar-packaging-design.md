@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-24
 - **Branch:** `fix/local-build-sidecar-packaging` (spec + plan + implementation on this one branch/PR)
-- **Status:** Implemented (PR #229) — code on this branch; §7 scratch-run verification pending
+- **Status:** Implemented (PR #229) — §7 release-path verification PASSED (macOS universal + Windows + Linux, run 36093892626); ready for final review
 - **Risk tier:** Low–medium. No app code changes. The new `beforeBundleCommand` guard runs inside every release build (macOS universal, Linux, Windows), so a wrong guard blocks releases. That is the reason for §7.
 
 ## Problem
@@ -292,10 +292,28 @@ sidecar is executable, so the exec-bit check is safe for macOS as-shipped.
 **The guard must not merge until the scratch-branch run has passed on macOS
 universal and Windows, and the result is recorded here:**
 
-> - [ ] Scratch-branch dispatch: macOS universal — hook ran, triple resolved,
->      exec bit verified: (result)
-> - [ ] Scratch-branch dispatch: Windows — hook ran, `node` resolved under
->      `cmd`: (result)
+> - [x] Scratch-branch dispatch: macOS universal — hook ran, triple resolved,
+>      exec bit verified: **PASS (run 36093892626, job guard-macos, 2026-09-25).**
+>      `TAURI_ENV_TARGET_TRIPLE=universal-apple-darwin` (confirmed — not an
+>      arch triple). Sidecar mode at hook time: `-rwxr-xr-x` (0755, 127835280
+>      bytes) — lipo's output IS executable despite no explicit chmod
+>      (Opus M1's concern did not materialize). Guard: `verify-sidecar: OK`,
+>      `guard_exit=0`, `.app` bundle built.
+> - [x] Scratch-branch dispatch: Windows — hook ran, `node` resolved under
+>      `cmd`: **PASS (same run, job guard-windows, 2026-09-25).**
+>      `TAURI_ENV_TARGET_TRIPLE=x86_64-pc-windows-msvc`, `.exe` resolved,
+>      `guard_exit=0`, `.msi` built. (Corroborated by Linux job:
+>      `x86_64-unknown-linux-gnu`, `guard_exit=0`, `.deb` built — matching the
+>      local verification.)
+
+Method: throwaway workflow `scratch-sidecar-guard-verify` on branch
+`scratch/sidecar-guard-verify` (never merged; deleted after merge) mirrors
+build.yml's exact recipe (action pins, apt mirror fix, per-arch sidecar builds
++ lipo) and bundles via `--config scratch-hook.conf.json`, whose
+`beforeBundleCommand` wrapper (`scratch-hook-runner.mjs`) logs the hook env to
+`hook-env.log` (uploaded as a workflow artifact), then execs the real
+`scripts/verify-sidecar.mjs`. No tauri-action step ran, so no GitHub Release
+was touched.
 
 ## Rollback
 
