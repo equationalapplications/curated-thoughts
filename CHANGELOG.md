@@ -1,3 +1,22 @@
+## [2.18.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.17.0...v2.18.0) (2026-09-25)
+
+### Features
+
+* **okf:** existing_unparsable error contract + updated_at in WriteNoteResult (issue [#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([2c2af5b](https://github.com/equationalapplications/curated-thoughts/commit/2c2af5b2be31591c2e13664fa5cfdddb52f4de08))
+* **okf:** quote title/supersedes conditionally, tags always, in render_frontmatter (issue [#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([8ea3d4b](https://github.com/equationalapplications/curated-thoughts/commit/8ea3d4bef5cfa552fb007201b5f0a147160f54ae))
+* **okf:** report-only repair scan for unparsable notes (issue [#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([f5d8e9b](https://github.com/equationalapplications/curated-thoughts/commit/f5d8e9b4d35d453dc618219786a5b1bf16541f75))
+* **okf:** write-path quoting predicates note_needs_quoting/quote_for_note (issue [#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([26336b8](https://github.com/equationalapplications/curated-thoughts/commit/26336b8b64b54a790521554a3dd5d09f5413c4a9))
+
+### Bug Fixes
+
+* **okf:** exact key-set round-trip guard rejects non-string keys; fix injected-key test position ([#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([ef73246](https://github.com/equationalapplications/curated-thoughts/commit/ef732460db845e0c2d96cc6bc4ca34696ee14244))
+* **okf:** pre-write round-trip guard in write_note (issue [#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([d40680d](https://github.com/equationalapplications/curated-thoughts/commit/d40680defe1b19b1c93cd2af7aff8c288aa91356))
+* **okf:** refuse non-UTF-8 existing note instead of silent clobber ([#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([45b1d5a](https://github.com/equationalapplications/curated-thoughts/commit/45b1d5a52c3ed3abbef93267bee8d87ffbe04456))
+* **okf:** repair scan drops index.md skip per write_note contract ([#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([9808904](https://github.com/equationalapplications/curated-thoughts/commit/98089046c33f2a59441901d4b64c50f9455ddc0a))
+* **okf:** restore CRLF note editability; collect fence once for both token paths ([#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([16ea669](https://github.com/equationalapplications/curated-thoughts/commit/16ea669f85edd1aba45c089602b0f54e95904629))
+* **okf:** round-trip guard reuses token-reader fence view; pin editability + 64-line cap ([#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([ea2155e](https://github.com/equationalapplications/curated-thoughts/commit/ea2155e2d805c131c1b896aee334fd33f86955dc))
+* **okf:** strict-first, tolerant-fallback If-Match token read (issue [#231](https://github.com/equationalapplications/curated-thoughts/issues/231)) ([c526106](https://github.com/equationalapplications/curated-thoughts/commit/c52610622b294d70659de247c00ff1fc237e8b20))
+
 ## [2.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.16.1...v2.17.0) (2026-09-25)
 
 ### Features
