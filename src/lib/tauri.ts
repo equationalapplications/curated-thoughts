@@ -551,6 +551,11 @@ export interface WikiStatusPayload {
   forgetting: boolean;
   diagnosticErrors?: number;
   diagnosticWarnings?: number;
+  /** Vault-watcher self-check result (spec 2026-09-24 §3): 'working' =
+   * armed and alive at the last monitor tick; 'degraded' = never armed,
+   * died, or recorded a notify error. Absent on older backends → treated
+   * as 'working' (no signal ≠ known-bad). */
+  watcherHealth?: 'working' | 'degraded';
 }
 
 export type WikiStatusEventPayload = Partial<WikiStatusPayload> & {

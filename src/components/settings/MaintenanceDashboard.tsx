@@ -53,6 +53,11 @@ export function MaintenanceDashboard() {
         Engine diagnostics since launch: {wikiStatus.diagnosticErrors ?? 0} errors,{' '}
         {wikiStatus.diagnosticWarnings ?? 0} warnings (details in the app log).
       </p>
+      <p className="maintenance-description" aria-live="polite">
+        {wikiStatus.watcherHealth === 'degraded'
+          ? '⚠ Vault watcher degraded: a notify error was recorded or the watcher failed its liveness check, so file changes may be missed. Details in .brain/errors.log.'
+          : 'Vault watcher: no degradation reported at the last self-check.'}
+      </p>
 
       <div className="maintenance-actions">
         <button

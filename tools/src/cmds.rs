@@ -315,6 +315,52 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Heal
+// ---------------------------------------------------------------------------
+
+/// `ct heal` body (spec 2026-09-24 §6): run the invalid-source heal core over
+/// the brain DB through the SAME `db::heal::heal_invalid_sources_conn` the GUI
+/// scheduler uses, then print the summary as a single JSON object on stdout.
+/// The write gate lives in the caller (bin/ct.rs), mirroring `Ingest`.
+///
+/// Concurrency: `open_rw` sets a 5s busy timeout, matching every other
+/// concurrent-writer participant (desktop per-event connections, watchdog).
+pub fn heal_run() -> Result<()> {
+    let brain = crate::write::resolve()?;
+    let mut conn = crate::write::open_rw(&brain)?;
+    // `/fix-pr` PRRT_kwDOSVmXas6lvgUV: `open_rw` is migration-free by design
+    // (it is the cheap-per-event connection the watcher uses), but `heal_run`
+    // is a one-shot CLI entry point that runs SELECTs against tables the
+    // headless binary may be the FIRST thing to open after a schema bump.
+    // Bring the DB up to the current schema on the same connection — the
+    // migrate is ungated (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT
+    // EXISTS) so it's a no-op on an already-current brain and idempotent
+    // across repeated invocations. Mirrors the watcher probe's
+    // `migrate_open_db` pattern (cmds.rs ~line 1190, same review finding
+    // applied there for the V23 repair).
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
+    // The `vault` parameter is unused by the core today, but pass the
+    // CONFIGURED VAULT ROOT (not the brain dir) so a future grounding check
+    // that reads it sees the same directory the GUI scheduler passes
+    // (final fresh-eyes review, m2).
+    let vault = {
+        let cfg =
+            tauri_app_lib::vault::VaultConfig::new(retrieval::resolve_brain_paths().config_path);
+        cfg.get_vault_path()
+            .ok()
+            .flatten()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| retrieval::resolve_brain_paths().brain_dir)
+    };
+    let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
+    // Serialize the struct directly (m2): `HealSummary` derives `Serialize`,
+    // so the stdout contract stays tied to the struct instead of a
+    // hand-built field list that can drift from it.
+    println!("{}", serde_json::to_string(&summary)?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Librarian
 // ---------------------------------------------------------------------------
 

@@ -8,11 +8,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -23,9 +23,37 @@ pub enum VaultEvent {
     Deleted(String),
 }
 
+/// Unix-secs "now" helper for the arming/error latches (`0` on clock
+/// failure — which reads as "never" to every consumer, the safe direction).
+pub fn unix_secs_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Record a notify runtime error into `last_error_at` and log it. Extracted
+/// as a free function (rather than a method on `WatcherHandle`) so the
+/// event-loop closure can own the `Arc` and tests can exercise the
+/// error-latch semantics directly — see the spec Tests section: dropping the
+/// notify sender yields `Disconnected`, not an `Err` item, so this path
+/// cannot be driven from a live watcher without channel tricks.
+pub fn record_watcher_error(last_error_at: &AtomicU64, err: &notify::Error) {
+    last_error_at.store(unix_secs_now(), Ordering::SeqCst);
+    eprintln!("[watch] notify error: {err}");
+}
+
 pub struct WatcherHandle {
     cancel: Arc<AtomicBool>,
     join: thread::JoinHandle<()>,
+    /// Unix-secs timestamp set once `watch()` returns Ok. `0` means the
+    /// watcher never armed (spec §1). Read by the periodic self-check
+    /// monitor to distinguish a healthy watcher from a never-armed one.
+    pub armed_at: Arc<AtomicU64>,
+    /// Unix-secs timestamp bumped whenever the event loop consumes a
+    /// `notify::Error`. `0` = no error seen. The self-check monitor treats a
+    /// bump since its last clean tick as degradation.
+    pub last_error_at: Arc<AtomicU64>,
     /// Optional vault lock held by this watcher. Released on `stop()` (before
     /// joining the watcher thread) so a subsequent watcher acquire cannot
     /// race against an exiting thread. See spec §7 deadlock prevention.
@@ -47,6 +75,59 @@ impl WatcherHandle {
         self.lock = Some(lock);
         self
     }
+
+    /// Liveness probe (spec §1). Linux: at least one entry under
+    /// `/proc/self/fd` whose readlink target contains `inotify` — the same
+    /// signal the incident evidence came from (0 fds = backend closed =
+    /// dead). This counts the whole process's inotify fds, so it is a lower
+    /// bound: it can never false-negative the incident signature, though in
+    /// principle another inotify user could mask a death (no other inotify
+    /// user exists in the tree today). Caveat (m5, Opus review of PR
+    /// #228): linked libraries — GTK/GIO/WebKitGTK — could open their own
+    /// inotify fds and mask a death the same way; incident data shows they
+    /// hold none today, but if a future dependency starts doing so the
+    /// remedy is a baseline count captured before `watch()` arms, compared
+    /// per tick, not a widening of this scan. Other platforms: always
+    /// `true` — no OS signal is available there, so the `last_error_at`
+    /// latch is the portable signal.
+    pub fn is_alive(&self) -> bool {
+        // Cross-platform thread-liveness first (final fresh-eyes review,
+        // M1): the event-loop thread owning the notify watcher dying
+        // (callback panic, `Disconnected` break) kills the watcher on EVERY
+        // platform, and `last_error_at` never sees it. `is_finished()` is
+        // the exact signal; the fd scan below stays as the Linux-only
+        // backend-death check on top.
+        if self.join.is_finished() {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let fd_dir = "/proc/self/fd";
+            match fs::read_dir(fd_dir) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        if let Ok(target) = fs::read_link(entry.path()) {
+                            if target.to_string_lossy().contains("inotify") {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+                // If /proc is unreadable (exotic sandbox), fail OPEN: the
+                // alternative would latch degraded on every tick on such a
+                // system, which is noise, not signal.
+                Err(e) => {
+                    eprintln!("[watch] is_alive: cannot scan {fd_dir}: {e}; assuming alive");
+                    true
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
 }
 
 pub fn spawn_vault_watcher<F>(vault_path: PathBuf, callback: F) -> Result<WatcherHandle>
@@ -57,6 +138,9 @@ where
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(&vault_path, RecursiveMode::Recursive)?;
 
+    let armed_at = Arc::new(AtomicU64::new(unix_secs_now()));
+    let last_error_at = Arc::new(AtomicU64::new(0));
+    let loop_last_error_at = last_error_at.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_thread = cancel.clone();
     let join = thread::spawn(move || {
@@ -78,7 +162,10 @@ where
                         callback(vault_event);
                     }
                 }
-                Ok(Err(_)) => {}
+                // Log + latch instead of silently swallowing (spec §1): the
+                // self-check monitor reads `last_error_at` to surface
+                // degraded watcher health.
+                Ok(Err(e)) => record_watcher_error(&loop_last_error_at, &e),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -88,6 +175,8 @@ where
     Ok(WatcherHandle {
         cancel,
         join,
+        armed_at,
+        last_error_at,
         lock: None,
     })
 }
@@ -404,6 +493,79 @@ mod tests {
             fs::read_to_string(&canary).unwrap(),
             contents,
             "acquire must not truncate the symlink's target"
+        );
+    }
+
+    // ── Watcher-arming self-check (spec 2026-09-24 §1 + Tests) ─────────────
+
+    /// A successfully spawned watcher must have `armed_at` set to a nonzero
+    /// unix-secs timestamp — `0` is reserved for "spawn failed before
+    /// arming", which cannot happen for a handle that exists, but the
+    /// self-check monitor keys on this so the invariant is pinned here.
+    #[test]
+    fn spawned_watcher_sets_armed_at() {
+        let tmp = TempDir::new().unwrap();
+        let (tx, _rx) = mpsc::channel::<VaultEvent>();
+        let handle = spawn_vault_watcher(tmp.path().to_path_buf(), move |e| {
+            tx.send(e).ok();
+        })
+        .expect("spawn succeeds");
+        let armed = handle.armed_at.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            armed > 0,
+            "armed_at must be a nonzero unix timestamp after watch() Ok, got {armed}"
+        );
+        assert_eq!(
+            handle
+                .last_error_at
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a fresh watcher must have no recorded errors"
+        );
+        handle.stop();
+    }
+
+    /// A live watcher (just armed) must report alive on Linux via the
+    /// `/proc/self/fd` inotify scan. On other platforms this is trivially
+    /// `true`, so the test documents the contract without asserting an OS
+    /// signal that does not exist there.
+    #[test]
+    fn freshly_spawned_watcher_is_alive() {
+        let tmp = TempDir::new().unwrap();
+        let (tx, _rx) = mpsc::channel::<VaultEvent>();
+        let handle = spawn_vault_watcher(tmp.path().to_path_buf(), move |e| {
+            tx.send(e).ok();
+        })
+        .expect("spawn succeeds");
+        assert!(
+            handle.is_alive(),
+            "a freshly-armed watcher must report alive"
+        );
+        handle.stop();
+    }
+
+    /// `record_watcher_error` must bump `last_error_at` to a nonzero
+    /// timestamp. It is a free function (not a handle method) precisely so
+    /// this can be unit-tested: dropping the notify sender inside a live
+    /// watcher yields `RecvTimeoutError::Disconnected`, never an `Err`
+    /// event, so the production path cannot be driven end-to-end without
+    /// channel tricks (spec Tests, "record_watcher_error unit test").
+    #[test]
+    fn record_watcher_error_bumps_last_error_at() {
+        let last_error_at = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(
+            last_error_at.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "precondition: no error recorded"
+        );
+        record_watcher_error(
+            &last_error_at,
+            &notify::Error::io(std::io::Error::other("test notify error")),
+        );
+        let bumped = last_error_at.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            bumped > 0,
+            "record_watcher_error must bump last_error_at to a nonzero unix timestamp, got {bumped}"
         );
     }
 }

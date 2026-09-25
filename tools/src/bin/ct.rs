@@ -91,6 +91,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LibrarianCmd,
     },
+    /// Soft-delete wiki entries whose source references are demonstrably
+    /// ungrounded (write; requires --yes).
+    Heal {
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Approve, list, or revoke symlinks the ingest walker may follow.
     Trust {
         /// Vault-relative path of the symlink, e.g. `documents/specs`.
@@ -320,6 +327,45 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Heal { yes } => {
+            if !yes {
+                // Path-only resolution so a fresh brain (no brain.db yet)
+                // can still print the refusal with the planned db path
+                // (same gate shape as `Ingest`, ct.rs:303-318). Spec §6
+                // also asks for the live-row count the pass WOULD
+                // evaluate; a count failure falls back to "?" rather than
+                // masking the refusal itself. The open MUST be read-only
+                // (round-2 M1): a default `Connection::open` would CREATE
+                // brain.db on a fresh brain, making the refusal path a
+                // write. Note: on a WAL-mode brain.db whose `-shm` sidecar
+                // is missing or unwritable, the read-only open itself can
+                // fail — the count then shows "?" on a populated brain,
+                // which is the documented fallback, not a bug (round-3 m4).
+                let db_path = tauri_app_lib::retrieval::resolve_brain_paths().db_path;
+                let live = tauri_app_lib::retrieval::open_brain_readonly(&db_path)
+                    .ok()
+                    .and_then(|conn| {
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM llm_wiki_entries \
+                             WHERE deleted_at IS NULL \
+                               AND source_ref IS NOT NULL \
+                               AND source_type = 'librarian_inferred'",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .ok()
+                    })
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                eprintln!(
+                    "refusing: `ct heal` would evaluate {live} live librarian_inferred row(s) and soft-delete the ungrounded ones in {} (a write). Pass --yes to proceed.",
+                    db_path.display()
+                );
+                return Ok(1);
+            }
+            cli_common::heal_run()?;
+            Ok(0)
+        }
         Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {
             once,

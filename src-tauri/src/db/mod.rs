@@ -11,6 +11,7 @@ pub mod entities;
 pub mod events;
 pub mod evidence_regrade;
 pub mod evidence_repair;
+pub mod heal;
 pub mod migration;
 pub mod okf_ddl;
 pub mod okf_migration;

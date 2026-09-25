@@ -106,6 +106,17 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
             title={healthTitle("Embeddings", embedding)}
           />
         </button>
+        {wikiStatus.watcherHealth === "degraded" && (
+          <button
+            type="button"
+            className="status-bar-diagnostics"
+            onClick={onOpenActivity}
+            title="Vault watcher degraded — file changes are NOT being ingested. Details in .brain/errors.log."
+            aria-label="Vault watcher degraded — file changes are not being ingested"
+          >
+            ⚠ Watcher degraded
+          </button>
+        )}
         {(wikiStatus.diagnosticErrors ?? 0) > 0 && (
           <button
             type="button"
