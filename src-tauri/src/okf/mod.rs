@@ -158,6 +158,76 @@ pub fn sha256_hash(s: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Characters that YAML double-quoted scalars must escape beyond the
+/// ASCII classics: NEL/LS/PS (YAML line breaks) and everything libyaml's
+/// reader rejects outright (C0, DEL, other C1, U+FFFE/U+FFFF).
+fn has_escape_set_char(value: &str) -> bool {
+    value.chars().any(|c| {
+        matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{FFFE}' | '\u{FFFF}')
+            || c.is_control()
+            || c == '\u{7F}'
+            || ('\u{80}'..='\u{9F}').contains(&c)
+    })
+}
+
+/// A leading `-`, `?` or `:` that is alone or followed by a space would be
+/// read as a block indicator. The shared needs_quoting only catches these
+/// when followed by a space; the lone form is a lockout too (serde_yaml
+/// reads `title: -` as a block sequence).
+fn lone_indicator_start(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('-' | '?' | ':'))
+        && matches!(chars.next(), None | Some(' '))
+}
+
+/// Write-path quoting predicate for `title` and `supersedes`.
+///
+/// NOT the shared `needs_quoting`: that function early-returns false on its
+/// loose `is_iso8601_timestamp` shape check (frontmatter.rs:76) BEFORE the
+/// `:`/`#` check at :103, so `2026-09-25T14:00:00Z: deploy retro` would slip
+/// through unquoted. Here we OR the shared predicate with explicit checks —
+/// the shared function stays byte-frozen for bundle export parity.
+pub(crate) fn note_needs_quoting(value: &str) -> bool {
+    crate::okf::frontmatter::needs_quoting(value)
+        || value.contains(':')
+        || value.contains('#')
+        || has_escape_set_char(value)
+        || lone_indicator_start(value)
+}
+
+/// Escape `value` for a YAML double-quoted scalar and wrap it in `"`.
+/// Covers: `\\ \" \n \r \t`, NEL (`\N`), LS (`\L`), PS (`\P`), remaining
+/// C0/DEL as `\xNN`, other C1 and U+FFFE/U+FFFF as `\uXXXX`.
+/// supersedes the private frontmatter::quote_string for the NOTE write path
+/// only — that one stays frozen (bundle-export parity).
+pub(crate) fn quote_for_note(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{85}' => out.push_str("\\N"),
+            '\u{2028}' => out.push_str("\\L"),
+            '\u{2029}' => out.push_str("\\P"),
+            '\u{FFFE}' => out.push_str("\\ufffe"),
+            '\u{FFFF}' => out.push_str("\\uffff"),
+            c if ('\u{80}'..='\u{9F}').contains(&c) => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c if c.is_control() || c == '\u{7F}' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Render frontmatter to YAML string
 pub fn render_frontmatter(fm: &OkfFrontmatter) -> String {
     let mut doc = String::from("---\n");
@@ -199,6 +269,44 @@ pub fn parse_frontmatter(yaml: &str) -> Result<OkfFrontmatter, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_note_needs_quoting_timestamp_prefix_with_colon() {
+        // The shared needs_quoting early-returns false on its loose
+        // is_iso8601_timestamp shape check (frontmatter.rs:76) BEFORE the
+        // ':' check at :103 — the write-path predicate must not.
+        assert!(note_needs_quoting("2026-09-25T14:00:00Z: deploy retro"));
+        assert!(note_needs_quoting("Deploy: retro"));
+        assert!(note_needs_quoting("C# tips"));
+        assert!(note_needs_quoting("Plan\u{2028}B")); // escape-set char only
+        assert!(note_needs_quoting("-"));  // lone leading indicator
+        assert!(note_needs_quoting("?"));  // lone leading indicator
+        assert!(note_needs_quoting("*foo")); // shared needs_quoting covers
+        assert!(note_needs_quoting("[WIP] retry"));
+        assert!(note_needs_quoting("2024")); // reserved/number-like via shared
+        assert!(note_needs_quoting("yes"));
+    }
+
+    #[test]
+    fn test_note_needs_quoting_negative_cases() {
+        assert!(!note_needs_quoting("Plain title"));
+        assert!(!note_needs_quoting("Tessera"));
+        assert!(!note_needs_quoting("immutable-source-files/agents/x.md"));
+    }
+
+    #[test]
+    fn test_quote_for_note_escapes_full_set() {
+        assert_eq!(quote_for_note("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(quote_for_note("a\\b"), "\"a\\\\b\"");
+        assert_eq!(quote_for_note("a\nb"), "\"a\\nb\"");
+        assert_eq!(quote_for_note("a\u{85}b"), "\"a\\Nb\"");
+        assert_eq!(quote_for_note("a\u{2028}b"), "\"a\\Lb\"");
+        assert_eq!(quote_for_note("a\u{2029}b"), "\"a\\Pb\"");
+        assert_eq!(quote_for_note("a\u{7f}b"), "\"a\\x7fb\"");
+        assert_eq!(quote_for_note("a\u{1}b"), "\"a\\x01b\"");
+        assert_eq!(quote_for_note("a\u{fffe}b"), "\"a\\ufffeb\"");
+        assert_eq!(quote_for_note("Deploy: retro"), "\"Deploy: retro\"");
+    }
 
     #[test]
     fn test_entity_type_display() {

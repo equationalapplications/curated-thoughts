@@ -66,7 +66,7 @@ fn is_iso8601_timestamp(value: &str) -> bool {
     true
 }
 
-fn needs_quoting(value: &str) -> bool {
+pub(crate) fn needs_quoting(value: &str) -> bool {
     if value != value.trim() {
         return true;
     }
