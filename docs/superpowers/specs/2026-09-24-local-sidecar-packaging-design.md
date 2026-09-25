@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-24
 - **Branch:** `fix/local-build-sidecar-packaging` (spec + plan + implementation on this one branch/PR)
-- **Status:** Draft — awaiting user review
+- **Status:** Draft — spec reviews round 1 (Opus + GLM 5.3, 2026-09-24) folded; §7 resolved to option (c); implementation pending
 - **Risk tier:** Low–medium. No app code changes. The new `beforeBundleCommand` guard runs inside every release build (macOS universal, Linux, Windows), so a wrong guard blocks releases. That is the reason for §7.
 
 ## Problem
@@ -55,6 +55,10 @@ Locally nothing replaces the placeholder:
   twice in CI and needs a separate `--target-dir` so the app binary is not
   clobbered. Rejected in brainstorming as Approach C.
 - Local universal/cross-target builds from the wrapper (§3 scope).
+- **Known limitation (accepted, Opus m3):** a stale but *real* sidecar passes
+  the guard. After the wrapper has run once, a later bare `pnpm tauri build`
+  bundles the previous sidecar — structurally sound, possibly old. The guard
+  is a placeholder detector, not a freshness check.
 
 ## Design
 
@@ -66,20 +70,33 @@ run there. Node is always present because the build is driven by pnpm, and
 `scripts/` already holds `.mjs` tooling (`check-release-config.mjs`,
 `engine-setup-probe.mjs`).
 
-**Exported pure function** (the unit-test surface):
+**Exported pure functions** (the unit-test surface, GLM + Opus m2):
 
 ```js
-// Returns { ok: true } or { ok: false, reason: string }.
+// Both return { ok: true } or { ok: false, reason: string }.
 export function checkSidecarBinary({ size, mode, head, isWindowsTarget })
+export function resolveSidecarPath({ envTriple, hostTriple, repoRoot, binariesDir = 'src-tauri/binaries' })
 ```
 
-Given `head` (the first 4 bytes of the file), it rejects when:
+`resolveSidecarPath` owns the triple/.exe/path logic so it is testable without
+a filesystem: `envTriple` wins over `hostTriple`; a `windows` triple appends
+`.exe`; the result is `<repoRoot>/<binariesDir>/curated-thoughts-mcp-<triple>[.exe]`.
+
+**Script-mode guard:** the module must never call `process.exit` when it is
+imported (vitest imports it). The CLI entry runs only when
+`import.meta.url === pathToFileURL(process.argv[1]).href` — compare via
+`pathToFileURL`, never a hand-built string (Windows drive letters and
+backslashes break naive comparisons, GLM minor).
+```
+
+`checkSidecarBinary` rejects when, given `head` (the first 4 bytes of the file):
 
 - `size < 1_048_576` (1 MiB). Real sidecars are tens of MiB, and both 0- and
   10-byte placeholders fail here.
 - the magic header is none of: ELF `7f 45 4c 46`; Mach-O thin
-  `fe ed fa ce`/`ce fa ed fe`/`fe ed fa cf`/`cf fa ed fe`; Mach-O fat/universal
-  `ca fe ba be`; PE `4d 5a` (`MZ`).
+  `fe ed fa ce`/`ce fa ed fe`/`fe ed fa cf`/`cf fa ed fe`; Mach-O fat
+  `ca fe ba be`; Mach-O fat64 `ca fe ba bf` (Opus m5: lipo only writes fat64
+  on offset overflow today, but the byte costs nothing); PE `4d 5a` (`MZ`).
 - `!isWindowsTarget && (mode & 0o111) === 0`. The file is not executable.
   This check is skipped for Windows targets, which have no exec bit.
 
@@ -115,10 +132,12 @@ failed check, and it prints the fix: run `scripts/build-local-bundle.sh`
 }
 ```
 
-The path is written relative to the repo root, which is Tauri's hook cwd for
-`beforeBuildCommand` (`pnpm run build` resolves the root `package.json`).
-Verify this during implementation. If the cwd differs, switch to the object
-form `{ "script": ..., "cwd": ".." }`, which CLI 2.11.4 supports.
+The path is written relative to the repo root, which is Tauri's hook cwd:
+confirmed empirically on CLI 2.11.4 (2026-09-24, GLM spec review — a temporary
+hook printed its cwd and `TAURI_ENV_TARGET_TRIPLE`; cwd = repo root, triple =
+host). Windows cwd risk is therefore retired to `node` resolution on `cmd`,
+which the scratch-workflow run in §7 exercises anyway. If it ever differs, the
+object form `{ "script": ..., "cwd": "..." }` is the fallback (Opus m1).
 
 The hook runs on `tauri build` (with bundling) and `tauri bundle`. It does not
 run on `tauri dev` or `tauri build --no-bundle`, so dev and test workflows
@@ -170,7 +189,10 @@ node "$REPO_ROOT/scripts/verify-sidecar.mjs" "$SIDECAR" || die "refusing to inst
 
 The installer reuses the verifier and does not re-implement it, so the rules
 cannot drift apart. The existing absolute `REPO_ROOT` (commit `fadfbb1`) stays
-unchanged.
+unchanged. Its "no .deb found" error (line 17) is updated in the same change to
+point at `scripts/build-local-bundle.sh` instead of `pnpm tauri build --bundles
+deb` (Opus m4 — the current message recommends the exact command that produces
+broken bundles).
 
 ### 5. README
 
@@ -181,9 +203,11 @@ In "Install & Run":
   by the bundle guard.
 - Replace the bare `pnpm tauri build` with `scripts/build-local-bundle.sh
   [bundles]`, with a one-line explanation of why (the sidecar must be the real
-  `mcp-server` build).
+  `mcp-server` build). State that macOS **universal** bundles are CI-only
+  (the wrapper refuses them); Apple Silicon developers build for their host
+  triple (GLM minor).
 
-## Testing
+## 6. Testing
 
 **Automated** (vitest, runs in `ci.yml` via `pnpm test`):
 `src/__tests__/verify-sidecar.test.ts` (or wherever vitest's include glob
@@ -200,9 +224,13 @@ picks it up) runs `checkSidecarBinary` against these cases:
 | 2 MiB, Mach-O 64 `cffaedfe`, 0755 | ok |
 | 2 MiB, `MZ`, mode 0644, Windows target | ok (exec skipped) |
 | 2 MiB, `MZ`, mode 0644, non-Windows | reject (exec) |
+| 2 MiB, Mach-O fat64 `cafebabf`, 0755 | ok |
+| path = a directory | `resolveSidecarPath` ok; stat/read fails → clean reject, not an uncaught EISDIR (GLM) |
+| path = symlink → placeholder | reject via `stat` (follows the link; size check catches it) (GLM) |
+| path = symlink → real binary | ok via `stat` (GLM) |
 
-It also covers path resolution: `TAURI_ENV_TARGET_TRIPLE` wins over the host,
-and a `windows` triple adds `.exe`.
+It also covers `resolveSidecarPath`: `TAURI_ENV_TARGET_TRIPLE` wins over the
+host, and a `windows` triple adds `.exe`.
 
 **Manual, local (Linux):**
 
@@ -215,34 +243,58 @@ and a `windows` triple adds `.exe`.
    `dpkg -i`.
 4. On macOS, `pnpm tauri build` with the placeholder fails at the hook.
 
-## 7. Open question — exercising the guard in release CI before merge
+## 7. Testing the guard in release CI before merge
 
 `build.yml` runs only on `v*` tags and `workflow_dispatch`. `ci.yml` never
 bundles. **A PR does not exercise the guard.** Without a pre-merge run, the
 first macOS-universal and Windows runs of the hook would be the next real
-release. Two things are unverified:
+release. Three things are unverified:
 
 - that `TAURI_ENV_TARGET_TRIPLE` equals `universal-apple-darwin` (not an
   arch triple) for `--target universal-apple-darwin`. The variable exists in
   CLI 2.11.4, but its value for universal builds is unconfirmed;
 - that the hook's cwd and `node` resolution work under `tauri-action` on
-  Windows.
+  Windows;
+- (Opus M1) that the macOS universal sidecar carries the exec bit — lipo
+  writes onto a 0644 `touch`ed placeholder with no `chmod` in `build.yml`, and
+  no one has ever observed the resulting mode. If it is 0644, the guard's
+  exec-bit check fails every macOS release.
 
-`workflow_dispatch` of `build.yml` on this branch would run the hook for real,
-but `tauri-action` is configured with `tagName`/`releaseName` and may create or
-modify a GitHub Release. Before implementation, resolve which option applies:
+### Resolution: option (c) — throwaway dispatch-only workflow on a scratch branch
 
-- **(a)** confirm from `tauri-action` v1.0.0 behavior that a dispatch from a
-  non-tag ref publishes nothing, or only a draft that can be deleted, then
-  dispatch on this branch;
-- **(b)** otherwise, verify the universal triple value locally on macOS
-  (`pnpm tauri build --target universal-apple-darwin` with a temporary
-  `beforeBundleCommand` that echoes the env), accept the Windows cwd risk, and
-  watch the next release's Build run closely with the rollback ready (remove
-  the one `beforeBundleCommand` line).
+Evidence collected 2026-09-24 (Tessera, source-level against tauri-action
+`1deb371`):
 
-The guard must not merge until (a) or (b) is done and its result is recorded
-here.
+- `src/index.ts` calls `await buildProject()` **first**; the release is only
+  created/uploaded after artifacts exist. A guard failure throws inside the
+  build, before any GitHub API call to releases.
+- Option **(a) is rejected (Opus M2)**: dispatching `build.yml` with
+  `tagName: v__VERSION__` from a branch *succeeding* would
+  `getOrCreateRelease('v2.16.1', ...)` — find the live release and upload this
+  branch's assets over the published downloads (`releaseDraft: false`, no
+  deletion of drafts involved).
+- Therefore: a **scratch branch, never merged**, adds a temporary
+  `workflow_dispatch`-only workflow (or strips `tagName`/`releaseName`/
+  `releaseBody` from the `tauri-action` step — with no release target the
+  action builds and uploads only workflow artifacts). Dispatch it on the
+  scratch branch; all three release runners (macOS universal, Linux, Windows)
+  run the guarded `tauri build` for real. The scratch branch is deleted after.
+  This does not violate the "don't change `build.yml`" non-goal because
+  nothing merges.
+
+Additional direct evidence already recorded: the published
+`Curated.Thoughts_2.16.1_universal.app.tar.gz` (downloaded 2026-09-24) contains
+`Contents/MacOS/curated-thoughts-mcp` as `-rwxr-xr-x` (0755) — today's release
+sidecar is executable, so the exec-bit check is safe for macOS as-shipped.
+(Opus M1's stat-check in the scratch run remains worthwhile as belt-and-braces.)
+
+**The guard must not merge until the scratch-branch run has passed on macOS
+universal and Windows, and the result is recorded here:**
+
+> - [ ] Scratch-branch dispatch: macOS universal — hook ran, triple resolved,
+>      exec bit verified: (result)
+> - [ ] Scratch-branch dispatch: Windows — hook ran, `node` resolved under
+>      `cmd`: (result)
 
 ## Rollback
 
