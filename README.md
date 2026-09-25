@@ -91,6 +91,15 @@ touch "src-tauri/binaries/curated-thoughts-mcp-$(rustc -vV | sed -n 's/^host: //
 # On Windows, append .exe to the placeholder name.
 ```
 
+This placeholder is **for dev and test only** (`pnpm tauri dev`,
+`cargo test`, clippy). Never build a bundle on top of it — the build fails
+closed by design. To produce an installable bundle, use the wrapper:
+
+```bash
+# Build a bundle with the real MCP sidecar (Linux: .deb; macOS: .app)
+scripts/build-local-bundle.sh
+```
+
 ```bash
 # Install frontend dependencies
 pnpm install
@@ -99,7 +108,11 @@ pnpm install
 pnpm tauri dev
 
 # Build the desktop app for production
-pnpm tauri build
+scripts/build-local-bundle.sh [deb|app|dmg|rpm]
+
+Bundles must go through the wrapper so the MCP sidecar is the real
+`mcp-server` build; **macOS universal bundles are CI-only** (the wrapper
+refuses them) — Apple Silicon developers build for their host triple.
 
 # Frontend only: type-check, lint, unit tests
 pnpm typecheck
