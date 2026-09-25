@@ -152,7 +152,7 @@ mod tests {
         let hits = scan_unparsable_notes(tmp.path());
         assert_eq!(hits.len(), 1, "got: {hits:?}");
         assert!(hits[0].path.ends_with("broken-agent.md"));
-        assert_eq!(hits[0].reason, "existing_unparsable:parse");
+        assert_eq!(hits[0].reason, "existing_unparsable:no_token");
     }
 
     #[test]
