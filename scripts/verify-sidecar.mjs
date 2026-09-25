@@ -12,9 +12,12 @@ import { promisify } from 'node:util';
 import { verifyFile, resolveSidecarPath } from './verify-sidecar-lib.mjs';
 
 function fail(filePath, reason) {
+  const isWindowsHost = process.platform === 'win32';
   console.error(`ERROR: sidecar verification failed for ${filePath}`);
   console.error(`  ${reason}`);
-  console.error(`Fix: run scripts/build-local-bundle.sh (local) or check build.yml's "Build MCP sidecar" step (CI).`);
+  console.error(isWindowsHost
+    ? `Fix (Windows): the wrapper does not support Windows — repeat build.yml's "Build MCP sidecar" step by hand (cargo build --release --manifest-path src-tauri/Cargo.toml --features mcp-server --bin curated-thoughts, then copy the binary over src-tauri/binaries/curated-thoughts-mcp-<host-triple>.exe and chmod-style +x it), or build on Linux/macOS via scripts/build-local-bundle.sh.`
+    : `Fix: run scripts/build-local-bundle.sh (local) or check build.yml's "Build MCP sidecar" step (CI).`);
   process.exit(1);
 }
 

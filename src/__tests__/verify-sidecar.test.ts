@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, writeFile, symlink, mkdir, chmod } from 'node:fs/promises';
+import { mkdtemp, writeFile, symlink, mkdir, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
   checkSidecarBinary,
@@ -73,7 +74,7 @@ describe('resolveSidecarPath', () => {
 describe('verifyFile (filesystem cases, spec §6)', () => {
   let dir: string;
   beforeAll(async () => { dir = await mkdtemp(path.join(tmpdir(), 'sidecar-test-')); });
-  afterAll(async () => { await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true }); });
+  afterAll(async () => { await rm(dir, { recursive: true, force: true }); });
 
   it('rejects a directory path (EISDIR → clean reject, not a crash)', async () => {
     const sub = path.join(dir, 'a-dir');
@@ -99,5 +100,34 @@ describe('verifyFile (filesystem cases, spec §6)', () => {
     await symlink(real, link);
     const r = await verifyFile(link, { isWindowsTarget: false });
     expect(r.ok).toBe(true);
+  });
+});
+
+// CLI exit behaviour (final-review m3): the lib/CLI split promises the guard
+// never exits 0 on a placeholder — make that a regression test.
+describe('verify-sidecar.mjs CLI (exit codes)', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..');
+  const cli = path.join(repoRoot, 'scripts', 'verify-sidecar.mjs');
+
+  it('exits 1 with the Fix line on a placeholder', async () => {
+    const bad = path.join(await mkdtemp(path.join(tmpdir(), 'sidecar-cli-')), 'bad');
+    await writeFile(bad, '#!/bin/sh\n');
+    const r = spawnSync(process.execPath, [cli, bad], { encoding: 'utf8' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/Fix: /);
+    await rm(path.dirname(bad), { recursive: true, force: true });
+  });
+
+  it('exits 0 on a real 2 MiB ELF 0755 binary', async () => {
+    const dir2 = await mkdtemp(path.join(tmpdir(), 'sidecar-cli-'));
+    const good = path.join(dir2, 'good');
+    const buf = Buffer.alloc(2 * MiB);
+    Buffer.from(ELF).copy(buf, 0);
+    await writeFile(good, buf);
+    await chmod(good, 0o755);
+    const r = spawnSync(process.execPath, [cli, good], { encoding: 'utf8' });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/verify-sidecar: OK/);
+    await rm(dir2, { recursive: true, force: true });
   });
 });

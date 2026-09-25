@@ -58,7 +58,9 @@ Locally nothing replaces the placeholder:
 - **Known limitation (accepted, Opus m3):** a stale but *real* sidecar passes
   the guard. After the wrapper has run once, a later bare `pnpm tauri build`
   bundles the previous sidecar — structurally sound, possibly old. The guard
-  is a placeholder detector, not a freshness check.
+  is a placeholder detector, not a freshness check. Relatedly, the magic check
+  does not bind file type to target: a Mach-O file passes for a Linux triple
+  (final review, nits).
 
 ## Design
 

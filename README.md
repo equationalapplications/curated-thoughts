@@ -111,6 +111,8 @@ pnpm tauri dev
 # Bundles must go through the wrapper so the MCP sidecar is the real
 # `mcp-server` build. macOS universal bundles are CI-only (the wrapper
 # refuses them) — Apple Silicon developers build for their host triple.
+# Windows: the wrapper does not support Windows; repeat build.yml's
+# "Build MCP sidecar" step by hand, or build on Linux/macOS.
 scripts/build-local-bundle.sh deb   # or: app | dmg | rpm
 
 # Frontend only: type-check, lint, unit tests
