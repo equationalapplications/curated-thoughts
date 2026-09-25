@@ -25,26 +25,41 @@
 
 ---
 
-### Task 1: `scripts/verify-sidecar.mjs` — pure functions (TDD)
+### Task 1: verifier — library + CLI split (TDD)
 
 **Files:**
-- Create: `scripts/verify-sidecar.mjs`
+- Create: `scripts/verify-sidecar-lib.mjs` (pure library — no `process.exit` anywhere)
+- Create: `scripts/verify-sidecar.mjs` (thin CLI — imports the lib, ALWAYS runs main)
 - Test: `src/__tests__/verify-sidecar.test.ts`
 
 **Interfaces:**
 - Consumes: nothing (leaf module).
-- Produces (Task 2–4 and tests import these):
+- Produces (Tasks 2–5 and tests import from `verify-sidecar-lib.mjs`):
   - `checkSidecarBinary({ size, mode, head, isWindowsTarget })` → `{ ok: true } | { ok: false, reason: string }`
   - `resolveSidecarPath({ envTriple, hostTriple, repoRoot, binariesDir = 'src-tauri/binaries' })` → `string` (absolute path, `.exe` appended iff triple contains `windows`)
-  - CLI: `node scripts/verify-sidecar.mjs [path]` — no arg: hook mode (env triple, else `rustc -vV` host); with arg: explicit file, non-Windows unless path ends `.exe`. Exit 0/1. On failure prints file path, size, failed check, and the fix line: `Fix: run scripts/build-local-bundle.sh (local) or check build.yml's "Build MCP sidecar" step (CI).`
+  - `verifyFile(filePath, { isWindowsTarget })` → `{ ok: true, size } | { ok: false, reason }` — pure-ish: stats/reads, NEVER exits (Opus M3; vitest exercises this directly)
+  - CLI `node scripts/verify-sidecar.mjs [path]`: no arg = hook mode (env triple, else `rustc -vV` host); with arg = explicit file, non-Windows unless path ends `.exe`. Exit 0/1; on failure prints file, size/reason, and the fix line: `Fix: run scripts/build-local-bundle.sh (local) or check build.yml's "Build MCP sidecar" step (CI).`
+
+The lib/CLI split replaces the `import.meta.url === pathToFileURL(argv[1])`
+guard (Opus M1: symlinked repo paths make that comparison unreliable, and a
+false negative means the guard exits 0 on a placeholder — silent pass). With a
+separate CLI file there is no mode detection at all: importing the lib never
+exits; running the CLI always checks.
 
 - [ ] **Step 1: Write the failing tests**
 
 Create `src/__tests__/verify-sidecar.test.ts`:
 
 ```ts
-import { describe, it, expect } from 'vitest';
-import { checkSidecarBinary, resolveSidecarPath } from '../../scripts/verify-sidecar.mjs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtemp, writeFile, symlink, mkdir, chmod } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import {
+  checkSidecarBinary,
+  resolveSidecarPath,
+  verifyFile,
+} from '../../scripts/verify-sidecar-lib.mjs';
 
 const MiB = 1024 * 1024;
 const ELF = [0x7f, 0x45, 0x4c, 0x46];
@@ -66,10 +81,13 @@ describe('checkSidecarBinary', () => {
   it('rejects 2 MiB ELF mode 0644 (exec)', () => {
     expect(checkSidecarBinary({ size: 2 * MiB, mode: 0o644, head: ELF, isWindowsTarget: false }).ok).toBe(false);
   });
+  it('rejects when mode is missing (fail closed, Opus m6)', () => {
+    expect(checkSidecarBinary({ size: 2 * MiB, head: ELF, isWindowsTarget: false }).ok).toBe(false);
+  });
   it('accepts 2 MiB ELF mode 0755', () => {
     expect(checkSidecarBinary({ size: 2 * MiB, mode: 0o755, head: ELF, isWindowsTarget: false }).ok).toBe(true);
   });
-  it('accepts Mach-O fat and fat64 and thin-64 0755', () => {
+  it('accepts Mach-O fat, fat64, thin-64 0755', () => {
     for (const head of [FAT, FAT64, MO64]) {
       expect(checkSidecarBinary({ size: 2 * MiB, mode: 0o755, head, isWindowsTarget: false }).ok).toBe(true);
     }
@@ -80,7 +98,7 @@ describe('checkSidecarBinary', () => {
   it('rejects MZ 0644 for non-Windows target (exec)', () => {
     expect(checkSidecarBinary({ size: 2 * MiB, mode: 0o644, head: MZ, isWindowsTarget: false }).ok).toBe(false);
   });
-  it('reports the failed check name in reason', () => {
+  it('names the failed check in reason', () => {
     const r = checkSidecarBinary({ size: 10, mode: 0o755, head: ELF, isWindowsTarget: false });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/size/i);
@@ -93,17 +111,47 @@ describe('resolveSidecarPath', () => {
     expect(resolveSidecarPath({ envTriple: 'universal-apple-darwin', hostTriple: 'x86_64-unknown-linux-gnu', repoRoot: repo }))
       .toBe('/repo/src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin');
   });
-  it('falls back to hostTriple when env unset', () => {
+  it('falls back to hostTriple when env unset or empty', () => {
     expect(resolveSidecarPath({ envTriple: undefined, hostTriple: 'x86_64-unknown-linux-gnu', repoRoot: repo }))
       .toBe('/repo/src-tauri/binaries/curated-thoughts-mcp-x86_64-unknown-linux-gnu');
+    expect(resolveSidecarPath({ envTriple: '', hostTriple: 'aarch64-apple-darwin', repoRoot: repo }))
+      .toBe('/repo/src-tauri/binaries/curated-thoughts-mcp-aarch64-apple-darwin');
   });
   it('appends .exe for windows triples', () => {
     expect(resolveSidecarPath({ envTriple: 'x86_64-pc-windows-msvc', hostTriple: undefined, repoRoot: repo }))
       .toBe('/repo/src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe');
   });
-  it('falls back to hostTriple when env is empty string', () => {
-    expect(resolveSidecarPath({ envTriple: '', hostTriple: 'aarch64-apple-darwin', repoRoot: repo }))
-      .toBe('/repo/src-tauri/binaries/curated-thoughts-mcp-aarch64-apple-darwin');
+});
+
+describe('verifyFile (filesystem cases, spec §6)', () => {
+  let dir: string;
+  beforeAll(async () => { dir = await mkdtemp(path.join(tmpdir(), 'sidecar-test-')); });
+  afterAll(async () => { await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true }); });
+
+  it('rejects a directory path (EISDIR → clean reject, not a crash)', async () => {
+    const sub = path.join(dir, 'a-dir');
+    await mkdir(sub);
+    const r = await verifyFile(sub, { isWindowsTarget: false });
+    expect(r.ok).toBe(false);
+  });
+  it('rejects a symlink to a placeholder (stat follows the link)', async () => {
+    const stub = path.join(dir, 'stub');
+    await writeFile(stub, '#!/bin/sh\n');
+    const link = path.join(dir, 'link-stub');
+    await symlink(stub, link);
+    const r = await verifyFile(link, { isWindowsTarget: false });
+    expect(r.ok).toBe(false);
+  });
+  it('accepts a symlink to a real 2 MiB ELF 0755 binary', async () => {
+    const real = path.join(dir, 'real');
+    const buf = Buffer.alloc(2 * MiB);
+    Buffer.from(ELF).copy(buf, 0);
+    await writeFile(real, buf);
+    await chmod(real, 0o755);
+    const link = path.join(dir, 'link-real');
+    await symlink(real, link);
+    const r = await verifyFile(link, { isWindowsTarget: false });
+    expect(r.ok).toBe(true);
   });
 });
 ```
@@ -111,25 +159,22 @@ describe('resolveSidecarPath', () => {
 - [ ] **Step 2: Run tests, verify they fail**
 
 Run: `pnpm vitest run src/__tests__/verify-sidecar.test.ts`
-Expected: FAIL — cannot find module `../../scripts/verify-sidecar.mjs`.
+Expected: FAIL — cannot find module `../../scripts/verify-sidecar-lib.mjs`.
 
-- [ ] **Step 3: Implement `scripts/verify-sidecar.mjs`**
+- [ ] **Step 3: Implement `scripts/verify-sidecar-lib.mjs`**
 
 ```js
-// scripts/verify-sidecar.mjs — fail-closed sidecar verifier (spec §1).
-// Library + guarded CLI: importing this module never exits; run as a
-// script to check the sidecar the bundler is about to package.
+// verify-sidecar-lib.mjs — pure library. NO process.exit here: vitest
+// imports this module, and verifyFile returns results instead of exiting
+// (the CLI owns exit behavior). Spec §1 as amended (Opus M1/M3, GLM).
 import { stat, open } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
-const MIN_SIZE = 1024 * 1024; // 1 MiB
+export const MIN_SIZE = 1024 * 1024; // 1 MiB
 
 const MAGIC = [
   { bytes: [0x7f, 0x45, 0x4c, 0x46], name: 'ELF' },
-  { bytes: [0xfe, 0xed, 0xfa, 0xce], name: 'Mach-O thin (ppc/be)' },
+  { bytes: [0xfe, 0xed, 0xfa, 0xce], name: 'Mach-O thin (be)' },
   { bytes: [0xce, 0xfa, 0xed, 0xfe], name: 'Mach-O thin (le)' },
   { bytes: [0xfe, 0xed, 0xfa, 0xcf], name: 'Mach-O 64 (be)' },
   { bytes: [0xcf, 0xfa, 0xed, 0xfe], name: 'Mach-O 64 (le)' },
@@ -147,8 +192,12 @@ export function checkSidecarBinary({ size, mode, head, isWindowsTarget }) {
   if (!magic) {
     return { ok: false, reason: `header ${h.map((b) => b.toString(16).padStart(2, '0')).join(' ')} is not a known executable format` };
   }
-  if (!isWindowsTarget && typeof mode === 'number' && (mode & 0o111) === 0) {
-    return { ok: false, reason: `mode ${(mode & 0o777).toString(8)} has no exec bit` };
+  // Missing/unknown mode REJECTS (fail closed, Opus m6). Windows targets
+  // have no exec bit, so the check is skipped there.
+  if (!isWindowsTarget && (typeof mode !== 'number' || (mode & 0o111) === 0)) {
+    return { ok: false, reason: typeof mode === 'number'
+      ? `mode ${(mode & 0o777).toString(8)} has no exec bit`
+      : `mode unknown (${String(mode)}) — cannot confirm executable` };
   }
   return { ok: true };
 }
@@ -160,23 +209,49 @@ export function resolveSidecarPath({ envTriple, hostTriple, repoRoot, binariesDi
   return path.resolve(repoRoot, binariesDir, `curated-thoughts-mcp-${triple}${exe}`);
 }
 
-async function readHeadAndStat(filePath) {
-  const st = await stat(filePath); // stat, NOT lstat: follow symlinks (GLM case)
-  const handle = await open(filePath, 'r');
+export async function verifyFile(filePath, { isWindowsTarget = false } = {}) {
+  let st;
   try {
-    const buf = Buffer.alloc(4);
-    await handle.read(buf, 0, 4, 0);
-    return { size: st.size, mode: st.mode, head: [...buf] };
-  } finally {
-    await handle.close();
+    st = await stat(filePath); // stat NOT lstat: follow symlinks (GLM case)
+  } catch (err) {
+    return { ok: false, reason: `cannot stat: ${err.message}` };
   }
+  if (!st.isFile()) {
+    return { ok: false, reason: `not a regular file` };
+  }
+  let head;
+  try {
+    const handle = await open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(4);
+      await handle.read(buf, 0, 4, 0);
+      head = [...buf];
+    } finally {
+      await handle.close();
+    }
+  } catch (err) {
+    return { ok: false, reason: `cannot read: ${err.message}` };
+  }
+  const result = checkSidecarBinary({ size: st.size, mode: st.mode, head, isWindowsTarget });
+  return result.ok ? { ok: true, size: st.size } : result;
 }
+```
 
-async function hostTripleFromRustc() {
-  const { stdout } = await promisify(execFile)('rustc', ['-vV']);
-  const line = stdout.split('\n').find((l) => l.startsWith('host:'));
-  return line ? line.slice('host:'.length).trim() : undefined;
-}
+- [ ] **Step 4: Implement `scripts/verify-sidecar.mjs` (CLI)**
+
+```js
+#!/usr/bin/env node
+// verify-sidecar.mjs — CLI entry. ALWAYS runs the check when executed;
+// all logic lives in verify-sidecar-lib.mjs (which never exits).
+// Usage: verify-sidecar.mjs [path]
+//   no path: bundle-hook mode — checks the sidecar for the triple being
+//   bundled (TAURI_ENV_TARGET_TRIPLE, else rustc -vV host).
+//   with path: checks that file (non-Windows unless it ends in .exe).
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { verifyFile, resolveSidecarPath } from './verify-sidecar-lib.mjs';
 
 function fail(filePath, reason) {
   console.error(`ERROR: sidecar verification failed for ${filePath}`);
@@ -185,61 +260,60 @@ function fail(filePath, reason) {
   process.exit(1);
 }
 
-export async function verifyFile(filePath, { isWindowsTarget = false } = {}) {
-  let props;
+async function hostTripleFromRustc() {
   try {
-    props = await readHeadAndStat(filePath);
-  } catch (err) {
-    fail(filePath, `cannot stat/read: ${err.message}`);
+    const { stdout } = await promisify(execFile)('rustc', ['-vV']);
+    const line = stdout.split('\n').find((l) => l.startsWith('host:'));
+    return line ? line.slice('host:'.length).trim() : undefined;
+  } catch {
+    return undefined; // caller fails closed with the Fix line (Opus m5)
   }
-  const result = checkSidecarBinary({ ...props, isWindowsTarget });
-  if (!result.ok) fail(filePath, result.reason);
-  console.error(`verify-sidecar: OK (${filePath}, ${props.size} bytes)`);
 }
 
 async function main() {
-  const isScript = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-  if (!isScript) return; // imported by vitest — never exit
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const explicit = process.argv[2];
   if (explicit) {
-    await verifyFile(path.resolve(explicit), { isWindowsTarget: explicit.endsWith('.exe') });
+    const p = path.resolve(explicit);
+    const r = await verifyFile(p, { isWindowsTarget: p.endsWith('.exe') });
+    if (!r.ok) fail(p, r.reason);
+    console.error(`verify-sidecar: OK (${p}, ${r.size} bytes)`);
     return;
   }
-  // Hook mode: triple the bundler is bundling for; fall back to rustc host.
   const envTriple = process.env.TAURI_ENV_TARGET_TRIPLE;
   const triple = (envTriple && envTriple.trim()) || (await hostTripleFromRustc());
-  if (!triple) fail('<sidecar>', 'TAURI_ENV_TARGET_TRIPLE unset and rustc -vV gave no host triple');
-  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  if (!triple) fail('<sidecar>', 'TAURI_ENV_TARGET_TRIPLE unset and rustc -vV unavailable/unparsed');
   const sidecar = resolveSidecarPath({ envTriple: triple, hostTriple: triple, repoRoot });
-  await verifyFile(sidecar, { isWindowsTarget: triple.includes('windows') });
+  const r = await verifyFile(sidecar, { isWindowsTarget: triple.includes('windows') });
+  if (!r.ok) fail(sidecar, r.reason);
+  console.error(`verify-sidecar: OK (${sidecar}, ${r.size} bytes)`);
 }
 
 await main();
 ```
 
-- [ ] **Step 4: Run tests, verify pass**
+- [ ] **Step 5: Run tests, verify pass**
 
 Run: `pnpm vitest run src/__tests__/verify-sidecar.test.ts`
 Expected: PASS (all cases).
 
-- [ ] **Step 5: Manual CLI sanity**
+- [ ] **Step 6: Manual CLI sanity (exit codes via PIPESTATUS, Opus m1)**
 
 Run:
 ```bash
-node scripts/verify-sidecar.mjs /usr/bin/curated-thoughts-mcp; echo "exit=$?"   # real 2.16.1 sidecar → exit 0
-node scripts/verify-sidecar.mjs /bin/true 2>&1 | tail -2                        # tiny but real ELF → expect size reject, exit 1
-node scripts/verify-sidecar.mjs 2>&1 | tail -2                                  # hook mode, placeholder present → exit 1, names the placeholder
+node scripts/verify-sidecar.mjs /usr/bin/curated-thoughts-mcp; echo "exit=$?"   # real 2.16.1 sidecar → OK, exit 0
+node scripts/verify-sidecar.mjs /bin/true; echo "exit=$?"                       # tiny real ELF → size reject, exit 1
+node scripts/verify-sidecar.mjs; echo "exit=$?"                                 # hook mode, placeholder present → exit 1, names placeholder + Fix line
+ln -sf scripts/verify-sidecar.mjs /tmp/vs-link && node /tmp/vs-link /bin/true; echo "exit=$?"   # symlinked CLI still runs (no silent pass, Opus M1)
 ```
-Expected: first exits 0; second and third exit 1 with the fix line. Restore the placeholder if the third call's file was altered (the verifier never writes; nothing to restore).
+Expected: first 0; the rest 1 with the Fix line. The symlinked invocation must NOT exit 0.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/verify-sidecar.mjs src/__tests__/verify-sidecar.test.ts
-git commit -m "feat(scripts): verify-sidecar.mjs — fail-closed sidecar verifier with vitest coverage"
+git add scripts/verify-sidecar-lib.mjs scripts/verify-sidecar.mjs src/__tests__/verify-sidecar.test.ts
+git commit -m "feat(scripts): sidecar verifier — pure lib + thin CLI, fail-closed, vitest-covered"
 ```
-
----
 
 ### Task 2: Wire the bundle hook
 
@@ -289,7 +363,7 @@ Run: `ls -la src-tauri/binaries/` — placeholder must exist and be < 1 MiB (it 
 
 - [ ] **Step 2: Run a bare bundle build**
 
-Run: `pnpm tauri build --bundles deb 2>&1 | tail -15`
+Run: `pnpm tauri build --bundles deb 2>&1 | tail -15; echo "exit=${PIPESTATUS[0]}"`
 Expected: FAILS during the bundle phase with the verifier's message naming the placeholder and the fix line; exit code non-zero. (Frontend build + cargo build still run first — that is expected and takes minutes.)
 
 - [ ] **Step 3: Confirm no .deb was produced**
@@ -344,6 +418,8 @@ esac
 DEST="src-tauri/binaries/curated-thoughts-mcp-$TRIPLE"
 mkdir -p src-tauri/binaries
 [ -e "$DEST" ] || touch "$DEST"   # placeholder satisfies tauri-build; never truncate a real binary
+# (No universal branch: rustc -vV never reports a universal host triple, so
+#  this recipe physically cannot produce one — Opus plan-review m4.)
 
 echo "== Building MCP sidecar (--features mcp-server) for $TRIPLE =="
 cargo build --release --manifest-path src-tauri/Cargo.toml --features mcp-server --bin curated-thoughts
@@ -412,33 +488,43 @@ if [[ ! -e "$SIDECAR" ]]; then
   echo "ERROR: refusing to install: no sidecar in $DEB" >&2
   exit 1
 fi
+command -v node >/dev/null 2>&1 || { echo "ERROR: node is required for the sidecar gate but was not found in PATH" >&2; exit 1; }
 node "$REPO_ROOT/scripts/verify-sidecar.mjs" "$SIDECAR" || {
   echo "ERROR: refusing to install: broken sidecar in $DEB" >&2
   exit 1
 }
 ```
 
-- [ ] **Step 3: Prove both paths (use the debs already on disk)**
+- [ ] **Step 3: Prove both paths — with shimmed `sudo`/`pkill` (Opus M2)**
 
-**Before both runs:** the script's "stop the running app" block (lines 26–31)
-pkills `/usr/bin/curated-thoughts`. The REFUSE path exits at the gate before
-that block, but the PASS path reaches it. If the GUI app is running
-(`pgrep -f '/usr/bin/curated-thoughts'` non-empty), do NOT run the PASS path
-as-is — either run it at a moment the app is closed, or accept killing and
-relaunching the app. Never leave the app dead silently: relaunch via
-`~/.local/bin/curated-thoughts &` if it was killed.
+The PASS path reaches the script's `sudo dpkg -i` and `pkill` lines. Running
+them for real risks an actual install (cached sudo credentials / NOPASSWD)
+and kills the GUI app **and any running MCP sidecars** (`pkill -f
+'/usr/bin/curated-thoughts'` matches the sidecar too). Shim both:
+
+```bash
+mkdir -p /tmp/ct229-shim
+printf '#!/bin/sh\necho "SHIM sudo $*"\n' > /tmp/ct229-shim/sudo
+printf '#!/bin/sh\necho "SHIM pkill $* (skipped)"\n' > /tmp/ct229-shim/pkill
+chmod +x /tmp/ct229-shim/sudo /tmp/ct229-shim/pkill
+```
 
 ```bash
 # REFUSE path — bad 2.15.1 local deb (10-byte sidecar):
-bash scripts/install-ct.sh "$HOME/code/github/equationalapplications/curated-thoughts/target/release/bundle/deb/Curated Thoughts_2.15.1_amd64.deb"; echo "exit=$?"
+PATH="/tmp/ct229-shim:$PATH" bash scripts/install-ct.sh "$HOME/code/github/equationalapplications/curated-thoughts/target/release/bundle/deb/Curated Thoughts_2.15.1_amd64.deb"; echo "exit=$?"
 ```
-Expected: `ERROR: refusing to install: broken sidecar`, `exit=1`, **no sudo prompt** (gate fires before `sudo dpkg -i`).
+Expected: `ERROR: refusing to install: broken sidecar`, `exit=1`, **no shim
+output** (gate fires before anything else).
 
 ```bash
-# PASS path — official 2.16.1 deb (stop at the sudo prompt with Ctrl-C or -S cancel; the gate is what's under test):
-timeout 10 bash scripts/install-ct.sh /tmp/ct-verify/Curated.Thoughts_2.16.1_amd64.deb; echo "exit=$?"
+# PASS path — official 2.16.1 deb:
+PATH="/tmp/ct229-shim:$PATH" bash scripts/install-ct.sh /tmp/ct-verify/Curated.Thoughts_2.16.1_amd64.deb; echo "exit=$?"
 ```
-Expected: gate passes silently (verifier OK line), then `sudo: A terminal is required` → `exit=1`. **No install happens.**
+Expected: verifier OK line, then `SHIM pkill ...` and `SHIM sudo dpkg -i ...`
+lines, `== Installed:` from the dpkg-query (real, read-only), config sanity,
+`exit=0`. **Nothing installed, nothing killed.**
+
+Delete the shims afterwards: `rm -rf /tmp/ct229-shim`.
 
 - [ ] **Step 4: Commit**
 
@@ -481,10 +567,21 @@ Replace `pnpm tauri build` with:
 scripts/build-local-bundle.sh [deb|app|dmg|rpm]
 ```
 
+Add one sentence after it: bundles must go through the wrapper so the MCP
+sidecar is the real `mcp-server` build; **macOS universal bundles are CI-only**
+(the wrapper refuses them) — Apple Silicon developers build for their host
+triple.
+
+- [ ] **Step 2b: Update `CONTRIBUTORS.md:48` (Opus m2)**
+
+The line "Build locally: `pnpm run tauri build`" now fails closed on a
+placeholder checkout. Change it to `scripts/build-local-bundle.sh` (same
+wording rationale as the README).
+
 - [ ] **Step 3: Commit**
 
 ```bash
-git add README.md
+git add README.md CONTRIBUTORS.md
 git commit -m "docs(readme): bundles go through build-local-bundle.sh; placeholder is dev-only"
 ```
 
@@ -501,7 +598,15 @@ Expected: all green (`pnpm test` runs the whole vitest suite including the new f
 
 - [ ] **Step 2: Manual matrix — re-confirm each item, check off in PR body**
 
-From spec §6 manual list: guard fails on placeholder (Task 3 evidence), wrapper produces a passing bundle (run `scripts/build-local-bundle.sh` — takes a while; the smoke test runs the onboarding+MCP handshake in a staged HOME), `install-ct.sh` rejects placeholder debs (Task 5 evidence).
+From spec §6 manual list: guard fails on placeholder (Task 3 evidence), wrapper produces a passing bundle (run `scripts/build-local-bundle.sh` — takes a while; the smoke test runs the onboarding+MCP handshake in a staged HOME), **and the packaged sidecar is smoke-tested from the extracted .deb** (Opus M4 — the wrapper's smoke test proves the source file, not what the bundler packaged):
+
+```bash
+DEB=$(ls -t target/release/bundle/deb/*.deb | head -1)
+X=$(mktemp -d) && dpkg-deb -x "$DEB" "$X"
+tools/smoke_test_mcp_sidecar.sh "$X/usr/bin/curated-thoughts-mcp" && echo "PACKAGED SIDECAR OK"
+rm -rf "$X"
+```
+Expected: `PACKAGED SIDECAR OK`. `install-ct.sh` rejects placeholder debs (Task 5 evidence).
 
 - [ ] **Step 3: Push**
 
@@ -517,4 +622,4 @@ git push origin fix/local-build-sidecar-packaging
 - Do NOT run `sudo dpkg -i` at any point (Task 5's PASS path ends at the sudo prompt by design).
 - The wrapper's full run (Task 7 Step 2) compiles the Rust workspace twice and takes 10+ minutes on this ThinkPad; use generous timeouts (≥ 1200s), never interrupt mid-`cargo`.
 - `TAURI_ENV_TARGET_TRIPLE` is exported to the hook by CLI 2.11.4 (empirically confirmed); the verifier's rustc fallback is for manual runs only.
-- Spec §7's scratch-branch release-CI verification is a SEPARATE workstream (dispatch-only workflow on a scratch branch, macOS + Windows) — not part of these tasks; tracked on the PR's merge blocker.
+- Spec §7's scratch-branch release-CI verification is a SEPARATE workstream (dispatch-only workflow on a scratch branch, macOS + Windows) — not part of these tasks. **The PR must NOT merge until §7's scratch-branch checkboxes are ticked** (Opus m7: if `TAURI_ENV_TARGET_TRIPLE` were an arch triple under `--target universal-apple-darwin`, the hook would check the 0-byte arch placeholders `build.yml` creates and the macOS release would fail — safe direction, but it must be observed before merge, not after).
