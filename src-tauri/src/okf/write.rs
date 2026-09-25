@@ -47,25 +47,86 @@ fn render_document(frontmatter: &OkfFrontmatter, body: &str) -> String {
     doc
 }
 
-/// Extract the `updated_at` token from an existing document's frontmatter.
-///
-/// Returns `None` for absent files' content distinctions being made by the
-/// caller: malformed / unparsable frontmatter yields `None`, which the caller
-/// treats as "no usable token present".
-fn extract_updated_at(existing_content: &str) -> Option<String> {
-    let mut lines = existing_content.lines();
-    if lines.next()? != "---" {
-        return None;
+/// Why an existing note's If-Match token could not be read.
+#[derive(Debug)]
+enum TokenReadError {
+    /// No `---` fence found within the 64-line collection cap.
+    NoFence,
+    /// Fence found but no usable `updated_at:` token line.
+    NoToken,
+    /// Duplicate `updated_at:` lines or a non-RFC-3339 value.
+    Unparsable,
+}
+
+impl std::fmt::Display for TokenReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TokenReadError::NoFence => "no_fence",
+            TokenReadError::NoToken => "no_token",
+            TokenReadError::Unparsable => "parse",
+        };
+        write!(f, "{s}")
     }
-    let mut fenced = String::new();
+}
+
+/// Read the If-Match token from an existing document.
+///
+/// Strict parse FIRST (so hand-edited values like `updated_at: X # note`
+/// behave exactly as today); only on failure, a tolerant line-scan with all
+/// of: same fence collection incl. the `lines.take(64)` cap; `updated_at:`
+/// at column 0; exactly one occurrence; quotes stripped; RFC 3339 required.
+/// ONE function serves enforce_staleness AND prev_token so the two can
+/// never disagree (differential test in Task 7).
+fn read_existing_token(content: &str) -> Result<String, TokenReadError> {
+    let Some((inner, _)) = content
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+    else {
+        return Err(TokenReadError::NoFence);
+    };
+    if let Ok(fm) = crate::okf::parse_frontmatter(inner) {
+        if let Some(token) = fm.updated_at {
+            return Ok(token);
+        }
+        return Err(TokenReadError::NoToken);
+    }
+    // Tolerant fallback (issue #231 healing path).
+    let mut hits: Vec<&str> = Vec::new();
+    let mut closed = false;
+    let mut lines = content.lines();
+    if lines.next() != Some("---") {
+        return Err(TokenReadError::NoFence);
+    }
     for line in lines.take(64) {
         if line == "---" {
-            return parse_frontmatter(&fenced).ok()?.updated_at;
+            closed = true;
+            break;
         }
-        fenced.push_str(line);
-        fenced.push('\n');
+        if let Some(rest) = line.strip_prefix("updated_at:") {
+            hits.push(rest.trim());
+        }
     }
-    None
+    if !closed {
+        // Same take(64) cap as the fence collector: no closing fence within
+        // the cap is "no fence" (matches the strict path's view).
+        return Err(TokenReadError::NoFence);
+    }
+    if hits.len() != 1 {
+        return Err(if hits.is_empty() {
+            TokenReadError::NoToken
+        } else {
+            TokenReadError::Unparsable // duplicates: refuse to pick
+        });
+    }
+    let raw = hits[0].trim();
+    let unquoted = raw
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or(raw);
+    chrono::DateTime::parse_from_rfc3339(unquoted)
+        .map(|_| unquoted.to_string())
+        .map_err(|_| TokenReadError::Unparsable)
 }
 
 /// Enforce If-Match staleness on the existing file's `updated_at` token.
@@ -83,17 +144,13 @@ fn enforce_staleness(
     let Some(content) = existing_content else {
         return Ok(()); // create path — nothing to be stale against
     };
-    let current = extract_updated_at(content);
-    let matches_current = match (&current, expected_updated_at) {
-        (Some(current), Some(expected)) => current == expected,
-        _ => false, // missing token on either side ⇒ cannot prove freshness
-    };
-    if matches_current {
-        Ok(())
-    } else {
-        Err(WriteNoteError::StaleUpdate {
-            updated_at: current.unwrap_or_default(),
-        })
+    let current = read_existing_token(content)
+        .map_err(|e| WriteNoteError::InvalidFrontmatter(format!("existing_unparsable:{}", e)))?;
+    match expected_updated_at {
+        Some(expected) if expected == current => Ok(()),
+        _ => Err(WriteNoteError::StaleUpdate {
+            updated_at: current,
+        }),
     }
 }
 
@@ -264,7 +321,9 @@ pub fn write_note(
     // Rotate the token on EVERY successful write. Floor: the previous file
     // token, so the successor is always strictly newer even when both calls
     // land inside the same millisecond — a reused token can never verify.
-    let prev_token = existing.as_deref().and_then(extract_updated_at);
+    let prev_token = existing
+        .as_deref()
+        .and_then(|c| read_existing_token(c).ok());
     let now = chrono::Utc::now();
     let mut fresh = now.to_rfc3339_opts(SecondsFormat::Millis, true);
     if let Some(prev) = prev_token
@@ -588,6 +647,79 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn token_read_strict_parse_wins_on_clean_fence() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z # trailing comment\n---\n";
+        // Hand-edited trailing comment: strict parser yields the bare value.
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    #[test]
+    fn token_read_tolerant_recovers_from_broken_colon_title() {
+        // The issue-#231 shape: unquoted colon title breaks the strict parse.
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Deploy: retro\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\n";
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    #[test]
+    fn token_read_tolerant_rejects_duplicate_or_noncol0_or_bad_rfc3339() {
+        let base = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n";
+        // duplicate updated_at lines
+        assert!(matches!(
+            super::read_existing_token(&format!(
+                "{base}updated_at: 2026-09-25T01:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\n"
+            )),
+            Err(super::TokenReadError::Unparsable)
+        ));
+        // key not at column 0
+        assert!(matches!(
+            super::read_existing_token(&format!("{base}  updated_at: 2026-09-25T01:00:00Z\n---\n")),
+            Err(super::TokenReadError::NoToken)
+        ));
+        // value not RFC 3339
+        assert!(matches!(
+            super::read_existing_token(&format!("{base}updated_at: not-a-date\n---\n")),
+            Err(super::TokenReadError::Unparsable)
+        ));
+        // no fence at all
+        assert!(matches!(
+            super::read_existing_token("just some text\n"),
+            Err(super::TokenReadError::NoFence)
+        ));
+    }
+
+    #[test]
+    fn token_read_tolerant_obeys_64_line_cap() {
+        // Same take(64) cap as the fence collector (write.rs:61): a closing
+        // fence beyond 64 lines is treated exactly like the strict path —
+        // no fence ⇒ NoFence.
+        let mut doc = String::from("---\ntitle: a: b\n");
+        for i in 0..70 {
+            doc.push_str(&format!("k{i}: v{i}\n"));
+        }
+        doc.push_str("---\n");
+        assert!(matches!(
+            super::read_existing_token(&doc),
+            Err(super::TokenReadError::NoFence)
+        ));
+    }
+
+    #[test]
+    fn enforce_staleness_reports_unparsable_not_stale() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n";
+        let err = super::enforce_staleness(Some(doc), Some("2026-09-25T01:00:00Z")).unwrap_err();
+        assert!(
+            err.to_string().contains("existing_unparsable"),
+            "got: {err}"
+        );
+    }
+
     fn vault() -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
@@ -635,7 +767,7 @@ mod tests {
         let (_g, root) = vault();
         write_note(&root, "wiki/n.md", &fm("T", None), "v1\n", None).unwrap();
         let current =
-            extract_updated_at(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
+            read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
 
         // No token → refused (cannot prove freshness).
         let err = write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", None).unwrap_err();
@@ -659,7 +791,7 @@ mod tests {
         // Correct token → succeeds, token rotates.
         write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", Some(&current)).unwrap();
         let bumped =
-            extract_updated_at(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
+            read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
         assert_ne!(current, bumped);
     }
 
