@@ -1343,6 +1343,338 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Task 7 — adversarial acceptance suite (issue #231, plan §Task 7).
+    // Second-edit coverage through the public `write_note` only.
+    // ------------------------------------------------------------------
+
+    /// Every adversarial title from the plan's Task 7 list.
+    const ADVERSARIAL_TITLES: &[&str] = &[
+        "Deploy: retro",
+        "2026-09-25T14:00:00Z: deploy retro", // timestamp prefix + colon
+        "Trailing colon:",
+        "[WIP] retry logic",
+        "*foo anchor alias",
+        "&x",            // must NOT round-trip to ""
+        "#foo",          // must NOT round-trip to ""
+        "!foo",          // must NOT round-trip to ""
+        "'Hello' world", // partly single-quoted
+        "\"Hello\" world",
+        "Plan\u{2028}B", // control char (LS) is the ONLY trigger
+        "Plan\u{FEFF}B", // BOM parses fine — no escape needed
+        "2024",
+        "yes", // reserved literals gain quotes (accepted)
+    ];
+
+    /// Create a note with `title`, scrape the If-Match token FROM DISK (the
+    /// way the issue-#231 reporter did), and edit again with that token.
+    fn write_and_edit(title: &str) -> Result<(WriteNoteResult, WriteNoteResult), WriteNoteError> {
+        let (_guard, root) = vault();
+        let create = write_note(&root, "wiki/note.md", &fm(title, None), "v1\n", None)?;
+        let on_disk = fs::read_to_string(root.join("wiki/note.md")).unwrap();
+        let token = read_existing_token(&on_disk).expect("token readable after create");
+        let edit = write_note(
+            &root,
+            "wiki/note.md",
+            &fm(title, None),
+            "v2\n",
+            Some(&token),
+        )?;
+        Ok((create, edit))
+    }
+
+    /// Task 7 acceptance: EVERY adversarial title survives create → scrape
+    /// token from disk → second edit.
+    #[test]
+    fn second_edit_succeeds_for_every_adversarial_title() {
+        for title in ADVERSARIAL_TITLES {
+            let (create, edit) = write_and_edit(title).unwrap_or_else(|e| panic!("{title:?}: {e}"));
+            assert!(create.success, "{title:?}: create");
+            assert!(edit.success, "{title:?}: second edit failed: {edit:?}");
+        }
+    }
+
+    /// Indicator/reserved titles must round-trip EXACTLY — never collapse to
+    /// the empty string (serde_yaml reads bare `&x`/`#foo`/`!foo` as `""`).
+    #[test]
+    fn adversarial_titles_round_trip_exactly_not_to_empty() {
+        for title in [
+            "&x",
+            "#foo",
+            "!foo",
+            "*foo anchor alias",
+            "Plan\u{2028}B",
+            "Plan\u{FEFF}B",
+            "2024",
+            "yes",
+            "2026-09-25T14:00:00Z: deploy retro",
+        ] {
+            let (_g, root) = vault();
+            write_note(&root, "wiki/n.md", &fm(title, None), "x\n", None)
+                .unwrap_or_else(|e| panic!("{title:?}: create failed: {e}"));
+            let on_disk = fs::read_to_string(root.join("wiki/n.md")).unwrap();
+            let parsed = extract_fm(&on_disk);
+            assert_eq!(
+                parsed.title, title,
+                "title must round-trip exactly (not to empty)"
+            );
+        }
+    }
+
+    /// Legacy broken fixture (pre-fix bytes, unquoted colon title) written
+    /// DIRECTLY to disk becomes editable via the tolerant token read — and,
+    /// per the Task 6 lesson, heals (it is NOT a repair-scan hit).
+    #[test]
+    fn legacy_unquoted_colon_note_becomes_editable() {
+        let (_g, root) = vault();
+        let legacy = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Deploy: retro\nentity_type: fact\ncreated_at: 2026-08-27T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\nbody v1\n";
+        fs::write(root.join("wiki/legacy.md"), legacy).unwrap();
+        // Scrape the token the way the reporter did: from the raw bytes.
+        let token = read_existing_token(legacy).expect("tolerant read recovers the token");
+        assert_eq!(token, "2026-09-25T01:00:00Z");
+        let result = write_note(
+            &root,
+            "wiki/legacy.md",
+            &fm("Deploy: retro", None),
+            "body v2\n",
+            Some(&token),
+        )
+        .expect("legacy broken fixture must heal on its next edit");
+        assert!(result.success);
+        // Healed: the title is now quoted on disk and the strict parse works.
+        let on_disk = fs::read_to_string(root.join("wiki/legacy.md")).unwrap();
+        assert!(
+            on_disk.contains("title: \"Deploy: retro\"\n"),
+            "healed file must quote the title, got: {on_disk}"
+        );
+        let parsed = extract_fm(&on_disk);
+        assert_eq!(parsed.title, "Deploy: retro");
+        assert_ne!(
+            parsed.updated_at.as_deref(),
+            Some("2026-09-25T01:00:00Z"),
+            "token must rotate on the healing edit"
+        );
+        // Healed note is editable again and NOT reported by the repair scan.
+        let hits = crate::okf::repair_scan::scan_unparsable_notes(&root);
+        assert!(
+            hits.is_empty(),
+            "healed note must not be a scan hit: {hits:?}"
+        );
+    }
+
+    /// Injection titles: a newline inside the title must NEVER smuggle extra
+    /// frontmatter keys into the rendered fence. The quoting layer neutralizes
+    /// the newline (escaped `\n` inside one double-quoted scalar), so the
+    /// acceptance property is: whatever the write outcome, the fence contains
+    /// EXACTLY the expected key set, the title round-trips, and no injected
+    /// value lands in a typed field.
+    #[test]
+    fn injection_titles_cannot_bypass_validation() {
+        for title in [
+            "x\nsupersedes: immutable-source-files/agents/anything.md",
+            "x\ntags: [a]",
+            "x\nstatus: approved",
+        ] {
+            let (_g, root) = vault();
+            let outcome = write_note(&root, "wiki/inj.md", &fm(title, None), "x\n", None);
+            let on_disk = match outcome {
+                Ok(result) => {
+                    assert!(result.success, "{title:?}");
+                    fs::read_to_string(root.join("wiki/inj.md")).unwrap()
+                }
+                // Refusal is also a safe outcome — but only via the pinned
+                // round_trip guard, never a silent wrong write.
+                Err(WriteNoteError::InvalidFrontmatter(detail)) => {
+                    assert!(
+                        detail.contains("round_trip"),
+                        "{title:?}: unexpected refusal detail: {detail}"
+                    );
+                    continue;
+                }
+                Err(e) => panic!("{title:?}: unexpected error: {e}"),
+            };
+            let fenced: String = on_disk
+                .lines()
+                .skip(1) // opening ---
+                .take_while(|l| l != &"---")
+                .fold(String::new(), |mut acc, l| {
+                    acc.push_str(l);
+                    acc.push('\n');
+                    acc
+                });
+            let parsed = parse_frontmatter(&fenced)
+                .unwrap_or_else(|e| panic!("{title:?}: fence must parse: {e}"));
+            // No injected key landed in a typed field:
+            assert_eq!(parsed.title, title, "{title:?}: title must round-trip");
+            assert!(
+                parsed.supersedes.is_none(),
+                "{title:?}: supersedes injected"
+            );
+            assert_eq!(
+                parsed.tags,
+                Some(vec!["test".to_string()]),
+                "{title:?}: tags must be the intended ones only"
+            );
+            // No injected key landed in the fence at all (status:, etc.):
+            let mut keys: Vec<&str> = fenced
+                .lines()
+                .filter_map(|l| l.split(':').next())
+                .filter(|k| !k.is_empty())
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "created_at",
+                    "entity_type",
+                    "okf_version",
+                    "profile",
+                    "tags",
+                    "title",
+                    "updated_at"
+                ],
+                "{title:?}: fence key set must be exactly the intended one, fence: {fenced:?}"
+            );
+        }
+    }
+
+    /// Differential: wherever the STRICT parser reads a token from a rendered
+    /// adversarial doc, the tolerant fallback returns the SAME token; wherever
+    /// strict fails, tolerant must still heal (these renders are all fixable).
+    #[test]
+    fn differential_tolerant_matches_strict_on_clean_notes() {
+        for title in ADVERSARIAL_TITLES {
+            let m = fm(title, Some("2026-09-25T01:00:00Z"));
+            let doc = render_document(&m, "body\n");
+            let fenced: String = doc.lines().skip(1).take_while(|l| l != &"---").fold(
+                String::new(),
+                |mut acc, l| {
+                    acc.push_str(l);
+                    acc.push('\n');
+                    acc
+                },
+            );
+            let strict = parse_frontmatter(&fenced).ok().and_then(|p| p.updated_at);
+            let tolerant = read_existing_token(&doc);
+            match strict {
+                Some(token) => assert_eq!(
+                    tolerant.ok().as_deref(),
+                    Some(token.as_str()),
+                    "{title:?}: tolerant must match strict wherever strict succeeds"
+                ),
+                None => assert!(
+                    tolerant.is_ok(),
+                    "{title:?}: strict failed but the tolerant fallback must heal"
+                ),
+            }
+        }
+    }
+
+    /// Adversarial tag values (flow context: `,` `]` `"` are mid-value
+    /// indicators) survive create → second edit → exact round-trip, and the
+    /// empty list normalizes to absent.
+    #[test]
+    fn adversarial_tags_second_edit() {
+        let cases: &[&[&str]] = &[
+            &["say \"hi\"", "C:\\p", "a\", \"b"],
+            &["a,b", "x]"],
+            &[], // Some(vec![]) renders as absent
+        ];
+        for tags in cases {
+            let (_g, root) = vault();
+            let mut m = fm("Tagged note", None);
+            m.tags = Some(tags.iter().map(|s| s.to_string()).collect());
+            write_note(&root, "wiki/tags.md", &m, "v1\n", None)
+                .unwrap_or_else(|e| panic!("create {tags:?}: {e}"));
+            let on_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
+            let token = read_existing_token(&on_disk).expect("token readable after create");
+            let edit = write_note(&root, "wiki/tags.md", &m, "v2\n", Some(&token))
+                .unwrap_or_else(|e| panic!("edit {tags:?}: {e}"));
+            assert!(edit.success, "{tags:?}");
+            let final_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
+            let parsed = extract_fm(&final_disk);
+            let expected = if tags.is_empty() {
+                None
+            } else {
+                Some(tags.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            };
+            assert_eq!(
+                parsed.tags, expected,
+                "tags must round-trip exactly through the second edit"
+            );
+        }
+    }
+
+    /// Consistency: every repair-scan hit MUST correspond to a write-path
+    /// refusal carrying the SAME `existing_unparsable:<reason>` detail — and
+    /// clean notes are neither reported nor refused.
+    #[test]
+    fn scan_hit_reason_matches_write_path_error() {
+        let (_g, root) = vault();
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "wiki/no_token.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\nbody\n",
+                "existing_unparsable:no_token",
+            ),
+            (
+                "wiki/no_fence.md",
+                "just prose, no fences\n",
+                "existing_unparsable:no_fence",
+            ),
+            (
+                "wiki/dup_token.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\nbody\n",
+                "existing_unparsable:parse",
+            ),
+            (
+                "wiki/bad_token.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: not-a-date\n---\nbody\n",
+                "existing_unparsable:parse",
+            ),
+            (
+                "wiki/clean.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Fine\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\nbody\n",
+                "",
+            ),
+        ];
+        for (name, content, _) in cases {
+            fs::write(root.join(name), content).unwrap();
+        }
+        let hits = crate::okf::repair_scan::scan_unparsable_notes(&root);
+        assert_eq!(hits.len(), 4, "exactly the 4 broken notes: {hits:?}");
+        for hit in &hits {
+            let (name, _, reason) = cases
+                .iter()
+                .find(|(n, _, _)| hit.path.ends_with(n))
+                .unwrap_or_else(|| panic!("scan hit {} matches no case", hit.path));
+            assert_eq!(hit.reason, *reason, "scan vs contract for {name}");
+            // The write path refuses an edit of the same note with the SAME
+            // detail (staleness check hits the unreadable token first).
+            let err = write_note(
+                &root,
+                name,
+                &fm("Edited", None),
+                "x\n",
+                Some("1999-01-01T00:00:00Z"),
+            )
+            .expect_err("edit of unparsable note must be refused");
+            assert!(
+                matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if detail == *reason),
+                "write path for {name}: expected {reason}, got {err}"
+            );
+        }
+        // The clean note edits fine.
+        write_note(
+            &root,
+            "wiki/clean.md",
+            &fm("Fine", None),
+            "edited\n",
+            Some("2026-09-25T01:00:00Z"),
+        )
+        .expect("clean note stays editable");
+    }
+
     /// Parse a rendered document's frontmatter block.
     fn extract_fm(raw: &str) -> OkfFrontmatter {
         let fenced: String = raw
