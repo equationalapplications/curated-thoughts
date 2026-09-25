@@ -898,15 +898,19 @@ fn vault_write_note(
 /// `immutable-source-files/agents/` whose frontmatter fails the strict parse
 /// (the future `existing_unparsable` clients). NEVER modifies any file.
 #[tauri::command]
-fn scan_unparsable_notes(
-    vault_root_state: State<VaultConfigState>,
+async fn scan_unparsable_notes(
+    vault_root_state: State<'_, VaultConfigState>,
 ) -> Result<Vec<okf::repair_scan::UnparsableNote>, String> {
+    // Async per Tauri conventions: the recursive walk must not block the
+    // main thread. `State` borrows are not Send, so grab what we need and
+    // run the walk on a blocking-friendly task.
     let vault_root = vault_root_from_state(&vault_root_state)?;
-    let hits = okf::repair_scan::scan_unparsable_notes(&vault_root);
-    #[cfg(feature = "mcp-server")]
+    let hits = tokio::task::spawn_blocking(move || {
+        okf::repair_scan::scan_unparsable_notes(&vault_root)
+    })
+    .await
+    .map_err(|e| format!("scan_unparsable_notes join error: {e}"))?;
     tracing::info!("scan_unparsable_notes: {} unparsable note(s)", hits.len());
-    #[cfg(not(feature = "mcp-server"))]
-    let _ = hits.len();
     Ok(hits)
 }
 

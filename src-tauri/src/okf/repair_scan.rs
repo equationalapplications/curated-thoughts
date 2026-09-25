@@ -23,7 +23,12 @@ pub struct UnparsableNote {
 }
 
 /// Walk `wiki/` and `immutable-source-files/agents/` under `vault_root`,
-/// reporting every `.md` file whose token read fails.
+/// reporting every `.md` file whose token read fails. Hit `path`s are
+/// VAULT-RELATIVE (e.g. `wiki/broken.md`) — contract B.6 forbids leaking
+/// the host's absolute layout. `index.md` files at ANY depth are skipped:
+/// they are indexes, not notes. V7-archive caveat: pages in legacy archives
+/// outside the two scan roots are not walked at all — widen `scan_roots`
+/// only if a future spec says so.
 ///
 /// REPORT-ONLY: reads files, writes nothing.
 pub fn scan_unparsable_notes(vault_root: &Path) -> Vec<UnparsableNote> {
@@ -46,16 +51,26 @@ pub fn scan_unparsable_notes(vault_root: &Path) -> Vec<UnparsableNote> {
             if entry.path().extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
+            // `index.md` at any depth is an index page, not a note.
+            if entry.file_name() == "index.md" {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(vault_root)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .replace('\\', "/");
             let Ok(content) = std::fs::read_to_string(entry.path()) else {
                 hits.push(UnparsableNote {
-                    path: entry.path().display().to_string(),
+                    path: rel,
                     reason: "existing_unparsable:parse".to_string(),
                 });
                 continue;
             };
             if let Err(e) = super::write::read_existing_token(&content) {
                 hits.push(UnparsableNote {
-                    path: entry.path().display().to_string(),
+                    path: rel,
                     reason: format!("existing_unparsable:{e}"),
                 });
             }
@@ -159,5 +174,49 @@ mod tests {
     fn scan_on_missing_roots_returns_empty() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(scan_unparsable_notes(tmp.path()).is_empty());
+    }
+
+    /// MINOR-4 (issue #231 review) — hit paths are VAULT-RELATIVE (contract
+    /// B.6: do not leak the host's absolute layout), e.g. `wiki/broken.md`.
+    #[test]
+    fn scan_returns_vault_relative_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("immutable-source-files").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("broken.md"),
+            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n",
+        )
+        .unwrap();
+        let hits = scan_unparsable_notes(tmp.path());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "immutable-source-files/agents/broken.md");
+        assert!(
+            !hits[0].path.contains(tmp.path().to_str().unwrap()),
+            "absolute path leaked: {}",
+            hits[0].path
+        );
+    }
+
+    /// MINOR-3 (issue #231 review) — `index.md` at ANY depth under a scan
+    /// root is an index, not a note; it is skipped even when it has no
+    /// fence. Nested subdirectories still walk.
+    #[test]
+    fn scan_skips_index_files_at_any_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        let nested = wiki.join("sub").join("deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(wiki.join("index.md"), "no fence at all\n").unwrap();
+        std::fs::write(nested.join("index.md"), "no fence at all\n").unwrap();
+        // a regular note next to them must still be reported
+        std::fs::write(
+            wiki.join("real.md"),
+            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n",
+        )
+        .unwrap();
+        let hits = scan_unparsable_notes(tmp.path());
+        assert_eq!(hits.len(), 1, "got: {hits:?}");
+        assert_eq!(hits[0].path, "wiki/real.md");
     }
 }

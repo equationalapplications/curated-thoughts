@@ -53,7 +53,7 @@ tree-sitter-python = { version = "0.25.0", default-features = false }
 tree-sitter-go = { version = "0.25.0", default-features = false }
 rmcp = { workspace = true, features = ["macros", "transport-io", "schemars"], optional = true }
 schemars = { workspace = true, optional = true }
-tracing = { version = "0.1", optional = true }
+tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", optional = true }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -78,7 +78,7 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 test-utils = ["tauri/test"]
 slow-tests = []
-mcp-server = ["dep:rmcp", "dep:schemars", "dep:tracing", "dep:tracing-subscriber"]
+mcp-server = ["dep:rmcp", "dep:schemars", "dep:tracing-subscriber"]
 
 [[bin]]
 name = "curated-thoughts"
