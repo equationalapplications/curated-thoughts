@@ -288,7 +288,7 @@ git commit -m "feat(okf): quote title/supersedes conditionally, tags always, in 
 
 **Interfaces:**
 - Consumes: `render_document` (write.rs:39), `parse_frontmatter` (`mod.rs:190`), `render_frontmatter` (Task 2 output).
-- Produces: `fn verify_round_trip(doc: &str, fm: &OkfFrontmatter) -> Result<(), WriteNoteError>` (private). `write_note` calls it before `safe_write_bytes` and returns its error unmapped. Task 7 relies on its injection rejection.
+- Produces: `fn check_round_trip(fm: &OkfFrontmatter, doc: &str) -> Result<(), WriteNoteError>` (NOTE: arg order matches the shipped code; plan originally had the reverse — Opus nit) (private). `write_note` calls it before `safe_write_bytes` and returns its error unmapped. Task 7 relies on its injection rejection.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -299,7 +299,7 @@ Add to `mod tests` in `write.rs`:
     fn round_trip_guard_accepts_valid_render() {
         let fm = crate::okf::test_fm_with_title("Deploy: retro");
         let doc = super::render_document(&fm, "body\n");
-        assert!(super::verify_round_trip(&doc, &fm).is_ok());
+        assert!(super::check_round_trip(&fm, &doc).is_ok());
     }
 
     #[test]
@@ -309,7 +309,7 @@ Add to `mod tests` in `write.rs`:
         // (OkfFrontmatter has no deny_unknown_fields).
         let fm = crate::okf::test_fm_with_title("T");
         let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nstatus: approved\n---\nbody\n";
-        let err = super::verify_round_trip(doc, &fm).unwrap_err();
+        let err = super::check_round_trip(&fm, doc).unwrap_err();
         assert!(err.to_string().contains("round_trip"), "got: {err}");
     }
 
@@ -320,7 +320,7 @@ Add to `mod tests` in `write.rs`:
         let mut fm = crate::okf::test_fm_with_title("T");
         fm.tags = Some(vec![]);
         let doc = super::render_document(&fm, "");
-        assert!(super::verify_round_trip(&doc, &fm).is_ok());
+        assert!(super::check_round_trip(&fm, &doc).is_ok());
     }
 ```
 
@@ -339,7 +339,7 @@ In `write.rs` (near `render_document`):
 /// `Some(vec![])` tags to `None` (render drops empty lists, mod.rs:168-169),
 /// and (b) the fence contains EXACTLY the rendered key set — the struct
 /// compare alone cannot see unknown injected keys (no deny_unknown_fields).
-fn verify_round_trip(doc: &str, fm: &OkfFrontmatter) -> Result<(), WriteNoteError> {
+fn check_round_trip(fm: &OkfFrontmatter, doc: &str) -> Result<(), WriteNoteError> {
     let inner = doc
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---"))
@@ -397,7 +397,7 @@ fn verify_round_trip(doc: &str, fm: &OkfFrontmatter) -> Result<(), WriteNoteErro
 In `write_note`, immediately before the `safe_write_bytes(...)` call for the NOTE path, insert:
 
 ```rust
-    verify_round_trip(&doc, &effective_fm)?;
+    check_round_trip(&effective_fm, &doc)?;
 ```
 
 (`doc` is the rendered document string; use the exact local names at that call site — read the surrounding code first.)
@@ -717,8 +717,7 @@ mod tests {
         // clean
         std::fs::write(
             wiki.join("clean.md"),
-            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Fine\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\nbody\n",  # clean fixture MUST carry a token (no-token => reported as existing_unparsable:no_token — CodeRabbit catch)
-        # 
+            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Fine\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\nbody\n",  // clean fixture MUST carry a token (no-token => reported as existing_unparsable:no_token)
         ).unwrap();
         let hits = scan_unparsable_notes(tmp.path());
         assert_eq!(hits.len(), 1);
