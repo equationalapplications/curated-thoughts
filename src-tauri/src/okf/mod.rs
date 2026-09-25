@@ -228,18 +228,29 @@ pub(crate) fn quote_for_note(value: &str) -> String {
     out
 }
 
+/// Conditional quoting for `title` / `supersedes`: quote only when the value
+/// needs it, so a normal deposit path or plain title keeps today's bytes
+/// (pins write.rs:910/945).
+fn render_scalar(value: &str) -> String {
+    if note_needs_quoting(value) {
+        quote_for_note(value)
+    } else {
+        value.to_string()
+    }
+}
+
 /// Render frontmatter to YAML string
 pub fn render_frontmatter(fm: &OkfFrontmatter) -> String {
     let mut doc = String::from("---\n");
     doc.push_str(&format!("okf_version: {}\n", fm.okf_version));
     doc.push_str(&format!("profile: {}\n", fm.profile));
-    doc.push_str(&format!("title: {}\n", fm.title));
+    doc.push_str(&format!("title: {}\n", render_scalar(&fm.title)));
     doc.push_str(&format!("entity_type: {}\n", fm.entity_type));
     if let Some(ref tags) = fm.tags {
         if !tags.is_empty() {
             let tags_str = tags
                 .iter()
-                .map(|t| format!("\"{}\"", t))
+                .map(|t| quote_for_note(t))
                 .collect::<Vec<_>>()
                 .join(", ");
             doc.push_str(&format!("tags: [{}]\n", tags_str));
@@ -250,7 +261,7 @@ pub fn render_frontmatter(fm: &OkfFrontmatter) -> String {
         doc.push_str(&format!("updated_at: {}\n", updated));
     }
     if let Some(ref supersedes) = fm.supersedes {
-        doc.push_str(&format!("supersedes: {}\n", supersedes));
+        doc.push_str(&format!("supersedes: {}\n", render_scalar(supersedes)));
     }
     doc.push_str("---\n");
     doc
@@ -306,6 +317,50 @@ mod tests {
         assert_eq!(quote_for_note("a\u{1}b"), "\"a\\x01b\"");
         assert_eq!(quote_for_note("a\u{fffe}b"), "\"a\\ufffeb\"");
         assert_eq!(quote_for_note("Deploy: retro"), "\"Deploy: retro\"");
+    }
+
+    #[test]
+    fn test_render_frontmatter_title_quoted_when_needed() {
+        let fm = test_fm_with_title("Deploy: retro");
+        let doc = render_frontmatter(&fm);
+        assert!(doc.contains("title: \"Deploy: retro\"\n"), "got: {doc}");
+        // Clean title stays unquoted (byte-identical with old behavior).
+        let clean = render_frontmatter(&test_fm_with_title("Test Note"));
+        assert!(clean.contains("title: Test Note\n"));
+    }
+
+    #[test]
+    fn test_render_frontmatter_tags_always_quoted_and_escaped() {
+        let mut fm = test_fm_with_title("T");
+        fm.tags = Some(vec!["say \"hi\"".to_string(), "ok-tag".to_string()]);
+        let doc = render_frontmatter(&fm);
+        // ALWAYS quoted (escaper runs even on clean tags — preserves the
+        // existing quoted shape) — byte-compatible with mod.rs:392 pin:
+        assert!(doc.contains("tags: [\"say \\\"hi\\\"\", \"ok-tag\"]\n"), "got: {doc}");
+    }
+
+    #[test]
+    fn test_render_frontmatter_new_quote_pins() {
+        // Titles containing ':'/'#' anywhere gain quotes on the next write —
+        // parse-equivalent, bytes change (accepted, spec §Design.1).
+        for t in ["C# tips", "https://example.com", "Ratio 3:1", "2024", "yes",
+                  "2026-09-25T14:00:00Z: deploy retro"] {
+            let doc = render_frontmatter(&test_fm_with_title(t));
+            assert!(doc.contains(&format!("title: \"{}\"\n", t)), "{t}: got {doc}");
+        }
+    }
+
+    fn test_fm_with_title(title: &str) -> OkfFrontmatter {
+        OkfFrontmatter {
+            okf_version: "0.1".to_string(),
+            profile: "llm-wiki/1".to_string(),
+            title: title.to_string(),
+            entity_type: EntityType::Fact,
+            tags: None,
+            created_at: "2026-09-25T00:00:00Z".to_string(),
+            updated_at: None,
+            supersedes: None,
+        }
     }
 
     #[test]
