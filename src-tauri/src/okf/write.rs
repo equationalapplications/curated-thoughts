@@ -77,6 +77,12 @@ impl std::fmt::Display for TokenReadError {
 
 /// Read the If-Match token from an existing document.
 ///
+/// The frontmatter fence is collected EXACTLY ONCE (a `lines()` loop with the
+/// `take(64)` cap — `str::lines()` strips `\r`, so CRLF notes work) and that
+/// ONE buffer feeds BOTH the strict parse and the tolerant fallback, so the
+/// two paths can never see different fences. The closing fence must be the
+/// EXACT line `---` (`----` or `---foo` is content, not a fence).
+///
 /// Strict parse FIRST (so hand-edited values like `updated_at: X # note`
 /// behave exactly as today); only on failure, a tolerant line-scan with all
 /// of: same fence collection incl. the `lines.take(64)` cap; `updated_at:`
@@ -84,38 +90,22 @@ impl std::fmt::Display for TokenReadError {
 /// ONE function serves enforce_staleness AND prev_token so the two can
 /// never disagree (differential test in Task 7).
 pub(crate) fn read_existing_token(content: &str) -> Result<String, TokenReadError> {
-    let Some((inner, _)) = content
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---"))
-    else {
+    let Some(inner) = collect_frontmatter_fence(content) else {
         return Err(TokenReadError::NoFence);
     };
-    if let Ok(fm) = crate::okf::parse_frontmatter(inner) {
+    if let Ok(fm) = crate::okf::parse_frontmatter(&inner) {
         if let Some(token) = fm.updated_at {
             return Ok(token);
         }
         return Err(TokenReadError::NoToken);
     }
-    // Tolerant fallback (issue #231 healing path).
+    // Tolerant fallback (issue #231 healing path) over the SAME buffer the
+    // strict parse saw.
     let mut hits: Vec<&str> = Vec::new();
-    let mut closed = false;
-    let mut lines = content.lines();
-    if lines.next() != Some("---") {
-        return Err(TokenReadError::NoFence);
-    }
-    for line in lines.take(64) {
-        if line == "---" {
-            closed = true;
-            break;
-        }
+    for line in inner.lines() {
         if let Some(rest) = line.strip_prefix("updated_at:") {
             hits.push(rest.trim());
         }
-    }
-    if !closed {
-        // Same take(64) cap as the fence collector: no closing fence within
-        // the cap is "no fence" (matches the strict path's view).
-        return Err(TokenReadError::NoFence);
     }
     if hits.len() != 1 {
         return Err(if hits.is_empty() {
@@ -133,6 +123,34 @@ pub(crate) fn read_existing_token(content: &str) -> Result<String, TokenReadErro
     chrono::DateTime::parse_from_rfc3339(unquoted)
         .map(|_| unquoted.to_string())
         .map_err(|_| TokenReadError::Unparsable)
+}
+
+/// Collect the text between the opening `---` line and the closing `---`
+/// line of a document's frontmatter, or `None` if either fence is missing
+/// within the 64-line cap. `str::lines()` handles `\r\n` line endings
+/// (it strips a trailing `\r`), so CRLF notes collect identically to LF
+/// notes; the closing fence must be the EXACT line `---`.
+fn collect_frontmatter_fence(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next() != Some("---") {
+        return None;
+    }
+    let mut closed = false;
+    let mut inner = String::new();
+    for line in lines.take(64) {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        inner.push_str(line);
+        inner.push('\n');
+    }
+    if !closed {
+        // Same take(64) cap for both paths: no closing fence within the cap
+        // is "no fence".
+        return None;
+    }
+    Some(inner)
 }
 
 /// Enforce If-Match staleness on the existing file's `updated_at` token.
@@ -713,6 +731,69 @@ mod tests {
         doc.push_str("---\n");
         assert!(matches!(
             super::read_existing_token(&doc),
+            Err(super::TokenReadError::NoFence)
+        ));
+    }
+
+    /// MAJOR-1 (issue #231 review) — CRLF fixtures must read their token on
+    /// the STRICT path (clean fence, CRLF line endings). The pre-review code
+    /// used `strip_prefix("---\n")` and turned `---\r\n` into NoFence.
+    #[test]
+    fn token_read_crlf_fence_strict_path() {
+        let doc = "---\r\nokf_version: 0.1\r\nprofile: llm-wiki/1\r\ntitle: T\r\nentity_type: fact\r\ncreated_at: 2026-09-25T00:00:00Z\r\nupdated_at: 2026-09-25T01:00:00Z\r\n---\r\nbody\r\n";
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    /// MAJOR-1 — CRLF fixtures must ALSO read their token on the tolerant
+    /// fallback path (the issue-#231 colon-title shape, CRLF line endings).
+    #[test]
+    fn token_read_crlf_fence_tolerant_path() {
+        let doc = "---\r\nokf_version: 0.1\r\nprofile: llm-wiki/1\r\ntitle: Deploy: retro\r\nentity_type: fact\r\ncreated_at: 2026-09-25T00:00:00Z\r\nupdated_at: 2026-09-25T01:00:00Z\r\n---\r\nbody\r\n";
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    /// MAJOR-1 — a CRLF note on disk must remain EDITABLE through
+    /// `write_note`: scrape the token from the CRLF file and edit again.
+    #[test]
+    fn crlf_note_remains_editable_through_write_note() {
+        let (_g, root) = vault();
+        let create = write_note(&root, "wiki/crlf.md", &fm("CRLF Note", None), "v1\n", None)
+            .expect("create succeeds");
+        let lf = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
+        let crlf = lf.replace('\n', "\r\n");
+        assert_ne!(lf, crlf, "fixture must actually be CRLF");
+        fs::write(root.join("wiki/crlf.md"), &crlf).unwrap();
+        let on_disk = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
+        let token = read_existing_token(&on_disk).expect("CRLF token readable");
+        assert_eq!(token, create.updated_at);
+        let edit = write_note(
+            &root,
+            "wiki/crlf.md",
+            &fm("CRLF Note", None),
+            "v2\n",
+            Some(&token),
+        );
+        assert!(
+            edit.is_ok(),
+            "CRLF note must stay editable: {:?}",
+            edit.err()
+        );
+    }
+
+    /// MAJOR-1 (doc contradiction) — the collected-fence close requires the
+    /// EXACT line `---`; a `----` rule-off line is NOT a closing fence
+    /// (the old `split_once("\n---")` matched it, and paths then disagreed).
+    #[test]
+    fn fence_close_requires_exact_dashes() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n----\n";
+        assert!(matches!(
+            super::read_existing_token(doc),
             Err(super::TokenReadError::NoFence)
         ));
     }
