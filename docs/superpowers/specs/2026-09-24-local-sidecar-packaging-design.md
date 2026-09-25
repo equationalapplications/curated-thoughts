@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-24
 - **Branch:** `fix/local-build-sidecar-packaging` (spec + plan + implementation on this one branch/PR)
-- **Status:** Draft — spec reviews round 1 (Opus + GLM 5.3, 2026-09-24) folded; §7 resolved to option (c); implementation pending
+- **Status:** Implemented (PR #229) — code on this branch; §7 scratch-run verification pending
 - **Risk tier:** Low–medium. No app code changes. The new `beforeBundleCommand` guard runs inside every release build (macOS universal, Linux, Windows), so a wrong guard blocks releases. That is the reason for §7.
 
 ## Problem
@@ -82,12 +82,13 @@ export function resolveSidecarPath({ envTriple, hostTriple, repoRoot, binariesDi
 a filesystem: `envTriple` wins over `hostTriple`; a `windows` triple appends
 `.exe`; the result is `<repoRoot>/<binariesDir>/curated-thoughts-mcp-<triple>[.exe]`.
 
-**Script-mode guard:** the module must never call `process.exit` when it is
-imported (vitest imports it). The CLI entry runs only when
-`import.meta.url === pathToFileURL(process.argv[1]).href` — compare via
-`pathToFileURL`, never a hand-built string (Windows drive letters and
-backslashes break naive comparisons, GLM minor).
-```
+**Library/CLI split (as implemented, supersedes the single-module sketch —
+Opus plan-review M1):** `scripts/verify-sidecar-lib.mjs` exports the pure
+functions and NEVER calls `process.exit` (vitest imports it; `verifyFile`
+returns `{ok, reason, size}`). `scripts/verify-sidecar.mjs` is a thin CLI that
+ALWAYS runs the check when executed (no import-vs-script heuristic — a
+mismatched symlinked path must not end in a silent exit 0). The spec's earlier
+`pathToFileURL` guard idea is superseded by this split.
 
 `checkSidecarBinary` rejects when, given `head` (the first 4 bytes of the file):
 

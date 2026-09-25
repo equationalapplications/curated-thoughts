@@ -107,12 +107,11 @@ pnpm install
 # Run the desktop app in dev mode
 pnpm tauri dev
 
-# Build the desktop app for production
-scripts/build-local-bundle.sh [deb|app|dmg|rpm]
-
-Bundles must go through the wrapper so the MCP sidecar is the real
-`mcp-server` build; **macOS universal bundles are CI-only** (the wrapper
-refuses them) — Apple Silicon developers build for their host triple.
+# Build the desktop app for production.
+# Bundles must go through the wrapper so the MCP sidecar is the real
+# `mcp-server` build. macOS universal bundles are CI-only (the wrapper
+# refuses them) — Apple Silicon developers build for their host triple.
+scripts/build-local-bundle.sh deb   # or: app | dmg | rpm
 
 # Frontend only: type-check, lint, unit tests
 pnpm typecheck
