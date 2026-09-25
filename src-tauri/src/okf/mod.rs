@@ -89,6 +89,9 @@ pub struct WriteNoteResult {
     pub success: bool,
     pub path: String,
     pub sha256: String,
+    /// The NEW If-Match token written into the file's frontmatter (RFC 3339).
+    /// The caller echoes this back verbatim on the next edit.
+    pub updated_at: String,
 }
 
 /// Errors that can occur when upserting index entries

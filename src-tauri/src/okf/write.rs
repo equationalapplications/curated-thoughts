@@ -16,6 +16,12 @@
 //! - Errors use the pinned string shapes: `path_outside_vault`,
 //!   `invalid_frontmatter:{detail}`, `stale_update:{current}`,
 //!   `index_not_found:{path}`, `invalid_entry_name`, `write_error:{io}`.
+//!   When the EXISTING file's frontmatter cannot be read for the If-Match
+//!   check, the write is refused with `invalid_frontmatter:existing_unparsable:{parse|no_fence|no_token}`
+//!   (`parse` = duplicate/malformed token, `no_fence` = no frontmatter fence,
+//!   `no_token` = fence with no `updated_at`). No-fence/no-token notes stay
+//!   permanently refused over MCP — use the report-only repair scan to find
+//!   them; the tool never rewrites a file it cannot token-verify.
 
 use std::path::{Component, Path};
 
@@ -338,7 +344,7 @@ pub fn write_note(
         }
     }
     let mut effective_fm = frontmatter.clone();
-    effective_fm.updated_at = Some(fresh);
+    effective_fm.updated_at = Some(fresh.clone());
     if effective_fm.created_at.trim().is_empty() && existing.is_none() {
         return Err(WriteNoteError::InvalidFrontmatter(
             "created_at is required on create".to_string(),
@@ -355,6 +361,7 @@ pub fn write_note(
         success: true,
         path: path.to_string(),
         sha256: sha256_hash(&document),
+        updated_at: fresh,
     })
 }
 
@@ -715,7 +722,54 @@ mod tests {
         let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n";
         let err = super::enforce_staleness(Some(doc), Some("2026-09-25T01:00:00Z")).unwrap_err();
         assert!(
-            err.to_string().contains("existing_unparsable"),
+            matches!(
+                &err,
+                WriteNoteError::InvalidFrontmatter(detail) if detail == "existing_unparsable:no_token"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Task 5 — the three existing-unparsable reasons are distinguishable.
+    #[test]
+    fn existing_unparsable_reasons_are_distinguishable() {
+        // parse: strict parse fails (colon title), tolerant finds ONE
+        // updated_at line whose value is not RFC 3339.
+        let parse_doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: not-a-timestamp\n---\n";
+        // no_token: clean fence, parses, but no updated_at line at all.
+        let no_token_doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n";
+        // no_fence: no frontmatter fence within the cap.
+        let no_fence_doc = "just prose, no fences\n";
+
+        for (doc, reason) in [
+            (parse_doc, "existing_unparsable:parse"),
+            (no_token_doc, "existing_unparsable:no_token"),
+            (no_fence_doc, "existing_unparsable:no_fence"),
+        ] {
+            let err = super::enforce_staleness(Some(doc), Some("2026-09-25T01:00:00Z"))
+                .expect_err("must be refused");
+            assert!(
+                matches!(
+                    &err,
+                    WriteNoteError::InvalidFrontmatter(detail) if detail == reason
+                ),
+                "expected {reason}, got: {err}"
+            );
+        }
+    }
+
+    /// Task 5 — stale edit against a fence the strict parser rejects still
+    /// returns StaleUpdate carrying the TOLERANT-read current token
+    /// (quote-stripped, RFC 3339).
+    #[test]
+    fn stale_carries_tolerant_read_current_token() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: \"2026-09-25T01:00:00Z\"\n---\n";
+        let err = super::enforce_staleness(Some(doc), Some("1999-01-01T00:00:00Z")).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                WriteNoteError::StaleUpdate { updated_at } if updated_at == "2026-09-25T01:00:00Z"
+            ),
             "got: {err}"
         );
     }
@@ -754,11 +808,29 @@ mod tests {
         .unwrap();
         assert_eq!(result.path, "wiki/test-note.md");
         assert!(result.success);
+        // Task 5: the result carries the fresh token written into the file.
+        chrono::DateTime::parse_from_rfc3339(&result.updated_at).unwrap();
         let content = fs::read_to_string(root.join("wiki/test-note.md")).unwrap();
         assert!(content.starts_with("---\nokf_version: 0.1\n"));
         assert!(content.contains("updated_at: 20"));
         assert!(content.ends_with("Second.\n"));
         assert_eq!(result.sha256, sha256_hash(&content));
+        assert_eq!(
+            result.updated_at,
+            read_existing_token(&content).unwrap(),
+            "result token must equal the token stored in the file"
+        );
+    }
+
+    /// Task 5 — the success result's `updated_at` is the NEW post-write
+    /// token: parseable RFC 3339 and non-empty (rotation checked in d2).
+    #[test]
+    fn write_note_result_carries_fresh_token() {
+        let (_g, root) = vault();
+        let result = write_note(&root, "wiki/tok.md", &fm("T", None), "x\n", None).unwrap();
+        assert!(result.success);
+        assert!(!result.updated_at.is_empty());
+        chrono::DateTime::parse_from_rfc3339(&result.updated_at).unwrap();
     }
 
     /// D2 — stale edit without token is refused; token must exact-match.
