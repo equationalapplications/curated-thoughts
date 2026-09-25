@@ -25,10 +25,15 @@ pub struct UnparsableNote {
 /// Walk `wiki/` and `immutable-source-files/agents/` under `vault_root`,
 /// reporting every `.md` file whose token read fails. Hit `path`s are
 /// VAULT-RELATIVE (e.g. `wiki/broken.md`) — contract B.6 forbids leaking
-/// the host's absolute layout. `index.md` files at ANY depth are skipped:
-/// they are indexes, not notes. V7-archive caveat: pages in legacy archives
-/// outside the two scan roots are not walked at all — widen `scan_roots`
-/// only if a future spec says so.
+/// the host's absolute layout. The scan's contract is "reported iff
+/// `write_note` would refuse the file as `existing_unparsable:*`", so there
+/// is NO special-casing of `index.md`: a fenceless `index.md` is reported
+/// as `no_fence`, exactly as `write_note` would refuse it. V7-archive
+/// caveat: legacy `wiki/` pages written before frontmatter was mandatory
+/// carry no fences and WILL be listed as `no_fence` — that is accurate
+/// (write_note refuses them too); repair for those is manual. Pages in
+/// legacy archives outside the two scan roots are not walked at all —
+/// widen `scan_roots` only if a future spec says so.
 ///
 /// REPORT-ONLY: reads files, writes nothing.
 pub fn scan_unparsable_notes(vault_root: &Path) -> Vec<UnparsableNote> {
@@ -51,10 +56,9 @@ pub fn scan_unparsable_notes(vault_root: &Path) -> Vec<UnparsableNote> {
             if entry.path().extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
-            // `index.md` at any depth is an index page, not a note.
-            if entry.file_name() == "index.md" {
-                continue;
-            }
+            // NOTE: no `index.md` skip — the contract is "reported iff
+            // write_note would refuse", and write_note has no index.md
+            // restriction.
             let rel = entry
                 .path()
                 .strip_prefix(vault_root)
@@ -198,25 +202,30 @@ mod tests {
         );
     }
 
-    /// MINOR-3 (issue #231 review) — `index.md` at ANY depth under a scan
-    /// root is an index, not a note; it is skipped even when it has no
-    /// fence. Nested subdirectories still walk.
+    /// MINOR-2 (issue #231 review) — the index.md skip is DROPPED: the scan's
+    /// contract is "reported iff write_note would refuse", and write_note has
+    /// no index.md restriction. So a fenceless `index.md` at any depth is
+    /// REPORTED as `no_fence`, like any other fenceless `.md`. Nested
+    /// subdirectories still walk.
     #[test]
-    fn scan_skips_index_files_at_any_depth() {
+    fn scan_reports_fenceless_index_files_at_any_depth() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");
         let nested = wiki.join("sub").join("deeper");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(wiki.join("index.md"), "no fence at all\n").unwrap();
         std::fs::write(nested.join("index.md"), "no fence at all\n").unwrap();
-        // a regular note next to them must still be reported
+        // a clean note next to them must NOT be reported
         std::fs::write(
             wiki.join("real.md"),
-            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n",
+            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\n",
         )
         .unwrap();
         let hits = scan_unparsable_notes(tmp.path());
-        assert_eq!(hits.len(), 1, "got: {hits:?}");
-        assert_eq!(hits[0].path, "wiki/real.md");
+        assert_eq!(hits.len(), 2, "got: {hits:?}");
+        assert_eq!(hits[0].path, "wiki/index.md");
+        assert_eq!(hits[0].reason, "existing_unparsable:no_fence");
+        assert_eq!(hits[1].path, "wiki/sub/deeper/index.md");
+        assert_eq!(hits[1].reason, "existing_unparsable:no_fence");
     }
 }
