@@ -4,7 +4,8 @@
 #   (no arg = newest .deb in src-tauri/target/release/bundle/deb/)
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# NOTE: absolute path — when copied to ~/kv-script.sh, relative resolution would break.
+REPO_ROOT="/home/kv-thinkpad-t420-ubuntu/code/github/equationalapplications/curated-thoughts"
 DEB_DIRS=("$REPO_ROOT/target/release/bundle/deb" "$REPO_ROOT/src-tauri/target/release/bundle/deb")
 DEB="${1:-}"
 if [[ -z "$DEB" ]]; then
