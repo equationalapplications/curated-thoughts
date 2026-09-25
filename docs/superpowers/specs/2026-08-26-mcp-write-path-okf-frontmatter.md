@@ -110,8 +110,12 @@ crate::vault::safe_vault_path(vault_root, user_path, &["."], crate::vault::PathM
      the caller MUST supply `frontmatter.updated_at == X` (exact string match).
      Any mismatch or absence → `stale_update:{X}` (error carries the current token
      so the caller can re-read and retry).
-   - If target file exists but has no `updated_at` (legacy/bootstrap): accept the
-     write (no token to compare).
+   - If target file exists but has no `updated_at` (legacy/bootstrap): ~~accept the
+     write (no token to compare)~~ **[SUPERSEDED 2026-09-25, issue #231 amendment
+     below]**: such files are now REFUSED with
+     `invalid_frontmatter:existing_unparsable:no_token` — the tool never rewrites
+     a file it cannot token-verify. (Accept-on-missing-token allowed unverified
+     overwrites of files whose fence the caller may never have seen.)
    - New file: accept; `updated_at` optional on create.
    
    Rationale: this is a read-modify-write optimistic-lock token (If-Match/ETag
@@ -212,7 +216,9 @@ crate::vault::safe_vault_path(vault_root, user_path, &["."], crate::vault::PathM
 - D2 path safety: traversal (`../`), absolute, embedded `..`, symlink escape →
   all `path_outside_vault`.
 - D3 stale contract: token mismatch → `stale_update`; token match → ok;
-  bootstrap (no token in file) → ok; new file without `updated_at` → ok.
+  ~~bootstrap (no token in file) → ok~~ **[SUPERSEDED 2026-09-25: existing file
+  without `updated_at` → `invalid_frontmatter:existing_unparsable:no_token` —
+  see the B.3 amendment above]**; new file without `updated_at` → ok.
   **No `thread::sleep`, no future timestamps — the contract is content-based.**
 - D4 append: format exactness, blank-line separation, `appended: true`.
 - D5 replace: no duplicates after repeated upserts; prefix-collision case

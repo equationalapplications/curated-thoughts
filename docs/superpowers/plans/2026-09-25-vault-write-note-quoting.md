@@ -84,7 +84,7 @@ Add to the `mod tests` block in `src-tauri/src/okf/mod.rs`:
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cd src-tauri && cargo test test_note_needs_quoting test_quote_for_note 2>&1 | tail -20`
+Run: `cd src-tauri && cargo test 'quoting::' 2>&1 | tail -20` (one filter per invocation — cargo accepts a single TESTNAME; or run the two filters separately)
 Expected: COMPILE ERROR (`note_needs_quoting` / `quote_for_note` not found).
 
 - [ ] **Step 4: Implement the helpers**
@@ -165,7 +165,7 @@ pub(crate) fn quote_for_note(value: &str) -> String {
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd src-tauri && cargo test test_note_needs_quoting test_quote_for_note 2>&1 | tail -5`
+Run: `cd src-tauri && cargo test 'quoting::' 2>&1 | tail -5`
 Expected: 3 tests PASS (also run the full `cargo test` once — the shared `needs_quoting` visibility change must break nothing: `cargo test 2>&1 | tail -3`).
 
 - [ ] **Step 6: Commit**
@@ -238,7 +238,7 @@ Add to `mod tests` in `mod.rs`:
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cd src-tauri && cargo test test_render_frontmatter_title_quoted test_render_frontmatter_tags_always test_render_frontmatter_new_quote 2>&1 | tail -10`
+Run: `cd src-tauri && cargo test render_frontmatter 2>&1 | tail -10` (single filter covers all three pins)
 Expected: the first two FAIL (assertions on quoting behavior), `test_fm_with_title` undefined compile error may surface first — that is the expected red.
 
 - [ ] **Step 3: Implement in `render_frontmatter`**
@@ -505,7 +505,7 @@ Add to `mod tests` in `write.rs`:
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cd src-tauri && cargo test token_read enforce_staleness_reports 2>&1 | tail -10`
+Run: `cd src-tauri && cargo test token_read 2>&1 | tail -10` && `cd src-tauri && cargo test enforce_staleness_reports 2>&1 | tail -5`
 Expected: COMPILE ERROR (`read_existing_token`, `TokenReadError` not found).
 
 - [ ] **Step 3: Implement `read_existing_token`; rewire `enforce_staleness` + `prev_token`**
@@ -717,7 +717,8 @@ mod tests {
         // clean
         std::fs::write(
             wiki.join("clean.md"),
-            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Fine\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\nbody\n",
+            "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Fine\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\nbody\n",  # clean fixture MUST carry a token (no-token => reported as existing_unparsable:no_token — CodeRabbit catch)
+        # 
         ).unwrap();
         let hits = scan_unparsable_notes(tmp.path());
         assert_eq!(hits.len(), 1);
@@ -823,7 +824,7 @@ Fill each body following the `write_and_edit` helper pattern (create → read fi
 
 - [ ] **Step 2: Run to verify the suite fails or exposes real gaps**
 
-Run: `cd src-tauri && cargo test second_edit legacy_unquoted injection_titles differential adversarial_tags 2>&1 | tail -20`
+Run: `cd src-tauri && cargo test second_edit 2>&1 | tail -20` — then run each remaining filter as its own invocation (legacy_unquoted, injection_titles, differential, adversarial_tags)
 Expected: any failure here is a REAL defect in Tasks 1-4 — fix the implementation (never weaken these assertions), then re-run.
 
 - [ ] **Step 3: Full suite + clippy**
