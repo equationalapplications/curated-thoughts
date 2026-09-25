@@ -288,7 +288,7 @@ git commit -m "feat(okf): quote title/supersedes conditionally, tags always, in 
 
 **Interfaces:**
 - Consumes: `render_document` (write.rs:39), `parse_frontmatter` (`mod.rs:190`), `render_frontmatter` (Task 2 output).
-- Produces: `fn check_round_trip(fm: &OkfFrontmatter, doc: &str) -> Result<(), WriteNoteError>` (NOTE: arg order matches the shipped code; plan originally had the reverse — Opus nit) (private). `write_note` calls it before `safe_write_bytes` and returns its error unmapped. Task 7 relies on its injection rejection.
+- Produces: `fn check_round_trip(fm: &OkfFrontmatter, doc: &str) -> Result<(), WriteNoteError>` (private). `write_note` calls it before `safe_write_bytes` and returns its error unmapped. Task 7 relies on its injection rejection.
 
 - [ ] **Step 1: Write the failing tests**
 
