@@ -1,3 +1,9 @@
+## [2.16.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.16.0...v2.16.1) (2026-09-25)
+
+### Bug Fixes
+
+* **scripts:** install-ct.sh — absolute REPO_ROOT (relative resolution breaks when run from ~/kv-script.sh) ([fadfbb1](https://github.com/equationalapplications/curated-thoughts/commit/fadfbb143fc0224b44b3d1cd3e6d127b2bc2ab9d))
+
 ## [2.16.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.15.1...v2.16.0) (2026-09-25)
 
 ### Features
