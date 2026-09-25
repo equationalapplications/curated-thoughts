@@ -339,7 +339,22 @@ pub fn write_note(
         Err(e) => return Err(map_safe_err_note(e)),
     };
 
-    let existing = std::fs::read_to_string(&target).ok();
+    // Contract (spec v2 §B.2): never rewrite a file we cannot token-verify.
+    // - NotFound → create path (Ok).
+    // - Exists but not valid UTF-8 (InvalidData) → the bytes are unparsable
+    //   BY CONSTRUCTION; refuse with `existing_unparsable:parse` (the same
+    //   reason the repair scan reports it) instead of silently clobbering.
+    // - Any other read error → refuse as a write error.
+    let existing = match std::fs::read_to_string(&target) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(WriteNoteError::InvalidFrontmatter(
+                "existing_unparsable:parse".to_string(),
+            ));
+        }
+        Err(e) => return Err(WriteNoteError::WriteError(format!("write_error:{}", e))),
+    };
     enforce_staleness(existing.as_deref(), expected_updated_at)?;
 
     // Rotate the token on EVERY successful write. Floor: the previous file
@@ -796,6 +811,28 @@ mod tests {
             super::read_existing_token(doc),
             Err(super::TokenReadError::NoFence)
         ));
+    }
+
+    /// MAJOR-2 (issue #231 review) — a target file that exists but is NOT
+    /// valid UTF-8 must be REFUSED (`existing_unparsable:parse`), never
+    /// silently clobbered as a "create".
+    #[test]
+    fn write_refuses_non_utf8_existing_file_without_clobbering() {
+        let (_g, root) = vault();
+        let target = root.join("wiki/binary.md");
+        let original: &[u8] = b"---\r\n\xff\xfe not utf8 \x00---\r\ngarbage\r\n";
+        fs::write(&target, original).unwrap();
+        let err = write_note(&root, "wiki/binary.md", &fm("Clobber", None), "x\n", None)
+            .expect_err("non-UTF-8 target must be refused, not overwritten");
+        assert!(
+            matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if detail == "existing_unparsable:parse"),
+            "got: {err}"
+        );
+        assert_eq!(
+            fs::read(&target).unwrap().as_slice(),
+            original,
+            "refused write must leave the file byte-identical"
+        );
     }
 
     #[test]
@@ -1722,13 +1759,22 @@ mod tests {
         for (name, content, _) in cases {
             fs::write(root.join(name), content).unwrap();
         }
+        // MAJOR-2 — a non-UTF-8 file: the scan reports existing_unparsable:parse
+        // (its read_to_string arm) and the write path must refuse with the
+        // SAME reason instead of silently clobbering the bytes.
+        let binary_name = "wiki/binary.md";
+        fs::write(root.join(binary_name), b"\xff\xfe not utf8 \x00").unwrap();
         let hits = crate::okf::repair_scan::scan_unparsable_notes(&root);
-        assert_eq!(hits.len(), 4, "exactly the 4 broken notes: {hits:?}");
+        assert_eq!(hits.len(), 5, "exactly the 5 broken notes: {hits:?}");
         for hit in &hits {
-            let (name, _, reason) = cases
-                .iter()
-                .find(|(n, _, _)| hit.path.ends_with(n))
-                .unwrap_or_else(|| panic!("scan hit {} matches no case", hit.path));
+            let (name, _, reason) = if hit.path.ends_with("binary.md") {
+                (binary_name, "", "existing_unparsable:parse")
+            } else {
+                *cases
+                    .iter()
+                    .find(|(n, _, _)| hit.path.ends_with(n))
+                    .unwrap_or_else(|| panic!("scan hit {} matches no case", hit.path))
+            };
             assert_eq!(hit.reason, *reason, "scan vs contract for {name}");
             // The write path refuses an edit of the same note with the SAME
             // detail (staleness check hits the unreadable token first).
@@ -1741,7 +1787,7 @@ mod tests {
             )
             .expect_err("edit of unparsable note must be refused");
             assert!(
-                matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if detail == *reason),
+                matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if *detail == *reason),
                 "write path for {name}: expected {reason}, got {err}"
             );
         }
