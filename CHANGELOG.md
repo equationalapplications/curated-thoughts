@@ -1,3 +1,17 @@
+## [2.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.16.1...v2.17.0) (2026-09-25)
+
+### Features
+
+* **build:** beforeBundleCommand runs the sidecar guard before every bundle ([6cdbff4](https://github.com/equationalapplications/curated-thoughts/commit/6cdbff471eb380ee0c20a84e3ef6668e2925500d))
+* **scripts:** build-local-bundle.sh — CI sidecar recipe + guarded bundle in one command ([8697d09](https://github.com/equationalapplications/curated-thoughts/commit/8697d0963445184e9128feb52df3af791b86509f))
+* **scripts:** install-ct.sh refuses .debs with broken sidecars; error message points at the wrapper ([1a649c5](https://github.com/equationalapplications/curated-thoughts/commit/1a649c5eae9a807511c5c6397076429f23e5ebd6))
+* **scripts:** sidecar verifier — pure lib + thin CLI, fail-closed, vitest-covered ([fa485a7](https://github.com/equationalapplications/curated-thoughts/commit/fa485a7e55c7355613f7a4b32017d1be1acd44d0))
+
+### Bug Fixes
+
+* **scripts:** fstat the open handle instead of stat-then-open (CodeQL js/file-system-race, alert [#11](https://github.com/equationalapplications/curated-thoughts/issues/11)) ([5b80f13](https://github.com/equationalapplications/curated-thoughts/commit/5b80f13c396a69ecdbf50cf6e9b24e178cc5e28d))
+* **scripts:** platform-aware Fix line for Windows; CLI exit-code regression tests; docs Windows route (final-review m1/m3 + nits) ([3d03b8a](https://github.com/equationalapplications/curated-thoughts/commit/3d03b8a71e93429a5d1db30a722dad67a454e112))
+
 ## [2.16.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.16.0...v2.16.1) (2026-09-25)
 
 ### Bug Fixes
