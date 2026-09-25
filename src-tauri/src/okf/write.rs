@@ -287,6 +287,7 @@ pub fn write_note(
     }
 
     let document = render_document(&effective_fm, body);
+    check_round_trip(&effective_fm, &document)?;
 
     crate::vault::safe_write_bytes(&target, document.as_bytes())
         .map_err(|e| WriteNoteError::WriteError(format!("write_error:{}", e)))?;
@@ -310,6 +311,88 @@ fn map_safe_err_note(e: SafePathError) -> WriteNoteError {
         }
         SafePathError::Io(e) => WriteNoteError::WriteError(format!("write_error:{}", e)),
     }
+}
+
+/// Pre-write round-trip guard (issue #231): verify the rendered document's
+/// frontmatter fence parses back to exactly the effective frontmatter.
+///
+/// Two checks, both pre-`safe_write_bytes`:
+/// 1. Typed round-trip — `parse_frontmatter` on the fence body must equal the
+///    effective frontmatter, after normalizing `Some(vec![])` tags to `None`
+///    on BOTH sides (render drops empty tag lists; serde default reads the
+///    omission back as `None`).
+/// 2. Rendered key-set check — parse the fence into a raw
+///    `serde_yaml::Mapping` and require the key set to match the known
+///    frontmatter keys exactly. `OkfFrontmatter` has no `deny_unknown_fields`,
+///    so check 1 alone would silently drop unknown keys; this catches
+///    injected keys in the rendered output.
+///
+/// Any mismatch aborts the write with `WriteNoteError::InvalidFrontmatter`.
+fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(), WriteNoteError> {
+    // Strip the `---` fences: serde_yaml rejects multi-document input
+    // (same approach as the tests' `extract_fm` helper).
+    let mut lines = document.lines();
+    if lines.next() != Some("---") {
+        return Err(WriteNoteError::InvalidFrontmatter(
+            "round_trip: missing frontmatter fence".to_string(),
+        ));
+    }
+    let fenced: String = lines
+        .take_while(|l| l != &"---")
+        .fold(String::new(), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+
+    // Check 2 — rendered key set must match the known key set exactly
+    // (catches unknown-key injection the typed struct silently drops).
+    let parsed_yaml: serde_yaml::Value = serde_yaml::from_str(&fenced).map_err(|e| {
+        WriteNoteError::InvalidFrontmatter(format!("round_trip: yaml parse failed: {}", e))
+    })?;
+    let rendered_keys = parsed_yaml
+        .as_mapping()
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let known_keys = [
+        "okf_version",
+        "profile",
+        "title",
+        "entity_type",
+        "tags",
+        "created_at",
+        "updated_at",
+        "supersedes",
+    ];
+    for key in &rendered_keys {
+        if !known_keys.contains(&key.as_str()) {
+            return Err(WriteNoteError::InvalidFrontmatter(format!(
+                "round_trip: unknown frontmatter key in rendered output: {}",
+                key
+            )));
+        }
+    }
+
+    // Check 1 — typed round-trip with empty-tags normalization on both sides.
+    let mut parsed = parse_frontmatter(&fenced)
+        .map_err(|e| WriteNoteError::InvalidFrontmatter(format!("round_trip: {}", e)))?;
+    if parsed.tags.as_ref().is_some_and(|t| t.is_empty()) {
+        parsed.tags = None;
+    }
+    let mut expected = effective_fm.clone();
+    if expected.tags.as_ref().is_some_and(|t| t.is_empty()) {
+        expected.tags = None;
+    }
+    if parsed != expected {
+        return Err(WriteNoteError::InvalidFrontmatter(
+            "round_trip: parsed frontmatter does not match effective frontmatter".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate an index entry name (pinned error: `invalid_entry_name`).
@@ -1008,6 +1091,52 @@ mod tests {
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
         let err = write_note(&root, "wiki/w.md", &m, "x\n", None).unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
+    }
+
+    /// T3.1 — round-trip guard: a valid note passes the guard unchanged.
+    #[test]
+    fn t3_roundtrip_guard_valid_note_passes() {
+        let (_g, root) = vault();
+        let result = write_note(&root, "wiki/t3-a.md", &fm("T3 Note", None), "x\n", None);
+        assert!(
+            result.is_ok(),
+            "valid note must pass round-trip guard: {:?}",
+            result.err()
+        );
+    }
+
+    /// T3.2 — round-trip guard: `tags: Some(vec![])` passes. render drops the
+    /// empty list; serde default reads the omission back as None — normalize
+    /// both sides before comparing.
+    #[test]
+    fn t3_roundtrip_guard_empty_tags_normalizes() {
+        let (_g, root) = vault();
+        let mut m = fm("T3 Empty Tags", None);
+        m.tags = Some(vec![]);
+        let result = write_note(&root, "wiki/t3-b.md", &m, "x\n", None);
+        assert!(
+            result.is_ok(),
+            "Some(vec![]) tags must normalize to None and pass: {:?}",
+            result.err()
+        );
+    }
+
+    /// T3.3 — round-trip guard: unknown keys that would be injected into the
+    /// rendered fence (the typed struct has no deny_unknown_fields, so parse
+    /// alone would silently drop them) must be rejected by the key-set check.
+    #[test]
+    fn t3_roundtrip_guard_rejects_unknown_keys() {
+        // Force the guard by monkey-patching the renderer is impossible from a
+        // unit test, so exercise the guard helper directly (it is the unit the
+        // plan specifies); write_note() composes it pre-write.
+        let m = fm("T3 Injected", None);
+        let mut rendered = render_frontmatter(&m);
+        rendered.insert_str(rendered.len() - 1, "injected_key: pwned\n");
+        let err = check_round_trip(&m, &rendered).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("unknown frontmatter key")),
+            "got: {err:?}"
+        );
     }
 
     /// Parse a rendered document's frontmatter block.

@@ -163,8 +163,10 @@ pub fn sha256_hash(s: &str) -> String {
 /// reader rejects outright (C0, DEL, other C1, U+FFFE/U+FFFF).
 fn has_escape_set_char(value: &str) -> bool {
     value.chars().any(|c| {
-        matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{FFFE}' | '\u{FFFF}')
-            || c.is_control()
+        matches!(
+            c,
+            '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{FFFE}' | '\u{FFFF}'
+        ) || c.is_control()
             || c == '\u{7F}'
             || ('\u{80}'..='\u{9F}').contains(&c)
     })
@@ -176,8 +178,7 @@ fn has_escape_set_char(value: &str) -> bool {
 /// reads `title: -` as a block sequence).
 fn lone_indicator_start(value: &str) -> bool {
     let mut chars = value.chars();
-    matches!(chars.next(), Some('-' | '?' | ':'))
-        && matches!(chars.next(), None | Some(' '))
+    matches!(chars.next(), Some('-' | '?' | ':')) && matches!(chars.next(), None | Some(' '))
 }
 
 /// Write-path quoting predicate for `title` and `supersedes`.
@@ -277,6 +278,23 @@ pub fn parse_frontmatter(yaml: &str) -> Result<OkfFrontmatter, String> {
 // temp+rename, whole-line entry matching. Thin adapters live in `lib.rs`
 // (Tauri commands) and `tool_dispatch.rs` (MCP dispatch).
 
+/// Crate-visible test fixture: a minimal valid frontmatter with the given
+/// title. Lives OUTSIDE `mod tests` so sibling modules' test blocks
+/// (okf/write.rs) can `use super::super::test_fm_with_title`.
+#[cfg(test)]
+pub(crate) fn test_fm_with_title(title: &str) -> OkfFrontmatter {
+    OkfFrontmatter {
+        okf_version: "0.1".to_string(),
+        profile: "llm-wiki/1".to_string(),
+        title: title.to_string(),
+        entity_type: EntityType::Fact,
+        tags: None,
+        created_at: "2026-09-25T00:00:00Z".to_string(),
+        updated_at: None,
+        supersedes: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,8 +308,8 @@ mod tests {
         assert!(note_needs_quoting("Deploy: retro"));
         assert!(note_needs_quoting("C# tips"));
         assert!(note_needs_quoting("Plan\u{2028}B")); // escape-set char only
-        assert!(note_needs_quoting("-"));  // lone leading indicator
-        assert!(note_needs_quoting("?"));  // lone leading indicator
+        assert!(note_needs_quoting("-")); // lone leading indicator
+        assert!(note_needs_quoting("?")); // lone leading indicator
         assert!(note_needs_quoting("*foo")); // shared needs_quoting covers
         assert!(note_needs_quoting("[WIP] retry"));
         assert!(note_needs_quoting("2024")); // reserved/number-like via shared
@@ -336,30 +354,29 @@ mod tests {
         let doc = render_frontmatter(&fm);
         // ALWAYS quoted (escaper runs even on clean tags — preserves the
         // existing quoted shape) — byte-compatible with mod.rs:392 pin:
-        assert!(doc.contains("tags: [\"say \\\"hi\\\"\", \"ok-tag\"]\n"), "got: {doc}");
+        assert!(
+            doc.contains("tags: [\"say \\\"hi\\\"\", \"ok-tag\"]\n"),
+            "got: {doc}"
+        );
     }
 
     #[test]
     fn test_render_frontmatter_new_quote_pins() {
         // Titles containing ':'/'#' anywhere gain quotes on the next write —
         // parse-equivalent, bytes change (accepted, spec §Design.1).
-        for t in ["C# tips", "https://example.com", "Ratio 3:1", "2024", "yes",
-                  "2026-09-25T14:00:00Z: deploy retro"] {
+        for t in [
+            "C# tips",
+            "https://example.com",
+            "Ratio 3:1",
+            "2024",
+            "yes",
+            "2026-09-25T14:00:00Z: deploy retro",
+        ] {
             let doc = render_frontmatter(&test_fm_with_title(t));
-            assert!(doc.contains(&format!("title: \"{}\"\n", t)), "{t}: got {doc}");
-        }
-    }
-
-    fn test_fm_with_title(title: &str) -> OkfFrontmatter {
-        OkfFrontmatter {
-            okf_version: "0.1".to_string(),
-            profile: "llm-wiki/1".to_string(),
-            title: title.to_string(),
-            entity_type: EntityType::Fact,
-            tags: None,
-            created_at: "2026-09-25T00:00:00Z".to_string(),
-            updated_at: None,
-            supersedes: None,
+            assert!(
+                doc.contains(&format!("title: \"{}\"\n", t)),
+                "{t}: got {doc}"
+            );
         }
     }
 
