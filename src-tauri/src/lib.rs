@@ -894,6 +894,26 @@ fn vault_write_note(
     .map_err(|e| e.to_string())
 }
 
+/// Report-only diagnostic: list notes under `wiki/` and
+/// `immutable-source-files/agents/` whose frontmatter fails the strict parse
+/// (the future `existing_unparsable` clients). NEVER modifies any file.
+#[tauri::command]
+async fn scan_unparsable_notes(
+    vault_root_state: State<'_, VaultConfigState>,
+) -> Result<Vec<okf::repair_scan::UnparsableNote>, String> {
+    // Async per Tauri conventions: `spawn_blocking` keeps the recursive
+    // directory walk (blocking filesystem I/O, potentially thousands of
+    // entries) OFF the async executor thread so it never stalls other
+    // commands on the same runtime.
+    let vault_root = vault_root_from_state(&vault_root_state)?;
+    let hits =
+        tokio::task::spawn_blocking(move || okf::repair_scan::scan_unparsable_notes(&vault_root))
+            .await
+            .map_err(|e| format!("scan_unparsable_notes join error: {e}"))?;
+    tracing::info!("scan_unparsable_notes: {} unparsable note(s)", hits.len());
+    Ok(hits)
+}
+
 #[tauri::command]
 fn vault_upsert_index_entry(
     vault_root_state: State<VaultConfigState>,
@@ -3900,6 +3920,7 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             commands::chunks::fetch_chunk_content,
             needs_chunk_hash_migration,
             vault_write_note,
+            scan_unparsable_notes,
             vault_upsert_index_entry,
             get_ontology_selection,
             set_ontology_selection,
@@ -4465,6 +4486,7 @@ pub fn run() {
             peek_pending_config_malformed,
             ack_pending_config_malformed,
             vault_write_note,
+            scan_unparsable_notes,
             vault_upsert_index_entry,
             record_wiki_diagnostic,
             get_wiki_status,

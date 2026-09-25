@@ -16,6 +16,12 @@
 //! - Errors use the pinned string shapes: `path_outside_vault`,
 //!   `invalid_frontmatter:{detail}`, `stale_update:{current}`,
 //!   `index_not_found:{path}`, `invalid_entry_name`, `write_error:{io}`.
+//!   When the EXISTING file's frontmatter cannot be read for the If-Match
+//!   check, the write is refused with `invalid_frontmatter:existing_unparsable:{parse|no_fence|no_token}`
+//!   (`parse` = duplicate/malformed token, `no_fence` = no frontmatter fence,
+//!   `no_token` = fence with no `updated_at`). No-fence/no-token notes stay
+//!   permanently refused over MCP — use the report-only repair scan to find
+//!   them; the tool never rewrites a file it cannot token-verify.
 
 use std::path::{Component, Path};
 
@@ -47,25 +53,109 @@ fn render_document(frontmatter: &OkfFrontmatter, body: &str) -> String {
     doc
 }
 
-/// Extract the `updated_at` token from an existing document's frontmatter.
+/// Why an existing note's If-Match token could not be read.
+#[derive(Debug)]
+pub(crate) enum TokenReadError {
+    /// No `---` fence found within the 64-line collection cap.
+    NoFence,
+    /// Fence found but no usable `updated_at:` token line.
+    NoToken,
+    /// Duplicate `updated_at:` lines or a non-RFC-3339 value.
+    Unparsable,
+}
+
+impl std::fmt::Display for TokenReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TokenReadError::NoFence => "no_fence",
+            TokenReadError::NoToken => "no_token",
+            TokenReadError::Unparsable => "parse",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// Read the If-Match token from an existing document.
 ///
-/// Returns `None` for absent files' content distinctions being made by the
-/// caller: malformed / unparsable frontmatter yields `None`, which the caller
-/// treats as "no usable token present".
-fn extract_updated_at(existing_content: &str) -> Option<String> {
-    let mut lines = existing_content.lines();
-    if lines.next()? != "---" {
+/// The frontmatter fence is collected EXACTLY ONCE (a `lines()` loop with the
+/// `take(64)` cap — `str::lines()` strips `\r`, so CRLF notes work) and that
+/// ONE buffer feeds BOTH the strict parse and the tolerant fallback, so the
+/// two paths can never see different fences. The closing fence must be the
+/// EXACT line `---` (`----` or `---foo` is content, not a fence).
+///
+/// Strict parse FIRST (so hand-edited values like `updated_at: X # note`
+/// behave exactly as today); only on failure, a tolerant line-scan with all
+/// of: same fence collection incl. the `lines.take(64)` cap; `updated_at:`
+/// at column 0; exactly one occurrence; quotes stripped; RFC 3339 required.
+/// ONE function serves enforce_staleness AND prev_token so the two can
+/// never disagree (differential test in Task 7).
+pub(crate) fn read_existing_token(content: &str) -> Result<String, TokenReadError> {
+    let Some(inner) = collect_frontmatter_fence(content) else {
+        return Err(TokenReadError::NoFence);
+    };
+    if let Ok(fm) = crate::okf::parse_frontmatter(&inner) {
+        if let Some(token) = fm.updated_at {
+            return Ok(token);
+        }
+        return Err(TokenReadError::NoToken);
+    }
+    // Tolerant fallback (issue #231 healing path) over the SAME buffer the
+    // strict parse saw.
+    let mut hits: Vec<&str> = Vec::new();
+    for line in inner.lines() {
+        if let Some(rest) = line.strip_prefix("updated_at:") {
+            hits.push(rest.trim());
+        }
+    }
+    if hits.len() != 1 {
+        return Err(if hits.is_empty() {
+            TokenReadError::NoToken
+        } else {
+            TokenReadError::Unparsable // duplicates: refuse to pick
+        });
+    }
+    let raw = hits[0].trim();
+    let unquoted = raw
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or(raw);
+    chrono::DateTime::parse_from_rfc3339(unquoted)
+        .map(|_| unquoted.to_string())
+        .map_err(|_| TokenReadError::Unparsable)
+}
+
+/// Collect the text between the opening `---` line and the closing `---`
+/// line of a document's frontmatter, or `None` if either fence is missing
+/// within the 64-line cap. `str::lines()` handles `\r\n` line endings
+/// (it strips a trailing `\r`), so CRLF notes collect identically to LF
+/// notes; the closing fence must be the EXACT line `---`.
+///
+/// The `take(64)` cap is INTENTIONAL and applies to BOTH paths: the guard in
+/// `check_round_trip` and the token reader share this one fence view, so a
+/// fence that never closes within 64 frontmatter lines is "no fence"
+/// everywhere (`existing_unparsable:no_fence`), never a partial parse.
+fn collect_frontmatter_fence(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next() != Some("---") {
         return None;
     }
-    let mut fenced = String::new();
+    let mut closed = false;
+    let mut inner = String::new();
     for line in lines.take(64) {
         if line == "---" {
-            return parse_frontmatter(&fenced).ok()?.updated_at;
+            closed = true;
+            break;
         }
-        fenced.push_str(line);
-        fenced.push('\n');
+        inner.push_str(line);
+        inner.push('\n');
     }
-    None
+    if !closed {
+        // Same take(64) cap for both paths: no closing fence within the cap
+        // is "no fence".
+        return None;
+    }
+    Some(inner)
 }
 
 /// Enforce If-Match staleness on the existing file's `updated_at` token.
@@ -83,17 +173,13 @@ fn enforce_staleness(
     let Some(content) = existing_content else {
         return Ok(()); // create path — nothing to be stale against
     };
-    let current = extract_updated_at(content);
-    let matches_current = match (&current, expected_updated_at) {
-        (Some(current), Some(expected)) => current == expected,
-        _ => false, // missing token on either side ⇒ cannot prove freshness
-    };
-    if matches_current {
-        Ok(())
-    } else {
-        Err(WriteNoteError::StaleUpdate {
-            updated_at: current.unwrap_or_default(),
-        })
+    let current = read_existing_token(content)
+        .map_err(|e| WriteNoteError::InvalidFrontmatter(format!("existing_unparsable:{}", e)))?;
+    match expected_updated_at {
+        Some(expected) if expected == current => Ok(()),
+        _ => Err(WriteNoteError::StaleUpdate {
+            updated_at: current,
+        }),
     }
 }
 
@@ -258,13 +344,30 @@ pub fn write_note(
         Err(e) => return Err(map_safe_err_note(e)),
     };
 
-    let existing = std::fs::read_to_string(&target).ok();
+    // Contract (spec v2 §B.2): never rewrite a file we cannot token-verify.
+    // - NotFound → create path (Ok).
+    // - Exists but not valid UTF-8 (InvalidData) → the bytes are unparsable
+    //   BY CONSTRUCTION; refuse with `existing_unparsable:parse` (the same
+    //   reason the repair scan reports it) instead of silently clobbering.
+    // - Any other read error → refuse as a write error.
+    let existing = match std::fs::read_to_string(&target) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(WriteNoteError::InvalidFrontmatter(
+                "existing_unparsable:parse".to_string(),
+            ));
+        }
+        Err(e) => return Err(WriteNoteError::WriteError(format!("write_error:{}", e))),
+    };
     enforce_staleness(existing.as_deref(), expected_updated_at)?;
 
     // Rotate the token on EVERY successful write. Floor: the previous file
     // token, so the successor is always strictly newer even when both calls
     // land inside the same millisecond — a reused token can never verify.
-    let prev_token = existing.as_deref().and_then(extract_updated_at);
+    let prev_token = existing
+        .as_deref()
+        .and_then(|c| read_existing_token(c).ok());
     let now = chrono::Utc::now();
     let mut fresh = now.to_rfc3339_opts(SecondsFormat::Millis, true);
     if let Some(prev) = prev_token
@@ -279,7 +382,7 @@ pub fn write_note(
         }
     }
     let mut effective_fm = frontmatter.clone();
-    effective_fm.updated_at = Some(fresh);
+    effective_fm.updated_at = Some(fresh.clone());
     if effective_fm.created_at.trim().is_empty() && existing.is_none() {
         return Err(WriteNoteError::InvalidFrontmatter(
             "created_at is required on create".to_string(),
@@ -287,6 +390,7 @@ pub fn write_note(
     }
 
     let document = render_document(&effective_fm, body);
+    check_round_trip(&effective_fm, &document)?;
 
     crate::vault::safe_write_bytes(&target, document.as_bytes())
         .map_err(|e| WriteNoteError::WriteError(format!("write_error:{}", e)))?;
@@ -295,6 +399,7 @@ pub fn write_note(
         success: true,
         path: path.to_string(),
         sha256: sha256_hash(&document),
+        updated_at: fresh,
     })
 }
 
@@ -310,6 +415,131 @@ fn map_safe_err_note(e: SafePathError) -> WriteNoteError {
         }
         SafePathError::Io(e) => WriteNoteError::WriteError(format!("write_error:{}", e)),
     }
+}
+
+/// Pre-write round-trip guard (issue #231): verify the rendered document's
+/// frontmatter fence parses back to exactly the effective frontmatter.
+///
+/// Two checks, both pre-`safe_write_bytes`:
+/// 1. Typed round-trip — `parse_frontmatter` on the fence body must equal the
+///    effective frontmatter, after normalizing `Some(vec![])` tags to `None`
+///    on BOTH sides (render drops empty tag lists; serde default reads the
+///    omission back as `None`).
+/// 2. Rendered key-set check — parse the fence into a raw
+///    `serde_yaml::Mapping` and require the key set to match the known
+///    frontmatter keys exactly. `OkfFrontmatter` has no `deny_unknown_fields`,
+///    so check 1 alone would silently drop unknown keys; this catches
+///    injected keys in the rendered output.
+/// 3. Editability check — `read_existing_token` on the WHOLE document must
+///    succeed, so a note that renders to something its own token reader
+///    cannot read back is refused pre-write rather than bricking the file.
+///    The fence view is collected with the same `collect_frontmatter_fence`
+///    helper (incl. the 64-line cap) the token reader uses.
+///
+/// Any mismatch aborts the write with `WriteNoteError::InvalidFrontmatter`.
+fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(), WriteNoteError> {
+    // Fence-view parity (issue #231 review): collect the fence with the SAME
+    // helper the token reader uses — `take(64)` cap, exact `---` closing
+    // line, CRLF via `lines()` — so the guard can never accept a fence view
+    // that a later `read_existing_token` would disagree with.
+    let fenced = collect_frontmatter_fence(document).ok_or_else(|| {
+        // Same condition the token reader maps to NoFence, same error string:
+        // one fence condition, one contract error on both call sites.
+        WriteNoteError::InvalidFrontmatter("existing_unparsable:no_fence".to_string())
+    })?;
+
+    // Check 2 — rendered key set must EQUAL the known key set exactly
+    // (catches unknown-key injection the typed struct silently drops, AND
+    // missing keys from a tampered render). Any rendered key that is not a
+    // string (e.g. `1: x` parses an integer key) is rejected outright — the
+    // renderer only ever emits string keys, so a non-string key is injection.
+    let parsed_yaml: serde_yaml::Value = serde_yaml::from_str(&fenced).map_err(|e| {
+        WriteNoteError::InvalidFrontmatter(format!("round_trip: yaml parse failed: {}", e))
+    })?;
+    let mapping = parsed_yaml.as_mapping().ok_or_else(|| {
+        WriteNoteError::InvalidFrontmatter(
+            "round_trip: rendered frontmatter is not a mapping".to_string(),
+        )
+    })?;
+    let mut rendered_keys: Vec<String> = Vec::with_capacity(mapping.len());
+    for key in mapping.keys() {
+        let Some(key_str) = key.as_str() else {
+            return Err(WriteNoteError::InvalidFrontmatter(format!(
+                "round_trip: non-string frontmatter key in rendered output: {key:?}"
+            )));
+        };
+        rendered_keys.push(key_str.to_string());
+    }
+    rendered_keys.sort();
+    // Pre-sorted ascending (issue #231 review bonus): the exact-set zip below
+    // compares against this order directly, so the literal must never be
+    // reshuffled without keeping it sorted.
+    const KNOWN_KEYS: [&str; 8] = [
+        "created_at",
+        "entity_type",
+        "okf_version",
+        "profile",
+        "supersedes",
+        "tags",
+        "title",
+        "updated_at",
+    ];
+    let known_sorted: &[&str] = &KNOWN_KEYS;
+    // Both directions: no unknown key, no missing key (exact set equality;
+    // serde skips `tags`/`updated_at`/`supersedes` when absent, so normalize
+    // the expected set the same way the renderer does).
+    let expected_keys: Vec<&str> = known_sorted
+        .iter()
+        .copied()
+        .filter(|k| {
+            !((*k == "tags" && effective_fm.tags.as_ref().is_none_or(|t| t.is_empty()))
+                || (*k == "updated_at" && effective_fm.updated_at.is_none())
+                || (*k == "supersedes" && effective_fm.supersedes.is_none()))
+        })
+        .collect();
+    if rendered_keys.len() != expected_keys.len()
+        || rendered_keys
+            .iter()
+            .zip(expected_keys.iter())
+            .any(|(a, b)| a != b)
+    {
+        return Err(WriteNoteError::InvalidFrontmatter(format!(
+            "round_trip: key set mismatch — expected: {expected_keys:?}, got: {rendered_keys:?}"
+        )));
+    }
+
+    // Hardening (issue #231 review): the note we are about to write MUST be
+    // readable back by the SAME token reader the next edit will use, to the
+    // SAME token. With shared fence views this is unreachable when checks
+    // 1–2 pass (defense-in-depth pinning the invariant), but a future edit
+    // that breaks parity fails here instead of bricking the file.
+    let read_back = read_existing_token(document).map_err(|e| {
+        WriteNoteError::InvalidFrontmatter(format!(
+            "round_trip: written note would be uneditable: {e}"
+        ))
+    })?;
+    if Some(&read_back) != effective_fm.updated_at.as_ref() {
+        return Err(WriteNoteError::InvalidFrontmatter(
+            "round_trip: written note would be uneditable: token mismatch".to_string(),
+        ));
+    }
+
+    // Check 1 — typed round-trip with empty-tags normalization on both sides.
+    let mut parsed = parse_frontmatter(&fenced)
+        .map_err(|e| WriteNoteError::InvalidFrontmatter(format!("round_trip: {}", e)))?;
+    if parsed.tags.as_ref().is_some_and(|t| t.is_empty()) {
+        parsed.tags = None;
+    }
+    let mut expected = effective_fm.clone();
+    if expected.tags.as_ref().is_some_and(|t| t.is_empty()) {
+        expected.tags = None;
+    }
+    if parsed != expected {
+        return Err(WriteNoteError::InvalidFrontmatter(
+            "round_trip: parsed frontmatter does not match effective frontmatter".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate an index entry name (pinned error: `invalid_entry_name`).
@@ -505,6 +735,211 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn token_read_strict_parse_wins_on_clean_fence() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z # trailing comment\n---\n";
+        // Hand-edited trailing comment: strict parser yields the bare value.
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    #[test]
+    fn token_read_tolerant_recovers_from_broken_colon_title() {
+        // The issue-#231 shape: unquoted colon title breaks the strict parse.
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Deploy: retro\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\n";
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    #[test]
+    fn token_read_tolerant_rejects_duplicate_or_noncol0_or_bad_rfc3339() {
+        let base = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n";
+        // duplicate updated_at lines
+        assert!(matches!(
+            super::read_existing_token(&format!(
+                "{base}updated_at: 2026-09-25T01:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\n"
+            )),
+            Err(super::TokenReadError::Unparsable)
+        ));
+        // key not at column 0
+        assert!(matches!(
+            super::read_existing_token(&format!("{base}  updated_at: 2026-09-25T01:00:00Z\n---\n")),
+            Err(super::TokenReadError::NoToken)
+        ));
+        // value not RFC 3339
+        assert!(matches!(
+            super::read_existing_token(&format!("{base}updated_at: not-a-date\n---\n")),
+            Err(super::TokenReadError::Unparsable)
+        ));
+        // no fence at all
+        assert!(matches!(
+            super::read_existing_token("just some text\n"),
+            Err(super::TokenReadError::NoFence)
+        ));
+    }
+
+    #[test]
+    fn token_read_tolerant_obeys_64_line_cap() {
+        // Same take(64) cap as the fence collector (write.rs:61): a closing
+        // fence beyond 64 lines is treated exactly like the strict path —
+        // no fence ⇒ NoFence.
+        let mut doc = String::from("---\ntitle: a: b\n");
+        for i in 0..70 {
+            doc.push_str(&format!("k{i}: v{i}\n"));
+        }
+        doc.push_str("---\n");
+        assert!(matches!(
+            super::read_existing_token(&doc),
+            Err(super::TokenReadError::NoFence)
+        ));
+    }
+
+    /// MAJOR-1 (issue #231 review) — CRLF fixtures must read their token on
+    /// the STRICT path (clean fence, CRLF line endings). The pre-review code
+    /// used `strip_prefix("---\n")` and turned `---\r\n` into NoFence.
+    #[test]
+    fn token_read_crlf_fence_strict_path() {
+        let doc = "---\r\nokf_version: 0.1\r\nprofile: llm-wiki/1\r\ntitle: T\r\nentity_type: fact\r\ncreated_at: 2026-09-25T00:00:00Z\r\nupdated_at: 2026-09-25T01:00:00Z\r\n---\r\nbody\r\n";
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    /// MAJOR-1 — CRLF fixtures must ALSO read their token on the tolerant
+    /// fallback path (the issue-#231 colon-title shape, CRLF line endings).
+    #[test]
+    fn token_read_crlf_fence_tolerant_path() {
+        let doc = "---\r\nokf_version: 0.1\r\nprofile: llm-wiki/1\r\ntitle: Deploy: retro\r\nentity_type: fact\r\ncreated_at: 2026-09-25T00:00:00Z\r\nupdated_at: 2026-09-25T01:00:00Z\r\n---\r\nbody\r\n";
+        assert_eq!(
+            super::read_existing_token(doc).unwrap(),
+            "2026-09-25T01:00:00Z"
+        );
+    }
+
+    /// MAJOR-1 — a CRLF note on disk must remain EDITABLE through
+    /// `write_note`: scrape the token from the CRLF file and edit again.
+    #[test]
+    fn crlf_note_remains_editable_through_write_note() {
+        let (_g, root) = vault();
+        let create = write_note(&root, "wiki/crlf.md", &fm("CRLF Note", None), "v1\n", None)
+            .expect("create succeeds");
+        let lf = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
+        let crlf = lf.replace('\n', "\r\n");
+        assert_ne!(lf, crlf, "fixture must actually be CRLF");
+        fs::write(root.join("wiki/crlf.md"), &crlf).unwrap();
+        let on_disk = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
+        let token = read_existing_token(&on_disk).expect("CRLF token readable");
+        assert_eq!(token, create.updated_at);
+        let edit = write_note(
+            &root,
+            "wiki/crlf.md",
+            &fm("CRLF Note", None),
+            "v2\n",
+            Some(&token),
+        );
+        assert!(
+            edit.is_ok(),
+            "CRLF note must stay editable: {:?}",
+            edit.err()
+        );
+    }
+
+    /// MAJOR-1 (doc contradiction) — the collected-fence close requires the
+    /// EXACT line `---`; a `----` rule-off line is NOT a closing fence
+    /// (the old `split_once("\n---")` matched it, and paths then disagreed).
+    #[test]
+    fn fence_close_requires_exact_dashes() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n----\n";
+        assert!(matches!(
+            super::read_existing_token(doc),
+            Err(super::TokenReadError::NoFence)
+        ));
+    }
+
+    /// MAJOR-2 (issue #231 review) — a target file that exists but is NOT
+    /// valid UTF-8 must be REFUSED (`existing_unparsable:parse`), never
+    /// silently clobbered as a "create".
+    #[test]
+    fn write_refuses_non_utf8_existing_file_without_clobbering() {
+        let (_g, root) = vault();
+        let target = root.join("wiki/binary.md");
+        let original: &[u8] = b"---\r\n\xff\xfe not utf8 \x00---\r\ngarbage\r\n";
+        fs::write(&target, original).unwrap();
+        let err = write_note(&root, "wiki/binary.md", &fm("Clobber", None), "x\n", None)
+            .expect_err("non-UTF-8 target must be refused, not overwritten");
+        assert!(
+            matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if detail == "existing_unparsable:parse"),
+            "got: {err}"
+        );
+        assert_eq!(
+            fs::read(&target).unwrap().as_slice(),
+            original,
+            "refused write must leave the file byte-identical"
+        );
+    }
+
+    #[test]
+    fn enforce_staleness_reports_unparsable_not_stale() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n";
+        let err = super::enforce_staleness(Some(doc), Some("2026-09-25T01:00:00Z")).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                WriteNoteError::InvalidFrontmatter(detail) if detail == "existing_unparsable:no_token"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Task 5 — the three existing-unparsable reasons are distinguishable.
+    #[test]
+    fn existing_unparsable_reasons_are_distinguishable() {
+        // parse: strict parse fails (colon title), tolerant finds ONE
+        // updated_at line whose value is not RFC 3339.
+        let parse_doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: not-a-timestamp\n---\n";
+        // no_token: clean fence, parses, but no updated_at line at all.
+        let no_token_doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\n";
+        // no_fence: no frontmatter fence within the cap.
+        let no_fence_doc = "just prose, no fences\n";
+
+        for (doc, reason) in [
+            (parse_doc, "existing_unparsable:parse"),
+            (no_token_doc, "existing_unparsable:no_token"),
+            (no_fence_doc, "existing_unparsable:no_fence"),
+        ] {
+            let err = super::enforce_staleness(Some(doc), Some("2026-09-25T01:00:00Z"))
+                .expect_err("must be refused");
+            assert!(
+                matches!(
+                    &err,
+                    WriteNoteError::InvalidFrontmatter(detail) if detail == reason
+                ),
+                "expected {reason}, got: {err}"
+            );
+        }
+    }
+
+    /// Task 5 — stale edit against a fence the strict parser rejects still
+    /// returns StaleUpdate carrying the TOLERANT-read current token
+    /// (quote-stripped, RFC 3339).
+    #[test]
+    fn stale_carries_tolerant_read_current_token() {
+        let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: \"2026-09-25T01:00:00Z\"\n---\n";
+        let err = super::enforce_staleness(Some(doc), Some("1999-01-01T00:00:00Z")).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                WriteNoteError::StaleUpdate { updated_at } if updated_at == "2026-09-25T01:00:00Z"
+            ),
+            "got: {err}"
+        );
+    }
+
     fn vault() -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
@@ -539,11 +974,29 @@ mod tests {
         .unwrap();
         assert_eq!(result.path, "wiki/test-note.md");
         assert!(result.success);
+        // Task 5: the result carries the fresh token written into the file.
+        chrono::DateTime::parse_from_rfc3339(&result.updated_at).unwrap();
         let content = fs::read_to_string(root.join("wiki/test-note.md")).unwrap();
         assert!(content.starts_with("---\nokf_version: 0.1\n"));
         assert!(content.contains("updated_at: 20"));
         assert!(content.ends_with("Second.\n"));
         assert_eq!(result.sha256, sha256_hash(&content));
+        assert_eq!(
+            result.updated_at,
+            read_existing_token(&content).unwrap(),
+            "result token must equal the token stored in the file"
+        );
+    }
+
+    /// Task 5 — the success result's `updated_at` is the NEW post-write
+    /// token: parseable RFC 3339 and non-empty (rotation checked in d2).
+    #[test]
+    fn write_note_result_carries_fresh_token() {
+        let (_g, root) = vault();
+        let result = write_note(&root, "wiki/tok.md", &fm("T", None), "x\n", None).unwrap();
+        assert!(result.success);
+        assert!(!result.updated_at.is_empty());
+        chrono::DateTime::parse_from_rfc3339(&result.updated_at).unwrap();
     }
 
     /// D2 — stale edit without token is refused; token must exact-match.
@@ -552,7 +1005,7 @@ mod tests {
         let (_g, root) = vault();
         write_note(&root, "wiki/n.md", &fm("T", None), "v1\n", None).unwrap();
         let current =
-            extract_updated_at(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
+            read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
 
         // No token → refused (cannot prove freshness).
         let err = write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", None).unwrap_err();
@@ -576,7 +1029,7 @@ mod tests {
         // Correct token → succeeds, token rotates.
         write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", Some(&current)).unwrap();
         let bumped =
-            extract_updated_at(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
+            read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
         assert_ne!(current, bumped);
     }
 
@@ -1008,6 +1461,482 @@ mod tests {
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
         let err = write_note(&root, "wiki/w.md", &m, "x\n", None).unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
+    }
+
+    /// T3.1 — round-trip guard: a valid note passes the guard unchanged.
+    #[test]
+    fn t3_roundtrip_guard_valid_note_passes() {
+        let (_g, root) = vault();
+        let result = write_note(&root, "wiki/t3-a.md", &fm("T3 Note", None), "x\n", None);
+        assert!(
+            result.is_ok(),
+            "valid note must pass round-trip guard: {:?}",
+            result.err()
+        );
+    }
+
+    /// T3.2 — round-trip guard: `tags: Some(vec![])` passes. render drops the
+    /// empty list; serde default reads the omission back as None — normalize
+    /// both sides before comparing.
+    #[test]
+    fn t3_roundtrip_guard_empty_tags_normalizes() {
+        let (_g, root) = vault();
+        let mut m = fm("T3 Empty Tags", None);
+        m.tags = Some(vec![]);
+        let result = write_note(&root, "wiki/t3-b.md", &m, "x\n", None);
+        assert!(
+            result.is_ok(),
+            "Some(vec![]) tags must normalize to None and pass: {:?}",
+            result.err()
+        );
+    }
+
+    /// T3.3 — round-trip guard: unknown keys that would be injected into the
+    /// rendered fence (the typed struct has no deny_unknown_fields, so parse
+    /// alone would silently drop them) must be rejected by the key-set check.
+    #[test]
+    fn t3_roundtrip_guard_rejects_unknown_keys() {
+        // Force the guard by monkey-patching the renderer is impossible from a
+        // unit test, so exercise the guard helper directly (it is the unit the
+        // plan specifies); write_note() composes it pre-write.
+        let m = fm("T3 Injected", None);
+        let mut rendered = render_frontmatter(&m);
+        rendered.insert_str(rendered.len() - 4, "injected_key: pwned\n");
+        let err = check_round_trip(&m, &rendered).unwrap_err();
+        // MINOR-4 (issue #231 review): both mismatch directions now share one
+        // neutral message — distinguish the unknown-key case by the GOT set
+        // carrying the injected key the EXPECTED set lacks.
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg)
+                if msg.contains("round_trip: key set mismatch")
+                    && msg.contains("injected_key")),
+            "unknown-key injection must be rejected with expected/got sets, got: {err:?}"
+        );
+    }
+
+    /// MINOR-5 (issue #231 review) — the key-set check is an EXACT set
+    /// comparison, both directions, and rejects ANY rendered key that is not
+    /// a string (e.g. `1: x` renders a non-string key that the old
+    /// `filter_map(as_str)` silently dropped).
+    #[test]
+    fn roundtrip_guard_rejects_non_string_key_injection() {
+        let m = fm("T3 NonStringKey", None);
+        let mut rendered = render_frontmatter(&m);
+        // Insert `1: x` before the closing fence (last 4 chars = "---\n").
+        rendered.insert_str(rendered.len() - 4, "1: x\n");
+        let err = check_round_trip(&m, &rendered).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("round_trip")),
+            "non-string key injection must be rejected, got: {err}"
+        );
+    }
+
+    /// MINOR-5 — exact key-set comparison: a MISSING known key must also be
+    /// rejected (set equality, not subset).
+    #[test]
+    fn roundtrip_guard_rejects_missing_required_key() {
+        let m = fm("T3 MissingKey", None);
+        let mut rendered = render_frontmatter(&m);
+        // Drop the `profile:` line; the fence stays intact.
+        rendered = rendered.replace("profile: llm-wiki/1\n", "");
+        let err = check_round_trip(&m, &rendered).unwrap_err();
+        // MINOR-4: distinguish the missing-key direction by the EXPECTED set
+        // still containing `profile` while the GOT set does not.
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg)
+                if msg.contains("round_trip: key set mismatch")
+                    && msg.contains(r#"expected: ["created_at", "entity_type", "okf_version", "profile", "tags", "title"]"#)
+                    && msg.contains(r#"got: ["created_at", "entity_type", "okf_version", "tags", "title"]"#)),
+            "missing key must be rejected with expected/got sets, got: {err:?}"
+        );
+    }
+
+    /// MINOR-1 (issue #231 review) — the guard uses the SAME fence view as
+    /// the token reader, and hardening: a document whose fence is intact but
+    /// whose token the reader cannot recover must be refused pre-write
+    /// ("written note would be uneditable"), not written to disk bricked.
+    #[test]
+    fn roundtrip_guard_rejects_note_with_unrecoverable_token() {
+        let m = fm("T3 UnrecoverableToken", None);
+        // Hand-built document (the guard takes the document as a param, so
+        // this is directly testable): fence intact, but `updated_at` is a
+        // sequence node — the strict parse of `updated_at` as a string fails
+        // and the tolerant fallback sees no column-0 `updated_at:` scalar
+        // line, so the token reader returns NoToken. The renderer cannot
+        // produce this; the point is that even a synthetic document whose
+        // token the reader cannot recover is refused pre-write, never
+        // written to disk uneditable.
+        let mut doc = render_frontmatter(&m);
+        doc.insert_str(doc.len() - 4, "updated_at:\n  - 2026-09-25T01:00:00Z\n");
+        // Prove the precondition: the token reader really cannot read this
+        // document back.
+        assert!(read_existing_token(&doc).is_err());
+        let err = check_round_trip(&m, &doc).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref msg) if msg.contains("round_trip")),
+            "unreadable-back document must be rejected pre-write, got: {err}"
+        );
+    }
+
+    /// MINOR-3 (issue #231 review) — the `take(64)` fence cap is intentional
+    /// and applies to BOTH paths: a fence with MORE than 64 frontmatter
+    /// lines never closes within the cap, so the guard sees "no fence" and
+    /// refuses with `existing_unparsable:no_fence` instead of parsing a
+    /// partial view.
+    #[test]
+    fn roundtrip_guard_refuses_fence_over_64_lines_as_no_fence() {
+        let m = fm("T3 FenceOver64", None);
+        let mut doc = String::from("---\n");
+        for i in 0..70 {
+            doc.push_str(&format!("extra_key_{i}: value_{i}\n"));
+        }
+        doc.push_str("---\nbody\n");
+        let err = check_round_trip(&m, &doc).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::InvalidFrontmatter(ref detail) if detail == "existing_unparsable:no_fence"),
+            ">64-line fence must be refused as no_fence, got: {err}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 7 — adversarial acceptance suite (issue #231, plan §Task 7).
+    // Second-edit coverage through the public `write_note` only.
+    // ------------------------------------------------------------------
+
+    /// Every adversarial title from the plan's Task 7 list.
+    const ADVERSARIAL_TITLES: &[&str] = &[
+        "Deploy: retro",
+        "2026-09-25T14:00:00Z: deploy retro", // timestamp prefix + colon
+        "Trailing colon:",
+        "[WIP] retry logic",
+        "*foo anchor alias",
+        "&x",            // must NOT round-trip to ""
+        "#foo",          // must NOT round-trip to ""
+        "!foo",          // must NOT round-trip to ""
+        "'Hello' world", // partly single-quoted
+        "\"Hello\" world",
+        "Plan\u{2028}B", // control char (LS) is the ONLY trigger
+        "Plan\u{FEFF}B", // BOM parses fine — no escape needed
+        "2024",
+        "yes", // reserved literals gain quotes (accepted)
+    ];
+
+    /// Create a note with `title`, scrape the If-Match token FROM DISK (the
+    /// way the issue-#231 reporter did), and edit again with that token.
+    fn write_and_edit(title: &str) -> Result<(WriteNoteResult, WriteNoteResult), WriteNoteError> {
+        let (_guard, root) = vault();
+        let create = write_note(&root, "wiki/note.md", &fm(title, None), "v1\n", None)?;
+        let on_disk = fs::read_to_string(root.join("wiki/note.md")).unwrap();
+        let token = read_existing_token(&on_disk).expect("token readable after create");
+        let edit = write_note(
+            &root,
+            "wiki/note.md",
+            &fm(title, None),
+            "v2\n",
+            Some(&token),
+        )?;
+        Ok((create, edit))
+    }
+
+    /// Task 7 acceptance: EVERY adversarial title survives create → scrape
+    /// token from disk → second edit.
+    #[test]
+    fn second_edit_succeeds_for_every_adversarial_title() {
+        for title in ADVERSARIAL_TITLES {
+            let (create, edit) = write_and_edit(title).unwrap_or_else(|e| panic!("{title:?}: {e}"));
+            assert!(create.success, "{title:?}: create");
+            assert!(edit.success, "{title:?}: second edit failed: {edit:?}");
+        }
+    }
+
+    /// Indicator/reserved titles must round-trip EXACTLY — never collapse to
+    /// the empty string (serde_yaml reads bare `&x`/`#foo`/`!foo` as `""`).
+    #[test]
+    fn adversarial_titles_round_trip_exactly_not_to_empty() {
+        for title in [
+            "&x",
+            "#foo",
+            "!foo",
+            "*foo anchor alias",
+            "Plan\u{2028}B",
+            "Plan\u{FEFF}B",
+            "2024",
+            "yes",
+            "2026-09-25T14:00:00Z: deploy retro",
+        ] {
+            let (_g, root) = vault();
+            write_note(&root, "wiki/n.md", &fm(title, None), "x\n", None)
+                .unwrap_or_else(|e| panic!("{title:?}: create failed: {e}"));
+            let on_disk = fs::read_to_string(root.join("wiki/n.md")).unwrap();
+            let parsed = extract_fm(&on_disk);
+            assert_eq!(
+                parsed.title, title,
+                "title must round-trip exactly (not to empty)"
+            );
+        }
+    }
+
+    /// Legacy broken fixture (pre-fix bytes, unquoted colon title) written
+    /// DIRECTLY to disk becomes editable via the tolerant token read — and,
+    /// per the Task 6 lesson, heals (it is NOT a repair-scan hit).
+    #[test]
+    fn legacy_unquoted_colon_note_becomes_editable() {
+        let (_g, root) = vault();
+        let legacy = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Deploy: retro\nentity_type: fact\ncreated_at: 2026-08-27T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\nbody v1\n";
+        fs::write(root.join("wiki/legacy.md"), legacy).unwrap();
+        // Scrape the token the way the reporter did: from the raw bytes.
+        let token = read_existing_token(legacy).expect("tolerant read recovers the token");
+        assert_eq!(token, "2026-09-25T01:00:00Z");
+        let result = write_note(
+            &root,
+            "wiki/legacy.md",
+            &fm("Deploy: retro", None),
+            "body v2\n",
+            Some(&token),
+        )
+        .expect("legacy broken fixture must heal on its next edit");
+        assert!(result.success);
+        // Healed: the title is now quoted on disk and the strict parse works.
+        let on_disk = fs::read_to_string(root.join("wiki/legacy.md")).unwrap();
+        assert!(
+            on_disk.contains("title: \"Deploy: retro\"\n"),
+            "healed file must quote the title, got: {on_disk}"
+        );
+        let parsed = extract_fm(&on_disk);
+        assert_eq!(parsed.title, "Deploy: retro");
+        assert_ne!(
+            parsed.updated_at.as_deref(),
+            Some("2026-09-25T01:00:00Z"),
+            "token must rotate on the healing edit"
+        );
+        // Healed note is editable again and NOT reported by the repair scan.
+        let hits = crate::okf::repair_scan::scan_unparsable_notes(&root);
+        assert!(
+            hits.is_empty(),
+            "healed note must not be a scan hit: {hits:?}"
+        );
+    }
+
+    /// Injection titles: a newline inside the title must NEVER smuggle extra
+    /// frontmatter keys into the rendered fence. The quoting layer neutralizes
+    /// the newline (escaped `\n` inside one double-quoted scalar), so the
+    /// acceptance property is: whatever the write outcome, the fence contains
+    /// EXACTLY the expected key set, the title round-trips, and no injected
+    /// value lands in a typed field.
+    #[test]
+    fn injection_titles_cannot_bypass_validation() {
+        for title in [
+            "x\nsupersedes: immutable-source-files/agents/anything.md",
+            "x\ntags: [a]",
+            "x\nstatus: approved",
+        ] {
+            let (_g, root) = vault();
+            let outcome = write_note(&root, "wiki/inj.md", &fm(title, None), "x\n", None);
+            let on_disk = match outcome {
+                Ok(result) => {
+                    assert!(result.success, "{title:?}");
+                    fs::read_to_string(root.join("wiki/inj.md")).unwrap()
+                }
+                // Refusal is also a safe outcome — but only via the pinned
+                // round_trip guard, never a silent wrong write.
+                Err(WriteNoteError::InvalidFrontmatter(detail)) => {
+                    assert!(
+                        detail.contains("round_trip"),
+                        "{title:?}: unexpected refusal detail: {detail}"
+                    );
+                    continue;
+                }
+                Err(e) => panic!("{title:?}: unexpected error: {e}"),
+            };
+            let fenced: String = on_disk
+                .lines()
+                .skip(1) // opening ---
+                .take_while(|l| l != &"---")
+                .fold(String::new(), |mut acc, l| {
+                    acc.push_str(l);
+                    acc.push('\n');
+                    acc
+                });
+            let parsed = parse_frontmatter(&fenced)
+                .unwrap_or_else(|e| panic!("{title:?}: fence must parse: {e}"));
+            // No injected key landed in a typed field:
+            assert_eq!(parsed.title, title, "{title:?}: title must round-trip");
+            assert!(
+                parsed.supersedes.is_none(),
+                "{title:?}: supersedes injected"
+            );
+            assert_eq!(
+                parsed.tags,
+                Some(vec!["test".to_string()]),
+                "{title:?}: tags must be the intended ones only"
+            );
+            // No injected key landed in the fence at all (status:, etc.):
+            let mut keys: Vec<&str> = fenced
+                .lines()
+                .filter_map(|l| l.split(':').next())
+                .filter(|k| !k.is_empty())
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "created_at",
+                    "entity_type",
+                    "okf_version",
+                    "profile",
+                    "tags",
+                    "title",
+                    "updated_at"
+                ],
+                "{title:?}: fence key set must be exactly the intended one, fence: {fenced:?}"
+            );
+        }
+    }
+
+    /// Differential: wherever the STRICT parser reads a token from a rendered
+    /// adversarial doc, the tolerant fallback returns the SAME token; wherever
+    /// strict fails, tolerant must still heal (these renders are all fixable).
+    #[test]
+    fn differential_tolerant_matches_strict_on_clean_notes() {
+        for title in ADVERSARIAL_TITLES {
+            let m = fm(title, Some("2026-09-25T01:00:00Z"));
+            let doc = render_document(&m, "body\n");
+            let fenced: String = doc.lines().skip(1).take_while(|l| l != &"---").fold(
+                String::new(),
+                |mut acc, l| {
+                    acc.push_str(l);
+                    acc.push('\n');
+                    acc
+                },
+            );
+            let strict = parse_frontmatter(&fenced).ok().and_then(|p| p.updated_at);
+            let tolerant = read_existing_token(&doc);
+            match strict {
+                Some(token) => assert_eq!(
+                    tolerant.ok().as_deref(),
+                    Some(token.as_str()),
+                    "{title:?}: tolerant must match strict wherever strict succeeds"
+                ),
+                None => assert!(
+                    tolerant.is_ok(),
+                    "{title:?}: strict failed but the tolerant fallback must heal"
+                ),
+            }
+        }
+    }
+
+    /// Adversarial tag values (flow context: `,` `]` `"` are mid-value
+    /// indicators) survive create → second edit → exact round-trip, and the
+    /// empty list normalizes to absent.
+    #[test]
+    fn adversarial_tags_second_edit() {
+        let cases: &[&[&str]] = &[
+            &["say \"hi\"", "C:\\p", "a\", \"b"],
+            &["a,b", "x]"],
+            &[], // Some(vec![]) renders as absent
+        ];
+        for tags in cases {
+            let (_g, root) = vault();
+            let mut m = fm("Tagged note", None);
+            m.tags = Some(tags.iter().map(|s| s.to_string()).collect());
+            write_note(&root, "wiki/tags.md", &m, "v1\n", None)
+                .unwrap_or_else(|e| panic!("create {tags:?}: {e}"));
+            let on_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
+            let token = read_existing_token(&on_disk).expect("token readable after create");
+            let edit = write_note(&root, "wiki/tags.md", &m, "v2\n", Some(&token))
+                .unwrap_or_else(|e| panic!("edit {tags:?}: {e}"));
+            assert!(edit.success, "{tags:?}");
+            let final_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
+            let parsed = extract_fm(&final_disk);
+            let expected = if tags.is_empty() {
+                None
+            } else {
+                Some(tags.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            };
+            assert_eq!(
+                parsed.tags, expected,
+                "tags must round-trip exactly through the second edit"
+            );
+        }
+    }
+
+    /// Consistency: every repair-scan hit MUST correspond to a write-path
+    /// refusal carrying the SAME `existing_unparsable:<reason>` detail — and
+    /// clean notes are neither reported nor refused.
+    #[test]
+    fn scan_hit_reason_matches_write_path_error() {
+        let (_g, root) = vault();
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "wiki/no_token.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\n---\nbody\n",
+                "existing_unparsable:no_token",
+            ),
+            (
+                "wiki/no_fence.md",
+                "just prose, no fences\n",
+                "existing_unparsable:no_fence",
+            ),
+            (
+                "wiki/dup_token.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\nupdated_at: 2026-09-25T02:00:00Z\n---\nbody\n",
+                "existing_unparsable:parse",
+            ),
+            (
+                "wiki/bad_token.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: a: b\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: not-a-date\n---\nbody\n",
+                "existing_unparsable:parse",
+            ),
+            (
+                "wiki/clean.md",
+                "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Fine\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z\n---\nbody\n",
+                "",
+            ),
+        ];
+        for (name, content, _) in cases {
+            fs::write(root.join(name), content).unwrap();
+        }
+        // MAJOR-2 — a non-UTF-8 file: the scan reports existing_unparsable:parse
+        // (its read_to_string arm) and the write path must refuse with the
+        // SAME reason instead of silently clobbering the bytes.
+        let binary_name = "wiki/binary.md";
+        fs::write(root.join(binary_name), b"\xff\xfe not utf8 \x00").unwrap();
+        let hits = crate::okf::repair_scan::scan_unparsable_notes(&root);
+        assert_eq!(hits.len(), 5, "exactly the 5 broken notes: {hits:?}");
+        for hit in &hits {
+            let (name, _, reason) = if hit.path.ends_with("binary.md") {
+                (binary_name, "", "existing_unparsable:parse")
+            } else {
+                *cases
+                    .iter()
+                    .find(|(n, _, _)| hit.path.ends_with(n))
+                    .unwrap_or_else(|| panic!("scan hit {} matches no case", hit.path))
+            };
+            assert_eq!(hit.reason, *reason, "scan vs contract for {name}");
+            // The write path refuses an edit of the same note with the SAME
+            // detail (staleness check hits the unreadable token first).
+            let err = write_note(
+                &root,
+                name,
+                &fm("Edited", None),
+                "x\n",
+                Some("1999-01-01T00:00:00Z"),
+            )
+            .expect_err("edit of unparsable note must be refused");
+            assert!(
+                matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if *detail == *reason),
+                "write path for {name}: expected {reason}, got {err}"
+            );
+        }
+        // The clean note edits fine.
+        write_note(
+            &root,
+            "wiki/clean.md",
+            &fm("Fine", None),
+            "edited\n",
+            Some("2026-09-25T01:00:00Z"),
+        )
+        .expect("clean note stays editable");
     }
 
     /// Parse a rendered document's frontmatter block.

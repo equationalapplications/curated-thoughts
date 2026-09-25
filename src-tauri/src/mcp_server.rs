@@ -125,7 +125,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "vault_write_note",
-        description = "Write or update a markdown note with OKF v0.1 frontmatter. Path safety: must be under vault root. If-Match semantics: on edits, frontmatter.updated_at must EXACTLY match the file\'s current updated_at token (mtime is never consulted); mismatch returns stale_update:{current}. On create the tool stamps a fresh token for you. Atomic write via temp file + rename."
+        description = "Write or update a markdown note with OKF v0.1 frontmatter. Path safety: must be under vault root. If-Match semantics: on edits, frontmatter.updated_at must EXACTLY match the file's current updated_at token (mtime is never consulted); mismatch returns stale_update:{current}. If the existing file's frontmatter is unreadable, the write is refused with invalid_frontmatter:existing_unparsable:{parse|no_fence|no_token} — such notes stay refused until repaired. On success the result carries updated_at: the NEW token written into the file; echo it back verbatim on your next edit. On create the tool stamps a fresh token for you. Atomic write via temp file + rename."
     )]
     async fn vault_write_note(
         &self,

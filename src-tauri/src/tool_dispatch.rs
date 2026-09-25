@@ -292,7 +292,8 @@ pub fn dispatch_vault_write_note(
 ) -> Result<crate::okf::WriteNoteResult> {
     // Thin adapter (spec v2): all logic lives in the `okf::write` core.
     // The MCP surface carries no separate If-Match parameter — the supplied
-    // frontmatter's `updated_at` IS the If-Match token.
+    // frontmatter's `updated_at` IS the If-Match token. On success the result's
+    // `updated_at` field carries the NEW post-write token (issue #231).
     crate::okf::write::write_note(
         vault_dir,
         path,
