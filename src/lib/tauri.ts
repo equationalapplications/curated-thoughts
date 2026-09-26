@@ -13,14 +13,28 @@ export const getVaultPath = (): Promise<string | null> =>
 export const setVaultPath = (path: string): Promise<void> =>
   invoke("set_vault_path", { path });
 
-export const getVaultLayout = (): Promise<{
+interface VaultFolder {
+  name: string;
+  label: string;
+}
+
+// `get_vault_layout` returns `[immutable, wiki]` as `Vec<VaultFolder>`;
+// reshape it into the named dirs and labels the UI reads.
+export const getVaultLayout = async (): Promise<{
   immutableDir: string;
   wikiDir: string;
   labels: {
     immutableDir: string;
     wikiDir: string;
   };
-}> => invoke("get_vault_layout");
+}> => {
+  const [immutable, wiki] = await invoke<VaultFolder[]>("get_vault_layout");
+  return {
+    immutableDir: immutable.name,
+    wikiDir: wiki.name,
+    labels: { immutableDir: immutable.label, wikiDir: wiki.label },
+  };
+};
 
 export const checkOllama = (): Promise<OllamaStatus> =>
   invoke("check_ollama");
