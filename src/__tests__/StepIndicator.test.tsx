@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { StepIndicator } from "../components/setup/StepIndicator";
 
 const STEPS = ["Welcome", "Privacy", "Fastembed", "Model", "Watch it think", "Done"];
@@ -7,14 +7,29 @@ const STEPS = ["Welcome", "Privacy", "Fastembed", "Model", "Watch it think", "Do
 describe("StepIndicator", () => {
   it("renders all step names with current highlighted", () => {
     render(<StepIndicator current={2} total={6} steps={STEPS} />);
-    expect(screen.getByText("Welcome")).toBeInTheDocument();
-    const fastembed = screen.getByText("Fastembed");
+    // The current step's name now appears twice by design: once in the rail
+    // (as the accessible text of its segment) and once on the label line. The
+    // rail is what this test is about, so scope the query to the <ol>.
+    const rail = screen.getByRole("list");
+    expect(within(rail).getByText("Welcome")).toBeInTheDocument();
+    const fastembed = within(rail).getByText("Fastembed");
     expect(fastembed).toHaveClass("step-indicator-current");
   });
 
-  it("renders the 1-based label 'Step N of M: <current-name>'", () => {
+  it("renders the 1-based position and the current step's name", () => {
+    // Pass 4 split the single "Step 4 of 6: Model" line into a position and a
+    // name, so the strip is not the only place the current step is named. The
+    // progressbar's own aria-label still carries the combined form.
     render(<StepIndicator current={3} total={6} steps={STEPS} />);
-    expect(screen.getByText(/step 4 of 6: model/i)).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    // Two "Model" nodes by design (rail segment + label line); assert the
+    // label line, which is the one that is actually painted.
+    const label = screen.getByText("4").closest("p");
+    expect(label).toHaveTextContent("Model");
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-label",
+      "Step 4 of 6: Model",
+    );
   });
 
   it("exposes aria-valuenow/aria-valuemax on the progress bar (1-based)", () => {

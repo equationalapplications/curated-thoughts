@@ -54,10 +54,14 @@ describe("TimelineMode", () => {
       expect(screen.queryByText(/Created/)).toBeInTheDocument();
     });
 
-    // Check that icons are rendered (emoji content)
-    expect(screen.getByText("✨")).toBeInTheDocument(); // synthesized icon
-    expect(screen.getByText("✅")).toBeInTheDocument(); // approved icon
-    expect(screen.getByText("📄")).toBeInTheDocument(); // ingested icon
+    // Icons are inline SVG line icons (one per event), not emoji. Assert the
+    // shape rather than glyph text: `aria-hidden` + at least one <path>.
+    const icons = document.querySelectorAll(".event-main svg.icon");
+    expect(icons.length).toBeGreaterThan(0);
+    for (const icon of icons) {
+      expect(icon.getAttribute("aria-hidden")).toBe("true");
+      expect(icon.querySelectorAll("path").length).toBeGreaterThan(0);
+    }
   });
 
   it("clicking_entity_event_navigates_to_brain", async () => {

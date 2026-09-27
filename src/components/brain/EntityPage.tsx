@@ -106,15 +106,31 @@ export function EntityPage({
   }
 
   if (!entityId) {
+    // `.entity-page` is a reading column, so its no-selection state was a
+    // 12.5px line pinned to the top-left of an 850px pane — the third
+    // different answer to "nothing selected" in the app. `.empty-pane`
+    // centres it and gives it an icon, like Review, Tasks and the editor.
     return (
-      <main className="entity-page">
-        <p className="placeholder">No entity selected. Pick one from the sidebar, or create a new one.</p>
+      <main className="entity-page entity-page--empty">
+        <div className="empty-pane">
+          <span className="empty-pane__icon" aria-hidden="true">
+            <svg className="icon" viewBox="0 0 24 24" focusable="false">
+              <path d="M12 4.2a3.1 3.1 0 0 0-3.1 3.1v1.4a2.7 2.7 0 0 0-1.9 2.6v5.4A2.7 2.7 0 0 0 9.7 19.4h4.6a2.7 2.7 0 0 0 2.7-2.7v-5.4a2.7 2.7 0 0 0-1.9-2.6V7.3A3.1 3.1 0 0 0 12 4.2z" />
+              <path d="M9.9 19.4v.9a2.1 2.1 0 0 0 4.2 0v-.9" />
+            </svg>
+          </span>
+          <h2 className="empty-pane__title">No entity selected</h2>
+          <p className="empty-pane__hint">
+            Pick one from the sidebar, or create a new one to start writing
+            facts about it.
+          </p>
+        </div>
       </main>
     );
   }
   if (!detail) {
     return (
-      <main className="entity-page">
+      <main className="entity-page entity-page--empty">
         {error ? (
           <p className="entity-page-error" role="alert">
             {error}

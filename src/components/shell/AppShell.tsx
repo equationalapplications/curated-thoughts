@@ -436,7 +436,18 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
           )}
           {dragging && (
             <div className="drop-overlay">
-              <span>Drop to add to Library</span>
+              <div className="drop-overlay__card">
+                <span className="drop-overlay__icon" aria-hidden="true">
+                  <svg className="icon icon--lg" viewBox="0 0 24 24" focusable="false">
+                    <path d="M12 15.5V4.2M8.2 8 12 4.2 15.8 8" />
+                    <path d="M4.5 15v3.5a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V15" />
+                  </svg>
+                </span>
+                <span className="drop-overlay__title">Drop to add to Library</span>
+                <span className="drop-overlay__hint">
+                  Files are indexed in place — nothing is moved.
+                </span>
+              </div>
             </div>
           )}
           {!privacyLoading &&

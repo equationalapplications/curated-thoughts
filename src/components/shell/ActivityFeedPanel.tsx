@@ -48,7 +48,14 @@ function ActivityFeedPanelBody({
             aria-label="Close"
             onClick={onClose}
           >
-            ×
+            {/* A drawn cross. The "×" character was 16px of a proportional
+                text font sitting on its own baseline, so it hung below the
+                optical centre of the 24px button and changed weight with the
+                surrounding text. The SVG is centred by the button's own
+                `display: inline-flex`. */}
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
           </button>
         </header>
         <div className="activity-panel-body">

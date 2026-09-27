@@ -75,7 +75,7 @@ function PeekPanelBody({ target, onDismiss, onPromote }: BodyProps) {
       <button
         type="button"
         className="peek-backdrop"
-        aria-label="Close source peek"
+        aria-label="Close source peek (click outside)"
         onClick={onDismiss}
       />
       <aside
@@ -87,13 +87,34 @@ function PeekPanelBody({ target, onDismiss, onPromote }: BodyProps) {
       >
         <header className="peek-panel-header">
           <h2 title={target.path}>{basename(target.path)}</h2>
-          <button
-            type="button"
-            className="peek-open-btn"
-            onClick={() => onPromote(target.path, target.hash)}
-          >
-            Open ↗
-          </button>
+          <div className="peek-panel-header-actions">
+            <button
+              type="button"
+              className="peek-open-btn"
+              onClick={() => onPromote(target.path, target.hash)}
+            >
+              Open
+              <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M13.5 5.5H18.5v5" />
+                <path d="M18.5 5.5 11 13" />
+                <path d="M17 14.5v3a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h3" />
+              </svg>
+            </button>
+            {/* A close button, to match the Activity panel beside it. This
+                panel was dismissable only by Esc or a click on the backdrop —
+                no visible control at all, and a mouse user had to guess where
+                to click. */}
+            <button
+              type="button"
+              className="peek-panel-close"
+              aria-label="Close source peek"
+              onClick={onDismiss}
+            >
+              <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M6 6l12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
         </header>
         <div className="peek-panel-body">
           {status === "loading" && <p className="placeholder">Loading…</p>}

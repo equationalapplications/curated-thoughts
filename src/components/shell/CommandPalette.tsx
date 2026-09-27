@@ -151,23 +151,34 @@ export function CommandPalette({ scope, onClose }: Props) {
         aria-modal="true"
         aria-label="Command palette"
       >
-        <input
-          ref={inputRef}
-          className="palette-input"
-          type="text"
-          placeholder="Type a command…"
-          aria-label="Search commands"
-          role="combobox"
-          aria-expanded="true"
-          aria-controls="palette-listbox"
-          aria-activedescendant={index >= 0 ? `palette-option-${index}` : undefined}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setActiveIndex(0);
-          }}
-          onKeyDown={handleInputKeyDown}
-        />
+        <div className="palette-input-row">
+          <svg
+            className="icon palette-input-icon"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <circle cx="11" cy="11" r="6.5" />
+            <path d="m15.8 15.8 4 4" />
+          </svg>
+          <input
+            ref={inputRef}
+            className="palette-input"
+            type="text"
+            placeholder="Type a command…"
+            aria-label="Search commands"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-listbox"
+            aria-activedescendant={index >= 0 ? `palette-option-${index}` : undefined}
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setActiveIndex(0);
+            }}
+            onKeyDown={handleInputKeyDown}
+          />
+        </div>
         <ul id="palette-listbox" role="listbox" aria-label="Commands" className="palette-list">
           {visible.length === 0 && (
             <li className="palette-empty" role="presentation">
@@ -189,6 +200,24 @@ export function CommandPalette({ scope, onClose }: Props) {
             </button>
           ))}
         </ul>
+        {/* The palette is keyboard-only for most of its life, and the list
+            gives no hint that ↑/↓/↵ do anything. A hint row costs one flex
+            row and turns an opaque list into a control you can drive. */}
+        <footer className="palette-footer">
+          <span className="palette-hint">
+            <kbd className="palette-key">↑</kbd>
+            <kbd className="palette-key">↓</kbd>
+            navigate
+          </span>
+          <span className="palette-hint">
+            <kbd className="palette-key">↵</kbd>
+            run
+          </span>
+          <span className="palette-hint">
+            <kbd className="palette-key">esc</kbd>
+            dismiss
+          </span>
+        </footer>
       </div>
     </>
   );

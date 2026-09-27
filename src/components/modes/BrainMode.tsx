@@ -140,6 +140,7 @@ export function BrainMode({
           onCreate={handleCreate}
           sort={sort}
           onSortChange={setSort}
+          suppressEmpty={entities.length === 0 && selectedEntityId === null}
         />
         <OkfInteropBar onImported={refresh} />
       </aside>

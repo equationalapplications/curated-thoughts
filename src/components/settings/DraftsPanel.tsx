@@ -104,7 +104,7 @@ export function DraftsPanel() {
   const isPending = (entityId: string, actionId: string) => !!pending[entityId]?.[actionId];
 
   return (
-    <section className="maintenance-drafts" aria-labelledby="drafts-heading">
+    <section className="settings-section maintenance-drafts" aria-labelledby="drafts-heading">
       <h4 id="drafts-heading">Drafts</h4>
       <p className="maintenance-description">
         Draft facts are visible in search. Promoting marks one stable and records you as its reviewer.

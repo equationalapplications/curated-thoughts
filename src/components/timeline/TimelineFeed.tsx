@@ -1,6 +1,6 @@
 import type { TimelineEvent } from "../../lib/tauri";
 import type { NavTarget } from "../../lib/navigation";
-import { groupByDay, parseSummary, KIND_ICONS } from "../../lib/timelineFormat";
+import { groupByDay, parseSummary, shortenPathForDisplay, KIND_ICON_PATHS } from "../../lib/timelineFormat";
 
 interface Props {
   events: TimelineEvent[];
@@ -12,7 +12,14 @@ export function TimelineFeed({ events, powerLayer, onNavigate }: Props) {
   const groups = groupByDay(events);
 
   if (groups.length === 0) {
-    return <p className="placeholder">No activity.</p>;
+    // Rendered *inside* .timeline-feed so the empty state inherits the feed's
+    // padding. Bailing out early put a bare <p> flush against the column's
+    // left divider.
+    return (
+      <div className="timeline-feed">
+        <p className="placeholder">No activity.</p>
+      </div>
+    );
   }
 
   return (
@@ -42,6 +49,7 @@ export function TimelineFeed({ events, powerLayer, onNavigate }: Props) {
                 <div
                   key={event.id}
                   className={`event-row ${isClickable ? "clickable" : ""}`}
+                  title={event.summary.replace(/\*/g, "")}
                   onClick={isClickable ? handleClick : undefined}
                   role={isClickable ? "button" : undefined}
                   tabIndex={isClickable ? 0 : -1}
@@ -57,13 +65,30 @@ export function TimelineFeed({ events, powerLayer, onNavigate }: Props) {
                   }
                 >
                   <div className="event-main">
-                    <span className="icon">{KIND_ICONS[event.kind]}</span>
+                    <svg
+                      className="icon"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      {KIND_ICON_PATHS[event.kind].map((d) => (
+                        <path key={d} d={d} />
+                      ))}
+                    </svg>
                     <span className="summary">
+                      {/* The elision runs on BOTH branches, not just the
+                          plain one. The Rust event summary formats an
+                          ingest as `Ingested *<path>*` — the path is the
+                          *emphasised* segment — so a helper applied only to
+                          plain text left every ingested row showing its full
+                          absolute path. For genuinely emphasised names
+                          ("Approved *Project X*") the helper is a no-op:
+                          there is no "/" in the text. */}
                       {segments.map((seg, idx) =>
                         seg.em ? (
-                          <em key={idx}>{seg.text}</em>
+                          <em key={idx}>{shortenPathForDisplay(seg.text)}</em>
                         ) : (
-                          <span key={idx}>{seg.text}</span>
+                          <span key={idx}>{shortenPathForDisplay(seg.text)}</span>
                         ),
                       )}
                     </span>

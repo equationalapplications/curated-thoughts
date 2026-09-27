@@ -113,12 +113,18 @@ export function StepWatchItThink({ onSkip, onRouteToReview }: Props) {
     >
       <div className="step-watch-it-think" data-testid="step-watch-it-think">
         {phase === "idle" && (
+          /* The step's one real action. It rendered as a secondary button
+             while the only other control on the step ("Skip") is a ghost, so
+             the step offered no primary path at all. */
           <button
             type="button"
-            className="step-watch-it-think-pick"
+            className="btn btn--primary step-watch-it-think-pick"
             onClick={pickFile}
             aria-label="Choose a document to ingest"
           >
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M3.5 7.2a1.7 1.7 0 0 1 1.7-1.7h3.3l2 2.2h8.3a1.7 1.7 0 0 1 1.7 1.7v8.6a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z" />
+            </svg>
             Choose a document to ingest
           </button>
         )}
@@ -129,6 +135,11 @@ export function StepWatchItThink({ onSkip, onRouteToReview }: Props) {
             role="status"
             aria-live="polite"
           >
+            {/* The pipeline takes up to a minute with no further output, so the
+                wait needs to be visibly *working* rather than just present. */}
+            <div className="step-watch-it-think-bar" aria-hidden="true">
+              <span />
+            </div>
             <p className="step-watch-it-think-path">{picked}</p>
             <p>
               {phase === "chunking" && "Chunking your document…"}
@@ -146,6 +157,7 @@ export function StepWatchItThink({ onSkip, onRouteToReview }: Props) {
             <p>{errorMsg}</p>
             <button
               type="button"
+              className="btn"
               onClick={() => {
                 applyPhase("idle");
                 setErrorMsg(null);

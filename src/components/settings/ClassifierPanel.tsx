@@ -115,82 +115,102 @@ export function ClassifierPanel() {
           {error}
         </p>
       )}
-      <label htmlFor="classifier-provider">Classifier provider</label>
-      <select
-        id="classifier-provider"
-        value={provider}
-        disabled={disableControls}
-        onChange={(e) => setProvider(e.target.value as ClassifierProviderKind)}
-      >
-        <option value="unconfigured">None</option>
-        <option value="cloudflare_jev">Cloudflare Workers AI (typesafe/jev)</option>
-        <option value="jev_http">Jev-compatible endpoint</option>
-      </select>
-      {provider === 'jev_http' && (
-        <>
-          <label htmlFor="classifier-url">Endpoint URL</label>
-          <input id="classifier-url" type="url" value={url} disabled={disableControls} onChange={(e) => setUrl(e.target.value)} />
-        </>
-      )}
-      {provider === 'cloudflare_jev' && (
-        <>
-          <label htmlFor="classifier-account">Cloudflare account ID</label>
-          <input id="classifier-account" type="text" value={accountId} disabled={disableControls} onChange={(e) => setAccountId(e.target.value)} />
-        </>
-      )}
-      {provider !== 'unconfigured' && (
-        <>
-          <label htmlFor="classifier-key">
-            API token {hasApiKey && <span className="settings-hint">(a token is currently stored in the OS keychain)</span>}
-          </label>
-          <input
-            id="classifier-key"
-            type="password"
-            value={apiKey}
-            placeholder={hasApiKey ? 'Leave blank to keep the stored token' : 'Paste a token to store in the OS keychain'}
+      <div className="settings-form">
+        <div>
+          <label htmlFor="classifier-provider">Classifier provider</label>
+          <select
+            id="classifier-provider"
+            value={provider}
             disabled={disableControls}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-          {hasApiKey && (
-            <button
-              type="button"
-              className="settings-button-secondary"
-              disabled={disableControls}
-              onClick={() => void clearStoredKey()}
-            >
-              Clear stored token
-            </button>
-          )}
-          <label htmlFor="classifier-min">Minimum confidence</label>
-          <input
-            id="classifier-min"
-            type="number"
-            min={0}
-            max={1}
-            step={0.05}
-            value={minConfidence}
+            onChange={(e) => setProvider(e.target.value as ClassifierProviderKind)}
+          >
+            <option value="unconfigured">None</option>
+            <option value="cloudflare_jev">Cloudflare Workers AI (typesafe/jev)</option>
+            <option value="jev_http">Jev-compatible endpoint</option>
+          </select>
+        </div>
+        {provider === 'jev_http' && (
+          <div>
+            <label htmlFor="classifier-url">Endpoint URL</label>
+            <input id="classifier-url" type="url" value={url} disabled={disableControls} onChange={(e) => setUrl(e.target.value)} />
+          </div>
+        )}
+        {provider === 'cloudflare_jev' && (
+          <div>
+            <label htmlFor="classifier-account">Cloudflare account ID</label>
+            <input id="classifier-account" type="text" value={accountId} disabled={disableControls} onChange={(e) => setAccountId(e.target.value)} />
+          </div>
+        )}
+        {provider !== 'unconfigured' && (
+          <>
+            <div>
+              <label htmlFor="classifier-key">API token</label>
+              <input
+                id="classifier-key"
+                type="password"
+                value={apiKey}
+                placeholder={hasApiKey ? 'Leave blank to keep the stored token' : 'Paste a token to store in the OS keychain'}
+                disabled={disableControls}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <p className="settings-form__hint">
+                {hasApiKey
+                  ? 'A token is currently stored in the OS keychain.'
+                  : 'Stored in the OS keychain, never in config.json.'}
+              </p>
+              {hasApiKey && (
+                <button
+                  type="button"
+                  className="btn btn--ghost settings-form__actions"
+                  disabled={disableControls}
+                  onClick={() => void clearStoredKey()}
+                >
+                  Clear stored token
+                </button>
+              )}
+            </div>
+            <div>
+              <label htmlFor="classifier-min">Minimum confidence</label>
+              <input
+                id="classifier-min"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={minConfidence}
+                disabled={disableControls}
+                onChange={(e) => setMinConfidence(Number(e.target.value))}
+              />
+            </div>
+            <div>
+              <label htmlFor="classifier-timeout">Request timeout (seconds)</label>
+              <input
+                id="classifier-timeout"
+                type="number"
+                min={1}
+                value={timeoutSecs ?? ''}
+                placeholder="30"
+                disabled={disableControls}
+                onChange={(e) => {
+                  const raw = e.target.value.trim();
+                  setTimeoutSecs(raw === '' ? null : Math.max(1, Number(raw)));
+                }}
+              />
+            </div>
+          </>
+        )}
+        <div className="settings-form__actions">
+          <button
+            type="button"
+            className="btn btn--primary"
             disabled={disableControls}
-            onChange={(e) => setMinConfidence(Number(e.target.value))}
-          />
-          <label htmlFor="classifier-timeout">Request timeout (seconds)</label>
-          <input
-            id="classifier-timeout"
-            type="number"
-            min={1}
-            value={timeoutSecs ?? ''}
-            placeholder="30"
-            disabled={disableControls}
-            onChange={(e) => {
-              const raw = e.target.value.trim();
-              setTimeoutSecs(raw === '' ? null : Math.max(1, Number(raw)));
-            }}
-          />
-        </>
-      )}
-      <button type="button" disabled={disableControls} onClick={() => void save()}>
-        {saving ? 'Saving…' : 'Save classifier'}
-      </button>
-      {status === 'saved' && <p className="settings-hint">Saved.</p>}
+            onClick={() => void save()}
+          >
+            {saving ? 'Saving…' : 'Save classifier'}
+          </button>
+          {status === 'saved' && <span className="model-success">Saved.</span>}
+        </div>
+      </div>
     </div>
   );
 }

@@ -10,7 +10,14 @@ export function StepWelcome({ onNext, vaultPath }: Props) {
       subtitle="Read-only: the folder your notes live in."
       onNext={onNext}
     >
-      {vaultPath ? <p>{vaultPath}</p> : <p>Your vault path will appear here once selected.</p>}
+      {vaultPath ? (
+        /* Monospace, like the same path in Settings → Vault. As body text a
+           filesystem path is hard to scan and the slashes stop reading as
+           separators. */
+        <p className="vault-full-path">{vaultPath}</p>
+      ) : (
+        <p>Your vault path will appear here once selected.</p>
+      )}
       <OntologyChoice />
     </WizardStep>
   );
