@@ -7,6 +7,7 @@ import {
   onProviderError,
   onProviderLoading,
   onProviderReady,
+  safeUnlisten,
 } from "../lib/events";
 
 export type HealthState = "ok" | "loading" | "error" | "unconfigured";
@@ -73,7 +74,7 @@ export function useProviderHealth(): {
       }),
     ]).then((uls) => {
       if (!active) {
-        uls.forEach((u) => u());
+        uls.forEach((u) => void safeUnlisten(u));
       } else {
         unlisteners.push(...uls);
       }
@@ -81,7 +82,7 @@ export function useProviderHealth(): {
 
     return () => {
       active = false;
-      unlisteners.forEach((u) => u());
+      unlisteners.forEach((u) => void safeUnlisten(u));
     };
   }, []);
 

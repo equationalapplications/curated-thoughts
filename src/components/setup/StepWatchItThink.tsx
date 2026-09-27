@@ -5,6 +5,7 @@ import {
   onIngestProgress,
   onIngestProposalReady,
   onIngestError,
+  safeUnlisten,
 } from "../../lib/events";
 import { WizardStep } from "./WizardStep";
 
@@ -56,11 +57,11 @@ export function StepWatchItThink({ onSkip, onRouteToReview }: Props) {
         }),
       ]);
       unlistens = [up, ur, ue];
-      if (!mounted) unlistens.forEach((u) => u());
+      if (!mounted) unlistens.forEach((u) => void safeUnlisten(u));
     })();
     return () => {
       mounted = false;
-      unlistens.forEach((u) => u());
+      unlistens.forEach((u) => void safeUnlisten(u));
     };
   }, []);
 

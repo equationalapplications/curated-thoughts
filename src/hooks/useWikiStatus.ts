@@ -6,6 +6,7 @@ import {
   type WikiStatusEventPayload,
   type WikiStatusPayload,
 } from '../lib/tauri';
+import { safeUnlisten } from '../lib/events';
 
 export interface WikiStatus extends WikiStatusPayload {
   busy: boolean;
@@ -196,7 +197,7 @@ export function useWikiStatus(): WikiStatus {
     })
       .then((unlisten) => {
         if (cancelled) {
-          unlisten();
+          void safeUnlisten(unlisten);
           return;
         }
         cleanup = unlisten;
@@ -207,7 +208,7 @@ export function useWikiStatus(): WikiStatus {
 
     return () => {
       cancelled = true;
-      cleanup?.();
+      void safeUnlisten(cleanup ?? undefined);
     };
   }, []);
 

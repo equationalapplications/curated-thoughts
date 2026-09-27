@@ -3,6 +3,7 @@ import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { safeUnlisten } from "./events";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
 import { getClassifierStatus, getOntologySelection, type ClassifierStatus, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
@@ -556,7 +557,7 @@ export function startAutoHeal(): () => void {
       clearTimeout(debounce);
       debounce = null;
     }
-    void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
+    unsubscribers.forEach((unlisten) => void safeUnlisten(unlisten));
   };
 }
 
@@ -594,7 +595,7 @@ export function startAutoMaintenance(): () => void {
 
   return () => {
     window.clearInterval(interval);
-    void Promise.all(unsubscribers).then((fns) => fns.forEach((fn) => fn()));
+    unsubscribers.forEach((unlisten) => void safeUnlisten(unlisten));
   };
 }
 

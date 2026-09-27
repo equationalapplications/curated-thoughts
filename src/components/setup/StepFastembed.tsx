@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { initFastembed } from "../../lib/tauri";
-import { onEmbedInitDone, onEmbedInitError } from "../../lib/events";
+import { onEmbedInitDone, onEmbedInitError, safeUnlisten } from "../../lib/events";
 import { WizardStep } from "./WizardStep";
 
 interface Props {
@@ -14,24 +14,21 @@ export function StepFastembed({ onNext }: Props) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    let unlistenDone: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
     let mounted = true;
+    // Hold the pending subscriptions so cleanup can remove them even when the
+    // step unmounts before listen() resolves.
+    const unlistenDone = onEmbedInitDone(() => {
+      if (!mounted) return;
+      onNext();
+    });
+    const unlistenError = onEmbedInitError(({ message }) => {
+      if (!mounted) return;
+      setErrorMsg(message);
+      setPhase("error");
+    });
 
     const setup = async () => {
-      const [done, error] = await Promise.all([
-        onEmbedInitDone(() => {
-          if (!mounted) return;
-          onNext();
-        }),
-        onEmbedInitError(({ message }) => {
-          if (!mounted) return;
-          setErrorMsg(message);
-          setPhase("error");
-        }),
-      ]);
-      unlistenDone = done;
-      unlistenError = error;
+      await Promise.all([unlistenDone, unlistenError]);
 
       try {
         await initFastembed();
@@ -45,8 +42,8 @@ export function StepFastembed({ onNext }: Props) {
     setup();
     return () => {
       mounted = false;
-      unlistenDone?.();
-      unlistenError?.();
+      void safeUnlisten(unlistenDone);
+      void safeUnlisten(unlistenError);
     };
   }, [onNext]);
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getProviderConfig, updateProvider } from "../../lib/tauri";
-import { onProviderLoading, onProviderReady, onProviderError } from "../../lib/events";
+import { onProviderLoading, onProviderReady, onProviderError, safeUnlisten } from "../../lib/events";
 import type { GenerationConfig } from "../../lib/tauri";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { EphemeralDisclosureModal } from "../privacy/EphemeralDisclosureModal";
@@ -42,12 +42,13 @@ export function GenerationPanel() {
         onProviderError(() => setStatus("error")),
       ]);
       unlistens = [loadingUnlisten, readyUnlisten, errorUnlisten];
+      if (!active) unlistens.forEach((u) => void safeUnlisten(u));
     };
 
     setup();
     return () => {
       active = false;
-      unlistens.forEach((u) => u());
+      unlistens.forEach((u) => void safeUnlisten(u));
     };
   }, []);
 

@@ -9,6 +9,7 @@ import {
   onGgufDownloadProgress,
   onSidecarDownloadProgress,
   onProviderError,
+  safeUnlisten,
 } from "../../lib/events";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { WizardStep } from "./WizardStep";
@@ -48,7 +49,7 @@ export function StepModel({ onNext }: Props) {
   const cleanup = () => {
     unlistens.current.forEach((u) => {
       if (typeof u === "function") {
-        u();
+        void safeUnlisten(u);
       }
     });
     unlistens.current = [];

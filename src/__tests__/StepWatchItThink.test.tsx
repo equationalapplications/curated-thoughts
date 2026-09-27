@@ -12,7 +12,8 @@ import {
 vi.mock("../lib/tauri", () => ({
   ingestDocument: vi.fn(),
 }));
-vi.mock("../lib/events", () => ({
+vi.mock("../lib/events", async (importOriginal) => ({
+  safeUnlisten: (await importOriginal<typeof import("../lib/events")>()).safeUnlisten,
   onIngestProgress: vi.fn(),
   onIngestProposalReady: vi.fn(),
   onIngestError: vi.fn(),

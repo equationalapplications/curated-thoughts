@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { checkOllama, getRecommendedModel, pullModel, startOllamaServer } from "../../lib/tauri";
-import { onPullProgress } from "../../lib/events";
+import { onPullProgress, safeUnlisten } from "../../lib/events";
 
 interface Props { onNext: () => void }
 
@@ -39,7 +39,7 @@ export function StepOllama({ onNext }: Props) {
       setErrorMsg(String(e));
       setPhase("error");
     } finally {
-      unlisten();
+      void safeUnlisten(unlisten);
     }
   }
 
