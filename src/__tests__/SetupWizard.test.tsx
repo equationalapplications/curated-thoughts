@@ -39,6 +39,11 @@ test("StepIndicator shows the current six-step position", () => {
   expect(screen.getByText("Step 3 of 6: Fastembed")).toBeInTheDocument();
 });
 
+test("first step is labelled Vault, matching its heading", () => {
+  render(<SetupWizard onComplete={vi.fn()} />);
+  expect(screen.getByText("Step 1 of 6: Vault")).toBeInTheDocument();
+});
+
 test("Watch it think renders as step four", () => {
   render(<SetupWizard onComplete={vi.fn()} initialStep={4} />);
   expect(screen.getByTestId("step-watch-it-think")).toBeInTheDocument();

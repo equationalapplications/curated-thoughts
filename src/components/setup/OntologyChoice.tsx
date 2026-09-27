@@ -45,7 +45,7 @@ export function OntologyChoice() {
 
   return (
     <fieldset className="setup-ontology">
-      <legend>What kinds of things should Tessera track?</legend>
+      <legend>What kinds of things should Curated Thoughts track?</legend>
       {visible.map((option) => (
         <label key={option.value} className="setup-ontology-option">
           <input
