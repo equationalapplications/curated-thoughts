@@ -183,7 +183,7 @@ In dark, the "this is in front" signal comes from the floating surface's border 
 
 One primary action per surface. In a dialog footer, the confirming action is primary and Cancel is default; they must never look identical.
 
-**Inputs** — `--bg` fill, `--outline-var` border, `--r-sm`; hover darkens the border to `--outline`; placeholder `--outline`. Checkboxes and radios are drawn in the theme's tones (checked = `--primary` fill with an `--on-primary` mark), never the platform widget. Selects use a custom caret.
+**Inputs** — `--bg` fill, `--outline-var` border, `--r-sm`; hover darkens the border to `--outline`; placeholder `--outline`. Checkboxes and radios are drawn in the theme's tones (checked = `--primary` fill with an `--on-primary` mark), never the platform widget. Selects use a custom caret — themed per mode via the SVG stroke and static across hover/focus/disabled; the input border carries the state change (1.5 above), so the caret itself does not need its own transition.
 
 **Selection & lists** — rows are flush, `--r-sm`, transparent at rest; hover `--elev-1`/`--elev-2`; selected `--primary-container` + `--on-primary-cont`, weight 500. Row lists inside a bordered group (`--elev-1`, `--outline-var` border) are divided by `--separator` hairlines.
 
@@ -214,7 +214,7 @@ One primary action per surface. In a dialog footer, the confirming action is pri
 ### 1.8 Accessibility (non-negotiable)
 
 - **WCAG 2.2 AA** across both themes. Text ≥4.5:1, control boundaries and focus ≥3:1 — asserted in tests, not eyeballed.
-- **Focus is always visible:** `2px solid var(--primary)`, 1px offset. If a composite control draws its own focus indicator, the inner element's ring moves to the container; it never simply disappears.
+- **Focus is always visible:** `2px solid var(--primary)`, 1px offset. The 1px offset is transparent — the surface behind shows through the gap, so the ring's contrast is `--primary` against whatever surface carries the control, not against a synthetic white. Under Windows High Contrast the system replaces both `--primary` and the surface token with system colours, so the 3:1 boundary contrast holds without a code change. If a composite control draws its own focus indicator, the inner element's ring moves to the container; it never simply disappears.
 - **State is never carried by colour alone:** disabled uses a dash, selection uses fill *and* weight, status uses text or icon plus colour.
 - Icon-only controls are labelled; decorative SVGs get `aria-hidden="true" focusable="false"` (some older call sites still lack `aria-hidden`).
 - Announcements go through the shared announcer, not ad-hoc live regions.
