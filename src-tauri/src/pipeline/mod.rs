@@ -659,6 +659,23 @@ fn ingest_file_virtual(
         // to the database, or we race the replacement worker (spec §4.1).
         return Ok(());
     }
+    // F4 `none` tier (spec 2026-09-27-vault-ingest-policy): do not index at
+    // all — no document row, chunks, or embeddings, the same outcome as a
+    // watcher exclusion. Gated here rather than in the librarian so every
+    // ingest caller (worker, Tauri command, `ct ingest`, bulk_reindex)
+    // honors it; after the epoch check above so a superseded worker never
+    // writes. A row left from before the folder was tiered `none` is
+    // removed (with provenance, issue #211), so re-tiering takes effect on
+    // the next touch.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    if policy.tier_for(virtual_path, vault_root.map(Path::new)) == crate::config::IngestTier::None {
+        if get_document_by_path(conn, virtual_path)?.is_some() {
+            let tx = conn.unchecked_transaction()?;
+            crate::db::queries::delete_document(&tx, virtual_path)?;
+            tx.commit()?;
+        }
+        return Ok(());
+    }
     let raw_bytes = std::fs::read(read_path)?;
     let hash = hash_bytes(&raw_bytes);
 
@@ -700,7 +717,10 @@ fn ingest_file_virtual(
             AstLang::Python => RefLang::Python,
             AstLang::Go => RefLang::Go,
         };
-        let refs = extract_references(ref_lang, &text, 0);
+        // Scan the same body `chunk_autodetect` chunked: YAML frontmatter is
+        // metadata, never call sites. `fm_lines` keeps spans source-relative.
+        let (body, fm_lines) = crate::chunker::split_leading_frontmatter(&text);
+        let refs = extract_references(ref_lang, body, fm_lines);
         chunks.extend(refs);
     }
 
@@ -994,6 +1014,57 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "wiki markdown must not be indexed post-V7");
+    }
+
+    /// F4 `none` tier: a file under a `none` folder gets no document row
+    /// (so no chunks, no embeddings), and a row left from before the folder
+    /// was tiered is purged. A sibling `full` file is untouched by the gate.
+    #[test]
+    fn ingest_skips_and_purges_none_tier_folder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let secret = vault.join("sensitive").join("s.md");
+        std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+        std::fs::write(&secret, "Sensitive body text.\n").unwrap();
+        let brain = tmp.path().join("brain");
+        std::fs::create_dir_all(&brain).unwrap();
+        std::fs::write(
+            brain.join("config.json"),
+            r#"{"ingest":{"folder_tiers":{"sensitive":"none"}}}"#,
+        )
+        .unwrap();
+
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let conn =
+                    crate::db::connection::open_app_db(&brain.join("brain.db"), None).unwrap();
+                let vault_str = vault.to_string_lossy().to_string();
+                let path_str = secret.to_string_lossy().to_string();
+                // A pre-existing row (indexed before the folder was tiered).
+                upsert_document(&conn, &path_str, "stale").unwrap();
+
+                let hb = crate::pipeline::watchdog::heartbeat::Heartbeat::new();
+                let hb = crate::pipeline::watchdog::heartbeat::StageReporter::unguarded(&hb);
+                ingest_file(
+                    &conn,
+                    &EmbedProfile::default(),
+                    &path_str,
+                    true,
+                    Some(&vault_str),
+                    &hb,
+                )
+                .unwrap();
+
+                let count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(count, 0, "`none` folder must leave no document row");
+            },
+        );
     }
 
     #[test]

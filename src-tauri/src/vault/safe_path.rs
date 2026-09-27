@@ -33,16 +33,21 @@ pub enum SafePathError {
 pub const IMMUTABLE_DIR: &str = "immutable-source-files";
 /// Directory name for wiki content (readable and writable)
 pub const WIKI_DIR: &str = "wiki";
+/// Directory name for the working-records tree (writable, never ingested).
+pub const RECORDS_DIR: &str = "records";
 /// Nested agent-deposit prefix inside the immutable tier.
 pub const AGENTS_DEPOSIT_DIR: &str = "immutable-source-files/agents";
-/// Subdirectories allowed for read operations
-pub const READABLE_SUBDIRS: &[&str] = &[IMMUTABLE_DIR, WIKI_DIR];
+/// Subdirectories allowed for read operations. `records/` is readable so a
+/// caller can fetch a record's `updated_at` If-Match token before editing it
+/// through `vault_write_note`; readability does not affect ingestion (the
+/// walker excludes the tree).
+pub const READABLE_SUBDIRS: &[&str] = &[IMMUTABLE_DIR, WIKI_DIR, RECORDS_DIR];
 /// Subdirectories allowed for write operations (excludes immutable-source-files)
 pub const WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR];
 /// Subdirectories allowed for proposed content operations
 pub const PROPOSED_SUBDIRS: &[&str] = &[WIKI_DIR, ".brain/proposed"];
 /// Subdirectories allowed for note write operations (wiki + agents)
-pub const NOTE_WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR, AGENTS_DEPOSIT_DIR];
+pub const NOTE_WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR, AGENTS_DEPOSIT_DIR, RECORDS_DIR];
 
 /// The `AGENTS_DEPOSIT_DIR` prefix with its trailing separator, so a prefix
 /// test cannot match a sibling directory (`.../agents-but-not-really/`).
@@ -859,6 +864,16 @@ mod tests {
             immutable_result.is_ok(),
             "read from immutable-source-files/ should succeed"
         );
+    }
+
+    /// Records are readable (If-Match token fetch before an edit).
+    #[test]
+    fn read_from_records_succeeds() {
+        let (_g, root) = vault();
+        fs::create_dir_all(root.join(RECORDS_DIR)).unwrap();
+        fs::write(root.join(RECORDS_DIR).join("r.md"), b"x").unwrap();
+        let out = safe_vault_path(&root, "records/r.md", READABLE_SUBDIRS, PathMode::MustExist);
+        assert!(out.is_ok(), "read from records/ should succeed: {out:?}");
     }
 
     #[test]
