@@ -7,7 +7,7 @@ import { StepDone } from "./StepDone";
 import { StepWatchItThink } from "./StepWatchItThink";
 import { StepIndicator } from "./StepIndicator";
 
-const STEPS = ["Welcome", "Privacy", "Fastembed", "Model", "Watch it think", "Done"];
+const STEPS = ["Vault", "Privacy", "Fastembed", "Model", "Watch it think", "Done"];
 
 interface Props {
   onComplete: () => void | Promise<void>;

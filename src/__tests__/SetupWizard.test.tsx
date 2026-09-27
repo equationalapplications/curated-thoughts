@@ -46,6 +46,14 @@ test("StepIndicator shows the current six-step position", () => {
   expect(screen.getByText("3")).toBeInTheDocument();
 });
 
+test("first step is labelled Vault, matching its heading", () => {
+  render(<SetupWizard onComplete={vi.fn()} />);
+  expect(screen.getByRole("progressbar")).toHaveAttribute(
+    "aria-label",
+    "Step 1 of 6: Vault",
+  );
+});
+
 test("Watch it think renders as step four", () => {
   render(<SetupWizard onComplete={vi.fn()} initialStep={4} />);
   expect(screen.getByTestId("step-watch-it-think")).toBeInTheDocument();

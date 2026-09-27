@@ -34,11 +34,13 @@ vi.mock("../hooks/usePrivacyMode", () => ({
 }));
 
 // Mock the events module
-vi.mock("../lib/events", () => {
+vi.mock("../lib/events", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/events")>();
   // The event functions return Promise<UnlistenFn>
   // UnlistenFn is a function that when called, unsubscribes
   const unlistenFn = vi.fn();
   return {
+    safeUnlisten: actual.safeUnlisten,
     onProviderLoading: vi.fn(() => Promise.resolve(unlistenFn)),
     onProviderReady: vi.fn(() => Promise.resolve(unlistenFn)),
     onProviderError: vi.fn(() => Promise.resolve(unlistenFn)),

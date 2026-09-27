@@ -22,6 +22,12 @@ vi.mock('../lib/wiki', () => ({
 describe('OntologyChoice', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('names the app, not an internal agent, in its question', async () => {
+    render(<OntologyChoice />);
+    expect(await screen.findByText('What kinds of things should Curated Thoughts track?')).toBeInTheDocument();
+    expect(screen.queryByText(/Tessera/)).not.toBeInTheDocument();
+  });
+
   it('shows General preselected and hides the other options', async () => {
     render(<OntologyChoice />);
     const general = await screen.findByRole('radio', { name: /General/ });

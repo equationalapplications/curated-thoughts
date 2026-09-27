@@ -6,7 +6,8 @@ vi.mock("../lib/tauri", () => ({
   initFastembed: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("../lib/events", () => ({
+vi.mock("../lib/events", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/events")>()),
   onEmbedInitDone: vi.fn(),
   onEmbedInitError: vi.fn(),
 }));
@@ -48,5 +49,28 @@ describe("StepFastembed", () => {
     );
     render(<StepFastembed onNext={onNext} />);
     await waitFor(() => expect(screen.getByText(/download failed/i)).toBeInTheDocument());
+  });
+
+  it("removes listeners that resolve after the step unmounts", async () => {
+    const unlistenDone = vi.fn();
+    const unlistenError = vi.fn();
+    let resolveDone!: (fn: () => void) => void;
+    let resolveError!: (fn: () => void) => void;
+    (onEmbedInitDone as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise((r) => (resolveDone = r)),
+    );
+    (onEmbedInitError as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise((r) => (resolveError = r)),
+    );
+
+    const { unmount } = render(<StepFastembed onNext={onNext} />);
+    unmount();
+    resolveDone(unlistenDone);
+    resolveError(unlistenError);
+
+    await waitFor(() => {
+      expect(unlistenDone).toHaveBeenCalledOnce();
+      expect(unlistenError).toHaveBeenCalledOnce();
+    });
   });
 });
