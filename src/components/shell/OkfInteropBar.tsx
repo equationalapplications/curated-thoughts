@@ -153,7 +153,16 @@ export function OkfInteropBar({ onImported }: Props) {
             ))}
           </fieldset>
           <div className="okf-interop-actions">
-            <button type="button" disabled={busy} onClick={() => void handleConfirm()}>
+            {/* One primary action per surface. "Confirm import" and "Cancel"
+                were two identical secondary buttons, so the committing choice
+                read as dismissible — the same defect the ephemeral disclosure
+                modal already fixed by promoting its confirming action. */}
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={busy}
+              onClick={() => void handleConfirm()}
+            >
               Confirm import
             </button>
             <button type="button" disabled={busy} onClick={() => setPending(null)}>
