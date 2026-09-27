@@ -201,6 +201,34 @@ pub fn is_doc_clean(
     synth_hash == Some(doc_hash) && synth_model == Some(active_model)
 }
 
+/// Per-note fact-extraction override (F4): true when the document's
+/// frontmatter carries a literal unquoted `wisdom: false`. Stored OKF
+/// frontmatter parses `false` to a [`OkfFrontmatterValue::Bool`]; any other
+/// value (string `"false"`, `true`, absent) does NOT suppress — the
+/// override must be deliberate.
+fn note_declares_no_wisdom(content: &str) -> bool {
+    let (fm, _) = crate::okf::frontmatter::parse_frontmatter(content);
+    matches!(
+        fm.fields.get("wisdom"),
+        Some(crate::okf::types::OkfFrontmatterValue::Bool(false))
+    )
+}
+
+/// Resolve the ingest tier for a document path from the brain config on
+/// disk. Any load problem degrades to [`IngestTier::Full`] — a config read
+/// failure must never silently broaden or narrow the extraction policy
+/// beyond its shipped behavior.
+fn tier_from_disk(source_path: &str) -> crate::config::IngestTier {
+    let paths = crate::retrieval::resolve_brain_paths();
+    match crate::config::BrainConfig::load_lenient(&paths) {
+        Ok(report) => report.config.ingest_tier_for(source_path),
+        Err(e) => {
+            eprintln!("librarian: could not read ingest tiers ({e}); assuming full");
+            crate::config::IngestTier::Full
+        }
+    }
+}
+
 pub fn generate_summary(
     conn: &mut Connection,
     source_path: &str,
@@ -211,6 +239,23 @@ pub fn generate_summary(
 
     if mode == "index" {
         return Ok(());
+    }
+
+    // F4 tier gate (spec 2026-09-27-vault-ingest-policy): `none` and
+    // `chunks-only` folders get chunks + embeddings but no fact extraction,
+    // so the librarian returns before any LLM work. Fires at proposal
+    // creation (the cheapest cut, per the spec's open-question lean).
+    if tier_from_disk(source_path).skips_fact_extraction() {
+        return Ok(());
+    }
+
+    // F4 per-note override: `wisdom: false` in the note's frontmatter
+    // suppresses extraction for THIS document regardless of folder tier.
+    // Read failures degrade to "extractable" (fail toward current behavior).
+    if let Ok(content) = std::fs::read_to_string(source_path) {
+        if note_declares_no_wisdom(&content) {
+            return Ok(());
+        }
     }
 
     let synthesis_mode = match mode.as_str() {
@@ -306,16 +351,46 @@ mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
 
+    /// Seed a real document + one chunk row, so a test can prove a skip
+    /// came from the F4 gates rather than from an empty chunks list.
+    fn test_seed_doc_chunk(conn: &Connection, path: &str) {
+        use crate::chunker::{Chunk, ChunkStrategyTag};
+        use crate::db::queries::{insert_chunk, upsert_document};
+        let doc_id = upsert_document(conn, path, "hash").unwrap();
+        let chunk = Chunk {
+            text: "Alpha project details here".into(),
+            start_line: 1,
+            end_line: 1,
+            symbol_name: None,
+            defined_symbol: None,
+            strategy: ChunkStrategyTag::Prose,
+        };
+        insert_chunk(conn, doc_id, &chunk, 0, "tier_fact", "").unwrap();
+    }
+
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
-        let mut conn = open_in_memory().unwrap();
-        let result = generate_summary(
-            &mut conn,
-            "/vault/documents/nonexistent.md",
-            "llama3.2:1b",
-            false,
+        // F4: generate_summary now resolves ingest tiers from the brain
+        // config; redirect so the issue #178 live-brain guard doesn't fire.
+        let brain = tempfile::TempDir::new().unwrap();
+        let brain_str = brain.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let mut conn = open_in_memory().unwrap();
+                let result = generate_summary(
+                    &mut conn,
+                    "/vault/documents/nonexistent.md",
+                    "llama3.2:1b",
+                    false,
+                );
+                assert!(result.is_ok());
+            },
         );
-        assert!(result.is_ok());
     }
 
     #[test]
@@ -327,6 +402,36 @@ mod tests {
         ).unwrap();
         let result = generate_summary(&mut conn, "/vault/documents/note.md", "llama3.2:1b", false);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tier_none_short_circuits_generate_summary() {
+        // F4: `none` on the folder — the librarian returns before touching
+        // chunks or the LLM. Redirected brain dir (issue #178 guard).
+        let brain = tempfile::TempDir::new().unwrap();
+        let brain_str = brain.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                // A config on disk tiering `documents/` to none.
+                std::fs::write(
+                    brain.path().join("config.json"),
+                    r#"{"ingest":{"folder_tiers":{"documents":"none"}}}"#,
+                )
+                .unwrap();
+                let mut conn = open_in_memory().unwrap();
+                // Seed a real document + chunk so the pre-F4 code path would
+                // have proceeded into synthesis (the skip must come from the
+                // tier gate, not from empty chunks).
+                super::tests::test_seed_doc_chunk(&conn, "/vault/documents/note.md");
+                let result = generate_summary(&mut conn, "/vault/documents/note.md", "m", false);
+                assert!(result.is_ok());
+            },
+        );
     }
 
     #[test]
@@ -435,5 +540,88 @@ mod tests {
             context.contains("[source: src/db/init.rs | symbol: foo | lines 22-45]"),
             "expected symbol in header, got:\n{context}"
         );
+    }
+
+    // ---- F4 ingest tiers + wisdom:false override (spec 2026-09-27-vault-ingest-policy) ----
+
+    use crate::config::{BrainConfig, IngestConfig, IngestTier};
+
+    fn tier_cfg(tiers: &[(&str, IngestTier)]) -> BrainConfig {
+        BrainConfig {
+            ingest: IngestConfig {
+                folder_tiers: tiers.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chunks_only_and_none_tiers_skip_fact_extraction() {
+        let cfg = tier_cfg(&[
+            ("operations", IngestTier::ChunksOnly),
+            ("people/tessera/sessions", IngestTier::None),
+        ]);
+        assert!(cfg
+            .ingest_tier_for("operations/brief.md")
+            .skips_fact_extraction());
+        assert!(cfg
+            .ingest_tier_for("people/tessera/sessions/2026-09-27.md")
+            .skips_fact_extraction());
+        // Full (default) never skips.
+        assert!(!cfg.ingest_tier_for("wiki/note.md").skips_fact_extraction());
+    }
+
+    /// The per-note override: `wisdom: false` in the note's frontmatter
+    /// suppresses fact extraction for THAT document regardless of folder
+    /// tier — including the default `full`.
+    #[test]
+    fn wisdom_false_frontmatter_overrides_full_tier() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let note = tmp.path().join("note.md");
+        std::fs::write(
+            &note,
+            "---\ntitle: T\nwisdom: false\n---\n\nBody without extraction.\n",
+        )
+        .unwrap();
+
+        assert!(super::note_declares_no_wisdom(
+            &std::fs::read_to_string(&note).unwrap()
+        ));
+
+        // And the positive control: without the key the note is extractable.
+        std::fs::write(&note, "---\ntitle: T\n---\n\nBody.\n").unwrap();
+        assert!(!super::note_declares_no_wisdom(
+            &std::fs::read_to_string(&note).unwrap()
+        ));
+        // No frontmatter at all → extractable.
+        assert!(!super::note_declares_no_wisdom("plain body\n"));
+    }
+
+    /// `wisdom: true` (or any other value) must NOT suppress extraction —
+    /// the override fires only on the literal unquoted false. A quoted
+    /// `"false"` is a YAML string, so it does not suppress either.
+    #[test]
+    fn wisdom_true_does_not_suppress() {
+        assert!(!super::note_declares_no_wisdom(
+            "---\nwisdom: true\n---\nbody\n"
+        ));
+        assert!(!super::note_declares_no_wisdom(
+            "---\nwisdom: \"false\"\n---\nbody\n"
+        ));
+    }
+
+    /// A `chunks-only` folder combined with `wisdom: false` still skips —
+    /// the matrix converges (tier OR override).
+    #[test]
+    fn tier_and_override_matrix_converges() {
+        let cfg = tier_cfg(&[("ops", IngestTier::ChunksOnly)]);
+        // Tier says skip.
+        assert!(cfg.ingest_tier_for("ops/a.md").skips_fact_extraction());
+        // Override says skip even on full.
+        assert!(super::note_declares_no_wisdom(
+            "---\nwisdom: false\n---\nb\n"
+        ));
+        // Default full + no override → extract.
+        assert!(!cfg.ingest_tier_for("wiki/a.md").skips_fact_extraction());
     }
 }

@@ -61,6 +61,79 @@ pub struct WikiConfig {
     pub deposit_default_tier: Option<String>,
 }
 
+/// Per-folder ingestion tier (F4, spec 2026-09-27-vault-ingest-policy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IngestTier {
+    /// Chunks + embeddings + librarian fact extraction (current behavior).
+    #[serde(rename = "full")]
+    Full,
+    /// Chunk + embed; the librarian skips fact extraction.
+    #[serde(rename = "chunks-only")]
+    ChunksOnly,
+    /// Do not index at all (watcher-exclusion equivalent).
+    #[serde(rename = "none")]
+    None,
+}
+
+impl Default for IngestTier {
+    fn default() -> Self {
+        IngestTier::Full
+    }
+}
+
+impl IngestTier {
+    /// True when this tier suppresses librarian fact extraction.
+    pub fn skips_fact_extraction(self) -> bool {
+        matches!(self, IngestTier::ChunksOnly | IngestTier::None)
+    }
+}
+
+/// Ingestion-policy block. Absent from config.json = every path `full`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IngestConfig {
+    /// Map of vault-relative folder prefix → tier. Resolution walks the
+    /// path's ancestor folders; the DEEPEST matching entry wins
+    /// (path-component aware: `ops` never matches `ops-archive`).
+    #[serde(default)]
+    pub folder_tiers: std::collections::HashMap<String, IngestTier>,
+}
+
+impl IngestConfig {
+    /// Resolve the tier for a vault-relative (or absolute) path.
+    ///
+    /// Matching is on ancestor FOLDER components, not raw strings, so a
+    /// prefix `ops` cannot capture a sibling `ops-archive`; among matching
+    /// ancestors the deepest (longest) prefix wins; anything unmatched is
+    /// [`IngestTier::Full`]. Separator spellings (`\` vs `/`) are normalized.
+    pub fn tier_for(&self, path: &str) -> IngestTier {
+        let normalized = path.replace('\\', "/");
+        let mut best: Option<(usize, IngestTier)> = None;
+        for (prefix, tier) in &self.folder_tiers {
+            let prefix = prefix.trim_matches('/');
+            if prefix.is_empty() {
+                continue;
+            }
+            let prefixed = format!("{prefix}/");
+            let rel = if normalized.starts_with(&prefixed) {
+                Some(normalized.as_str())
+            } else {
+                // Absolute spellings still match a vault-relative tier key by
+                // component: .../<prefix>/...
+                normalized
+                    .rsplit_once(&format!("/{prefix}/"))
+                    .map(|_| normalized.as_str())
+            };
+            if rel.is_some() {
+                let depth = prefix.split('/').count();
+                if best.map_or(true, |(d, _)| depth > d) {
+                    best = Some((depth, *tier));
+                }
+            }
+        }
+        best.map_or(IngestTier::Full, |(_, t)| t)
+    }
+}
+
 /// Unified configuration for a brain directory.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BrainConfig {
@@ -89,6 +162,12 @@ pub struct BrainConfig {
     /// Wiki-layer settings (deposit tier default).
     #[serde(default)]
     pub wiki: WikiConfig,
+    /// Ingestion policy (F4, spec 2026-09-27-vault-ingest-policy).
+    /// `#[serde(default)]` on purpose: an absent block is the shipped
+    /// behavior (every folder `full`), NOT a leniency diagnostic — this
+    /// block must never route a working config into `load_lenient`.
+    #[serde(default)]
+    pub ingest: IngestConfig,
     /// Approved symlink `(link, target)` pairs. Written only by the approval
     /// flows (`ct trust`, the Desktop review prompt) — never hand-edited.
     #[serde(default)]
@@ -178,7 +257,38 @@ fn truncate_for_diag(value: &str) -> String {
     }
 }
 
+/// Salvage an `IngestConfig` from a lenient load report's raw context.
+///
+/// The test surface mirrors `ingest_from_value_lenient` usage in the
+/// lenient-path tests: given the raw `serde_json::Value` of an `ingest`
+/// block, parse tier values entry-by-entry, dropping (with a diagnostic to
+/// stderr) any value outside the tier vocabulary. Valid entries survive —
+/// one typo must not nuke the whole policy.
+pub fn ingest_from_value_lenient(raw: &serde_json::Value) -> IngestConfig {
+    let mut out = IngestConfig::default();
+    let Some(map) = raw.get("folder_tiers").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (k, v) in map {
+        match serde_json::from_value::<IngestTier>(v.clone()) {
+            Ok(tier) => {
+                out.folder_tiers.insert(k.clone(), tier);
+            }
+            Err(e) => {
+                eprintln!("config: ingest.folder_tiers entry {k:?} dropped: {e}");
+            }
+        }
+    }
+    out
+}
+
 impl BrainConfig {
+    /// Resolve the ingest tier for a path (F4). Thin delegation to the
+    /// `ingest` block; unmatched paths are [`IngestTier::Full`].
+    pub fn ingest_tier_for(&self, path: &str) -> IngestTier {
+        self.ingest.tier_for(path)
+    }
+
     /// Load config from disk with no leniency. Malformed top-level JSON is fatal.
     /// Missing or unparseable vault_path is fatal (never masked).
     /// Returns an error if config.json does not exist.
@@ -208,6 +318,7 @@ impl BrainConfig {
             "privacy",
             "ontology",
             "wiki",
+            "ingest",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -410,6 +521,7 @@ impl BrainConfig {
             "privacy",
             "ontology",
             "wiki",
+            "ingest",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -622,6 +734,39 @@ impl BrainConfig {
             }
         }
 
+        // ingest: lenient (F4). Same known_keys reasoning as `wiki`: the
+        // block is modeled, so it must not leak into `preserved_keys`. An
+        // entirely unparseable block falls back to full; within a parseable
+        // block, one bad tier VALUE drops only that entry (same
+        // drop-one-keep-the-rest semantics as `trusted_links`), so a
+        // hand-edit typo cannot silently disable or nuke whole trees.
+        // Note the `ingest` BLOCK is `#[serde(default)]` on BrainConfig, so
+        // an absent block never enters this branch — no diagnostic.
+        if let Some(ing) = obj.get("ingest") {
+            match serde_json::from_value::<IngestConfig>(ing.clone()) {
+                Ok(cfg) => report.config.ingest = cfg,
+                Err(_) => {
+                    // Block-level parse failed: salvage entry by entry.
+                    if let Some(map) = ing.get("folder_tiers").and_then(|v| v.as_object()) {
+                        for (k, v) in map {
+                            match serde_json::from_value::<IngestTier>(v.clone()) {
+                                Ok(tier) => {
+                                    report.config.ingest.folder_tiers.insert(k.clone(), tier);
+                                }
+                                Err(e) => report
+                                    .diagnostics
+                                    .push(format!("ingest.folder_tiers entry {k:?} dropped: {e}")),
+                            }
+                        }
+                    } else {
+                        report
+                            .diagnostics
+                            .push("ingest block unparseable; all folders full".to_string());
+                    }
+                }
+            }
+        }
+
         // trusted_links: lenient — an unparseable entry is dropped, the rest
         // survive. This is the only mutable-from-config surface for the
         // ledger; a corruption in one entry must not nuke the whole list.
@@ -780,6 +925,9 @@ impl BrainConfig {
             }
         }
         obj.insert("wiki".to_string(), wiki_value);
+        // F4: persist the ingest-policy block (empty map serializes as `{}`,
+        // keeping the block visible and hand-editable).
+        obj.insert("ingest".to_string(), serde_json::to_value(&self.ingest)?);
         obj.insert(
             "trusted_links".to_string(),
             serde_json::to_value(&self.trusted_links)?,
@@ -927,5 +1075,87 @@ mod tests {
                 .is_err(),
             "a config with only a wiki block is still missing generation/embedding/privacy"
         );
+    }
+
+    // ---- F4 ingest tiers (spec 2026-09-27-vault-ingest-policy) ----
+
+    #[test]
+    fn ingest_block_parses_tiers_and_defaults_to_full() {
+        let cfg: BrainConfig = serde_json::from_str(
+            r#"{"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true},
+                "ingest":{"folder_tiers":{"operations":"chunks-only","people/tessera/sessions":"none"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.ingest.folder_tiers.get("operations"),
+            Some(&IngestTier::ChunksOnly)
+        );
+        assert_eq!(
+            cfg.ingest.folder_tiers.get("people/tessera/sessions"),
+            Some(&IngestTier::None)
+        );
+        // Absent key = full ingestion.
+        assert_eq!(cfg.ingest_tier_for("wiki/some-note.md"), IngestTier::Full);
+    }
+
+    /// A config with NO ingest block at all resolves every path to `full`
+    /// (the universal pre-F4 behavior) and round-trips through write.
+    #[test]
+    fn absent_ingest_block_means_full_everywhere() {
+        let cfg: BrainConfig = serde_json::from_str(
+            r#"{"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}"#,
+        )
+        .unwrap();
+        assert!(cfg.ingest.folder_tiers.is_empty());
+        assert_eq!(cfg.ingest_tier_for("anything/at/all.md"), IngestTier::Full);
+    }
+
+    /// Longest matching prefix wins; matching is PATH-COMPONENT aware:
+    /// a tier keyed `ops` must not capture `ops-archive/…` (review
+    /// amendment b). Separators are normalized so Windows spellings match.
+    #[test]
+    fn longest_component_aware_prefix_wins() {
+        let cfg: BrainConfig = serde_json::from_str(
+            r#"{"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true},
+                "ingest":{"folder_tiers":{"ops":"none","ops-archive":"chunks-only","people/tessera":"chunks-only","people/tessera/sessions":"none"}}}"#,
+        )
+        .unwrap();
+        // Sibling that merely SHARES a string prefix must NOT match `ops`.
+        assert_eq!(
+            cfg.ingest_tier_for("ops-archive/a.md"),
+            IngestTier::ChunksOnly
+        );
+        // Longest prefix wins over a shorter one.
+        assert_eq!(
+            cfg.ingest_tier_for("people/tessera/sessions/s1.md"),
+            IngestTier::None
+        );
+        assert_eq!(
+            cfg.ingest_tier_for("people/tessera/notes.md"),
+            IngestTier::ChunksOnly
+        );
+        assert_eq!(cfg.ingest_tier_for("people/other.md"), IngestTier::Full);
+        assert_eq!(cfg.ingest_tier_for("ops/x.md"), IngestTier::None);
+        // Backslash spellings normalize onto the `/`-keyed tiers.
+        assert_eq!(
+            cfg.ingest_tier_for("people\\tessera\\notes.md"),
+            IngestTier::ChunksOnly
+        );
+    }
+
+    /// An unparseable tier VALUE falls back to full (config is hand-editable;
+    /// garbage must not disable ingestion of a whole tree).
+    #[test]
+    fn unparseable_tier_value_falls_back_to_full() {
+        let report = serde_json::from_str::<serde_json::Value>(
+            r#"{"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true},
+                "ingest":{"folder_tiers":{"operations":"bogus-tier","notes":"chunks-only"}}}"#,
+        )
+        .unwrap();
+        let cfg = crate::config::ingest_from_value_lenient(report.get("ingest").unwrap());
+        // The bogus entry is dropped; the valid one survives.
+        assert!(cfg.folder_tiers.get("operations").is_none());
+        assert_eq!(cfg.folder_tiers.get("notes"), Some(&IngestTier::ChunksOnly));
+        assert_eq!(cfg.tier_for("operations/a.md"), IngestTier::Full);
     }
 }
