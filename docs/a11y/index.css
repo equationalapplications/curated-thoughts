@@ -3,7 +3,7 @@
  * palette preview harness, which loads this copy without a bundler).
  * Regenerate after ANY change to src/index.css:
  *   cp src/index.css docs/a11y/index.css
- * Last regenerated: 2026-09-26 @ #234 visual polish review fixes. */
+ * Last regenerated: 2026-09-26 @ light-theme polish. */
 /* ── Design tokens ────────────────────────────────────────────────────────
    Surfaces climb --bg -> --surface -> --elev-1/2/3 -> --surface-variant.
    Text climbs --on-surface -> --on-surface-var -> --outline.
@@ -20,8 +20,16 @@
    Every fg/bg pair asserted in src/__tests__/a11y-contrast.test.ts.
    ---------------------------------------------------------------------- */
 :root {
-  --bg:                 #fffbff;
-  --surface:            #fffbff;
+  /* "Warm paper" means the WHOLE ladder is one temperature. --bg used to be
+     #fffbff — a near-white with a *violet* cast (R255 G251 B255, so blue is
+     4 above green) while every step above it is warm cream. That put the
+     largest hue discontinuity in the app at the most visible boundary there
+     is: the page against the rail, status bar and panels. #fffcf9 is the same
+     near-white with the cast removed, so the page and the chrome it sits in
+     finally share a hue. Luminance is essentially unchanged, so every
+     contrast gate below holds with the same headroom. */
+  --bg:                 #fffcf9;
+  --surface:            #fffcf9;
   --elev-1:             #f9f3f2;
   --elev-2:             #f5eeeb;
   --elev-3:             #f1e9e3;
@@ -29,7 +37,20 @@
   --separator:          #e0d3c4;   /* chrome hairlines only */
   --primary:            #835400;
   --primary-hover:      #6d4600;
-  --primary-container:  #ffddb5;
+  /* Selection fill. This is the token that decides whether the app reads as
+     "warm paper with an amber accent" or "an orange app", for exactly the
+     reason dark's was retuned to #262e3c: it is the fill behind every
+     selected row (tree files, entity rows, palette options, settings nav,
+     chosen option cards, mode-rail active item), so a saturated slab here
+     tints every screen at once. #ffddb5 carries a chroma of 74 against a page
+     whose own is 6 — a 12x jump — which is why the chosen Appearance card and
+     the Appearance nav item read as two orange blocks stacked on each other.
+     #eadbc4 halves the chroma to 38 and deepens the value, so selection is
+     carried by a *sand fill + 500 weight* rather than by orange. It is still
+     1.33:1 against --bg (more distinct than before, not less) and 1.19:1
+     against the --elev-2 hover it has to be told apart from.
+     --on-primary-cont is its paired label, 12.55:1. */
+  --primary-container:  #eadbc4;
   --on-primary:         #ffffff;
   --on-primary-cont:    #2a1800;
   --secondary:          #705b40;
@@ -502,7 +523,17 @@ input[type="radio"]:checked::after {
 /* The OS drag state. The full-window dashed edge says "a drop is live"; the
    card in the middle says what will happen, which a bare line of text floating
    over a scrim did not. The card is the resting `.drop-target` shape, so the
-   drag reads as that target filling in rather than as a new screen. */
+   drag reads as that target filling in rather than as a new screen.
+
+   The scrim is `color-mix(--surface 85%, transparent)`, which works in dark
+   (85% of a near-black surface over a near-black page is a real dim) and
+   does *nothing* in light, where --surface and --bg are the same value: "85%
+   of the page colour" resolves to the page colour. That is the general failure
+   of a scrim expressed as "most of the surface" on a theme whose surface IS its
+   background. Light therefore overrides it with a real warm scrim built from
+   the theme's own text colour; the dark rule is left exactly as it was. A drag
+   is a transient hint rather than a commitment, so it stays well under the
+   modal scrim's weight. */
 .drop-overlay {
   position: fixed;
   inset: 0;
@@ -515,6 +546,9 @@ input[type="radio"]:checked::after {
   margin: 0;
   border-radius: 0;
   background: color-mix(in srgb, var(--surface) 85%, transparent);
+}
+[data-theme="light"] .drop-overlay {
+  background: color-mix(in srgb, var(--on-surface) 12%, transparent);
 }
 .drop-overlay__card {
   display: flex;
@@ -1041,6 +1075,30 @@ code {
 .bn-container {
   font-family: var(--font-body) !important;
 }
+/* BlockNote ships its own neutral palette (#fff / #3f3f3f in light, #1f1f1f /
+   #cfcfcf in dark), which painted the document as a grey rounded slab that
+   stopped where the text did, in both themes, and gave its menus a different
+   white/grey than every other popover. Map its chrome variables onto ours so
+   the editor sits on the pane and its menus are our surfaces. The doubled
+   class outranks BlockNote's `.bn-root[data-color-scheme=dark]`. Highlight
+   colours are the user's content and are left alone. */
+.bn-root.bn-root {
+  --bn-colors-editor-text: var(--on-surface);
+  --bn-colors-editor-background: transparent;
+  --bn-colors-menu-text: var(--on-surface);
+  --bn-colors-menu-background: var(--surface);
+  --bn-colors-tooltip-text: var(--on-surface);
+  --bn-colors-tooltip-background: var(--elev-2);
+  --bn-colors-hovered-text: var(--on-surface);
+  --bn-colors-hovered-background: var(--elev-2);
+  --bn-colors-selected-text: var(--on-primary-cont);
+  --bn-colors-selected-background: var(--primary-container);
+  --bn-colors-disabled-text: var(--disabled-fg);
+  --bn-colors-disabled-background: var(--disabled-bg);
+  --bn-colors-shadow: rgba(0, 0, 0, 0.12);
+  --bn-colors-border: var(--separator);
+  --bn-colors-side-menu: var(--outline);
+}
 
 /* ── Folder tree ────────────────────────────────────────────────────────────── */
 .tree-section { display: flex; flex-direction: column; gap: 1px; }
@@ -1263,7 +1321,12 @@ code {
   margin-top: var(--sp-1);
 }
 .settings-form__actions button { font-size: 12.5px; min-width: 84px; }
-.rule-input, .rule-select { font-size: 12.5px; background: var(--bg); }
+/* `background-color`, NOT the `background` shorthand: the shorthand resets
+   `background-image` to `none`, and this rule outranks the base `select` rule
+   that paints the custom caret. So the Folder Rules mode <select> lost its
+   caret and fell back to the WebView's own native frame — the only select in
+   the app that rendered with a bezel. Longhand keeps the caret. */
+.rule-input, .rule-select { font-size: 12.5px; background-color: var(--bg); }
 .rule-input { flex: 1; min-width: 200px; }
 .rule-input:focus, .rule-select:focus { border-color: var(--primary); }
 .rule-auto-label {

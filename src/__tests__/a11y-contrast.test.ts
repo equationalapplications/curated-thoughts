@@ -112,10 +112,24 @@ describe("a11y: token contrast (WCAG 2.2 AA)", () => {
 
   it("retuned tokens have the approved values", () => {
     // Light keeps the warm-paper palette it has always had; the dark theme
-    // was retuned to a neutral slate set (2026-09-26 visual pass).
+    // was retuned to a neutral slate set (2026-09-26 visual pass). Two more
+    // light values moved in the light-theme pass, both to make "warm paper"
+    // true of the whole ladder:
+    //   --bg / --surface  #fffbff -> #fffcf9. The old value was near-white
+    //     with a *violet* cast while every step above it is warm cream, so
+    //     the app's biggest hue discontinuity sat at the page/chrome edge.
+    //   --primary-container #ffddb5 -> #eadbc4. The old fill had nearly twice
+    //     the chroma of the page and painted every selected row orange; the
+    //     replacement is a desaturated sand, so selection is structure.
+    expect(light["--bg"]).toBe("#fffcf9");
+    expect(light["--surface"]).toBe("#fffcf9");
+    expect(light["--primary-container"]).toBe("#eadbc4");
     expect(light["--outline"]).toBe("#6b5e50");
     expect(light["--outline-var"]).toBe("#94826e");
     expect(light["--separator"]).toBe("#e0d3c4");
+    expect(dark["--bg"]).toBe("#101215");
+    expect(dark["--surface"]).toBe("#15181c");
+    expect(dark["--primary-container"]).toBe("#262e3c");
     expect(dark["--outline"]).toBe("#8b95a3");
     expect(dark["--outline-var"]).toBe("#6f7a87");
     expect(dark["--separator"]).toBe("#262c33");
