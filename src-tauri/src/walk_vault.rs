@@ -45,6 +45,12 @@ const EXCLUDED_DIRS: &[&str] = &[
     ".idea",
     ".vscode",
     ".fastembed_cache",
+    // Working-records tree (sessions, operations, archive). Writable via
+    // `vault_write_note` but NEVER ingested: no document rows, no chunks, no
+    // embeddings, no fact extraction. Exact component match only — sibling
+    // names like `records-evil/` still ingest (spec D4). Spec:
+    // docs/superpowers/specs/2026-09-27-vault-ingest-policy-design.md, F1.
+    "records",
 ];
 
 fn is_excluded_dir(dir_name: &str) -> bool {
@@ -705,6 +711,102 @@ mod tests {
         assert!(
             outcome.pending.is_empty(),
             "excluded-name link must not be offered for approval"
+        );
+    }
+
+    // ---- records/ exclusion (spec 2026-09-27-vault-ingest-policy, F1) ----
+
+    /// The `records/` tree is never ingested: no file under it may appear in
+    /// the walk, at any depth, while sibling lookalikes still ingest.
+    /// Fixtures are `.md` so the extension gate cannot pass this test on the
+    /// prune's behalf (same rule as the `.brain` prune tests above).
+    #[test]
+    fn collect_files_prunes_records_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("records/sessions")).unwrap();
+        std::fs::create_dir_all(root.join("records-but-not-really")).unwrap();
+        std::fs::write(root.join("notes.md"), b"a").unwrap();
+        std::fs::write(root.join("records").join("session.md"), b"b").unwrap();
+        std::fs::write(root.join("records/sessions").join("deep.md"), b"c").unwrap();
+        std::fs::write(root.join("records-but-not-really").join("x.md"), b"d").unwrap();
+
+        let mut out = Vec::new();
+        let mut errs = Vec::new();
+        super::collect_files(&root, &mut out, &mut errs);
+        let names: Vec<String> = out
+            .iter()
+            .map(|f| f.virtual_path.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.iter().any(|n| n.ends_with("notes.md")));
+        assert!(names
+            .iter()
+            .any(|n| n.ends_with("records-but-not-really/x.md")));
+        assert!(
+            !names.iter().any(|n| n.contains("records/")),
+            "walk leaked records/ content: {names:?}"
+        );
+    }
+
+    /// The `records` exclusion participates in the same component predicate
+    /// as every other EXCLUDED_DIRS name: exact segment match only.
+    #[test]
+    fn records_predicate_matches_segments_exactly() {
+        use std::path::Path;
+        assert!(super::rel_path_has_excluded_component(Path::new(
+            "records/session.md"
+        )));
+        assert!(super::rel_path_has_excluded_component(Path::new(
+            "notes/records/archive/x.md"
+        )));
+        // Substring lookalikes must still ingest (spec D4 pattern).
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "my.records/x.md"
+        )));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "records-evil/x.md"
+        )));
+    }
+
+    /// The absolute-path fail-closed predicate covers `records/` too — this
+    /// is the hook the watcher pre-pass and reconcile use to keep records
+    /// rows out of (and deletable from) the DB.
+    #[test]
+    fn abs_predicate_excludes_records_under_vault_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("records")).unwrap();
+        assert!(super::abs_path_is_excluded_in_vault(
+            &root.join("records").join("session.md"),
+            &root
+        ));
+        assert!(!super::abs_path_is_excluded_in_vault(
+            &root.join("notes.md"),
+            &root
+        ));
+    }
+
+    /// A `documents/records` symlink is Denied (reported), never silently
+    /// skipped and never offered for approval — same carve-out as
+    /// `documents/.brain` above.
+    #[cfg(unix)]
+    #[test]
+    fn records_name_symlink_is_denied_not_silently_skipped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("documents")).unwrap();
+        let target = tmp.path().join("records-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("documents").join("records")).unwrap();
+
+        let outcome = super::walk_vault(&root, &[], None);
+
+        assert_eq!(outcome.denied.len(), 1, "got {:?}", outcome.denied);
+        assert_eq!(outcome.denied[0].link, "documents/records");
+        assert!(
+            outcome.pending.is_empty(),
+            "records-name link must not be offered for approval"
         );
     }
 }
