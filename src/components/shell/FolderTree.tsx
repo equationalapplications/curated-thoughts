@@ -37,21 +37,49 @@ function FileRow({
   return (
     <div className={`tree-file-row${isSelected ? " tree-file-row--active" : ""}`}>
       <button
+        type="button"
         className={`tree-file${isSelected ? " tree-file--active" : ""}`}
         onClick={onSelect}
         title={file.name}
       >
-        {file.name}
+        <svg
+          className="icon icon--sm tree-file-icon"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h5.2L18 8.3v11.2a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19.5z" />
+        </svg>
+        {/* The name lives in a span because the button itself is a flex
+            container (icon + label), and `text-overflow: ellipsis` does not
+            apply to a flex container's own text — it only clips an inline
+            child. With the bare text node, "Designing Data-Intensive
+            Applications.md" wrapped onto a second line flush with the left
+            edge of the row, which read as a broken tree. */}
+        <span className="tree-file-name">{file.name}</span>
       </button>
       {deletable && (
         <button
+          type="button"
           className={`tree-file-delete${confirming ? " tree-file-delete--confirm" : ""}`}
           onClick={handleDelete}
           onBlur={() => setConfirming(false)}
           title={confirming ? "Click again to confirm" : "Delete file"}
           aria-label={confirming ? "Confirm delete" : "Delete file"}
         >
-          {confirming ? "✕" : "🗑"}
+          {/* Armed state shows a check: the second click deletes, so a
+              cross (which reads as "cancel") would misstate the action. */}
+          {confirming ? (
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M5 12.5 9.5 17 19 7" />
+            </svg>
+          ) : (
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M4.5 6.5h15M9.5 6.5V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5" />
+              <path d="M6.5 6.5 7.4 19a1.5 1.5 0 0 0 1.5 1.4h6.2a1.5 1.5 0 0 0 1.5-1.4l.9-12.5" />
+              <path d="M10.5 10v6.5M13.5 10v6.5" />
+            </svg>
+          )}
         </button>
       )}
     </div>

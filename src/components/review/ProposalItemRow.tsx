@@ -73,10 +73,10 @@ export function ProposalItemRow({
               onChange={(e) => setDraft(e.target.value)}
             />
             <div className="proposal-item-edit-actions">
-              <button type="button" onClick={save}>
+              <button type="button" className="btn btn--primary" onClick={save}>
                 Save
               </button>
-              <button type="button" onClick={() => setEditing(false)}>
+              <button type="button" className="btn" onClick={() => setEditing(false)}>
                 Cancel
               </button>
             </div>

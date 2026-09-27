@@ -42,8 +42,22 @@ export function AppearancePanel() {
               checked={preference === opt.id}
               onChange={() => setPreference(opt.id)}
             />
-            <span className="theme-option-label">{opt.label}</span>
-            <span className="theme-option-hint">{opt.hint}</span>
+            {/* Same drawn mark as the privacy cards. The radio is opacity:0,
+                so without it the three theme options were distinguished only
+                by a fill change — and the panel whose whole job is showing you
+                which theme is active had no indicator at all. */}
+            <span className="privacy-option__mark" aria-hidden="true">
+              <svg className="icon icon--sm" viewBox="0 0 24 24" focusable="false">
+                <circle cx="12" cy="12" r="8" />
+                {preference === opt.id && (
+                  <circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" />
+                )}
+              </svg>
+            </span>
+            <span className="privacy-option__text">
+              <span className="theme-option-label">{opt.label}</span>
+              <span className="theme-option-hint">{opt.hint}</span>
+            </span>
           </label>
         ))}
       </div>

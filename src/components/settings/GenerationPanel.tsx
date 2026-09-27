@@ -119,44 +119,50 @@ export function GenerationPanel() {
         </p>
       )}
 
-      <div className="rule-form">
-        <label htmlFor="gen-url">External base URL</label>
-        <input
-          id="gen-url"
-          type="text"
-          placeholder="http://localhost:11434/v1"
-          value={externalUrl}
-          onChange={(e) => setExternalUrl(e.target.value)}
-          className="rule-input"
-          disabled={strictPrivacy}
-        />
-        <label htmlFor="gen-key">API key (optional)</label>
-        <input
-          id="gen-key"
-          type="password"
-          placeholder="sk-..."
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          className="rule-input"
-          disabled={strictPrivacy}
-        />
-        <label htmlFor="gen-model">Model name</label>
-        <input
-          id="gen-model"
-          type="text"
-          placeholder="e.g. llama3.2, gpt-4o"
-          value={modelName}
-          onChange={(e) => setModelName(e.target.value)}
-          className="rule-input"
-          disabled={strictPrivacy}
-        />
-        <button
-          className="rule-add-btn"
-          onClick={handleSave}
-          disabled={savePhase === "saving" || strictPrivacy}
-        >
-          {savePhase === "saving" ? "Saving…" : "Save"}
-        </button>
+      <div className="settings-form">
+        <div>
+          <label htmlFor="gen-url">External base URL</label>
+          <input
+            id="gen-url"
+            type="text"
+            placeholder="http://localhost:11434/v1"
+            value={externalUrl}
+            onChange={(e) => setExternalUrl(e.target.value)}
+            disabled={strictPrivacy}
+          />
+        </div>
+        <div>
+          <label htmlFor="gen-key">API key (optional)</label>
+          <input
+            id="gen-key"
+            type="password"
+            placeholder="sk-..."
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            disabled={strictPrivacy}
+          />
+        </div>
+        <div>
+          <label htmlFor="gen-model">Model name</label>
+          <input
+            id="gen-model"
+            type="text"
+            placeholder="e.g. llama3.2, gpt-4o"
+            value={modelName}
+            onChange={(e) => setModelName(e.target.value)}
+            disabled={strictPrivacy}
+          />
+        </div>
+        <div className="settings-form__actions">
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={handleSave}
+            disabled={savePhase === "saving" || strictPrivacy}
+          >
+            {savePhase === "saving" ? "Saving…" : "Save"}
+          </button>
+        </div>
       </div>
 
       {savePhase === "error" && (

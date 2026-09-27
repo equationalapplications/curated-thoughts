@@ -28,7 +28,7 @@ describe('HealthReportPanel', () => {
   it('runs lint on demand and shows counts and samples', async () => {
     render(<HealthReportPanel />);
     expect(lintSeededTiers).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: 'Run health report' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Run report' }));
     expect(await screen.findByText('tier_fact')).toBeInTheDocument();
     // Anchored so a future '19' or '90' won't match by accident.
     expect(screen.getByText('Untyped facts').nextSibling).toHaveTextContent(/^9$/);
@@ -37,7 +37,7 @@ describe('HealthReportPanel', () => {
 
   it('types untyped facts and reports the outcome', async () => {
     render(<HealthReportPanel />);
-    await userEvent.click(screen.getByRole('button', { name: 'Type untyped facts' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Type facts' }));
     expect(typeUntypedFacts).toHaveBeenCalledTimes(1);
     expect(await screen.findByText('Typed 6 facts; 3 still untyped.')).toBeInTheDocument();
   });
@@ -45,6 +45,6 @@ describe('HealthReportPanel', () => {
   it('disables typing while a wiki job is busy', () => {
     useWikiStatus.mockReturnValue({ busy: true });
     render(<HealthReportPanel />);
-    expect(screen.getByRole('button', { name: 'Type untyped facts' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Type facts' })).toBeDisabled();
   });
 });

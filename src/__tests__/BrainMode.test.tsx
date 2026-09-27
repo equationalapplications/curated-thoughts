@@ -177,8 +177,11 @@ test("LibraryMode shows empty state when no document is selected", async () => {
     />,
   );
   // isFirstRun: no docFiles (empty vault) + no selectedDoc + no query
+  // The heading is now "Drop your first document" (the "to get started" tail
+  // moved into the supporting hint) and it is an <h2> so the empty state has
+  // a heading role like every other pane.
   expect(
-    await screen.findByText(/drop your first document to get started/i),
+    await screen.findByRole("heading", { name: /drop your first document/i }),
   ).toBeInTheDocument();
 });
 
@@ -218,7 +221,7 @@ test("LibraryMode shows first-run empty state with file picker CTA when no docs"
       onPickFile={onPickFile}
     />,
   );
-  expect(await screen.findByText(/drop your first document to get started/i)).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: /drop your first document/i })).toBeInTheDocument();
   const cta = screen.getByRole("button", { name: /choose a folder/i });
   fireEvent.click(cta);
   expect(onPickFile).toHaveBeenCalledOnce();

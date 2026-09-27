@@ -46,17 +46,27 @@ test("Escape dismisses the panel", () => {
 
 test("backdrop click dismisses the panel", () => {
   const { onDismiss } = renderPanel();
+  // Two controls dismiss the panel now (the backdrop and the header close
+  // button added in pass 4), so this targets the backdrop specifically.
+  fireEvent.click(
+    screen.getByRole("button", { name: "Close source peek (click outside)" }),
+  );
+  expect(onDismiss).toHaveBeenCalledTimes(1);
+});
+
+test("the header close button dismisses the panel", () => {
+  const { onDismiss } = renderPanel();
   fireEvent.click(screen.getByRole("button", { name: "Close source peek" }));
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
 
-test("Open ↗ calls onPromote with path and hash", () => {
+test("Open calls onPromote with path and hash", () => {
   const { onPromote } = renderPanel();
-  fireEvent.click(screen.getByRole("button", { name: "Open ↗" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open" }));
   expect(onPromote).toHaveBeenCalledWith("documents/notes.md", "abc123");
 });
 
-test("focus moves to Open ↗ on mount and returns to opener on unmount", () => {
+test("focus moves to Open on mount and returns to opener on unmount", () => {
   const opener = render(<button type="button">Opener chip</button>);
   const openerBtn = screen.getByRole("button", { name: "Opener chip" });
   openerBtn.focus();
@@ -69,7 +79,7 @@ test("focus moves to Open ↗ on mount and returns to opener on unmount", () => 
       onPromote={vi.fn()}
     />,
   );
-  const openBtn = screen.getByRole("button", { name: "Open ↗" });
+  const openBtn = screen.getByRole("button", { name: "Open" });
   expect(document.activeElement).toBe(openBtn);
 
   panel.unmount();
@@ -79,7 +89,7 @@ test("focus moves to Open ↗ on mount and returns to opener on unmount", () => 
 
 test("Tab cycles within the panel", () => {
   renderPanel();
-  const openBtn = screen.getByRole("button", { name: "Open ↗" });
+  const openBtn = screen.getByRole("button", { name: "Open" });
   openBtn.focus();
   // The Open button is the panel's only focusable element, so Tab wraps
   // straight back onto it instead of escaping to the page behind.

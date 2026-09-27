@@ -118,7 +118,7 @@ describe('MaintenanceDashboard', () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
     render(React.createElement(MaintenanceDashboard));
 
-    const pruneButton = screen.getByRole('button', { name: /Prune Trash/i });
+    const pruneButton = screen.getByRole('button', { name: /Prune now/i });
     fireEvent.click(pruneButton);
 
     expect(invoke).toHaveBeenCalledWith('run_wiki_prune');

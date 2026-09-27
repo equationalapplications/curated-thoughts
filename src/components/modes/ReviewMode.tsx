@@ -375,11 +375,26 @@ export function ReviewMode({
     return (
       <div className="mode-layout review-screen">
         <PendingLinksPanel />
-        <div className="review-empty">
-          <h2>{queueError ? "Queue unavailable" : "Queue clear."}</h2>
-          {queueError && <p className="review-hint">{queueError}</p>}
-          <p className="placeholder">
-            {`Librarian is watching ${indexed} document${indexed === 1 ? "" : "s"}.`}
+        <div className="empty-pane">
+          <span className="empty-pane__icon" aria-hidden="true">
+            {queueError ? (
+              <svg className="icon" viewBox="0 0 24 24" focusable="false">
+                <path d="M12 8.2v4.6M12 16.4h.01" />
+                <path d="M10.3 4.1 3 17.2A2 2 0 0 0 4.7 20.2h14.6a2 2 0 0 0 1.7-3L13.7 4.1a2 2 0 0 0-3.4 0z" />
+              </svg>
+            ) : (
+              <svg className="icon" viewBox="0 0 24 24" focusable="false">
+                <path d="m5.5 12.5 4.2 4.2 8.8-9.4" />
+              </svg>
+            )}
+          </span>
+          <h2 className="empty-pane__title">
+            {queueError ? "Queue unavailable" : "Queue clear."}
+          </h2>
+          <p className="empty-pane__hint">
+            {queueError
+              ? queueError
+              : `The librarian is watching ${indexed} document${indexed === 1 ? "" : "s"}. Proposals appear here as it works.`}
           </p>
         </div>
       </div>

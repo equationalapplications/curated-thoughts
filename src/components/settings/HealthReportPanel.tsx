@@ -50,23 +50,54 @@ export function HealthReportPanel() {
   }
 
   return (
-    <section className="maintenance-health" aria-labelledby="health-heading">
+    <section className="settings-section maintenance-health" aria-labelledby="health-heading">
       <h4 id="health-heading">Health report</h4>
       {error && (
         <p className="maintenance-error" role="alert">
           Health report: {error}
         </p>
       )}
-      <button type="button" disabled={running !== null} onClick={() => void runLint()}>
-        Run health report
-      </button>
-      <button type="button" disabled={busy || running !== null} onClick={() => void runTyping()}>
-        Type untyped facts
-      </button>
-      <p className="maintenance-description">
-        Assigns ontology types to facts that have none. Uses the classifier when one is configured
-        in Settings → Models; otherwise uses the generation model.
-      </p>
+      {/* Same action-row shape as the maintenance commands above: a control
+          with its consequence, instead of two full-width buttons stacked on a
+          description that only explained the second of them. */}
+      <div className="action-list">
+        <div className="action-row">
+          <div className="action-row__text">
+            <span className="action-row__title">Run health report</span>
+            <p className="action-row__desc">
+              Lint every seeded tier for dangling edges, manifest violations, untyped facts and
+              unverified inferences. Read-only — it changes nothing.
+            </p>
+          </div>
+          <div className="action-row__control">
+            <button
+              type="button"
+              disabled={running !== null}
+              onClick={() => void runLint()}
+            >
+              {running === 'lint' ? 'Running…' : 'Run report'}
+            </button>
+          </div>
+        </div>
+        <div className="action-row">
+          <div className="action-row__text">
+            <span className="action-row__title">Type untyped facts</span>
+            <p className="action-row__desc">
+              Assigns ontology types to facts that have none. Uses the classifier when one is
+              configured in Settings → Models; otherwise uses the generation model.
+            </p>
+          </div>
+          <div className="action-row__control">
+            <button
+              type="button"
+              disabled={busy || running !== null}
+              onClick={() => void runTyping()}
+            >
+              {running === 'type' ? 'Typing…' : 'Type facts'}
+            </button>
+          </div>
+        </div>
+      </div>
       {typingResult && <p className="maintenance-description">{typingResult}</p>}
       {reports?.map(({ entityId, report }) => (
         <div key={entityId} className="maintenance-health-tier">

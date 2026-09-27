@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSummary, groupByDay, KIND_ICONS, KIND_LABELS } from "../lib/timelineFormat";
+import { parseSummary, groupByDay, shortenPathForDisplay, KIND_ICON_PATHS, KIND_LABELS } from "../lib/timelineFormat";
 import type { TimelineEvent } from "../lib/tauri";
 
 describe("timelineFormat", () => {
@@ -31,6 +31,66 @@ describe("timelineFormat", () => {
       expect(segments).toHaveLength(2);
       expect(segments[0]).toEqual({ text: "Emphasized", em: true });
       expect(segments[1]).toEqual({ text: " start" });
+    });
+  });
+
+  describe("shortenPathForDisplay", () => {
+    it("shortens Windows drive paths and keeps their separator", () => {
+      expect(
+        shortenPathForDisplay("Ingested C:\\Users\\Maya\\Vault\\People\\Maya Chen.md"),
+      ).toBe("Ingested …\\People\\Maya Chen.md");
+      expect(shortenPathForDisplay("Ingested D:/Vault/immutable-source-files/People/Note.md")).toBe(
+        "Ingested …/People/Note.md",
+      );
+    });
+
+    it("shortens Windows UNC paths", () => {
+      expect(shortenPathForDisplay("Ingested \\\\server\\share\\Vault\\People\\Note.md")).toBe(
+        "Ingested …\\People\\Note.md",
+      );
+    });
+
+    it("keeps the last two path components and elides the directory prefix", () => {
+      expect(
+        shortenPathForDisplay(
+          "Ingested /private/tmp/claude-502/DemoVault/immutable-source-files/People/Maya Chen.md",
+        ),
+      ).toBe("Ingested …/People/Maya Chen.md");
+    });
+
+    it("leaves a short path alone — no elision for two components or fewer", () => {
+      expect(shortenPathForDisplay("Ingested /vault/notes.md")).toBe(
+        "Ingested /vault/notes.md",
+      );
+    });
+
+    it("leaves text with no path alone", () => {
+      expect(shortenPathForDisplay("Librarian is idle.")).toBe("Librarian is idle.");
+    });
+
+    it("keeps a literal backslash in a POSIX filename", () => {
+      expect(shortenPathForDisplay("Ingested /People/Maya\\Chen.md")).toBe(
+        "Ingested /People/Maya\\Chen.md",
+      );
+      expect(shortenPathForDisplay("Ingested /vault/notes/People/Maya\\Chen.md")).toBe(
+        "Ingested …/People/Maya\\Chen.md",
+      );
+    });
+
+    it("leaves a bare ratio alone — the slash does not start a token", () => {
+      expect(shortenPathForDisplay("Approved 3/4 facts")).toBe("Approved 3/4 facts");
+    });
+
+    it("keeps a spaced filename intact", () => {
+      expect(
+        shortenPathForDisplay(
+          "/private/tmp/DemoVault/immutable-source-files/People/Maya Chen.md",
+        ),
+      ).toBe("…/People/Maya Chen.md");
+    });
+
+    it("leaves an emphasised entity name alone — no slash at all", () => {
+      expect(shortenPathForDisplay("Project X")).toBe("Project X");
     });
   });
 
@@ -76,12 +136,25 @@ describe("timelineFormat", () => {
     });
   });
 
-  describe("KIND_ICONS and KIND_LABELS", () => {
+  describe("KIND_ICON_PATHS and KIND_LABELS", () => {
     it("has all kinds covered", () => {
       const kinds = ["ingested", "synthesized", "approved", "rejected", "healed", "imported", "exported", "agent_access", "other"] as const;
       for (const kind of kinds) {
-        expect(KIND_ICONS[kind]).toBeDefined();
+        expect(KIND_ICON_PATHS[kind]).toBeDefined();
         expect(KIND_LABELS[kind]).toBeDefined();
+      }
+    });
+
+    // The icons are inline SVG path data, not emoji: each entry must be a
+    // non-empty list of path commands, and none may contain a non-ASCII
+    // character (which is how an emoji sneaks back in).
+    it("every kind has at least one drawable, ASCII-only path", () => {
+      for (const [kind, paths] of Object.entries(KIND_ICON_PATHS)) {
+        expect(paths.length, `${kind} has paths`).toBeGreaterThan(0);
+        for (const d of paths) {
+          expect(d.length, `${kind} path is non-empty`).toBeGreaterThan(0);
+          expect(/^[\x20-\x7E]+$/.test(d), `${kind} path is ASCII: ${d}`).toBe(true);
+        }
       }
     });
   });

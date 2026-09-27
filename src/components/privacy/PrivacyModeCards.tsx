@@ -49,8 +49,22 @@ export function PrivacyModeCards({ mode, onChange, disabled = false }: Props) {
             disabled={disabled}
             onChange={() => onChange(m.id)}
           />
-          <span className="privacy-option-label">{m.label}</span>
-          <span className="privacy-option-summary">{m.summary}</span>
+          {/* A drawn radio mark, not the platform's. The real input is
+              opacity:0 (it stays focusable and screen-reader-visible), so
+              without this the three cards had no radio at all — the only
+              difference between selected and unselected was a fill change,
+              which is a weak signal for the one control in Settings that
+              governs whether data leaves the machine. */}
+          <span className="privacy-option__mark" aria-hidden="true">
+            <svg className="icon icon--sm" viewBox="0 0 24 24" focusable="false">
+              <circle cx="12" cy="12" r="8" />
+              {mode === m.id && <circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" />}
+            </svg>
+          </span>
+          <span className="privacy-option__text">
+            <span className="privacy-option-label">{m.label}</span>
+            <span className="privacy-option-summary">{m.summary}</span>
+          </span>
         </label>
       ))}
     </div>

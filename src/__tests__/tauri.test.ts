@@ -22,6 +22,7 @@ import {
   archiveEntityFact,
   getOntologySelection,
   setOntologySelection,
+  getVaultLayout,
 } from '../lib/tauri';
 
 describe('tauri API helpers', () => {
@@ -86,5 +87,19 @@ describe('tauri API helpers', () => {
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
     await setOntologySelection('off');
     expect(invoke).toHaveBeenCalledWith('set_ontology_selection', { selection: 'off' });
+  });
+
+  it('maps the get_vault_layout folder list into dirs and labels', async () => {
+    // The Rust command returns Vec<VaultFolder { name, label }>, not an object.
+    vi.mocked(invoke).mockResolvedValue([
+      { name: 'immutable-source-files', label: 'Source Files' },
+      { name: 'wiki', label: 'Wiki Pages' },
+    ]);
+    await expect(getVaultLayout()).resolves.toEqual({
+      immutableDir: 'immutable-source-files',
+      wikiDir: 'wiki',
+      labels: { immutableDir: 'Source Files', wikiDir: 'Wiki Pages' },
+    });
+    expect(invoke).toHaveBeenCalledWith('get_vault_layout');
   });
 });

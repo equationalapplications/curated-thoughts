@@ -6,6 +6,10 @@ import { wiki, setupWiki } from "./lib/wiki";
 import { ThemeProvider } from "./lib/ThemeContext";
 import { AnnouncerProvider } from "./a11y";
 import "./index.css";
+// Component styles live here; imported after index.css so the shared token
+// and primitive layer is established first. This import was missing, which
+// left the entity page, connections rail, OKF bar and folder tree unstyled.
+import "./App.css";
 
 function Root() {
   const [wikiInstance, setWikiInstance] = useState(wiki);

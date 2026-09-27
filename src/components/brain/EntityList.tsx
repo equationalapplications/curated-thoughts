@@ -10,9 +10,15 @@ interface Props {
   sort: EntitySort;
   /** Fires when the user changes the sort dropdown. Parent updates `sort` in response. */
   onSortChange: (sort: EntitySort) => void;
+  /**
+   * Suppress this component's own "no entities" line. The parent shows a
+   * first-run block in the same column in that case, and two empty-state
+   * messages in one sidebar is a layout fault, not redundancy worth keeping.
+   */
+  suppressEmpty?: boolean;
 }
 
-export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onSortChange }: Props) {
+export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onSortChange, suppressEmpty = false }: Props) {
   const [filter, setFilter] = useState("");
   const [creating, setCreating] = useState(false);
   const [draftName, setDraftName] = useState("");
@@ -57,10 +63,23 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onS
           onChange={(e) => setFilter(e.target.value)}
         />
       </div>
-      <select aria-label="Sort entities" className="entity-sort-picker" value={sort} onChange={(e) => {
-        const next = e.target.value as EntitySort;
-        onSortChange(next);
-      }}>
+      {/* A visible label, not just the aria-label. The picker sat between the
+          filter box and the "New entity" button as a bare dropdown, so nothing
+          on screen said what it did — "Recently updated" reads as a filter
+          value, and the row above it is already a filter. */}
+      <label className="entity-sort-label" htmlFor="entity-sort">
+        Sort
+      </label>
+      <select
+        id="entity-sort"
+        aria-label="Sort entities"
+        className="entity-sort-picker"
+        value={sort}
+        onChange={(e) => {
+          const next = e.target.value as EntitySort;
+          onSortChange(next);
+        }}
+      >
         <option value="updated_desc">Recently updated</option>
         <option value="name_asc">Name (A → Z)</option>
         <option value="name_desc">Name (Z → A)</option>
@@ -92,10 +111,24 @@ export function EntityList({ entities, selectedId, onSelect, onCreate, sort, onS
           className="entity-create-btn"
           onClick={() => setCreating(true)}
         >
-          + New entity
+          <svg
+            className="icon icon--sm"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M12 5.5v13M5.5 12h13" />
+          </svg>
+          New entity
         </button>
       )}
-      {groups.length === 0 && (
+      {/* Only when the list is empty *but* the parent is not already showing
+          the first-run block. BrainMode renders "No entities yet. Drop a
+          document in Library…" above this component, so on a first run the
+          sidebar used to say "No entities yet" twice with different advice,
+          ~200px apart, which read as a rendering fault rather than as two
+          messages. The list itself stays silent; the parent owns the copy. */}
+      {groups.length === 0 && !suppressEmpty && (
         <p className="placeholder">
           No entities yet. Approve proposals in Review or create one.
         </p>

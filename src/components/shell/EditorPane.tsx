@@ -198,9 +198,27 @@ export function EditorPane({ selectedDoc, isWiki, anchorChunkId = null }: Props)
   }
 
   if (!selectedDoc) {
+    // Shared full-pane empty state. The old line — a bare "Drop your first
+    // document" — was shown for *every* no-selection state, including the
+    // ordinary one where the sidebar is full of documents and you simply have
+    // not picked one yet, so it told you to do something you had already
+    // done. Both cases are now covered by one block: how to get a document
+    // open, and where to put a new one.
     return (
       <main className="editor-pane">
-        <p className="placeholder">Drop your first document</p>
+        <div className="empty-pane">
+          <span className="empty-pane__icon" aria-hidden="true">
+            <svg className="icon" viewBox="0 0 24 24" focusable="false">
+              <path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h5.2L18 8.3v11.2a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19.5z" />
+              <path d="M12.8 3.2V8a1 1 0 0 0 1 1h4.1" />
+            </svg>
+          </span>
+          <h2 className="empty-pane__title">No document open</h2>
+          <p className="empty-pane__hint">
+            Pick a file from the sidebar to read it here, or drop a document
+            into your vault folder and it will be indexed.
+          </p>
+        </div>
       </main>
     );
   }
