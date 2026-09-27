@@ -1,3 +1,11 @@
+## [2.19.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.1...v2.19.2) (2026-09-27)
+
+### Bug Fixes
+
+* **events:** stop unlisten racing Tauri's listener registration ([b5c0419](https://github.com/equationalapplications/curated-thoughts/commit/b5c041906bd06e6b1d2632f0cb2eb569ac51b43a))
+* **setup:** name the app, not the Tessera agent, and label step 1 "Vault" ([dc78672](https://github.com/equationalapplications/curated-thoughts/commit/dc78672f8dc34a27e66faae36d88867d2ac46eb4))
+* **setup:** StepModel removes auto-install listeners pending at unmount ([30e0155](https://github.com/equationalapplications/curated-thoughts/commit/30e015591d363da7d30cc8e5ce43ff4f154c0369))
+
 ## [2.19.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.0...v2.19.1) (2026-09-27)
 
 ### Bug Fixes
