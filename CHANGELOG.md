@@ -1,3 +1,12 @@
+## [2.19.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.0...v2.19.1) (2026-09-27)
+
+### Bug Fixes
+
+* **a11y:** re-terminate docs/a11y/index.css GENERATED header comment ([52e2a2b](https://github.com/equationalapplications/curated-thoughts/commit/52e2a2baac6eee6e77a5de9b9830fe99cc50e444)), closes [#234](https://github.com/equationalapplications/curated-thoughts/issues/234)
+* **timeline:** keep literal backslashes in POSIX paths when shortening ([80ae8f1](https://github.com/equationalapplications/curated-thoughts/commit/80ae8f1bc2da8700ec1f14fb475a12024b1ce947))
+* **ui:** address review on visual polish ([4a85406](https://github.com/equationalapplications/curated-thoughts/commit/4a854065047cd7d8248e78b796531336e41d5b1b))
+* **vault:** map get_vault_layout's folder list into the shape FolderTree reads ([56db365](https://github.com/equationalapplications/curated-thoughts/commit/56db365028b9f3e0d56f0fd3c9c49535d17ff04b))
+
 ## [2.19.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.18.0...v2.19.0) (2026-09-25)
 
 ### Features
