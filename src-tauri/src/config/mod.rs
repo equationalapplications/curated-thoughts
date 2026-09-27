@@ -162,19 +162,19 @@ impl IngestPolicy {
     }
 }
 
-type PolicyCache = std::collections::HashMap<
-    std::path::PathBuf,
-    (Option<std::time::SystemTime>, u64, IngestPolicy),
->;
+type PolicyCache = std::collections::HashMap<std::path::PathBuf, (Vec<u8>, IngestPolicy)>;
 
 /// The ingest policy for the brain that owns the database at `db_path`
 /// (`Connection::path()`), resolved exactly as the pipeline worker resolves
 /// its config (`brain_paths_for(parent(db))`).
 ///
 /// Consulted per document on the ingest and synthesis hot paths, so the
-/// parsed policy is cached per config file and re-read only when its
-/// mtime/length changes — hand-edits take effect on the next document
-/// without re-parsing config.json for every file of a bulk reindex. An
+/// parsed policy is cached per config file, keyed on the file's exact
+/// bytes: each call is one small read, and the JSON is re-parsed only when
+/// the contents change. Bytes, not mtime/length — `full` ↔ `none` is a
+/// same-length edit, and `BrainConfig::write`'s temp-file rename can keep a
+/// coarse (1–2 s) mtime unchanged, so a metadata stamp could serve a stale
+/// policy. Hand-edits take effect on the next document. An
 /// in-memory or path-less database, a missing config, or a load error all
 /// yield the default policy (every folder `full`, the shipped behavior).
 pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
@@ -188,15 +188,14 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         return IngestPolicy::default();
     };
     let paths = crate::retrieval::brain_paths_for(brain_dir);
-    let Ok(meta) = fs::metadata(&paths.config_path) else {
+    let Ok(contents) = fs::read(&paths.config_path) else {
         return IngestPolicy::default();
     };
-    let stamp = (meta.modified().ok(), meta.len());
 
     let cache = CACHE.get_or_init(|| Mutex::new(PolicyCache::new()));
     if let Ok(guard) = cache.lock() {
-        if let Some((mtime, len, policy)) = guard.get(&paths.config_path) {
-            if (*mtime, *len) == stamp {
+        if let Some((cached, policy)) = guard.get(&paths.config_path) {
+            if *cached == contents {
                 return policy.clone();
             }
         }
@@ -213,7 +212,7 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         }
     };
     if let Ok(mut guard) = cache.lock() {
-        guard.insert(paths.config_path, (stamp.0, stamp.1, policy.clone()));
+        guard.insert(paths.config_path, (contents, policy.clone()));
     }
     policy
 }
@@ -1301,7 +1300,7 @@ mod tests {
     }
 
     /// The policy loader follows the db's brain dir, sees hand-edits on the
-    /// next call (mtime/len cache), and defaults to full for in-memory dbs.
+    /// next call (content-keyed cache), and defaults to full for in-memory dbs.
     #[test]
     fn ingest_policy_for_db_reads_and_refreshes() {
         let brain = tempfile::TempDir::new().unwrap();
@@ -1324,14 +1323,22 @@ mod tests {
                 let p = ingest_policy_for_db(Some(db));
                 assert_eq!(p.tier_for("/v/ops/a.md", None), IngestTier::None);
 
-                // Different length → cache invalidates without waiting on mtime.
+                // SAME-length edit (`none` → `full`), with the mtime pinned
+                // back: a metadata-keyed cache would serve the stale `none`.
+                let mtime = std::fs::metadata(&cfg_path).unwrap().modified().unwrap();
                 std::fs::write(
                     &cfg_path,
-                    r#"{"vault_path":"/v","ingest":{"folder_tiers":{"ops":"chunks-only"}}}"#,
+                    r#"{"vault_path":"/v","ingest":{"folder_tiers":{"ops":"full"}}}"#,
                 )
                 .unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&cfg_path)
+                    .unwrap()
+                    .set_modified(mtime)
+                    .unwrap();
                 let p = ingest_policy_for_db(Some(db));
-                assert_eq!(p.tier_for("ops/a.md", None), IngestTier::ChunksOnly);
+                assert_eq!(p.tier_for("ops/a.md", None), IngestTier::Full);
 
                 assert!(ingest_policy_for_db(None).tiers.folder_tiers.is_empty());
                 assert!(ingest_policy_for_db(Some("")).tiers.folder_tiers.is_empty());

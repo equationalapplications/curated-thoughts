@@ -103,8 +103,10 @@
   row removed (with deletion provenance) the next time it is ingested;
   operators wanting it gone immediately reindex.
 - The policy is read from the config of the brain that owns the database
-  and cached per config file, re-parsed only when its mtime/length changes,
-  so hand-edits take effect on the next document without a per-file parse.
+  and cached per config file keyed on its exact bytes (one small read per
+  document, re-parsed only when the contents change — not mtime/length,
+  since `full`↔`none` is a same-length edit and coarse mtimes can survive
+  the atomic-rename write), so hand-edits take effect on the next document.
 - `wisdom: false` detection accepts the same opener as the chunker's fence
   strip (an optional UTF-8 BOM before `---`).
 
