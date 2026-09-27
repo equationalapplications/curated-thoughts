@@ -6,6 +6,7 @@ import {
   type PrivacyMode,
   type PrivacyState,
 } from "../lib/tauri";
+import { safeUnlisten } from "../lib/events";
 
 export type { PrivacyMode };
 
@@ -85,7 +86,7 @@ export function usePrivacyMode(): PrivacyState & {
 
     return () => {
       active = false;
-      unlistenPromise.then((unlisten) => unlisten());
+      void safeUnlisten(unlistenPromise);
     };
   }, []);
 

@@ -19,6 +19,12 @@ describe('OntologyPanel', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
   });
 
+  it('names the app, not an internal agent, in its description', async () => {
+    render(<OntologyPanel />);
+    expect(await screen.findByText(/What kinds of things Curated Thoughts tracks/)).toBeInTheDocument();
+    expect(screen.queryByText(/Tessera/)).not.toBeInTheDocument();
+  });
+
   it('renders all four options with the package id as secondary text', async () => {
     render(<OntologyPanel />);
     expect(await screen.findByRole('radio', { name: /General/ })).toBeChecked();

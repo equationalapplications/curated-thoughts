@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { safeUnlisten } from "../../lib/events";
 
 interface Props {
   onComplete: () => void;
@@ -32,9 +33,9 @@ export function SplashScreen({ onComplete }: Props) {
       (event) => setError(event.payload.message),
     );
     return () => {
-      unlistenProgress.then((fn) => fn());
-      unlistenComplete.then((fn) => fn());
-      unlistenError.then((fn) => fn());
+      void safeUnlisten(unlistenProgress);
+      void safeUnlisten(unlistenComplete);
+      void safeUnlisten(unlistenError);
     };
   }, [onComplete]);
 

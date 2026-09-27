@@ -8,7 +8,8 @@ vi.mock("../lib/tauri", () => ({
   updateProvider: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("../lib/events", () => ({
+vi.mock("../lib/events", async (importOriginal) => ({
+  safeUnlisten: (await importOriginal<typeof import("../lib/events")>()).safeUnlisten,
   onGgufDownloadProgress: vi.fn().mockResolvedValue(() => {}),
   onSidecarDownloadProgress: vi.fn().mockResolvedValue(() => {}),
   onProviderReady: vi.fn().mockImplementation((cb: () => void) => {

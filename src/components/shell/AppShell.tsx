@@ -18,7 +18,7 @@ import {
 import { SetupWizard } from "../setup/SetupWizard";
 import { SkipLink } from "../../a11y";
 import { startFileWatcher, needsChunkHashMigration, peekPendingConfigMalformed, ackPendingConfigMalformed } from "../../lib/tauri";
-import { onVaultSwitched } from "../../lib/events";
+import { onVaultSwitched, safeUnlisten } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
 import { useProposalNotifications } from "../../hooks/useProposalNotifications";
@@ -141,7 +141,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
       onVaultChanged(newPath);
     });
     return () => {
-      promise.then((unlisten) => unlisten());
+      void safeUnlisten(promise);
     };
   }, [onVaultChanged, nav.reset]);
 
@@ -164,7 +164,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
       })
       .then((fn) => {
         if (cancelled) {
-          fn();
+          void safeUnlisten(fn);
         } else {
           unlisten = fn;
         }
@@ -172,7 +172,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      void safeUnlisten(unlisten);
     };
   }, [vaultPath]);
 
@@ -239,7 +239,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
       renderMalformed(event.payload);
     });
     return () => {
-      promise.then((unlisten) => unlisten());
+      void safeUnlisten(promise);
     };
   }, []);
 

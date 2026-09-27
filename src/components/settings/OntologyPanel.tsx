@@ -48,7 +48,7 @@ export function OntologyPanel() {
     <div className="settings-section">
       <h3>Knowledge schema</h3>
       <p className="settings-hint">
-        What kinds of things Tessera tracks, and how facts are connected.
+        What kinds of things Curated Thoughts tracks, and how facts are connected.
         Changing this rebuilds type labels and connections — your notes and
         search are untouched.
       </p>

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { listLocalModels, pullModel, getRecommendedModel } from "../../lib/tauri";
-import { onPullProgress } from "../../lib/events";
+import { onPullProgress, safeUnlisten } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 
 export function ModelPanel() {
@@ -48,7 +48,7 @@ export function ModelPanel() {
       setError(String(e));
       setPhase("error");
     } finally {
-      unlisten();
+      void safeUnlisten(unlisten);
     }
   }
 

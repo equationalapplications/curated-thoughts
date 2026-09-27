@@ -1,5 +1,44 @@
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
+// Backoff between unlisten attempts (~0.5s in total), long enough for a
+// registration eval queued behind startup work in a busy webview.
+const UNLISTEN_RETRY_DELAYS_MS = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256];
+
+/**
+ * Unsubscribe a Tauri listener without racing its registration.
+ *
+ * Tauri registers the JS side of a listener by eval'ing a script into the
+ * webview, but resolves `listen()` over a separate IPC channel, so `listen()`
+ * can resolve before the registration lands. Unlistening in that window (an
+ * effect cleaned up right after mount) throws inside `unregisterListener`
+ * (`listeners[eventId].handlerId`) before the Rust side is told, which leaks
+ * the listener and surfaces as an unhandled rejection. Retry with backoff
+ * until the registration has landed.
+ */
+export async function safeUnlisten(
+  unlisten: UnlistenFn | Promise<UnlistenFn> | undefined,
+): Promise<void> {
+  let fn: UnlistenFn | undefined;
+  try {
+    fn = await unlisten;
+  } catch {
+    return; // listen() never subscribed, so there is nothing to remove
+  }
+  if (!fn) return;
+  for (const delay of [...UNLISTEN_RETRY_DELAYS_MS, null]) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      if (delay === null) {
+        console.warn("[events] unlisten failed", err);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 export interface VaultEvent {
   kind: "Added" | "Modified" | "Deleted";
   path: string;
