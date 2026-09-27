@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   downloadSidecarEngine,
   downloadModelWeights,
@@ -44,14 +45,10 @@ export function StepModel({ onNext }: Props) {
   const [externalUrl, setExternalUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [modelName, setModelName] = useState("");
-  const unlistens = useRef<Array<() => void>>([]);
+  const unlistens = useRef<Array<Promise<UnlistenFn>>>([]);
 
   const cleanup = () => {
-    unlistens.current.forEach((u) => {
-      if (typeof u === "function") {
-        void safeUnlisten(u);
-      }
-    });
+    unlistens.current.forEach((u) => void safeUnlisten(u));
     unlistens.current = [];
   };
 
@@ -69,7 +66,9 @@ export function StepModel({ onNext }: Props) {
     }
 
     cleanup();
-    const [unlistenProgress, unlistenEngineProgress, unlistenError] = await Promise.all([
+    // Store the pending subscriptions before awaiting them so cleanup can
+    // remove them even when the step unmounts before listen() resolves.
+    unlistens.current = [
       onSidecarDownloadProgress(({ downloaded, total }) => {
         setProgress(total > 0 ? Math.round((downloaded / total) * 100) : 0);
       }),
@@ -80,8 +79,8 @@ export function StepModel({ onNext }: Props) {
         setErrorMsg(message);
         setPhase("auto-error");
       }),
-    ]);
-    unlistens.current = [unlistenProgress, unlistenEngineProgress, unlistenError];
+    ];
+    await Promise.all(unlistens.current);
 
     try {
       setPhase("auto-downloading-engine");
