@@ -4,7 +4,7 @@
 - **Status:** Proposed
 - **Branch:** `vault-ingest-policy`
 - **Priority:** High
-- **Requested by:** Kurt VanDusen (approved Opus-reviewed plan, 2026-09-27)
+- **Requested by:** maintainer (approved independently-reviewed plan, 2026-09-27)
 - **Related issues:** #240 (size-drop guard, separate), #241 (delete hygiene — amended)
 
 ## Problem (verified evidence, all from live system 2026-09-27)
@@ -23,7 +23,7 @@
    In the 2026-09-27 architecture review (briefs in operations/, verdict
    APPROVE WITH NITS → REQUEST CHANGES), the agreed policy is: sessions and
    operations stay *searchable* but must not feed fact extraction; review
-   briefs/logs should not be indexed at all. Kurt's approved plan moves them
+   briefs/logs should not be indexed at all. the approved plan moves them
    to a vault-root `records/` tree that is **never ingested**.
 
 3. **The write path accepts any folder.** `vault_write_note` has no
