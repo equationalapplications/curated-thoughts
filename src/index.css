@@ -1073,10 +1073,12 @@ code {
    #cfcfcf in dark), which painted the document as a grey rounded slab that
    stopped where the text did, in both themes, and gave its menus a different
    white/grey than every other popover. Map its chrome variables onto ours so
-   the editor sits on the pane and its menus are our surfaces. The doubled
-   class outranks BlockNote's `.bn-root[data-color-scheme=dark]`. Highlight
-   colours are the user's content and are left alone. */
-.bn-root.bn-root {
+   the editor sits on the pane and its menus are our surfaces. BlockNote sets
+   these on `.bn-root` (0,1,0) and `.bn-root[data-color-scheme="dark"]`
+   (0,2,0); `:root .bn-root.bn-root` is (0,3,0), so it wins in both themes
+   regardless of which stylesheet the bundler emits last. Highlight colours
+   are the user's content and are left alone. */
+:root .bn-root.bn-root {
   --bn-colors-editor-text: var(--on-surface);
   --bn-colors-editor-background: transparent;
   --bn-colors-menu-text: var(--on-surface);
