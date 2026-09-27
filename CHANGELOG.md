@@ -1,3 +1,5 @@
+## [2.19.3](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.2...v2.19.3) (2026-09-27)
+
 ## [2.19.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.1...v2.19.2) (2026-09-27)
 
 ### Bug Fixes
