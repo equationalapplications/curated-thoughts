@@ -68,6 +68,15 @@ describe("timelineFormat", () => {
       expect(shortenPathForDisplay("Librarian is idle.")).toBe("Librarian is idle.");
     });
 
+    it("keeps a literal backslash in a POSIX filename", () => {
+      expect(shortenPathForDisplay("Ingested /People/Maya\\Chen.md")).toBe(
+        "Ingested /People/Maya\\Chen.md",
+      );
+      expect(shortenPathForDisplay("Ingested /vault/notes/People/Maya\\Chen.md")).toBe(
+        "Ingested …/People/Maya\\Chen.md",
+      );
+    });
+
     it("leaves a bare ratio alone — the slash does not start a token", () => {
       expect(shortenPathForDisplay("Approved 3/4 facts")).toBe("Approved 3/4 facts");
     });

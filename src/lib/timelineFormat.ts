@@ -42,15 +42,17 @@ export function parseSummary(summary: string): SummarySegment[] {
  * The path runs to the end of the string rather than to the next space,
  * because the last component of a real path can contain spaces
  * ("Maya Chen.md") and stopping at the space would drop the filename. The
- * elided form keeps the path's own separator.
+ * elided form keeps the path's own separator. A POSIX path splits on "/"
+ * only, since "\" is a legal filename character there.
  */
 export function shortenPathForDisplay(text: string): string {
   const start = /(^|\s)(\/|[A-Za-z]:[\\/]|\\\\)/.exec(text);
   if (!start) return text;
   const from = start.index + start[1].length;
   const path = text.slice(from);
-  const sep = path.includes("\\") ? "\\" : "/";
-  const segments = path.split(/[\\/]/).filter(Boolean);
+  const posix = start[2] === "/";
+  const sep = !posix && path.includes("\\") ? "\\" : "/";
+  const segments = path.split(posix ? "/" : /[\\/]/).filter(Boolean);
   if (segments.length <= 2) return text;
   return text.slice(0, from) + `…${sep}${segments.slice(-2).join(sep)}`;
 }
