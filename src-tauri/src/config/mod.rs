@@ -62,10 +62,11 @@ pub struct WikiConfig {
 }
 
 /// Per-folder ingestion tier (F4, spec 2026-09-27-vault-ingest-policy).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IngestTier {
     /// Chunks + embeddings + librarian fact extraction (current behavior).
     #[serde(rename = "full")]
+    #[default]
     Full,
     /// Chunk + embed; the librarian skips fact extraction.
     #[serde(rename = "chunks-only")]
@@ -73,12 +74,6 @@ pub enum IngestTier {
     /// Do not index at all (watcher-exclusion equivalent).
     #[serde(rename = "none")]
     None,
-}
-
-impl Default for IngestTier {
-    fn default() -> Self {
-        IngestTier::Full
-    }
 }
 
 impl IngestTier {
@@ -125,7 +120,7 @@ impl IngestConfig {
             };
             if rel.is_some() {
                 let depth = prefix.split('/').count();
-                if best.map_or(true, |(d, _)| depth > d) {
+                if best.is_none_or(|(d, _)| depth > d) {
                     best = Some((depth, *tier));
                 }
             }

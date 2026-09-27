@@ -18,7 +18,7 @@
    a librarian-level one.
 
 2. **No structural separation between durable memory and working records.**
-   Session records (`people/tessera/sessions/`, 69+ files) and operations
+   Session records (`people/agent/sessions/`, 69+ files) and operations
    notes (`operations/`, 80 files) are ingested exactly like curated facts.
    In the 2026-09-27 architecture review (briefs in operations/, verdict
    APPROVE WITH NITS → REQUEST CHANGES), the agreed policy is: sessions and
@@ -28,7 +28,7 @@
 
 3. **The write path accepts any folder.** `vault_write_note` has no
    top-level constraint beyond being inside the vault. A deposit to
-   `agents/tessera/…` (a retired layout) silently recreated the flat folder
+   `agents/agent/…` (a retired layout) silently recreated the flat folder
    (2026-09-27 incident, Opus round-1 M1). The choke point needs an
    allow-list so structural mistakes fail loudly instead of silently
    forking the ontology.
@@ -67,6 +67,9 @@
   exclude it from all emitted chunks. Metadata still flows to the indexer
   through the existing structured path (it already reads frontmatter
   separately for OKF fields).
+  - Fence parsing MUST accept LF and CRLF line endings (normalize before
+    matching) so CRLF files cannot silently leak YAML into chunks (dedicated
+    CRLF test required).
 - One-time reindex note: existing chunks keep their old text until their
   document is re-indexed (hash-gated, standard behavior). No forced
   migration in this PR; a maintenance reindex is a follow-up ops task.
@@ -76,7 +79,8 @@
 - New config block in `~/.brain/config.json`:
   `"ingest": { "folder_tiers": { "<vault-relative-prefix>": "full" |
   "chunks-only" | "none" } }` (absent = `full`). Resolution: longest
-  matching prefix wins.
+  matching prefix wins, matched at PATH-COMPONENT boundaries only — a tier
+  for `ops` never matches `ops-archive` (sibling-prefix test required).
   - `full` — current behavior (chunks + embeddings + librarian facts).
   - `chunks-only` — chunk + embed; librarian skips fact extraction.
   - `none` — do not index at all (equivalent to watcher exclusion).
@@ -112,7 +116,7 @@
    `records/` (test: file created under `records/` never appears in
    `documents`).
 2. Write allow-list: `tool_dispatch` write-path validation
-   (tests: allowed roots succeed; `agents/tessera/…` → error naming roots).
+   (tests: allowed roots succeed; `agents/agent/…` → error naming roots).
 3. Chunker: frontmatter parse-and-skip (tests: file with frontmatter
    yields zero chunks containing `okf_version:`; metadata still parsed).
 4. Tiers: config plumbing + librarian skip (tests: folder tier matrix ×
