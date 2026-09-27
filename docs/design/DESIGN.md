@@ -1,6 +1,6 @@
 # Curated Thoughts — Design Language
 
-**Status:** Living document. Describes the look shipped in PR #234 (v2.19.1).
+**Status:** Living document. Describes the look shipped in PR #234 (v2.19.1) plus the light-theme pass in PR #238.
 **Source of truth for values:** `src/index.css` (token block at the top, dark theme under `[data-theme="dark"]`). If this document and the CSS disagree, the CSS wins — fix this document.
 **Enforced by:** `src/__tests__/a11y-contrast.test.ts` (every fg/bg pair), `eslint-plugin-jsx-a11y`, axe in Vitest. See `docs/superpowers/specs/2026-08-31-ui-ux-accessibility-design.md`.
 **Preview:** `docs/a11y/palette-preview.html`.
@@ -39,14 +39,16 @@ The token roles are identical in both; only values change. Always reference the 
 
 | Token | Role | Light | Dark |
 |---|---|---|---|
-| `--bg` | Page / editor background; text-field fill | `#fffbff` | `#101215` |
-| `--surface` | Sidebars, panels, dialogs | `#fffbff` | `#15181c` |
+| `--bg` | Page / editor background; text-field fill | `#fffcf9` | `#101215` |
+| `--surface` | Sidebars, panels, dialogs | `#fffcf9` | `#15181c` |
 | `--elev-1` | Rail, status bar, cards, list groups, dialog footer | `#f9f3f2` | `#191d22` |
 | `--elev-2` | Resting button fill; hover on quiet rows | `#f5eeeb` | `#1f242a` |
 | `--elev-3` | Button hover/active | `#f1e9e3` | `#262c33` |
 | `--surface-variant` | Highest tonal step | `#f0e0d0` | `#2c333b` |
 
-In light, `--bg` and `--surface` are the same value; in dark, panels sit one step above the page. Both work because the `--separator` hairline carries the boundary.
+In light, `--bg` and `--surface` are the same value; in dark, panels sit one step above the page. For docked regions (sidebar, panels) both work because the `--separator` hairline carries the boundary. Anything that must *dim* the page cannot rely on `--surface`: see the scrim rule under Overlays.
+
+The whole light ladder is one temperature (warm cream). A near-white with a cool or violet cast next to warm chrome reads as a seam.
 
 #### Text (climb from strongest to quietest)
 
@@ -74,7 +76,7 @@ Never use `--separator` to outline a control, and never use `--outline-var` for 
 | `--primary` | Primary button, focus ring, active indicator, checked control, link-style buttons | `#835400` | `#7aa2f7` |
 | `--primary-hover` | Primary hover | `#6d4600` | `#9cb9f9` |
 | `--on-primary` | Label on `--primary` | `#ffffff` | `#0d1017` |
-| `--primary-container` | Selected row / chosen option / drop-active fill | `#ffddb5` | `#262e3c` |
+| `--primary-container` | Selected row / chosen option / drop-active fill | `#eadbc4` | `#262e3c` |
 | `--on-primary-cont` | Label on `--primary-container` | `#2a1800` | `#ccd6e6` |
 | `--secondary` | Secondary accent (rare) | `#705b40` | `#8fa0b4` |
 | `--secondary-cont` / `--tertiary-cont` | Tonal fills (rare) | `#fbdebc` / `#d5eaba` | `#1d232a` / `#1f3029` |
@@ -116,6 +118,8 @@ Disabled is not a dimmed copy of enabled. It is **structural**: a fill that rece
 | `--backdrop-palette` | Transient way-station (command palette) | `rgba(24,18,12,.20)` | `rgba(0,0,0,.28)` |
 
 Light scrims are tinted with the theme's own near-black, not `#000`, so the app behind does not go grey. The heavier the commitment, the darker the scrim; the palette is always lightest so the app stays legible behind it.
+
+**Never build a scrim as a fraction of `--surface`.** In light, `--surface` equals `--bg`, so "85% surface" over the page has no visible effect. Use a backdrop token, or a tint of `--on-surface`.
 
 ### 1.3 Typography
 
@@ -196,6 +200,8 @@ One primary action per surface. In a dialog footer, the confirming action is pri
 **Error banner** — tinted status pattern (1.2), `--r-sm`, 12px text.
 
 **Progress** — 4px pill track on `--elev-2`, `--primary` fill.
+
+**Third-party components** — anything that ships its own palette (e.g. BlockNote's `--bn-colors-*`) has its chrome variables mapped onto our tokens in both themes: transparent editor background, `--on-surface` text, `--surface` menus, `--primary-container` selection. The user's own content colours (highlights) are left alone.
 
 **Scrollbars** — thin, transparent track, `--scrollbar-thumb` capsule that only reaches the outline value on hover. Chrome, not a seam.
 
