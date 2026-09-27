@@ -1149,7 +1149,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::ingest_from_value_lenient(report.get("ingest").unwrap());
         // The bogus entry is dropped; the valid one survives.
-        assert!(cfg.folder_tiers.get("operations").is_none());
+        assert!(!cfg.folder_tiers.contains_key("operations"));
         assert_eq!(cfg.folder_tiers.get("notes"), Some(&IngestTier::ChunksOnly));
         assert_eq!(cfg.tier_for("operations/a.md"), IngestTier::Full);
     }

@@ -303,7 +303,7 @@ mod integration_tests {
     fn non_leading_fence_is_not_stripped() {
         let text = "Intro paragraph before any fence.\n\n---\n\nmiddle text\n";
         let p = PathBuf::from("/v/note.md");
-        let chunks = chunk_autodetect(&p, &text);
+        let chunks = chunk_autodetect(&p, text);
         assert!(!chunks.is_empty());
         let joined: String = chunks
             .iter()
@@ -350,7 +350,7 @@ mod integration_tests {
     fn crlf_frontmatter_is_stripped() {
         let text = "---\r\nokf_version: 0.1\r\n---\r\n\r\nBody line one.\r\n";
         let p = PathBuf::from("/v/note.md");
-        for c in chunk_autodetect(&p, &text) {
+        for c in chunk_autodetect(&p, text) {
             assert!(
                 !c.text.contains("okf_version:"),
                 "CRLF chunk leaked frontmatter: {:?}",
@@ -365,7 +365,7 @@ mod integration_tests {
     fn unterminated_fence_chunks_everything() {
         let text = "---\nokf_version: 0.1\nnever closed\nbody survives\n";
         let p = PathBuf::from("/v/note.md");
-        let chunks = chunk_autodetect(&p, &text);
+        let chunks = chunk_autodetect(&p, text);
         let joined: String = chunks
             .iter()
             .map(|c| c.text.as_str())
