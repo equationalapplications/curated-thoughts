@@ -187,110 +187,35 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
 
   return (
     <div className="mode-layout">
-      <aside className="sidebar">
+      <aside className="mode-sidebar">
         {/* Status filter */}
-        <div>
-          <h3
-            style={{
-              fontSize: "11px",
-              fontWeight: 600,
-              margin: "0 0 8px",
-            }}
-          >
-            Status
-          </h3>
-          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="radio"
-                name="status"
-                value="pending"
-                checked={status === "pending"}
-                onChange={() => setStatus("pending")}
-              />
-              Open
-            </label>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="radio"
-                name="status"
-                value="done"
-                checked={status === "done"}
-                onChange={() => setStatus("done")}
-              />
-              Done
-            </label>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="radio"
-                name="status"
-                value="archived"
-                checked={status === "archived"}
-                onChange={() => setStatus("archived")}
-              />
-              Archived
-            </label>
+        <section>
+          <h3>Status</h3>
+          <div className="tasks-status-filter" role="radiogroup" aria-label="Task status">
+            {(["pending", "done", "archived"] as const).map((value) => (
+              <label key={value} className="tasks-status-option">
+                <input
+                  type="radio"
+                  name="status"
+                  value={value}
+                  checked={status === value}
+                  onChange={() => setStatus(value)}
+                />
+                {value === "pending" ? "Open" : value === "done" ? "Done" : "Archived"}
+              </label>
+            ))}
           </div>
-        </div>
+        </section>
 
         {/* Create new task form */}
-        <div>
-          <h3
-            style={{
-              fontSize: "11px",
-              fontWeight: 600,
-              margin: "0 0 8px",
-            }}
-          >
-            + New Task
-          </h3>
-          {createError && (
-            <p
-              style={{
-                fontSize: "12px",
-                color: "var(--error)",
-                marginBottom: "8px",
-              }}
-            >
-              {createError}
-            </p>
-          )}
-          <form
-            onSubmit={handleCreateTask}
-            style={{ display: "flex", flexDirection: "column", gap: "6px" }}
-          >
+        <section>
+          <h3>+ New Task</h3>
+          {createError && <p className="tasks-form-error">{createError}</p>}
+          <form className="tasks-create-form" onSubmit={handleCreateTask}>
             <select
+              aria-label="Entity"
               value={selectedEntityId}
               onChange={(e) => setSelectedEntityId(e.target.value)}
-              style={{
-                padding: "6px",
-                borderRadius: "4px",
-                border: "1px solid var(--outline-var)",
-                fontSize: "13px",
-                backgroundColor: "var(--elev-2)",
-                color: "var(--on-surface)",
-              }}
             >
               <option value="">Select entity…</option>
               {entities.map((e) => (
@@ -304,130 +229,77 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
               placeholder="Description"
               value={taskDescription}
               onChange={(e) => setTaskDescription(e.target.value)}
-              style={{
-                padding: "6px",
-                borderRadius: "4px",
-                border: "1px solid var(--outline-var)",
-                fontSize: "13px",
-                backgroundColor: "var(--elev-2)",
-                color: "var(--on-surface)",
-              }}
             />
             <button
               type="submit"
+              className="btn btn--primary"
               disabled={
                 createLoading ||
                 !selectedEntityId ||
                 !taskDescription.trim()
               }
-              style={{
-                padding: "6px 12px",
-                backgroundColor: "var(--primary)",
-                color: "var(--on-primary)",
-                border: "none",
-                borderRadius: "4px",
-                fontSize: "13px",
-                fontWeight: 600,
-                cursor: createLoading ? "not-allowed" : "pointer",
-                opacity:
-                  createLoading ||
-                  !selectedEntityId ||
-                  !taskDescription.trim()
-                    ? 0.5
-                    : 1,
-              }}
             >
               Create
             </button>
           </form>
-        </div>
+        </section>
       </aside>
 
-      <main
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "16px 24px",
-        }}
-      >
+      <main className="mode-main tasks-main">
         {error && (
-          <p
-            style={{
-              color: "var(--error)",
-              fontSize: "13px",
-              marginBottom: "16px",
-            }}
-            role="alert"
-          >
+          <p className="tasks-error" role="alert">
             {error}
           </p>
         )}
 
         {loading ? (
-          <p
-            style={{
-              color: "var(--outline)",
-              fontSize: "13px",
-              fontStyle: "italic",
-            }}
-          >
-            Loading tasks…
-          </p>
+          <p className="placeholder tasks-loading">Loading tasks…</p>
         ) : tasks.length === 0 ? (
-          <div style={{ color: "var(--outline)", fontSize: "13px" }}>
-            <p style={{ fontStyle: "italic", marginBottom: "8px" }}>
+          /* Same .empty-pane block as Review and the editor. Tasks had its
+             own `.tasks-empty`, which was a top-left-aligned pair of lines in
+             a 1300px column while the Review equivalent sat centred — two
+             sibling modes, two different answers to "nothing here yet". */
+          <div className="empty-pane">
+            <span className="empty-pane__icon" aria-hidden="true">
+              <svg className="icon" viewBox="0 0 24 24" focusable="false">
+                <path d="M9.5 6.5h9M9.5 12h9M9.5 17.5h9" />
+                <path d="M4.6 6.6 5.5 8l2-2.4M4.6 12.1 5.5 13.5l2-2.4M4.6 17.6l.9 1.4 2-2.4" />
+              </svg>
+            </span>
+            <h2 className="empty-pane__title">
               No{" "}
               {status === "archived"
                 ? "archived"
                 : status === "done"
                   ? "done"
-                  : "open"}
-              {" "}
+                  : "open"}{" "}
               tasks.
+            </h2>
+            <p className="empty-pane__hint">
+              {status === "pending"
+                ? "The librarian proposes tasks through Review; approve one there, or create your own with New task."
+                : "Switch the filter above to see tasks in another state."}
             </p>
-            {status === "pending" && (
-              <p style={{ fontSize: "12px", lineHeight: 1.5 }}>
-                The librarian proposes tasks through Review; approve one or
-                create your own.
-              </p>
-            )}
           </div>
         ) : (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "20px",
-            }}
-          >
+          <div className="tasks-groups">
             {sortedEntityIds.map((entityId) => {
               const group = groupedTasks[entityId];
               const entityName = group[0]?.entity_name ?? "";
               return (
-                <div key={entityId}>
+                <section key={entityId} className="tasks-group">
                   <button
+                    className="tasks-group-link"
                     onClick={() => {
                       onNavigate({
                         mode: "brain",
                         entityId,
                       });
                     }}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    cursor: "pointer",
-                    textDecoration: "underline",
-                    fontSize: "14px",
-                    fontWeight: 600,
-                    color: "var(--primary)",
-                    padding: 0,
-                    marginBottom: "8px",
-                  }}
-                >
-                  {entityName}
-                </button>
-
-                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  >
+                    {entityName}
+                  </button>
+                  <div className="tasks-group-items">
                     {group
                       .sort((a, b) => {
                         // Sort by priority DESC, then by created_at ASC
@@ -439,70 +311,45 @@ export function TasksMode({ onNavigate }: TasksModeProps) {
                       .map((task) => (
                         <div
                           key={task.id}
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            alignItems: "flex-start",
-                            padding: "8px",
-                            backgroundColor: "var(--elev-2)",
-                            borderRadius: "6px",
-                          }}
+                          className={`tasks-row${
+                            task.status === "done" ? " tasks-row--done" : ""
+                          }`}
                         >
                           <input
                             type="checkbox"
+                            className="tasks-row-checkbox"
                             checked={task.status === "done"}
                             onChange={() =>
                               handleToggleTaskStatus(task.id, task.status)
                             }
-                            style={{ marginTop: "2px", cursor: "pointer" }}
                             aria-label={`Mark "${task.description}" as ${task.status === "done" ? "pending" : "done"}`}
                           />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <p
-                              style={{
-                                margin: 0,
-                                fontSize: "13px",
-                                color:
-                                  task.status === "done"
-                                    ? "var(--outline)"
-                                    : "var(--on-surface)",
-                                textDecoration:
-                                  task.status === "done"
-                                    ? "line-through"
-                                    : "none",
-                              }}
-                            >
+                          <div className="tasks-row-body">
+                            <p className="tasks-row-content">
                               {task.description}
                             </p>
-                            <p
-                              style={{
-                                margin: "2px 0 0",
-                                fontSize: "11px",
-                                color: "var(--outline)",
-                              }}
-                            >
+                            <p className="tasks-row-meta">
                               {formatDate(task.created_at)}
                             </p>
                           </div>
                           <button
+                            className="icon-btn"
                             onClick={() => handleArchiveTask(task.id)}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              cursor: "pointer",
-                              padding: "0 4px",
-                              fontSize: "16px",
-                              color: "var(--outline)",
-                              opacity: 0.6,
-                            }}
                             aria-label={`Archive task "${task.description}"`}
                           >
-                            ×
+                            <svg
+                              className="icon icon--sm"
+                              viewBox="0 0 24 24"
+                              aria-hidden="true"
+                              focusable="false"
+                            >
+                              <path d="M6 6l12 12M18 6 6 18" />
+                            </svg>
                           </button>
                         </div>
                       ))}
                   </div>
-                </div>
+                </section>
               );
             })}
           </div>

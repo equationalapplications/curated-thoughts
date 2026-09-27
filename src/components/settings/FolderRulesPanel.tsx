@@ -50,6 +50,7 @@ export function FolderRulesPanel() {
   }
 
   return (
+    <>
     <div className="folder-rules-panel">
       <h3>Folder Rules</h3>
       <p className="settings-hint">Set how the librarian processes each folder.</p>
@@ -60,7 +61,16 @@ export function FolderRulesPanel() {
               <span className="rule-path">{r.folder_path}</span>
               <span className="rule-mode">{r.librarian_mode}</span>
               {r.auto_approve && <span className="rule-auto">auto</span>}
-              <button className="rule-delete" onClick={() => handleDelete(r.id)}>✕</button>
+              <button
+                type="button"
+                className="rule-delete"
+                aria-label={`Delete rule for ${r.folder_path}`}
+                onClick={() => handleDelete(r.id)}
+              >
+                <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
+              </button>
             </div>
           ))}
         </div>
@@ -84,20 +94,25 @@ export function FolderRulesPanel() {
           {saving ? "Saving…" : "Add rule"}
         </button>
       </div>
-      <div className="notification-settings">
-        <h3>Notifications</h3>
-        <label className="notification-label">
-          <input
-            type="checkbox"
-            checked={notificationsEnabled}
-            onChange={(e) => {
-              setNotificationsEnabled(e.target.checked);
-              setProposalNotificationsEnabled(e.target.checked);
-            }}
-          />
-          Notify me when new proposals arrive
-        </label>
-      </div>
     </div>
+    {/* Its own settings section, not a child of the rules panel. Nested, the
+        two headings shared one block and rendered as a single list — the
+        hairline that separates every other pair of settings sections stopped
+        here. */}
+    <div className="settings-section notification-settings">
+      <h3>Notifications</h3>
+      <label className="notification-label">
+        <input
+          type="checkbox"
+          checked={notificationsEnabled}
+          onChange={(e) => {
+            setNotificationsEnabled(e.target.checked);
+            setProposalNotificationsEnabled(e.target.checked);
+          }}
+        />
+        Notify me when new proposals arrive
+      </label>
+    </div>
+    </>
   );
 }

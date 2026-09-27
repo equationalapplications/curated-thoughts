@@ -1,247 +1,350 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
+/* Component styles that were historically parked here. The file used to carry
+   the Vite starter template — a `:root` font/colour override, white
+   `input, button` fills with an outset `box-shadow`, and a blue link colour —
+   and was never imported by `main.tsx`, so none of it (or the real component
+   rules below) reached the browser. `main.tsx` now imports it after
+   `index.css`; the starter boilerplate is gone and every rule here consumes
+   the shared tokens. */
 
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
+/* ── Brain mode: entity list (sidebar) ─────────────────────────────────── */
+.entity-list {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  gap: var(--sp-2);
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
+.entity-create-btn {
+  justify-content: flex-start;
+  width: 100%;
+  font-size: 12.5px;
+}
+.entity-create-form { display: flex; gap: var(--sp-1); }
+.entity-create-form input { flex: 1; min-width: 0; font-size: 12px; }
+.entity-create-form button { padding: 0 8px; font-size: 12px; }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
-.okf-interop {
-  margin-top: auto;
-  padding: 8px;
-  border-top: 1px solid var(--border-color, #e0e0e0);
-  font-size: 12px;
-}
-.okf-interop-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.okf-interop-notice,
-.okf-interop-warnings {
-  margin: 6px 0 0;
-  color: var(--text-secondary, #666);
-}
-.okf-interop-preview {
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid var(--border-color, #e0e0e0);
-  border-radius: 6px;
-}
-.okf-interop-modes label {
-  display: block;
-  margin: 2px 0;
-}
-
-/* ── Brain mode: entity pages (Phase 4) ─────────────────────────────── */
-
-.mode-rail-history {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 8px;
-}
-.mode-rail-history-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  padding: 4px;
-  opacity: 0.8;
-}
-.mode-rail-history-btn:disabled {
-  opacity: 0.25;
-  cursor: default;
-}
-
-.entity-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
-.entity-create-btn { text-align: left; padding: 6px 8px; }
-.entity-create-form { display: flex; gap: 4px; }
-.entity-create-form input { flex: 1; min-width: 0; }
 .entity-group-heading {
   text-transform: uppercase;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  opacity: 0.6;
-  margin: 8px 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--on-surface-var);
+  margin: var(--sp-3) 0 var(--sp-1);
+  padding: 0 6px;
 }
 .entity-group-items { list-style: none; margin: 0; padding: 0; }
 .entity-row {
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: var(--sp-2);
   width: 100%;
-  padding: 6px 8px;
-  border: none;
-  background: none;
+  min-height: 24px;
+  padding: 0 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--on-surface-var);
+  font-size: 12.5px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
+  text-align: left;
+  transition: background 0.1s, color 0.1s;
 }
-.entity-row--selected { background: color-mix(in srgb, currentColor 12%, transparent); }
-.entity-row-count { opacity: 0.5; font-size: 12px; }
+.entity-row:hover { background: var(--elev-2); color: var(--on-surface); }
+.entity-row--selected,
+.entity-row--selected:hover {
+  background: var(--primary-container);
+  border-color: transparent;
+  color: var(--on-primary-cont);
+  font-weight: 500;
+}
+.entity-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entity-row-count {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--on-surface-var);
+}
+.entity-row--selected .entity-row-count { color: var(--on-primary-cont); opacity: 0.8; }
+.entity-error,
+.entity-page-error,
+.fact-card-error,
+.entity-summary-error,
+.settings-error {
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.45;
+  margin-bottom: var(--sp-2);
+}
 
-.entity-page { flex: 1; overflow-y: auto; padding: 16px 24px; }
-.entity-page-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.entity-page-header h2 { margin: 0; }
+/* ── Brain mode: entity page (main column) ────────────────────────────── */
+/* The gutter on the left is the point: the body text was previously flush
+   against the sidebar divider because this rule lived in a stylesheet that
+   was never loaded. Content is centred with a max measure so long lines
+   stay readable on a wide window. */
+.entity-page {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--sp-5) var(--sp-6) var(--sp-6);
+}
+.entity-page > * { max-width: 720px; margin-left: auto; margin-right: auto; }
+/* The no-selection and loading states are not reading content, so they opt
+   out of the centred 720px measure and fill the column. */
+.entity-page--empty { padding: 0; display: flex; }
+.entity-page--empty > * { max-width: none; width: 100%; }
+.entity-page-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding-bottom: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--separator);
+}
+.entity-page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--on-surface);
+}
 .entity-type-chip,
 .fact-chip {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  background: var(--elev-2);
+  border: 1px solid var(--outline-var);
+  color: var(--on-surface-var);
+  white-space: nowrap;
+}
+.entity-page-meta { font-size: 11.5px; color: var(--on-surface-var); }
+.entity-archive-btn {
+  margin-left: auto;
+  font-size: 11.5px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--on-surface-var);
+}
+.entity-archive-btn:hover {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  border-color: var(--error);
+  color: var(--error);
+}
+.entity-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-5);
+  margin-bottom: var(--sp-2);
+}
+.entity-section-header h3,
+.entity-summary h3,
+.entity-facts h3,
+.entity-tasks h3,
+.entity-events h3 {
   font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--on-surface-var);
 }
-.entity-page-meta { font-size: 12px; opacity: 0.6; }
-.entity-archive-btn { margin-left: auto; }
-.entity-page-error, .fact-card-error, .entity-summary-error { color: #c0392b; }
-.entity-section-header { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; }
-.entity-summary-prose { white-space: pre-wrap; }
+.entity-summary-prose,
+.entity-summary-prose * { line-height: 1.6; }
+.entity-summary-prose { font-size: 13.5px; color: var(--on-surface); }
+.entity-summary-actions { display: flex; gap: var(--sp-1); }
+.entity-summary-actions button { font-size: 11.5px; }
 
-.entity-add-fact { display: flex; gap: 8px; margin: 8px 0 12px; }
-.entity-add-fact input { flex: 1; }
+.entity-add-fact { display: flex; gap: var(--sp-2); margin: 0 0 var(--sp-3); }
+.entity-add-fact input { flex: 1; min-width: 0; font-size: 12.5px; }
+.entity-add-fact button { font-size: 12.5px; }
+
 .fact-card {
-  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
+  border: 1px solid var(--outline-var);
+  background: var(--elev-1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
 }
-.fact-card-body { margin: 0 0 6px; white-space: pre-wrap; }
-.fact-card-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.fact-chip--source { cursor: pointer; border: none; }
-.fact-card-date { font-size: 11px; opacity: 0.5; margin-left: auto; }
-.fact-card-actions { display: flex; gap: 8px; margin-top: 6px; }
-.fact-card-editor textarea { width: 100%; min-height: 72px; }
+.fact-card-body {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.fact-card-meta {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.fact-chip--confidence {
+  background: var(--primary-container);
+  border-color: transparent;
+  color: var(--on-primary-cont);
+}
+.fact-chip--source { cursor: pointer; }
+.fact-chip--source:hover { background: var(--elev-3); color: var(--on-surface); }
+.fact-card-date {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--on-surface-var);
+  margin-left: auto;
+}
+.fact-card-actions { display: flex; gap: var(--sp-1); margin-top: var(--sp-2); }
+.fact-card-actions button { font-size: 11.5px; }
+.fact-card-editor { display: flex; flex-direction: column; gap: var(--sp-2); }
+.fact-card-editor textarea { width: 100%; min-height: 72px; font-size: 12.5px; }
 
+.wikilink-text { white-space: pre-wrap; line-height: 1.55; }
 .wikilink-chip {
-  border: none;
-  background: color-mix(in srgb, currentColor 10%, transparent);
-  border-radius: 4px;
+  border: 1px solid transparent;
+  background: var(--primary-container);
+  border-radius: var(--r-sm);
   padding: 0 4px;
   cursor: pointer;
   font: inherit;
-  color: inherit;
-  text-decoration: underline;
+  font-size: 0.95em;
+  color: var(--on-primary-cont);
+  text-decoration: none;
 }
-
-.wikilink-chip--resolved {
-  color: var(--primary);
-  opacity: 1;
-}
-
+.wikilink-chip:hover { border-color: var(--primary); }
 .wikilink-chip--unresolved {
-  opacity: 0.5;
-  text-decoration: underline dashed;
+  background: transparent;
+  border-color: var(--outline-var);
+  color: var(--on-surface-var);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
 }
 
-.connections-panel { width: 260px; overflow-y: auto; padding: 12px; }
-.connections-section h4 { margin: 12px 0 4px; font-size: 12px; opacity: 0.7; }
-.connections-section ul { list-style: none; margin: 0; padding: 0; }
-.connections-backlink { background: none; border: none; cursor: pointer; padding: 4px 0; text-decoration: underline; }
-.connections-edge { font-size: 13px; padding: 2px 0; }
+.entity-tasks ul,
+.entity-events ul,
+.connections-panel ul { list-style: none; margin: 0; padding: 0; }
+.entity-tasks li,
+.entity-events li {
+  display: flex;
+  gap: var(--sp-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--on-surface-var);
+  padding: 3px 0;
+}
+.entity-event-date {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--on-surface-var);
+}
+
+/* ── Brain mode: connections (right rail) ─────────────────────────────── */
+.connections-panel {
+  width: 240px;
+  flex: 0 0 240px;
+  overflow-y: auto;
+  padding: var(--sp-4) var(--sp-3);
+  background: var(--surface);
+  border-left: 1px solid var(--separator);
+}
+.connections-panel > h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--on-surface-var);
+  margin-bottom: var(--sp-2);
+}
+.connections-section { margin-bottom: var(--sp-4); }
+.connections-section h4 {
+  margin: 0 0 var(--sp-1);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--on-surface-var);
+}
+.connections-backlink {
+  display: block;
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 22px;
+  padding: 0 4px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--primary);
+  font-size: 12.5px;
+  text-align: left;
+}
+.connections-backlink:hover { background: var(--elev-2); }
+.connections-edge { font-size: 12px; padding: 2px 0; color: var(--on-surface-var); }
+
+/* ── OKF interop bar ─────────────────────────────────────────────────── */
+.okf-interop {
+  margin-top: auto;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--separator);
+  font-size: 12px;
+}
+/* Stacked, not a wrapping row. Two auto-width buttons in a 264px sidebar
+   wrap to two rows of different widths, which reads as a layout bug; stacked
+   full-width they line up with the fields above them. */
+.okf-interop-actions { display: flex; flex-direction: column; gap: var(--sp-1); }
+.okf-interop-actions button { font-size: 11.5px; }
+.okf-interop-notice,
+.okf-interop-warnings {
+  margin: var(--sp-2) 0 0;
+  color: var(--on-surface-var);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.okf-interop-warnings { color: var(--warning); }
+.okf-interop-preview {
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--elev-1);
+  border: 1px solid var(--outline-var);
+  border-radius: var(--r-sm);
+}
+.okf-interop-preview h4 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--on-surface-var);
+  margin-bottom: var(--sp-2);
+}
+.okf-interop-preview ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--on-surface-var);
+}
+.okf-interop-modes {
+  margin: var(--sp-3) 0;
+  padding: 0;
+  border: 0;
+}
+.okf-interop-modes legend {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--on-surface-var);
+  margin-bottom: var(--sp-1);
+}
+.okf-interop-modes label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12px;
+  color: var(--on-surface-var);
+  cursor: pointer;
+}

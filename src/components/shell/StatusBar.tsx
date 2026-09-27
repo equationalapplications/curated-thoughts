@@ -114,7 +114,8 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
             title="Vault watcher degraded — file changes are NOT being ingested. Details in .brain/errors.log."
             aria-label="Vault watcher degraded — file changes are not being ingested"
           >
-            ⚠ Watcher degraded
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.5v4" /><path d="M12 16.2h.01" /><path d="M10.3 4.2 3.6 16.4A2 2 0 0 0 5.3 19.4h13.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z" /></svg>
+            Watcher degraded
           </button>
         )}
         {(wikiStatus.diagnosticErrors ?? 0) > 0 && (
@@ -125,7 +126,8 @@ export function StatusBar({ vaultPath, onOpenActivity, onOpenPrivacy }: Props) {
             title={`${wikiStatus.diagnosticErrors} wiki engine errors since launch`}
             aria-label={`${wikiStatus.diagnosticErrors} wiki engine errors since launch`}
           >
-            ⚠ {wikiStatus.diagnosticErrors}
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.5v4" /><path d="M12 16.2h.01" /><path d="M10.3 4.2 3.6 16.4A2 2 0 0 0 5.3 19.4h13.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z" /></svg>
+            {wikiStatus.diagnosticErrors}
           </button>
         )}
         <button

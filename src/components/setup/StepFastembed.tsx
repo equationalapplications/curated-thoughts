@@ -66,7 +66,7 @@ export function StepFastembed({ onNext }: Props) {
       )}
       {phase === "error" && (
         <>
-          <p style={{ color: "red" }}>Error: {errorMsg}</p>
+          <p className="wizard-error">Error: {errorMsg}</p>
           <p>Search will fall back to keyword mode. You can retry from Settings.</p>
         </>
       )}

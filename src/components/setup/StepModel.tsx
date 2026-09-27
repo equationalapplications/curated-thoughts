@@ -148,17 +148,29 @@ export function StepModel({ onNext }: Props) {
       {phase === "choice" && (
         <>
           <p>Choose how to power the Active Librarian:</p>
-          <button onClick={runAutoInstall} disabled={!AUTO_INSTALL_AVAILABLE}>
+          {/* Primary: it is the recommended path and the one the step is
+              written around. It rendered as a plain secondary button
+              identical to "Skip / Use my own" directly beneath it. */}
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={runAutoInstall}
+            disabled={!AUTO_INSTALL_AVAILABLE}
+          >
             Auto-Install (recommended)
           </button>
           <p className="ollama-hint">Downloads llama-server and a model to your machine.</p>
           {!AUTO_INSTALL_AVAILABLE && (
-            <p className="ollama-hint" style={{ color: "gray" }}>
+            /* A hard-coded `color: "gray"` inline style — the only colour
+               literal left in the wizard, and wrong in the light theme. */
+            <p className="ollama-hint wizard-note">
               Auto-install is unavailable until the recommended model checksum is configured.
             </p>
           )}
           {!strictPrivacy ? (
-            <button onClick={() => setPhase("skip")}>Skip / Use my own</button>
+            <button type="button" className="btn" onClick={() => setPhase("skip")}>
+              Skip / Use my own
+            </button>
           ) : null}
           {!strictPrivacy ? (
             <p className="ollama-hint">
@@ -192,43 +204,61 @@ export function StepModel({ onNext }: Props) {
 
       {phase === "auto-error" && (
         <>
-          <p style={{ color: "red" }}>Error: {errorMsg}</p>
-          <button onClick={() => setPhase("choice")}>Back</button>
-          <button onClick={runAutoInstall}>Retry</button>
+          <p className="wizard-error">Error: {errorMsg}</p>
+          <button type="button" className="btn" onClick={() => setPhase("choice")}>
+            Back
+          </button>
+          <button type="button" className="btn btn--primary" onClick={runAutoInstall}>
+            Retry
+          </button>
         </>
       )}
 
       {phase === "skip" && (
-        <>
-          <p>Optional: enter an OpenAI-compatible base URL and API key.</p>
-          <label htmlFor="external-url">OpenAI-compatible base URL</label>
-          <input
-            id="external-url"
-            type="text"
-            placeholder="http://localhost:11434/v1"
-            value={externalUrl}
-            onChange={(e) => setExternalUrl(e.target.value)}
-          />
-          <label htmlFor="api-key">API key (optional)</label>
-          <input
-            id="api-key"
-            type="password"
-            placeholder="API key (optional)"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-          <label htmlFor="model-name">Model name (optional)</label>
-          <input
-            id="model-name"
-            type="text"
-            placeholder="Model name (optional)"
-            value={modelName}
-            onChange={(e) => setModelName(e.target.value)}
-          />
-          <button onClick={handleSkipSave}>Save & continue</button>
-          <button onClick={() => setPhase("choice")}>Back</button>
-          {errorMsg && <p style={{ color: "red" }}>{errorMsg}</p>}
-        </>
+        /* The same stacked, label-above-field form the settings panels use —
+           the raw label/input pairs here were unstyled, so each label sat on
+           the same line as the field above it. */
+        <div className="settings-form">
+          <div>
+            <label htmlFor="external-url">OpenAI-compatible base URL</label>
+            <input
+              id="external-url"
+              type="text"
+              placeholder="http://localhost:11434/v1"
+              value={externalUrl}
+              onChange={(e) => setExternalUrl(e.target.value)}
+            />
+          </div>
+          <div>
+            <label htmlFor="api-key">API key (optional)</label>
+            <input
+              id="api-key"
+              type="password"
+              placeholder="API key (optional)"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </div>
+          <div>
+            <label htmlFor="model-name">Model name (optional)</label>
+            <input
+              id="model-name"
+              type="text"
+              placeholder="Model name (optional)"
+              value={modelName}
+              onChange={(e) => setModelName(e.target.value)}
+            />
+          </div>
+          <div className="settings-form__actions">
+            <button type="button" className="btn btn--primary" onClick={handleSkipSave}>
+              Save &amp; continue
+            </button>
+            <button type="button" className="btn" onClick={() => setPhase("choice")}>
+              Back
+            </button>
+          </div>
+          {errorMsg && <p className="wizard-error">{errorMsg}</p>}
+        </div>
       )}
     </WizardStep>
   );

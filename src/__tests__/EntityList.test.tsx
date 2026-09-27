@@ -94,7 +94,10 @@ describe("EntityList", () => {
   it("new entity form submits trimmed name", () => {
     const onCreate = vi.fn();
     render(<EntityList entities={[]} selectedId={null} onSelect={vi.fn()} onCreate={onCreate} sort="updated_desc" onSortChange={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "+ New entity" }));
+    // The label dropped its leading "+" in pass 4 — the affordance is now an
+    // inline-SVG plus icon, and a text "+" in the accessible name described
+    // a glyph that is no longer in the DOM.
+    fireEvent.click(screen.getByRole("button", { name: "New entity" }));
     fireEvent.change(screen.getByLabelText("New entity name"), {
       target: { value: "  Project X  " },
     });
