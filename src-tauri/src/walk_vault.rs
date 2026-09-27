@@ -45,16 +45,32 @@ const EXCLUDED_DIRS: &[&str] = &[
     ".idea",
     ".vscode",
     ".fastembed_cache",
-    // Working-records tree (sessions, operations, archive). Writable via
-    // `vault_write_note` but NEVER ingested: no document rows, no chunks, no
-    // embeddings, no fact extraction. Exact component match only — sibling
-    // names like `records-evil/` still ingest (spec D4). Spec:
-    // docs/superpowers/specs/2026-09-27-vault-ingest-policy-design.md, F1.
-    "records",
 ];
+
+/// Directory names excluded ONLY as the FIRST vault-relative path
+/// component. These are CT-managed top-level trees, not generic names:
+/// `records` is the working-records tree (sessions, operations, archive),
+/// writable via `vault_write_note` but never ingested. A same-named
+/// directory NESTED deeper (`documents/x/records/`, `wiki/records/`) is
+/// ordinary content and must keep ingesting (M4) — matching the name at
+/// any depth made an upgrade silently stop ingesting those trees and let
+/// reconcile DELETE their existing rows. Sibling lookalikes
+/// (`records-archive/`) were never excluded (spec D4). Spec:
+/// docs/superpowers/specs/2026-09-27-vault-ingest-policy-design.md, F1.
+const EXCLUDED_ROOT_DIRS: &[&str] = &["records"];
 
 fn is_excluded_dir(dir_name: &str) -> bool {
     EXCLUDED_DIRS.contains(&dir_name)
+}
+
+/// True when `rel`'s FIRST component is an excluded root-only directory
+/// name. `rel` MUST be vault-root-relative (same contract as
+/// [`rel_path_has_excluded_component`]).
+fn first_component_is_excluded_root_dir(rel: &Path) -> bool {
+    rel.components().next().is_some_and(|c| match c {
+        Component::Normal(n) => EXCLUDED_ROOT_DIRS.contains(&n.to_string_lossy().as_ref()),
+        _ => false,
+    })
 }
 
 /// True when any *component* of `rel` is an excluded directory name.
@@ -74,7 +90,7 @@ pub fn rel_path_has_excluded_component(rel: &Path) -> bool {
     rel.components().any(|c| match c {
         Component::Normal(n) => is_excluded_dir(&n.to_string_lossy()),
         _ => false,
-    })
+    }) || first_component_is_excluded_root_dir(rel)
 }
 
 /// Narrow sibling of [`rel_path_has_excluded_component`] matching ONLY
@@ -253,7 +269,17 @@ pub fn collect_files(root: &Path, out: &mut Vec<WalkedFile>, errors: &mut Vec<St
         }
         if e.file_type().is_dir() {
             if let Some(name) = e.path().file_name() {
-                return !is_excluded_dir(&name.to_string_lossy());
+                if is_excluded_dir(&name.to_string_lossy()) {
+                    return false;
+                }
+                // Root-only names (`records`) prune ONLY at depth 1 — the
+                // first vault-relative component. Deeper same-named dirs
+                // are ordinary content (M4).
+                let name_str = name.to_string_lossy();
+                if e.depth() == 1 && EXCLUDED_ROOT_DIRS.contains(&name_str.as_ref()) {
+                    return false;
+                }
+                return true;
             }
         }
         true
@@ -349,6 +375,10 @@ pub fn walk_vault(vault_root: &Path, ledger: &[TrustedLink], home: Option<&Path>
             });
             continue;
         }
+        // M4: `records` is a ROOT-only exclusion. A link nested under
+        // `documents/` (e.g. `documents/records` → a sibling tree) is an
+        // ordinary link now — it goes through the normal classification
+        // below instead of the blanket excluded-name denial.
 
         let target = match std::fs::canonicalize(&p) {
             Ok(t) => t,
@@ -717,19 +747,31 @@ mod tests {
     // ---- records/ exclusion (spec 2026-09-27-vault-ingest-policy, F1) ----
 
     /// The `records/` tree is never ingested: no file under it may appear in
-    /// the walk, at any depth, while sibling lookalikes still ingest.
-    /// Fixtures are `.md` so the extension gate cannot pass this test on the
-    /// prune's behalf (same rule as the `.brain` prune tests above).
+    /// the walk, while sibling lookalikes still ingest. `records` is
+    /// anchored to the FIRST vault-relative component ONLY (M4) — nested
+    /// `documents/x/records/` or `wiki/records/` trees are ordinary
+    /// content and must still ingest. Fixtures are `.md` so the extension
+    /// gate cannot pass this test on the prune's behalf (same rule as the
+    /// `.brain` prune tests above).
     #[test]
     fn collect_files_prunes_records_tree() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("vault");
         std::fs::create_dir_all(root.join("records/sessions")).unwrap();
         std::fs::create_dir_all(root.join("records-but-not-really")).unwrap();
+        std::fs::create_dir_all(root.join("documents").join("x").join("records")).unwrap();
         std::fs::write(root.join("notes.md"), b"a").unwrap();
         std::fs::write(root.join("records").join("session.md"), b"b").unwrap();
         std::fs::write(root.join("records/sessions").join("deep.md"), b"c").unwrap();
         std::fs::write(root.join("records-but-not-really").join("x.md"), b"d").unwrap();
+        std::fs::write(
+            root.join("documents")
+                .join("x")
+                .join("records")
+                .join("kept.md"),
+            b"e",
+        )
+        .unwrap();
 
         let mut out = Vec::new();
         let mut errs = Vec::new();
@@ -743,22 +785,42 @@ mod tests {
         assert!(names
             .iter()
             .any(|n| n.ends_with("records-but-not-really/x.md")));
+        // M4: nested records dirs are ordinary content — still ingested.
         assert!(
-            !names.iter().any(|n| n.contains("records/")),
-            "walk leaked records/ content: {names:?}"
+            names
+                .iter()
+                .any(|n| n.ends_with("documents/x/records/kept.md")),
+            "nested records/ tree must still ingest: {names:?}"
+        );
+        let root_records_prefix = format!("{}/", root.join("records").to_string_lossy());
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with(root_records_prefix.as_str())),
+            "walk leaked vault-root records/ content: {names:?}"
         );
     }
 
-    /// The `records` exclusion participates in the same component predicate
-    /// as every other EXCLUDED_DIRS name: exact segment match only.
+    /// The `records` exclusion is anchored to the FIRST vault-relative
+    /// component ONLY (M4): the exact segment `records` as the first
+    /// component excludes; the same name NESTED is ordinary content, and
+    /// substring/sibling lookalikes still ingest.
     #[test]
-    fn records_predicate_matches_segments_exactly() {
+    fn records_predicate_matches_first_component_only() {
         use std::path::Path;
+        // Vault-root records/ tree: excluded.
         assert!(super::rel_path_has_excluded_component(Path::new(
             "records/session.md"
         )));
         assert!(super::rel_path_has_excluded_component(Path::new(
-            "notes/records/archive/x.md"
+            "records/sessions/deep/x.md"
+        )));
+        // Nested records/ dirs: ordinary content, still ingested (M4).
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "documents/x/records/kept.md"
+        )));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "wiki/records/note.md"
         )));
         // Substring lookalikes must still ingest (spec D4 pattern).
         assert!(!super::rel_path_has_excluded_component(Path::new(
@@ -787,26 +849,36 @@ mod tests {
         ));
     }
 
-    /// A `documents/records` symlink is Denied (reported), never silently
-    /// skipped and never offered for approval — same carve-out as
-    /// `documents/.brain` above.
+    /// M4: `records` is a ROOT-only exclusion, so a `documents/records`
+    /// symlink is an ORDINARY link now. With an in-vault target it is
+    /// auto-Trusted (nothing leaves the vault boundary); it is neither
+    /// denied nor silently skipped.
     #[cfg(unix)]
     #[test]
-    fn records_name_symlink_is_denied_not_silently_skipped() {
+    fn records_name_symlink_under_documents_classifies_normally() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("vault");
-        std::fs::create_dir_all(root.join("documents")).unwrap();
-        let target = tmp.path().join("records-target");
+        std::fs::create_dir_all(root.join("documents").join("real-records")).unwrap();
+        let target = root.join("records-target");
         std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("kept.md"), b"k").unwrap();
         std::os::unix::fs::symlink(&target, root.join("documents").join("records")).unwrap();
 
         let outcome = super::walk_vault(&root, &[], None);
 
-        assert_eq!(outcome.denied.len(), 1, "got {:?}", outcome.denied);
-        assert_eq!(outcome.denied[0].link, "documents/records");
         assert!(
-            outcome.pending.is_empty(),
-            "records-name link must not be offered for approval"
+            outcome.denied.is_empty(),
+            "records-name link must not be denied anymore: {:?}",
+            outcome.denied
+        );
+        // In-vault target: auto-trusted, its content is ingested.
+        assert!(
+            outcome
+                .files
+                .iter()
+                .any(|f| f.virtual_path.ends_with("kept.md")),
+            "records-link content must ingest: {:?}",
+            outcome.files
         );
     }
 }
