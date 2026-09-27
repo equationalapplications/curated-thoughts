@@ -33,6 +33,8 @@ pub enum SafePathError {
 pub const IMMUTABLE_DIR: &str = "immutable-source-files";
 /// Directory name for wiki content (readable and writable)
 pub const WIKI_DIR: &str = "wiki";
+/// Directory name for the working-records tree (writable, never ingested).
+pub const RECORDS_DIR: &str = "records";
 /// Nested agent-deposit prefix inside the immutable tier.
 pub const AGENTS_DEPOSIT_DIR: &str = "immutable-source-files/agents";
 /// Subdirectories allowed for read operations
@@ -42,7 +44,7 @@ pub const WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR];
 /// Subdirectories allowed for proposed content operations
 pub const PROPOSED_SUBDIRS: &[&str] = &[WIKI_DIR, ".brain/proposed"];
 /// Subdirectories allowed for note write operations (wiki + agents)
-pub const NOTE_WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR, AGENTS_DEPOSIT_DIR];
+pub const NOTE_WRITABLE_SUBDIRS: &[&str] = &[WIKI_DIR, AGENTS_DEPOSIT_DIR, RECORDS_DIR];
 
 /// The `AGENTS_DEPOSIT_DIR` prefix with its trailing separator, so a prefix
 /// test cannot match a sibling directory (`.../agents-but-not-really/`).

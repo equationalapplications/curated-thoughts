@@ -29,9 +29,17 @@ use chrono::SecondsFormat;
 use serde_json::Value;
 
 use crate::vault::{
-    safe_vault_path, PathMode, SafePathError, AGENTS_DEPOSIT_DIR, NOTE_WRITABLE_SUBDIRS,
-    READABLE_SUBDIRS,
+    safe_vault_path, PathMode, SafePathError, AGENTS_DEPOSIT_DIR, IMMUTABLE_DIR,
+    NOTE_WRITABLE_SUBDIRS, READABLE_SUBDIRS, RECORDS_DIR, WIKI_DIR,
 };
+
+/// Top-level vault folders `write_note` may target (F2 allow-list, spec
+/// 2026-09-27-vault-ingest-policy). The first path component must be one of
+/// these; anything else — e.g. a deposit to the retired flat `agents/…`
+/// layout — is refused before any filesystem access, naming the roots.
+/// Within `immutable-source-files`, writes stay constrained to the
+/// `immutable-source-files/agents/**` deposit prefix by `NOTE_WRITABLE_SUBDIRS`.
+pub const NOTE_WRITABLE_ROOTS: &[&str] = &[IMMUTABLE_DIR, RECORDS_DIR, WIKI_DIR];
 
 use super::{
     parse_frontmatter, render_frontmatter, sha256_hash, validate_frontmatter, OkfFrontmatter,
@@ -254,6 +262,21 @@ fn create_parents_no_symlink(vault_root: &Path, rel_parent: &Path) -> std::io::R
     Ok(())
 }
 
+/// First path component of `path`, ONLY when it is a plain name. A leading
+/// `..` (traversal) or `/` (absolute) yields `None` so those shapes fall
+/// through to `safe_vault_path`, which maps them to the pinned
+/// `PathOutsideVault` error — the F2 gate never re-labels a traversal. A
+/// leading `./` is skipped so it does not change which root a path lands in
+/// (see `dot_prefixed_path_with_missing_parents_still_writes`).
+fn first_path_segment(path: &str) -> Option<String> {
+    Path::new(path)
+        .components()
+        .find(|c| !matches!(c, Component::CurDir))
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .and_then(|c| c.as_os_str().to_str())
+        .map(str::to_string)
+}
+
 /// Write a note with OKF frontmatter to the vault (single core, spec v2).
 ///
 /// * `vault_root` — absolute path to the vault root.
@@ -279,6 +302,23 @@ pub fn write_note(
     expected_updated_at: Option<&str>,
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
+
+    // F2 top-level allow-list (spec 2026-09-27-vault-ingest-policy): the
+    // FIRST path segment must name an allowed root. Checked before any
+    // filesystem access so a structural mistake (the retired flat
+    // `agents/…` deposit layout, a stray `people/…` note) fails loudly
+    // with the roots named instead of silently forking the ontology.
+    // Within `immutable-source-files`, the deposit-prefix constraint
+    // (`immutable-source-files/agents/**`) is still enforced below by
+    // `NOTE_WRITABLE_SUBDIRS`.
+    if let Some(first) = first_path_segment(path) {
+        if !NOTE_WRITABLE_ROOTS.contains(&first.as_str()) {
+            return Err(WriteNoteError::DisallowedRoot {
+                allowed: NOTE_WRITABLE_ROOTS.join(", "),
+                first_segment: first,
+            });
+        }
+    }
 
     // Validate supersession: deposit-to-deposit only, target must exist.
     if let Some(ref supersedes_path) = frontmatter.supersedes {
@@ -1316,6 +1356,114 @@ mod tests {
         assert!(
             !outside.join("deep").exists(),
             "create_dir_all followed the symlink and escaped the vault"
+        );
+    }
+
+    // ---- F2 top-level write-root allow-list (spec 2026-09-27-vault-ingest-policy) ----
+
+    /// R1 — `records/…` writes succeed at any depth (new writable root,
+    /// never-ingested counterpart of the walker exclusion).
+    #[test]
+    fn records_root_write_succeeds_at_depth() {
+        let (_g, root) = vault();
+        let result = write_note(
+            &root,
+            "records/sessions/people/tessera/x.md",
+            &fm("Session", None),
+            "deposited\n",
+            None,
+        )
+        .unwrap();
+        assert!(result.success);
+        assert!(root.join("records/sessions/people/tessera/x.md").is_file());
+    }
+
+    /// R2 — a first segment that is not an allowed root is rejected with the
+    /// `DisallowedRoot` variant and the message NAMES the allowed roots
+    /// (machine-parseable, per the PathOutsideVault MCP error conventions).
+    #[test]
+    fn retired_flat_agents_layout_is_rejected_naming_roots() {
+        let (_g, root) = deposit_vault();
+        let err =
+            write_note(&root, "agents/tessera/mem.md", &fm("T", None), "x\n", None).unwrap_err();
+        match &err {
+            WriteNoteError::DisallowedRoot {
+                first_segment,
+                allowed,
+            } => {
+                assert_eq!(first_segment, "agents");
+                for root_name in ["immutable-source-files", "records", "wiki"] {
+                    assert!(
+                        allowed.contains(root_name),
+                        "error must name allowed root {root_name}; got {allowed:?}"
+                    );
+                }
+            }
+            other => panic!("expected DisallowedRoot, got {other:?}"),
+        }
+        // No filesystem trace: the disallowed root must not be created.
+        assert!(!root.join("agents").exists());
+    }
+
+    /// R2b — the check fires BEFORE any filesystem access, so a nested
+    /// not-yet-existing disallowed tree (`people/deep/a.md`) leaves no
+    /// directories behind either.
+    #[test]
+    fn disallowed_root_rejection_creates_no_dirs() {
+        let (_g, root) = vault();
+        let err =
+            write_note(&root, "people/deep/notes.md", &fm("T", None), "x\n", None).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::DisallowedRoot { .. }),
+            "got {err:?}"
+        );
+        assert!(!root.join("people").exists());
+    }
+
+    /// R3 — sibling lookalikes of allowed roots are still rejected
+    /// (exact segment match, spec D4 pattern).
+    #[test]
+    fn root_lookalikes_are_rejected() {
+        let (_g, root) = vault();
+        for path in ["records-evil/x.md", "wiki-adjacent/x.md", "my.records/x.md"] {
+            let err = write_note(&root, path, &fm("T", None), "x\n", None).unwrap_err();
+            assert!(
+                matches!(err, WriteNoteError::DisallowedRoot { .. }),
+                "{path}: expected DisallowedRoot, got {err:?}"
+            );
+        }
+    }
+
+    /// R4 — `immutable-source-files` outside the deposit prefix is still
+    /// rejected (F2 preserves the AD3 constraint; now it fails as Outside
+    /// before reaching the deposit allowlist only when the first segment is
+    /// not a root — here the first segment IS a root, so the existing
+    /// PathOutsideVault shape must hold).
+    #[test]
+    fn immutable_root_outside_deposit_prefix_still_rejected() {
+        let (_g, root) = deposit_vault();
+        let err = write_note(
+            &root,
+            "immutable-source-files/secrets.md",
+            &fm("T", None),
+            "x\n",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WriteNoteError::PathOutsideVault));
+    }
+
+    /// R5 — a leading `./` does not change which root a path lands in
+    /// (`./wiki/…` stays allowed; `./agents/…` is still rejected).
+    #[test]
+    fn dot_prefix_does_not_bypass_root_allowlist() {
+        let (_g, root) = vault();
+        write_note(&root, "./wiki/ok.md", &fm("D", None), "x\n", None).unwrap();
+        let err =
+            write_note(&root, "./agents/tessera/m.md", &fm("D", None), "x\n", None).unwrap_err();
+        assert!(
+            matches!(err, WriteNoteError::DisallowedRoot { .. }),
+            "got {err:?}"
         );
     }
 

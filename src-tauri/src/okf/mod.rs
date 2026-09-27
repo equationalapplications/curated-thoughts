@@ -76,6 +76,14 @@ impl std::fmt::Display for EntityType {
 pub enum WriteNoteError {
     #[error("Path is outside vault root")]
     PathOutsideVault,
+    /// First path segment is not an allowed write root. The message names
+    /// the allowed roots so a caller (agent or human) can self-correct in
+    /// one round trip (spec 2026-09-27-vault-ingest-policy, F2).
+    #[error("write_error:disallowed_root:{first_segment}: allowed roots: {allowed}")]
+    DisallowedRoot {
+        first_segment: String,
+        allowed: String,
+    },
     #[error("Invalid frontmatter: {0}")]
     InvalidFrontmatter(String),
     #[error("Stale update: file was modified since updated_at={updated_at}")]
