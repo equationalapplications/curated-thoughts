@@ -1,3 +1,9 @@
+## [2.20.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.20.0...v2.20.1) (2026-09-27)
+
+### Bug Fixes
+
+* **walk:** anchor records exclusion to the first path component (M4) ([7df4dde](https://github.com/equationalapplications/curated-thoughts/commit/7df4dde2ec8849230bff412d276b9180b3253fca))
+
 ## [2.20.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.3...v2.20.0) (2026-09-27)
 
 ### Features
