@@ -94,31 +94,26 @@ pub struct IngestConfig {
 }
 
 impl IngestConfig {
-    /// Resolve the tier for a vault-relative (or absolute) path.
+    /// Resolve the tier for a VAULT-RELATIVE path.
     ///
-    /// Matching is on ancestor FOLDER components, not raw strings, so a
-    /// prefix `ops` cannot capture a sibling `ops-archive`; among matching
-    /// ancestors the deepest (longest) prefix wins; anything unmatched is
-    /// [`IngestTier::Full`]. Separator spellings (`\` vs `/`) are normalized.
-    pub fn tier_for(&self, path: &str) -> IngestTier {
-        let normalized = path.replace('\\', "/");
+    /// Matching is anchored at the vault root and on FOLDER components, not
+    /// raw strings, so a prefix `ops` cannot capture a sibling `ops-archive`
+    /// nor an `ops/` folder nested elsewhere; among matching prefixes the
+    /// deepest wins; anything unmatched is [`IngestTier::Full`]. Separator
+    /// spellings (`\` vs `/`) are normalized on BOTH the path and the
+    /// configured keys (config.json is hand-edited). Absolute paths never
+    /// match — relativize first via [`IngestConfig::tier_for_path`].
+    pub fn tier_for(&self, rel_path: &str) -> IngestTier {
+        let normalized = rel_path.replace('\\', "/");
+        let normalized = normalized.trim_start_matches("./");
         let mut best: Option<(usize, IngestTier)> = None;
         for (prefix, tier) in &self.folder_tiers {
+            let prefix = prefix.replace('\\', "/");
             let prefix = prefix.trim_matches('/');
             if prefix.is_empty() {
                 continue;
             }
-            let prefixed = format!("{prefix}/");
-            let rel = if normalized.starts_with(&prefixed) {
-                Some(normalized.as_str())
-            } else {
-                // Absolute spellings still match a vault-relative tier key by
-                // component: .../<prefix>/...
-                normalized
-                    .rsplit_once(&format!("/{prefix}/"))
-                    .map(|_| normalized.as_str())
-            };
-            if rel.is_some() {
+            if normalized.starts_with(&format!("{prefix}/")) {
                 let depth = prefix.split('/').count();
                 if best.is_none_or(|(d, _)| depth > d) {
                     best = Some((depth, *tier));
@@ -127,6 +122,100 @@ impl IngestConfig {
         }
         best.map_or(IngestTier::Full, |(_, t)| t)
     }
+
+    /// Resolve the tier for a vault-relative OR absolute path. An absolute
+    /// path is relativized against `vault_root` first, so folder names in
+    /// the vault's own ancestors (`/home/operations/vault/…`) can never
+    /// match a tier key. An absolute path that cannot be placed inside the
+    /// vault (or with no root known) resolves to [`IngestTier::Full`] —
+    /// the shipped behavior.
+    pub fn tier_for_path(&self, path: &str, vault_root: Option<&std::path::Path>) -> IngestTier {
+        if self.folder_tiers.is_empty() {
+            return IngestTier::Full;
+        }
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() {
+            return self.tier_for(path);
+        }
+        vault_root
+            .and_then(|root| crate::walk_vault::relativize_to_vault(p, root))
+            .map_or(IngestTier::Full, |rel| {
+                self.tier_for(&rel.to_string_lossy())
+            })
+    }
+}
+
+/// The ingest policy in force for one brain: the tier map plus the
+/// configured vault root it is relative to.
+#[derive(Debug, Clone, Default)]
+pub struct IngestPolicy {
+    pub tiers: IngestConfig,
+    pub vault_root: Option<std::path::PathBuf>,
+}
+
+impl IngestPolicy {
+    /// Tier for `path`; `vault_root` overrides the configured one when the
+    /// caller knows it (the pipeline worker does).
+    pub fn tier_for(&self, path: &str, vault_root: Option<&std::path::Path>) -> IngestTier {
+        self.tiers
+            .tier_for_path(path, vault_root.or(self.vault_root.as_deref()))
+    }
+}
+
+type PolicyCache = std::collections::HashMap<
+    std::path::PathBuf,
+    (Option<std::time::SystemTime>, u64, IngestPolicy),
+>;
+
+/// The ingest policy for the brain that owns the database at `db_path`
+/// (`Connection::path()`), resolved exactly as the pipeline worker resolves
+/// its config (`brain_paths_for(parent(db))`).
+///
+/// Consulted per document on the ingest and synthesis hot paths, so the
+/// parsed policy is cached per config file and re-read only when its
+/// mtime/length changes — hand-edits take effect on the next document
+/// without re-parsing config.json for every file of a bulk reindex. An
+/// in-memory or path-less database, a missing config, or a load error all
+/// yield the default policy (every folder `full`, the shipped behavior).
+pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
+
+    let Some(brain_dir) = db_path
+        .filter(|p| !p.is_empty())
+        .and_then(|p| std::path::Path::new(p).parent())
+    else {
+        return IngestPolicy::default();
+    };
+    let paths = crate::retrieval::brain_paths_for(brain_dir);
+    let Ok(meta) = fs::metadata(&paths.config_path) else {
+        return IngestPolicy::default();
+    };
+    let stamp = (meta.modified().ok(), meta.len());
+
+    let cache = CACHE.get_or_init(|| Mutex::new(PolicyCache::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((mtime, len, policy)) = guard.get(&paths.config_path) {
+            if (*mtime, *len) == stamp {
+                return policy.clone();
+            }
+        }
+    }
+
+    let policy = match BrainConfig::load_lenient(&paths) {
+        Ok(report) => IngestPolicy {
+            tiers: report.config.ingest,
+            vault_root: report.config.vault_path.map(std::path::PathBuf::from),
+        },
+        Err(e) => {
+            eprintln!("config: could not read ingest tiers ({e}); assuming full");
+            return IngestPolicy::default();
+        }
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(paths.config_path, (stamp.0, stamp.1, policy.clone()));
+    }
+    policy
 }
 
 /// Unified configuration for a brain directory.
@@ -278,10 +367,12 @@ pub fn ingest_from_value_lenient(raw: &serde_json::Value) -> IngestConfig {
 }
 
 impl BrainConfig {
-    /// Resolve the ingest tier for a path (F4). Thin delegation to the
-    /// `ingest` block; unmatched paths are [`IngestTier::Full`].
+    /// Resolve the ingest tier for a path (F4). Absolute paths are
+    /// relativized against the configured `vault_path`; unmatched paths are
+    /// [`IngestTier::Full`].
     pub fn ingest_tier_for(&self, path: &str) -> IngestTier {
-        self.ingest.tier_for(path)
+        self.ingest
+            .tier_for_path(path, self.vault_path.as_deref().map(std::path::Path::new))
     }
 
     /// Load config from disk with no leniency. Malformed top-level JSON is fatal.
@@ -1152,5 +1243,99 @@ mod tests {
         assert!(!cfg.folder_tiers.contains_key("operations"));
         assert_eq!(cfg.folder_tiers.get("notes"), Some(&IngestTier::ChunksOnly));
         assert_eq!(cfg.tier_for("operations/a.md"), IngestTier::Full);
+    }
+
+    fn tiers(entries: &[(&str, IngestTier)]) -> IngestConfig {
+        IngestConfig {
+            folder_tiers: entries.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        }
+    }
+
+    /// A hand-edited key spelled with `\` separators matches like its `/`
+    /// spelling — normalization is symmetric, not path-only.
+    #[test]
+    fn backslash_configured_key_matches() {
+        let cfg = tiers(&[("people\\tessera\\sessions", IngestTier::None)]);
+        assert_eq!(
+            cfg.tier_for("people/tessera/sessions/s.md"),
+            IngestTier::None
+        );
+        assert_eq!(
+            cfg.tier_for("people\\tessera\\sessions\\s.md"),
+            IngestTier::None
+        );
+        assert_eq!(cfg.tier_for("people/tessera/notes.md"), IngestTier::Full);
+    }
+
+    /// Prefixes anchor at the VAULT ROOT: a vault whose own ancestors share a
+    /// tier key's name, and a same-named folder nested deeper in the vault,
+    /// must both stay `full`.
+    #[test]
+    fn prefixes_anchor_at_vault_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("operations").join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = tiers(&[("operations", IngestTier::ChunksOnly)]);
+        let under = |rel: &str| root.join(rel).to_string_lossy().into_owned();
+
+        // Ancestor `operations/` outside the vault does not match.
+        assert_eq!(
+            cfg.tier_for_path(&under("documents/note.md"), Some(&root)),
+            IngestTier::Full
+        );
+        // Nested `…/operations/` deeper in the vault does not match.
+        assert_eq!(
+            cfg.tier_for_path(&under("notes/operations/x.md"), Some(&root)),
+            IngestTier::Full
+        );
+        // The vault-root `operations/` folder does.
+        assert_eq!(
+            cfg.tier_for_path(&under("operations/brief.md"), Some(&root)),
+            IngestTier::ChunksOnly
+        );
+        // Absolute path with no known root: shipped behavior (full).
+        assert_eq!(
+            cfg.tier_for_path(&under("operations/brief.md"), None),
+            IngestTier::Full
+        );
+    }
+
+    /// The policy loader follows the db's brain dir, sees hand-edits on the
+    /// next call (mtime/len cache), and defaults to full for in-memory dbs.
+    #[test]
+    fn ingest_policy_for_db_reads_and_refreshes() {
+        let brain = tempfile::TempDir::new().unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let db = brain.path().join("brain.db");
+                let db = db.to_str().unwrap();
+                let cfg_path = brain.path().join("config.json");
+                assert!(ingest_policy_for_db(Some(db)).tiers.folder_tiers.is_empty());
+
+                std::fs::write(
+                    &cfg_path,
+                    r#"{"vault_path":"/v","ingest":{"folder_tiers":{"ops":"none"}}}"#,
+                )
+                .unwrap();
+                let p = ingest_policy_for_db(Some(db));
+                assert_eq!(p.tier_for("/v/ops/a.md", None), IngestTier::None);
+
+                // Different length → cache invalidates without waiting on mtime.
+                std::fs::write(
+                    &cfg_path,
+                    r#"{"vault_path":"/v","ingest":{"folder_tiers":{"ops":"chunks-only"}}}"#,
+                )
+                .unwrap();
+                let p = ingest_policy_for_db(Some(db));
+                assert_eq!(p.tier_for("ops/a.md", None), IngestTier::ChunksOnly);
+
+                assert!(ingest_policy_for_db(None).tiers.folder_tiers.is_empty());
+                assert!(ingest_policy_for_db(Some("")).tiers.folder_tiers.is_empty());
+            },
+        );
     }
 }

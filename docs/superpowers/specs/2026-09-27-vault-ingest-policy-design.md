@@ -70,6 +70,10 @@
   - Fence parsing MUST accept LF and CRLF line endings (normalize before
     matching) so CRLF files cannot silently leak YAML into chunks (dedicated
     CRLF test required).
+  - Emitted chunk spans stay SOURCE-file lines (the librarian cites them):
+    the stripped fence's line count is added back to every chunk, and the
+    pass-2 reference extractor scans the same stripped body at the same
+    offset, so frontmatter can never yield call-site chunks.
 - One-time reindex note: existing chunks keep their old text until their
   document is re-indexed (hash-gated, standard behavior). No forced
   migration in this PR; a maintenance reindex is a follow-up ops task.
@@ -81,13 +85,28 @@
   "chunks-only" | "none" } }` (absent = `full`). Resolution: longest
   matching prefix wins, matched at PATH-COMPONENT boundaries only — a tier
   for `ops` never matches `ops-archive` (sibling-prefix test required).
+  Prefixes are anchored at the VAULT ROOT: absolute paths are relativized
+  against the vault root first, so neither the vault's own ancestor folders
+  nor a same-named folder nested deeper in the vault can match; a path that
+  cannot be placed in the vault resolves to `full`. `\` and `/` separators
+  are normalized on both the path and the configured keys.
   - `full` — current behavior (chunks + embeddings + librarian facts).
   - `chunks-only` — chunk + embed; librarian skips fact extraction.
-  - `none` — do not index at all (equivalent to watcher exclusion).
+  - `none` — do not index at all (equivalent to watcher exclusion). Enforced
+    in the ingest pipeline before any document row, chunk, or embedding is
+    written, so every ingest entry point (watcher worker, Tauri command,
+    `ct ingest`, bulk reindex) honors it — not only the librarian.
 - Frontmatter override on any note: `wisdom: false` → librarian skips
   fact extraction for that document regardless of folder tier.
 - Tiers apply to newly indexed/re-indexed documents; changing a tier does
-  not retroactively purge (operator reindexes or uses existing heal tooling).
+  not trigger a sweep. A document in a folder newly tiered `none` has its
+  row removed (with deletion provenance) the next time it is ingested;
+  operators wanting it gone immediately reindex.
+- The policy is read from the config of the brain that owns the database
+  and cached per config file, re-parsed only when its mtime/length changes,
+  so hand-edits take effect on the next document without a per-file parse.
+- `wisdom: false` detection accepts the same opener as the chunker's fence
+  strip (an optional UTF-8 BOM before `---`).
 
 ## Rejected alternatives
 

@@ -207,6 +207,9 @@ pub fn is_doc_clean(
 /// value (string `"false"`, `true`, absent) does NOT suppress — the
 /// override must be deliberate.
 fn note_declares_no_wisdom(content: &str) -> bool {
+    // Same opener rule as the chunker's fence strip: an optional UTF-8 BOM
+    // may precede `---` (parse_frontmatter requires `---` as line one).
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let (fm, _) = crate::okf::frontmatter::parse_frontmatter(content);
     matches!(
         fm.fields.get("wisdom"),
@@ -214,19 +217,13 @@ fn note_declares_no_wisdom(content: &str) -> bool {
     )
 }
 
-/// Resolve the ingest tier for a document path from the brain config on
-/// disk. Any load problem degrades to [`IngestTier::Full`] — a config read
-/// failure must never silently broaden or narrow the extraction policy
-/// beyond its shipped behavior.
-fn tier_from_disk(source_path: &str) -> crate::config::IngestTier {
-    let paths = crate::retrieval::resolve_brain_paths();
-    match crate::config::BrainConfig::load_lenient(&paths) {
-        Ok(report) => report.config.ingest_tier_for(source_path),
-        Err(e) => {
-            eprintln!("librarian: could not read ingest tiers ({e}); assuming full");
-            crate::config::IngestTier::Full
-        }
-    }
+/// Resolve the ingest tier for a document path from the config of the brain
+/// that owns `conn` (cached; see [`crate::config::ingest_policy_for_db`]).
+/// Any load problem degrades to [`IngestTier::Full`] — a config read failure
+/// must never silently broaden or narrow the extraction policy beyond its
+/// shipped behavior.
+fn tier_for_doc(conn: &Connection, source_path: &str) -> crate::config::IngestTier {
+    crate::config::ingest_policy_for_db(conn.path()).tier_for(source_path, None)
 }
 
 pub fn generate_summary(
@@ -241,11 +238,13 @@ pub fn generate_summary(
         return Ok(());
     }
 
-    // F4 tier gate (spec 2026-09-27-vault-ingest-policy): `none` and
-    // `chunks-only` folders get chunks + embeddings but no fact extraction,
-    // so the librarian returns before any LLM work. Fires at proposal
-    // creation (the cheapest cut, per the spec's open-question lean).
-    if tier_from_disk(source_path).skips_fact_extraction() {
+    // F4 tier gate (spec 2026-09-27-vault-ingest-policy): `chunks-only`
+    // folders get chunks + embeddings but no fact extraction, so the
+    // librarian returns before any LLM work. (`none` folders never reach
+    // here with chunks — the pipeline skips them before indexing — but the
+    // gate covers them too, e.g. `ct synth` over a stale row.) Fires at
+    // proposal creation (the cheapest cut, per the spec's open-question lean).
+    if tier_for_doc(conn, source_path).skips_fact_extraction() {
         return Ok(());
     }
 
@@ -370,10 +369,26 @@ mod tests {
 
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
-        // F4: generate_summary now resolves ingest tiers from the brain
-        // config; redirect so the issue #178 live-brain guard doesn't fire.
+        let mut conn = open_in_memory().unwrap();
+        let result = generate_summary(
+            &mut conn,
+            "/vault/documents/nonexistent.md",
+            "llama3.2:1b",
+            false,
+        );
+        assert!(result.is_ok());
+    }
+
+    /// Run `f` against a file-backed brain db in a redirected brain dir whose
+    /// config.json is `config` (issue #178 guard). The config carries no
+    /// `generation` block, so any path that gets PAST the F4 gates reaches
+    /// `run_synthesis` and fails with "LLM provider not configured" — which
+    /// makes `generate_summary(..).is_ok()` a real witness that a gate fired
+    /// (a seeded chunk rules out the empty-chunks early return).
+    fn with_brain(config: &str, f: impl FnOnce(&mut Connection)) {
         let brain = tempfile::TempDir::new().unwrap();
         let brain_str = brain.path().to_string_lossy().into_owned();
+        std::fs::write(brain.path().join("config.json"), config).unwrap();
         temp_env::with_vars(
             [
                 ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
@@ -381,14 +396,10 @@ mod tests {
                 ("CURATED_BRAIN_DB", None::<&str>),
             ],
             || {
-                let mut conn = open_in_memory().unwrap();
-                let result = generate_summary(
-                    &mut conn,
-                    "/vault/documents/nonexistent.md",
-                    "llama3.2:1b",
-                    false,
-                );
-                assert!(result.is_ok());
+                let mut conn =
+                    crate::db::connection::open_app_db(&brain.path().join("brain.db"), None)
+                        .unwrap();
+                f(&mut conn);
             },
         );
     }
@@ -405,33 +416,52 @@ mod tests {
     }
 
     #[test]
-    fn tier_none_short_circuits_generate_summary() {
-        // F4: `none` on the folder — the librarian returns before touching
-        // chunks or the LLM. Redirected brain dir (issue #178 guard).
-        let brain = tempfile::TempDir::new().unwrap();
-        let brain_str = brain.path().to_string_lossy().into_owned();
-        temp_env::with_vars(
-            [
-                ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
-                ("CURATED_BRAIN_CONFIG", None::<&str>),
-                ("CURATED_BRAIN_DB", None::<&str>),
-            ],
-            || {
-                // A config on disk tiering `documents/` to none.
-                std::fs::write(
-                    brain.path().join("config.json"),
-                    r#"{"ingest":{"folder_tiers":{"documents":"none"}}}"#,
-                )
-                .unwrap();
-                let mut conn = open_in_memory().unwrap();
-                // Seed a real document + chunk so the pre-F4 code path would
-                // have proceeded into synthesis (the skip must come from the
-                // tier gate, not from empty chunks).
-                super::tests::test_seed_doc_chunk(&conn, "/vault/documents/note.md");
-                let result = generate_summary(&mut conn, "/vault/documents/note.md", "m", false);
-                assert!(result.is_ok());
+    fn tier_chunks_only_short_circuits_generate_summary() {
+        // F4: `chunks-only` on the folder — the librarian returns before
+        // touching the LLM (see `with_brain` for why is_ok is the witness).
+        with_brain(
+            r#"{"vault_path":"/vault","ingest":{"folder_tiers":{"documents":"chunks-only"}}}"#,
+            |conn| {
+                test_seed_doc_chunk(conn, "/vault/documents/note.md");
+                let result = generate_summary(conn, "/vault/documents/note.md", "m", false);
+                assert!(result.is_ok(), "tier gate did not fire: {result:?}");
             },
         );
+    }
+
+    /// Positive control for `with_brain`: with no tier and no override the
+    /// same seeded doc DOES reach synthesis and fails on the unconfigured
+    /// provider — proving the gate tests above are not vacuous.
+    #[test]
+    fn full_tier_reaches_synthesis() {
+        with_brain(r#"{"vault_path":"/vault"}"#, |conn| {
+            test_seed_doc_chunk(conn, "/vault/documents/note.md");
+            let result = generate_summary(conn, "/vault/documents/note.md", "m", false);
+            assert!(result.is_err(), "expected to reach run_synthesis");
+        });
+    }
+
+    /// End-to-end per-note override: a `wisdom: false` note in a `full`
+    /// folder is skipped by `generate_summary` itself, not just by the
+    /// helper. BOM-prefixed, to pin the chunker-matching opener rule.
+    #[test]
+    fn wisdom_false_note_skips_generate_summary() {
+        with_brain(r#"{"vault_path":"/vault"}"#, |conn| {
+            let vault = tempfile::TempDir::new().unwrap();
+            let note = vault.path().join("note.md");
+            std::fs::write(
+                &note,
+                "\u{feff}---\ntitle: T\nwisdom: false\n---\n\nBody.\n",
+            )
+            .unwrap();
+            let note = note.to_string_lossy().into_owned();
+            test_seed_doc_chunk(conn, &note);
+            let result = generate_summary(conn, &note, "m", false);
+            assert!(
+                result.is_ok(),
+                "wisdom:false override did not fire: {result:?}"
+            );
+        });
     }
 
     #[test]

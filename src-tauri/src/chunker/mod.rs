@@ -160,9 +160,9 @@ pub fn chunk_autodetect(path: &Path, text: &str) -> Vec<Chunk> {
     // frontmatter pollution was confirmed in EMBEDDED prose chunks, and an
     // `.md` file routed to a code/declarative strategy would leak the same
     // tokens through those emitters.
-    let body = strip_leading_frontmatter(text);
+    let (body, fm_lines) = split_leading_frontmatter(text);
 
-    match strategy {
+    let mut chunks = match strategy {
         ChunkStrategy::AstSymbol(lang) => {
             let use_tsx = path_uses_tsx(path);
             let chunks = ast_symbol::chunk(lang, body, use_tsx);
@@ -176,53 +176,52 @@ pub fn chunk_autodetect(path: &Path, text: &str) -> Vec<Chunk> {
         ChunkStrategy::CodeLike => code_like::chunk_code_like_chunks(body),
         ChunkStrategy::Declarative => declarative::chunk_declarative_chunks(path, body),
         ChunkStrategy::Fallback => fallback::chunk_fallback_chunks(body),
+    };
+    // Emitters count lines within `body`; stored spans are SOURCE-file lines
+    // (the librarian cites them as `lines N-M`), so shift past the stripped
+    // fence.
+    if fm_lines > 0 {
+        for c in &mut chunks {
+            c.start_line += fm_lines;
+            c.end_line += fm_lines;
+        }
     }
+    chunks
 }
 
-/// Strip the leading YAML frontmatter fence (`---\n…\n---`) from `text`.
+/// Split the leading YAML frontmatter fence (`---\n…\n---`) off `text`,
+/// returning the body and the number of source lines removed ahead of it.
 ///
 /// Recognizes the fence only at byte 0 (an optional UTF-8 BOM precedes it —
 /// the indexer's metadata reader accepts one, so chunking must agree).
 /// The closing fence must sit on its own line; `\r\n` line endings are
 /// handled. An unterminated fence is NOT metadata (it's an hr at the top of
-/// the body) and is returned verbatim. Line spans of the emitted chunks
-/// shift accordingly — they index into the stripped `body` string, which is
-/// what `pipeline::ingest_file_virtual` stores chunks against.
-pub(crate) fn strip_leading_frontmatter(text: &str) -> &str {
-    let mut rest = text;
-    if let Some(stripped) = rest.strip_prefix('\u{feff}') {
-        rest = stripped;
-    }
-    let mut lines = rest.lines();
-    let first = lines.next();
-    // Accept `---` or `---…` fence openers only as the very first line.
-    // `serde_yaml`-adjacent readers treat any `---`-prefixed opener as a
-    // document start; `---` exactly is the OKF convention (frontmatter.rs).
-    if !matches!(first, Some(l) if l.trim_end_matches('\r') == "---") {
-        return text;
-    }
-    // Offset of the byte after the first line's newline.
-    let mut offset = first.map_or(0, |l| l.len() + 1);
-    let mut close_offset: Option<usize> = None;
+/// the body) and is returned verbatim with a zero line count. The body is
+/// always a suffix of `text`, so `lines_removed` + a body-relative line is
+/// the source-file line.
+pub fn split_leading_frontmatter(text: &str) -> (&str, u32) {
+    let rest = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // `split_inclusive` keeps each line's terminator, so the running offset
+    // is exact on `\r\n` files too (`lines()` drops the `\r`, and counting
+    // `len() + 1` under-counts one byte per CRLF line).
+    let mut lines = rest.split_inclusive('\n');
+    let is_fence = |l: &str| l.trim_end_matches(['\n', '\r']) == "---";
+    // `---` exactly is the OKF convention (frontmatter.rs).
+    let Some(first) = lines.next().filter(|l| is_fence(l)) else {
+        return (text, 0);
+    };
+    let mut offset = first.len();
     for line in lines {
-        if line.trim_end_matches('\r') == "---" {
-            close_offset = Some(offset);
-            break;
+        offset += line.len();
+        if is_fence(line) {
+            let body = &rest[offset..];
+            let removed = &text[..text.len() - body.len()];
+            let lines_removed = removed.bytes().filter(|&b| b == b'\n').count() as u32;
+            return (body, lines_removed);
         }
-        offset += line.len() + 1;
     }
-    match close_offset {
-        Some(start_of_close) => {
-            let after_close = &rest[start_of_close + 3..];
-            // Skip the newline that terminated the closing fence.
-            after_close
-                .strip_prefix("\r\n")
-                .or_else(|| after_close.strip_prefix('\n'))
-                .unwrap_or(after_close)
-        }
-        // Unterminated fence: not frontmatter, return the input untouched.
-        None => text,
-    }
+    // Unterminated fence: not frontmatter, return the input untouched.
+    (text, 0)
 }
 
 #[cfg(test)]
@@ -231,6 +230,35 @@ mod integration_tests {
     use std::path::PathBuf;
 
     // ---- F3 frontmatter strip (spec 2026-09-27-vault-ingest-policy) ----
+
+    /// CRLF offsets are byte-exact: the body starts at `Body`, not inside
+    /// the closing fence (`lines()` drops `\r`, so `len() + 1` arithmetic
+    /// used to land two bytes early here and leak `--` into the body).
+    #[test]
+    fn crlf_frontmatter_body_is_byte_exact() {
+        let text = "---\r\nokf_version: 0.1\r\n---\r\n\r\nBody\r\n";
+        assert_eq!(split_leading_frontmatter(text), ("\r\nBody\r\n", 3));
+        let lf = "---\nokf_version: 0.1\n---\n\nBody\n";
+        assert_eq!(split_leading_frontmatter(lf), ("\nBody\n", 3));
+        // BOM-prefixed fence is recognized; the BOM goes with the fence.
+        let bom = "\u{feff}---\nk: v\n---\nBody\n";
+        assert_eq!(split_leading_frontmatter(bom), ("Body\n", 3));
+        // Fence closing at EOF without a newline.
+        assert_eq!(split_leading_frontmatter("---\nk: v\n---"), ("", 2));
+    }
+
+    /// Emitted spans are SOURCE-file lines, not body-relative ones.
+    #[test]
+    fn chunk_lines_are_source_relative_after_strip() {
+        // Frontmatter occupies lines 1-3, blank line 4, body starts line 5.
+        let text = "---\ntitle: T\n---\n\nFirst body sentence here.\n";
+        let chunks = chunk_autodetect(&PathBuf::from("/v/note.md"), text);
+        let first = chunks.first().expect("body must chunk");
+        assert_eq!(first.start_line, 5, "chunk: {first:?}");
+        // No frontmatter → spans unchanged.
+        let plain = chunk_autodetect(&PathBuf::from("/v/note.md"), "Only line.\n");
+        assert_eq!(plain[0].start_line, 1);
+    }
 
     fn frontmatter_fixture() -> String {
         "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Test note\n\
