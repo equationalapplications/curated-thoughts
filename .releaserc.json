@@ -26,6 +26,10 @@
             "release": false
           },
           {
+            "type": "style",
+            "release": "patch"
+          },
+          {
             "type": "revert",
             "release": false
           }
