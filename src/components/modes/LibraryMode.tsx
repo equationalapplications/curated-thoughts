@@ -53,7 +53,7 @@ export function LibraryMode({
             <h2 className="empty-pane__title">Drop your first document</h2>
             <p className="empty-pane__hint">
               Notes, documents and source files are indexed in place — the
-              files stay where they are, and nothing leaves your machine.
+              files stay where they are.
             </p>
             {onPickFile && (
               <div className="empty-pane__actions">

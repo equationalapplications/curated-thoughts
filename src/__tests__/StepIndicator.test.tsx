@@ -49,4 +49,11 @@ describe("StepIndicator", () => {
     expect(fill).not.toHaveStyle({ animation: expect.any(String) });
     expect(fill).not.toHaveStyle({ transition: expect.any(String) });
   });
+
+  it("keeps the step list outside the progressbar so its semantics survive", () => {
+    render(<StepIndicator current={2} total={6} steps={STEPS} />);
+    // role="progressbar" makes its descendants presentational.
+    expect(screen.getByRole("progressbar")).not.toContainElement(screen.getByRole("list"));
+    expect(screen.getByText("Fastembed", { selector: "li" })).toHaveAttribute("aria-current", "step");
+  });
 });

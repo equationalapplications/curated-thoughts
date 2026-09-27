@@ -35,6 +35,21 @@ describe("timelineFormat", () => {
   });
 
   describe("shortenPathForDisplay", () => {
+    it("shortens Windows drive paths and keeps their separator", () => {
+      expect(
+        shortenPathForDisplay("Ingested C:\\Users\\Maya\\Vault\\People\\Maya Chen.md"),
+      ).toBe("Ingested …\\People\\Maya Chen.md");
+      expect(shortenPathForDisplay("Ingested D:/Vault/immutable-source-files/People/Note.md")).toBe(
+        "Ingested …/People/Note.md",
+      );
+    });
+
+    it("shortens Windows UNC paths", () => {
+      expect(shortenPathForDisplay("Ingested \\\\server\\share\\Vault\\People\\Note.md")).toBe(
+        "Ingested …\\People\\Note.md",
+      );
+    });
+
     it("keeps the last two path components and elides the directory prefix", () => {
       expect(
         shortenPathForDisplay(

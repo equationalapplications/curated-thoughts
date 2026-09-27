@@ -36,20 +36,23 @@ export function parseSummary(summary: string): SummarySegment[] {
  * Purely presentational: the untruncated text stays in the event's `summary`
  * and is exposed as the row's `title`, so nothing is lost.
  *
- * Only a "/" that begins a token is treated as a path start, so a sentence
+ * Only a path root that begins a token counts as a path start: "/" (POSIX),
+ * a drive such as "C:\" or "C:/", or a "\\" UNC prefix (Windows). A sentence
  * containing a ratio or a date ("approved 3/4", "seen 9/12") is left alone.
  * The path runs to the end of the string rather than to the next space,
  * because the last component of a real path can contain spaces
- * ("Maya Chen.md") and stopping at the space would drop the filename.
+ * ("Maya Chen.md") and stopping at the space would drop the filename. The
+ * elided form keeps the path's own separator.
  */
 export function shortenPathForDisplay(text: string): string {
-  const start = /(^|\s)\//.exec(text);
+  const start = /(^|\s)(\/|[A-Za-z]:[\\/]|\\\\)/.exec(text);
   if (!start) return text;
-  const from = start.index + start[0].length - 1;
+  const from = start.index + start[1].length;
   const path = text.slice(from);
-  const segments = path.split("/").filter(Boolean);
+  const sep = path.includes("\\") ? "\\" : "/";
+  const segments = path.split(/[\\/]/).filter(Boolean);
   if (segments.length <= 2) return text;
-  return text.slice(0, from) + `…/${segments.slice(-2).join("/")}`;
+  return text.slice(0, from) + `…${sep}${segments.slice(-2).join(sep)}`;
 }
 
 /**

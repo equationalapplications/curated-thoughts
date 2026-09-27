@@ -67,17 +67,19 @@ function FileRow({
           title={confirming ? "Click again to confirm" : "Delete file"}
           aria-label={confirming ? "Confirm delete" : "Delete file"}
         >
+          {/* Armed state shows a check: the second click deletes, so a
+              cross (which reads as "cancel") would misstate the action. */}
           {confirming ? (
-          <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M6 6l12 12M18 6 6 18" />
-          </svg>
-        ) : (
-          <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M4.5 6.5h15M9.5 6.5V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5" />
-            <path d="M6.5 6.5 7.4 19a1.5 1.5 0 0 0 1.5 1.4h6.2a1.5 1.5 0 0 0 1.5-1.4l.9-12.5" />
-            <path d="M10.5 10v6.5M13.5 10v6.5" />
-          </svg>
-        )}
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M5 12.5 9.5 17 19 7" />
+            </svg>
+          ) : (
+            <svg className="icon icon--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M4.5 6.5h15M9.5 6.5V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5" />
+              <path d="M6.5 6.5 7.4 19a1.5 1.5 0 0 0 1.5 1.4h6.2a1.5 1.5 0 0 0 1.5-1.4l.9-12.5" />
+              <path d="M10.5 10v6.5M13.5 10v6.5" />
+            </svg>
+          )}
         </button>
       )}
     </div>

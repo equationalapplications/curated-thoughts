@@ -3112,8 +3112,17 @@ code {
   font-weight: 500;
   color: var(--on-surface);
 }
-.step-indicator-bar { display: none; }
-.step-indicator-fill { display: none; }
+/* Visually hidden, not display:none, so the progressbar stays in the
+   accessibility tree. */
+.step-indicator-bar {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 
 /* ── StepWatchItThink ───────────────────────────────────────────────────── */
 .step-watch-it-think {
