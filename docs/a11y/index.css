@@ -3,7 +3,7 @@
  * palette preview harness, which loads this copy without a bundler).
  * Regenerate after ANY change to src/index.css:
  *   cp src/index.css docs/a11y/index.css
- * Last regenerated: 2026-09-26 @ #234 visual polish review fixes.
+ * Last regenerated: 2026-09-26 @ #234 visual polish review fixes. */
 /* ── Design tokens ────────────────────────────────────────────────────────
    Surfaces climb --bg -> --surface -> --elev-1/2/3 -> --surface-variant.
    Text climbs --on-surface -> --on-surface-var -> --outline.
