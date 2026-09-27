@@ -150,20 +150,78 @@ pub fn chunk_autodetect(path: &Path, text: &str) -> Vec<Chunk> {
         eprintln!("[ingest-chunk] {} strategy={:?}", path.display(), strategy);
     }
 
+    // F3 (spec 2026-09-27-vault-ingest-policy): strip the LEADING YAML
+    // frontmatter fence before dispatch, so no emitted chunk ever contains
+    // raw frontmatter tokens (`okf_version:`, `updated_at:`). The indexer's
+    // structured metadata path parses frontmatter separately from the file
+    // bytes, so this only affects chunk text. Only the `---`-delimited block
+    // at byte 0 is metadata; the same fence later in the document is content
+    // (an hr + setext rule) and must survive. Applies to every strategy:
+    // frontmatter pollution was confirmed in EMBEDDED prose chunks, and an
+    // `.md` file routed to a code/declarative strategy would leak the same
+    // tokens through those emitters.
+    let body = strip_leading_frontmatter(text);
+
     match strategy {
         ChunkStrategy::AstSymbol(lang) => {
             let use_tsx = path_uses_tsx(path);
-            let chunks = ast_symbol::chunk(lang, text, use_tsx);
+            let chunks = ast_symbol::chunk(lang, body, use_tsx);
             if chunks.is_empty() {
-                code_like::chunk_code_like_chunks(text)
+                code_like::chunk_code_like_chunks(body)
             } else {
                 chunks
             }
         }
-        ChunkStrategy::Prose => prose::chunk_prose_chunks(text),
-        ChunkStrategy::CodeLike => code_like::chunk_code_like_chunks(text),
-        ChunkStrategy::Declarative => declarative::chunk_declarative_chunks(path, text),
-        ChunkStrategy::Fallback => fallback::chunk_fallback_chunks(text),
+        ChunkStrategy::Prose => prose::chunk_prose_chunks(body),
+        ChunkStrategy::CodeLike => code_like::chunk_code_like_chunks(body),
+        ChunkStrategy::Declarative => declarative::chunk_declarative_chunks(path, body),
+        ChunkStrategy::Fallback => fallback::chunk_fallback_chunks(body),
+    }
+}
+
+/// Strip the leading YAML frontmatter fence (`---\n…\n---`) from `text`.
+///
+/// Recognizes the fence only at byte 0 (an optional UTF-8 BOM precedes it —
+/// the indexer's metadata reader accepts one, so chunking must agree).
+/// The closing fence must sit on its own line; `\r\n` line endings are
+/// handled. An unterminated fence is NOT metadata (it's an hr at the top of
+/// the body) and is returned verbatim. Line spans of the emitted chunks
+/// shift accordingly — they index into the stripped `body` string, which is
+/// what `pipeline::ingest_file_virtual` stores chunks against.
+pub(crate) fn strip_leading_frontmatter(text: &str) -> &str {
+    let mut rest = text;
+    if let Some(stripped) = rest.strip_prefix('\u{feff}') {
+        rest = stripped;
+    }
+    let mut lines = rest.lines();
+    let first = lines.next();
+    // Accept `---` or `---…` fence openers only as the very first line.
+    // `serde_yaml`-adjacent readers treat any `---`-prefixed opener as a
+    // document start; `---` exactly is the OKF convention (frontmatter.rs).
+    if !matches!(first, Some(l) if l.trim_end_matches('\r') == "---") {
+        return text;
+    }
+    // Offset of the byte after the first line's newline.
+    let mut offset = first.map_or(0, |l| l.len() + 1);
+    let mut close_offset: Option<usize> = None;
+    for line in lines {
+        if line.trim_end_matches('\r') == "---" {
+            close_offset = Some(offset);
+            break;
+        }
+        offset += line.len() + 1;
+    }
+    match close_offset {
+        Some(start_of_close) => {
+            let after_close = &rest[start_of_close + 3..];
+            // Skip the newline that terminated the closing fence.
+            after_close
+                .strip_prefix("\r\n")
+                .or_else(|| after_close.strip_prefix('\n'))
+                .unwrap_or(after_close)
+        }
+        // Unterminated fence: not frontmatter, return the input untouched.
+        None => text,
     }
 }
 
@@ -171,6 +229,153 @@ pub fn chunk_autodetect(path: &Path, text: &str) -> Vec<Chunk> {
 mod integration_tests {
     use super::*;
     use std::path::PathBuf;
+
+    // ---- F3 frontmatter strip (spec 2026-09-27-vault-ingest-policy) ----
+
+    fn frontmatter_fixture() -> String {
+        "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: Test note\n\
+         entity_type: fact\ncreated_at: 2026-09-27T00:00:00Z\nupdated_at: 2026-09-27T01:00:00Z\n\
+         ---\n\nThis is the body after the frontmatter. It has real content.\n"
+            .to_string()
+    }
+
+    /// Zero emitted chunks contain frontmatter tokens (the production
+    /// pollution: 378 chunks carried `okf_version:` / `updated_at:`).
+    #[test]
+    fn no_chunk_contains_frontmatter_tokens() {
+        let text = frontmatter_fixture();
+        let p = PathBuf::from("/v/note.md");
+        let chunks = chunk_autodetect(&p, &text);
+        assert!(!chunks.is_empty(), "body must still produce chunks");
+        for c in &chunks {
+            assert!(
+                !c.text.contains("okf_version:"),
+                "chunk leaked okf_version: {:?}",
+                c.text
+            );
+            assert!(
+                !c.text.contains("updated_at:"),
+                "chunk leaked updated_at: {:?}",
+                c.text
+            );
+            assert!(
+                !c.text.contains("profile: llm-wiki/1"),
+                "chunk leaked profile: {:?}",
+                c.text
+            );
+        }
+    }
+
+    /// No chunk contains the leading fence itself.
+    #[test]
+    fn no_chunk_contains_leading_fence() {
+        let text = frontmatter_fixture();
+        let p = PathBuf::from("/v/note.md");
+        for c in chunk_autodetect(&p, &text) {
+            assert!(
+                !c.text.starts_with("---"),
+                "chunk starts with the fence: {:?}",
+                c.text
+            );
+        }
+    }
+
+    /// Body content survives the strip.
+    #[test]
+    fn body_content_still_chunked_after_strip() {
+        let text = frontmatter_fixture();
+        let p = PathBuf::from("/v/note.md");
+        let chunks = chunk_autodetect(&p, &text);
+        let joined: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("body after the frontmatter"),
+            "body lost: {joined:?}"
+        );
+    }
+
+    /// Only a LEADING fence is stripped; horizontal rules after the first
+    /// line are ordinary content.
+    #[test]
+    fn non_leading_fence_is_not_stripped() {
+        let text = "Intro paragraph before any fence.\n\n---\n\nmiddle text\n";
+        let p = PathBuf::from("/v/note.md");
+        let chunks = chunk_autodetect(&p, &text);
+        assert!(!chunks.is_empty());
+        let joined: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("Intro paragraph"),
+            "leading body lost: {joined:?}"
+        );
+    }
+
+    /// A file with NO frontmatter chunks identically to before (regression
+    /// guard: the strip must not eat ordinary content).
+    #[test]
+    fn plain_body_unchanged_by_strip() {
+        let text = "Aa bb cc. Dd ee ff.";
+        let p = PathBuf::from("/v/note.md");
+        let with_strip: Vec<String> = chunk_autodetect(&p, text)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(with_strip, chunk_text(text));
+    }
+
+    /// Legacy prose API keeps its own behavior; the strip lives at the
+    /// autodetect dispatch, not inside chunk_prose_chunks. (Verified against
+    /// pre-change behavior: chunk_prose_chunks on this fixture emits the
+    /// fence block as its first chunk.)
+    #[test]
+    fn legacy_chunk_text_api_is_untouched() {
+        let text = frontmatter_fixture();
+        let chunks = chunk_prose_chunks(&text);
+        let first = chunks.first().expect("fixture must chunk");
+        assert!(
+            first.text.contains("okf_version:"),
+            "legacy API contract changed unexpectedly: first chunk {:?}",
+            first.text
+        );
+    }
+
+    /// The strip handles CRLF files (lines() normalizes \\r\\n).
+    #[test]
+    fn crlf_frontmatter_is_stripped() {
+        let text = "---\r\nokf_version: 0.1\r\n---\r\n\r\nBody line one.\r\n";
+        let p = PathBuf::from("/v/note.md");
+        for c in chunk_autodetect(&p, &text) {
+            assert!(
+                !c.text.contains("okf_version:"),
+                "CRLF chunk leaked frontmatter: {:?}",
+                c.text
+            );
+        }
+    }
+
+    /// Unterminated fence (no closing ---): must NOT eat the whole file —
+    /// chunk everything as if no frontmatter existed.
+    #[test]
+    fn unterminated_fence_chunks_everything() {
+        let text = "---\nokf_version: 0.1\nnever closed\nbody survives\n";
+        let p = PathBuf::from("/v/note.md");
+        let chunks = chunk_autodetect(&p, &text);
+        let joined: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("body survives"),
+            "unterminated fence swallowed the body: {joined:?}"
+        );
+    }
 
     #[test]
     fn md_matches_legacy_chunk_text() {
