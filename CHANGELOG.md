@@ -1,3 +1,18 @@
+## [2.20.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.3...v2.20.0) (2026-09-27)
+
+### Features
+
+* **chunker:** strip leading YAML frontmatter before chunk emission ([eef468a](https://github.com/equationalapplications/curated-thoughts/commit/eef468a31765b1e70a5987cbdfc9089d746cdbd9))
+* **config,librarian:** per-folder ingest tiers with wisdom:false note override ([d177cfd](https://github.com/equationalapplications/curated-thoughts/commit/d177cfd837697dce77603e3451aeb6b2a2d2afcd)), closes [#178](https://github.com/equationalapplications/curated-thoughts/issues/178)
+* **ingest:** exclude vault-root records/ tree from ingestion ([a763e1a](https://github.com/equationalapplications/curated-thoughts/commit/a763e1acac8fd47767b63cdcf8923416e8423b64))
+* **write:** allow-list vault_write_note to the immutable-source-files, records, and wiki roots ([0106f15](https://github.com/equationalapplications/curated-thoughts/commit/0106f15e696f66d6634516f25315cd26447b904e))
+
+### Bug Fixes
+
+* **config:** key the ingest-policy cache on config bytes, not mtime/len ([86a6be7](https://github.com/equationalapplications/curated-thoughts/commit/86a6be71fd7b9f7e63cb24ed1299962957229537))
+* **ingest:** enforce `none` tier in pipeline; vault-anchored tiers; source-relative chunk lines ([64733b5](https://github.com/equationalapplications/curated-thoughts/commit/64733b5b34c9db3037d52fb41bfff2cddf9195d6)), closes [#242](https://github.com/equationalapplications/curated-thoughts/issues/242)
+* **tests:** resolve clippy 1.98 lints (needless_borrow, unnecessary_get_then_check) ([7e2b51d](https://github.com/equationalapplications/curated-thoughts/commit/7e2b51d8a56d4f55af9be1700b9980bfedeacba1))
+
 ## [2.19.3](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.2...v2.19.3) (2026-09-27)
 
 ## [2.19.2](https://github.com/equationalapplications/curated-thoughts/compare/v2.19.1...v2.19.2) (2026-09-27)
