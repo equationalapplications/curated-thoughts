@@ -37,15 +37,19 @@ Full investigation (verified current state, root cause, Opus verdict history):
    read moves OUT of the `api_key.is_none()` block — a single
    `merge_stored(incoming, stored)` pass applied unconditionally (api_key
    merged only on `None`, model merged only on `None`), or a save carrying a
-   new key + `model: null` still wipes the pin. Wire rule: `jev_http` panel
-   sends `model.trim()` as a STRING (empty = explicit unpin);
-   `null`/omitted = untouched. **Provider rule (Opus spec M1):** non-jev_http
-   providers ALWAYS send `model: null` (never `undefined`) so the payload
-   shape is deterministic and the exact-match `toHaveBeenCalledWith` panel
-   test (`ClassifierPanel.test.tsx:37-44`) stays stable; blank `""` is
-   normalized to `null` at the panel boundary (m1) — the backend
-   blank-fallback remains as defense in depth, plus a whitespace-only-model
-   test (m2).
+   new key + `model: null` still wipes the pin. **Unpin rule (Opus spec c2
+   Critical — supersedes any panel-side normalization):** the panel sends
+   `model.trim()` AS TYPED — empty string = explicit unpin, null/omitted =
+   untouched; the BLANK→default normalization happens BACKEND-SIDE only,
+   AFTER the merge (merge `Some("")` past the stored pin, then map blank to
+   `None` before persist — `request_body`'s blank-fallback then yields
+   `jev-latest`). Panel-side blank→null normalization would re-merge the
+   stored pin and make the pin impossible to remove from the UI. **Provider
+   rule (Opus spec M1):** non-jev_http providers ALWAYS send `model: null`
+   (never `undefined`) so the payload shape is deterministic; the existing
+   exact-match panel assertion at `ClassifierPanel.test.tsx:37-44` is UPDATED
+   in the same commit (c2 Major: `toHaveBeenCalledWith` distinguishes
+   `null` from missing).
 5. ClassifierPanel: `model` field shown only for `jev_http`; load effect
    hydrates `setModel(cfg.model ?? '')`; payload type in `src/lib/tauri.ts`
    gains `model?: string | null` (m3).
@@ -70,9 +74,13 @@ blank-fallback means no invalid states reach the HTTP layer.
   (:812) — prefer extracting a pure `merge_stored(incoming, stored)` helper
   used by both command and test (the mirror-only test cannot catch missing
   wiring; see investigation OQ2).
-- Panel tests: clear→`""` saves with pin gone; hydration on load; non-jev_http
-  providers send `model: null` (exact-match payload assertions stay valid);
-  whitespace-only model → null at the panel boundary (m2).
+- Panel tests: clear→`""` saves with pin GONE (unpin path through merge);
+  hydration on load; non-jev_http providers send `model: null` — the
+  `:37-44` exact-match assertion is UPDATED accordingly (null ≠ missing).
+- Rust: `set_classifier_config` merge tests — `Some("")` unpin persists
+  `None` (blank normalization backend-side, after merge); `Some("  ")`
+  whitespace-only also normalizes to `None` (trim before the blank check);
+  `None` keeps the stored pin.
 - `cargo test -p curated-thoughts classifier` + `pnpm test` (ClassifierPanel).
 
 ## Out of scope / open questions
