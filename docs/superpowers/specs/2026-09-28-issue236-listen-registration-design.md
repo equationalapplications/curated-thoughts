@@ -43,9 +43,11 @@ patterns plus the `tauri.ts` wrapper — failure shapes, Opus verdict history):
 5. **StepModel (own rule, wording direction fixed per spec m1):** BEFORE the
    auto-install starts, keep ref-array cleanup with
    `await Promise.allSettled(unlistens.current)` — a progress-listener
-   rejection must NOT abort the in-flight auto-install. (allSettled is only
-   for the cleanup await — no allSettled at single-listener sites where the
-   existing try/finally already handles ordering; spec m2.)
+   rejection must NOT abort the in-flight auto-install. (This allSettled is
+   a PRE-INSTALL AWAIT that drains the ref before starting work — not
+   teardown (Opus c3 nit); the ref-array `safeUnlisten` sweep remains the
+   teardown. No allSettled at single-listener sites where the existing
+   try/finally already handles ordering; spec m2.)
 6. **ModelPanel / StepOllama (ordering corrected, Opus spec M1):** the
    `await onPullProgress(...)` fires BEFORE `pullModel()` — a listener
    rejection must not abort a pull that hasn't started. Rule: on rejection,
@@ -60,11 +62,16 @@ patterns plus the `tauri.ts` wrapper — failure shapes, Opus verdict history):
    over guarded listens so one rejected subscription never fails boot and
    never double-logs; features relying on a rejected listener degrade
    (auto-heal trigger, classifier-refresh trigger) while the rest of the
-   wiki engine comes up. **Teardown (Opus c2 R3):** the cleanup iterates the
-   SETTLED results and calls safeUnlisten only on fulfilled entries —
-   never invoke an `undefined` unlisten from a rejected one; the
-   `startAutoHeal`/`startAutoMaintenance` subscription sites get the same
-   settled-cleanup treatment.
+   wiki engine comes up. **Teardown (Opus c2 R3, corrected c3 Major):**
+   setupWiki's cleanup iterates the SETTLED results and calls safeUnlisten
+   only on fulfilled entries — never invoke an `undefined` unlisten from a
+   rejected one. **The long-lived sites (`startAutoHeal` `wiki.ts:545-552`,
+   `startAutoMaintenance` `wiki.ts:590-598`) do NOT use settled iteration —
+   their stop path can run while `listen()` is still pending, so a settled
+   array would unlisten nothing and LEAK. They use the item-3 held-promise
+   idiom: keep the guarded promises and clean up with
+   `promises.forEach((p) => void safeUnlisten(p))`.** `allSettled` survives
+   ONLY as setupWiki's boot gate.
 8. **useWikiStatus / tauri.ts `subscribeEntityStatus`** (name corrected from
    the investigation's `onWikiStatusChange`): KEEP its existing
    `.catch(console.error)` and do NOT add guardListen there — guard+catch on
@@ -122,7 +129,11 @@ de-facto behavior, just without the unhandled rejection).
   allSettled, subscribeEntityStatus existing-catch, AppShell pattern).
   Ripgrep notes retained from the investigation: `--type ts` covers tsx;
   `(<[^>]*>)?\(` required for generic-parameterized calls; multi-line
-  generics evade the pattern — diff against the site list too.
+  generics evade the pattern — diff against the site list too. Site-count
+  reconciliation (Opus c3 nit): "20+" counts raw listen/on* creations;
+  "≈34" counts those PLUS the events.ts wrapper definitions the plan must
+  thread guardListen through — both are correct over their own sets; the
+  plan states which set each check covers.
 
 ## Out of scope / open questions
 
