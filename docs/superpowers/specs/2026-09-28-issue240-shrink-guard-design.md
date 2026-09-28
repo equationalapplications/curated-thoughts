@@ -26,9 +26,15 @@ dispatch adapter (`tool_dispatch.rs:287`, params at :1135-1141) and the
 Tauri command (`lib.rs:877`). No internal repair pass writes through
 `write_note`; the frontend never calls the tool.
 
-1. **D1 — size-drop guard** on the If-Match edit path, after
-   `enforce_staleness` (:403), before token rotation; the exact trigger,
+1. **D1 — size-drop guard** on the If-Match edit path; the exact trigger,
    floor, boundary, error shape, and measurement basis are pinned in D3/D4.
+   **Placement (Opus spec c2 N1):** BOTH checks (shrink + marker) run after
+   `render_document` (write.rs `:432`) and before `safe_write_bytes`
+   (`:435`) — NOT immediately after `enforce_staleness` — because the
+   measurement basis is the rendered body, which only exists after rendering
+   (raw `body.len()` disagrees with the rendered length whenever a trailing
+   newline gets appended: 512→513 bytes flips the pinned 1025 boundary
+   pair).
 2. **D2 — compaction-marker reject:** creates reject ALL markers
    (`[SKILL_PRUNED]`, `HERMES-CONTEXT-COMPRESSION`, const list); edits reject
    only NEWLY-INTRODUCED markers (a note quoting a marker — e.g. the
@@ -61,19 +67,24 @@ Tauri command (`lib.rs:877`). No internal repair pass writes through
    basis uses the helper's offset; CRLF boundary test required.
 7. Extend the refusal-contract list in the `write.rs` module header (:16-18).
 
-**Pins (Opus spec minors):** new-body bytes = the body string returned by the
-D4 split of the rendered document, measured as `.len()` of exactly what is
-written (`render_document` does not collapse trailing newlines — no
-normalization step); marker error variant `CompactionMarkerRejected { marker:
-String }` with Display `compaction_marker:{marker}: rephrase and resend
-without compaction artifacts` (same no-`allow_shrink` rule as the shrink
-refusal); "newly introduced" = the marker string is absent from the existing
-body (presence, not count; body and frontmatter both scanned; `allow_shrink`
-does NOT bypass the marker check); `MIN_GUARDED_BODY_BYTES = 1024`; the
-marker check runs immediately after `enforce_staleness` (:403), before token
-rotation; the module-header convention claim is corrected to "Display strings
-are the contract; see each variant's `#[error]`" (the literal
-`{detail}:{value}` shape doesn't hold for `StaleUpdate`).
+**Pins (Opus spec minors + c2):** new-body bytes = rendered document length
+minus the split helper's frontmatter offset (`doc.len() - offset`; the
+rendered document does not collapse trailing newlines — no normalization
+step, and "normalized" in earlier drafts meant exactly this measured form);
+marker error variant `CompactionMarkerRejected { marker: String }` with
+Display `compaction_marker:{marker}: rephrase and resend without compaction
+artifacts` (same no-`allow_shrink` rule as the shrink refusal); "newly
+introduced" = the marker string is absent from the existing content —
+FRONTMATTER INCLUDED (Opus spec c2 N2: scanning only the existing body would
+lock any note whose title/description quotes a marker, since every
+legitimate edit re-sends that frontmatter; presence, not count; the check
+covers the incoming payload's body AND frontmatter symmetrically;
+`allow_shrink` does NOT bypass the marker check); `MIN_GUARDED_BODY_BYTES =
+1024`; check ORDER pinned: marker check first, then shrink check (both after
+`render_document`, before `safe_write_bytes`); the module-header convention
+claim is corrected to "Display strings are the contract; see each variant's
+`#[error]`" (the literal `{detail}:{value}` shape doesn't hold for
+`StaleUpdate`).
 
 **Rejected alternatives:** float ratio const (superseded by integer math);
 full-content comparison basis (frontmatter size noise can flip borderline
@@ -88,8 +99,8 @@ not smuggled in here (semantic change deserves its own design).
 ## Error handling
 
 Two new `WriteNoteError` refusal variants (shrink, marker), following the
-module's `{detail}:{value}` Display convention. MCP callers see the Display
-string via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
+module's Display-string contract (see Pins for the exact strings). MCP
+callers see the Display string via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
 
 ## Testing
 
