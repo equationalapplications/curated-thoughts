@@ -51,7 +51,11 @@ verdict history): `2026-09-28-issue244-241-ct-release-and-drift-investigation.md
    lacks); on the macOS leg, smoke the lipo'd universal binary (target-triple
    builds land under `target/<triple>/release/`).
 7. macOS: universal build (both targets + `lipo`), matching the sidecar's
-   proven pattern.
+   proven pattern; the ct build step declares explicit `--target` values and
+   an ordering dependency on the sidecar steps' target placeholders.
+   Tag-gating tauri-action (item 4) drops desktop-installer coverage on
+   dispatch runs — accepted: the ct steps ARE the dispatch-run coverage;
+   installers are covered on tag builds (Opus spec minor).
 
 **#241 — docs + drift:**
 1. README `ct` section: deleting superseded notes outright is safe and
@@ -59,15 +63,33 @@ verdict history): `2026-09-28-issue244-241-ct-release-and-drift-investigation.md
    doc+chunks+embeddings; lineage lives in git history + session records);
    `ct drift` = periodic CHECK, `ct ingest --yes` = REPAIR.
 2. **Split `reconcile_vault` (`src-tauri/src/reconcile.rs:50`) into classify
-   + apply**; `ct drift` calls the CLASSIFY half as a dry run — guard
-   semantics shared by construction (empty-walk = unmounted vault,
-   ambiguous/unrelativizable rows). Drift reports reconcile's
-   gone/ambiguous outputs ONLY — the files-without-rows direction is
-   deliberately out (a hand-rolled second check would evade the guards).
-   Read-only (ro connection; repair stays `ct ingest`/desktop startup).
+   + apply;** `ct drift` calls the CLASSIFY half as a dry run. **Scope
+   (Opus spec M1):** classify returns the FULL plan — gone rows, repointed
+   rows, and deletes-of-excluded-rows — and drift reports ALL of it: the
+   Sep 27 `records/` incident was exactly a missed excluded-dir delete, so a
+   drift that only reports "gone" would have missed it too. Exit 3 on any
+   pending repoint/delete/gone.
+   **Ambiguous rows (Opus spec M2):** ambiguous entries are WARNINGS, not
+   drift — `ct ingest --yes` never clears them (reconcile leaves them
+   untouched by design), so failing on them would mean exit 3 forever after
+   a "successful" repair; ambiguous-only state exits 0 with the warning
+   printed (and listed in `--json`).
+   **Claim scope (Opus spec M3):** "shared by construction" holds for `ct
+   ingest` ONLY — the desktop startup path (`lib.rs:1524-1560`) runs its own
+   purge/exists-delete and never repoints, so startup can DELETE a moved row
+   where ingest would repoint it. README names `ct ingest --yes` as the
+   repair tool; drift compares against ingest semantics.
+   **Walk identity (Opus spec M4):** drift must consume the IDENTICAL file
+   list `ct ingest` passes to reconcile (post symlink-trust, sorted, deduped
+   — `cmds.rs:163-183`); a shared walk helper serves both commands so the
+   two can never diverge.
+   Read-only (ro connection; repair stays `ct ingest`).
 3. New `Cmd::Drift { json: bool }` in `tools/src/bin/ct.rs`; exit codes:
-   0 clean, 3 drift found (exit 2 is `EXIT_NO_RESULTS` — collision avoided),
-   4 classify guard trip (clear message, NOT "drift").
+   0 clean (ambiguous warnings don't fail), 3 pending plan found
+   (repoint/delete/gone), 4 classify guard trip — an empty walk is a vault
+   problem, not drift (note: that branch currently writes `.brain` deletes
+   via reconcile; the exit-4 message says drift made no classification and
+   no repair was attempted by drift itself).
 
 **Rejected alternatives:** startup drift check in the desktop app
 (redundant — startup reconcile already repairs); hand-rolled symmetric diff
@@ -85,8 +107,12 @@ elsewhere (build steps fail the workflow on their own).
 
 - #241: all existing reconcile tests stay green against the split (incl.
   `vanished_file_is_deleted_and_chunks_cascade`); classify unit tests in
-  `src-tauri/src/reconcile.rs`; CLI tests in `tools/` (clean → 0, drifted →
-  3, guard trip → 4) in reconcile's fixture style (tempdir + seeded sqlite).
+  `src-tauri/src/reconcile.rs`; CLI tests in `tools/` — clean → 0, pending
+  plan (gone/repoint/excluded-delete each) → 3, ambiguous-only → 0 with
+  warning, guard trip → 4 — in reconcile's fixture style (tempdir + seeded
+  sqlite); exit codes asserted via the CLI harness's status return, not
+  stdout string matches. Walk-helper test: drift and ingest produce the
+  identical file list on the same fixture.
 - #244: local `cargo build --release -p curated-thoughts-tools --bin ct` +
   `ct --help`; CI verified by workflow_dispatch on the PR branch (build +
   package steps, gate keeps the release untouched); upload path proven on
