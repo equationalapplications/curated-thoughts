@@ -53,7 +53,7 @@ safety gates when the app is upgraded underneath it.
    (or a release-free verification job). This gate is part of THIS PR — the
    ct-asset work cannot be CI-verified without it, and the current
    unprotected dispatch trigger is a latent incident regardless.
-4. New post-tauri-action step: `gh release upload "$GITHUB_REF_NAME" ct_*.tar.gz
+4. New post-tauri-action step: `gh release upload "$GITHUB_REF_NAME" ct_*.*
    --clobber`, `if: github.ref_type == 'tag'`, **with `env: GH_TOKEN:
    ${{ secrets.GITHUB_TOKEN }}`** (Opus M3: actions checkout runs with
    `persist-credentials: false` and `GITHUB_TOKEN` is only present on the
@@ -149,7 +149,8 @@ genuinely additive, and thin.
    NOT in that claim — it deletes where ingest repoints).
    - New `Cmd::Drift { json: bool }` variant in `tools/src/bin/ct.rs`
      (~:14-140), handler read-only (open ro connection; NO repair — repair
-     remains `ct ingest`/desktop startup).
+     remains `ct ingest` per the spec's M3 ruling; the desktop startup path
+     is NOT an equivalent repair — it deletes where ingest repoints).
    - Exit codes (Opus m1): drift found → exit 3 (exit 2 already means
      `EXIT_NO_RESULTS` in this CLI); clean → 0; classify guard trip
      (unmounted vault etc.) → exit 4 with a clear message, NOT "drift".
@@ -157,7 +158,9 @@ genuinely additive, and thin.
      (`reconcile.rs:349 vanished_file_is_deleted_and_chunks_cascade` and
      neighbors) must stay green against the split, plus a drift-mode test
      mirroring reconcile's fixture style (tempdir + seeded sqlite) asserting
-     report content and exit codes in both clean and drifted states.
+     report content and exit codes across the full matrix (clean → 0, pending
+     plan gone/repoint/excluded-delete → 3, ambiguous-only → 0 with warning,
+     guard trip → 4 — see the Verification section above).
 3. Item 3 (wisdom-fact lifecycle on delete) stays with PR #242 territory per
    the issue; out of scope here.
 
