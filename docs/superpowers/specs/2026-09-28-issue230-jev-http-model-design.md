@@ -49,7 +49,13 @@ Full investigation (verified current state, root cause, Opus verdict history):
    (never `undefined`) so the payload shape is deterministic; the existing
    exact-match panel assertion at `ClassifierPanel.test.tsx:37-44` is UPDATED
    in the same commit (c2 Major: `toHaveBeenCalledWith` distinguishes
-   `null` from missing).
+   `null` from missing). **Normalization home (Opus c3 nit ①):** the
+   blank→`None` normalization lives INSIDE `merge_stored` (the pure helper
+   both the command and the test call) — not duplicated in the command body —
+   so the OQ2 test blind spot cannot reopen. **Load race (Opus c3 nit ②):**
+   the panel's save button is disabled until the load effect has resolved
+   (guarded by the same `status !== 'idle'` gate the panel already uses), so
+   a save can never fire with unpinned state and overwrite a stored pin.
 5. ClassifierPanel: `model` field shown only for `jev_http`; load effect
    hydrates `setModel(cfg.model ?? '')`; payload type in `src/lib/tauri.ts`
    gains `model?: string | null` (m3).
@@ -74,8 +80,10 @@ blank-fallback means no invalid states reach the HTTP layer.
   (:812) — prefer extracting a pure `merge_stored(incoming, stored)` helper
   used by both command and test (the mirror-only test cannot catch missing
   wiring; see investigation OQ2).
-- Panel tests: clear→`""` saves with pin GONE (unpin path through merge);
-  hydration on load; non-jev_http providers send `model: null` — the
+- Panel tests: clear→`""` sends `model: ""` and the SAVED CONFIG shows the
+  pin removed (backend-verifiable via `read_classifier_config`; the panel
+  assertion alone is only wire-level — Opus c3 nit ③); hydration on load;
+  non-jev_http providers send `model: null` — the
   `:37-44` exact-match assertion is UPDATED accordingly (null ≠ missing).
 - Rust: `set_classifier_config` merge tests — `Some("")` unpin persists
   `None` (blank normalization backend-side, after merge); `Some("  ")`
