@@ -48,25 +48,41 @@ patterns plus the `tauri.ts` wrapper — failure shapes, Opus verdict history):
    existing try/finally already handles ordering; spec m2.)
 6. **ModelPanel / StepOllama (ordering corrected, Opus spec M1):** the
    `await onPullProgress(...)` fires BEFORE `pullModel()` — a listener
-   rejection must not abort a pull that hasn't started. Rule: wrap the
-   listener creation in its own `.catch` that logs-and-continues
-   (`guardListen` already logs; on rejection set progress display to
-   "unavailable" and STILL call `pullModel()`), `unlisten` declared before
-   `try`, `safeUnlisten` in `finally`. The pull itself proceeds even if its
-   progress listener could not attach (listener failure is display-only;
-   the pull is the user's actual request).
+   rejection must not abort a pull that hasn't started. Rule: on rejection,
+   log-and-continue — guardListen has ALREADY logged once, so the surrounding
+   code catches ONLY to prevent the escape and MUST NOT log again
+   (`.catch(() => {})` shape; this is the one sanctioned silent catch, scoped
+   to sites where guardListen owns the log — R1). On rejection set progress
+   display to "unavailable" and STILL call `pullModel()`; `unlisten`
+   declared before `try`, `safeUnlisten` in `finally`.
 7. **setupWiki (Opus spec M3):** the four `await listen(...)` calls
    (`wiki.ts:450-464`) are boot-gating — convert to `Promise.allSettled`
    over guarded listens so one rejected subscription never fails boot and
    never double-logs; features relying on a rejected listener degrade
    (auto-heal trigger, classifier-refresh trigger) while the rest of the
-   wiki engine comes up.
+   wiki engine comes up. **Teardown (Opus c2 R3):** the cleanup iterates the
+   SETTLED results and calls safeUnlisten only on fulfilled entries —
+   never invoke an `undefined` unlisten from a rejected one; the
+   `startAutoHeal`/`startAutoMaintenance` subscription sites get the same
+   settled-cleanup treatment.
 8. **useWikiStatus / tauri.ts `subscribeEntityStatus`** (name corrected from
    the investigation's `onWikiStatusChange`): KEEP its existing
    `.catch(console.error)` and do NOT add guardListen there — guard+catch on
    the same chain is exactly the double-log this spec forbids (Opus spec
-   M4; supersedes the earlier "normalize" wording). One warning source per
-   site, everywhere.
+   M4; supersedes the earlier "normalize" wording). **Per CALL SITE, not per
+   wrapper (Opus c2 R4):** the exemption applies to the useWikiStatus call
+   site(s) that already handle rejection; any FUTURE caller of
+   `subscribeEntityStatus` without its own `.catch` needs guardListen.
+
+**Precedence rule (Opus c2 R2):** where this spec and the companion
+investigation doc disagree (ModelPanel/StepOllama ordering, the wrapper name,
+the rg creator list), THIS SPEC WINS — the investigation records the review
+history, not the final ruling.
+
+**Logging contract (Opus c2 R6, replaces the blanket "exactly one warn"):**
+one `console.warn` per FAILED subscription, emitted by guardListen except at
+exempted sites (useWikiStatus's own console.error). Successful subscriptions
+are silent — today's behavior is unchanged for them.
 
 **Rejected alternatives:** guarding inside the `on*` wrappers (double-logs at
 sites with their own handling; changes return contracts mid-file);
