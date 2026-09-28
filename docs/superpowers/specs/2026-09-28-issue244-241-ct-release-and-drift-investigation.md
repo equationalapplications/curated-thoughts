@@ -86,17 +86,17 @@ CI: workflow_dispatch on the PR branch exercises the build+package steps with
 the tauri-action gate in place (no release touching — that's the BLOCKER
 fix); the upload path itself is proven on the next real release tag.
 
-**#241 (aligned with the item-2 test requirements — the old "exit 2 in
-tools/" wording was a regression of the c1 fixes):** the classify/apply split
-lives in `src-tauri/src/reconcile.rs`, so its tests stay THERE (all existing
+**#241 (aligned with the item-2 test requirements — rewritten c2 to match the
+spec's drift semantics):** the classify/apply split lives in
+`src-tauri/src/reconcile.rs`, so its tests stay THERE (all existing
 reconcile tests green against the split, incl.
 `vanished_file_is_deleted_and_chunks_cascade`); `tools/` carries only the CLI
-tests: clean state → exit 0, drifted state → exit 3, classify guard trip
-(unmounted vault) → exit 4. `ct drift` covers ONLY rows whose backing files
-are gone (reconcile classify's "gone" + "ambiguous" outputs) — the
-files-without-rows direction (vault files never ingested) is OUT of drift's
-scope unless it too goes through the classify step; do not hand-roll it in
-the tool, or the empty-walk guard at `reconcile.rs:69` stops applying.
+tests: clean → 0, pending plan (gone/repoint/excluded-delete each) → 3,
+ambiguous-only → 0 with warning, classify guard trip (unmounted vault) → 4.
+`ct drift` reports reconcile's FULL plan (gone + repointed +
+excluded-dir deletes); ambiguous rows are warnings, not drift; the
+files-without-rows direction (never-ingested files) stays OUT — a hand-rolled
+reverse diff would evade the empty-walk guard at `reconcile.rs:69`.
 
 ## Issue #241 — deletion-is-self-cleaning docs + drift sweep
 
@@ -106,7 +106,9 @@ Self-cleaning is real and multi-layered:
 
 - **Desktop startup reconcile:** `lib.rs:1508-1565` purges rows whose backing
   file is gone (`enqueue_vault_event(Remove)`, comment at :1518) + `purge_excluded_rows`
-  (:1035-1072).
+  (:1035-1072). NOTE (superseded by the spec's M3 ruling): this path never
+  repoints — it deletes rows the `ct ingest` reconcile path would repoint,
+  so "self-cleaning" behaves DIFFERENTLY on desktop startup vs ingest.
 - **Watcher Deleted event:** `lib.rs:1713-1715` → heal scheduler (:1630) →
   removal via `db::queries::delete_document` (`queries.rs:155`, cascades chunks;
   embeddings ride the cascade, `delete_document_chunks` at `queries.rs:50`).
@@ -130,20 +132,21 @@ genuinely additive, and thin.
    reconcile/`ct ingest` remove doc row + chunks + embeddings automatically;
    lineage lives in git history and session records. Point to `ct drift` as
    the periodic CHECK and `ct ingest --yes` as the REPAIR (Opus m3).
-2. **`ct drift` headless subcommand (item 2 — reshaped per Opus c1 M4):** a
-   hand-rolled symmetric diff in the tool would IGNORE reconcile's hard-won
-   guards — `reconcile.rs:69` treats an empty walk as an unmounted/misconfigured
-   vault (a naive diff would report the whole DB as drift and exit nonzero
-   forever), and the ambiguous/unrelativizable-row handling (:35-36, :104)
-   exists precisely to avoid false deletes. Reshape: **split
-   `reconcile_vault` (`src-tauri/src/reconcile.rs:50`) into classify + apply**;
-   `ct drift` calls the CLASSIFY half as a dry run and reports the same
-   struct reconcile would act on (gone/ambiguous). Scope note (c2): "gone"
-   already IS rows-without-files — drift intentionally does NOT add the
-   files-without-rows direction (never-ingested vault files); that would be a
-   second hand-rolled check outside the shared guards. See Verification.
-   All the guard semantics are then shared by construction — drift can never
-   disagree with what reconcile would actually repair.
+2. **`ct drift` headless subcommand (item 2 — reshaped per Opus c1 M4 and
+   c2 spec M1/M2/M3; THIS SECTION IS SUPERSEDED BY THE SPEC where they
+   differ):** a hand-rolled symmetric diff in the tool would IGNORE
+   reconcile's hard-won guards — `reconcile.rs:69` treats an empty walk as
+   an unmounted/misconfigured vault (a naive diff would report the whole DB
+   as drift and exit nonzero forever), and the ambiguous/unrelativizable-row
+   handling (:35-36, :104) exists precisely to avoid false deletes. Reshape:
+   **split `reconcile_vault` (`src-tauri/src/reconcile.rs:50`) into classify
+   + apply**; `ct drift` calls the CLASSIFY half as a dry run. Final scope
+   per the spec: classify returns the FULL plan (gone + repointed +
+   excluded-dir deletes — the Sep 27 `records/` incident was an
+   excluded-delete class, so "gone-only" would have missed it); ambiguous
+   rows are WARNINGS exiting 0 (ingest never clears them); guard semantics
+   shared with `ct ingest` by construction (desktop startup is explicitly
+   NOT in that claim — it deletes where ingest repoints).
    - New `Cmd::Drift { json: bool }` variant in `tools/src/bin/ct.rs`
      (~:14-140), handler read-only (open ro connection; NO repair — repair
      remains `ct ingest`/desktop startup).
@@ -160,9 +163,12 @@ genuinely additive, and thin.
 
 ### Verification
 
-Unit test in `tools/` mirroring reconcile's style (tempdir + seeded sqlite,
-assert exit 2 + row lists both directions). Docs verified by reading rendered
-README.
+(Superseded in detail by the spec's Testing section — reproduced here with the
+final exit codes so this doc no longer contradicts it:) classify tests in
+`src-tauri/src/reconcile.rs` (existing suite green against the split); CLI
+tests in `tools/` — clean → 0, pending plan → 3, ambiguous-only → 0 with
+warning, guard trip → 4 (tempdir + seeded sqlite, reconcile fixture style).
+Docs verified by reading rendered README.
 
 ## Open questions
 
