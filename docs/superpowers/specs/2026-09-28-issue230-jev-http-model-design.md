@@ -33,11 +33,22 @@ Full investigation (verified current state, root cause, Opus verdict history):
    Blank/whitespace → default (never `"model": ""`).
 4. Config merge: `set_classifier_config` (`classifier.rs:478-498`) merges
    `model` from stored config when incoming is `None` — panel saves must not
-   wipe a hand-pinned model. Wire rule: `jev_http` panel sends `model.trim()`
-   as a STRING (empty = explicit unpin); `null`/omitted = untouched.
+   wipe a hand-pinned model. **Placement (Opus spec M2):** the stored-config
+   read moves OUT of the `api_key.is_none()` block — a single
+   `merge_stored(incoming, stored)` pass applied unconditionally (api_key
+   merged only on `None`, model merged only on `None`), or a save carrying a
+   new key + `model: null` still wipes the pin. Wire rule: `jev_http` panel
+   sends `model.trim()` as a STRING (empty = explicit unpin);
+   `null`/omitted = untouched. **Provider rule (Opus spec M1):** non-jev_http
+   providers ALWAYS send `model: null` (never `undefined`) so the payload
+   shape is deterministic and the exact-match `toHaveBeenCalledWith` panel
+   test (`ClassifierPanel.test.tsx:37-44`) stays stable; blank `""` is
+   normalized to `null` at the panel boundary (m1) — the backend
+   blank-fallback remains as defense in depth, plus a whitespace-only-model
+   test (m2).
 5. ClassifierPanel: `model` field shown only for `jev_http`; load effect
    hydrates `setModel(cfg.model ?? '')`; payload type in `src/lib/tauri.ts`
-   gains `model?: string | null`.
+   gains `model?: string | null` (m3).
 
 **Rejected alternatives:** Cloudflare-only fix (leaves the documented hosted
 path broken); making the panel field write-only-null with no merge (wipes
@@ -59,7 +70,9 @@ blank-fallback means no invalid states reach the HTTP layer.
   (:812) — prefer extracting a pure `merge_stored(incoming, stored)` helper
   used by both command and test (the mirror-only test cannot catch missing
   wiring; see investigation OQ2).
-- Panel tests: clear→`""` saves with pin gone; hydration on load.
+- Panel tests: clear→`""` saves with pin gone; hydration on load; non-jev_http
+  providers send `model: null` (exact-match payload assertions stay valid);
+  whitespace-only model → null at the panel boundary (m2).
 - `cargo test -p curated-thoughts classifier` + `pnpm test` (ClassifierPanel).
 
 ## Out of scope / open questions
@@ -69,5 +82,10 @@ blank-fallback means no invalid states reach the HTTP layer.
 - Third-party jev_http servers rejecting unknown fields: accepted risk
   (investigation "What was NOT checked"); `model` is the documented TypeSafe
   contract.
+- Bad pins (m5): a hand-typed model name that the API rejects yields 422 →
+  classify is skipped for that pass; acceptable (same failure mode as a bad
+  endpoint URL), no extra validation in v1.
+- `_` match arm also covers `Unconfigured` (m4) — unreachable via
+  `is_available` (see investigation); no code change.
 
 Fixes #230.
