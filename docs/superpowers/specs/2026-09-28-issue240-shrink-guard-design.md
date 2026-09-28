@@ -48,9 +48,13 @@ Tauri command (`lib.rs:877`). No internal repair pass writes through
    edits. Error: `ShrinkRefused { existing_bytes, new_bytes }`, Display
    PINNED to
    `shrink_refused:{existing_bytes}:{new_bytes}: re-read the note and resend the full body`.
-4. **D4 — byte basis:** new body (normalized, exactly what `render_document`
-   appends) vs existing body (via `collect_frontmatter_fence`, :146) —
-   body-to-body, frontmatter excluded from both sides.
+4. **D4 — byte basis:** new body = rendered document length minus the split
+   helper's offset (`doc.len() - offset`; exactly what `render_document`
+   appends — no normalization step) vs existing body =
+   `content.len() - offset` — both measured via the new
+   `split_frontmatter_fence` helper (item 6), never via
+   `collect_frontmatter_fence` (mis-measures CRLF, see item 6).
+   Body-to-body, frontmatter excluded from both sides.
 5. **D5 — plumbing:** `allow_shrink` on `VaultWriteNoteParams` (schemars
    auto-derives the MCP schema), passed through both adapters; both
    production callers default to `false`. **Tauri command shape (Opus spec
@@ -118,6 +122,17 @@ callers see the Display string via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
   (Tauri `Option<bool>` unwrap path) behaves identically to today.
 - CRLF note: `content.len() - offset` basis measured via the new split
   helper matches the body length on CRLF files.
+- c2-behaviour regression tests (Opus c3): marker quoted in EXISTING
+  FRONTMATTER (title/description) + body re-sends it → edit succeeds
+  (N2 lock-out); check ORDER — a payload that is both marker-tainted and
+  shrunk refuses with `compaction_marker` first; rendered-length basis —
+  body not ending in `\n` measures +1 after render and the boundary pair
+  (1025/512) refuses exactly as pinned.
+- `split_frontmatter_fence` returning `None` (existing file without a
+  fence): pin = treat the whole existing content as body for measurement
+  (`offset = 0`) and let frontmatter validation produce its own refusal
+  downstream; test: fence-less existing file edits measure correctly and do
+  not panic.
 - Neither refusal's Display contains `allow_shrink`.
 - Audit existing tests for shrinking fixture edits (long → `"x\n"`) — route
   intentional ones through `allow_shrink: true`.
