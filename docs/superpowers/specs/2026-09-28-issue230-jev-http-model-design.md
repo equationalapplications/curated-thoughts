@@ -1,0 +1,73 @@
+# Jev HTTP classifier: send the required `model` field (issue #230)
+
+**Date:** 2026-09-28
+**Status:** Draft
+**Branch:** fix/issue-230-jev-http-model
+**Priority:** High (bug — the documented TypeSafe-hosted path cannot work at all)
+
+## Problem
+
+The `jev_http` classifier provider cannot talk to TypeSafe's hosted API: its
+request body omits the required top-level `model` field, so every classify
+call returns HTTP 422. Evidence: the issue's live curl (422 without / 200 with
+`"model": "jev-latest"`; the 200 body already parses via the existing
+`from_jev_response()`), corroborated locally by the HTTP mock echoing
+`"model": "jev-1.13.0"` (`classifier.rs:662`). Code: `request_body`
+(`src-tauri/src/inference/classifier.rs:299-305`) only wraps the Cloudflare
+arm in an envelope; the JevHttp arm forwards the inner body bare. A unit test
+even pins the omission as desired behavior (`classifier.rs:562-564`).
+
+Full investigation (verified current state, root cause, Opus verdict history):
+`2026-09-28-issue230-jev-http-model-investigation.md` (same directory).
+
+## Approach
+
+1. `JEV_HTTP_MODEL: &str = "jev-latest"` const next to `JEV_MODEL`, both
+   doc-commented to disambiguate (Cloudflare envelope id `typesafe/jev` vs
+   TypeSafe-hosted default `jev-latest`).
+2. `#[serde(default)] pub model: Option<String>` on `ClassifierConfig`
+   (backward compatible; `api_key` is `#[serde(skip)]`, rest default).
+3. `request_body` JevHttp arm (compiling form from the investigation):
+   `let mut inner`, then `cfg.model.as_deref().map(str::trim).filter(|m|
+   !m.is_empty()).unwrap_or(JEV_HTTP_MODEL)` injected as `inner["model"]`.
+   Blank/whitespace → default (never `"model": ""`).
+4. Config merge: `set_classifier_config` (`classifier.rs:478-498`) merges
+   `model` from stored config when incoming is `None` — panel saves must not
+   wipe a hand-pinned model. Wire rule: `jev_http` panel sends `model.trim()`
+   as a STRING (empty = explicit unpin); `null`/omitted = untouched.
+5. ClassifierPanel: `model` field shown only for `jev_http`; load effect
+   hydrates `setModel(cfg.model ?? '')`; payload type in `src/lib/tauri.ts`
+   gains `model?: string | null`.
+
+**Rejected alternatives:** Cloudflare-only fix (leaves the documented hosted
+path broken); making the panel field write-only-null with no merge (wipes
+pins on every save — Opus c1 M3); naive `cfg.model.unwrap_or(...)` (does not
+compile: E0507/E0308 — Opus c1 M1).
+
+## Error handling
+
+No new error paths: the field defaults, never fails validation. Backend
+blank-fallback means no invalid states reach the HTTP layer.
+
+## Testing
+
+- Flip the :562-564 assertion; `jev_http_body_names_model` (default
+  `jev-latest`); pinned `cfg.model` case; `Some("")` → `jev-latest` fallback.
+- HTTP seam: add `"model": "jev-latest"` to the `PartialJson` matcher in
+  `round_trips_over_http_with_bearer_key` (:657-659).
+- Rust merge test mirroring `set_classifier_config_merges_existing_key_when_payload_says_null`
+  (:812) — prefer extracting a pure `merge_stored(incoming, stored)` helper
+  used by both command and test (the mirror-only test cannot catch missing
+  wiring; see investigation OQ2).
+- Panel tests: clear→`""` saves with pin gone; hydration on load.
+- `cargo test -p curated-thoughts classifier` + `pnpm test` (ClassifierPanel).
+
+## Out of scope / open questions
+
+- Live end-to-end verification against api.typesafe.ai needs a key — lands on
+  Kurt after merge (setup notes in the investigation doc).
+- Third-party jev_http servers rejecting unknown fields: accepted risk
+  (investigation "What was NOT checked"); `model` is the documented TypeSafe
+  contract.
+
+Fixes #230.
