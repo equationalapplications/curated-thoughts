@@ -47,8 +47,33 @@ Tauri command (`lib.rs:877`). No internal repair pass writes through
    body-to-body, frontmatter excluded from both sides.
 5. **D5 — plumbing:** `allow_shrink` on `VaultWriteNoteParams` (schemars
    auto-derives the MCP schema), passed through both adapters; both
-   production callers default to `false`.
-6. Extend the refusal-contract list in the `write.rs` module header (:16-18).
+   production callers default to `false`. **Tauri command shape (Opus spec
+   M1):** `lib.rs:877` takes `allow_shrink: Option<bool>` +
+   `.unwrap_or(false)` — Tauri command params do NOT honor
+   `#[serde(default)]`, so a plain `bool` would make `allowShrink` a
+   required invoke key and break every existing invoke (incl.
+   `tests/mcp_write_integration.rs:80-87`).
+6. **CRLF-safe body split (Opus spec M2):** a new
+   `split_frontmatter_fence(content) -> Option<(String, usize)>` helper
+   sharing the fence logic — `collect_frontmatter_fence` (:146) returns only
+   inner text with no offset and rebuilds via `lines()` (drops `\r`), so
+   `content.len() - inner.len()` mis-measures every CRLF note. D4's byte
+   basis uses the helper's offset; CRLF boundary test required.
+7. Extend the refusal-contract list in the `write.rs` module header (:16-18).
+
+**Pins (Opus spec minors):** new-body bytes = the body string returned by the
+D4 split of the rendered document, measured as `.len()` of exactly what is
+written (`render_document` does not collapse trailing newlines — no
+normalization step); marker error variant `CompactionMarkerRejected { marker:
+String }` with Display `compaction_marker:{marker}: rephrase and resend
+without compaction artifacts` (same no-`allow_shrink` rule as the shrink
+refusal); "newly introduced" = the marker string is absent from the existing
+body (presence, not count; body and frontmatter both scanned; `allow_shrink`
+does NOT bypass the marker check); `MIN_GUARDED_BODY_BYTES = 1024`; the
+marker check runs immediately after `enforce_staleness` (:403), before token
+rotation; the module-header convention claim is corrected to "Display strings
+are the contract; see each variant's `#[error]`" (the literal
+`{detail}:{value}` shape doesn't hold for `StaleUpdate`).
 
 **Rejected alternatives:** float ratio const (superseded by integer math);
 full-content comparison basis (frontmatter size noise can flip borderline
@@ -78,7 +103,10 @@ string via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
   (incl. odd pair 1025→512); existing < floor → any shrink free.
 - Markers: create rejected; newly-introduced-on-edit rejected;
   already-present marker + append succeeds.
-- `allow_shrink: true` permits a major shrink.
+- `allow_shrink: true` permits a major shrink; `allow_shrink: false`/omitted
+  (Tauri `Option<bool>` unwrap path) behaves identically to today.
+- CRLF note: `content.len() - offset` basis measured via the new split
+  helper matches the body length on CRLF files.
 - Neither refusal's Display contains `allow_shrink`.
 - Audit existing tests for shrinking fixture edits (long → `"x\n"`) — route
   intentional ones through `allow_shrink: true`.
