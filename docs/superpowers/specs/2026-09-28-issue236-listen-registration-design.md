@@ -40,21 +40,33 @@ patterns plus the `tauri.ts` wrapper — failure shapes, Opus verdict history):
    anywhere (double-log guard).
 4. **StepFastembed:** `initFastembed()` runs after allSettled regardless of
    subscription outcomes (degrade progress UI; never stuck on "loading").
-5. **StepModel (own rule):** keeps ref-array cleanup with
+5. **StepModel (own rule, wording direction fixed per spec m1):** BEFORE the
+   auto-install starts, keep ref-array cleanup with
    `await Promise.allSettled(unlistens.current)` — a progress-listener
-   rejection must NOT abort the in-flight auto-install.
-6. **ModelPanel / StepOllama:** `await` moved inside `try`, unlisten variable
-   declared before `try`, `safeUnlisten` in `finally`; on rejection the pull
-   proceeds without progress display (aborting an in-flight pull would be
-   worse).
-7. **AppShell drag-drop** converted to the standard pattern:
-   `const promise = guardListen(getCurrentWindow().onDragDropEvent(...),
-   "drag-drop")` + cleanup `void safeUnlisten(promise)` (the `cancelled` flag
-   dance becomes unnecessary).
-8. **useWikiStatus / tauri.ts `onWikiStatusChange`:** normalize to
-   guardListen for consistent `[events]` formatting; KEEP existing `.catch`
-   semantics (a bare `.then` chain on a guarded promise re-creates the
-   unhandled rejection; guard+catch on one chain double-logs).
+   rejection must NOT abort the in-flight auto-install. (allSettled is only
+   for the cleanup await — no allSettled at single-listener sites where the
+   existing try/finally already handles ordering; spec m2.)
+6. **ModelPanel / StepOllama (ordering corrected, Opus spec M1):** the
+   `await onPullProgress(...)` fires BEFORE `pullModel()` — a listener
+   rejection must not abort a pull that hasn't started. Rule: wrap the
+   listener creation in its own `.catch` that logs-and-continues
+   (`guardListen` already logs; on rejection set progress display to
+   "unavailable" and STILL call `pullModel()`), `unlisten` declared before
+   `try`, `safeUnlisten` in `finally`. The pull itself proceeds even if its
+   progress listener could not attach (listener failure is display-only;
+   the pull is the user's actual request).
+7. **setupWiki (Opus spec M3):** the four `await listen(...)` calls
+   (`wiki.ts:450-464`) are boot-gating — convert to `Promise.allSettled`
+   over guarded listens so one rejected subscription never fails boot and
+   never double-logs; features relying on a rejected listener degrade
+   (auto-heal trigger, classifier-refresh trigger) while the rest of the
+   wiki engine comes up.
+8. **useWikiStatus / tauri.ts `subscribeEntityStatus`** (name corrected from
+   the investigation's `onWikiStatusChange`): KEEP its existing
+   `.catch(console.error)` and do NOT add guardListen there — guard+catch on
+   the same chain is exactly the double-log this spec forbids (Opus spec
+   M4; supersedes the earlier "normalize" wording). One warning source per
+   site, everywhere.
 
 **Rejected alternatives:** guarding inside the `on*` wrappers (double-logs at
 sites with their own handling; changes return contracts mid-file);
@@ -80,10 +92,21 @@ de-facto behavior, just without the unhandled rejection).
 - useProviderHealth: one of six subscriptions rejects → the other five
   unlisten fns still fire on unmount (leak rule).
 - StepFastembed: subscription rejects AND `initFastembed()` still runs.
-- Inventory cross-check (post-conversion gate): the explicit-creator rg from
-  the investigation (with `(<[^>]*>)?\(` for generic-parameterized calls;
-  known residual gap: multi-line generics — diff against the doc's inventory
-  too).
+- ModelPanel/StepOllama: listener rejection → pull STILL runs, progress shows
+  unavailable, one warn (ordering-corrected rule); unlisten in `finally`.
+- setupWiki: one rejected listen of four → boot completes, other three
+  subscriptions live, exactly one warn.
+- useWikiStatus/subscribeEntityStatus: unchanged behavior (existing catch
+  remains the only handler — no guard added).
+- Inventory cross-check (post-conversion gate; baseline corrected per Opus
+  spec M2 — the c3 command missed `Progress/Done/Error` wrapper variants and
+  named a nonexistent wrapper; the plan re-derives the creator list from
+  `events.ts` exports + `subscribeEntityStatus` and reconciles ~34 sites):
+  every hit guarded or covered by an explicit site rule (setupWiki
+  allSettled, subscribeEntityStatus existing-catch, AppShell pattern).
+  Ripgrep notes retained from the investigation: `--type ts` covers tsx;
+  `(<[^>]*>)?\(` required for generic-parameterized calls; multi-line
+  generics evade the pattern — diff against the site list too.
 
 ## Out of scope / open questions
 
