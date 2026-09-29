@@ -403,3 +403,39 @@ describe('makeWikiOptions classifier wiring', () => {
     expect('classify' in opts.llmProvider).toBe(false);
   });
 });
+
+describe('setupWiki boot gate', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('completes setup when one boot listener fails to register, warning exactly once', async () => {
+    vi.mocked(createWiki).mockReturnValue({
+      setup: vi.fn().mockResolvedValue(undefined),
+      read: vi.fn().mockResolvedValue({ facts: [] }),
+      runHeal: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.mocked(listen).mockImplementation((async (event: string) => {
+      if (event === 'outbox-worker-started') {
+        throw new Error('registration eval failed');
+      }
+      return () => {};
+    }) as never);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_ontology_selection') return 'schema-org';
+      if (cmd === 'outbox_is_configured') return false;
+      return undefined;
+    });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Boot gate: a rejected listen() must not fail setupWiki.
+    await expect(setupWiki()).resolves.toBeUndefined();
+
+    const listenWarns = warn.mock.calls.filter(([first]) =>
+      typeof first === 'string' && first.startsWith('[events] listen failed ('),
+    );
+    expect(listenWarns).toHaveLength(1);
+    expect(listenWarns[0][0]).toBe('[events] listen failed (outbox-worker-started)');
+    expect(listenWarns[0][1]).toBeInstanceOf(Error);
+    warn.mockRestore();
+  });
+});
