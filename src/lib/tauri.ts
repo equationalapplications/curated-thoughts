@@ -609,6 +609,9 @@ export interface ClassifierConfig {
   api_key?: string | null;
   min_confidence?: number | null;
   timeout_secs?: number | null;
+  /** Classifier model id (jev_http pin). Empty string = unpin the model;
+   * null/omitted leaves the stored model untouched. */
+  model?: string | null;
 }
 
 export interface ClassifierStatus {

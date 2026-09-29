@@ -20,6 +20,10 @@ pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 pub const JEV_MODEL: &str = "typesafe/jev";
+/// Default `model` for the `jev_http` (TypeSafe-hosted) request body. The
+/// API rejects requests without it (HTTP 422); users may pin an exact
+/// version via `ClassifierConfig::model` for reproducible typing.
+pub const JEV_HTTP_MODEL: &str = "jev-latest";
 const CONFIG_KEY: &str = "classifier";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -53,6 +57,10 @@ pub struct ClassifierConfig {
     pub min_confidence: Option<f64>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional model pin for `jev_http` (e.g. `jev-1.13.0`). `None` or blank
+    /// falls back to [`JEV_HTTP_MODEL`]. Ignored by other providers.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -297,10 +305,19 @@ pub fn to_jev_questions(questions: &BTreeMap<String, ClassifierQuestion>) -> Val
 }
 
 pub fn request_body(cfg: &ClassifierConfig, req: &ClassifyRequest) -> Value {
-    let inner = json!({ "state": req.state, "questions": to_jev_questions(&req.questions) });
+    let mut inner = json!({ "state": req.state, "questions": to_jev_questions(&req.questions) });
     match cfg.provider {
         ClassifierProviderKind::CloudflareJev => json!({ "model": JEV_MODEL, "input": inner }),
-        _ => inner,
+        _ => {
+            let model = cfg
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or(JEV_HTTP_MODEL);
+            inner["model"] = json!(model);
+            inner
+        }
     }
 }
 
@@ -474,6 +491,56 @@ pub fn get_classifier_config() -> Result<ClassifierConfig, String> {
     .map_err(|e| e.to_string())
 }
 
+/// Merge an incoming save payload with the stored config. `None` in
+/// `incoming` means "untouched — keep stored" for `api_key` and `model`;
+/// a blank/whitespace `model` normalizes to `None` AFTER the merge so an
+/// explicit unpin (`""` from the panel) replaces a stored pin but never
+/// persists blank. All other fields pass `incoming` through untouched.
+/// Pure helper shared by `set_classifier_config` and its tests — the
+/// merge logic exists exactly once.
+///
+/// Intended quirk: a stored pin survives a provider round-trip — pin
+/// jev-1.13.0, switch to Cloudflare (save sends `model: null` → the merge
+/// keeps the stored pin), switch back to jev_http, and the pin reappears
+/// without the field ever being rendered for Cloudflare. Harmless by
+/// design.
+pub(crate) fn merge_stored(
+    mut incoming: ClassifierConfig,
+    stored: Option<ClassifierConfig>,
+) -> ClassifierConfig {
+    if let Some(stored) = stored {
+        if incoming.api_key.is_none() {
+            incoming.api_key = stored.api_key;
+        }
+        if incoming.model.is_none() {
+            incoming.model = stored.model;
+        }
+    }
+    if let Some(m) = incoming.model.take() {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            incoming.model = Some(trimmed.to_string());
+        }
+    }
+    incoming
+}
+
+/// Read-merge-write core of the classifier save, split out from the Tauri
+/// command so the abort-on-read-failure contract is unit-testable. A failed
+/// stored-config read aborts the save BEFORE any write: mapping the error to
+/// `None` would make `merge_stored` treat `model: null` as untouched and then
+/// persist a fresh default block over the stored pin.
+fn persist_merged_config(
+    paths: &BrainPaths,
+    store: &dyn ClassifierSecretStore,
+    config: ClassifierConfig,
+) -> Result<()> {
+    let stored = read_classifier_config(paths, store)
+        .context("reading stored classifier config")?;
+    let merged = merge_stored(config, Some(stored));
+    write_classifier_config(paths, &merged, store)
+}
+
 #[tauri::command]
 pub fn set_classifier_config(
     config: ClassifierConfig,
@@ -482,17 +549,10 @@ pub fn set_classifier_config(
     use tauri::Emitter;
     let store = super::classifier_secrets::KeyringClassifierSecretStore;
     let (_, paths) = current_brain();
-    // Preserve any key already in the keychain when the FE sends `api_key:
-    // null` (the user saved a non-key field). Loading first gives us the
-    // current key, and only an explicit empty-string payload ("Clear stored
-    // token") will remove it.
-    let mut merged = config.clone();
-    if merged.api_key.is_none() {
-        merged.api_key = read_classifier_config(&paths, &store)
-            .ok()
-            .and_then(|cur| cur.api_key);
-    }
-    write_classifier_config(&paths, &merged, &store).map_err(|e| e.to_string())?;
+    // Unconditional merge: `None` fields (api_key, model) take the stored
+    // value so saving one field never wipes another; blank `model` unpins
+    // (normalization happens inside merge_stored, after the merge).
+    persist_merged_config(&paths, &store, config).map_err(|e| e.to_string())?;
     let _ = app.emit("classifier-config-changed", ());
     Ok(())
 }
@@ -559,9 +619,30 @@ mod tests {
             endpoint(&cfg).unwrap(),
             "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run"
         );
-        assert!(request_body(&jev_cfg("https://x"), &choice_req())
-            .get("model")
-            .is_none());
+    }
+
+    #[test]
+    fn jev_http_body_names_model_default() {
+        let body = request_body(&jev_cfg("https://x"), &choice_req());
+        assert_eq!(body["model"], JEV_HTTP_MODEL);
+        assert_eq!(body["state"], "Alice is a person.");
+    }
+
+    #[test]
+    fn jev_http_body_uses_pinned_model() {
+        let cfg = ClassifierConfig {
+            model: Some("jev-1.13.0".into()),
+            ..jev_cfg("https://x")
+        };
+        assert_eq!(request_body(&cfg, &choice_req())["model"], "jev-1.13.0");
+    }
+
+    #[test]
+    fn jev_http_blank_model_falls_back_to_default() {
+        for blank in [Some(String::new()), Some("   ".into())] {
+            let cfg = ClassifierConfig { model: blank, ..jev_cfg("https://x") };
+            assert_eq!(request_body(&cfg, &choice_req())["model"], JEV_HTTP_MODEL);
+        }
     }
 
     #[test]
@@ -654,9 +735,10 @@ mod tests {
         let mock = server
             .mock("POST", "/")
             .match_header("authorization", "Bearer k")
-            .match_body(mockito::Matcher::PartialJson(
-                json!({ "state": "Alice is a person." }),
-            ))
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "state": "Alice is a person.",
+                "model": JEV_HTTP_MODEL,
+            })))
             .with_header("content-type", "application/json")
             .with_body(
                 json!({ "model": "jev-1.13.0", "answers": { "okf_type": {
@@ -804,6 +886,169 @@ mod tests {
         assert!(!round.has_api_key);
     }
 
+    #[test]
+    fn persist_merged_config_aborts_when_stored_read_fails() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        // Unparseable JSON makes the stored read FAIL. (A missing file is the
+        // lenient "absent configuration" case and must NOT error.)
+        std::fs::write(&paths.config_path, "{ not json").unwrap();
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
+
+        let err = persist_merged_config(&paths, &store, stored_cfg()).unwrap_err();
+        assert!(
+            err.to_string().contains("reading stored classifier config"),
+            "unexpected error: {err}"
+        );
+        // The failed save must not have clobbered the unreadable config with
+        // a fresh default block.
+        let raw = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert_eq!(raw, "{ not json");
+    }
+
+    fn stored_cfg() -> ClassifierConfig {
+        ClassifierConfig {
+            provider: ClassifierProviderKind::JevHttp,
+            url: Some("https://x".into()),
+            model: Some("jev-1.13.0".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merge_stored_none_model_keeps_stored_pin() {
+        let merged = merge_stored(
+            ClassifierConfig { model: None, ..stored_cfg() },
+            Some(stored_cfg()),
+        );
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
+    }
+
+    #[test]
+    fn merge_stored_blank_model_unpins_after_merge() {
+        let merged = merge_stored(
+            ClassifierConfig { model: Some("".into()), ..stored_cfg() },
+            Some(stored_cfg()),
+        );
+        assert_eq!(merged.model, None);
+        let merged = merge_stored(
+            ClassifierConfig { model: Some("  ".into()), ..stored_cfg() },
+            Some(stored_cfg()),
+        );
+        assert_eq!(merged.model, None);
+    }
+
+    #[test]
+    fn merge_stored_trims_a_padded_pin_instead_of_persisting_whitespace() {
+        let merged = merge_stored(
+            ClassifierConfig { model: Some(" jev-1.13.0 ".into()), ..stored_cfg() },
+            None,
+        );
+        // The padded value is canonicalized to the trimmed pin: what is
+        // merged is exactly what request_body will later send.
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
+    }
+
+    #[test]
+    fn merge_stored_explicit_pin_replaces_stored() {
+        let merged = merge_stored(
+            ClassifierConfig { model: Some("jev-1.12".into()), ..stored_cfg() },
+            Some(stored_cfg()),
+        );
+        assert_eq!(merged.model.as_deref(), Some("jev-1.12"));
+    }
+
+    #[test]
+    fn merge_stored_without_stored_keeps_incoming() {
+        let incoming = ClassifierConfig { model: Some("jev-1.12".into()), ..stored_cfg() };
+        let merged = merge_stored(incoming.clone(), None);
+        assert_eq!(merged, incoming);
+    }
+
+    #[test]
+    fn merge_stored_null_api_key_still_takes_stored_key() {
+        let mut stored = stored_cfg();
+        stored.api_key = Some("tok".into());
+        let merged = merge_stored(
+            ClassifierConfig { api_key: None, model: None, ..stored_cfg() },
+            Some(stored),
+        );
+        assert_eq!(merged.api_key.as_deref(), Some("tok"));
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
+    }
+
+    /// Local fixture for the merge disk round-trip tests — tempdir paths +
+    /// in-memory secret store, same shape as `config_round_trips…`.
+    fn merge_fixture() -> (
+        tempfile::TempDir,
+        BrainPaths,
+        crate::inference::classifier_secrets::InMemoryClassifierSecretStore,
+    ) {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        // Caller keeps the TempDir alive — dropping it deletes the folder.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        std::fs::write(&paths.config_path, "{}").unwrap();
+        (
+            dir,
+            paths,
+            InMemoryClassifierSecretStore(Mutex::new(None)),
+        )
+    }
+
+    #[test]
+    fn set_classifier_config_persists_model_unpin_to_disk() {
+        let (_dir, paths, store) = merge_fixture();
+        let pinned = ClassifierConfig {
+            provider: ClassifierProviderKind::JevHttp,
+            url: Some("https://x".into()),
+            model: Some("jev-1.13.0".into()),
+            ..Default::default()
+        };
+        write_classifier_config(&paths, &pinned, &store).unwrap();
+
+        // Unpin: blank model through merge_stored, like the command does.
+        let incoming = ClassifierConfig { model: Some("".into()), ..pinned.clone() };
+        let merged = merge_stored(incoming, Some(read_classifier_config(&paths, &store).unwrap()));
+        write_classifier_config(&paths, &merged, &store).unwrap();
+        // Backend-verifiable: the pin is GONE on a fresh read.
+        assert_eq!(read_classifier_config(&paths, &store).unwrap().model, None);
+    }
+
+    #[test]
+    fn set_classifier_config_persists_model_pin_survives_null_round_trip() {
+        let (_dir, paths, store) = merge_fixture();
+        let pinned = ClassifierConfig {
+            provider: ClassifierProviderKind::JevHttp,
+            url: Some("https://x".into()),
+            model: Some("jev-1.13.0".into()),
+            ..Default::default()
+        };
+        write_classifier_config(&paths, &pinned, &store).unwrap();
+
+        // `model: None` = untouched: the stored pin must survive the trip.
+        let incoming = ClassifierConfig { model: None, ..pinned.clone() };
+        let merged = merge_stored(incoming, Some(read_classifier_config(&paths, &store).unwrap()));
+        write_classifier_config(&paths, &merged, &store).unwrap();
+        assert_eq!(
+            read_classifier_config(&paths, &store).unwrap().model.as_deref(),
+            Some("jev-1.13.0")
+        );
+    }
+
     /// `set_classifier_config` (Tauri command) must merge the existing keyring
     /// entry when the FE sends `api_key: null` so a save of non-key fields
     /// never wipes the stored credential. Validates against a CloudflareJev
@@ -835,16 +1080,19 @@ mod tests {
         assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
 
         // Simulate the panel saving without touching the key field.
-        let mut payload = ClassifierConfig {
+        let payload = ClassifierConfig {
             provider: ClassifierProviderKind::CloudflareJev,
             account_id: Some("abc123".into()),
             api_key: None,
             ..Default::default()
         };
-        // Mirror the Tauri-command merge.
-        if payload.api_key.is_none() {
-            payload.api_key = read_classifier_config(&paths, &store).unwrap().api_key;
-        }
+        // Same helper the Tauri command calls — no mirror to drift.
+        let payload = merge_stored(
+            payload,
+            // Keep .unwrap() — the original test failed loudly on a read
+            // error; `.ok()` would turn that into a silent config wipe.
+            Some(read_classifier_config(&paths, &store).unwrap()),
+        );
         write_classifier_config(&paths, &payload, &store).unwrap();
         // Key survived — the leave-alone contract worked.
         assert_eq!(store.get().unwrap().as_deref(), Some("tok"));
