@@ -307,8 +307,6 @@ fn drift_report_serializes_documented_shape() {
 // ---------------------------------------------------------------------------
 
 mod indeterminate {
-    use anyhow::Result;
-
     /// Drive `drift_cmd`'s indeterminacy decision without a brain config or
     /// HOME: the production wrapper computes `walk_incomplete` from the
     /// shared walk's surfacing and maps (incomplete, code 3) -> exit 5. The
