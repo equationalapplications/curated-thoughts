@@ -31,7 +31,7 @@
 - Test: same file (`mod tests`, `vanished_file_is_deleted_and_chunks_cascade` :348-363 and neighbors must stay green)
 
 **Interfaces:**
-- Produces: `pub struct ClassifiedOutcome { pub plan: ReconcileOutcome, pub empty_walk: bool }` and `pub fn classify_vault(conn: &Connection, walked: &[WalkedFile], vault_root: &Path) -> Result<ClassifiedOutcome>` (pure: SELECTs only). `reconcile_vault` becomes `classify_vault` + `apply_outcome(conn, &plan, empty_walk, vault_root)`. Task 3's `ct drift` calls `classify_vault` + the shared walk helper only.
+- Produces: `pub struct ClassifiedOutcome { pub plan: ReconcileOutcome, pub gone_deletes: Vec<String>, pub excluded_deletes: Vec<String>, pub empty_walk: bool }` and `pub fn classify_vault(conn: &Connection, walked: &[WalkedFile], vault_root: &Path) -> Result<ClassifiedOutcome>` (pure: SELECTs only). The `gone_deletes` / `excluded_deletes` partition is filled from the classify pass's existing `excluded` / `remaining` arms (reconcile.rs:190-192 fills `excluded_deletes`, :215 fills `gone_deletes`), so `plan.deleted == gone_deletes + excluded_deletes` always holds and drift never re-filters. `ReconcileOutcome` itself is UNCHANGED, so `reconcile_vault` output stays byte-identical. `reconcile_vault` becomes `classify_vault` + `apply_outcome(conn, classified, vault_root)`. Task 3's `ct drift` calls `classify_vault` + the shared walk helper only.
 
 - [ ] **Step 1: Write a classification-only failing test** (in `reconcile.rs` `mod tests`, beside :348)
 
@@ -80,6 +80,14 @@ Expected: compile failure (`classify_vault` not found).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClassifiedOutcome {
     pub plan: ReconcileOutcome,
+    /// The subset of `plan.deleted` whose files landed under an excluded
+    /// dir (the `excluded` arm at reconcile.rs:190-192).
+    pub excluded_deletes: Vec<String>,
+    /// The subset of `plan.deleted` whose files plain vanished (the
+    /// no-candidate arm at :215). `plan.deleted == gone_deletes +
+    /// excluded_deletes` — drift consumes this partition directly and
+    /// never re-filters.
+    pub gone_deletes: Vec<String>,
     /// The empty-walk guard tripped (misconfigured/unmounted vault). The
     /// plan in this state only contains the narrow `.brain` purge produced
     /// by `purge_brain_rows` classification — never a full-index delete.
@@ -131,40 +139,60 @@ git commit -m "refactor(reconcile): split classify_vault from apply so drift can
 ### Task 2: Shared walk helper in `tools` (identical list for ingest + drift)
 
 **Files:**
-- Modify: `tools/src/cmds.rs` (extract from the :120-183 region: walk + trust re-walk + pending/denied/errors surfacing + sort/dedup)
+- Modify: `tools/src/cmds.rs` (extract from the :90-210 region: walk + trust re-walk + pending/denied/errors surfacing + sort/dedup)
 - Create: `tools/src/walk_list.rs` (or add to an existing shared module — keep it one function)
+- Modify: `tools/src/lib.rs` (module registration — the commit below stages it, so the Files list must include it)
 
 **Interfaces:**
-- Produces: `pub fn build_ingest_file_list(vault_root: &Path, brain_cfg: &BrainConfig) -> Result<Vec<WalkedFile>>` — trust-link re-walk included, `denied`/`pending`/`errors` surfaced to stderr exactly as today, sort+dedup by `virtual_path`. `ct ingest` (Task 2 refactor) and `ct drift` (Task 3) both call it.
+- Produces: `pub fn build_ingest_file_list(paths_b: &BrainPaths, trust_new_links: bool) -> anyhow::Result<(std::path::PathBuf, Vec<tauri_app_lib::walk_vault::WalkedFile>)>` — returns the CANONICALIZED vault root alongside the list, because ingest canonicalizes (`cmds.rs:23`: `vault_root.canonicalize().unwrap_or(vault_root)`) and drift must see the same root or `relativize_to_vault` matching diverges (spec M4). Trust-link re-walk included verbatim (`cmds.rs:108-184`: the `trust_new_links` gate, `classify_link` promotion, ledger persist via `brain_cfg.write(&paths_b)`, second `walk_vault`, the `!outcome.pending.is_empty()` guard — NOT just the final re-walk), `denied`/`pending`/`errors` surfaced to stderr exactly as today, sort+dedup by `virtual_path`. `ct ingest` (Task 2 refactor) and `ct drift` (Task 3) both call it.
 
 - [ ] **Step 1: Extract without behavior change.** Move the walk assembly from the `ingest` command path into:
 
 ```rust
-/// The EXACT file list `ct ingest` feeds to reconcile + ingest: walk with
+/// The EXACT file list `ct ingest` feeds to reconcile + ingest: resolve the
+/// vault root from config and canonicalize it (cmds.rs:22-23), walk with the
 /// symlink-trust re-walk, surface denied/pending/errors, sort+dedup by
-/// virtual_path. `ct drift` shares this so its view can never diverge from
-/// what ingest would actually reconcile (spec M4).
-pub fn build_ingest_file_list(vault_root: &Path, trust_links: bool) -> anyhow::Result<Vec<tauri_app_lib::walk_vault::WalkedFile>> {
-    let brain_cfg = /* read brain config as cmds.rs does today */;
+/// virtual_path. Returns the CANONICAL root so drift reconciles against the
+/// same root ingest used. `ct drift` shares this so its view can never
+/// diverge from what ingest would actually reconcile (spec M4).
+pub fn build_ingest_file_list(
+    paths_b: &BrainPaths,
+    trust_new_links: bool,
+) -> anyhow::Result<(std::path::PathBuf, Vec<tauri_app_lib::walk_vault::WalkedFile>)> {
+    // Verbatim from cmds.rs ingest (cmds.rs:18-23):
+    let config = VaultConfig::new(paths_b.config_path.clone());
+    let vault_root = config
+        .vault_root()?
+        .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
+    let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
+
+    let mut brain_cfg = tauri_app_lib::config::BrainConfig::load(paths_b)
+        .context("read trusted_links ledger from config.json")?;
     let mut outcome = walk_vault(
-        vault_root,
+        &vault_root,
         &brain_cfg.trusted_links,
         dirs::home_dir().as_deref(),
     );
-    if trust_links {
-        // (port the :155-160 re-walk block verbatim)
+
+    // Port cmds.rs:108-184 WHOLESALE — the `trust_new_links &&
+    // !outcome.pending.is_empty()` gate, classify_link promotion, the
+    // ledger persist via brain_cfg.write(paths_b), and the second
+    // walk_vault. `if trust_new_links` alone is NOT the gate.
+    if trust_new_links && !outcome.pending.is_empty() {
+        // (verbatim block from cmds.rs:111-144)
     }
-    for d in &outcome.denied { /* verbatim stderr surfacing from :165-170 */ }
-    for p in &outcome.pending { /* verbatim from :171-176 */ }
-    for e in &outcome.errors { /* verbatim from :177-179 */ }
+
+    for d in &outcome.denied { /* verbatim stderr surfacing */ }
+    for p in &outcome.pending { /* verbatim */ }
+    for e in &outcome.errors { /* verbatim */ }
     let mut files = outcome.files;
     files.sort_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
     files.dedup_by(|a, b| a.virtual_path == b.virtual_path);
-    Ok(files)
+    Ok((vault_root, files))
 }
 ```
 
-(Verbatim-port the referenced blocks from `cmds.rs:120-183` — the [similar-to] notes above are extraction pointers for ONE refactor commit, not license to change logic. The helper takes `trust_links: bool` to mirror the existing `--trust-new-links` flag plumbing.)
+(Verbatim-port the referenced blocks from `cmds.rs:90-210` — the [similar-to] notes above are extraction pointers for ONE refactor commit, not license to change logic. The helper takes `trust_new_links: bool` to mirror the existing `--trust-new-links` flag plumbing.)
 
 Refactor `ingest` in `cmds.rs` to call the helper. Diff check: `git diff` must show ONLY the moved code (plus the new fn).
 
@@ -196,29 +224,59 @@ git commit -m "refactor(tools): shared ingest walk helper so drift sees the iden
 { "empty_walk": false, "gone": ["wiki/old.md"], "repointed": [{"from": "a.md", "to": "b.md"}], "excluded_deletes": [".brain/errors.log"], "ambiguous_warnings": ["x.md"] }
 ```
 
-- [ ] **Step 1: Write failing tests** (fixture style of reconcile tests: tempdir + seeded sqlite; the tools crate can reach `tauri_app_lib::db::connection::open_in_memory` and `tauri_app_lib::reconcile::seed`-equivalent helpers — if seeding helpers are `pub(crate)`, replicate the minimal `INSERT INTO documents` inline)
+- [ ] **Step 1: Write failing tests** (target `drift_report`, the pure core — NOT `drift_cmd`, whose brain/HOME resolution makes it untestable as a unit. If end-to-end coverage is wanted later, `temp-env` (already a dev-dependency) is the tool for `drift_cmd`. Fixture style of reconcile tests: tempdir + seeded sqlite. `tauri_app_lib::db::connection::open_in_memory` is `pub` (reconcile.rs:873) and the reconcile `mod tests` helpers (`seed_doc` :274, `walked` :308, `hash_of` :320, `s` :324) are `#[cfg(test)]`-gated — replicate the minimal `INSERT INTO documents` inline or via a small local helper in the drift test module.)
 
 ```rust
-    // Human + JSON output content assertions live on the CLASSIFY result, so
-    // the tests seed a brain.db via the lib helpers, run the handler fn, and
-    // assert on the returned summary struct + exit code.
-    #[test]
-    fn drift_clean_vault_exits_0() { /* seed: every row has its file; classify → empty plan; assert Ok(0) */ }
+    // All tests call tools::drift::drift_report(&conn, &files, &vault_root)
+    // and assert on (DriftReport, i32). Fixtures use the same
+    // open_in_memory + seed-docs + walked() pattern as reconcile's tests.
 
     #[test]
-    fn drift_pending_gone_exits_3() { /* seed one row whose file is gone; assert Ok(3) + report lists it under "gone" */ }
+    fn drift_clean_vault_exits_0() { /* seed: every row has its file; classify → empty plan; assert Ok((report, 0)), all report vecs empty */ }
 
     #[test]
-    drift_pending_repoint_exits_3() { /* seed a row whose content moved (same hash, new path); assert Ok(3) + repoint in report */ }
+    fn drift_pending_gone_exits_3() { /* seed one row whose file is gone; assert Ok((report, 3)) + report.gone lists it */ }
+
+    #[test]
+    fn drift_pending_repoint_exits_3() { /* seed a row whose content moved (same hash, new path); assert Ok((report, 3)) + report.repointed has {from, to} */ }
+
+    #[test]
+    fn drift_excluded_delete_listed_under_excluded_not_gone() {
+        // Spec :111 REQUIRED case — the Sep-27 regression class. Seed a
+        // `documents` row whose path lives under an excluded dir (e.g.
+        // `.brain/errors.log`) and remove the file. Assert Ok((report, 3)),
+        // the path appears in report.excluded_deletes AND NOT in
+        // report.gone (no double-count), and the JSON serialization of
+        // excluded_deletes is a plain string array.
+    }
+
+    #[test]
+    fn drift_walk_identity_with_ingest() {
+        // Spec :114-115 REQUIRED case — drift and ingest must produce the
+        // same file list. Build the list via
+        // tools::walk_list::build_ingest_file_list(&paths, false), then
+        // assert classify_vault(conn, &files, &root) equals what drift_report
+        // computed for the same inputs (same root, same list ⇒ same report).
+        // Guards the canonicalized-root contract: if drift ever walks with a
+        // non-canonical root while ingest canonicalizes, this test fails.
+    }
 
     #[test]
     fn drift_ambiguous_only_exits_0_with_warning() {
         // Seed a vanished row whose hash matches TWO new files (ambiguous arm).
-        // Assert Ok(0) and the path listed under ambiguous_warnings.
+        // Assert Ok((report, 0)) and the path listed under ambiguous_warnings.
     }
 
     #[test]
-    fn drift_empty_walk_exits_4() { /* walk list is empty (empty vault dir); assert Ok(4) */ }
+    fn drift_empty_walk_exits_4() { /* walk list is empty (empty vault dir); assert Ok((report, 4)), report.empty_walk */ }
+
+    #[test]
+    fn drift_report_serializes_documented_shape() {
+        // Serialize a populated DriftReport with serde_json and assert:
+        // repointed is [{"from": .., "to": ..}] objects (NOT [["a","b"]]),
+        // and the empty-walk report serializes as the FULL shape with
+        // empty_walk: true and empty vectors — not a different shape.
+    }
 ```
 
 - [ ] **Step 2: Run to verify RED**
@@ -237,62 +295,124 @@ Expected: compile failure (`Drift` variant not found).
 //! permanent nonzero exit after a "successful" repair).
 //! Never writes: read-only connection, classify only.
 
+use serde::Serialize;
+
+/// Serializable EXACTLY as documented in the JSON contract above:
+/// `repointed` must emit `[{"from": .., "to": ..}]` objects, NOT
+/// `Vec<(String, String)>` (which serializes as `[["a","b"]]`).
+#[derive(Debug, Serialize)]
+pub struct Repoint {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DriftReport {
     pub empty_walk: bool,
     pub gone: Vec<String>,
-    pub repointed: Vec<(String, String)>,
+    pub repointed: Vec<Repoint>,
     pub excluded_deletes: Vec<String>,
     pub ambiguous_warnings: Vec<String>,
 }
 
-pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
-    let brain = crate::write::resolve()?;
-    let conn = crate::write::open_ro(&brain)?;
-    let vault_root = /* resolve the configured vault root the same way cmds.rs ingest does (brain config) */;
-    let files = crate::walk_list::build_ingest_file_list(&vault_root, /* trust_links: false for drift — see note */ false)?;
-
-    let classified = tauri_app_lib::reconcile::classify_vault(&conn, &files, &vault_root)?;
+/// Pure core: classify an already-built file list into a report + exit code.
+/// Unit tests target THIS function (no brain config, no HOME resolution);
+/// `drift_cmd` is a thin I/O wrapper around it.
+pub fn drift_report(
+    conn: &Connection,
+    files: &[tauri_app_lib::walk_vault::WalkedFile],
+    vault_root: &Path,
+) -> anyhow::Result<(DriftReport, i32)> {
+    let classified = tauri_app_lib::reconcile::classify_vault(conn, files, vault_root)?;
 
     if classified.empty_walk {
-        if json { println!(r#"{{"empty_walk": true}}"#); }
-        else { eprintln!("drift: vault walk returned no files — vault missing or unmounted; NOT reporting drift"); }
-        return Ok(4);
+        let report = DriftReport {
+            empty_walk: true,
+            gone: vec![],
+            repointed: vec![],
+            excluded_deletes: vec![],
+            ambiguous_warnings: vec![],
+        };
+        return Ok((report, 4));
     }
 
     let report = DriftReport {
         empty_walk: false,
-        gone: classified.plan.deleted.clone(),
-        repointed: classified.plan.repointed.clone(),
-        excluded_deletes: classified.plan.deleted.iter().filter(|p| is_excluded(p, &vault_root)).cloned().collect(),
+        // Consume the classify partition directly — NO is_excluded
+        // re-filter (there is no such helper, and `plan.deleted` holds
+        // both categories).
+        gone: classified.gone_deletes.clone(),
+        excluded_deletes: classified.excluded_deletes.clone(),
+        repointed: classified
+            .plan
+            .repointed
+            .iter()
+            .map(|(from, to)| Repoint { from: from.clone(), to: to.clone() })
+            .collect(),
         ambiguous_warnings: classified.plan.ambiguous.clone(),
     };
-    // NOTE: reconcile's `deleted` vector mixes plain-gone and
-    // excluded-dir deletes; if classify exposes the partition
-    // (Task 1 restructure), use it directly instead of re-filtering here.
+    let pending = !report.gone.is_empty()
+        || !report.repointed.is_empty()
+        || !report.excluded_deletes.is_empty();
+    Ok((report, if pending { 3 } else { 0 }))
+}
 
-    let pending = !report.gone.is_empty() || !report.repointed.is_empty() || !report.excluded_deletes.is_empty();
+/// I/O wrapper: resolves brain + vault root, builds the walk list, prints.
+pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
+    let brain = crate::write::resolve()?;
+    let conn = crate::write::open_ro(&brain)?;
+    // Resolve the configured vault root exactly as cmds.rs ingest does:
+    // VaultConfig::new(paths.config_path).vault_root()? (error if missing),
+    // then .canonicalize().unwrap_or(vault_root). Canonicalization is NOT
+    // optional — non-canonical roots break relativize_to_vault matching and
+    // drift would report false gone/excluded deletes (spec M4).
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    let config = tauri_app_lib::vault::VaultConfig::new(paths.config_path);
+    let vault_root = config
+        .vault_root()?
+        .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
+    let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
+    // trust_links: false — drift reports what a plain ingest would see;
+    // promoting pending links is a `ct trust` decision, not drift's.
+    let (_vault_root_from_helper, files) =
+        crate::walk_list::build_ingest_file_list(&paths, false)?;
+    // `_vault_root_from_helper` equals the canonicalized `vault_root`
+    // resolved above (same code path); either may be used for classify.
+
+    let (report, code) = drift_report(&conn, &files, &vault_root)?;
+
+    if report.empty_walk {
+        if json { println!(r#"{{"empty_walk": true}}"#); }
+        else {
+            // Spec :90-92 wording — drift made NO classification; ingest
+            // or app startup WOULD purge .brain rows on this walk.
+            eprintln!("drift: vault walk returned no files — vault missing or unmounted; no drift classified (ingest would purge .brain rows for this walk)");
+        }
+        return Ok(4);
+    }
+
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
         for p in &report.gone { println!("drift: gone {p}"); }
-        for (o, n) in &report.repointed { println!("drift: moved {o} -> {n}"); }
+        for r in &report.repointed { println!("drift: moved {} -> {}", r.from, r.to); }
         for p in &report.excluded_deletes { println!("drift: excluded-delete {p}"); }
         for p in &report.ambiguous_warnings { eprintln!("warning: ambiguous (left alone by repair): {p}"); }
-        if pending {
+        if code == 3 {
             eprintln!("repair with: ct ingest --yes");
         }
     }
-    Ok(if pending { 3 } else { 0 })
+    Ok(code)
 }
 ```
-
-(Resolve the two inline `/* ... */` notes against `cmds.rs`'s actual vault-root resolution and `trust_links` plumbing — copy the exact expressions; drift uses the same defaults as ingest's non-flag path. If Task 1's classify kept the excluded/gone partition internal, extend `ClassifiedOutcome` with the partition fields rather than re-filtering here.)
 
 Dispatch in `ct.rs`:
 
 ```rust
-        Cmd::Drift { json } => crate::drift::drift_cmd(json),
+        Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
 ```
+
+(NOT `crate::drift::drift_cmd` — `ct.rs` is a separate bin target, so `crate::` resolves inside the bin only and `drift` lives in the library crate. This matches the existing pattern at `ct.rs:3`.)
 
 with the enum variant (place before `Heal`):
 
@@ -358,6 +478,9 @@ git commit -m "docs(readme): vault deletion is self-cleaning; ct drift check / c
 ```yaml
       - name: Derive version
         id: ctver
+        # bash syntax (jq, $GITHUB_OUTPUT, [ ]) — without this, the Windows
+        # leg runs `run:` under pwsh and dies before tauri-action ever fires.
+        shell: bash
         run: |
           VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -371,9 +494,12 @@ git commit -m "docs(readme): vault deletion is self-cleaning; ct drift check / c
 
       - name: Build ct CLI
         if: matrix.platform != 'macos-latest'
+        id: ctbuild
+        shell: bash
         run: |
           set -euo pipefail
           cargo build --release -p curated-thoughts-tools --bin ct
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           case "${{ matrix.platform }}" in
             ubuntu-22.04) OS=linux; ARCH=amd64; EXT=tar.gz ;;
             windows-latest) OS=windows; ARCH=amd64; EXT=zip ;;
@@ -381,35 +507,43 @@ git commit -m "docs(readme): vault deletion is self-cleaning; ct drift check / c
           esac
           ASSET="ct_${{ steps.ctver.outputs.version }}_${OS}_${ARCH}.${EXT}"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+          # Spec :38-41 — every archive carries a short README alongside the binary.
+          printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > README.txt
           if [ "${EXT}" = "zip" ]; then
-            pwsh -NoProfile -Command "Compress-Archive -Path target/release/ct.exe -DestinationPath '${ASSET}'"
+            pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','README.txt' -DestinationPath '${ASSET}'"
           else
-            tar czf "${ASSET}" -C target/release ct
+            tar czf "${ASSET}" -C "${TARGET_DIR}/release" ct -C "$OLDPWD/." README.txt
           fi
-        shell: bash
 
       - name: Build ct CLI (macOS universal)
         if: matrix.platform == 'macos-latest'
+        id: ctbuildmac
+        shell: bash
         run: |
           set -euo pipefail
           cargo build --release -p curated-thoughts-tools --bin ct --target aarch64-apple-darwin
           cargo build --release -p curated-thoughts-tools --bin ct --target x86_64-apple-darwin
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           lipo -create \
-            target/aarch64-apple-darwin/release/ct \
-            target/x86_64-apple-darwin/release/ct \
-            -output target/ct-universal
-          lipo -info target/ct-universal
+            "${TARGET_DIR}/aarch64-apple-darwin/release/ct" \
+            "${TARGET_DIR}/x86_64-apple-darwin/release/ct" \
+            -output "${TARGET_DIR}/ct-universal"
+          lipo -info "${TARGET_DIR}/ct-universal"
+          # Stage under the user-facing name so the archive unpacks to `ct`,
+          # not `ct-universal` (spec: each archive holds the binary + README).
+          cp "${TARGET_DIR}/ct-universal" "${TARGET_DIR}/ct"
           ASSET="ct_${{ steps.ctver.outputs.version }}_macos_universal.tar.gz"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
-          tar czf "${ASSET}" -C target ct-universal
-        shell: bash
+          printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > "${TARGET_DIR}/README.txt"
+          tar czf "${ASSET}" -C "${TARGET_DIR}" ct README.txt
 
       - name: Smoke test ct CLI
-        run: |
-          BIN=./target/release/ct
-          if [ "${{ matrix.platform }}" = "macos-latest" ]; then BIN=./target/ct-universal; fi
-          "${BIN}" --help > /dev/null
         shell: bash
+        run: |
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          BIN="${TARGET_DIR}/release/ct"
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then BIN="${TARGET_DIR}/ct-universal"; fi
+          "${BIN}" --help > /dev/null
 ```
 
 - [ ] **Step 2: Tag-gate tauri-action + add the upload step.** tauri-action (:147-157) gains `if: github.ref_type == 'tag'`. After it, add:
@@ -419,9 +553,21 @@ git commit -m "docs(readme): vault deletion is self-cleaning; ct drift check / c
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # bash syntax ($GITHUB_REF_NAME env-var expansion). pwsh would expand
+        # "$GITHUB_REF_NAME" as an undefined PowerShell variable to "" and the
+        # glob `ct_*.*` would never expand. Upload the EXACT filename from the
+        # build step output instead of a glob so a partial matrix leg cannot
+        # silently skip or double-upload.
+        shell: bash
         run: |
-          gh release upload "$GITHUB_REF_NAME" ct_*.* --clobber
+          if [ -n "${{ steps.ctbuild.outputs.asset }}" ]; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuild.outputs.asset }}" --clobber
+          else
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuildmac.outputs.asset }}" --clobber
+          fi
 ```
+
+(The empty-output `if/else` picks the asset from whichever build step ran on this matrix leg — the non-macOS `ctbuild` step is skipped on macOS, and vice versa. The upload path itself is proven on the next real release tag; the dispatch run exercises everything up to it.)
 
 (Also add a step-level `if: startsWith(github.ref, 'refs/tags/')` equivalent only if the tag-type check proves insufficient for `workflow_dispatch` from a tag ref — `ref_type` is the authoritative signal.)
 
