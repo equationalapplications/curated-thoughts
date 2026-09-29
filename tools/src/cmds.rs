@@ -40,7 +40,6 @@ use tauri_app_lib::db::connection::AppDb;
 use tauri_app_lib::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
-use tauri_app_lib::vault::VaultConfig;
 // Re-export walker types so `curated_thoughts_tools::cmds::WalkedFile` (and
 // friends) remain reachable from external callers and tests.
 pub use tauri_app_lib::walk_vault::{
@@ -103,84 +102,12 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
         .context("open brain database")?;
     let conn = &db.0;
 
-    let config = VaultConfig::new(paths_b.config_path.clone());
-    let vault_root = config
-        .vault_root()
-        .context("read vault root")?
-        .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
-    let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
-
-    // Load the ledger (Task 10) so walk_vault gates every direct-child
-    // documents/ symlink through classify_link.
-    let mut brain_cfg = tauri_app_lib::config::BrainConfig::load(&paths_b)
-        .context("read trusted_links ledger from config.json")?;
-    let mut outcome = walk_vault(
-        &vault_root,
-        &brain_cfg.trusted_links,
-        dirs::home_dir().as_deref(),
-    );
-
-    // Scripted setups: promote every Pending link that survives
-    // classify_link (Denied stays Denied — that's the security boundary) and
-    // re-walk before ingesting. Persist first so a mid-run crash doesn't
-    // leave the walker half-collected with no ledger entry.
-    if trust_new_links && !outcome.pending.is_empty() {
-        use tauri_app_lib::trusted_links::{classify_link, LinkVerdict, TrustedLink};
-        let mut newly_trusted: Vec<TrustedLink> = Vec::new();
-        for p in &outcome.pending {
-            match classify_link(
-                &p.link,
-                Path::new(&p.target),
-                &vault_root,
-                dirs::home_dir().as_deref(),
-                &brain_cfg.trusted_links,
-            ) {
-                LinkVerdict::Pending => newly_trusted.push(TrustedLink {
-                    link: p.link.clone(),
-                    target: p.target.clone(),
-                    approved_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0),
-                }),
-                LinkVerdict::Denied(_) => {}
-                LinkVerdict::Trusted => {}
-            }
-        }
-        if !newly_trusted.is_empty() {
-            replace_trusted_links(&mut brain_cfg.trusted_links, newly_trusted);
-            brain_cfg
-                .write(&paths_b)
-                .context("persist newly-trusted links")?;
-            outcome = walk_vault(
-                &vault_root,
-                &brain_cfg.trusted_links,
-                dirs::home_dir().as_deref(),
-            );
-        }
-    }
-
-    // Surface pending + denied so a headless run exits with the right
-    // remediation hint (spec Risks).
-    for d in &outcome.denied {
-        eprintln!(
-            "refused: {} -> {} ({}). This cannot be approved.",
-            d.link, d.target, d.reason
-        );
-    }
-    for p in &outcome.pending {
-        eprintln!(
-            "pending: {} -> {} is not approved; its content was skipped.\n  approve with: ct trust {}",
-            p.link, p.target, p.link
-        );
-    }
-    for e in &outcome.errors {
-        eprintln!("warn: {e}");
-    }
-
-    let mut files = outcome.files;
-    files.sort_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
-    files.dedup_by(|a, b| a.virtual_path == b.virtual_path);
+    // Walk assembly (root resolution, trust re-walk, surfacing, sort/dedup)
+    // is shared with `ct drift` — see walk_list.rs (issue #241, spec M4).
+    let (vault_root, files, surfacing) = crate::walk_list::build_ingest_file_list(
+        &paths_b,
+        trust_new_links,
+    )?;
 
     // Heal offline moves before ingesting. A file that was `git mv`'d while
     // the app was closed otherwise leaves its old row -- and every chunk
@@ -219,7 +146,7 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
         }
     }
 
-    let mut failed = outcome.errors.len() + outcome.pending.len() + outcome.denied.len();
+    let mut failed = surfacing.errors.len() + surfacing.pending.len() + surfacing.denied.len();
     println!(
         "ingesting {} file(s) from {}",
         files.len(),
@@ -305,7 +232,7 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
         // summary to stderr before bailing so CI / systemd / cron see both
         // the diagnostic line and a non-zero exit code.
         eprintln!("{summary}");
-        for p in &outcome.pending {
+        for p in &surfacing.pending {
             eprintln!("  approve with: ct trust {}", p.link);
         }
         bail!("ingest completed with {failed} failure(s)");

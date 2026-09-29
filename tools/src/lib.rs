@@ -1,9 +1,11 @@
 pub mod cli_common;
 pub mod cmds;
+pub mod drift;
 pub mod graph_reanchor;
 pub mod lock;
 pub mod paths;
 pub mod queries;
 pub mod tier_backfill;
+pub mod walk_list;
 pub mod watcher;
 pub mod write;

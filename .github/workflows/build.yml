@@ -141,10 +141,84 @@ jobs:
             -output src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
           lipo -info src-tauri/binaries/curated-thoughts-mcp-universal-apple-darwin
 
+      - name: Derive version
+        id: ctver
+        # bash syntax (jq, $GITHUB_OUTPUT, [ ]) — without this, the Windows
+        # leg runs `run:` under pwsh and dies before tauri-action ever fires.
+        shell: bash
+        run: |
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "${VERSION}" != "${TAG_VERSION}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} but tauri.conf.json says ${VERSION}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Build ct CLI
+        if: matrix.platform != 'macos-latest'
+        id: ctbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p curated-thoughts-tools --bin ct
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          case "${{ matrix.platform }}" in
+            ubuntu-22.04) OS=linux; ARCH=amd64; EXT=tar.gz ;;
+            windows-latest) OS=windows; ARCH=amd64; EXT=zip ;;
+            *) echo "Unsupported platform: ${{ matrix.platform }}" >&2; exit 1 ;;
+          esac
+          ASSET="ct_${{ steps.ctver.outputs.version }}_${OS}_${ARCH}.${EXT}"
+          echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+          # Spec :38-41 — every archive carries a short README alongside the binary.
+          printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > README.txt
+          if [ "${EXT}" = "zip" ]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','README.txt' -DestinationPath '${ASSET}'"
+          else
+            # Copy next to the binary so tar needs a single -C (OLDPWD is
+            # unset under `set -u` when bash never cd'd — unbound-variable
+            # abort, review B1).
+            cp README.txt "${TARGET_DIR}/release/README.txt"
+            tar czf "${ASSET}" -C "${TARGET_DIR}/release" ct README.txt
+          fi
+
+      - name: Build ct CLI (macOS universal)
+        if: matrix.platform == 'macos-latest'
+        id: ctbuildmac
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p curated-thoughts-tools --bin ct --target aarch64-apple-darwin
+          cargo build --release -p curated-thoughts-tools --bin ct --target x86_64-apple-darwin
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          lipo -create \
+            "${TARGET_DIR}/aarch64-apple-darwin/release/ct" \
+            "${TARGET_DIR}/x86_64-apple-darwin/release/ct" \
+            -output "${TARGET_DIR}/ct-universal"
+          lipo -info "${TARGET_DIR}/ct-universal"
+          # Stage under the user-facing name so the archive unpacks to `ct`,
+          # not `ct-universal` (spec: each archive holds the binary + README).
+          cp "${TARGET_DIR}/ct-universal" "${TARGET_DIR}/ct"
+          ASSET="ct_${{ steps.ctver.outputs.version }}_macos_universal.tar.gz"
+          echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+          printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > "${TARGET_DIR}/README.txt"
+          tar czf "${ASSET}" -C "${TARGET_DIR}" ct README.txt
+
+      - name: Smoke test ct CLI
+        shell: bash
+        run: |
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          BIN="${TARGET_DIR}/release/ct"
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then BIN="${TARGET_DIR}/ct-universal"; fi
+          "${BIN}" --help > /dev/null
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        if: github.ref_type == 'tag'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -155,3 +229,20 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload ct release asset
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # bash syntax ($GITHUB_REF_NAME env-var expansion). pwsh would expand
+        # "$GITHUB_REF_NAME" as an undefined PowerShell variable to "" and the
+        # glob `ct_*.*` would never expand. Upload the EXACT filename from the
+        # build step output instead of a glob so a partial matrix leg cannot
+        # silently skip or double-upload.
+        shell: bash
+        run: |
+          if [ -n "${{ steps.ctbuild.outputs.asset }}" ]; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuild.outputs.asset }}" --clobber
+          else
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuildmac.outputs.asset }}" --clobber
+          fi

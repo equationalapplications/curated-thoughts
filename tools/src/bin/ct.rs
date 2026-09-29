@@ -91,6 +91,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: LibrarianCmd,
     },
+    /// Report what reconcile would repair (read-only; no writes).
+    Drift {
+        #[arg(long)]
+        json: bool,
+    },
     /// Soft-delete wiki entries whose source references are demonstrably
     /// ungrounded (write; requires --yes).
     Heal {
@@ -327,6 +332,7 @@ fn run(cmd: Cmd) -> Result<i32> {
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
+        Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
         Cmd::Heal { yes } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
