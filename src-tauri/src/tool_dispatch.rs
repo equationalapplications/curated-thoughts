@@ -1140,9 +1140,9 @@ pub struct VaultWriteNoteParams {
     pub path: String,
     pub frontmatter: crate::okf::OkfFrontmatter,
     pub body: String,
-    /// Issue #240: set true ONLY for a deliberate full rewrite that the
-    /// size-drop guard would refuse. Defaults to false; the MCP schema
-    /// exposes it via schemars.
+    /// Set true only when the user explicitly asked to remove most of this
+    /// note's content. Never set it to retry after a refused write; re-read
+    /// the note and resend the full body instead.
     #[serde(default)]
     pub allow_shrink: bool,
 }
