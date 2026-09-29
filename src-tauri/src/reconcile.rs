@@ -36,6 +36,25 @@ pub struct ReconcileOutcome {
     pub ambiguous: Vec<String>,
 }
 
+/// What a reconciliation pass WOULD change, computed without writing.
+/// `ct drift` reports this; `reconcile_vault` applies it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ClassifiedOutcome {
+    pub plan: ReconcileOutcome,
+    /// The subset of `plan.deleted` whose files landed under an excluded
+    /// dir (the `excluded` pre-pass arm). Filled by `classify_vault`.
+    pub excluded_deletes: Vec<String>,
+    /// The subset of `plan.deleted` whose files plain vanished with no
+    /// content-identical replacement (the no-candidate arm).
+    /// `plan.deleted == gone_deletes + excluded_deletes` always holds, so
+    /// drift consumes this partition directly and never re-filters.
+    pub gone_deletes: Vec<String>,
+    /// The empty-walk guard tripped (misconfigured/unmounted vault). The
+    /// plan in this state only contains the narrow `.brain` purge computed
+    /// by `classify_brain_rows` -- never a full-index delete.
+    pub empty_walk: bool,
+}
+
 /// Diff `documents` against `walked` and apply renames and deletions.
 ///
 /// Only `tier = 'user_doc'` rows participate. Wiki-tier rows are not all
@@ -52,8 +71,18 @@ pub fn reconcile_vault(
     walked: &[WalkedFile],
     vault_root: &Path,
 ) -> Result<ReconcileOutcome> {
-    let mut outcome = ReconcileOutcome::default();
+    let classified = classify_vault(conn, walked, vault_root)?;
+    apply_outcome(conn, classified, vault_root)
+}
 
+/// Compute what a reconciliation pass WOULD do, without writing. SELECTs
+/// only (plus read-only filesystem hashing of walked files); no DELETE or
+/// UPDATE is executed.
+pub fn classify_vault(
+    conn: &Connection,
+    walked: &[WalkedFile],
+    vault_root: &Path,
+) -> Result<ClassifiedOutcome> {
     // An empty walk means a misconfigured or unmounted vault root, not an
     // empty vault. Reconciling against it would delete the entire index --
     // a transient mount failure must never be able to do that.
@@ -67,9 +96,17 @@ pub fn reconcile_vault(
     // them on an unmounted vault is exactly the disaster this guard exists
     // to prevent (spec item 4).
     if walked.is_empty() {
-        eprintln!("[reconcile] walk returned no files; skipping reconciliation");
-        return purge_brain_rows(conn, vault_root);
+        let (outcome, empty_walk) = (classify_brain_rows(conn, vault_root)?, true);
+        return Ok(ClassifiedOutcome {
+            plan: outcome,
+            empty_walk,
+            ..ClassifiedOutcome::default()
+        });
     }
+
+    let mut outcome = ReconcileOutcome::default();
+    let mut excluded_deletes: Vec<String> = Vec::new();
+    let mut gone_deletes: Vec<String> = Vec::new();
 
     // `documents.path` stores the VIRTUAL path (tools/src/cmds.rs:217).
     // Comparing against `read_path` would report every symlinked file as
@@ -122,7 +159,10 @@ pub fn reconcile_vault(
         });
 
     if excluded.is_empty() && remaining.is_empty() {
-        return Ok(outcome);
+        return Ok(ClassifiedOutcome {
+            plan: outcome,
+            ..ClassifiedOutcome::default()
+        });
     }
 
     // Hash only paths the database has never seen. Re-hashing the whole vault
@@ -181,15 +221,11 @@ pub fn reconcile_vault(
         *vanished_per_hash.entry(h.as_str()).or_insert(0) += 1;
     }
 
-    // ONE transaction covers both the pre-pass and the rename/delete match,
-    // so a mid-loop rusqlite error rolls the whole pass back. It is opened
-    // above the "nothing left to match" return below: when the pre-pass
-    // consumed every vanished row, its deletes must still commit.
-    let tx = conn.unchecked_transaction()?;
-
+    // Detection-only: the excluded and no-candidate arms below RECORD the
+    // deletes instead of executing them. `apply_plan` runs them later inside
+    // one transaction, so the pass still commits atomically.
     for (old_path, _) in &excluded {
-        crate::db::queries::delete_document(&tx, old_path)?;
-        outcome.deleted.push((*old_path).clone());
+        excluded_deletes.push((*old_path).clone());
     }
 
     for (old_path, hash) in &remaining {
@@ -197,10 +233,6 @@ pub fn reconcile_vault(
         match unknown_by_hash.get(hash.as_str()) {
             Some(candidates) if candidates.len() == 1 && unique_source => {
                 let new_path = &candidates[0];
-                tx.execute(
-                    "UPDATE documents SET path = ?1 WHERE path = ?2",
-                    rusqlite::params![new_path, old_path],
-                )?;
                 outcome
                     .repointed
                     .push(((*old_path).clone(), new_path.clone()));
@@ -211,14 +243,69 @@ pub fn reconcile_vault(
                 outcome.ambiguous.push((*old_path).clone());
             }
             None => {
-                crate::db::queries::delete_document(&tx, old_path)?;
-                outcome.deleted.push((*old_path).clone());
+                gone_deletes.push((*old_path).clone());
             }
         }
     }
+
+    outcome.deleted = excluded_deletes
+        .iter()
+        .chain(gone_deletes.iter())
+        .cloned()
+        .collect();
+
+    Ok(ClassifiedOutcome {
+        plan: outcome,
+        excluded_deletes,
+        gone_deletes,
+        empty_walk: false,
+    })
+}
+
+/// Diff `documents` against `walked` and apply renames and deletions.
+/// (Unchanged public behavior: classify + apply, byte-identical outcomes.)
+fn apply_outcome(
+    conn: &Connection,
+    classified: ClassifiedOutcome,
+    vault_root: &Path,
+) -> Result<ReconcileOutcome> {
+    if classified.empty_walk {
+        eprintln!("[reconcile] walk returned no files; skipping reconciliation");
+        return purge_brain_rows(conn, vault_root);
+    }
+    apply_plan(conn, classified.plan, vault_root)
+}
+
+/// Execute the recorded actions of a classified plan. Detection already
+/// happened in `classify_vault`; this only mutates. One transaction covers
+/// the pre-pass and rename/delete arms, so a mid-loop rusqlite error rolls
+/// the whole pass back.
+fn apply_plan(
+    conn: &Connection,
+    plan: ReconcileOutcome,
+    _vault_root: &Path,
+) -> Result<ReconcileOutcome> {
+    if plan.repointed.is_empty() && plan.deleted.is_empty() {
+        return Ok(plan);
+    }
+
+    // `unchecked_transaction` because this path (like `reconcile_vault`)
+    // only holds `&Connection`; the checked `transaction()` needs `&mut`.
+    // Every statement inside propagates with `?`, so a dropped tx rolls back.
+    let tx = conn.unchecked_transaction()?;
+
+    for (old_path, new_path) in &plan.repointed {
+        tx.execute(
+            "UPDATE documents SET path = ?1 WHERE path = ?2",
+            rusqlite::params![new_path, old_path],
+        )?;
+    }
+    for old_path in &plan.deleted {
+        crate::db::queries::delete_document(&tx, old_path)?;
+    }
     tx.commit()?;
 
-    Ok(outcome)
+    Ok(plan)
 }
 
 /// Delete `user_doc` rows whose vault-relative path contains a `.brain`
@@ -261,6 +348,28 @@ fn purge_brain_rows(conn: &Connection, vault_root: &Path) -> Result<ReconcileOut
         "[reconcile] empty walk: purged {} .brain row(s); all other rows preserved",
         outcome.deleted.len()
     );
+    Ok(outcome)
+}
+
+/// Classify-shaped sibling of `purge_brain_rows`: computes the SAME narrow
+/// `.brain` delete list WITHOUT executing any DELETE. Used by
+/// `classify_vault` on the empty-walk branch.
+fn classify_brain_rows(conn: &Connection, vault_root: &Path) -> Result<ReconcileOutcome> {
+    let mut outcome = ReconcileOutcome::default();
+
+    let rows: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT path FROM documents WHERE tier = 'user_doc'")?;
+        let r = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        r.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    for path in rows
+        .into_iter()
+        .filter(|p| crate::walk_vault::abs_path_has_brain_in_vault(Path::new(p), vault_root))
+    {
+        outcome.deleted.push(path);
+    }
+
     Ok(outcome)
 }
 
@@ -360,6 +469,39 @@ mod tests {
         assert_eq!(out.deleted, vec![gone_path]);
         assert!(out.repointed.is_empty());
         assert_eq!(chunk_count(&conn, gone_id), 0, "chunks must cascade");
+    }
+
+    fn doc_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM documents WHERE tier = 'user_doc'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn classify_reports_plan_without_writing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let survivor = walked(tmp.path(), "kept.md", b"# kept");
+        let gone_path = s(&tmp.path().join("gone.md"));
+        seed_doc(&conn, &gone_path, &hash_of(b"# gone"), "user_doc", 5);
+
+        let out = classify_vault(&conn, &[survivor], tmp.path()).unwrap();
+
+        assert_eq!(out.plan.deleted, vec![gone_path]);
+        assert!(!out.empty_walk);
+        // NOTHING was applied: the row and its chunks are untouched.
+        assert_eq!(doc_count(&conn), 1, "classify_vault must not delete rows");
+    }
+
+    #[test]
+    fn classify_flags_empty_walk() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let out = classify_vault(&conn, &[], tmp.path()).unwrap();
+        assert!(out.empty_walk);
     }
 
     #[test]
