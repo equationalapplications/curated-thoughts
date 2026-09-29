@@ -197,7 +197,15 @@ fn drift_walk_identity_with_ingest() {
     let classified =
         tauri_app_lib::reconcile::classify_vault(&c, &files, &root_from_helper).unwrap();
 
-    assert!(!root_from_helper.to_string_lossy().starts_with("/tmp"), "root must be canonicalized: {root_from_helper:?}");
+    // Canonicalization contract: the helper must return the canonical root
+    // (ingest canonicalizes; drift must match — review M1 fix; the old
+    // `!starts_with("/tmp")` assertion was backwards on Linux where /tmp IS
+    // canonical).
+    assert_eq!(
+        root_from_helper,
+        tmp.path().canonicalize().unwrap(),
+        "root must be canonicalized: {root_from_helper:?}"
+    );
     assert_eq!(drift_code, 3);
     assert_eq!(drift_report_val.gone, classified.gone_deletes);
     assert_eq!(drift_report_val.excluded_deletes, classified.excluded_deletes);

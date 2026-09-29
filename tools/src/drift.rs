@@ -78,42 +78,29 @@ pub fn drift_report(
 pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
     let brain = crate::write::resolve()?;
     let conn = crate::write::open_ro(&brain)?;
-    // Resolve the configured vault root exactly as cmds.rs ingest does:
-    // VaultConfig::new(paths.config_path).vault_root()? (error if missing),
-    // then .canonicalize().unwrap_or(vault_root). Canonicalization is NOT
-    // optional — non-canonical roots break relativize_to_vault matching and
-    // drift would report false gone/excluded deletes (spec M4).
+    // Resolve the configured vault root exactly as cmds.rs ingest does —
+    // delegated to the SHARED helper (build_ingest_file_list), which runs
+    // VaultConfig + canonicalize with the same context-wrapped errors as
+    // ingest. Canonicalization is NOT optional — non-canonical roots break
+    // relativize_to_vault matching and drift would report false gone/
+    // excluded deletes (spec M4, review m1: no duplicate resolution here).
     let paths = tauri_app_lib::retrieval::resolve_brain_paths();
-    let config = tauri_app_lib::vault::VaultConfig::new(paths.config_path.clone());
-    let vault_root = config
-        .vault_root()?
-        .ok_or_else(|| anyhow::anyhow!("vault root missing"))?;
-    let vault_root = vault_root.canonicalize().unwrap_or(vault_root);
     // trust_links: false — drift reports what a plain ingest would see;
     // promoting pending links is a `ct trust` decision, not drift's.
-    let (vault_root_from_helper, files) = {
-        let (root, files, _surfacing) = crate::walk_list::build_ingest_file_list(&paths, false)?;
-        (root, files)
-    };
-    // `vault_root_from_helper` equals the canonicalized `vault_root`
-    // resolved above (same code path); either may be used for classify.
-    debug_assert_eq!(vault_root_from_helper, vault_root);
+    let (vault_root, files, _surfacing) =
+        crate::walk_list::build_ingest_file_list(&paths, false)?;
 
     let (report, code) = drift_report(&conn, &files, &vault_root)?;
 
-    if report.empty_walk {
-        if json {
-            println!(r#"{{"empty_walk": true}}"#);
-        } else {
-            // Spec :90-92 wording — drift made NO classification; ingest
-            // or app startup WOULD purge .brain rows on this walk.
-            eprintln!("drift: vault walk returned no files — vault missing or unmounted; no drift classified (ingest would purge .brain rows for this walk)");
-        }
-        return Ok(4);
-    }
-
     if json {
+        // ALWAYS the full DriftReport shape (review M2): scripts do
+        // `jq '.gone | length'` — the literal `{"empty_walk": true}` stub
+        // returned null exactly when the vault is unmounted.
         println!("{}", serde_json::to_string(&report)?);
+    } else if report.empty_walk {
+        // Spec :90-92 wording — drift made NO classification; ingest
+        // or app startup WOULD purge .brain rows on this walk.
+        eprintln!("drift: vault walk returned no files — vault missing or unmounted; no drift classified (ingest would purge .brain rows for this walk)");
     } else {
         for p in &report.gone {
             println!("drift: gone {p}");

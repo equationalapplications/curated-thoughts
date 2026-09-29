@@ -177,7 +177,11 @@ jobs:
           if [ "${EXT}" = "zip" ]; then
             pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','README.txt' -DestinationPath '${ASSET}'"
           else
-            tar czf "${ASSET}" -C "${TARGET_DIR}/release" ct -C "$OLDPWD/." README.txt
+            # Copy next to the binary so tar needs a single -C (OLDPWD is
+            # unset under `set -u` when bash never cd'd — unbound-variable
+            # abort, review B1).
+            cp README.txt "${TARGET_DIR}/release/README.txt"
+            tar czf "${ASSET}" -C "${TARGET_DIR}/release" ct README.txt
           fi
 
       - name: Build ct CLI (macOS universal)
