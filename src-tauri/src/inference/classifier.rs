@@ -516,12 +516,29 @@ pub(crate) fn merge_stored(
             incoming.model = stored.model;
         }
     }
-    if let Some(m) = incoming.model.as_deref().map(str::trim) {
-        if m.is_empty() {
-            incoming.model = None;
+    if let Some(m) = incoming.model.take() {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            incoming.model = Some(trimmed.to_string());
         }
     }
     incoming
+}
+
+/// Read-merge-write core of the classifier save, split out from the Tauri
+/// command so the abort-on-read-failure contract is unit-testable. A failed
+/// stored-config read aborts the save BEFORE any write: mapping the error to
+/// `None` would make `merge_stored` treat `model: null` as untouched and then
+/// persist a fresh default block over the stored pin.
+fn persist_merged_config(
+    paths: &BrainPaths,
+    store: &dyn ClassifierSecretStore,
+    config: ClassifierConfig,
+) -> Result<()> {
+    let stored = read_classifier_config(paths, store)
+        .context("reading stored classifier config")?;
+    let merged = merge_stored(config, Some(stored));
+    write_classifier_config(paths, &merged, store)
 }
 
 #[tauri::command]
@@ -535,9 +552,7 @@ pub fn set_classifier_config(
     // Unconditional merge: `None` fields (api_key, model) take the stored
     // value so saving one field never wipes another; blank `model` unpins
     // (normalization happens inside merge_stored, after the merge).
-    let stored = read_classifier_config(&paths, &store).ok();
-    let merged = merge_stored(config, stored);
-    write_classifier_config(&paths, &merged, &store).map_err(|e| e.to_string())?;
+    persist_merged_config(&paths, &store, config).map_err(|e| e.to_string())?;
     let _ = app.emit("classifier-config-changed", ());
     Ok(())
 }
@@ -871,6 +886,33 @@ mod tests {
         assert!(!round.has_api_key);
     }
 
+    #[test]
+    fn persist_merged_config_aborts_when_stored_read_fails() {
+        use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BrainPaths {
+            brain_dir: dir.path().to_path_buf(),
+            config_path: dir.path().join("config.json"),
+            db_path: dir.path().join("brain.db"),
+        };
+        // Unparseable JSON makes the stored read FAIL. (A missing file is the
+        // lenient "absent configuration" case and must NOT error.)
+        std::fs::write(&paths.config_path, "{ not json").unwrap();
+        let store = InMemoryClassifierSecretStore(Mutex::new(None));
+
+        let err = persist_merged_config(&paths, &store, stored_cfg()).unwrap_err();
+        assert!(
+            err.to_string().contains("reading stored classifier config"),
+            "unexpected error: {err}"
+        );
+        // The failed save must not have clobbered the unreadable config with
+        // a fresh default block.
+        let raw = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert_eq!(raw, "{ not json");
+    }
+
     fn stored_cfg() -> ClassifierConfig {
         ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
@@ -901,6 +943,17 @@ mod tests {
             Some(stored_cfg()),
         );
         assert_eq!(merged.model, None);
+    }
+
+    #[test]
+    fn merge_stored_trims_a_padded_pin_instead_of_persisting_whitespace() {
+        let merged = merge_stored(
+            ClassifierConfig { model: Some(" jev-1.13 ".into()), ..stored_cfg() },
+            None,
+        );
+        // The padded value is canonicalized to the trimmed pin: what is
+        // merged is exactly what request_body will later send.
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13"));
     }
 
     #[test]

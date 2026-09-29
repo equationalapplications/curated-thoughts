@@ -311,9 +311,10 @@ pub(crate) fn merge_stored(
             incoming.model = stored.model;
         }
     }
-    if let Some(m) = incoming.model.as_deref().map(str::trim) {
-        if m.is_empty() {
-            incoming.model = None;
+    if let Some(m) = incoming.model.take() {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            incoming.model = Some(trimmed.to_string());
         }
     }
     incoming
@@ -334,9 +335,10 @@ pub fn set_classifier_config(
     // Unconditional merge: `None` fields (api_key, model) take the stored
     // value so saving one field never wipes another; blank `model` unpins
     // (normalization happens inside merge_stored, after the merge).
-    let stored = read_classifier_config(&paths, &store).ok();
-    let merged = merge_stored(config, stored);
-    write_classifier_config(&paths, &merged, &store).map_err(|e| e.to_string())?;
+    // A failed stored-config read aborts the save BEFORE any write — the
+    // read error is propagated through `persist_merged_config`, never
+    // converted to `None` with `.ok()`.
+    persist_merged_config(&paths, &store, config).map_err(|e| e.to_string())?;
     let _ = app.emit("classifier-config-changed", ());
     Ok(())
 }
@@ -494,7 +496,7 @@ Load effect `.then` block (inside :31-54) gains (after the `setTimeoutSecs(...)`
     );
   });
 
-  it('clears a loaded jev_http pin when switching to cloudflare (review m5)', async () => {
+  it('sends model: null when switching to cloudflare with a loaded pin (merge_stored treats null as untouched, so the stored pin survives server-side)', async () => {
     // Seed the panel WITH a saved jev_http pin (model: "jev-1.13") so the
     // load effect hydrates model state, THEN switch provider to
     // cloudflare_jev and save. This is the case that actually exercises the

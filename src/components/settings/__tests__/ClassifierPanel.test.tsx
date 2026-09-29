@@ -136,7 +136,12 @@ describe('ClassifierPanel', () => {
     );
   });
 
-  it('hydrates the stored pin and sends model: null for cloudflare saves (null = untouched per merge_stored)', async () => {
+  it('sends model: null when switching to cloudflare with a loaded pin (merge_stored treats null as untouched, so the stored pin survives server-side)', async () => {
+    // Seed the panel WITH a saved jev_http pin so the load effect hydrates
+    // model state, THEN switch provider to cloudflare_jev and save. The UI
+    // contract here is the null payload only — null means "untouched" to
+    // merge_stored (tested in Rust), so the stored pin is preserved on the
+    // backend rather than cleared by the panel.
     getClassifierConfig.mockResolvedValue({
       provider: 'jev_http',
       url: 'https://jev.example.com',
