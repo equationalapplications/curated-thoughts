@@ -88,6 +88,23 @@ pub enum WriteNoteError {
     InvalidFrontmatter(String),
     #[error("Stale update: file was modified since updated_at={updated_at}")]
     StaleUpdate { updated_at: String },
+    /// Issue #240: an If-Match edit shrank the rendered note body to under
+    /// half its size — the signature of a truncated payload — and the caller
+    /// did not pass `allow_shrink`. The Display carries a machine-readable
+    /// prefix plus the recovery instruction; it deliberately does NOT mention
+    /// the override flag (a compacted agent must re-read, not retry blindly).
+    #[error(
+        "shrink_refused:{existing_bytes}:{new_bytes}: re-read the note and resend the full body"
+    )]
+    ShrinkRefused {
+        existing_bytes: usize,
+        new_bytes: usize,
+    },
+    /// Issue #240: the payload introduces a context-compaction marker that
+    /// was not already present in the note. Compaction debris must never be
+    /// persisted; the escape is to rephrase, not to override.
+    #[error("compaction_marker:{marker}: rephrase and resend without compaction artifacts")]
+    CompactionMarkerRejected { marker: String },
     #[error("Write error: {0}")]
     WriteError(String),
 }

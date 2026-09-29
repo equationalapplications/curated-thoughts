@@ -289,6 +289,7 @@ pub fn dispatch_vault_write_note(
     path: &str,
     frontmatter: &crate::okf::OkfFrontmatter,
     body: &str,
+    allow_shrink: bool,
 ) -> Result<crate::okf::WriteNoteResult> {
     // Thin adapter (spec v2): all logic lives in the `okf::write` core.
     // The MCP surface carries no separate If-Match parameter — the supplied
@@ -300,6 +301,7 @@ pub fn dispatch_vault_write_note(
         frontmatter,
         body,
         frontmatter.updated_at.as_deref(),
+        allow_shrink,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
@@ -1138,6 +1140,11 @@ pub struct VaultWriteNoteParams {
     pub path: String,
     pub frontmatter: crate::okf::OkfFrontmatter,
     pub body: String,
+    /// Set true only when the user explicitly asked to remove most of this
+    /// note's content. Never set it to retry after a refused write; re-read
+    /// the note and resend the full body instead.
+    #[serde(default)]
+    pub allow_shrink: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1510,7 +1517,13 @@ pub async fn dispatch_tool_call(
                 .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
                 .clone();
             let result = tokio::task::spawn_blocking(move || {
-                dispatch_vault_write_note(&vault_dir, &p.path, &p.frontmatter, &p.body)
+                dispatch_vault_write_note(
+                    &vault_dir,
+                    &p.path,
+                    &p.frontmatter,
+                    &p.body,
+                    p.allow_shrink,
+                )
             })
             .await??;
             Ok(serde_json::to_value(result)?)
