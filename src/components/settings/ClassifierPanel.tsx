@@ -24,6 +24,7 @@ export function ClassifierPanel() {
   const [apiKey, setApiKey] = useState('');
   const [minConfidence, setMinConfidence] = useState(0.5);
   const [timeoutSecs, setTimeoutSecs] = useState<number | null>(null);
+  const [model, setModel] = useState('');
   const [hasApiKey, setHasApiKey] = useState(false);
   const [status, setStatus] = useState<'idle' | 'loading' | 'saving' | 'saved'>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +41,7 @@ export function ClassifierPanel() {
         setApiKey('');
         setMinConfidence(cfg.min_confidence ?? 0.5);
         setTimeoutSecs(cfg.timeout_secs ?? null);
+        setModel(cfg.model ?? '');
         setHasApiKey(cfg.has_api_key ?? false);
         setStatus('idle');
       })
@@ -69,6 +71,7 @@ export function ClassifierPanel() {
         api_key: apiKeyPayload,
         min_confidence: minConfidence,
         timeout_secs: timeoutSecs,
+        model: provider === 'jev_http' ? model.trim() : null,
       });
       // Optimistic local view: reflect what the keychain should now hold.
       setHasApiKey(Boolean(apiKeyPayload));
@@ -130,10 +133,16 @@ export function ClassifierPanel() {
           </select>
         </div>
         {provider === 'jev_http' && (
-          <div>
-            <label htmlFor="classifier-url">Endpoint URL</label>
-            <input id="classifier-url" type="url" value={url} disabled={disableControls} onChange={(e) => setUrl(e.target.value)} />
-          </div>
+          <>
+            <div>
+              <label htmlFor="classifier-url">Endpoint URL</label>
+              <input id="classifier-url" type="url" value={url} disabled={disableControls} onChange={(e) => setUrl(e.target.value)} />
+            </div>
+            <div>
+              <label htmlFor="classifier-model">Model</label>
+              <input id="classifier-model" type="text" value={model} disabled={disableControls} onChange={(e) => setModel(e.target.value)} />
+            </div>
+          </>
         )}
         {provider === 'cloudflare_jev' && (
           <div>

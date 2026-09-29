@@ -41,6 +41,7 @@ describe('ClassifierPanel', () => {
       api_key: 'tok',
       min_confidence: 0.5,
       timeout_secs: null,
+      model: null,
     });
   });
 
@@ -99,5 +100,56 @@ describe('ClassifierPanel', () => {
     await userEvent.selectOptions(await screen.findByLabelText('Classifier provider'), 'jev_http');
     await userEvent.click(screen.getByRole('button', { name: 'Save classifier' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('http(s) url');
+  });
+
+  it('saves the typed jev_http model field exactly as typed (blank = unpin)', async () => {
+    render(<ClassifierPanel />);
+    await userEvent.selectOptions(await screen.findByLabelText('Classifier provider'), 'jev_http');
+    await userEvent.type(screen.getByLabelText('Endpoint URL'), 'https://jev.example.com');
+    await userEvent.type(screen.getByLabelText('Model'), 'jev-small');
+    await userEvent.click(screen.getByRole('button', { name: 'Save classifier' }));
+    expect(setClassifierConfig).toHaveBeenCalledWith({
+      provider: 'jev_http',
+      url: 'https://jev.example.com',
+      account_id: null,
+      api_key: null,
+      min_confidence: 0.5,
+      timeout_secs: null,
+      model: 'jev-small',
+    });
+    // Blank model field is sent as "" (explicit unpin signal), not
+    // normalized to null by the panel.
+    await userEvent.clear(screen.getByLabelText('Model'));
+    await userEvent.click(screen.getByRole('button', { name: 'Save classifier' }));
+    expect(setClassifierConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({ model: '' }),
+    );
+  });
+
+  it('does not send the model field for cloudflare_jev saves', async () => {
+    render(<ClassifierPanel />);
+    await userEvent.selectOptions(await screen.findByLabelText('Classifier provider'), 'cloudflare_jev');
+    await userEvent.type(screen.getByLabelText('Cloudflare account ID'), 'abc123');
+    await userEvent.click(screen.getByRole('button', { name: 'Save classifier' }));
+    expect(setClassifierConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ model: null }),
+    );
+  });
+
+  it('clears a loaded jev_http pin when switching to cloudflare', async () => {
+    getClassifierConfig.mockResolvedValue({
+      provider: 'jev_http',
+      url: 'https://jev.example.com',
+      model: 'jev-small',
+      has_api_key: false,
+    });
+    render(<ClassifierPanel />);
+    const modelInput = await screen.findByLabelText('Model');
+    expect(modelInput).toHaveValue('jev-small');
+    await userEvent.selectOptions(screen.getByLabelText('Classifier provider'), 'cloudflare_jev');
+    await userEvent.click(screen.getByRole('button', { name: 'Save classifier' }));
+    expect(setClassifierConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ model: null }),
+    );
   });
 });
