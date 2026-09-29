@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reject `vault_write_note` edits whose rendered body shrinks below half its size (truncated-payload signature) and any payload introducing a context-compaction marker, unless the caller explicitly passes `allow_shrink` — replaying the 2026-09-26 incident (12,860→505 bytes) as a refusal.
+**Goal:** Reject `vault_write_note` edits whose rendered body shrinks below half its size (truncated-payload signature) unless the caller explicitly passes `allow_shrink`, and reject ANY payload introducing a context-compaction marker (creates: any marker at all) — `allow_shrink` does NOT bypass the marker check. Replays the 2026-09-26 incident (12,860→505 bytes) as a refusal.
 
 **Architecture:** Two guard helpers (`enforce_size_drop`, `enforce_compaction_markers`) in the ONE write-path core (`okf::write::write_note`), running after `render_document` (the measurement basis is the rendered body) and before `safe_write_bytes`. A new `split_frontmatter_fence` helper provides CRLF-safe body offsets. `allow_shrink` plumbs from MCP params (`#[serde(default)]`) and the Tauri command (`Option<bool>` — command params don't honor serde defaults) into the core; both default to `false`.
 
@@ -71,7 +71,7 @@
 
     #[test]
     fn split_fence_body_bytes_helper_matches() {
-        // body_bytes is defined in Task 2; this test pins the contract early.
+        // body_bytes is implemented in THIS task (Task 1 Step 3); this test pins the contract early.
         let content = "---\r\ntitle: T\r\n---\r\n0123456789\r\n";
         assert_eq!(body_bytes(content), "0123456789\r\n".len());
     }
@@ -97,14 +97,16 @@ Expected: compile failure (`split_frontmatter_fence` not found).
 /// helper computes offsets on raw bytes, so `content.len() - offset` is the
 /// true body byte length (issue #240: the size-drop guard measures bytes).
 fn split_frontmatter_fence(content: &str) -> Option<(String, usize)> {
-    let mut offset = 0usize;
-    if content.as_bytes().starts_with(b"---\r\n") {
-        offset = 5;
+    // Review m1: initialize in ONE expression — `let mut offset = 0usize;`
+    // followed by unconditional reassignment trips `unused_assignments`,
+    // which is fatal under the repo's clippy -D warnings gate.
+    let offset = if content.as_bytes().starts_with(b"---\r\n") {
+        5
     } else if content.as_bytes().starts_with(b"---\n") {
-        offset = 4;
+        4
     } else {
         return None;
-    }
+    };
     let mut inner = String::new();
     for _ in 0..64 {
         if offset >= content.len() {
@@ -252,7 +254,7 @@ git commit -m "feat(okf): shrink_refused and compaction_marker refusal variants 
 
 **Interfaces:**
 - Consumes: `split_frontmatter_fence`/`body_bytes` (Task 1), error variants + consts (Task 2).
-- Produces: `write_note(vault_root, path, frontmatter, body, expected_updated_at, allow_shrink: bool)` — 6th positional param. Both adapters updated in this task; no other callers exist.
+- Produces: `write_note(vault_root, path, frontmatter, body, expected_updated_at, allow_shrink: bool)` — 6th positional param. **Callers that break:** both adapters, PLUS every existing test call site — the 56 unit tests in `okf/write.rs` and the four `tests/mcp_write_integration.rs` sites (:836, :867, :881, :904), all 5-arg today. "No other callers exist" was wrong; see Task 3 Step 3b.
 
 - [ ] **Step 1: Write the failing guard tests** (in `write.rs` `mod tests`; helpers `vault()`/`fm()` exist at :983/:990). Helper for a long body:
 
@@ -261,63 +263,89 @@ git commit -m "feat(okf): shrink_refused and compaction_marker refusal variants 
         (0..lines).map(|i| format!("line {i} of a substantial note body\n")).collect()
     }
 
-    fn edit(target: &str, body: &str, token: &str, allow_shrink: bool) -> Result<super::WriteNoteResult, crate::okf::WriteNoteError> {
-        write_note(&root, target, &fm("T", Some(token)), body, Some(token), allow_shrink)
-    }
 ```
 
-(Adapt the closure shape to the existing test style — tests create the file first via `write_note(..., None, false)`, read back the token with `read_existing_token`, then edit.)
+(Review M1: the old draft's `fn edit(...)` helper referenced `root` out of scope — a compile error — and was never called; it is deleted. Tests create the file first via `write_note(..., None, false)` (or `fs::write` for marker seeds), read back the token with `read_existing_token`, then edit inline.)
 
 ```rust
     #[test]
     fn edit_rejects_truncated_payload_replay_of_incident() {
-        let (dir, root) = vault();
-        let created = write_note(&root, "wiki/n.md", &fm("T", None), &long_body(400), None, false).unwrap();
-        let err = write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), "stub\n", Some(&created.updated_at), false).unwrap_err();
+        // Spec L114-116 exact byte counts (review M3): 12,860 → 505 RENDERED.
+        // Bodies are built WITH their trailing newline (render_document adds
+        // one only if missing — review R1), so 12859+1 = 12860 on disk,
+        // 504+1 = 505 rendered.
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing_body = format!("{}\n", "x".repeat(12859)); // 12,860 bytes rendered
+        let new_body = format!("{}\n", "x".repeat(504));         // 505 bytes rendered
+        let created = write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
+        let err = write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), &new_body, Some(&created.updated_at), false).unwrap_err();
         let s = err.to_string();
-        assert!(s.starts_with("shrink_refused:"), "{s}");
+        assert!(s.starts_with("shrink_refused:12860:505"), "{s}");
         assert!(s.contains("re-read the note"), "{s}");
         assert!(!s.contains("allow_shrink"), "{s}");
     }
 
     #[test]
     fn edit_boundary_new_double_is_allowed() {
-        // existing body B bytes, new body exactly B/2 → allowed (== is allowed).
-        let existing_body = "x".repeat(1024); // ≥ MIN_GUARDED_BODY_BYTES, even
-        let new_body = "x".repeat(512);
-        let (dir, root) = vault();
+        // B1 fix: bodies carry their own trailing newline. Rendered sizes:
+        // existing 1023+1 = 1024, new 511+1 = 512 → 512*2 == 1024 → ALLOWED
+        // (== must pass). (Old draft used 1024/512 raw; render made them
+        // 1025/513, so the equality case never actually tested equality.)
+        let existing_body = format!("{}\n", "x".repeat(1023)); // 1024 rendered
+        let new_body = format!("{}\n", "x".repeat(511));       // 512 rendered
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
         write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), &new_body, Some(&created.updated_at), false).unwrap();
     }
 
     #[test]
     fn edit_boundary_odd_existing_refused() {
-        // existing 1025 bytes, new 512 → 512*2 = 1024 < 1025 → refused.
-        let existing_body = "x".repeat(1025);
-        let new_body = "x".repeat(512);
-        let (dir, root) = vault();
+        // B1 fix: rendered sizes existing 1024+1 = 1025, new 511+1 = 512 →
+        // 512*2 = 1024 < 1025 → refused with the exact prefix. (Old draft's
+        // 1025/512 raw bodies rendered 1026/513 → 513*2 = 1026, NOT < 1026,
+        // so unwrap_err() panicked — the exact spec L35-37 trap.)
+        let existing_body = format!("{}\n", "x".repeat(1024)); // 1025 rendered
+        let new_body = format!("{}\n", "x".repeat(511));       // 512 rendered
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
         let err = write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), &new_body, Some(&created.updated_at), false).unwrap_err();
         assert!(err.to_string().starts_with("shrink_refused:1025:512"));
     }
 
     #[test]
+    fn edit_boundary_plus_one_newline_alone_can_refuse() {
+        // Spec L128-130 (review B1): a new body WITHOUT a trailing \n that
+        // is refused only because render adds the +1. Existing renders 1025
+        // (1024+\n). Raw-new 511 renders 512 → 512*2 = 1024 < 1025 →
+        // refused — but raw math on 511 gives the same verdict. To pin the
+        // +1 ITSELF, use raw-new 512: raw math says 512*2 = 1024 < 1025
+        // (refuse), rendered math says 513*2 = 1026 ≥ 1025 (allow). Rendered
+        // wins → the write SUCCEEDS. This test fails if anyone switches the
+        // measurement basis to raw bodies.
+        let existing_body = format!("{}\n", "x".repeat(1024)); // 1025 rendered
+        let new_body = "x".repeat(512);                        // NO newline → renders 513
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
+        write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), &new_body, Some(&created.updated_at), false).unwrap();
+    }
+
+    #[test]
     fn small_notes_may_be_fully_rewritten_without_flag() {
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &"x".repeat(200), None, false).unwrap();
         write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), "tiny\n", Some(&created.updated_at), false).unwrap();
     }
 
     #[test]
     fn allow_shrink_permits_major_shrink() {
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &long_body(400), None, false).unwrap();
         write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), "deliberate full rewrite\n", Some(&created.updated_at), true).unwrap();
     }
 
     #[test]
     fn create_with_marker_is_rejected() {
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let body = "text [SKILL_PRUNED] more text\n";
         let err = write_note(&root, "wiki/n.md", &fm("T", None), body, None, false).unwrap_err();
         assert!(err.to_string().starts_with("compaction_marker:[SKILL_PRUNED]"), "{err}");
@@ -325,7 +353,7 @@ git commit -m "feat(okf): shrink_refused and compaction_marker refusal variants 
 
     #[test]
     fn edit_rejects_newly_introduced_marker() {
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), "clean body\n", None, false).unwrap();
         let err = write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), "clean body\nHERMES-CONTEXT-COMPRESSION\n", Some(&created.updated_at), true).unwrap_err();
         assert!(err.to_string().starts_with("compaction_marker:HERMES-CONTEXT-COMPRESSION"), "{err}");
@@ -333,21 +361,96 @@ git commit -m "feat(okf): shrink_refused and compaction_marker refusal variants 
 
     #[test]
     fn edit_permits_marker_already_in_existing_frontmatter() {
-        // The incident note itself: title quotes the marker. Every legitimate
-        // edit re-sends that frontmatter — must NOT be locked (spec D2).
-        let (dir, root) = vault();
-        let mut note = fm("note about [SKILL_PRUNED]", None);
-        note.description = Some("quotes HERMES-CONTEXT-COMPRESSION".into());
-        let created = write_note(&root, "wiki/n.md", &note, "body one\n", None, false).unwrap();
-        write_note(&root, "wiki/n.md", &note, "body two\n", Some(&created.updated_at), false).unwrap();
+        // B2 fix (review): write_note CREATE refuses every marker — including
+        // in the title — so the seed note must go straight to disk via
+        // fs::write with a hand-built valid fence. OkfFrontmatter has NO
+        // `description` field (fields: okf_version, profile, title,
+        // entity_type, tags, created_at, updated_at, supersedes) — the old
+        // draft's `note.description = …` was a compile error; the second
+        // marker lives in `tags`.
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing = [
+            "---",
+            "okf_version: 1",
+            "title: \"note about [SKILL_PRUNED]\"",
+            "tags: [\"quotes HERMES-CONTEXT-COMPRESSION\"]",
+            "created_at: \"2026-09-01T00:00:00Z\"",
+            "updated_at: \"2026-09-01T00:00:00Z\"",
+            "---",
+            "body one",
+            "",
+        ]
+        .join("\n");
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/n.md"), &existing).unwrap();
+        let token = read_existing_token(&existing).unwrap();
+        // Every legitimate edit re-sends that frontmatter — must NOT be
+        // locked (spec D2). Use fm("note about [SKILL_PRUNED]", …) so the new
+        // document carries the same markers the existing one has.
+        let note = fm("note about [SKILL_PRUNED]", Some(&token));
+        write_note(&root, "wiki/n.md", &note, "body two\n", Some(&token), false).unwrap();
+    }
+
+    #[test]
+    fn edit_rejects_marker_in_existing_body_when_not_resent() {
+        // Review B2 addition (spec L119): marker already in the existing
+        // BODY, and the edit drops it — allowed, because the guard only
+        // refuses NEWLY INTRODUCED markers (document contains ∧ ¬existing
+        // contains). Seeded via fs::write for the same create-refusal reason.
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing = [
+            "---",
+            "okf_version: 1",
+            "title: \"t\"",
+            "created_at: \"2026-09-01T00:00:00Z\"",
+            "updated_at: \"2026-09-01T00:00:00Z\"",
+            "---",
+            "text [SKILL_PRUNED] from an old compaction",
+            "",
+        ]
+        .join("\n");
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/n.md"), &existing).unwrap();
+        let token = read_existing_token(&existing).unwrap();
+        write_note(&root, "wiki/n.md", &fm("t", Some(&token)), "clean replacement\n", Some(&token), false).unwrap();
     }
 
     #[test]
     fn marker_check_runs_before_shrink_check() {
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &long_body(400), None, false).unwrap();
         let err = write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), "[SKILL_PRUNED]\n", Some(&created.updated_at), false).unwrap_err();
         assert!(err.to_string().starts_with("compaction_marker:"), "marker must win: {err}");
+    }
+
+    #[test]
+    fn body_bytes_counts_fence_less_content_whole() {
+        // Review m6 (spec L131-135): the fence-less path is UNREACHABLE
+        // through write_note — enforce_staleness refuses no_fence first — so
+        // this pins the helper directly instead of an end-to-end refusal.
+        assert_eq!(body_bytes("no fence\n"), 9);
+        assert_eq!(body_bytes(""), 0);
+    }
+
+    #[test]
+    fn params_allow_shrink_omitted_defaults_false_and_true_parses() {
+        // Review m7 (spec L121-122): plumbing tests. Key omitted → false.
+        let v: serde_json::Value = serde_json::json!({ "path": "wiki/n.md", "frontmatter": {}, "body": "b" });
+        let p: crate::tool_dispatch::VaultWriteNoteParams = serde_json::from_value(v).unwrap();
+        assert!(!p.allow_shrink);
+        let v: serde_json::Value = serde_json::json!({ "path": "wiki/n.md", "frontmatter": {}, "body": "b", "allow_shrink": true });
+        let p: crate::tool_dispatch::VaultWriteNoteParams = serde_json::from_value(v).unwrap();
+        assert!(p.allow_shrink);
+    }
+
+    #[test]
+    fn shrink_refusal_reaches_mcp_surface_via_anyhow() {
+        // Review m7: a shrink refusal must surface through dispatch's
+        // anyhow!("{}") mapping — assert the message survives the mapping
+        // and still carries the exact prefix (never "allow_shrink").
+        // (Arrange: seed a guarded note; Act: dispatch_vault_write_note with
+        // a halved body; Assert: err.to_string() starts_with
+        // "shrink_refused:" and does not contain "allow_shrink".)
     }
 
     #[test]
@@ -359,14 +462,14 @@ git commit -m "feat(okf): shrink_refused and compaction_marker refusal variants 
         // disagree-by-one case.)
         let existing_body = "x".repeat(2048);
         let new_body = "x".repeat(1024); // renders +1 newline
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
         write_note(&root, "wiki/n.md", &fm("T", Some(&created.updated_at)), &new_body, Some(&created.updated_at), false).unwrap();
     }
 
     #[test]
     fn crlf_note_measures_byte_exact_body() {
-        let (dir, root) = vault();
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let existing_body = "x".repeat(1100);
         let created = write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
         let on_disk = std::fs::read_to_string(root.join("wiki/n.md")).unwrap();
@@ -374,11 +477,21 @@ git commit -m "feat(okf): shrink_refused and compaction_marker refusal variants 
         let crlf = on_disk.replace('\n', "\r\n");
         std::fs::write(root.join("wiki/n.md"), &crlf).unwrap();
         let token = read_existing_token(&crlf).unwrap();
-        // Body shrinks 1100 → 549 (549*2 = 1098 < 1100 → refused). A
-        // fence-length mis-measurement (dropping \r bytes) could flip this.
+        // M4 fix: pin the EXACT error, not just the prefix — a prefix-only
+        // assert passes even if fence measurement silently drops \r bytes.
+        // Existing: raw 1100-body + \n, whole file converted to CRLF → the
+        // renderer-normalized existing body measures 1101 (its trailing
+        // newline); rendered new body 549+1 = 550 → 550*2 = 1100 < 1101 →
+        // refused. (If the measured pair differs by the CRLF frontmatter
+        // bytes, adjust these two numbers — but the assert MUST stay exact,
+        // per review R1's render semantics.)
         let new_body = "x".repeat(549);
         let err = write_note(&root, "wiki/n.md", &fm("T", Some(&token)), &new_body, Some(&token), false).unwrap_err();
-        assert!(err.to_string().starts_with("shrink_refused:"), "{err}");
+        let s = err.to_string();
+        assert!(s.starts_with("shrink_refused:"), "{s}");
+        // Exact-pair assert (guard against silent \r-dropping fence bugs):
+        assert_eq!(s.split(':').nth(1), Some("1101"), "{s}");
+        assert_eq!(s.split(':').nth(2), Some("550"), "{s}");
     }
 ```
 
@@ -465,7 +578,7 @@ Wire into the tail (between `check_round_trip` and `safe_write_bytes`, :433-435)
     crate::vault::safe_write_bytes(&target, document.as_bytes())
 ```
 
-Update the earlier create/edit calls inside `write_note` itself (the bootstrap/parent logic at :321+ may call `write_note` recursively — update any internal call sites to pass `allow_shrink` through).
+(Review m2: the bootstrap/parent logic does NOT call `write_note` recursively — it only re-enters `safe_vault_path`. There is no internal recursive call site to update; don't go looking for one.)
 
 - [ ] **Step 4: Plumb `allow_shrink` through both adapters.**
 
@@ -533,6 +646,16 @@ fn vault_write_note(
 }
 ```
 
+- [ ] **Step 3b: Update EVERY existing caller (review M2 — the compile-break step).** The signature change breaks the build before any test runs: all 56 existing `write_note` unit tests in `okf/write.rs` and the four `tests/mcp_write_integration.rs` call sites (:836, :867, :881, :904) are 5-arg today. Append `, false` (the old behavior) to every call:
+
+```bash
+# mechanical pass — then compile to catch any dispatch_vault_write_note
+# direct calls the same way:
+rg -n 'write_note\(' src-tauri --type rust
+```
+
+Any direct `dispatch_vault_write_note` callers in the integration tests get the new trailing `allow_shrink: false` argument the same way. The crate must COMPILE before Step 5's test run.
+
 - [ ] **Step 5: Run the full write suites; audit RED fixtures**
 
 Run: `cargo test -p curated-thoughts okf::write && cargo test -p curated-thoughts --test mcp_write_integration`
@@ -569,3 +692,14 @@ git add docs/superpowers/specs/2026-09-28-issue240-shrink-guard-design.md
 git commit -m "docs(spec): mark #240 design implemented (PR #248)"
 git push origin feat/issue-240-shrink-guard
 ```
+
+
+---
+
+## Review resolutions (pre-implementation, verified against source 2026-09-28)
+
+- **R1 — `render_document` (okf/write.rs:53-62):** appends the body, then ensures exactly one trailing `\n` (only appends if missing). No blank-line insertion between fence and body. Byte math: a body without trailing `\n` gains exactly +1 rendered byte; one ending in `\n` gains 0. All boundary tests above are built with the newline already on.
+- **R2 — `WriteNoteResult` (okf/mod.rs:97-104):** fields are `success`, `path`, `sha256`, `updated_at: String` — `created.updated_at` IS valid; no change needed.
+- **R3 — `collect_frontmatter_fence` (okf/write.rs:146-169):** opener must be the line `---` (`lines()` strips a trailing `\r`, so CRLF openers pass); the opener does NOT count toward the 64-line `take(64)` cap; no closing fence within the cap → `None`.
+- **R4 — `tests/mcp_write_integration.rs`:** all four sites (:836, :867, :881, :904) call the library `write_note(...)` helper directly with 5 args — they break exactly as M2 predicts; Step 3b covers them.
+- **m8 (spec text):** the spec's "no normalization step" wording (L52-53, L75-77) is wrong — the body IS normalized to end with exactly one `\n` by `render_document`. Fix the spec text in Task 4's spec flip: "the measurement basis is the RENDERED document, whose body ends with exactly one trailing `\n` (added only if missing)".
