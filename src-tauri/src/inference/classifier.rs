@@ -20,6 +20,10 @@ pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 pub const JEV_MODEL: &str = "typesafe/jev";
+/// Default `model` for the `jev_http` (TypeSafe-hosted) request body. The
+/// API rejects requests without it (HTTP 422); users may pin an exact
+/// version via `ClassifierConfig::model` for reproducible typing.
+pub const JEV_HTTP_MODEL: &str = "jev-latest";
 const CONFIG_KEY: &str = "classifier";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -53,6 +57,10 @@ pub struct ClassifierConfig {
     pub min_confidence: Option<f64>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional model pin for `jev_http` (e.g. `jev-1.13`). `None` or blank
+    /// falls back to [`JEV_HTTP_MODEL`]. Ignored by other providers.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -297,10 +305,19 @@ pub fn to_jev_questions(questions: &BTreeMap<String, ClassifierQuestion>) -> Val
 }
 
 pub fn request_body(cfg: &ClassifierConfig, req: &ClassifyRequest) -> Value {
-    let inner = json!({ "state": req.state, "questions": to_jev_questions(&req.questions) });
+    let mut inner = json!({ "state": req.state, "questions": to_jev_questions(&req.questions) });
     match cfg.provider {
         ClassifierProviderKind::CloudflareJev => json!({ "model": JEV_MODEL, "input": inner }),
-        _ => inner,
+        _ => {
+            let model = cfg
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or(JEV_HTTP_MODEL);
+            inner["model"] = json!(model);
+            inner
+        }
     }
 }
 
@@ -559,9 +576,34 @@ mod tests {
             endpoint(&cfg).unwrap(),
             "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run"
         );
-        assert!(request_body(&jev_cfg("https://x"), &choice_req())
-            .get("model")
-            .is_none());
+        assert_eq!(
+            request_body(&jev_cfg("https://x"), &choice_req())["model"],
+            JEV_HTTP_MODEL
+        );
+    }
+
+    #[test]
+    fn jev_http_body_names_model_default() {
+        let body = request_body(&jev_cfg("https://x"), &choice_req());
+        assert_eq!(body["model"], JEV_HTTP_MODEL);
+        assert_eq!(body["state"], "Alice is a person.");
+    }
+
+    #[test]
+    fn jev_http_body_uses_pinned_model() {
+        let cfg = ClassifierConfig {
+            model: Some("jev-1.13".into()),
+            ..jev_cfg("https://x")
+        };
+        assert_eq!(request_body(&cfg, &choice_req())["model"], "jev-1.13");
+    }
+
+    #[test]
+    fn jev_http_blank_model_falls_back_to_default() {
+        for blank in [Some(String::new()), Some("   ".into())] {
+            let cfg = ClassifierConfig { model: blank, ..jev_cfg("https://x") };
+            assert_eq!(request_body(&cfg, &choice_req())["model"], JEV_HTTP_MODEL);
+        }
     }
 
     #[test]
@@ -654,9 +696,10 @@ mod tests {
         let mock = server
             .mock("POST", "/")
             .match_header("authorization", "Bearer k")
-            .match_body(mockito::Matcher::PartialJson(
-                json!({ "state": "Alice is a person." }),
-            ))
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "state": "Alice is a person.",
+                "model": JEV_HTTP_MODEL,
+            })))
             .with_header("content-type", "application/json")
             .with_body(
                 json!({ "model": "jev-1.13.0", "answers": { "okf_type": {
