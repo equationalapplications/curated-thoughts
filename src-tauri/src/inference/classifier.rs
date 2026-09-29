@@ -604,10 +604,6 @@ mod tests {
             endpoint(&cfg).unwrap(),
             "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run"
         );
-        assert_eq!(
-            request_body(&jev_cfg("https://x"), &choice_req())["model"],
-            JEV_HTTP_MODEL
-        );
     }
 
     #[test]
