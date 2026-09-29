@@ -838,8 +838,8 @@ fn first_deposit_succeeds_on_vault_with_neither_wiki_nor_agents() {
         note_path,
         &create_test_frontmatter("Deposit On Bare Vault"),
         "Deposited without a manual mkdir -p.",
-        None,
-    )
+        None
+    , false)
     .expect("deposit should succeed on a vault with no writable subdir yet");
     assert!(!res.sha256.is_empty(), "sha256 should be populated");
 
@@ -869,8 +869,8 @@ fn first_write_succeeds_on_vault_with_no_subdirs_at_all() {
         deposit,
         &create_test_frontmatter("Deep Deposit"),
         "Two levels of parents bootstrapped.",
-        None,
-    )
+        None
+    , false)
     .expect("nested deposit should succeed");
     assert!(
         vault_root.join(deposit).exists(),
@@ -883,8 +883,8 @@ fn first_write_succeeds_on_vault_with_no_subdirs_at_all() {
         wiki_note,
         &create_test_frontmatter("First Page"),
         "wiki/ bootstrapped too.",
-        None,
-    )
+        None
+    , false)
     .expect("wiki write should succeed");
     assert!(
         vault_root.join(wiki_note).exists(),
@@ -906,8 +906,8 @@ fn bootstrap_refuses_sibling_prefix_dir() {
         "immutable-source-files/agents-evil/x.md",
         &create_test_frontmatter("Sibling Prefix"),
         "should never land",
-        None,
-    );
+        None
+    , false);
     assert!(err.is_err(), "sibling-prefix path must be rejected");
     assert!(
         !vault_root

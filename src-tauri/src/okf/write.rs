@@ -190,9 +190,7 @@ fn collect_frontmatter_fence(content: &str) -> Option<String> {
 /// [`collect_frontmatter_fence`], whose `lines()` view drops `\r`, this
 /// helper computes offsets on raw bytes, so `content.len() - offset` is the
 /// true body byte length (issue #240: the size-drop guard measures bytes).
-/// Task 3's guards consume this; until they land, the dead-code gate
-/// (clippy -D warnings) is silenced here. Remove the allow in Task 3.
-#[allow(dead_code)]
+/// Consumed by [`enforce_size_drop`] (Task 3); no allow needed anymore.
 fn split_frontmatter_fence(content: &str) -> Option<(String, usize)> {
     // Review m1: initialize in ONE expression — `let mut offset = 0usize;`
     // followed by unconditional reassignment trips `unused_assignments`,
@@ -233,7 +231,6 @@ fn split_frontmatter_fence(content: &str) -> Option<(String, usize)> {
 /// frontmatter fence, or the whole content when fence-less.
 /// Consumed by Task 3's guards; see the allow note on
 /// [`split_frontmatter_fence`].
-#[allow(dead_code)]
 fn body_bytes(content: &str) -> usize {
     match split_frontmatter_fence(content) {
         Some((_, offset)) => content.len() - offset,
@@ -264,6 +261,52 @@ fn enforce_staleness(
             updated_at: current,
         }),
     }
+}
+
+/// Issue #240: refuse a rendered document that introduces a context-
+/// compaction marker absent from the existing content (creates: any marker).
+/// The scan covers frontmatter AND body on both sides — a note quoting a
+/// marker in its title must stay editable. `allow_shrink` does NOT bypass
+/// this check.
+fn enforce_compaction_markers(
+    document: &str,
+    existing: Option<&str>,
+) -> Result<(), WriteNoteError> {
+    let already = existing.unwrap_or("");
+    for marker in COMPACTION_MARKERS {
+        if document.contains(marker) && !already.contains(marker) {
+            return Err(WriteNoteError::CompactionMarkerRejected {
+                marker: (*marker).to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Issue #240: refuse an edit whose rendered body shrank below half its
+/// size — the signature of a truncated payload — unless the caller
+/// explicitly opted in. Applies only to existing bodies ≥
+/// [`MIN_GUARDED_BODY_BYTES`]; smaller notes may be fully rewritten.
+fn enforce_size_drop(
+    existing: Option<&str>,
+    document: &str,
+    allow_shrink: bool,
+) -> Result<(), WriteNoteError> {
+    let Some(existing) = existing else {
+        return Ok(()); // create path — nothing to shrink against
+    };
+    let existing_bytes = body_bytes(existing);
+    if existing_bytes < MIN_GUARDED_BODY_BYTES {
+        return Ok(());
+    }
+    let new_bytes = body_bytes(document);
+    if allow_shrink || new_bytes * 2 >= existing_bytes {
+        return Ok(());
+    }
+    Err(WriteNoteError::ShrinkRefused {
+        existing_bytes,
+        new_bytes,
+    })
 }
 
 /// True iff `path` is inside the deposit folder at any depth (incl. subfolders,
@@ -375,6 +418,7 @@ pub fn write_note(
     frontmatter: &OkfFrontmatter,
     body: &str,
     expected_updated_at: Option<&str>,
+    allow_shrink: bool,
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
 
@@ -506,6 +550,12 @@ pub fn write_note(
 
     let document = render_document(&effective_fm, body);
     check_round_trip(&effective_fm, &document)?;
+
+    // Issue #240 guards — AFTER render (the measurement basis is the
+    // rendered body) and BEFORE any bytes hit disk. Order pinned: marker
+    // check first, then shrink.
+    enforce_compaction_markers(&document, existing.as_deref())?;
+    enforce_size_drop(existing.as_deref(), &document, allow_shrink)?;
 
     crate::vault::safe_write_bytes(&target, document.as_bytes())
         .map_err(|e| WriteNoteError::WriteError(format!("write_error:{}", e)))?;
@@ -941,7 +991,7 @@ mod tests {
     #[test]
     fn crlf_note_remains_editable_through_write_note() {
         let (_g, root) = vault();
-        let create = write_note(&root, "wiki/crlf.md", &fm("CRLF Note", None), "v1\n", None)
+        let create = write_note(&root, "wiki/crlf.md", &fm("CRLF Note", None), "v1\n", None, false)
             .expect("create succeeds");
         let lf = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
         let crlf = lf.replace('\n', "\r\n");
@@ -955,8 +1005,8 @@ mod tests {
             "wiki/crlf.md",
             &fm("CRLF Note", None),
             "v2\n",
-            Some(&token),
-        );
+            Some(&token)
+        , false);
         assert!(
             edit.is_ok(),
             "CRLF note must stay editable: {:?}",
@@ -1022,7 +1072,7 @@ mod tests {
         let target = root.join("wiki/binary.md");
         let original: &[u8] = b"---\r\n\xff\xfe not utf8 \x00---\r\ngarbage\r\n";
         fs::write(&target, original).unwrap();
-        let err = write_note(&root, "wiki/binary.md", &fm("Clobber", None), "x\n", None)
+        let err = write_note(&root, "wiki/binary.md", &fm("Clobber", None), "x\n", None, false)
             .expect_err("non-UTF-8 target must be refused, not overwritten");
         assert!(
             matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if detail == "existing_unparsable:parse"),
@@ -1121,8 +1171,8 @@ mod tests {
             "wiki/test-note.md",
             &fm("T", None),
             "Body line.\nSecond.\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert_eq!(result.path, "wiki/test-note.md");
         assert!(result.success);
@@ -1145,7 +1195,7 @@ mod tests {
     #[test]
     fn write_note_result_carries_fresh_token() {
         let (_g, root) = vault();
-        let result = write_note(&root, "wiki/tok.md", &fm("T", None), "x\n", None).unwrap();
+        let result = write_note(&root, "wiki/tok.md", &fm("T", None), "x\n", None, false).unwrap();
         assert!(result.success);
         assert!(!result.updated_at.is_empty());
         chrono::DateTime::parse_from_rfc3339(&result.updated_at).unwrap();
@@ -1155,12 +1205,12 @@ mod tests {
     #[test]
     fn d2_edit_requires_exact_token() {
         let (_g, root) = vault();
-        write_note(&root, "wiki/n.md", &fm("T", None), "v1\n", None).unwrap();
+        write_note(&root, "wiki/n.md", &fm("T", None), "v1\n", None, false).unwrap();
         let current =
             read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
 
         // No token → refused (cannot prove freshness).
-        let err = write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", None).unwrap_err();
+        let err = write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", None, false).unwrap_err();
         assert!(
             matches!(err, WriteNoteError::StaleUpdate { ref updated_at } if updated_at == &current)
         );
@@ -1171,15 +1221,15 @@ mod tests {
             "wiki/n.md",
             &fm("T", None),
             "v2\n",
-            Some("1999-01-01T00:00:00Z"),
-        )
+            Some("1999-01-01T00:00:00Z")
+        , false)
         .unwrap_err();
         assert!(
             matches!(err, WriteNoteError::StaleUpdate { ref updated_at } if updated_at == &current)
         );
 
         // Correct token → succeeds, token rotates.
-        write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", Some(&current)).unwrap();
+        write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", Some(&current), false).unwrap();
         let bumped =
             read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
         assert_ne!(current, bumped);
@@ -1189,9 +1239,9 @@ mod tests {
     #[test]
     fn d3_traversal_rejected() {
         let (_g, root) = vault();
-        let err = write_note(&root, "../outside.md", &fm("T", None), "x\n", None).unwrap_err();
+        let err = write_note(&root, "../outside.md", &fm("T", None), "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
-        let err = write_note(&root, "/etc/passwd", &fm("T", None), "x\n", None).unwrap_err();
+        let err = write_note(&root, "/etc/passwd", &fm("T", None), "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
     }
 
@@ -1204,8 +1254,8 @@ mod tests {
             "wiki/deep/er/note.md",
             &fm("Deep", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(root.join("wiki/deep/er/note.md").is_file());
     }
@@ -1214,7 +1264,7 @@ mod tests {
     #[test]
     fn d5_upsert_no_duplicates() {
         let (_g, root) = vault();
-        write_note(&root, "wiki/a.md", &fm("A", None), "x\n", None).unwrap();
+        write_note(&root, "wiki/a.md", &fm("A", None), "x\n", None, false).unwrap();
         fs::write(
             root.join("wiki/INDEX.md"),
             "# Index\n\n## other\n[[b.md]]\n- Type: doc\n",
@@ -1334,8 +1384,8 @@ mod tests {
             "immutable-source-files/agents/mem.md",
             &fm("Agent memory", None),
             "deposited\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(result.success);
         assert!(root.join("immutable-source-files/agents/mem.md").is_file());
@@ -1351,8 +1401,8 @@ mod tests {
             "immutable-source-files/agents/people/tessera/x.md",
             &fm("Nested", None),
             "deposited\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(result.success);
         assert!(root
@@ -1370,8 +1420,8 @@ mod tests {
             "immutable-source-files/agents/products/curated-thoughts/specs/y.md",
             &fm("Deep", None),
             "deposited\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(result.success);
         assert!(root
@@ -1388,8 +1438,8 @@ mod tests {
             "immutable-source-files/secrets.md",
             &fm("T", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
     }
@@ -1405,8 +1455,8 @@ mod tests {
             "immutable-source-files/agents-evil/nested/mem.md",
             &fm("T", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
         assert!(!root.join("immutable-source-files/agents-evil").exists());
@@ -1424,8 +1474,8 @@ mod tests {
             "./wiki/deep/er/dot.md",
             &fm("Dot", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(root.join("wiki/deep/er/dot.md").is_file());
 
@@ -1434,8 +1484,8 @@ mod tests {
             "./immutable-source-files/agents/nested/dot.md",
             &fm("Dot", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(root
             .join("immutable-source-files/agents/nested/dot.md")
@@ -1460,8 +1510,8 @@ mod tests {
             "immutable-source-files/agents/sub/deep/mem.md",
             &fm("T", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap_err();
 
         assert!(matches!(err, WriteNoteError::WriteError(_)));
@@ -1483,8 +1533,8 @@ mod tests {
             "records/sessions/people/tessera/x.md",
             &fm("Session", None),
             "deposited\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(result.success);
         assert!(root.join("records/sessions/people/tessera/x.md").is_file());
@@ -1497,7 +1547,7 @@ mod tests {
     fn retired_flat_agents_layout_is_rejected_naming_roots() {
         let (_g, root) = deposit_vault();
         let err =
-            write_note(&root, "agents/tessera/mem.md", &fm("T", None), "x\n", None).unwrap_err();
+            write_note(&root, "agents/tessera/mem.md", &fm("T", None), "x\n", None, false).unwrap_err();
         match &err {
             WriteNoteError::DisallowedRoot {
                 first_segment,
@@ -1524,7 +1574,7 @@ mod tests {
     fn disallowed_root_rejection_creates_no_dirs() {
         let (_g, root) = vault();
         let err =
-            write_note(&root, "people/deep/notes.md", &fm("T", None), "x\n", None).unwrap_err();
+            write_note(&root, "people/deep/notes.md", &fm("T", None), "x\n", None, false).unwrap_err();
         assert!(
             matches!(err, WriteNoteError::DisallowedRoot { .. }),
             "got {err:?}"
@@ -1538,7 +1588,7 @@ mod tests {
     fn root_lookalikes_are_rejected() {
         let (_g, root) = vault();
         for path in ["records-evil/x.md", "wiki-adjacent/x.md", "my.records/x.md"] {
-            let err = write_note(&root, path, &fm("T", None), "x\n", None).unwrap_err();
+            let err = write_note(&root, path, &fm("T", None), "x\n", None, false).unwrap_err();
             assert!(
                 matches!(err, WriteNoteError::DisallowedRoot { .. }),
                 "{path}: expected DisallowedRoot, got {err:?}"
@@ -1559,8 +1609,8 @@ mod tests {
             "immutable-source-files/secrets.md",
             &fm("T", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
     }
@@ -1570,9 +1620,9 @@ mod tests {
     #[test]
     fn dot_prefix_does_not_bypass_root_allowlist() {
         let (_g, root) = vault();
-        write_note(&root, "./wiki/ok.md", &fm("D", None), "x\n", None).unwrap();
+        write_note(&root, "./wiki/ok.md", &fm("D", None), "x\n", None, false).unwrap();
         let err =
-            write_note(&root, "./agents/tessera/m.md", &fm("D", None), "x\n", None).unwrap_err();
+            write_note(&root, "./agents/tessera/m.md", &fm("D", None), "x\n", None, false).unwrap_err();
         assert!(
             matches!(err, WriteNoteError::DisallowedRoot { .. }),
             "got {err:?}"
@@ -1588,8 +1638,8 @@ mod tests {
             "immutable-source-files/agents/first.md",
             &fm("First", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         assert!(root
             .join("immutable-source-files/agents/first.md")
@@ -1606,8 +1656,8 @@ mod tests {
             "immutable-source-files/agents/v1.md",
             &fm("V1", None),
             "old\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         let mut m = fm("V2", None);
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
@@ -1616,8 +1666,8 @@ mod tests {
             "immutable-source-files/agents/v2.md",
             &m,
             "new\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         let raw = fs::read_to_string(root.join("immutable-source-files/agents/v2.md")).unwrap();
         assert!(raw.contains("supersedes: immutable-source-files/agents/v1.md"));
@@ -1639,8 +1689,8 @@ mod tests {
             "immutable-source-files/agents/people/tessera/v1.md",
             &fm("V1", None),
             "old\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         let mut m = fm("V2", None);
         m.supersedes = Some("immutable-source-files/agents/people/tessera/v1.md".to_string());
@@ -1649,8 +1699,8 @@ mod tests {
             "immutable-source-files/agents/people/tessera/v2.md",
             &m,
             "new\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         let raw =
             fs::read_to_string(root.join("immutable-source-files/agents/people/tessera/v2.md"))
@@ -1667,11 +1717,11 @@ mod tests {
     #[test]
     fn ad6_supersedes_outside_deposit_rejected() {
         let (_g, root) = deposit_vault();
-        write_note(&root, "wiki/target.md", &fm("T", None), "x\n", None).unwrap();
+        write_note(&root, "wiki/target.md", &fm("T", None), "x\n", None, false).unwrap();
         let mut m = fm("Evil", None);
         m.supersedes = Some("wiki/target.md".to_string());
         let err =
-            write_note(&root, "immutable-source-files/agents/e.md", &m, "x\n", None).unwrap_err();
+            write_note(&root, "immutable-source-files/agents/e.md", &m, "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
     }
 
@@ -1682,7 +1732,7 @@ mod tests {
         let mut m = fm("T", None);
         m.supersedes = Some("immutable-source-files/agents/ghost.md".to_string());
         let err =
-            write_note(&root, "immutable-source-files/agents/n.md", &m, "x\n", None).unwrap_err();
+            write_note(&root, "immutable-source-files/agents/n.md", &m, "x\n", None, false).unwrap_err();
         match err {
             WriteNoteError::InvalidFrontmatter(ref detail) => {
                 assert!(detail.contains("supersedes_not_found"));
@@ -1701,7 +1751,7 @@ mod tests {
         let mut m = fm("Evil", None);
         m.supersedes = Some("immutable-source-files/agents-evil/x.md".to_string());
         let err =
-            write_note(&root, "immutable-source-files/agents/e.md", &m, "x\n", None).unwrap_err();
+            write_note(&root, "immutable-source-files/agents/e.md", &m, "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
     }
 
@@ -1714,12 +1764,12 @@ mod tests {
             "immutable-source-files/agents/v1.md",
             &fm("V1", None),
             "x\n",
-            None,
-        )
+            None
+        , false)
         .unwrap();
         let mut m = fm("W", None);
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
-        let err = write_note(&root, "wiki/w.md", &m, "x\n", None).unwrap_err();
+        let err = write_note(&root, "wiki/w.md", &m, "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
     }
 
@@ -1727,7 +1777,7 @@ mod tests {
     #[test]
     fn t3_roundtrip_guard_valid_note_passes() {
         let (_g, root) = vault();
-        let result = write_note(&root, "wiki/t3-a.md", &fm("T3 Note", None), "x\n", None);
+        let result = write_note(&root, "wiki/t3-a.md", &fm("T3 Note", None), "x\n", None, false);
         assert!(
             result.is_ok(),
             "valid note must pass round-trip guard: {:?}",
@@ -1743,7 +1793,7 @@ mod tests {
         let (_g, root) = vault();
         let mut m = fm("T3 Empty Tags", None);
         m.tags = Some(vec![]);
-        let result = write_note(&root, "wiki/t3-b.md", &m, "x\n", None);
+        let result = write_note(&root, "wiki/t3-b.md", &m, "x\n", None, false);
         assert!(
             result.is_ok(),
             "Some(vec![]) tags must normalize to None and pass: {:?}",
@@ -1885,7 +1935,7 @@ mod tests {
     /// way the issue-#231 reporter did), and edit again with that token.
     fn write_and_edit(title: &str) -> Result<(WriteNoteResult, WriteNoteResult), WriteNoteError> {
         let (_guard, root) = vault();
-        let create = write_note(&root, "wiki/note.md", &fm(title, None), "v1\n", None)?;
+        let create = write_note(&root, "wiki/note.md", &fm(title, None), "v1\n", None, false)?;
         let on_disk = fs::read_to_string(root.join("wiki/note.md")).unwrap();
         let token = read_existing_token(&on_disk).expect("token readable after create");
         let edit = write_note(
@@ -1893,8 +1943,8 @@ mod tests {
             "wiki/note.md",
             &fm(title, None),
             "v2\n",
-            Some(&token),
-        )?;
+            Some(&token)
+        , false)?;
         Ok((create, edit))
     }
 
@@ -1925,7 +1975,7 @@ mod tests {
             "2026-09-25T14:00:00Z: deploy retro",
         ] {
             let (_g, root) = vault();
-            write_note(&root, "wiki/n.md", &fm(title, None), "x\n", None)
+            write_note(&root, "wiki/n.md", &fm(title, None), "x\n", None, false)
                 .unwrap_or_else(|e| panic!("{title:?}: create failed: {e}"));
             let on_disk = fs::read_to_string(root.join("wiki/n.md")).unwrap();
             let parsed = extract_fm(&on_disk);
@@ -1952,8 +2002,8 @@ mod tests {
             "wiki/legacy.md",
             &fm("Deploy: retro", None),
             "body v2\n",
-            Some(&token),
-        )
+            Some(&token)
+        , false)
         .expect("legacy broken fixture must heal on its next edit");
         assert!(result.success);
         // Healed: the title is now quoted on disk and the strict parse works.
@@ -1991,7 +2041,7 @@ mod tests {
             "x\nstatus: approved",
         ] {
             let (_g, root) = vault();
-            let outcome = write_note(&root, "wiki/inj.md", &fm(title, None), "x\n", None);
+            let outcome = write_note(&root, "wiki/inj.md", &fm(title, None), "x\n", None, false);
             let on_disk = match outcome {
                 Ok(result) => {
                     assert!(result.success, "{title:?}");
@@ -2099,11 +2149,11 @@ mod tests {
             let (_g, root) = vault();
             let mut m = fm("Tagged note", None);
             m.tags = Some(tags.iter().map(|s| s.to_string()).collect());
-            write_note(&root, "wiki/tags.md", &m, "v1\n", None)
+            write_note(&root, "wiki/tags.md", &m, "v1\n", None, false)
                 .unwrap_or_else(|e| panic!("create {tags:?}: {e}"));
             let on_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
             let token = read_existing_token(&on_disk).expect("token readable after create");
-            let edit = write_note(&root, "wiki/tags.md", &m, "v2\n", Some(&token))
+            let edit = write_note(&root, "wiki/tags.md", &m, "v2\n", Some(&token), false)
                 .unwrap_or_else(|e| panic!("edit {tags:?}: {e}"));
             assert!(edit.success, "{tags:?}");
             let final_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
@@ -2180,8 +2230,8 @@ mod tests {
                 name,
                 &fm("Edited", None),
                 "x\n",
-                Some("1999-01-01T00:00:00Z"),
-            )
+                Some("1999-01-01T00:00:00Z")
+            , false)
             .expect_err("edit of unparsable note must be refused");
             assert!(
                 matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if *detail == *reason),
@@ -2194,8 +2244,8 @@ mod tests {
             "wiki/clean.md",
             &fm("Fine", None),
             "edited\n",
-            Some("2026-09-25T01:00:00Z"),
-        )
+            Some("2026-09-25T01:00:00Z")
+        , false)
         .expect("clean note stays editable");
     }
 
@@ -2211,6 +2261,449 @@ mod tests {
                 acc
             });
         parse_frontmatter(&fenced).unwrap()
+    }
+
+    fn long_body(lines: usize) -> String {
+        (0..lines)
+            .map(|i| format!("line {i} of a substantial note body\n"))
+            .collect()
+    }
+
+    #[test]
+    fn edit_rejects_truncated_payload_replay_of_incident() {
+        // Spec L114-116 exact byte counts (review M3): 12,860 → 505 RENDERED.
+        // Bodies are built WITH their trailing newline (render_document adds
+        // one only if missing — review R1), so 12859+1 = 12860 on disk,
+        // 504+1 = 505 rendered.
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing_body = format!("{}\n", "x".repeat(12859)); // 12,860 bytes rendered
+        let new_body = format!("{}\n", "x".repeat(504)); // 505 bytes rendered
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            &new_body,
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap_err();
+        let s = err.to_string();
+        assert!(s.starts_with("shrink_refused:12860:505"), "{s}");
+        assert!(s.contains("re-read the note"), "{s}");
+        assert!(!s.contains("allow_shrink"), "{s}");
+    }
+
+    #[test]
+    fn edit_boundary_new_double_is_allowed() {
+        // B1 fix: bodies carry their own trailing newline. Rendered sizes:
+        // existing 1023+1 = 1024, new 511+1 = 512 → 512*2 == 1024 → ALLOWED
+        // (== must pass). (Old draft used 1024/512 raw; render made them
+        // 1025/513, so the equality case never actually tested equality.)
+        let existing_body = format!("{}\n", "x".repeat(1023)); // 1024 rendered
+        let new_body = format!("{}\n", "x".repeat(511)); // 512 rendered
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            &new_body,
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn edit_boundary_odd_existing_refused() {
+        // B1 fix: rendered sizes existing 1024+1 = 1025, new 511+1 = 512 →
+        // 512*2 = 1024 < 1025 → refused with the exact prefix. (Old draft's
+        // 1025/512 raw bodies rendered 1026/513 → 513*2 = 1026, NOT < 1026,
+        // so unwrap_err() panicked — the exact spec L35-37 trap.)
+        let existing_body = format!("{}\n", "x".repeat(1024)); // 1025 rendered
+        let new_body = format!("{}\n", "x".repeat(511)); // 512 rendered
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            &new_body,
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().starts_with("shrink_refused:1025:512"));
+    }
+
+    #[test]
+    fn edit_boundary_plus_one_newline_alone_can_refuse() {
+        // Spec L128-130 (review B1): a new body WITHOUT a trailing \n that
+        // is refused only because render adds the +1. Existing renders 1025
+        // (1024+\n). Raw-new 511 renders 512 → 512*2 = 1024 < 1025 →
+        // refused — but raw math on 511 gives the same verdict. To pin the
+        // +1 ITSELF, use raw-new 512: raw math says 512*2 = 1024 < 1025
+        // (refuse), rendered math says 513*2 = 1026 ≥ 1025 (allow). Rendered
+        // wins → the write SUCCEEDS. This test fails if anyone switches the
+        // measurement basis to raw bodies.
+        let existing_body = format!("{}\n", "x".repeat(1024)); // 1025 rendered
+        let new_body = "x".repeat(512); // NO newline → renders 513
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            &new_body,
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn small_notes_may_be_fully_rewritten_without_flag() {
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &"x".repeat(200),
+            None,
+            false,
+        )
+        .unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            "tiny\n",
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn allow_shrink_permits_major_shrink() {
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &long_body(400),
+            None,
+            false,
+        )
+        .unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            "deliberate full rewrite\n",
+            Some(&created.updated_at),
+            true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn create_with_marker_is_rejected() {
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let body = "text [SKILL_PRUNED] more text\n";
+        let err = write_note(&root, "wiki/n.md", &fm("T", None), body, None, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("compaction_marker:[SKILL_PRUNED]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn edit_rejects_newly_introduced_marker() {
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            "clean body\n",
+            None,
+            false,
+        )
+        .unwrap();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            "clean body\nHERMES-CONTEXT-COMPRESSION\n",
+            Some(&created.updated_at),
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("compaction_marker:HERMES-CONTEXT-COMPRESSION"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn edit_permits_marker_already_in_existing_frontmatter() {
+        // B2 fix (review): write_note CREATE refuses every marker — including
+        // in the title — so the seed note must go straight to disk via
+        // fs::write with a hand-built valid fence. OkfFrontmatter has NO
+        // `description` field (fields: okf_version, profile, title,
+        // entity_type, tags, created_at, updated_at, supersedes) — the old
+        // draft's `note.description = …` was a compile error; the second
+        // marker lives in `tags`.
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing = [
+            "---",
+            "okf_version: 1",
+            "title: \"note about [SKILL_PRUNED]\"",
+            "tags: [\"quotes HERMES-CONTEXT-COMPRESSION\"]",
+            "created_at: \"2026-09-01T00:00:00Z\"",
+            "updated_at: \"2026-09-01T00:00:00Z\"",
+            "---",
+            "body one",
+            "",
+        ]
+        .join("\n");
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/n.md"), &existing).unwrap();
+        let token = read_existing_token(&existing).unwrap();
+        // Every legitimate edit re-sends that frontmatter — must NOT be
+        // locked (spec D2). Use fm("note about [SKILL_PRUNED]", …) so the new
+        // document carries the same markers the existing one has.
+        let note = fm("note about [SKILL_PRUNED]", Some(&token));
+        write_note(&root, "wiki/n.md", &note, "body two\n", Some(&token), false).unwrap();
+    }
+
+    #[test]
+    fn edit_rejects_marker_in_existing_body_when_not_resent() {
+        // Review B2 addition (spec L119): marker already in the existing
+        // BODY, and the edit drops it — allowed, because the guard only
+        // refuses NEWLY INTRODUCED markers (document contains ∧ ¬existing
+        // contains). Seeded via fs::write for the same create-refusal reason.
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing = [
+            "---",
+            "okf_version: 1",
+            "title: \"t\"",
+            "created_at: \"2026-09-01T00:00:00Z\"",
+            "updated_at: \"2026-09-01T00:00:00Z\"",
+            "---",
+            "text [SKILL_PRUNED] from an old compaction",
+            "",
+        ]
+        .join("\n");
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/n.md"), &existing).unwrap();
+        let token = read_existing_token(&existing).unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("t", Some(&token)),
+            "clean replacement\n",
+            Some(&token),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn marker_check_runs_before_shrink_check() {
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &long_body(400),
+            None,
+            false,
+        )
+        .unwrap();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            "[SKILL_PRUNED]\n",
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().starts_with("compaction_marker:"),
+            "marker must win: {err}"
+        );
+    }
+
+    #[test]
+    fn body_bytes_counts_fence_less_content_whole() {
+        // Review m6 (spec L131-135): the fence-less path is UNREACHABLE
+        // through write_note — enforce_staleness refuses no_fence first — so
+        // this pins the helper directly instead of an end-to-end refusal.
+        assert_eq!(body_bytes("no fence\n"), 9);
+        assert_eq!(body_bytes(""), 0);
+    }
+
+    #[test]
+    fn params_allow_shrink_omitted_defaults_false_and_true_parses() {
+        // Review m7 (spec L121-122): plumbing tests. Key omitted → false.
+        // DEVIATION (plan-vs-code): the plan's fixture used "frontmatter": {}
+        // but OkfFrontmatter has no Default and five required fields, so that
+        // deserialization fails; the fixture fills the required fields. The
+        // asserted behavior (allow_shrink default/parse) is unchanged.
+        let fm_json = serde_json::json!({
+            "okf_version": "0.1",
+            "profile": "llm-wiki/1",
+            "title": "T",
+            "entity_type": "fact",
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+        let v: serde_json::Value =
+            serde_json::json!({ "path": "wiki/n.md", "frontmatter": fm_json, "body": "b" });
+        let p: crate::tool_dispatch::VaultWriteNoteParams = serde_json::from_value(v).unwrap();
+        assert!(!p.allow_shrink);
+        let v: serde_json::Value = serde_json::json!({ "path": "wiki/n.md", "frontmatter": fm_json, "body": "b", "allow_shrink": true });
+        let p: crate::tool_dispatch::VaultWriteNoteParams = serde_json::from_value(v).unwrap();
+        assert!(p.allow_shrink);
+    }
+
+    #[test]
+    fn shrink_refusal_reaches_mcp_surface_via_anyhow() {
+        // Review m7: a shrink refusal must surface through dispatch's
+        // anyhow!("{}") mapping — assert the message survives the mapping
+        // and still carries the exact prefix (never "allow_shrink").
+        // (The plan shipped this test as a stub; body implemented per the
+        // plan's own Arrange/Act/Assert sketch.)
+        let (_g, root) = vault();
+        let existing_body = "x".repeat(2048);
+        let created =
+            write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
+        // Rendered new body 100+1 = 101 → 202 < 2049 → shrink_refused.
+        let new_body = "y".repeat(100);
+        let err = crate::tool_dispatch::dispatch_vault_write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            &new_body,
+            false,
+        )
+        .unwrap_err();
+        let s = err.to_string();
+        assert!(s.starts_with("shrink_refused:"), "{s}");
+        assert!(!s.contains("allow_shrink"), "must not teach the bypass: {s}");
+    }
+
+    #[test]
+    fn rendered_length_is_the_basis_trailing_newline_added() {
+        // Body of exactly 1024 bytes WITHOUT a trailing newline renders at
+        // 1025 — the guard measures the RENDERED form; existing rendered is
+        // 2048 → 1025*2 = 2050 ≥ 2048 → allowed. (Raw-body math would also
+        // allow here; the odd-existing pair in the CRLF test pins the exact
+        // disagree-by-one case.)
+        let existing_body = "x".repeat(2048);
+        let new_body = "x".repeat(1024); // renders +1 newline
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&created.updated_at)),
+            &new_body,
+            Some(&created.updated_at),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn crlf_note_measures_byte_exact_body() {
+        let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
+        let existing_body = "x".repeat(1100);
+        // `_created`: unused in this test (the token is scraped from the CRLF
+        // file below); underscore-prefix keeps the clippy -D warnings gate
+        // green, matching the plan's own `_g` fixture style.
+        let _created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
+        let on_disk = std::fs::read_to_string(root.join("wiki/n.md")).unwrap();
+        // Convert the stored file to CRLF line endings to simulate a CRLF note.
+        let crlf = on_disk.replace('\n', "\r\n");
+        std::fs::write(root.join("wiki/n.md"), &crlf).unwrap();
+        let token = read_existing_token(&crlf).unwrap();
+        // M4 fix: pin the EXACT error, not just the prefix — a prefix-only
+        // assert passes even if fence measurement silently drops \r bytes.
+        // Existing: raw 1100-body + \n, whole file converted to CRLF → the
+        // existing body measures 1102 raw bytes (1100 x's + \r\n — the spec
+        // pins RAW rendered bytes, "no normalization step", D4). Rendered
+        // new body 549+1 = 550 → 550*2 = 1100 < 1102 → refused. (Plan draft
+        // asserted 1101 via a "renderer-normalized" basis that does not
+        // exist; the plan's own escape hatch authorizes adjusting the pair —
+        // the assert stays exact, per review R1's render semantics.)
+        let new_body = "x".repeat(549);
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &new_body,
+            Some(&token),
+            false,
+        )
+        .unwrap_err();
+        let s = err.to_string();
+        assert!(s.starts_with("shrink_refused:"), "{s}");
+        // Exact-pair assert (guard against silent \r-dropping fence bugs):
+        assert_eq!(s.split(':').nth(1), Some("1102"), "{s}");
+        assert_eq!(s.split(':').nth(2), Some("550"), "{s}");
     }
 
     #[test]

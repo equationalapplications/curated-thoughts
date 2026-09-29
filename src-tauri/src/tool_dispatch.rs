@@ -289,6 +289,7 @@ pub fn dispatch_vault_write_note(
     path: &str,
     frontmatter: &crate::okf::OkfFrontmatter,
     body: &str,
+    allow_shrink: bool,
 ) -> Result<crate::okf::WriteNoteResult> {
     // Thin adapter (spec v2): all logic lives in the `okf::write` core.
     // The MCP surface carries no separate If-Match parameter — the supplied
@@ -300,6 +301,7 @@ pub fn dispatch_vault_write_note(
         frontmatter,
         body,
         frontmatter.updated_at.as_deref(),
+        allow_shrink,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
@@ -1138,6 +1140,11 @@ pub struct VaultWriteNoteParams {
     pub path: String,
     pub frontmatter: crate::okf::OkfFrontmatter,
     pub body: String,
+    /// Issue #240: set true ONLY for a deliberate full rewrite that the
+    /// size-drop guard would refuse. Defaults to false; the MCP schema
+    /// exposes it via schemars.
+    #[serde(default)]
+    pub allow_shrink: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1510,7 +1517,7 @@ pub async fn dispatch_tool_call(
                 .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
                 .clone();
             let result = tokio::task::spawn_blocking(move || {
-                dispatch_vault_write_note(&vault_dir, &p.path, &p.frontmatter, &p.body)
+                dispatch_vault_write_note(&vault_dir, &p.path, &p.frontmatter, &p.body, p.allow_shrink)
             })
             .await??;
             Ok(serde_json::to_value(result)?)
