@@ -15,7 +15,11 @@
 //!   `## {name}` / `[[{path}]]` / `- Type: {type}` / `- Key: value`… lines.
 //! - Errors use the pinned string shapes: `path_outside_vault`,
 //!   `invalid_frontmatter:{detail}`, `stale_update:{current}`,
-//!   `index_not_found:{path}`, `invalid_entry_name`, `write_error:{io}`.
+//!   `index_not_found:{path}`, `invalid_entry_name`, `write_error:{io}`,
+//!   `shrink_refused:{existing}:{new}: re-read the note and resend the full
+//!   body`, `compaction_marker:{marker}: rephrase and resend without
+//!   compaction artifacts`. Display strings ARE the contract; see each
+//!   variant's `#[error]` for the authoritative shape.
 //!   When the EXISTING file's frontmatter cannot be read for the If-Match
 //!   check, the write is refused with `invalid_frontmatter:existing_unparsable:{parse|no_fence|no_token}`
 //!   (`parse` = duplicate/malformed token, `no_fence` = no frontmatter fence,
@@ -40,6 +44,15 @@ use crate::vault::{
 /// Within `immutable-source-files`, writes stay constrained to the
 /// `immutable-source-files/agents/**` deposit prefix by `NOTE_WRITABLE_SUBDIRS`.
 pub const NOTE_WRITABLE_ROOTS: &[&str] = &[IMMUTABLE_DIR, RECORDS_DIR, WIKI_DIR];
+
+/// Context-compaction markers (issue #240): text a truncated agent payload
+/// can carry into a note. A create containing any of these is refused; an
+/// edit may only introduce a marker the existing content already contains.
+pub const COMPACTION_MARKERS: &[&str] = &["[SKILL_PRUNED]", "HERMES-CONTEXT-COMPRESSION"];
+/// Edits of notes whose body is smaller than this are never shrink-guarded:
+/// a legitimate full rewrite of a small note must stay possible without
+/// `allow_shrink` (the incident this guard replays was 12,860 bytes).
+pub const MIN_GUARDED_BODY_BYTES: usize = 1024;
 
 use super::{
     parse_frontmatter, render_frontmatter, sha256_hash, validate_frontmatter, OkfFrontmatter,
@@ -2198,5 +2211,23 @@ mod tests {
                 acc
             });
         parse_frontmatter(&fenced).unwrap()
+    }
+
+    #[test]
+    fn shrink_refused_display_has_pinned_shape_without_allow_shrink_hint() {
+        let e = WriteNoteError::ShrinkRefused { existing_bytes: 12860, new_bytes: 505 };
+        let s = e.to_string();
+        assert!(s.starts_with("shrink_refused:12860:505"), "{s}");
+        assert!(s.contains("re-read the note and resend the full body"), "{s}");
+        assert!(!s.contains("allow_shrink"), "must not teach the bypass: {s}");
+    }
+
+    #[test]
+    fn compaction_marker_display_has_pinned_shape_without_allow_shrink_hint() {
+        let e = WriteNoteError::CompactionMarkerRejected { marker: "[SKILL_PRUNED]".into() };
+        let s = e.to_string();
+        assert!(s.starts_with("compaction_marker:[SKILL_PRUNED]"), "{s}");
+        assert!(s.contains("rephrase and resend"), "{s}");
+        assert!(!s.contains("allow_shrink"), "must not teach the bypass: {s}");
     }
 }
