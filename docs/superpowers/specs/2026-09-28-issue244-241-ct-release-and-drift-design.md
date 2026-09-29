@@ -1,7 +1,7 @@
 # Ship `ct` as a release asset (#244) + deletion self-cleaning docs & `ct drift` (#241)
 
 **Date:** 2026-09-28
-**Status:** Draft
+**Status:** Implemented 2026-09-28 (PR #249)
 **Branch:** feat/issue-244-ct-release-and-241-drift
 **Priority:** High for #244 (real stale-binary incident 2026-09-27); Medium for #241
 
