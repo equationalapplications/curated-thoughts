@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { safeUnlisten } from "../../lib/events";
+import { safeUnlisten, guardListen } from "../../lib/events";
+import { needsChunkHashMigration } from "../../lib/tauri";
 
 interface Props {
   onComplete: () => void;
@@ -21,21 +22,54 @@ export function SplashScreen({ onComplete }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const unlistenProgress = listen<MigrationProgressEvent>(
+    const unlistenProgress = guardListen(
+      listen<MigrationProgressEvent>(
+        "migration-progress",
+        (event) => setProgress(event.payload),
+      ),
       "migration-progress",
-      (event) => setProgress(event.payload),
     );
-    const unlistenComplete = listen("migration-complete", () => {
-      onComplete();
+    const unlistenComplete = guardListen(
+      listen("migration-complete", () => {
+        onComplete();
+      }),
+      "migration-complete",
+    );
+    // Fallback when the completion listener fails to REGISTER: the event can
+    // never arrive, so the splash would sit here forever (issue #236
+    // review). Poll the migration gate command instead — it flips to `false`
+    // once the backend migration has done its work, which is exactly the
+    // condition "migration-complete" fires under. A rejected gate query
+    // keeps the poll running; the error event still drives the error UI.
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    void unlistenComplete.catch((err) => {
+      console.warn("[splash] migration-complete registration failed; polling gate", err);
+      const poll = async () => {
+        try {
+          if (!(await needsChunkHashMigration())) {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = null;
+            onComplete();
+          }
+        } catch {
+          // gate query failed — keep polling; do not complete on a guess
+        }
+      };
+      void poll();
+      pollTimer = setInterval(poll, 2000);
     });
-    const unlistenError = listen<MigrationErrorEvent>(
+    const unlistenError = guardListen(
+      listen<MigrationErrorEvent>(
+        "migration-error",
+        (event) => setError(event.payload.message),
+      ),
       "migration-error",
-      (event) => setError(event.payload.message),
     );
     return () => {
       void safeUnlisten(unlistenProgress);
       void safeUnlisten(unlistenComplete);
       void safeUnlisten(unlistenError);
+      if (pollTimer) clearInterval(pollTimer);
     };
   }, [onComplete]);
 

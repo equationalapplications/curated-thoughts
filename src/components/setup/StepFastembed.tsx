@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { initFastembed } from "../../lib/tauri";
-import { onEmbedInitDone, onEmbedInitError, safeUnlisten } from "../../lib/events";
+import { onEmbedInitDone, onEmbedInitError, guardListen, safeUnlisten } from "../../lib/events";
 import { WizardStep } from "./WizardStep";
 
 interface Props {
@@ -17,18 +17,32 @@ export function StepFastembed({ onNext }: Props) {
     let mounted = true;
     // Hold the pending subscriptions so cleanup can remove them even when the
     // step unmounts before listen() resolves.
-    const unlistenDone = onEmbedInitDone(() => {
+    const unlistenDone = guardListen(onEmbedInitDone(() => {
       if (!mounted) return;
       onNext();
+    }), "embed-init-done");
+    // Registration failure means the completion event can never arrive and
+    // call onNext — surface it instead of spinning in "loading" forever
+    // (WizardStep keeps "Continue" disabled while isLoading is true). Side
+    // branch: unlistenDone itself stays the ORIGINAL subscription (the
+    // events.ts contract for caller catches), so cleanup via safeUnlisten
+    // is unchanged and no derived rejection can float.
+    void unlistenDone.catch((err) => {
+      if (mounted) {
+        setErrorMsg(String(err));
+        setPhase("error");
+      }
     });
-    const unlistenError = onEmbedInitError(({ message }) => {
+    const unlistenError = guardListen(onEmbedInitError(({ message }) => {
       if (!mounted) return;
       setErrorMsg(message);
       setPhase("error");
-    });
+    }), "embed-init-error");
 
     const setup = async () => {
-      await Promise.all([unlistenDone, unlistenError]);
+      // allSettled: subscription failure degrades progress/error display but
+      // must never skip the actual init (the old Promise.all skipped it).
+      await Promise.allSettled([unlistenDone, unlistenError]);
 
       try {
         await initFastembed();

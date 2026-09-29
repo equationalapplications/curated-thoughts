@@ -40,7 +40,7 @@ vi.mock("../lib/events", async (importOriginal) => {
   // UnlistenFn is a function that when called, unsubscribes
   const unlistenFn = vi.fn();
   return {
-    safeUnlisten: actual.safeUnlisten,
+    ...actual,
     onProviderLoading: vi.fn(() => Promise.resolve(unlistenFn)),
     onProviderReady: vi.fn(() => Promise.resolve(unlistenFn)),
     onProviderError: vi.fn(() => Promise.resolve(unlistenFn)),
@@ -165,5 +165,41 @@ describe("GenerationPanel", () => {
     await waitFor(() => expect(getProviderConfig).toHaveBeenCalled());
     expect(screen.getByLabelText(/External base URL/i)).toBeDisabled();
     expect(screen.getByRole("button", { name: /Save/i })).toBeDisabled();
+  });
+
+  it("unlistens surviving subscriptions when one listen() rejects", async () => {
+    // Regression (#236): the old Promise.all shape rejected as soon as one
+    // subscription failed, so the survivors' unlisten fns were never
+    // awaited or cleaned up — a held-promise leak. Each subscription must
+    // be guarded individually: the rejection logs once, and the survivors
+    // still unlisten on unmount.
+    const unlistenReady = vi.fn();
+    const unlistenError = vi.fn();
+    let resolveReady!: (fn: () => void) => void;
+    let resolveError!: (fn: () => void) => void;
+    (events.onProviderLoading as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.reject(new Error("listen boom")),
+    );
+    (events.onProviderReady as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => (resolveReady = r)),
+    );
+    (events.onProviderError as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => (resolveError = r)),
+    );
+
+    const { unmount } = render(<GenerationPanel />);
+    await waitFor(() =>
+      expect(events.onProviderLoading).toHaveBeenCalledOnce(),
+    );
+    unmount();
+
+    // Resolving after unmount must still drive each survivor's unlisten.
+    resolveReady(unlistenReady);
+    resolveError(unlistenError);
+
+    await waitFor(() => {
+      expect(unlistenReady).toHaveBeenCalledOnce();
+      expect(unlistenError).toHaveBeenCalledOnce();
+    });
   });
 });

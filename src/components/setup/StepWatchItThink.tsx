@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ingestDocument } from "../../lib/tauri";
 import {
+  guardListen,
   onIngestProgress,
   onIngestProposalReady,
   onIngestError,
   safeUnlisten,
+  UnlistenFn,
 } from "../../lib/events";
 import { WizardStep } from "./WizardStep";
 
@@ -36,28 +38,36 @@ export function StepWatchItThink({ onSkip, onRouteToReview }: Props) {
 
   useEffect(() => {
     let mounted = true;
-    let unlistens: Array<() => void> = [];
+    let unlistens: Array<Promise<UnlistenFn>> = [];
     (async () => {
-      const [up, ur, ue] = await Promise.all([
-        onIngestProgress((p) => {
-          if (!mounted) return;
-          lastProgressAt.current = Date.now();
-          applyPhase(p.phase);
-        }),
-        onIngestProposalReady((p) => {
-          if (!mounted) return;
-          lastProgressAt.current = Date.now();
-          setProposalId(p.proposalId);
-          applyPhase("ready");
-        }),
-        onIngestError((p) => {
-          if (!mounted) return;
-          setErrorMsg(p.message);
-          applyPhase("error");
-        }),
-      ]);
-      unlistens = [up, ur, ue];
-      if (!mounted) unlistens.forEach((u) => void safeUnlisten(u));
+      unlistens = [
+        guardListen(
+          onIngestProgress((p) => {
+            if (!mounted) return;
+            lastProgressAt.current = Date.now();
+            applyPhase(p.phase);
+          }),
+          "ingest-progress",
+        ),
+        guardListen(
+          onIngestProposalReady((p) => {
+            if (!mounted) return;
+            lastProgressAt.current = Date.now();
+            setProposalId(p.proposalId);
+            applyPhase("ready");
+          }),
+          "ingest-proposal-ready",
+        ),
+        guardListen(
+          onIngestError((p) => {
+            if (!mounted) return;
+            setErrorMsg(p.message);
+            applyPhase("error");
+          }),
+          "ingest-error",
+        ),
+      ];
+      if (!mounted) unlistens.forEach((p) => void safeUnlisten(p));
     })();
     return () => {
       mounted = false;

@@ -18,7 +18,7 @@ import {
 import { SetupWizard } from "../setup/SetupWizard";
 import { SkipLink } from "../../a11y";
 import { startFileWatcher, needsChunkHashMigration, peekPendingConfigMalformed, ackPendingConfigMalformed } from "../../lib/tauri";
-import { onVaultSwitched, safeUnlisten } from "../../lib/events";
+import { onVaultSwitched, safeUnlisten, guardListen } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 import { useProposalQueue } from "../../hooks/useProposalQueue";
 import { useProposalNotifications } from "../../hooks/useProposalNotifications";
@@ -132,25 +132,25 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   }
 
   useEffect(() => {
-    const promise = onVaultSwitched((newPath) => {
-      setPeekTarget(null);
-      setBrainEntityId(null);
-      setBrainEntityName(null);
-      setLibraryDoc(null);
-      nav.reset({ mode: "brain" });
-      onVaultChanged(newPath);
-    });
+    const promise = guardListen(
+      onVaultSwitched((newPath) => {
+        setPeekTarget(null);
+        setBrainEntityId(null);
+        setBrainEntityName(null);
+        setLibraryDoc(null);
+        nav.reset({ mode: "brain" });
+        onVaultChanged(newPath);
+      }),
+      "vault-switched",
+    );
     return () => {
       void safeUnlisten(promise);
     };
   }, [onVaultChanged, nav.reset]);
 
   useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-
-    getCurrentWindow()
-      .onDragDropEvent((event) => {
+    const promise = guardListen(
+      getCurrentWindow().onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === "leave") {
           setDragging(false);
@@ -161,18 +161,11 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
         } else if (payload.type === "drop") {
           setDragging(false);
         }
-      })
-      .then((fn) => {
-        if (cancelled) {
-          void safeUnlisten(fn);
-        } else {
-          unlisten = fn;
-        }
-      });
-
+      }),
+      "drag-drop",
+    );
     return () => {
-      cancelled = true;
-      void safeUnlisten(unlisten);
+      void safeUnlisten(promise);
     };
   }, [vaultPath]);
 
@@ -231,13 +224,16 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
         // Drain is best-effort — fall back to the live listener below.
         console.warn("[config-malformed] drain failed:", err);
       });
-    const promise = listen<{
-      config_path: string;
-      diagnostics: string[];
-      remediation: string;
-    }>("config-malformed", (event) => {
-      renderMalformed(event.payload);
-    });
+    const promise = guardListen(
+      listen<{
+        config_path: string;
+        diagnostics: string[];
+        remediation: string;
+      }>("config-malformed", (event) => {
+        renderMalformed(event.payload);
+      }),
+      "config-malformed",
+    );
     return () => {
       void safeUnlisten(promise);
     };

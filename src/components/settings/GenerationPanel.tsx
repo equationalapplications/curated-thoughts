@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { getProviderConfig, updateProvider } from "../../lib/tauri";
-import { onProviderLoading, onProviderReady, onProviderError, safeUnlisten } from "../../lib/events";
+import {
+  guardListen,
+  onProviderLoading,
+  onProviderReady,
+  onProviderError,
+  safeUnlisten,
+  UnlistenFn,
+} from "../../lib/events";
 import type { GenerationConfig } from "../../lib/tauri";
 import { usePrivacyMode } from "../../hooks/usePrivacyMode";
 import { EphemeralDisclosureModal } from "../privacy/EphemeralDisclosureModal";
@@ -21,7 +28,7 @@ export function GenerationPanel() {
 
   useEffect(() => {
     let active = true;
-    let unlistens: Array<() => void> = [];
+    let unlistens: Array<Promise<UnlistenFn>> = [];
 
     const setup = async () => {
       const cfg = await getProviderConfig().catch(() => null);
@@ -34,15 +41,17 @@ export function GenerationPanel() {
         setStatus(cfg.generation.provider === "unconfigured" ? "unconfigured" : "ready");
       }
 
-      const [loadingUnlisten, readyUnlisten, errorUnlisten] = await Promise.all([
-        onProviderLoading(() => setStatus("loading")),
-        onProviderReady(() => {
-          setStatus(cfg?.generation.provider === "unconfigured" ? "unconfigured" : "ready");
-        }),
-        onProviderError(() => setStatus("error")),
-      ]);
-      unlistens = [loadingUnlisten, readyUnlisten, errorUnlisten];
-      if (!active) unlistens.forEach((u) => void safeUnlisten(u));
+      const subscriptions = [
+        guardListen(onProviderLoading(() => setStatus("loading")), "provider-loading"),
+        guardListen(
+          onProviderReady(() => {
+            setStatus(cfg?.generation.provider === "unconfigured" ? "unconfigured" : "ready");
+          }),
+          "provider-ready",
+        ),
+        guardListen(onProviderError(() => setStatus("error")), "provider-error"),
+      ];
+      unlistens = subscriptions;
     };
 
     setup();

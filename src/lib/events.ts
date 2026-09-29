@@ -1,5 +1,7 @@
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
+export type { UnlistenFn };
+
 // Backoff between unlisten attempts (~0.5s in total), long enough for a
 // registration eval queued behind startup work in a busy webview.
 const UNLISTEN_RETRY_DELAYS_MS = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256];
@@ -37,6 +39,24 @@ export async function safeUnlisten(
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
+}
+
+/**
+ * Attach a logging rejection handler to a pending Tauri subscription so a
+ * failed listen() surfaces as ONE console.warn instead of an
+ * unhandledrejection. Returns the ORIGINAL promise — pass it to
+ * safeUnlisten() exactly as before (safeUnlisten already tolerates a
+ * rejected listen). Callers may add their OWN non-logging .catch for UI
+ * degradation; never add a second LOGGING handler (double-log).
+ */
+export function guardListen(
+  subscription: Promise<UnlistenFn>,
+  context: string,
+): Promise<UnlistenFn> {
+  subscription.catch((err) => {
+    console.warn(`[events] listen failed (${context})`, err);
+  });
+  return subscription;
 }
 
 export interface VaultEvent {

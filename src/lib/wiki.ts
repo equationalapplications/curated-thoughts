@@ -3,7 +3,7 @@ import type { GraphExpansionOptions } from './wikiGraphAdapter';
 import { tauriGraphAdapter } from './wikiGraphAdapter';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { safeUnlisten } from "./events";
+import { guardListen, safeUnlisten, type UnlistenFn } from "./events";
 import { tauriWikiAdapter } from "./wikiAdapter";
 import { entityIdForPath } from "./wikiTiers";
 import { getClassifierStatus, getOntologySelection, type ClassifierStatus, type OntologySelection, type WikiStatusEventPayload } from "./tauri";
@@ -12,6 +12,14 @@ import { seedManifestsIfAbsent } from "./ontologySeed";
 
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
+
+// Pending setupWiki lifecycle subscriptions, held as PROMISES so the boot
+// gate can await them even if a listen() is still registering. The wiki
+// listeners live for the session; there is intentionally no teardown
+// consumer. setupWiki must be called ONCE per session (main.tsx guarantees
+// this): a second call would register duplicate lifecycle listeners.
+let wikiLifecycleListeners: Array<Promise<UnlistenFn>> = [];
+
 // Tracks the in-flight `initWorkspaceId` promise so callers like
 // `applyOntologyChange` can wait for the workspace entity to resolve before
 // iterating tiers. Without this, a setup-wizard click that fires before
@@ -447,21 +455,32 @@ export async function setupWiki() {
   // Register worker lifecycle listeners before running the initial wiki setup.
   // This prevents a race where the worker starts or stops during setup and the
   // module keeps a stale wiki instance based on the earlier outbox status value.
-  const startedUnlisten = await listen<void>('outbox-worker-started', async () => {
-    _outboxEnabled = true;
-    await rebuildWiki();
-  });
-  const stoppedUnlisten = await listen<void>('outbox-worker-stopped', async () => {
-    _outboxEnabled = false;
-    await rebuildWiki();
-  });
   // Classifier availability depends on both its config and the privacy mode.
   const onClassifierInputsChanged = async () => {
     _classifier = await readClassifierStatus();
     await rebuildWiki();
   };
-  const classifierUnlisten = await listen<void>('classifier-config-changed', onClassifierInputsChanged);
-  const privacyUnlisten = await listen<void>('privacy-mode-changed', onClassifierInputsChanged);
+  // Assign (not push): this module array is the boot-gate input. setupWiki
+  // is a once-per-session call (main.tsx); re-calling it would register
+  // duplicate lifecycle listeners — see the comment at the declaration.
+  wikiLifecycleListeners = [
+    guardListen(listen<void>('outbox-worker-started', async () => {
+      _outboxEnabled = true;
+      await rebuildWiki();
+    }), 'outbox-worker-started'),
+    guardListen(listen<void>('outbox-worker-stopped', async () => {
+      _outboxEnabled = false;
+      await rebuildWiki();
+    }), 'outbox-worker-stopped'),
+    guardListen(listen<void>('classifier-config-changed', onClassifierInputsChanged), 'classifier-config-changed'),
+    guardListen(listen<void>('privacy-mode-changed', onClassifierInputsChanged), 'privacy-mode-changed'),
+  ];
+  // Boot gate (allSettled — never fail boot over a subscription): outcomes
+  // are settled before the initial setup runs, preserving the
+  // register-before-setup intent. A rejected listener degrades its feature
+  // (worker-lifecycle rebuilds / classifier refreshes) while the wiki engine
+  // still comes up.
+  await Promise.allSettled(wikiLifecycleListeners);
 
   _outboxEnabled = await invoke<boolean>('outbox_is_configured').catch(() => false);
   let newWiki;
@@ -491,12 +510,6 @@ export async function setupWiki() {
   // lands in and leave the real workspace tier untyped. The workspace tier is
   // seeded by `initWorkspaceId` once its id is known.
   await seedOntologyManifests([...STABLE_ONTOLOGY_ENTITY_IDS]);
-
-  // Store unlisten if you need cleanup; for now the listeners live for the session.
-  void startedUnlisten;
-  void stoppedUnlisten;
-  void classifierUnlisten;
-  void privacyUnlisten;
 }
 
 /** Tiered read: Facts (1.5×) > Wisdom (1.0×) > Working (0.6×). */
@@ -542,13 +555,16 @@ export function startAutoHeal(): () => void {
     }, 3000);
   };
 
-  const unsubscribers = [
-    listen<VaultEventPayload>('vault-event', (event) => {
-      if (!active) return;
-      if (event.payload.kind === 'Deleted') {
-        scheduleHeal();
-      }
-    }),
+  const subscriptions = [
+    guardListen(
+      listen<VaultEventPayload>('vault-event', (event) => {
+        if (!active) return;
+        if (event.payload.kind === 'Deleted') {
+          scheduleHeal();
+        }
+      }),
+      'vault-event (auto-heal)',
+    ),
   ];
 
   return () => {
@@ -557,7 +573,7 @@ export function startAutoHeal(): () => void {
       clearTimeout(debounce);
       debounce = null;
     }
-    unsubscribers.forEach((unlisten) => void safeUnlisten(unlisten));
+    subscriptions.forEach((p) => void safeUnlisten(p));
   };
 }
 
@@ -587,7 +603,7 @@ export function startAutoMaintenance(): () => void {
     }
   };
 
-  const unsubscribers = [listen('wiki-status-change', handleStatusChange)];
+  const subscriptions = [guardListen(listen('wiki-status-change', handleStatusChange), 'wiki-status-change (auto-maintenance)')];
 
   // Run a prune once at startup, then every 24 hours.
   void runPrune();
@@ -595,7 +611,7 @@ export function startAutoMaintenance(): () => void {
 
   return () => {
     window.clearInterval(interval);
-    unsubscribers.forEach((unlisten) => void safeUnlisten(unlisten));
+    subscriptions.forEach((p) => void safeUnlisten(p));
   };
 }
 
