@@ -62,7 +62,8 @@ use super::{
 /// Render a note document: strict YAML frontmatter fence + body.
 ///
 /// `render_frontmatter` already emits the trailing `---\n`; append the body
-/// and guarantee exactly one terminating newline.
+/// and ensure at least one terminating newline (added only if missing —
+/// trailing newlines are never collapsed).
 fn render_document(frontmatter: &OkfFrontmatter, body: &str) -> String {
     let mut doc = render_frontmatter(frontmatter);
     if !body.is_empty() {
@@ -991,8 +992,15 @@ mod tests {
     #[test]
     fn crlf_note_remains_editable_through_write_note() {
         let (_g, root) = vault();
-        let create = write_note(&root, "wiki/crlf.md", &fm("CRLF Note", None), "v1\n", None, false)
-            .expect("create succeeds");
+        let create = write_note(
+            &root,
+            "wiki/crlf.md",
+            &fm("CRLF Note", None),
+            "v1\n",
+            None,
+            false,
+        )
+        .expect("create succeeds");
         let lf = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
         let crlf = lf.replace('\n', "\r\n");
         assert_ne!(lf, crlf, "fixture must actually be CRLF");
@@ -1005,8 +1013,9 @@ mod tests {
             "wiki/crlf.md",
             &fm("CRLF Note", None),
             "v2\n",
-            Some(&token)
-        , false);
+            Some(&token),
+            false,
+        );
         assert!(
             edit.is_ok(),
             "CRLF note must stay editable: {:?}",
@@ -1072,8 +1081,15 @@ mod tests {
         let target = root.join("wiki/binary.md");
         let original: &[u8] = b"---\r\n\xff\xfe not utf8 \x00---\r\ngarbage\r\n";
         fs::write(&target, original).unwrap();
-        let err = write_note(&root, "wiki/binary.md", &fm("Clobber", None), "x\n", None, false)
-            .expect_err("non-UTF-8 target must be refused, not overwritten");
+        let err = write_note(
+            &root,
+            "wiki/binary.md",
+            &fm("Clobber", None),
+            "x\n",
+            None,
+            false,
+        )
+        .expect_err("non-UTF-8 target must be refused, not overwritten");
         assert!(
             matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if detail == "existing_unparsable:parse"),
             "got: {err}"
@@ -1171,8 +1187,9 @@ mod tests {
             "wiki/test-note.md",
             &fm("T", None),
             "Body line.\nSecond.\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert_eq!(result.path, "wiki/test-note.md");
         assert!(result.success);
@@ -1221,15 +1238,24 @@ mod tests {
             "wiki/n.md",
             &fm("T", None),
             "v2\n",
-            Some("1999-01-01T00:00:00Z")
-        , false)
+            Some("1999-01-01T00:00:00Z"),
+            false,
+        )
         .unwrap_err();
         assert!(
             matches!(err, WriteNoteError::StaleUpdate { ref updated_at } if updated_at == &current)
         );
 
         // Correct token → succeeds, token rotates.
-        write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", Some(&current), false).unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            "v2\n",
+            Some(&current),
+            false,
+        )
+        .unwrap();
         let bumped =
             read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
         assert_ne!(current, bumped);
@@ -1239,7 +1265,8 @@ mod tests {
     #[test]
     fn d3_traversal_rejected() {
         let (_g, root) = vault();
-        let err = write_note(&root, "../outside.md", &fm("T", None), "x\n", None, false).unwrap_err();
+        let err =
+            write_note(&root, "../outside.md", &fm("T", None), "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
         let err = write_note(&root, "/etc/passwd", &fm("T", None), "x\n", None, false).unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
@@ -1254,8 +1281,9 @@ mod tests {
             "wiki/deep/er/note.md",
             &fm("Deep", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(root.join("wiki/deep/er/note.md").is_file());
     }
@@ -1384,8 +1412,9 @@ mod tests {
             "immutable-source-files/agents/mem.md",
             &fm("Agent memory", None),
             "deposited\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(result.success);
         assert!(root.join("immutable-source-files/agents/mem.md").is_file());
@@ -1401,8 +1430,9 @@ mod tests {
             "immutable-source-files/agents/people/tessera/x.md",
             &fm("Nested", None),
             "deposited\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(result.success);
         assert!(root
@@ -1420,8 +1450,9 @@ mod tests {
             "immutable-source-files/agents/products/curated-thoughts/specs/y.md",
             &fm("Deep", None),
             "deposited\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(result.success);
         assert!(root
@@ -1438,8 +1469,9 @@ mod tests {
             "immutable-source-files/secrets.md",
             &fm("T", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
     }
@@ -1455,8 +1487,9 @@ mod tests {
             "immutable-source-files/agents-evil/nested/mem.md",
             &fm("T", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
         assert!(!root.join("immutable-source-files/agents-evil").exists());
@@ -1474,8 +1507,9 @@ mod tests {
             "./wiki/deep/er/dot.md",
             &fm("Dot", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(root.join("wiki/deep/er/dot.md").is_file());
 
@@ -1484,8 +1518,9 @@ mod tests {
             "./immutable-source-files/agents/nested/dot.md",
             &fm("Dot", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(root
             .join("immutable-source-files/agents/nested/dot.md")
@@ -1510,8 +1545,9 @@ mod tests {
             "immutable-source-files/agents/sub/deep/mem.md",
             &fm("T", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap_err();
 
         assert!(matches!(err, WriteNoteError::WriteError(_)));
@@ -1533,8 +1569,9 @@ mod tests {
             "records/sessions/people/tessera/x.md",
             &fm("Session", None),
             "deposited\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(result.success);
         assert!(root.join("records/sessions/people/tessera/x.md").is_file());
@@ -1546,8 +1583,15 @@ mod tests {
     #[test]
     fn retired_flat_agents_layout_is_rejected_naming_roots() {
         let (_g, root) = deposit_vault();
-        let err =
-            write_note(&root, "agents/tessera/mem.md", &fm("T", None), "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "agents/tessera/mem.md",
+            &fm("T", None),
+            "x\n",
+            None,
+            false,
+        )
+        .unwrap_err();
         match &err {
             WriteNoteError::DisallowedRoot {
                 first_segment,
@@ -1573,8 +1617,15 @@ mod tests {
     #[test]
     fn disallowed_root_rejection_creates_no_dirs() {
         let (_g, root) = vault();
-        let err =
-            write_note(&root, "people/deep/notes.md", &fm("T", None), "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "people/deep/notes.md",
+            &fm("T", None),
+            "x\n",
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, WriteNoteError::DisallowedRoot { .. }),
             "got {err:?}"
@@ -1609,8 +1660,9 @@ mod tests {
             "immutable-source-files/secrets.md",
             &fm("T", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
     }
@@ -1621,8 +1673,15 @@ mod tests {
     fn dot_prefix_does_not_bypass_root_allowlist() {
         let (_g, root) = vault();
         write_note(&root, "./wiki/ok.md", &fm("D", None), "x\n", None, false).unwrap();
-        let err =
-            write_note(&root, "./agents/tessera/m.md", &fm("D", None), "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "./agents/tessera/m.md",
+            &fm("D", None),
+            "x\n",
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, WriteNoteError::DisallowedRoot { .. }),
             "got {err:?}"
@@ -1638,8 +1697,9 @@ mod tests {
             "immutable-source-files/agents/first.md",
             &fm("First", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         assert!(root
             .join("immutable-source-files/agents/first.md")
@@ -1656,8 +1716,9 @@ mod tests {
             "immutable-source-files/agents/v1.md",
             &fm("V1", None),
             "old\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         let mut m = fm("V2", None);
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
@@ -1666,8 +1727,9 @@ mod tests {
             "immutable-source-files/agents/v2.md",
             &m,
             "new\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         let raw = fs::read_to_string(root.join("immutable-source-files/agents/v2.md")).unwrap();
         assert!(raw.contains("supersedes: immutable-source-files/agents/v1.md"));
@@ -1689,8 +1751,9 @@ mod tests {
             "immutable-source-files/agents/people/tessera/v1.md",
             &fm("V1", None),
             "old\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         let mut m = fm("V2", None);
         m.supersedes = Some("immutable-source-files/agents/people/tessera/v1.md".to_string());
@@ -1699,8 +1762,9 @@ mod tests {
             "immutable-source-files/agents/people/tessera/v2.md",
             &m,
             "new\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         let raw =
             fs::read_to_string(root.join("immutable-source-files/agents/people/tessera/v2.md"))
@@ -1720,8 +1784,15 @@ mod tests {
         write_note(&root, "wiki/target.md", &fm("T", None), "x\n", None, false).unwrap();
         let mut m = fm("Evil", None);
         m.supersedes = Some("wiki/target.md".to_string());
-        let err =
-            write_note(&root, "immutable-source-files/agents/e.md", &m, "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/e.md",
+            &m,
+            "x\n",
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
     }
 
@@ -1731,8 +1802,15 @@ mod tests {
         let (_g, root) = deposit_vault();
         let mut m = fm("T", None);
         m.supersedes = Some("immutable-source-files/agents/ghost.md".to_string());
-        let err =
-            write_note(&root, "immutable-source-files/agents/n.md", &m, "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/n.md",
+            &m,
+            "x\n",
+            None,
+            false,
+        )
+        .unwrap_err();
         match err {
             WriteNoteError::InvalidFrontmatter(ref detail) => {
                 assert!(detail.contains("supersedes_not_found"));
@@ -1750,8 +1828,15 @@ mod tests {
         fs::write(root.join("immutable-source-files/agents-evil/x.md"), "x\n").unwrap();
         let mut m = fm("Evil", None);
         m.supersedes = Some("immutable-source-files/agents-evil/x.md".to_string());
-        let err =
-            write_note(&root, "immutable-source-files/agents/e.md", &m, "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "immutable-source-files/agents/e.md",
+            &m,
+            "x\n",
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
     }
 
@@ -1764,8 +1849,9 @@ mod tests {
             "immutable-source-files/agents/v1.md",
             &fm("V1", None),
             "x\n",
-            None
-        , false)
+            None,
+            false,
+        )
         .unwrap();
         let mut m = fm("W", None);
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
@@ -1777,7 +1863,14 @@ mod tests {
     #[test]
     fn t3_roundtrip_guard_valid_note_passes() {
         let (_g, root) = vault();
-        let result = write_note(&root, "wiki/t3-a.md", &fm("T3 Note", None), "x\n", None, false);
+        let result = write_note(
+            &root,
+            "wiki/t3-a.md",
+            &fm("T3 Note", None),
+            "x\n",
+            None,
+            false,
+        );
         assert!(
             result.is_ok(),
             "valid note must pass round-trip guard: {:?}",
@@ -1943,8 +2036,9 @@ mod tests {
             "wiki/note.md",
             &fm(title, None),
             "v2\n",
-            Some(&token)
-        , false)?;
+            Some(&token),
+            false,
+        )?;
         Ok((create, edit))
     }
 
@@ -2002,8 +2096,9 @@ mod tests {
             "wiki/legacy.md",
             &fm("Deploy: retro", None),
             "body v2\n",
-            Some(&token)
-        , false)
+            Some(&token),
+            false,
+        )
         .expect("legacy broken fixture must heal on its next edit");
         assert!(result.success);
         // Healed: the title is now quoted on disk and the strict parse works.
@@ -2230,8 +2325,9 @@ mod tests {
                 name,
                 &fm("Edited", None),
                 "x\n",
-                Some("1999-01-01T00:00:00Z")
-            , false)
+                Some("1999-01-01T00:00:00Z"),
+                false,
+            )
             .expect_err("edit of unparsable note must be refused");
             assert!(
                 matches!(&err, WriteNoteError::InvalidFrontmatter(detail) if *detail == *reason),
@@ -2244,8 +2340,9 @@ mod tests {
             "wiki/clean.md",
             &fm("Fine", None),
             "edited\n",
-            Some("2026-09-25T01:00:00Z")
-        , false)
+            Some("2026-09-25T01:00:00Z"),
+            false,
+        )
         .expect("clean note stays editable");
     }
 
@@ -2612,8 +2709,15 @@ mod tests {
         // plan's own Arrange/Act/Assert sketch.)
         let (_g, root) = vault();
         let existing_body = "x".repeat(2048);
-        let created =
-            write_note(&root, "wiki/n.md", &fm("T", None), &existing_body, None, false).unwrap();
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &existing_body,
+            None,
+            false,
+        )
+        .unwrap();
         // Rendered new body 100+1 = 101 → 202 < 2049 → shrink_refused.
         let new_body = "y".repeat(100);
         let err = crate::tool_dispatch::dispatch_vault_write_note(
@@ -2626,7 +2730,10 @@ mod tests {
         .unwrap_err();
         let s = err.to_string();
         assert!(s.starts_with("shrink_refused:"), "{s}");
-        assert!(!s.contains("allow_shrink"), "must not teach the bypass: {s}");
+        assert!(
+            !s.contains("allow_shrink"),
+            "must not teach the bypass: {s}"
+        );
     }
 
     #[test]
@@ -2708,19 +2815,33 @@ mod tests {
 
     #[test]
     fn shrink_refused_display_has_pinned_shape_without_allow_shrink_hint() {
-        let e = WriteNoteError::ShrinkRefused { existing_bytes: 12860, new_bytes: 505 };
+        let e = WriteNoteError::ShrinkRefused {
+            existing_bytes: 12860,
+            new_bytes: 505,
+        };
         let s = e.to_string();
         assert!(s.starts_with("shrink_refused:12860:505"), "{s}");
-        assert!(s.contains("re-read the note and resend the full body"), "{s}");
-        assert!(!s.contains("allow_shrink"), "must not teach the bypass: {s}");
+        assert!(
+            s.contains("re-read the note and resend the full body"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("allow_shrink"),
+            "must not teach the bypass: {s}"
+        );
     }
 
     #[test]
     fn compaction_marker_display_has_pinned_shape_without_allow_shrink_hint() {
-        let e = WriteNoteError::CompactionMarkerRejected { marker: "[SKILL_PRUNED]".into() };
+        let e = WriteNoteError::CompactionMarkerRejected {
+            marker: "[SKILL_PRUNED]".into(),
+        };
         let s = e.to_string();
         assert!(s.starts_with("compaction_marker:[SKILL_PRUNED]"), "{s}");
         assert!(s.contains("rephrase and resend"), "{s}");
-        assert!(!s.contains("allow_shrink"), "must not teach the bypass: {s}");
+        assert!(
+            !s.contains("allow_shrink"),
+            "must not teach the bypass: {s}"
+        );
     }
 }

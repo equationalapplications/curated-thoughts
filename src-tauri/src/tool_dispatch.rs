@@ -1517,7 +1517,13 @@ pub async fn dispatch_tool_call(
                 .ok_or_else(|| anyhow::anyhow!("vault directory not configured"))?
                 .clone();
             let result = tokio::task::spawn_blocking(move || {
-                dispatch_vault_write_note(&vault_dir, &p.path, &p.frontmatter, &p.body, p.allow_shrink)
+                dispatch_vault_write_note(
+                    &vault_dir,
+                    &p.path,
+                    &p.frontmatter,
+                    &p.body,
+                    p.allow_shrink,
+                )
             })
             .await??;
             Ok(serde_json::to_value(result)?)

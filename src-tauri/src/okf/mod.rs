@@ -93,7 +93,9 @@ pub enum WriteNoteError {
     /// did not pass `allow_shrink`. The Display carries a machine-readable
     /// prefix plus the recovery instruction; it deliberately does NOT mention
     /// the override flag (a compacted agent must re-read, not retry blindly).
-    #[error("shrink_refused:{existing_bytes}:{new_bytes}: re-read the note and resend the full body")]
+    #[error(
+        "shrink_refused:{existing_bytes}:{new_bytes}: re-read the note and resend the full body"
+    )]
     ShrinkRefused {
         existing_bytes: usize,
         new_bytes: usize,
