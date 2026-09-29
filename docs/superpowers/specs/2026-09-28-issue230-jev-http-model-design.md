@@ -1,7 +1,7 @@
 # Jev HTTP classifier: send the required `model` field (issue #230)
 
 **Date:** 2026-09-28
-**Status:** Draft
+**Status:** Implemented 2026-09-28 (PR #246)
 **Branch:** fix/issue-230-jev-http-model
 **Priority:** High (bug — the documented TypeSafe-hosted path cannot work at all)
 
