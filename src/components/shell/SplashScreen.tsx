@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { safeUnlisten } from "../../lib/events";
+import { safeUnlisten, guardListen } from "../../lib/events";
 
 interface Props {
   onComplete: () => void;
@@ -21,16 +21,25 @@ export function SplashScreen({ onComplete }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const unlistenProgress = listen<MigrationProgressEvent>(
+    const unlistenProgress = guardListen(
+      listen<MigrationProgressEvent>(
+        "migration-progress",
+        (event) => setProgress(event.payload),
+      ),
       "migration-progress",
-      (event) => setProgress(event.payload),
     );
-    const unlistenComplete = listen("migration-complete", () => {
-      onComplete();
-    });
-    const unlistenError = listen<MigrationErrorEvent>(
+    const unlistenComplete = guardListen(
+      listen("migration-complete", () => {
+        onComplete();
+      }),
+      "migration-complete",
+    );
+    const unlistenError = guardListen(
+      listen<MigrationErrorEvent>(
+        "migration-error",
+        (event) => setError(event.payload.message),
+      ),
       "migration-error",
-      (event) => setError(event.payload.message),
     );
     return () => {
       void safeUnlisten(unlistenProgress);

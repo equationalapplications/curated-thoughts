@@ -6,7 +6,7 @@ import {
   type PrivacyMode,
   type PrivacyState,
 } from "../lib/tauri";
-import { safeUnlisten } from "../lib/events";
+import { safeUnlisten, guardListen } from "../lib/events";
 
 export type { PrivacyMode };
 
@@ -80,9 +80,12 @@ export function usePrivacyMode(): PrivacyState & {
 
     load();
 
-    const unlistenPromise = listen<PrivacyState>("privacy-mode-changed", (event) => {
-      setState(event.payload);
-    });
+    const unlistenPromise = guardListen(
+      listen<PrivacyState>("privacy-mode-changed", (event) => {
+        setState(event.payload);
+      }),
+      "privacy-mode-changed",
+    );
 
     return () => {
       active = false;
