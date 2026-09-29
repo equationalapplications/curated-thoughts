@@ -241,6 +241,13 @@ ct evidence regrade --yes              # re-run the V20 evidence re-grade (idemp
 ct trust [--list] [--revoke <path>]    # manage symlinks the ingest walker may follow
 ```
 
+Deleting a superseded note from the vault is safe and recommended: the
+watcher, the next app startup, and `ct ingest` all remove its document row,
+chunks, and embeddings automatically. Note lineage lives in git history (and
+your session records), not in the retrieval DB. Run `ct drift` for a
+read-only check that the database matches the vault; repair any reported
+drift with `ct ingest --yes`.
+
 `ct watch` is the one long-running command: a foreground daemon that watches the vault and requires `CURATED_VAULT_ROOT`. Add `--json` for one JSON event per line on stdout, or `--once` to exit after a bounded window (default 60s, set with `--once-timeout`):
 
 ```bash
