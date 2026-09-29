@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { StepFastembed } from "../components/setup/StepFastembed";
 
 vi.mock("../lib/tauri", () => ({
@@ -28,6 +28,10 @@ describe("StepFastembed", () => {
     );
     (onEmbedInitError as ReturnType<typeof vi.fn>).mockResolvedValue(() => {});
     (initFastembed as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("shows spinner while initializing", () => {
@@ -72,5 +76,27 @@ describe("StepFastembed", () => {
       expect(unlistenDone).toHaveBeenCalledOnce();
       expect(unlistenError).toHaveBeenCalledOnce();
     });
+  });
+
+  it("still calls initFastembed when a subscription rejects", async () => {
+    // Regression (#236): the old Promise.all shape rejected as soon as one
+    // subscription failed, skipping initFastembed entirely — the model never
+    // initialized and the wizard stalled. With allSettled, a rejected
+    // subscription must degrade to one guarded warn while init proceeds.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    (onEmbedInitDone as ReturnType<typeof vi.fn>).mockReturnValue(
+      Promise.reject(new Error("listen boom")),
+    );
+    (onEmbedInitError as ReturnType<typeof vi.fn>).mockResolvedValue(() => {});
+
+    render(<StepFastembed onNext={onNext} />);
+
+    await waitFor(() => expect(initFastembed).toHaveBeenCalledOnce());
+    const warns = warnSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(
+      warns.filter((m: string) =>
+        m.includes("[events] listen failed (embed-init-done)"),
+      ).length,
+    ).toBe(1);
   });
 });

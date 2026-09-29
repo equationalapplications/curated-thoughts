@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { initFastembed } from "../../lib/tauri";
-import { onEmbedInitDone, onEmbedInitError, safeUnlisten } from "../../lib/events";
+import { onEmbedInitDone, onEmbedInitError, guardListen, safeUnlisten } from "../../lib/events";
 import { WizardStep } from "./WizardStep";
 
 interface Props {
@@ -17,18 +17,20 @@ export function StepFastembed({ onNext }: Props) {
     let mounted = true;
     // Hold the pending subscriptions so cleanup can remove them even when the
     // step unmounts before listen() resolves.
-    const unlistenDone = onEmbedInitDone(() => {
+    const unlistenDone = guardListen(onEmbedInitDone(() => {
       if (!mounted) return;
       onNext();
-    });
-    const unlistenError = onEmbedInitError(({ message }) => {
+    }), "embed-init-done");
+    const unlistenError = guardListen(onEmbedInitError(({ message }) => {
       if (!mounted) return;
       setErrorMsg(message);
       setPhase("error");
-    });
+    }), "embed-init-error");
 
     const setup = async () => {
-      await Promise.all([unlistenDone, unlistenError]);
+      // allSettled: subscription failure degrades progress/error display but
+      // must never skip the actual init (the old Promise.all skipped it).
+      await Promise.allSettled([unlistenDone, unlistenError]);
 
       try {
         await initFastembed();
