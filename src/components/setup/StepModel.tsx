@@ -7,6 +7,7 @@ import {
   type GenerationConfig,
 } from "../../lib/tauri";
 import {
+  guardListen,
   onGgufDownloadProgress,
   onSidecarDownloadProgress,
   onProviderError,
@@ -66,21 +67,24 @@ export function StepModel({ onNext }: Props) {
     }
 
     cleanup();
-    // Store the pending subscriptions before awaiting them so cleanup can
+    // Store the pending subscriptions before draining them so cleanup can
     // remove them even when the step unmounts before listen() resolves.
     unlistens.current = [
-      onSidecarDownloadProgress(({ downloaded, total }) => {
+      guardListen(onSidecarDownloadProgress(({ downloaded, total }) => {
         setProgress(total > 0 ? Math.round((downloaded / total) * 100) : 0);
-      }),
-      onGgufDownloadProgress(({ downloaded, total }) => {
+      }), "sidecar-download-progress"),
+      guardListen(onGgufDownloadProgress(({ downloaded, total }) => {
         setProgress(total > 0 ? Math.round((downloaded / total) * 100) : 0);
-      }),
-      onProviderError(({ message }) => {
+      }), "gguf-download-progress"),
+      guardListen(onProviderError(({ message }) => {
         setErrorMsg(message);
         setPhase("auto-error");
-      }),
+      }), "provider-error"),
     ];
-    await Promise.all(unlistens.current);
+    // Pre-install drain (NOT teardown): make sure registration outcomes are
+    // settled before the downloads start; a rejected subscription degrades
+    // progress display but must NOT abort the install.
+    await Promise.allSettled(unlistens.current);
 
     try {
       setPhase("auto-downloading-engine");
