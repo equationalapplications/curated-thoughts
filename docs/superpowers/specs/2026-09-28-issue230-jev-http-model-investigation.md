@@ -80,7 +80,7 @@ implemented.
   TypeSafe-hosted default (`jev-latest`) — confusable names, so the comments
   are mandatory.
 - Optional `#[serde(default)] pub model: Option<String>` on `ClassifierConfig`
-  so users can pin (e.g. `jev-1.13`) for reproducible typing.
+  so users can pin (e.g. `jev-1.13.0`) for reproducible typing.
 - `request_body` JevHttp arm — **compiling form** (the naive
   `cfg.model.unwrap_or(...)` both moves out of a borrow (E0507) and type-mismatches
   (E0308), and `inner` is immutably bound):

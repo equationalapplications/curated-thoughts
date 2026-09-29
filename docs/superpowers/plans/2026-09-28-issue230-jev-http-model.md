@@ -50,10 +50,10 @@
     #[test]
     fn jev_http_body_uses_pinned_model() {
         let cfg = ClassifierConfig {
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..jev_cfg("https://x")
         };
-        assert_eq!(request_body(&cfg, &choice_req())["model"], "jev-1.13");
+        assert_eq!(request_body(&cfg, &choice_req())["model"], "jev-1.13.0");
     }
 
     #[test]
@@ -105,7 +105,7 @@ pub const JEV_HTTP_MODEL: &str = "jev-latest";
 Struct field (after `timeout_secs`, keep `#[serde(default)]`):
 
 ```rust
-    /// Optional model pin for `jev_http` (e.g. `jev-1.13`). `None` or blank
+    /// Optional model pin for `jev_http` (e.g. `jev-1.13.0`). `None` or blank
     /// falls back to [`JEV_HTTP_MODEL`]. Ignored by other providers.
     #[serde(default)]
     pub model: Option<String>,
@@ -169,7 +169,7 @@ git commit -m "fix(inference): jev_http request body names the required model fi
 **Interfaces:**
 - Consumes: `ClassifierConfig` (Task 1), `read_classifier_config`.
 - Produces: `pub(crate) fn merge_stored(incoming: ClassifierConfig, stored: Option<ClassifierConfig>) -> ClassifierConfig` — PURE (no I/O), testable; semantics: for `api_key` and `model`, a `None` in `incoming` takes the stored value; blank/whitespace `model` (after merge) normalizes to `None`; the kept stored/model value is canonicalized with `m.trim().to_string()` so disk + hydration match what `request_body` sends (review m3); every other field passes `incoming` through untouched.
-  - Intended quirk (review m2): a stored pin survives a provider round-trip — pin jev-1.13, switch to Cloudflare (save sends `model: null` → merge keeps the stored pin), switch back to jev_http, and the pin reappears without the field ever being rendered for Cloudflare. Harmless by design; say so in the `merge_stored` doc comment.
+  - Intended quirk (review m2): a stored pin survives a provider round-trip — pin jev-1.13.0, switch to Cloudflare (save sends `model: null` → merge keeps the stored pin), switch back to jev_http, and the pin reappears without the field ever being rendered for Cloudflare. Harmless by design; say so in the `merge_stored` doc comment.
 
 - [ ] **Step 1: Write the failing tests** (in `mod tests`, near the merge tests ~:807; the MIRROR test to convert is `set_classifier_config_merges_existing_key_when_payload_says_null` at :838-847)
 
@@ -178,7 +178,7 @@ git commit -m "fix(inference): jev_http request body names the required model fi
         ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..Default::default()
         }
     }
@@ -189,7 +189,7 @@ git commit -m "fix(inference): jev_http request body names the required model fi
             ClassifierConfig { model: None, ..stored_cfg() },
             Some(stored_cfg()),
         );
-        assert_eq!(merged.model.as_deref(), Some("jev-1.13"));
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
     }
 
     #[test]
@@ -231,7 +231,7 @@ git commit -m "fix(inference): jev_http request body names the required model fi
             Some(stored),
         );
         assert_eq!(merged.api_key.as_deref(), Some("tok"));
-        assert_eq!(merged.model.as_deref(), Some("jev-1.13"));
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
     }
 ```
 
@@ -247,7 +247,7 @@ Plus the spec-required DISK round-trip tests (spec Testing :83-91; Opus review M
         let pinned = ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..Default::default()
         };
         write_classifier_config(&paths, &pinned, &store).unwrap();
@@ -266,7 +266,7 @@ Plus the spec-required DISK round-trip tests (spec Testing :83-91; Opus review M
         let pinned = ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..Default::default()
         };
         write_classifier_config(&paths, &pinned, &store).unwrap();
@@ -277,7 +277,7 @@ Plus the spec-required DISK round-trip tests (spec Testing :83-91; Opus review M
         write_classifier_config(&paths, &merged, &store).unwrap();
         assert_eq!(
             read_classifier_config(&paths, &store).unwrap().model.as_deref(),
-            Some("jev-1.13")
+            Some("jev-1.13.0")
         );
     }
 ```
@@ -395,7 +395,7 @@ git commit -m "feat(inference): merge_stored helper for classifier config saves 
 - [ ] **Step 1: Update the TS type** — in `ClassifierConfig` (tauri.ts:364-376) add after `timeout_secs`:
 
 ```ts
-  /** Model pin for jev_http (e.g. "jev-1.13"). Send a non-empty string to
+  /** Model pin for jev_http (e.g. "jev-1.13.0"). Send a non-empty string to
    * pin, "" to unpin, null/omit to leave the stored pin untouched. Other
    * providers always send null. */
   model?: string | null;
@@ -458,7 +458,7 @@ Load effect `.then` block (inside :31-54) gains (after the `setTimeoutSecs(...)`
                 onChange={(e) => setModel(e.target.value)}
               />
               <p className="settings-form__hint">
-                Pin an exact model (e.g. jev-1.13) for reproducible typing; blank
+                Pin an exact model (e.g. jev-1.13.0) for reproducible typing; blank
                 uses the default (jev-latest).
               </p>
             </div>
@@ -471,11 +471,11 @@ Load effect `.then` block (inside :31-54) gains (after the `setTimeoutSecs(...)`
 ```tsx
   it('sends model as typed for jev_http (blank = explicit unpin)', async () => {
     getClassifierConfig.mockResolvedValue({
-      provider: 'jev_http', url: 'https://x', model: 'jev-1.13', has_api_key: true,
+      provider: 'jev_http', url: 'https://x', model: 'jev-1.13.0', has_api_key: true,
     });
     render(<ClassifierPanel />);
     const modelInput = await screen.findByLabelText('Model (optional)');
-    expect(modelInput).toHaveValue('jev-1.13');
+    expect(modelInput).toHaveValue('jev-1.13.0');
     await userEvent.clear(modelInput);
     await userEvent.click(screen.getByRole('button', { name: 'Save classifier' }));
     await waitFor(() =>
@@ -497,12 +497,12 @@ Load effect `.then` block (inside :31-54) gains (after the `setTimeoutSecs(...)`
   });
 
   it('sends model: null when switching to cloudflare with a loaded pin (merge_stored treats null as untouched, so the stored pin survives server-side)', async () => {
-    // Seed the panel WITH a saved jev_http pin (model: "jev-1.13") so the
+    // Seed the panel WITH a saved jev_http pin (model: "jev-1.13.0") so the
     // load effect hydrates model state, THEN switch provider to
     // cloudflare_jev and save. This is the case that actually exercises the
     // null branch AFTER a pin was loaded — the static cloudflare-only render
     // above never proves the loaded pin gets cleared.
-    const loadConfig = { provider: 'jev_http', url: 'https://x', model: 'jev-1.13', /* ... */ };
+    const loadConfig = { provider: 'jev_http', url: 'https://x', model: 'jev-1.13.0', /* ... */ };
     vi.mocked(getClassifierConfig).mockResolvedValue(loadConfig);
     render(<ClassifierPanel />);
     await screen.findByLabelText('Model (optional)');

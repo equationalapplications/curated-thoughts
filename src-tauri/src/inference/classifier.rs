@@ -57,7 +57,7 @@ pub struct ClassifierConfig {
     pub min_confidence: Option<f64>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Optional model pin for `jev_http` (e.g. `jev-1.13`). `None` or blank
+    /// Optional model pin for `jev_http` (e.g. `jev-1.13.0`). `None` or blank
     /// falls back to [`JEV_HTTP_MODEL`]. Ignored by other providers.
     #[serde(default)]
     pub model: Option<String>,
@@ -500,7 +500,7 @@ pub fn get_classifier_config() -> Result<ClassifierConfig, String> {
 /// merge logic exists exactly once.
 ///
 /// Intended quirk: a stored pin survives a provider round-trip — pin
-/// jev-1.13, switch to Cloudflare (save sends `model: null` → the merge
+/// jev-1.13.0, switch to Cloudflare (save sends `model: null` → the merge
 /// keeps the stored pin), switch back to jev_http, and the pin reappears
 /// without the field ever being rendered for Cloudflare. Harmless by
 /// design.
@@ -631,10 +631,10 @@ mod tests {
     #[test]
     fn jev_http_body_uses_pinned_model() {
         let cfg = ClassifierConfig {
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..jev_cfg("https://x")
         };
-        assert_eq!(request_body(&cfg, &choice_req())["model"], "jev-1.13");
+        assert_eq!(request_body(&cfg, &choice_req())["model"], "jev-1.13.0");
     }
 
     #[test]
@@ -917,7 +917,7 @@ mod tests {
         ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..Default::default()
         }
     }
@@ -928,7 +928,7 @@ mod tests {
             ClassifierConfig { model: None, ..stored_cfg() },
             Some(stored_cfg()),
         );
-        assert_eq!(merged.model.as_deref(), Some("jev-1.13"));
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
     }
 
     #[test]
@@ -948,12 +948,12 @@ mod tests {
     #[test]
     fn merge_stored_trims_a_padded_pin_instead_of_persisting_whitespace() {
         let merged = merge_stored(
-            ClassifierConfig { model: Some(" jev-1.13 ".into()), ..stored_cfg() },
+            ClassifierConfig { model: Some(" jev-1.13.0 ".into()), ..stored_cfg() },
             None,
         );
         // The padded value is canonicalized to the trimmed pin: what is
         // merged is exactly what request_body will later send.
-        assert_eq!(merged.model.as_deref(), Some("jev-1.13"));
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
     }
 
     #[test]
@@ -981,7 +981,7 @@ mod tests {
             Some(stored),
         );
         assert_eq!(merged.api_key.as_deref(), Some("tok"));
-        assert_eq!(merged.model.as_deref(), Some("jev-1.13"));
+        assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
     }
 
     /// Local fixture for the merge disk round-trip tests — tempdir paths +
@@ -1015,7 +1015,7 @@ mod tests {
         let pinned = ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..Default::default()
         };
         write_classifier_config(&paths, &pinned, &store).unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
         let pinned = ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
-            model: Some("jev-1.13".into()),
+            model: Some("jev-1.13.0".into()),
             ..Default::default()
         };
         write_classifier_config(&paths, &pinned, &store).unwrap();
@@ -1045,7 +1045,7 @@ mod tests {
         write_classifier_config(&paths, &merged, &store).unwrap();
         assert_eq!(
             read_classifier_config(&paths, &store).unwrap().model.as_deref(),
-            Some("jev-1.13")
+            Some("jev-1.13.0")
         );
     }
 
