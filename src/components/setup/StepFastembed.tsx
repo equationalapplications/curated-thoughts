@@ -21,6 +21,18 @@ export function StepFastembed({ onNext }: Props) {
       if (!mounted) return;
       onNext();
     }), "embed-init-done");
+    // Registration failure means the completion event can never arrive and
+    // call onNext — surface it instead of spinning in "loading" forever
+    // (WizardStep keeps "Continue" disabled while isLoading is true). Side
+    // branch: unlistenDone itself stays the ORIGINAL subscription (the
+    // events.ts contract for caller catches), so cleanup via safeUnlisten
+    // is unchanged and no derived rejection can float.
+    void unlistenDone.catch((err) => {
+      if (mounted) {
+        setErrorMsg(String(err));
+        setPhase("error");
+      }
+    });
     const unlistenError = guardListen(onEmbedInitError(({ message }) => {
       if (!mounted) return;
       setErrorMsg(message);
