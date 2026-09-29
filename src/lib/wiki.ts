@@ -15,9 +15,9 @@ let _workspaceIdRequest = 0;
 
 // Pending setupWiki lifecycle subscriptions, held as PROMISES so the boot
 // gate can await them even if a listen() is still registering. The wiki
-// listeners live for the session (main.tsx calls setupWiki once); there is
-// intentionally no teardown consumer. Kept local to setupWiki so repeated
-// calls can never accumulate stale entries.
+// listeners live for the session; there is intentionally no teardown
+// consumer. setupWiki must be called ONCE per session (main.tsx guarantees
+// this): a second call would register duplicate lifecycle listeners.
 let wikiLifecycleListeners: Array<Promise<UnlistenFn>> = [];
 
 // Tracks the in-flight `initWorkspaceId` promise so callers like
@@ -460,8 +460,9 @@ export async function setupWiki() {
     _classifier = await readClassifierStatus();
     await rebuildWiki();
   };
-  // Reset per call: a second setupWiki must not wait on the previous call's
-  // (already settled) promises.
+  // Assign (not push): this module array is the boot-gate input. setupWiki
+  // is a once-per-session call (main.tsx); re-calling it would register
+  // duplicate lifecycle listeners — see the comment at the declaration.
   wikiLifecycleListeners = [
     guardListen(listen<void>('outbox-worker-started', async () => {
       _outboxEnabled = true;

@@ -31,14 +31,24 @@ describe("ModelPanel", () => {
   it("still pulls when the progress listener rejects (degraded display only)", async () => {
     // Regression (#236, review M4): the old shape `await onPullProgress(...)`
     // threw before pullModel ran when registration rejected, so the user's
-    // pull silently never started. The pull must proceed, the panel must say
-    // progress is unavailable, and guardListen must log exactly one warn.
+    // pull silently never started. The pull must proceed, guardListen must
+    // log exactly one warn, and the "Progress unavailable" hint must show
+    // while pulling and disappear once the pull ends.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // Create the rejection lazily per call so it is handled in the same tick
     // guardListen attaches its catch (an eagerly-rejected promise would fire
     // a spurious unhandledRejection before the component ever subscribes).
     (onPullProgress as ReturnType<typeof vi.fn>).mockImplementation(
       () => Promise.reject(new Error("listen boom")),
+    );
+    // Hold the pull open so the pulling phase (and its hint) is observable,
+    // mirroring the StepOllama test.
+    let resolvePull: () => void = () => {};
+    (pullModel as ReturnType<typeof vi.fn>).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvePull = resolve;
+        }),
     );
 
     render(<ModelPanel />);
@@ -48,17 +58,20 @@ describe("ModelPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Pull model/i }));
 
     await waitFor(() => expect(pullModel).toHaveBeenCalledWith("llama3.2:3b"));
-    // The pull-proceeds behavior itself: a rejected registration must not
-    // abort the pull, and guardListen logs exactly one warn.
-    // (The hint is rendered only during the pulling phase — fast-review fix —
-    // and this mocked pull resolves in the same tick as registration, so the
-    // hint can flash past before any waitFor poll sees it. StepOllama's test
-    // pins the hint visually by holding the pull open.)
+    // While pulling: the hint is visible (registration rejected → degraded
+    // display, but the pull continues).
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Progress unavailable — pull continuing\./),
+      ).toBeInTheDocument(),
+    );
+    resolvePull();
     await waitFor(() =>
       expect(
         screen.getByText(/Model pulled successfully\./),
       ).toBeInTheDocument(),
     );
+    // After the pull ends the hint must NOT linger.
     expect(
       screen.queryByText(/Progress unavailable — pull continuing\./),
     ).not.toBeInTheDocument();
