@@ -1,7 +1,7 @@
 # Tauri listener registration: no unhandled rejections (issue #236)
 
 **Date:** 2026-09-28
-**Status:** Draft
+**Status:** Implemented 2026-09-28 (PR #247)
 **Branch:** fix/issue-236-listen-registration
 **Priority:** Medium (bug, low severity — console noise + silently missing listeners)
 
@@ -136,6 +136,19 @@ de-facto behavior, just without the unhandled rejection).
   plan states which set each check covers.
 
 ## Out of scope / open questions
+
+### Deliberate departures from this spec (plan wins; recorded 2026-09-28, review m2)
+
+1. **Item 3 (await vs allSettled):** useProviderHealth, GenerationPanel and
+   StepWatchItThink use held-promise arrays WITHOUT awaiting settlement,
+   instead of this spec's `allSettled` — nothing at those sites needs the
+   registration outcome, so awaiting would only delay unmount-path cleanup.
+2. **Item 7 (cleanup holds promises vs iterating settled results):**
+   setupWiki cleanup keeps held promises (`safeUnlisten` tolerates pending),
+   rather than iterating settled results.
+3. **Line 110 (test location):** guardListen tests live in a new
+   `src/__tests__/guardListen.test.ts` rather than extending
+   `safeUnlisten.test.ts`.
 
 - Rust-side listener health: out of scope (registration failure is
   host-level; the app cannot do more than log).
