@@ -1,3 +1,32 @@
+## [2.21.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.20.1...v2.21.0) (2026-09-29)
+
+### Features
+
+* **events:** guardListen logs subscription registration failures once ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([6002397](https://github.com/equationalapplications/curated-thoughts/commit/6002397f1320e3d8f05af3d4fcb4ce4e54f29e46))
+* **inference:** merge_stored helper for classifier config saves ([#230](https://github.com/equationalapplications/curated-thoughts/issues/230)) ([9889fa1](https://github.com/equationalapplications/curated-thoughts/commit/9889fa1e1ba37a968e19c08ea7dce079d2ab91a1))
+* **okf:** CRLF-safe frontmatter split helper for byte-exact body measurement ([#240](https://github.com/equationalapplications/curated-thoughts/issues/240)) ([52d4db5](https://github.com/equationalapplications/curated-thoughts/commit/52d4db5513dd7125d1aa1bdd1f0bad225fbf6fa2))
+* **okf:** shrink_refused and compaction_marker refusal variants with pinned displays ([#240](https://github.com/equationalapplications/curated-thoughts/issues/240)) ([5a2a7af](https://github.com/equationalapplications/curated-thoughts/commit/5a2a7af981dde8c244ef44a2be0843bc0b2b3e44))
+* **okf:** size-drop + compaction-marker guards on vault_write_note ([#240](https://github.com/equationalapplications/curated-thoughts/issues/240)) ([c23157f](https://github.com/equationalapplications/curated-thoughts/commit/c23157f1f988d7766b3479efd1092e46f6516d00))
+* **tools:** ct drift — read-only reconcile dry-run report ([#241](https://github.com/equationalapplications/curated-thoughts/issues/241)) ([c2bd500](https://github.com/equationalapplications/curated-thoughts/commit/c2bd5007df9489838f27f0caea204bad17a3eeec))
+* **ui:** classifier model pin field for jev_http ([#230](https://github.com/equationalapplications/curated-thoughts/issues/230)) ([d1cd9a2](https://github.com/equationalapplications/curated-thoughts/commit/d1cd9a2e5817ee2e0c90409778394cada41c7828))
+
+### Bug Fixes
+
+* address CodeRabbit review threads on PR [#246](https://github.com/equationalapplications/curated-thoughts/issues/246) ([8d47dcc](https://github.com/equationalapplications/curated-thoughts/commit/8d47dccd70e93f2fa3fdedfed0e7ec55451a3d36))
+* **ci:** drop unused anyhow::Result import from drift test module ([cadd380](https://github.com/equationalapplications/curated-thoughts/commit/cadd3802f478bcb93b2dcb2eedd995e1a36152c1))
+* **drift:** emit full-shape JSON on the indeterminate exit 5 (CR review) ([81f96c3](https://github.com/equationalapplications/curated-thoughts/commit/81f96c338478bc3b2a2d3f20a1f0116a671b7fcf))
+* **drift:** incomplete walk is indeterminate, not actionable drift ([#244](https://github.com/equationalapplications/curated-thoughts/issues/244)) ([b16717c](https://github.com/equationalapplications/curated-thoughts/commit/b16717c22eef0a16d85b6ea914cf682b57dd2757))
+* **inference:** jev_http request body names the required model field ([#230](https://github.com/equationalapplications/curated-thoughts/issues/230)) ([2547a8b](https://github.com/equationalapplications/curated-thoughts/commit/2547a8bc8fd8df4c55ca8e5d03b13d2ce2ad4f2c))
+* **mcp:** neutral allow_shrink schema wording + list the two new refusals in the tool description ([#240](https://github.com/equationalapplications/curated-thoughts/issues/240)) ([41de3fd](https://github.com/equationalapplications/curated-thoughts/commit/41de3fd813588fd3ffd213d1164f221d3ae49bf4))
+* **setup:** fastembed init proceeds when event subscriptions reject ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([8f1fa58](https://github.com/equationalapplications/curated-thoughts/commit/8f1fa58c0bf5367e84309ecf57df73984b8b08c7))
+* **setup:** model auto-install proceeds when progress subscriptions reject ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([a4a729a](https://github.com/equationalapplications/curated-thoughts/commit/a4a729afebaa9f3ba0b4742bff658892e139d22c))
+* **tools,ci:** fast-review — tar single -C (OLDPWD unbound), canonical-root assert fixed for Linux, full-shape empty-walk JSON, shared-helper root resolution ([#249](https://github.com/equationalapplications/curated-thoughts/issues/249)) ([25ef297](https://github.com/equationalapplications/curated-thoughts/commit/25ef29730dcb566258834c542330de472ad958e6))
+* **ui:** degrade gracefully when listen registration rejects ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([3540f4e](https://github.com/equationalapplications/curated-thoughts/commit/3540f4e93bea60477885598d97b0f8a7187ed658))
+* **ui:** guard pending Tauri subscriptions in hooks and shell ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([9bec5d0](https://github.com/equationalapplications/curated-thoughts/commit/9bec5d017f1383b725fecc409f8eb9fc27762ef1))
+* **ui:** hold pending subscription promises so one rejection cannot leak the rest ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([8a5cca9](https://github.com/equationalapplications/curated-thoughts/commit/8a5cca96369b423358def6590a8e5ffee1d0c78c))
+* **ui:** model pulls proceed when their progress listener rejects ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([7a711cc](https://github.com/equationalapplications/curated-thoughts/commit/7a711ccf4166368916b3761ec51cb04a2f4ff32a))
+* **wiki:** boot gate + held-promise cleanup for wiki event subscriptions ([#236](https://github.com/equationalapplications/curated-thoughts/issues/236)) ([6d07f22](https://github.com/equationalapplications/curated-thoughts/commit/6d07f22852ba6f3a49fd305b6901834e4afa340b))
+
 ## [2.20.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.20.0...v2.20.1) (2026-09-27)
 
 ### Bug Fixes
