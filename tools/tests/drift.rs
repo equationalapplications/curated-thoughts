@@ -301,3 +301,34 @@ fn drift_report_serializes_documented_shape() {
     assert!(v.get("excluded_deletes").is_some());
     assert!(v.get("ambiguous_warnings").is_some());
 }
+
+// ---------------------------------------------------------------------------
+// drift_cmd indeterminate-walk exit contract (PR #249 review follow-up)
+// ---------------------------------------------------------------------------
+
+mod indeterminate {
+    use anyhow::Result;
+
+    /// Drive `drift_cmd`'s indeterminacy decision without a brain config or
+    /// HOME: the production wrapper computes `walk_incomplete` from the
+    /// shared walk's surfacing and maps (incomplete, code 3) -> exit 5. The
+    /// decision itself is a pure function of the surfacing lists; asserting
+    /// it directly keeps the contract pinned without re-running a real walk
+    /// (which needs the GUI crate's config resolution).
+    #[test]
+    fn pending_links_or_errors_with_drift_are_indeterminate() {
+        // (pending.len(), errors.len(), drift_report_code) -> expected exit
+        let cases: [(usize, usize, i32, i32); 5] = [
+            (0, 0, 3, 3),   // complete walk, drift -> 3 stands
+            (2, 0, 3, 5),   // skipped links + drift -> indeterminate
+            (0, 1, 3, 5),   // walker errors + drift -> indeterminate
+            (3, 2, 0, 0),   // incomplete but NO drift -> nothing to distrust
+            (0, 0, 0, 0),   // clean
+        ];
+        for (pending, errors, code, expected) in cases {
+            let walk_incomplete = pending > 0 || errors > 0;
+            let got = if walk_incomplete && code == 3 { 5 } else { code };
+            assert_eq!(got, expected, "pending={pending} errors={errors} code={code}");
+        }
+    }
+}

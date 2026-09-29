@@ -5,6 +5,11 @@
 //! as WARNINGS (ingest never clears them; failing on them would mean a
 //! permanent nonzero exit after a "successful" repair).
 //! Never writes: read-only connection, classify only.
+//!
+//! Exit contract: 0 clean (ambiguous is a warning, not a failure), 3 drift
+//! pending, 4 empty walk, 5 INDETERMINATE — the walk skipped content
+//! (pending links) or errored, so a 3 from this command cannot be trusted
+//! as "deleted" (see `drift_cmd`).
 
 use std::path::Path;
 
@@ -75,6 +80,14 @@ pub fn drift_report(
 }
 
 /// I/O wrapper: resolves brain + vault root, builds the walk list, prints.
+///
+/// Walk incompleteness is treated as INDETERMINATE, never as drift: when the
+/// walk skipped content (pending-approval symlinks) or hit walker errors, a
+/// "gone" classification could equally mean "deleted" or "skipped this
+/// walk", so exiting 3 (and recommending `ct ingest --yes`, whose reconcile
+/// would then DELETE the skipped rows) would be a wrong answer delivered
+/// confidently. Exit 5 tells the operator the report is unreliable until the
+/// skipped content is approved (ct trust) or the errors are resolved.
 pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
     let brain = crate::write::resolve()?;
     let conn = crate::write::open_ro(&brain)?;
@@ -87,10 +100,34 @@ pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
     let paths = tauri_app_lib::retrieval::resolve_brain_paths();
     // trust_links: false — drift reports what a plain ingest would see;
     // promoting pending links is a `ct trust` decision, not drift's.
-    let (vault_root, files, _surfacing) =
+    let (vault_root, files, surfacing) =
         crate::walk_list::build_ingest_file_list(&paths, false)?;
 
+    // trust_links=false means nothing was auto-promoted, so a non-empty
+    // `pending` list is content this walk SKIPPED awaiting `ct trust` —
+    // combined with walker errors it makes any "gone"/"excluded-delete"
+    // verdict indeterminate (deleted vs skipped-this-walk).
+    let walk_incomplete = !surfacing.pending.is_empty() || !surfacing.errors.is_empty();
+
     let (report, code) = drift_report(&conn, &files, &vault_root)?;
+
+    if walk_incomplete && code == 3 {
+        for p in &surfacing.pending {
+            eprintln!(
+                "warning: pending link {} -> {} was skipped by this walk; its absence from the report is NOT verified",
+                p.link, p.target
+            );
+        }
+        for e in &surfacing.errors {
+            eprintln!("warning: walk error made this report indeterminate: {e}");
+        }
+        eprintln!(
+            "drift: walk was INCOMPLETE ({} skipped link(s), {} walker error(s)) — the report cannot distinguish deleted from skipped; approve links with `ct trust` / resolve errors, then re-run",
+            surfacing.pending.len(),
+            surfacing.errors.len()
+        );
+        return Ok(5);
+    }
 
     if json {
         // ALWAYS the full DriftReport shape (review M2): scripts do
