@@ -1,7 +1,7 @@
 # vault_write_note: size-drop guard + compaction-marker reject (issue #240)
 
 **Date:** 2026-09-28
-**Status:** Draft
+**Status:** Implemented 2026-09-28 (PR #248)
 **Branch:** feat/issue-240-shrink-guard
 **Priority:** High (real production incident 2026-09-26; write-path hardening)
 
@@ -49,8 +49,9 @@ Tauri command (`lib.rs:877`). No internal repair pass writes through
    PINNED to
    `shrink_refused:{existing_bytes}:{new_bytes}: re-read the note and resend the full body`.
 4. **D4 — byte basis:** new body = rendered document length minus the split
-   helper's offset (`doc.len() - offset`; exactly what `render_document`
-   appends — no normalization step) vs existing body =
+   helper's offset (`doc.len() - offset`; `render_document` normalizes the
+   body to end with exactly one trailing `\n`, added only if missing — the
+   measurement basis is the RENDERED document) vs existing body =
    `content.len() - offset` — both measured via the new
    `split_frontmatter_fence` helper (item 6), never via
    `collect_frontmatter_fence` (mis-measures CRLF, see item 6).
@@ -73,8 +74,9 @@ Tauri command (`lib.rs:877`). No internal repair pass writes through
 
 **Pins (Opus spec minors + c2):** new-body bytes = rendered document length
 minus the split helper's frontmatter offset (`doc.len() - offset`; the
-rendered document does not collapse trailing newlines — no normalization
-step, and "normalized" in earlier drafts meant exactly this measured form);
+rendered document ends with exactly one trailing `\n` — `render_document`
+adds it only if missing, and "normalized" in earlier drafts meant exactly
+this measured form);
 marker error variant `CompactionMarkerRejected { marker: String }` with
 Display `compaction_marker:{marker}: rephrase and resend without compaction
 artifacts` (same no-`allow_shrink` rule as the shrink refusal); "newly
