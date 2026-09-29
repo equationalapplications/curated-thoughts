@@ -140,7 +140,17 @@ export function ClassifierPanel() {
             </div>
             <div>
               <label htmlFor="classifier-model">Model</label>
-              <input id="classifier-model" type="text" value={model} disabled={disableControls} onChange={(e) => setModel(e.target.value)} />
+              <input
+                id="classifier-model"
+                type="text"
+                value={model}
+                placeholder="jev-latest"
+                disabled={disableControls}
+                onChange={(e) => setModel(e.target.value)}
+              />
+              <p className="settings-form__hint">
+                Blank uses the default (jev-latest); pin an exact model (e.g. jev-1.13) for reproducible typing. Clearing the field unpins on save.
+              </p>
             </div>
           </>
         )}

@@ -937,11 +937,15 @@ mod tests {
 
     /// Local fixture for the merge disk round-trip tests — tempdir paths +
     /// in-memory secret store, same shape as `config_round_trips…`.
-    fn merge_fixture(
-    ) -> (BrainPaths, crate::inference::classifier_secrets::InMemoryClassifierSecretStore) {
+    fn merge_fixture() -> (
+        tempfile::TempDir,
+        BrainPaths,
+        crate::inference::classifier_secrets::InMemoryClassifierSecretStore,
+    ) {
         use crate::inference::classifier_secrets::InMemoryClassifierSecretStore;
         use std::sync::Mutex;
 
+        // Caller keeps the TempDir alive — dropping it deletes the folder.
         let dir = tempfile::tempdir().unwrap();
         let paths = BrainPaths {
             brain_dir: dir.path().to_path_buf(),
@@ -949,12 +953,16 @@ mod tests {
             db_path: dir.path().join("brain.db"),
         };
         std::fs::write(&paths.config_path, "{}").unwrap();
-        (paths, InMemoryClassifierSecretStore(Mutex::new(None)))
+        (
+            dir,
+            paths,
+            InMemoryClassifierSecretStore(Mutex::new(None)),
+        )
     }
 
     #[test]
     fn set_classifier_config_persists_model_unpin_to_disk() {
-        let (paths, store) = merge_fixture();
+        let (_dir, paths, store) = merge_fixture();
         let pinned = ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),
@@ -973,7 +981,7 @@ mod tests {
 
     #[test]
     fn set_classifier_config_persists_model_pin_survives_null_round_trip() {
-        let (paths, store) = merge_fixture();
+        let (_dir, paths, store) = merge_fixture();
         let pinned = ClassifierConfig {
             provider: ClassifierProviderKind::JevHttp,
             url: Some("https://x".into()),

@@ -136,7 +136,7 @@ describe('ClassifierPanel', () => {
     );
   });
 
-  it('clears a loaded jev_http pin when switching to cloudflare', async () => {
+  it('hydrates the stored pin and sends model: null for cloudflare saves (null = untouched per merge_stored)', async () => {
     getClassifierConfig.mockResolvedValue({
       provider: 'jev_http',
       url: 'https://jev.example.com',
