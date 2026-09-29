@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { listLocalModels, pullModel, getRecommendedModel } from "../../lib/tauri";
-import { onPullProgress, safeUnlisten } from "../../lib/events";
+import { guardListen, onPullProgress, safeUnlisten } from "../../lib/events";
 import { reportBackgroundError } from "../../lib/errorFeed";
 
 export function ModelPanel() {
@@ -9,6 +9,7 @@ export function ModelPanel() {
   const [newModel, setNewModel] = useState("");
   const [phase, setPhase] = useState<"idle" | "pulling" | "done" | "error">("idle");
   const [progress, setProgress] = useState(0);
+  const [progressUnavailable, setProgressUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -34,10 +35,23 @@ export function ModelPanel() {
     if (!newModel.trim()) return;
     setPhase("pulling");
     setProgress(0);
+    setProgressUnavailable(false);
     setError(null);
-    const unlisten = await onPullProgress(({ completed, total }) => {
-      setProgress(total > 0 ? Math.round((completed / total) * 100) : 0);
-    });
+    // Progress listener is best-effort: if it cannot attach, show that and
+    // STILL pull — aborting the user's pull over a display listener would be
+    // worse. guardListen logs the failure; no second logger here.
+    const unlisten = guardListen(
+      onPullProgress(({ completed, total }) => {
+        setProgress(total > 0 ? Math.round((completed / total) * 100) : 0);
+      }),
+      "ollama-pull-progress",
+    );
+    // Review M5: AWAIT (not `void`) — Tauri does not buffer events, so
+    // pullModel() must not start until registration settles; early
+    // ollama-pull-progress events would otherwise be lost and a fast/cached
+    // pull could finish before the listener exists (progress stuck at 0%).
+    // A rejection still lets the pull proceed (degraded display only).
+    await unlisten.catch(() => setProgressUnavailable(true));
     try {
       await pullModel(newModel.trim());
       setPhase("done");
@@ -87,6 +101,7 @@ export function ModelPanel() {
       {phase === "pulling" && (
         <progress value={progress} max={100} style={{ width: "100%", height: "6px" }} />
       )}
+      {progressUnavailable && <p className="settings-hint">Progress unavailable — pull continuing.</p>}
       {phase === "done" && <p className="model-success">Model pulled successfully.</p>}
       {phase === "error" && <p className="model-error">Error: {error}</p>}
     </div>

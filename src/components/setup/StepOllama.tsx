@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { checkOllama, getRecommendedModel, pullModel, startOllamaServer } from "../../lib/tauri";
-import { onPullProgress, safeUnlisten } from "../../lib/events";
+import { guardListen, onPullProgress, safeUnlisten } from "../../lib/events";
 
 interface Props { onNext: () => void }
 
@@ -12,6 +12,7 @@ const POLL_INTERVAL_MS = 3000;
 export function StepOllama({ onNext }: Props) {
   const [phase, setPhase] = useState<Phase>("checking");
   const [progress, setProgress] = useState(0);
+  const [progressUnavailable, setProgressUnavailable] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [model, setModel] = useState<string>("");
   const [ollamaRunning, setOllamaRunning] = useState(false);
@@ -29,9 +30,16 @@ export function StepOllama({ onNext }: Props) {
     }
     setPhase("pulling");
     setProgress(0);
-    const unlisten = await onPullProgress(({ completed, total }) => {
-      setProgress(total > 0 ? Math.round((completed / total) * 100) : 0);
-    });
+    setProgressUnavailable(false);
+    // Best-effort progress: rejection degrades display, never aborts the pull.
+    const unlisten = guardListen(
+      onPullProgress(({ completed, total }) => {
+        setProgress(total > 0 ? Math.round((completed / total) * 100) : 0);
+      }),
+      "ollama-pull-progress",
+    );
+    // Same await-before-pull as ModelPanel (review M5).
+    await unlisten.catch(() => setProgressUnavailable(true));
     try {
       await pullModel(modelId);
       setPhase("ready");
@@ -126,6 +134,7 @@ export function StepOllama({ onNext }: Props) {
         <>
           <p>Downloading {model}… {progress}%</p>
           <progress value={progress} max={100} style={{ width: "100%" }} />
+          {progressUnavailable && <p className="settings-hint">Progress unavailable — pull continuing.</p>}
         </>
       )}
 
