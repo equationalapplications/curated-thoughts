@@ -28,6 +28,14 @@ pub struct Repoint {
 #[derive(Debug, Serialize)]
 pub struct DriftReport {
     pub empty_walk: bool,
+    /// True when the walk skipped content (pending-approval symlinks) or hit
+    /// walker errors, making any pending-drift classification untrustworthy
+    /// (deleted vs skipped-this-walk). JSON consumers MUST treat this run as
+    /// advisory: exit code 5 accompanies it and `gone`/`excluded_deletes`
+    /// may be false positives. (CR review: the 5-exit previously bypassed
+    /// the JSON branch entirely — `--json` exited 5 with no output.)
+    #[serde(default)]
+    pub walk_incomplete: bool,
     pub gone: Vec<String>,
     pub repointed: Vec<Repoint>,
     pub excluded_deletes: Vec<String>,
@@ -48,6 +56,7 @@ pub fn drift_report(
     if classified.empty_walk {
         let report = DriftReport {
             empty_walk: true,
+            walk_incomplete: false,
             gone: vec![],
             repointed: vec![],
             excluded_deletes: vec![],
@@ -58,6 +67,7 @@ pub fn drift_report(
 
     let report = DriftReport {
         empty_walk: false,
+        walk_incomplete: false,
         // Consume the classify partition directly — NO is_excluded
         // re-filter (there is no such helper, and `plan.deleted` holds
         // both categories).
@@ -126,6 +136,12 @@ pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
             surfacing.pending.len(),
             surfacing.errors.len()
         );
+        // JSON consumers get the full report shape PLUS walk_incomplete:
+        // exit 5 alone emitted nothing under --json, leaving jq with empty
+        // stdout and no way to tell indeterminate from clean (CR review).
+        if json {
+            println!("{}", serde_json::to_string(&DriftReport { walk_incomplete: true, ..report })?);
+        }
         return Ok(5);
     }
 

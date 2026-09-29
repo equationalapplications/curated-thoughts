@@ -270,6 +270,7 @@ fn drift_report_serializes_documented_shape() {
     // empty_walk: true and empty vectors — not a different shape.
     let populated = curated_thoughts_tools::drift::DriftReport {
         empty_walk: false,
+        walk_incomplete: false,
         gone: vec!["wiki/old.md".to_string()],
         repointed: vec![curated_thoughts_tools::drift::Repoint {
             from: "a.md".to_string(),
@@ -288,6 +289,7 @@ fn drift_report_serializes_documented_shape() {
 
     let empty_walk = curated_thoughts_tools::drift::DriftReport {
         empty_walk: true,
+        walk_incomplete: false,
         gone: vec![],
         repointed: vec![],
         excluded_deletes: vec![],
@@ -330,3 +332,29 @@ mod indeterminate {
         }
     }
 }
+    /// JSON contract (CR review): `ct drift --json` on an indeterminate walk
+    /// must still emit the full report shape — walk_incomplete: true — before
+    /// exiting 5. Pinned on the serialization side (the full cmd path needs a
+    /// real brain config): the indeterminate payload is `DriftReport {
+    /// walk_incomplete: true, ..report }`, so asserting the marker field
+    /// serializes and coexists with the standard shape covers the contract.
+    #[test]
+    fn indeterminate_json_emits_full_shape_with_walk_incomplete() {
+        let report = curated_thoughts_tools::drift::DriftReport {
+            empty_walk: false,
+            walk_incomplete: true,
+            gone: vec!["maybe-deleted.md".to_string()],
+            repointed: vec![],
+            excluded_deletes: vec![],
+            ambiguous_warnings: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["walk_incomplete"], serde_json::Value::Bool(true));
+        assert!(v.is_object(), "indeterminate payload must keep the full shape");
+        assert!(v.get("empty_walk").is_some());
+        assert!(v.get("gone").is_some());
+        assert!(v.get("repointed").is_some());
+        assert!(v.get("excluded_deletes").is_some());
+        assert!(v.get("ambiguous_warnings").is_some());
+        assert_eq!(v["gone"], serde_json::json!(["maybe-deleted.md"]));
+    }
