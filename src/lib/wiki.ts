@@ -13,9 +13,12 @@ import { seedManifestsIfAbsent } from "./ontologySeed";
 let _workspaceId: string = 'tier_working::default';
 let _workspaceIdRequest = 0;
 
-// Pending setupWiki lifecycle subscriptions. Held as PROMISES so teardown
-// works even if disposal runs while a listen() is still registering.
-const wikiLifecycleListeners: Array<Promise<UnlistenFn>> = [];
+// Pending setupWiki lifecycle subscriptions, held as PROMISES so the boot
+// gate can await them even if a listen() is still registering. The wiki
+// listeners live for the session (main.tsx calls setupWiki once); there is
+// intentionally no teardown consumer. Kept local to setupWiki so repeated
+// calls can never accumulate stale entries.
+let wikiLifecycleListeners: Array<Promise<UnlistenFn>> = [];
 
 // Tracks the in-flight `initWorkspaceId` promise so callers like
 // `applyOntologyChange` can wait for the workspace entity to resolve before
@@ -457,7 +460,9 @@ export async function setupWiki() {
     _classifier = await readClassifierStatus();
     await rebuildWiki();
   };
-  wikiLifecycleListeners.push(
+  // Reset per call: a second setupWiki must not wait on the previous call's
+  // (already settled) promises.
+  wikiLifecycleListeners = [
     guardListen(listen<void>('outbox-worker-started', async () => {
       _outboxEnabled = true;
       await rebuildWiki();
@@ -468,7 +473,7 @@ export async function setupWiki() {
     }), 'outbox-worker-stopped'),
     guardListen(listen<void>('classifier-config-changed', onClassifierInputsChanged), 'classifier-config-changed'),
     guardListen(listen<void>('privacy-mode-changed', onClassifierInputsChanged), 'privacy-mode-changed'),
-  );
+  ];
   // Boot gate (allSettled — never fail boot over a subscription): outcomes
   // are settled before the initial setup runs, preserving the
   // register-before-setup intent. A rejected listener degrades its feature

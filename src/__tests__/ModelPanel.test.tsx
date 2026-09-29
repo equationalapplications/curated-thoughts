@@ -48,16 +48,20 @@ describe("ModelPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Pull model/i }));
 
     await waitFor(() => expect(pullModel).toHaveBeenCalledWith("llama3.2:3b"));
-    await waitFor(() =>
-      expect(
-        screen.getByText(/Progress unavailable — pull continuing\./),
-      ).toBeInTheDocument(),
-    );
+    // The pull-proceeds behavior itself: a rejected registration must not
+    // abort the pull, and guardListen logs exactly one warn.
+    // (The hint is rendered only during the pulling phase — fast-review fix —
+    // and this mocked pull resolves in the same tick as registration, so the
+    // hint can flash past before any waitFor poll sees it. StepOllama's test
+    // pins the hint visually by holding the pull open.)
     await waitFor(() =>
       expect(
         screen.getByText(/Model pulled successfully\./),
       ).toBeInTheDocument(),
     );
+    expect(
+      screen.queryByText(/Progress unavailable — pull continuing\./),
+    ).not.toBeInTheDocument();
     const warns = warnSpy.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(
       warns.filter((m: string) =>

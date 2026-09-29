@@ -84,7 +84,10 @@ describe("StepFastembed", () => {
     // initialized and the wizard stalled. With allSettled, a rejected
     // subscription must degrade to one guarded warn while init proceeds.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    (onEmbedInitDone as ReturnType<typeof vi.fn>).mockReturnValue(
+    // mockImplementation (not mockReturnValue): an eagerly-created rejected
+    // promise can fire unhandledrejection before the component subscribes;
+    // lazy creation matches the ModelPanel/StepOllama tests.
+    (onEmbedInitDone as ReturnType<typeof vi.fn>).mockImplementation(() =>
       Promise.reject(new Error("listen boom")),
     );
     (onEmbedInitError as ReturnType<typeof vi.fn>).mockResolvedValue(() => {});

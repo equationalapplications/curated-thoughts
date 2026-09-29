@@ -101,7 +101,7 @@ export function ModelPanel() {
       {phase === "pulling" && (
         <progress value={progress} max={100} style={{ width: "100%", height: "6px" }} />
       )}
-      {progressUnavailable && <p className="settings-hint">Progress unavailable — pull continuing.</p>}
+      {phase === "pulling" && progressUnavailable && <p className="settings-hint">Progress unavailable — pull continuing.</p>}
       {phase === "done" && <p className="model-success">Model pulled successfully.</p>}
       {phase === "error" && <p className="model-error">Error: {error}</p>}
     </div>
