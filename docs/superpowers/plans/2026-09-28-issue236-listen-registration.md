@@ -32,6 +32,7 @@
 **Interfaces:**
 - Consumes: nothing.
 - Produces: `export function guardListen(subscription: Promise<UnlistenFn>, context: string): Promise<UnlistenFn>` — every later task imports this.
+- ALSO produces (review M1): `export type { UnlistenFn } from "@tauri-apps/api/event";` — events.ts imports `UnlistenFn` but does NOT re-export it today, so every later task's `import { …, type UnlistenFn } from './events'` fails `tsc` (TS2459) under `pnpm run build` (tsconfig covers all of src; vitest strips type imports so tests alone won't catch it). Add this export in Step 3 and import `UnlistenFn` FROM `./events` (not `@tauri-apps/api/event`) in Tasks 3, 6, 7 (useProviderHealth, GenerationPanel, StepWatchItThink, ModelPanel, StepOllama, wiki.ts).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -121,6 +122,8 @@ git commit -m "feat(events): guardListen logs subscription registration failures
 
 ### Task 2: Pattern-A sites (pending-promise cleanup) — hooks, SplashScreen, AppShell ×3
 
+> **Line-number correction (review m3):** the original survey numbering is stale. Actual locations: useProviderHealth :47-81 (not :375-409), GenerationPanel :37-44 (not :437-445), StepWatchItThink :41-59 (not :477-498), StepModel :68-83 (not :593-608), StepOllama :24-44 (not :634-654), AppShell onVaultSwitched :134-146 / drag-drop :148-177 / config-malformed :234-243 (the draft's ":269-281 in current file" etc. was survey numbering, NOT file lines), startAutoHeal wiki.ts:545-552, startAutoMaintenance wiki.ts:590. Every edit below is anchored on quoted source text — locate edits by the quotes, never by line numbers.
+
 **Files:**
 - Modify: `src/hooks/usePrivacyMode.ts:83-91`
 - Modify: `src/hooks/useVaultFiles.ts:15-18`
@@ -150,7 +153,7 @@ to
     );
 ```
 
-- [ ] **Step 2: useVaultFiles** — import `guardListen` (and drop the direct `listen` import) and change
+- [ ] **Step 2: useVaultFiles** — import `guardListen` and KEEP the direct `listen` import (the wrapped call below still uses it — dropping it breaks `tsc`; review m4):
 
 ```ts
     const unlisten = listen("vault-event", refresh);
@@ -322,10 +325,9 @@ Delete the now-unused `unlisteners` array and its `push` mechanism (cleanup prev
         guardListen(onProviderError(() => setStatus("error")), "provider-error"),
       ];
       unlistens = subscriptions;
-      if (!active) unlistens.forEach((p) => void safeUnlisten(p));
 ```
 
-and re-type the outer `unlistens` declaration to hold promises (`let unlistens: Array<Promise<UnlistenFn>> = []`). The effect cleanup (`unlistens.forEach(...)`) is otherwise unchanged — `safeUnlisten` accepts pending promises.
+and re-type the outer `unlistens` declaration to hold promises (`let unlistens: Array<Promise<UnlistenFn>> = []`). The effect cleanup (`unlistens.forEach(...)`) is otherwise unchanged — `safeUnlisten` accepts pending promises. (Review m5: do NOT add the old draft's `if (!active) unlistens.forEach(...)` — `active` was already checked right after the await at GenerationPanel.tsx:28, so the check can never be true and cleanup already covers the pending promises.)
 
 - [ ] **Step 3: StepWatchItThink** — same shape; replace the awaited `Promise.all` IIFE body (:477-498):
 
@@ -355,12 +357,25 @@ and re-type the outer `unlistens` declaration to hold promises (`let unlistens: 
 
 re-type `unlistens` to `Array<Promise<UnlistenFn>>`; cleanup `unlistens.forEach((u) => void safeUnlisten(u))` unchanged.
 
-- [ ] **Step 4: Run**
+- [ ] **Step 4: Failing-first regression tests (review M4; spec Testing :115-121).** The behavior changes in this task (leak fix) ship with no coverage unless added here. For each component, a test where ONE of its subscriptions rejects and the OTHERS still unlisten on unmount:
+
+```ts
+// Per component (useProviderHealth, GenerationPanel, StepWatchItThink):
+// 1. Mock events so, say, onProviderLoading rejects and the rest resolve.
+// 2. Render the component (hook: renderHook).
+// 3. Assert exactly one '[events] listen failed (provider-loading)' warn.
+// 4. Unmount.
+// 5. Assert EVERY subscription's unlisten fn was invoked — including the
+//    ones whose listen() rejected (safeUnlisten tolerates them). That is
+//    the leak fix: the old Promise.all shape dropped the pending promises.
+```
+
+- [ ] **Step 5: Run**
 
 Run: `pnpm test`
-Expected: ALL PASS.
+Expected: ALL PASS, including the new regression tests (RED first in Step 4's draft form only while the components still use `Promise.all`).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/hooks/useProviderHealth.ts src/components/settings/GenerationPanel.tsx src/components/setup/StepWatchItThink.tsx
@@ -414,12 +429,14 @@ git commit -m "fix(ui): hold pending subscription promises so one rejection cann
 
 (Import `guardListen` alongside the existing events imports.)
 
-- [ ] **Step 2: Run**
+- [ ] **Step 2: Failing-first test (review M4; spec Testing :117-118):** mock `onEmbedInitDone` to REJECT and assert `initFastembed()` was still called exactly once (the old `Promise.all` shape skipped it), and that exactly one `[events] listen failed (embed-init-done)` warn fired. RED while the component still uses `Promise.all`.
+
+- [ ] **Step 3: Run**
 
 Run: `pnpm test`
 Expected: ALL PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/components/setup/StepFastembed.tsx
@@ -499,7 +516,12 @@ Rewrite `handlePull`:
       }),
       "ollama-pull-progress",
     );
-    void unlisten.catch(() => setProgressUnavailable(true));
+    // Review M5: AWAIT (not `void`) — Tauri does not buffer events, so
+    // pullModel() must not start until registration settles; early
+    // ollama-pull-progress events would otherwise be lost and a fast/cached
+    // pull could finish before the listener exists (progress stuck at 0%).
+    // A rejection still lets the pull proceed (degraded display only).
+    await unlisten.catch(() => setProgressUnavailable(true));
     try {
       await pullModel(newModel.trim());
       setPhase("done");
@@ -534,7 +556,8 @@ In the JSX progress row, render the degraded state (locate the progress render i
       }),
       "ollama-pull-progress",
     );
-    void unlisten.catch(() => setProgressUnavailable(true));
+    // Same await-before-pull as ModelPanel (review M5).
+    await unlisten.catch(() => setProgressUnavailable(true));
     try {
       await pullModel(modelId);
       setPhase("ready");
@@ -548,12 +571,14 @@ In the JSX progress row, render the degraded state (locate the progress render i
 
 plus the same hint line in its pulling-phase JSX.
 
-- [ ] **Step 3: Run**
+- [ ] **Step 3: Failing-first tests (review M4; spec Testing :119-120):** for ModelPanel and StepOllama — mock `onPullProgress` to REJECT and `pullModel` to resolve; assert the pull still ran (phase reaches done/ready), the "Progress unavailable" hint rendered, and exactly one `[events] listen failed (ollama-pull-progress)` warn fired. RED while the listener still aborts/skips the pull.
+
+- [ ] **Step 4: Run**
 
 Run: `pnpm test`
 Expected: ALL PASS.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/components/settings/ModelPanel.tsx src/components/setup/StepOllama.tsx
@@ -567,7 +592,7 @@ git commit -m "fix(ui): model pulls proceed when their progress listener rejects
 
 **Interfaces:**
 - Consumes: `guardListen` (Task 1).
-- Produces: module-level `wikiLifecycleListeners: Array<Promise<UnlistenFn>>` consumed by setupWiki's existing teardown path.
+- Produces: module-level `wikiLifecycleListeners: Array<Promise<UnlistenFn>>`. (Review m1: wiki.ts:495-499 today only does `void startedUnlisten; …` with a "listeners live for the session" comment — there is NO existing teardown path to consume this array. Step 2 therefore DELETES those `void` lines instead of replacing a disposal that doesn't exist; the array serves as the allSettled gate's handle, not a teardown registry.)
 
 - [ ] **Step 1: setupWiki boot gate.** Add a module-level array near the other module state (top of file, beside `_ontologySelection` etc.):
 
@@ -604,17 +629,7 @@ Replace the four awaits (:450-464 region):
 
 Delete the four `const startedUnlisten = ...` / `stoppedUnlisten` / `classifierUnlisten` / `privacyUnlisten` bindings.
 
-- [ ] **Step 2: setupWiki teardown.** Find where the four unlistens are disposed today:
-
-Run: `grep -rn "startedUnlisten\|stoppedUnlisten\|classifierUnlisten\|privacyUnlisten" src/`
-
-Replace every disposal use with:
-
-```ts
-  wikiLifecycleListeners.forEach((p) => void safeUnlisten(p));
-```
-
-(If they are disposed in more than one place, guard against double-dispose by clearing after: `wikiLifecycleListeners.length = 0;` following the forEach — `safeUnlisten` tolerates repeats, so this is belt-and-braces, not required.)
+- [ ] **Step 2: Delete the `void` disposal lines (review m1).** wiki.ts:495-499 has only `void startedUnlisten; void stoppedUnlisten; …` ("listeners live for the session") — there is NO disposal to replace. Delete those lines and the comment; do NOT grep for a teardown path that does not exist. The listeners intentionally live for the session; `wikiLifecycleListeners` exists as the Step 1 allSettled gate's handle, not a teardown registry.
 
 - [ ] **Step 3: startAutoHeal** (:552-568) — wrap and KEEP held-promise cleanup (its stop path can run while `listen()` is pending):
 
@@ -646,12 +661,14 @@ cleanup: `subscriptions.forEach((p) => void safeUnlisten(p));`
 
 - [ ] **Step 5: useWikiStatus / subscribeEntityStatus — NO CHANGE.** The hook's existing `.catch(console.error)` already owns rejection handling (spec exemption). Do not touch `src/hooks/useWikiStatus.ts` or `subscribeEntityStatus` in `src/lib/tauri.ts`.
 
-- [ ] **Step 6: Run**
+- [ ] **Step 6: Failing-first test (review M4; spec Testing :120-121):** for setupWiki — mock `listen` so ONE of the four boot listeners rejects; assert `setupWiki()` still completes (boot gate holds) and exactly one `[events] listen failed (<ctx>)` warn fired. RED while setupWiki still uses the old shape.
+
+- [ ] **Step 7: Run**
 
 Run: `pnpm test`
 Expected: ALL PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/lib/wiki.ts
@@ -661,45 +678,65 @@ git commit -m "fix(wiki): boot gate + held-promise cleanup for wiki event subscr
 ### Task 8: AppShell component test + inventory cross-check + spec flip
 
 **Files:**
-- Create: `src/components/shell/__tests__/AppShell.dragdrop.test.tsx`
-- Modify: `docs/superpowers/specs/2026-09-28-issue236-listen-registration-design.md` (status)
+- Create: `src/__tests__/AppShell.dragdrop.test.tsx` (in `src/__tests__/`, NOT beside the component — see Step 1)
+- Modify: `docs/superpowers/specs/2026-09-28-issue236-listen-registration-design.md` (status + the deliberate departures, review m2)
 
-- [ ] **Step 1: Write the AppShell rejection test.** IMPORTANT mock mechanics: `test-setup.ts` mocks `@tauri-apps/api/window` with `getCurrentWindow: vi.fn(() => ({ onDragDropEvent: vi.fn(() => Promise.resolve(() => {})), ... }))` — a FRESH `vi.fn` per call, so `mockRejectedValueOnce` on a captured reference does NOT affect the component's call. Grab the mock per-render:
+- [ ] **Step 1: Write the AppShell rejection test.** (Review M2 — the old draft's test could not pass: it captured its own `getCurrentWindow()` object, but `test-setup.ts:197-202` returns a FRESH object with a fresh `vi.fn` per call, so the component got a resolving mock and no warn fired; `render(<AppShell />)` omitted AppShell's REQUIRED props (`AppShell.tsx:61`: `{ vaultPath, onVaultChanged, needsSetup }`); and the Proxy mock of `lib/tauri` made `needsChunkHashMigration()`/`startFileWatcher()` return `undefined`, whose `.then`/`.catch` throw during mount — the Proxy could even answer `then` and look like a thenable. This rewrite fixes all four.) The file goes in `src/__tests__/` — NOT `src/components/shell/__tests__/` — because tsconfig excludes only `src/__tests__` and this file's type surface would otherwise break `pnpm run build`:
 
 ```tsx
+// src/__tests__/AppShell.dragdrop.test.tsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render } from '@testing-library/react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-const { useVault } = vi.hoisted(() => ({ useVault: vi.fn(() => ({ path: '/v' })) }));
-vi.mock('../../hooks/useVault', () => ({ useVault }));
+// Explicit resolving stubs for exactly what AppShell + its hooks call at
+// mount. NO Proxy — a Proxy mock answers `then` (thenable trap) and returns
+// `undefined` for needsChunkHashMigration/startFileWatcher, whose .then
+// calls throw during mount.
+vi.mock('../lib/tauri', () => ({
+  needsChunkHashMigration: vi.fn(() => Promise.resolve(false)),
+  startFileWatcher: vi.fn(() => Promise.resolve(() => {})),
+  // add stubs for anything else the mount trace touches — extend this
+  // object, never switch to a Proxy.
+}));
 
-// AppShell has many child dependencies; mock what the shell needs to mount.
-vi.mock('../../lib/tauri', () => new Proxy({}, { get: (_t, k) => (k === 'getCurrentWindow' ? undefined : vi.fn()) }));
-
-import { AppShell } from '../AppShell';
+import { AppShell } from '../components/shell/AppShell';
 
 describe('AppShell drag-drop registration failure', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('logs one warning and does not throw unhandled when onDragDropEvent rejects', async () => {
+  it('logs exactly one warning and does not throw unhandled when onDragDropEvent rejects', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const win = getCurrentWindow() as unknown as {
-      onDragDropEvent: ReturnType<typeof vi.fn>;
-    };
-    win.onDragDropEvent.mockReturnValueOnce(Promise.reject(new Error('no drag drop')));
-    render(<AppShell />);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(warn).toHaveBeenCalledWith(
-      '[events] listen failed (drag-drop)',
-      expect.any(Error),
+    // Mock at the SOURCE (getCurrentWindow), not on a captured object —
+    // test-setup returns a fresh object per call, so per-object
+    // mockReturnValueOnce never reaches the component.
+    vi.mocked(getCurrentWindow).mockImplementation(() => ({
+      onDragDropEvent: vi.fn(() => Promise.reject(new Error('no drag drop'))),
+      setTitle: vi.fn(() => Promise.resolve()),
+    }) as never);
+
+    render(
+      <AppShell
+        vaultPath="/v"
+        onVaultChanged={() => {}}
+        needsSetup={false}
+      />,
     );
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Review m6: assert the COUNT on warns filtered by the prefix — a bare
+    // toHaveBeenCalledWith does not prove "exactly one", and the
+    // config-malformed drain can also warn (AppShell.tsx:232).
+    const eventsWarns = warn.mock.calls.filter(([m]) =>
+      String(m).startsWith('[events] listen failed'),
+    );
+    expect(eventsWarns).toHaveLength(1);
+    expect(eventsWarns[0][0]).toBe('[events] listen failed (drag-drop)');
+    expect(eventsWarns[0][1]).toBeInstanceOf(Error);
     warn.mockRestore();
   });
 });
 ```
-
-If AppShell's prop/module surface makes this harness fight the test suite, adjust the mocks to what AppShell actually imports (keep the CORE assertions: one `[events] listen failed (drag-drop)` warn; vitest fails the suite automatically on any unhandled rejection). The warn-count and message assertions are the contract — do not weaken them.
 
 - [ ] **Step 2: Run**
 
@@ -709,10 +746,16 @@ Expected: PASS (one warn; no unhandled rejection — vitest fails the run otherw
 - [ ] **Step 3: Inventory cross-check.** Every subscription creation in `src/` must now be either guardListen-wrapped or covered by an explicit rule (setupWiki allSettled, startAutoHeal/startAutoMaintenance held-promise, useWikiStatus existing-catch, pull-proceeds sites):
 
 ```bash
-rg -n --type ts "\b(listen|onVaultEvent|onPullProgress|onVaultSwitched|onSidecarDownloadProgress|onProviderLoading|onProviderReady|onProviderError|onEmbedInit|onGgufDownloadProgress|onIngest|onMigrationProgress|onMigrationComplete|onMigrationError|onConfigMalformed|onDragDropEvent)(<[^>]*>)?\(" src/ -g '!src/__tests__/**' -g '!src/lib/events.ts' -g '!src/test-setup.ts'
+# Review M3: the old pattern required `onEmbedInit`/`onIngest` to be followed
+# DIRECTLY by `<` or `(`, so it silently missed onEmbedInitDone/Progress/Error
+# and onIngestProgress/ProposalReady/Error (useProviderHealth.ts:66-72,
+# StepFastembed.tsx:20,24, StepWatchItThink.tsx:42-53). It also listed
+# non-existent wrappers (onMigration*, onConfigMalformed) and omitted
+# subscribeEntityStatus. Wildcards fix the misses:
+rg -n --type ts "\b(listen|subscribeEntityStatus|on(VaultEvent|PullProgress|VaultSwitched|SidecarDownloadProgress|Provider\w+|EmbedInit\w+|GgufDownloadProgress|Ingest\w+|DragDropEvent))(<[^>]*>)?\(" src/ -g '!src/__tests__/**' -g '!src/lib/events.ts' -g '!src/test-setup.ts'
 ```
 
-Gate: every hit is an argument of `guardListen(` (check with `rg -B1` over the same pattern), or sits in setupWiki/startAutoHeal/startAutoMaintenance (which wrap internally), or is `subscribeEntityStatus`'s own body (exempt). Known grep gaps (do not fix by hand-rolling patterns): multi-line generics (AppShell config-malformed uses `listen<{` across lines — verify that one by eye at :233-246). Record the checked hit list in the commit message body.
+Gate: every hit is an argument of `guardListen(` (check with `rg -B1` over the same pattern), or sits in setupWiki/startAutoHeal/startAutoMaintenance (which wrap internally), or is `subscribeEntityStatus`'s own body (exempt). EXPECTED COUNT: ~34 hits at head including 2 comment lines — if the count differs, diff the hit list against this explicit site list and resolve EVERY delta by eye before committing; do not proceed with unexplained hits. Known grep gap (do not hand-roll around it): multi-line generics (AppShell config-malformed uses `listen<{` across lines — verify that one by eye at :233-246). Record the checked hit list in the commit message body.
 
 - [ ] **Step 4: Full verification**
 
@@ -721,10 +764,16 @@ Expected: all green.
 
 - [ ] **Step 5: Flip spec status + commit + push**
 
-Set `**Status:**` to `Implemented 2026-09-28 (PR #247)` in the design doc, then:
+Set `**Status:**` to `Implemented 2026-09-28 (PR #247)` in the design doc, AND amend the spec to record the plan's deliberate departures (review m2 — the plan diverges from the spec in three places and claims "THE SPEC WINS", so the spec must be updated to match reality):
+
+1. **Item 3 (await vs allSettled):** useProviderHealth, GenerationPanel and StepWatchItThink use held-promise arrays WITHOUT awaiting settlement, instead of the spec's `allSettled` — nothing at those sites needs the registration outcome, so awaiting would only delay unmount-path cleanup.
+2. **Item 7 (cleanup holds promises vs iterating settled results):** setupWiki cleanup keeps held promises (`safeUnlisten` tolerates pending), rather than iterating settled results.
+3. **Line 110 (test location):** guardListen tests live in a new `src/__tests__/guardListen.test.ts` rather than extending `safeUnlisten.test.ts`.
+
+Then:
 
 ```bash
-git add src/components/shell/__tests__/AppShell.dragdrop.test.tsx docs/superpowers/specs/2026-09-28-issue236-listen-registration-design.md
+git add src/__tests__/AppShell.dragdrop.test.tsx docs/superpowers/specs/2026-09-28-issue236-listen-registration-design.md
 git commit -m "test(ui): drag-drop rejection guard test; mark #236 design implemented (PR #247)"
 git push origin fix/issue-236-listen-registration
 ```
