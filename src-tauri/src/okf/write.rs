@@ -166,6 +166,68 @@ fn collect_frontmatter_fence(content: &str) -> Option<String> {
     Some(inner)
 }
 
+/// Split `content` into `(frontmatter_inner, body_start_offset)` where
+/// `body_start_offset` is the byte offset at which the note body begins
+/// (immediately after the closing `---` line). Same fence rules as
+/// [`collect_frontmatter_fence`]: exact `---` opener, closing fence within
+/// 64 lines, no partial parse on over-cap fences. Returns `None` when there
+/// is no fence; callers treat the WHOLE content as body (offset 0).
+///
+/// The offset is byte-exact on CRLF files — unlike
+/// [`collect_frontmatter_fence`], whose `lines()` view drops `\r`, this
+/// helper computes offsets on raw bytes, so `content.len() - offset` is the
+/// true body byte length (issue #240: the size-drop guard measures bytes).
+/// Task 3's guards consume this; until they land, the dead-code gate
+/// (clippy -D warnings) is silenced here. Remove the allow in Task 3.
+#[allow(dead_code)]
+fn split_frontmatter_fence(content: &str) -> Option<(String, usize)> {
+    // Review m1: initialize in ONE expression — `let mut offset = 0usize;`
+    // followed by unconditional reassignment trips `unused_assignments`,
+    // which is fatal under the repo's clippy -D warnings gate.
+    let mut offset = if content.as_bytes().starts_with(b"---\r\n") {
+        5
+    } else if content.as_bytes().starts_with(b"---\n") {
+        4
+    } else {
+        return None;
+    };
+    let mut inner = String::new();
+    for _ in 0..64 {
+        if offset >= content.len() {
+            return None;
+        }
+        let line_end = content[offset..]
+            .find('\n')
+            .map_or(content.len(), |i| offset + i);
+        let line = &content[offset..line_end];
+        let trimmed = line.strip_suffix('\r').unwrap_or(line);
+        let next = if line_end < content.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+        if trimmed == "---" {
+            return Some((inner, next));
+        }
+        inner.push_str(trimmed);
+        inner.push('\n');
+        offset = next;
+    }
+    None
+}
+
+/// True body byte length of a rendered note: everything after the
+/// frontmatter fence, or the whole content when fence-less.
+/// Consumed by Task 3's guards; see the allow note on
+/// [`split_frontmatter_fence`].
+#[allow(dead_code)]
+fn body_bytes(content: &str) -> usize {
+    match split_frontmatter_fence(content) {
+        Some((_, offset)) => content.len() - offset,
+        None => content.len(),
+    }
+}
+
 /// Enforce If-Match staleness on the existing file's `updated_at` token.
 ///
 /// Rules (spec v2 §B.2, resolved rulings):
@@ -899,6 +961,43 @@ mod tests {
             super::read_existing_token(doc),
             Err(super::TokenReadError::NoFence)
         ));
+    }
+
+    #[test]
+    fn split_fence_lf_content() {
+        let content = "---\ntitle: T\n---\nbody here\n";
+        let (inner, offset) = split_frontmatter_fence(content).unwrap();
+        assert_eq!(inner, "title: T\n");
+        assert_eq!(&content[offset..], "body here\n");
+    }
+
+    #[test]
+    fn split_fence_crlf_content_byte_exact() {
+        let content = "---\r\ntitle: T\r\n---\r\nbody here\r\n";
+        let (inner, offset) = split_frontmatter_fence(content).unwrap();
+        assert_eq!(inner, "title: T\n");
+        assert_eq!(&content[offset..], "body here\r\n");
+    }
+
+    #[test]
+    fn split_fence_none_without_opener() {
+        assert!(split_frontmatter_fence("no fence\n").is_none());
+    }
+
+    #[test]
+    fn split_fence_none_without_closer_within_cap() {
+        let mut content = String::from("---\n");
+        for i in 0..70 {
+            content.push_str(&format!("k{i}: v\n"));
+        }
+        assert!(split_frontmatter_fence(&content).is_none());
+    }
+
+    #[test]
+    fn split_fence_body_bytes_helper_matches() {
+        // body_bytes is implemented in THIS task (Task 1 Step 3); this test pins the contract early.
+        let content = "---\r\ntitle: T\r\n---\r\n0123456789\r\n";
+        assert_eq!(body_bytes(content), "0123456789\r\n".len());
     }
 
     /// MAJOR-2 (issue #231 review) — a target file that exists but is NOT
