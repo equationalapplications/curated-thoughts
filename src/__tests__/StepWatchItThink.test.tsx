@@ -13,6 +13,7 @@ vi.mock("../lib/tauri", () => ({
   ingestDocument: vi.fn(),
 }));
 vi.mock("../lib/events", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/events")>()),
   safeUnlisten: (await importOriginal<typeof import("../lib/events")>()).safeUnlisten,
   onIngestProgress: vi.fn(),
   onIngestProposalReady: vi.fn(),
@@ -117,5 +118,43 @@ describe("StepWatchItThink", () => {
       vi.advanceTimersByTime(61_000);
     });
     expect(screen.getByText(/still working/i)).toBeInTheDocument();
+  });
+
+  it("unlistens surviving subscriptions when one listen() rejects", async () => {
+    // Regression (#236): the old Promise.all shape rejected as soon as one
+    // subscription failed, so the survivors' unlisten fns were never
+    // awaited or cleaned up — a held-promise leak. Each subscription must
+    // be guarded individually: the rejection logs once, and the survivors
+    // still unlisten on unmount.
+    const unlistenProposal = vi.fn();
+    const unlistenError = vi.fn();
+    let resolveProposal!: (fn: () => void) => void;
+    let resolveError!: (fn: () => void) => void;
+    (onIngestProgress as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.reject(new Error("listen boom")),
+    );
+    (onIngestProposalReady as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => (resolveProposal = r)),
+    );
+    (onIngestError as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => (resolveError = r)),
+    );
+
+    const { unmount } = render(
+      <StepWatchItThink onSkip={vi.fn()} onRouteToReview={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(onIngestProgress).toHaveBeenCalledOnce(),
+    );
+    unmount();
+
+    // Resolving after unmount must still drive each survivor's unlisten.
+    resolveProposal(unlistenProposal);
+    resolveError(unlistenError);
+
+    await waitFor(() => {
+      expect(unlistenProposal).toHaveBeenCalledOnce();
+      expect(unlistenError).toHaveBeenCalledOnce();
+    });
   });
 });

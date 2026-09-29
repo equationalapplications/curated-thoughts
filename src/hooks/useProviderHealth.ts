@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getProviderConfig } from "../lib/tauri";
 import {
+  guardListen,
   onEmbedInitDone,
   onEmbedInitError,
   onEmbedInitProgress,
@@ -8,6 +9,7 @@ import {
   onProviderLoading,
   onProviderReady,
   safeUnlisten,
+  UnlistenFn,
 } from "../lib/events";
 
 export type HealthState = "ok" | "loading" | "error" | "unconfigured";
@@ -27,7 +29,6 @@ export function useProviderHealth(): {
 
   useEffect(() => {
     let active = true;
-    const unlisteners: Array<() => void> = [];
 
     getProviderConfig()
       .then((cfg) => {
@@ -44,45 +45,57 @@ export function useProviderHealth(): {
         }
       });
 
-    void Promise.all([
-      onProviderLoading(() => {
-        if (active) setGeneration("loading");
-      }),
-      onProviderReady(() => {
-        if (!active) return;
-        getProviderConfig()
-          .then((cfg) => {
-            if (active) {
-              setGeneration(generationFromConfig(cfg.generation.provider));
-            }
-          })
-          .catch(() => {
-            if (active) setGeneration("error");
-          });
-      }),
-      onProviderError(() => {
-        if (active) setGeneration("error");
-      }),
-      onEmbedInitProgress(() => {
-        if (active) setEmbedding("loading");
-      }),
-      onEmbedInitDone(() => {
-        if (active) setEmbedding("ok");
-      }),
-      onEmbedInitError(() => {
-        if (active) setEmbedding("error");
-      }),
-    ]).then((uls) => {
-      if (!active) {
-        uls.forEach((u) => void safeUnlisten(u));
-      } else {
-        unlisteners.push(...uls);
-      }
-    });
+    const subscriptions: Array<Promise<UnlistenFn>> = [
+      guardListen(
+        onProviderLoading(() => {
+          if (active) setGeneration("loading");
+        }),
+        "provider-loading",
+      ),
+      guardListen(
+        onProviderReady(() => {
+          if (!active) return;
+          getProviderConfig()
+            .then((cfg) => {
+              if (active) {
+                setGeneration(generationFromConfig(cfg.generation.provider));
+              }
+            })
+            .catch(() => {
+              if (active) setGeneration("error");
+            });
+        }),
+        "provider-ready",
+      ),
+      guardListen(
+        onProviderError(() => {
+          if (active) setGeneration("error");
+        }),
+        "provider-error",
+      ),
+      guardListen(
+        onEmbedInitProgress(() => {
+          if (active) setEmbedding("loading");
+        }),
+        "embed-init-progress",
+      ),
+      guardListen(
+        onEmbedInitDone(() => {
+          if (active) setEmbedding("ok");
+        }),
+        "embed-init-done",
+      ),
+      guardListen(
+        onEmbedInitError(() => {
+          if (active) setEmbedding("error");
+        }),
+        "embed-init-error",
+      ),
+    ];
 
     return () => {
       active = false;
-      unlisteners.forEach((u) => void safeUnlisten(u));
+      subscriptions.forEach((p) => void safeUnlisten(p));
     };
   }, []);
 
