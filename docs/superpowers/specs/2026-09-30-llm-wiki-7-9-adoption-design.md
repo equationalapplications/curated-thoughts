@@ -1,7 +1,7 @@
 # core-llm-wiki 7.9.0 adoption (schema sync)
 
 **Date:** 2026-09-30
-**Status:** Drafted on `feat/llm-wiki-7-9-adoption`
+**Status:** Implemented on `feat/llm-wiki-7-9-adoption` — pending PR review
 **Branch:** `feat/llm-wiki-7-9-adoption` (spec + plan + implementation ride one branch and one PR)
 **Upstream:** expo-llm-wiki `v7.9.0` (`33f1af6`, 2026-09-30); prior adoption: `docs/superpowers/specs/2026-09-22-llm-wiki-7-7-adoption-design.md`
 
