@@ -49,15 +49,20 @@ const EXCLUDED_DIRS: &[&str] = &[
 
 /// Directory names excluded ONLY as the FIRST vault-relative path
 /// component. These are CT-managed top-level trees, not generic names:
-/// `records` is the working-records tree (sessions, operations, archive),
-/// writable via `vault_write_note` but never ingested. A same-named
+/// `records` is the working-records tree (sessions, operations, archive);
+/// `archive` and `backups` hold long-term snapshots and OKF bundle
+/// exports. All three are writable via `vault_write_note` but never
+/// ingested (ISF-restructure decision 2026-09-29, Option A — Opus
+/// opinion: exclusion at the root protects against writers recreating
+/// stale paths; spec: records/specs/2026-09-29-isf-restructuring-spec.md
+/// in equational-wiki). A same-named
 /// directory NESTED deeper (`documents/x/records/`, `wiki/records/`) is
 /// ordinary content and must keep ingesting (M4) — matching the name at
 /// any depth made an upgrade silently stop ingesting those trees and let
 /// reconcile DELETE their existing rows. Sibling lookalikes
 /// (`records-archive/`) were never excluded (spec D4). Spec:
 /// docs/superpowers/specs/2026-09-27-vault-ingest-policy-design.md, F1.
-const EXCLUDED_ROOT_DIRS: &[&str] = &["records"];
+const EXCLUDED_ROOT_DIRS: &[&str] = &["records", "archive", "backups"];
 
 fn is_excluded_dir(dir_name: &str) -> bool {
     EXCLUDED_DIRS.contains(&dir_name)
@@ -828,6 +833,39 @@ mod tests {
         )));
         assert!(!super::rel_path_has_excluded_component(Path::new(
             "records-evil/x.md"
+        )));
+    }
+
+    /// ISF-restructure (2026-09-29, Option A): the root-only exclusion
+    /// covers `archive` and `backups` alongside `records`, with the SAME
+    /// first-component anchoring — nested same-name dirs stay ordinary
+    /// content and keep ingesting, and lookalikes were never excluded.
+    #[test]
+    fn archive_and_backups_excluded_at_root_only() {
+        use std::path::Path;
+        // Root-level archive/ and backups/ trees: excluded.
+        assert!(super::rel_path_has_excluded_component(Path::new(
+            "archive/README.md"
+        )));
+        assert!(super::rel_path_has_excluded_component(Path::new(
+            "backups/okf/brain-okf.zip"
+        )));
+        assert!(super::rel_path_has_excluded_component(Path::new(
+            "backups/deep/snapshot.md"
+        )));
+        // Nested same-name dirs: ordinary content, still ingested (M4/D4).
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "documents/x/archive/kept.md"
+        )));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "projects/backups/notes.md"
+        )));
+        // Lookalikes never excluded.
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "archives/x.md"
+        )));
+        assert!(!super::rel_path_has_excluded_component(Path::new(
+            "backup/x.md"
         )));
     }
 
