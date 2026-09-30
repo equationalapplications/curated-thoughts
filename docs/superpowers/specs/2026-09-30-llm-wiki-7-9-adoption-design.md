@@ -69,17 +69,20 @@ CT cannot adopt blindly. Three CT invariants shape the design:
   schema-software-org / core-okf all publish `7.9.0` against core-llm-wiki
   `7.9.0`; the override set must move together.
 - **7.8.0 advisory floors** (upstream-monorepo overrides): `brace-expansion@5`
-  floor raised to `5.0.11` (GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p). CT
-  pins `brace-expansion@5: 5.0.9` and takes the same floor.
+  floor raised to `5.0.11` (GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p) and the
+  `undici@7` advisory pin raised to `7.29.1` (GHSA-rfgv-xxqx-mfg5,
+  GHSA-w293-vg96-wgc3). CT pins both (`brace-expansion@5: 5.0.9`,
+  `undici@7: 7.29.0`) and takes the same floors.
 
 ## 1. Version bumps and supply-chain floor [CT-REQ-BUMP-01]
 
 All llm-wiki deps and overrides → exactly `7.9.0` (no ranges):
-`package.json` dependencies ×4, `pnpm.overrides` ×2, and the
-`brace-expansion@5` override `5.0.9 → 5.0.11` per upstream 7.8.0's advisory
-floor. Lockfile regenerated with `CI=true npx -y pnpm@10.33.2 install`
-(plain install first so `pnpm-lock.yaml` picks up the new overrides, then
-`--frozen-lockfile` as the verification).
+`package.json` dependencies ×4 and `pnpm.overrides` ×2, plus the advisory
+floors CT actually pins: `brace-expansion@5` `5.0.9 → 5.0.11` and `undici@7`
+`7.29.0 → 7.29.1` per upstream 7.8.0. Lockfile regenerated with
+`CI=true npx -y pnpm@10.33.2 install` (plain install first so
+`pnpm-lock.yaml` picks up the new overrides, then `--frozen-lockfile` as the
+verification).
 
 ## 2. DDL mirror: migration 13 [CT-REQ-DDL-01]
 
@@ -136,8 +139,8 @@ Recorded here so no one assumes the capability exists:
 - `'ops'` librarian strategy, temporal reads/`supersede()`/`history()`,
   `read({ asOf, tokenBudget })`, `formatContext` compact mode, `callLlm`
   gateway / `llm_usage` diagnostic — all opt-in upstream, none on a CT path.
-- `undici`/`fast-uri` advisory floors — upstream-monorepo-only overrides; CT
-  takes only the `brace-expansion@5` floor it actually pins.
+- `fast-uri` advisory floor — upstream-monorepo-only override; CT pins no
+  `fast-uri` override, so nothing to take.
 
 ## 6. Testing
 

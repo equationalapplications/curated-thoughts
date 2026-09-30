@@ -6,13 +6,13 @@ settings:
 
 overrides:
   undici@6: 6.28.0
-  undici@7: 7.29.0
+  undici@7: 7.29.1
   js-yaml: 4.3.2
   postcss: 8.5.26
   brace-expansion@1: 1.1.18
-  brace-expansion@5: 5.0.9
-  '@equationalapplications/core-llm-wiki': 7.7.4
-  '@equationalapplications/core-okf': 7.7.5
+  brace-expansion@5: 5.0.11
+  '@equationalapplications/core-llm-wiki': 7.9.0
+  '@equationalapplications/core-okf': 7.9.0
   '@tiptap/core': 3.30.6
   '@tiptap/extension-bold': 3.30.6
   '@tiptap/extension-bubble-menu': 3.30.6
@@ -41,17 +41,17 @@ importers:
         specifier: 0.54.2
         version: 0.54.2(@floating-ui/dom@1.8.0)(@types/hast@3.0.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(y-prosemirror@1.3.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.3)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30))(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       '@equationalapplications/core-llm-wiki':
-        specifier: 7.7.4
-        version: 7.7.4
+        specifier: 7.9.0
+        version: 7.9.0
       '@equationalapplications/react-llm-wiki':
-        specifier: 7.7.4
-        version: 7.7.4(react@19.3.0)
+        specifier: 7.9.0
+        version: 7.9.0(react@19.3.0)
       '@equationalapplications/schema-org-llm-wiki':
-        specifier: 7.7.4
-        version: 7.7.4
+        specifier: 7.9.0
+        version: 7.9.0
       '@equationalapplications/schema-software-org':
-        specifier: 7.7.4
-        version: 7.7.4
+        specifier: 7.9.0
+        version: 7.9.0
       '@mantine/core':
         specifier: 9.6.1
         version: 9.6.1(@mantine/hooks@9.6.1(react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -283,26 +283,26 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@7.7.4':
-    resolution: {integrity: sha512-8S79HX2kCV3mZfIO2RjqjVBL+eTj9hWmAwLC0tvjkWc33AlrgQQIz3agW8yAI4Nzs80/B7eO5Qo/tGsor6t1AQ==}
+  '@equationalapplications/core-llm-wiki@7.9.0':
+    resolution: {integrity: sha512-BfTLEji4DW8OWfANMA5TiJe5/bg8rdTBcLvfXSw48hgHNcVOQUXrafc5mCzBlfRc5DSzcCMfAz7o0R4Oy9ZgSQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/core-okf@7.7.5':
-    resolution: {integrity: sha512-Flk1hSiNUBwcZsDA+SuM+KK451ZoWzh3/f8x8retfE4URr9K1+/qBz4zHC3Aha2yitaUa5T/EUAytI+fCGhnbg==}
+  '@equationalapplications/core-okf@7.9.0':
+    resolution: {integrity: sha512-7dgYgythxA4yg2Y4cGb11DqYc2SiRA4JyxrAxhYUZSqgWUxxcZco1+w73mBfCtUkvEsEgGTZN5tUCthFgrpsEQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@7.7.4':
-    resolution: {integrity: sha512-GijwYxcjDxNYdiYeHY6p4tkaBBzqqZINjVNt7fpeITl9Pn1k/72hEW7GI1lGDMtucqW3O59yT5IoiZyqyRGIug==}
+  '@equationalapplications/react-llm-wiki@7.9.0':
+    resolution: {integrity: sha512-VGi5sOEUaOcmfBGoRJSMEe3onay5pNdv6apPX8Z6d2tmM8DuXzemvpj3lfjFPb6WzrldyaBWLp/G3TNSZV6Unw==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
 
-  '@equationalapplications/schema-org-llm-wiki@7.7.4':
-    resolution: {integrity: sha512-SmRhVrvhYrFOA8kiIzxyLv5NlqCVfRahpwp2OCD/nJUdESI3C8SO3uxCKEb4hPVkbEn92MxtBQnOol8Os4msiQ==}
+  '@equationalapplications/schema-org-llm-wiki@7.9.0':
+    resolution: {integrity: sha512-cY7/3qQ4VLN8Mheuil7hFX2HrEUAGlt0pcVW+CprXZTLJoSCwcObZD/Jph87qyxwUpqF1dm/MWNfuS4PBNx9ng==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/schema-software-org@7.7.4':
-    resolution: {integrity: sha512-AL2j/VUregoLzIVwEAWf4czY2KTXUcUBlHl/yK2araphs5ULVFSUwgb+SviRaRLAPqi89RiGhuL6M2jeCnOZwQ==}
+  '@equationalapplications/schema-software-org@7.9.0':
+    resolution: {integrity: sha512-LJJxpK2u0JGwO8MfuggMkhdvbCh1wiGia5246OF0ciYFdHkIqiGX5Lt72OPRYXMEIXrc/AF5oFSkjGg1Gjnmgw==}
     engines: {node: '>=20'}
 
   '@eslint-community/eslint-utils@4.10.1':
@@ -1124,8 +1124,8 @@ packages:
   brace-expansion@1.1.18:
     resolution: {integrity: sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==}
 
-  brace-expansion@5.0.9:
-    resolution: {integrity: sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==}
+  brace-expansion@5.0.11:
+    resolution: {integrity: sha512-awigjhi6cLTh90bdw6+QJ9CtmJmyYhEIi70iCbc8Rozn04Fw9FeQIBjv/E22FFGuCGx1bLJyUfB64x/szUSXUg==}
     engines: {node: 20 || >=22}
 
   braces@3.0.3:
@@ -3084,8 +3084,8 @@ packages:
     resolution: {integrity: sha512-LIY910g9TI13YS95lrMFrs8Rm/u/irgHeTWoKCoteeJ04CUJ92eEfj0rVn+7VKMPBpUPiUoBKfhNyLI23EE/KA==}
     engines: {node: '>=18.17'}
 
-  undici@7.29.0:
-    resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
+  undici@7.29.1:
+    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
 
   undici@8.10.0:
@@ -3549,25 +3549,25 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@7.7.4':
+  '@equationalapplications/core-llm-wiki@7.9.0':
     dependencies:
-      '@equationalapplications/core-okf': 7.7.5
+      '@equationalapplications/core-okf': 7.9.0
       minisearch: 7.2.0
 
-  '@equationalapplications/core-okf@7.7.5': {}
+  '@equationalapplications/core-okf@7.9.0': {}
 
-  '@equationalapplications/react-llm-wiki@7.7.4(react@19.3.0)':
+  '@equationalapplications/react-llm-wiki@7.9.0(react@19.3.0)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.7.4
+      '@equationalapplications/core-llm-wiki': 7.9.0
       react: 19.3.0
 
-  '@equationalapplications/schema-org-llm-wiki@7.7.4':
+  '@equationalapplications/schema-org-llm-wiki@7.9.0':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.7.4
+      '@equationalapplications/core-llm-wiki': 7.9.0
 
-  '@equationalapplications/schema-software-org@7.7.4':
+  '@equationalapplications/schema-software-org@7.9.0':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.7.4
+      '@equationalapplications/core-llm-wiki': 7.9.0
 
   '@eslint-community/eslint-utils@4.10.1(eslint@9.39.4)':
     dependencies:
@@ -3890,7 +3890,7 @@ snapshots:
       p-filter: 4.1.0
       semantic-release: 25.0.9(typescript@6.0.3)
       tinyglobby: 0.2.17
-      undici: 7.29.0
+      undici: 7.29.1
       url-join: 5.0.0
     transitivePeerDependencies:
       - kerberos
@@ -4412,7 +4412,7 @@ snapshots:
       balanced-match: 1.0.2
       concat-map: 0.0.1
 
-  brace-expansion@5.0.9:
+  brace-expansion@5.0.11:
     dependencies:
       balanced-match: 4.0.4
 
@@ -5569,7 +5569,7 @@ snapshots:
 
   minimatch@10.2.6:
     dependencies:
-      brace-expansion: 5.0.9
+      brace-expansion: 5.0.11
 
   minimatch@3.1.5:
     dependencies:
@@ -6488,7 +6488,7 @@ snapshots:
 
   undici@6.28.0: {}
 
-  undici@7.29.0: {}
+  undici@7.29.1: {}
 
   undici@8.10.0: {}
 
