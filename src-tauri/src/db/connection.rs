@@ -3107,7 +3107,10 @@ mod tests {
             format!("{configured_root}/notes.md"),
             "V22 must still run on the first rooted open"
         );
-        assert_eq!(max_version(&conn), 23, "rooted open stamps 22 then 23");
+        assert_eq!(
+            max_version(&conn), 24,
+            "rooted open stamps 22, then 23 and 24 (both gated on V22)"
+        );
     }
 
     fn edge_index_names(conn: &Connection) -> Vec<String> {
