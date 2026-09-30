@@ -232,6 +232,9 @@ fn test_app_open_runs_v7_schema() {
     // `curated_proposals.reviewed_by` column (Human Verification Gate).
     // V23 (issue #211) adds `curated_proposal_deleted_sources` on every open
     // but stamps only after V22, which rootless opens defer, so this stays 21.
+    // V24 (core-llm-wiki 7.9.0 adoption) mirrors engine migration 13's
+    // temporal/watermark columns on every open but, like V23, stamps only
+    // once V22 has — so this still caps at 21.
     assert_eq!(max_version, 21);
 }
 
