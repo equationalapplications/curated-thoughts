@@ -1,3 +1,9 @@
+## [2.22.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.21.0...v2.22.0) (2026-09-30)
+
+### Features
+
+* **walker:** exclude archive/ and backups/ at vault root (ISF restructure Option A) ([#250](https://github.com/equationalapplications/curated-thoughts/issues/250)) ([210c453](https://github.com/equationalapplications/curated-thoughts/commit/210c45391f1f2ac1aefdbc41692a50c1dd601e18)), closes [#2](https://github.com/equationalapplications/curated-thoughts/issues/2)
+
 ## [2.21.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.20.1...v2.21.0) (2026-09-29)
 
 ### Features
