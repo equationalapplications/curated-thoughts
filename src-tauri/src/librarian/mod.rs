@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 pub use synthesis::active_generation_model;
+pub(crate) use synthesis::llm_generation_configured;
 
 pub struct ChunkRow {
     pub id: i64,

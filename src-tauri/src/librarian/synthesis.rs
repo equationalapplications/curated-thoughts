@@ -1094,6 +1094,13 @@ fn write_synth_watermark(conn: &Connection, doc_id: i64, model: &str) -> Result<
     Ok(())
 }
 
+pub(crate) fn llm_generation_configured() -> bool {
+    matches!(
+        build_llm_completer(&active_generation_model("llama3.2:3b")),
+        Ok(Some(_))
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_synthesis_with_completer(
     conn: &mut Connection,
