@@ -269,16 +269,24 @@ impl PipelineWorker {
             }
 
             if count_pending {
-                let updated = self
-                    .pending
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                        if current == 0 {
-                            Some(0)
-                        } else {
-                            Some(current - 1)
-                        }
-                    })
-                    .unwrap_or(0);
+                // CAS loop instead of `fetch_update`: the newer Rust
+                // toolchain (1.97+) denies the method outright (renamed to
+                // `try_update`), and older toolchains don't have that name —
+                // an explicit compare-exchange loop compiles everywhere.
+                // The closure always returns Some, so the loop retries until
+                // it wins (spurious CAS loss just spins once more).
+                let updated = loop {
+                    let current = self.pending.load(Ordering::SeqCst);
+                    match self.pending.compare_exchange(
+                        current,
+                        if current == 0 { 0 } else { current - 1 },
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break current,
+                        Err(_) => continue,
+                    }
+                };
                 let current = updated.saturating_sub(1);
                 let _ = self
                     .status_tx
