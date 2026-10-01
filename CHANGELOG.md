@@ -1634,3 +1634,21 @@ Claude-Session: https://claude.ai/code/session_01Pbep1BCTiwwpfnpcQfYR9T
 * **watcher:** enqueue normalized canonical paths ([ac7a555](https://github.com/equationalapplications/curated-thoughts/commit/ac7a5553fc373cb9fd428081be4016e45d63332a))
 * wiki isWiki + MustExist regular-file guard ([0509e09](https://github.com/equationalapplications/curated-thoughts/commit/0509e09b8169721a5580824ec214f6086ebcfe8a))
 * wrap schema migrations in atomic transaction ([d5a8c86](https://github.com/equationalapplications/curated-thoughts/commit/d5a8c865379022524bac48c072d6e1d1413d12ac))
+
+## [Unreleased]
+
+### Changed
+
+- **mcp:** remove the direct-insert write tools `curated_add_wisdom`, `curated_update_wisdom`,
+  `curated_archive_wisdom`, and `curated_proposal_decide` (INTENT rule 1: agents never insert,
+  update, approve, or archive brain rows directly). Replaced by the `wisdom_*` deposit surface:
+  `wisdom_deposit` (append-only fact file under `immutable-source-files/agents/`), 
+  `wisdom_deposit_status`, `wisdom_propose_supersession`, and `wisdom_pending`.
+
+### Removed
+
+- **tools:** `ct approve` and the stray `approve_pending_proposals` binary; `ct proposals review`
+  now requires an interactive terminal (Human Verification Gate).
+- **tools:** `ct` gained `ct wisdom deposit|status|propose-supersession|pending` mirroring the
+  MCP surface.
+
