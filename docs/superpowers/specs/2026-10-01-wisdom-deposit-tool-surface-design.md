@@ -156,17 +156,28 @@ does NOT touch brain rows — application is the Active Librarian's job
 (rule 4): automatic when the target is agent tier, a human-resolved proposal
 when human tier. Librarian application is a follow-up spec; until it lands,
 `wisdom_deposit_status` on a supersession file reports `pending`, and the
-supersessions lane is excluded from the D3 folder rule (it ingests as an
-ordinary document, producing no facts via the fact-mode rule — its lane
-semantics arrive with the application spec).
+supersessions lane is excluded from the D3 folder rule. Exclusion is an
+**explicit override, not an absence** (CodeRabbit #258 finding 2): folder
+rules inherit up the tree (`get_folder_mode` walks ancestors), so
+`agents/supersessions/` would silently inherit the parent's
+`synthesize`+`auto_approve` and auto-generate standalone facts from
+supersession proposals. The D3 migration therefore seeds a second row:
+`immutable-source-files/agents/supersessions/` with `librarian_mode =
+"summarize"` (zero fact candidates) and `auto_approve = true` — the file
+still ingests and drains, but produces no facts; its lane semantics arrive
+with the application spec. Test 8 asserts both rows.
 
 ### D6 — `wisdom_pending` (review F1-aligned)
 
 Read-only: list deposit files under `immutable-source-files/agents/` with no
 librarian rows linked via `librarian_evidence` (the D4 query, batched), each
-with `{ path, deposited_at (file mtime), kick }`. Isolation from recall is
-structural — separate tool, separate code path, plus the existing grep-level
-guard test pattern.
+with `{ path, deposited_at (file mtime), kick }`. Definition pinned to the
+query, not the word "ingested" (CodeRabbit #258 finding 1): a deposit can be
+**chunked** (chunks/embeddings exist) yet lack librarian evidence — that is
+still pending. `wisdom_pending` returns deposits without librarian evidence,
+including `chunked` and deferred `supersession` deposits. Isolation from
+recall is structural — separate tool, separate code path, plus the existing
+grep-level guard test pattern.
 
 ### D7 — CLI parity + closing every agent-reachable approve path
 
@@ -180,7 +191,16 @@ Removed agent-reachable write/approve paths (review F4/F5/F13):
 - **`ct proposals review` gains a TTY gate** (review F4): refuses unless
   stdin is a terminal (`is_terminal()`; fail-closed). The Human Verification
   Gate is human-at-keyboard by definition; `yes y | ct proposals review`
-  must error, with a test.
+  must error, with a test. **Threat-model bound (CodeRabbit #258 finding 3):
+  this gate is hygiene, not authentication** — any agent with raw shell
+  access can allocate a PTY (`pty.spawn()`) and satisfy `is_terminal()`.
+  The gate defeats lazy piping; it does not defeat a deliberate adversary.
+  The real boundary stays rule 1's sandbox assumption (agents reach the
+  brain only through sanctioned MCP/CLI surfaces, never raw shell) plus the
+  audit log making any approved action attributable. A stronger interactive
+  challenge (random confirmation code) is deliberately not built here: it
+  belongs to B1's human-attestation design, where human authentication is
+  done properly for the app UI and CLI alike.
 - **`tools/src/bin/approve_pending_proposals.rs` is deleted** (review F5):
   Cargo auto-discovers it (16 bin files vs 13 `[[bin]]` entries, autobins
   on) and it calls `approve_all()` non-interactively. `approve_all`/
@@ -228,9 +248,12 @@ parity audit.
    count assert); `ct approve` unknown-command.
 7. Bridge + audit: cloud-bridge session calling `wisdom_deposit` denied;
    deposit/supersession writes present in the fail-closed agent-access audit.
-8. Folder rule migration: `immutable-source-files/agents/` rule seeded with
-   auto_approve; librarian run over a deposit stamps agent-tier rows that
-   recall returns (no human-tier label anywhere).
+8. Folder rule migration: `immutable-source-files/agents/` seeded
+   `synthesize`+`auto_approve` AND `immutable-source-files/agents/supersessions/`
+   seeded `summarize`+`auto_approve` (override asserted — the inheritance walk
+   returns the child row); librarian run over a deposit stamps agent-tier rows
+   that recall returns (no human-tier label anywhere); librarian run over a
+   supersession deposit produces **zero fact rows**.
 9. Benchmark gates: supersession scenarios etc. fire only when the recall
    consumption PR lands; this PR changes no ranked-recall semantics (the
    librarian runs only over the deposited document, as the worker already
