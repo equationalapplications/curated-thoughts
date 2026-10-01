@@ -22,7 +22,9 @@
 //! `wiki_*`) continue to live in `crate::queries`.
 //!
 //! Path-level helpers (`BrainPaths`, `resolve_brain_paths`, `print_json`,
-//! `vault_contains`) live in `crate::paths`.use std::io::IsTerminal;
+//! `vault_contains`) live in `crate::paths`.
+
+use std::io::IsTerminal;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -370,6 +372,172 @@ pub fn librarian_run_on(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Librarian observability helpers (private)
+// ---------------------------------------------------------------------------
+
+/// End-of-run totals for [`run_librarian_docs`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LibrarianRunSummary {
+    pub attempted: usize,
+    pub ok: usize,
+    pub error: usize,
+    /// Phase-1 synthesis-watermark gate counter. Dirty-doc selection has
+    /// landed, but skipped docs are filtered out of the run loop *before* this
+    /// counter is incremented — so this stays 0 in practice today. The field
+    /// is reserved for a future phase that counts (rather than drops) them.
+    pub skipped_by_watermark: usize,
+    pub elapsed_secs: u64,
+}
+
+pub(crate) fn format_progress(
+    n: usize,
+    total: usize,
+    path: &str,
+    status: &str,
+    elapsed_secs: u64,
+) -> String {
+    format!("[{n}/{total}] {path} {status} ({elapsed_secs}s)")
+}
+
+pub(crate) fn format_run_summary(summary: &LibrarianRunSummary) -> String {
+    format!(
+        "librarian run summary: attempted={} ok={} error={} \
+         skipped_by_watermark={} elapsed={}s",
+        summary.attempted,
+        summary.ok,
+        summary.error,
+        summary.skipped_by_watermark,
+        summary.elapsed_secs
+    )
+}
+
+fn errors_log_len(path: Option<&Path>) -> u64 {
+    path.and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// First line of whatever was appended to the errors log at `from` offset.
+fn errors_log_tail(path: &Path, from: u64) -> Option<String> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(std::io::SeekFrom::Start(from)).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let line = text.lines().next()?.trim().to_string();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+/// Per-doc librarian loop with stderr observability. One `[n/total] <path>
+/// ok|error (<elapsed>s)` line per doc plus a final run-summary line, all
+/// written (flushed) to `err`. Synthesis failures are surfaced whether they
+/// come back as `Err` or were swallowed into `error_log` by
+/// `write_synthesis_error` (detected via log growth during the call).
+pub(crate) fn run_librarian_docs<F>(
+    docs: &[String],
+    mut synthesize: F,
+    err: &mut dyn std::io::Write,
+    error_log: Option<&Path>,
+) -> LibrarianRunSummary
+where
+    F: FnMut(&str) -> std::result::Result<(), String>,
+{
+    let start = std::time::Instant::now();
+    let total = docs.len();
+    let mut summary = LibrarianRunSummary {
+        attempted: total,
+        ..Default::default()
+    };
+
+    for (i, path) in docs.iter().enumerate() {
+        let log_before = errors_log_len(error_log);
+        let doc_start = std::time::Instant::now();
+        let result = synthesize(path);
+        let elapsed = doc_start.elapsed().as_secs();
+
+        let mut status = "ok";
+        match result {
+            Ok(()) => {
+                if let Some(log) = error_log {
+                    // TODO(pr-followup): errors_log_len/tail reads the shared
+                    // error log without coordinating with concurrent writers.
+                    // If the librarian pipeline is writing errors.log at the
+                    // same moment this check runs (e.g. during a parallel
+                    // librarian --force + watcher ingest), the > log_before
+                    // check can misattribute an unrelated writer's entry to
+                    // the doc currently being synthesized. Flagged by
+                    // aws-cloud-agent-pr-review on PR #84 as a minor
+                    // concurrency concern; not blocking this PR. Filed in
+                    // procedures/curated-thoughts-improvement-backlog.md.
+                    if errors_log_len(error_log) > log_before {
+                        status = "error";
+                        let detail = errors_log_tail(log, log_before).unwrap_or_default();
+                        let _ = writeln!(
+                            err,
+                            "error: synthesis failed for {path} — recorded in {}: {detail}",
+                            log.display()
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                status = "error";
+                let _ = writeln!(err, "error: synthesis failed for {path}: {e}");
+            }
+        }
+        if status == "ok" {
+            summary.ok += 1;
+        } else {
+            summary.error += 1;
+        }
+
+        let _ = writeln!(
+            err,
+            "{}",
+            format_progress(i + 1, total, path, status, elapsed)
+        );
+        let _ = err.flush();
+    }
+
+    summary.elapsed_secs = start.elapsed().as_secs();
+    let _ = writeln!(err, "{}", format_run_summary(&summary));
+    let _ = err.flush();
+    summary
+}
+
+// ---------------------------------------------------------------------------
+// enqueue_vault_event (vault filesystem event → brain DB row)
+// ---------------------------------------------------------------------------
+
+/// Enqueue a vault filesystem event into the brain DB.
+///
+/// Thin delegating wrapper around
+/// [`tauri_app_lib::db::queue::enqueue_vault_event`] (moved into
+/// `src-tauri/src/db/queue.rs` in Task 5b to resolve the cargo dep-cycle
+/// that would otherwise block Task 7 calling the same logic from
+/// `src-tauri/src/lib.rs`). Identical contract — see spec §6 for the
+/// 4-stage path hardening + sha256 + upsert semantics:
+///
+/// 1. `std::path::absolute()` — defensive (notify v6 already absolute).
+/// 2. `std::fs::canonicalize()` — resolves symlinks (e.g. macOS /var → /private/var).
+///    Falls back to absolute path on failure (typical for Delete events).
+/// 3. `canonical.starts_with(vault_root)` guard — rejects out-of-vault events.
+///    The vault root is read from `CURATED_VAULT_ROOT`. If unset (the watcher
+///    runs with it set; tests may not), the guard is skipped. Excluded-directory
+///    gate (step 3b): rejects `.brain` and other EXCLUDED_DIRS content on the
+///    vault-RELATIVE virtual path. `vault_root` is the explicit root; `None`
+///    falls back to `CURATED_VAULT_ROOT`, which is the established mechanism
+///    for `ct watch`.
+/// 4. sha256 the bytes; upsert documents row with status='pending'.
+///
+/// For Delete: skip step 4 (file is gone); DELETE the documents row.
+/// chunks cascade-delete via FK ON DELETE CASCADE.
 pub fn enqueue_vault_event(
     conn: &mut Connection,
     event_kind: notify::EventKind,

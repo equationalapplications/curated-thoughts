@@ -559,9 +559,6 @@ fn run(cmd: Cmd) -> Result<i32> {
             ),
             WisdomCmd::Pending { json } => wisdom_pending_cmd(json),
         },
-        Cmd::Librarian { cmd } => match cmd {
-            LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
-        },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
         Cmd::Heal { yes } => {
             if !yes {

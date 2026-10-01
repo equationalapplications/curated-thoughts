@@ -135,13 +135,6 @@ use tauri_app_lib::db::proposals::{
     ProposalSourceRole, StoredEvidenceChunk,
 };
 
-/// The CLI's default reject reason — must stay in sync with
-/// `proposals_review_cmd` in `tools/src/cmds.rs`.
-
-/// The CLI reviewer identity fallback — `proposals_review_cmd` uses the
-/// `USER` env var (or `USERNAME`), and "cli-operator" when neither is set.
-/// The review e2e runs strip both, so this is also the value asserted
-
 /// Seed a pending new_entity proposal with one anchored fact_add item via the
 /// real `insert_proposal` path (same seam the librarian synthesis uses). The
 /// evidence chunk lives in a real `documents`/`chunks` row so hydration
