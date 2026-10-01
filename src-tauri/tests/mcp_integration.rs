@@ -577,11 +577,6 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
 
     // -- wisdom_deposit round-trip: file lands with agent provenance ---------
     let vault = {
-        let conn = rusqlite::Connection::open_with_flags(
-            brain.join("config.json"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .ok();
         // vault_path lives in config.json (rooted V22 open in spawn setup)
         let cfg = std::fs::read_to_string(brain.join("config.json")).unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&cfg).unwrap();

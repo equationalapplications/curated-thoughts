@@ -622,7 +622,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(v["pending"], serde_json::json!(true));
-        let file = std::fs::read_to_string(&dir.join("immutable-source-files/agents/note-1.md")).unwrap();
+        let file = std::fs::read_to_string(dir.join("immutable-source-files/agents/note-1.md")).unwrap();
         assert!(file.starts_with("# Alpha ships v2"));
         assert!(file.contains("Alpha v2 ships 2026-11-01"));
 
@@ -774,7 +774,7 @@ mod tests {
         let path = v["path"].as_str().unwrap();
         assert!(path.starts_with("immutable-source-files/agents/supersessions/"));
         assert_eq!(v["supersedes"], serde_json::json!("librarian-abc"));
-        let file = std::fs::read_to_string(&dir.join(path)).unwrap();
+        let file = std::fs::read_to_string(dir.join(path)).unwrap();
         assert!(file.contains("supersedes: `librarian-abc`"));
         assert!(file.contains("# Gamma v3"));
         });
