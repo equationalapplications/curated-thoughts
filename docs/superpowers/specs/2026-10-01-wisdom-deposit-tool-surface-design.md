@@ -67,7 +67,7 @@ composes; the agent cannot claim tiers or ids through file contents.
      tool-owned shape.
 - Symlink escape refusal: verified existing behavior
   (`safe_vault_path` + `create_parents_no_symlink`, `okf/write.rs:355`, tests
-  at `:1402-1430`) — deposit reuses that stack; test pins it (review F14).
+  at `:1465-1560`) — deposit reuses that stack; test pins it (review F14).
 
 Return: `{ path, pending: true, kick: "started" | "queued_watcher" |
 "no_ingest_host" }` (semantics in D3).
@@ -82,8 +82,8 @@ bare-`ingest_document_with_vault_root` kick would strand every deposit in
 
 - **Folder rule (review F3):** a migration seeds
   `folder_rules` for `immutable-source-files/agents/` with
-  `librarian_mode = <fact-producing mode, pinned from librarian/mod.rs at
-  implementation>` and `auto_approve = true`. Without it, every deposit waits
+  `librarian_mode = "synthesize"` (the fact-producing mode — Summarize yields
+  zero fact candidates) and `auto_approve = true`. Without it, every deposit waits
   on a human (`get_folder_mode` defaults to `("summarize", false)`) — the
   opposite of rule 3. Auto-approve on this folder is trustworthy precisely
   because the folder is agent-class: the seeding migration's test asserts the
@@ -109,8 +109,10 @@ bare-`ingest_document_with_vault_root` kick would strand every deposit in
 - **Recovery (review F8a):** `ct watch` and the sidecar startup path gain a
   **catch-up sweep** — scan `immutable-source-files/agents/` for deposits
   with no librarian rows (the D6 query) and ingest them. A file deposited
-  while nothing was running gets picked up at the next host start; no file
-  can strand silently.
+  while nothing was running gets picked up at the next host start — **only
+  at start**: the sweep does not re-fire mid-session (c2 nit 3; implementers
+  must not assume in-session retry), which stays honest per rule 3 because
+  `wisdom_deposit_status` reports the stranded state throughout.
 - **Failure visibility (review F8c):** spawned-task errors (embedding
   failure, panic, missing RW connection) are logged AND recorded;
   `wisdom_deposit_status` reports `failed` with the error text. A deposit
