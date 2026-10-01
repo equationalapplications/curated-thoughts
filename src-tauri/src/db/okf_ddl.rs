@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS llm_wiki_entries (
   okf_usage_window TEXT,
   embedding_failed_at INTEGER,
   embedding_failure_kind TEXT,
-  embedding_attempts INTEGER NOT NULL DEFAULT 0
+  embedding_attempts INTEGER NOT NULL DEFAULT 0,
+  valid_from INTEGER,
+  valid_to INTEGER,
+  superseded_by TEXT,
+  superseded_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_entity_idx ON llm_wiki_entries(entity_id);
@@ -106,7 +110,8 @@ CREATE TABLE IF NOT EXISTS llm_wiki_events (
   event_type TEXT NOT NULL,
   summary TEXT NOT NULL,
   related_entry_id TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  occurred_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_events_entity_idx ON llm_wiki_events(entity_id, created_at DESC);
@@ -114,7 +119,9 @@ CREATE INDEX IF NOT EXISTS llm_wiki_events_entity_idx ON llm_wiki_events(entity_
 CREATE TABLE IF NOT EXISTS llm_wiki_checkpoints (
   entity_id TEXT PRIMARY KEY,
   heal_checkpoint INTEGER NOT NULL DEFAULT 0,
-  memory_checkpoint INTEGER NOT NULL DEFAULT 0
+  memory_checkpoint INTEGER NOT NULL DEFAULT 0,
+  librarian_watermark_at INTEGER,
+  librarian_watermark_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS llm_wiki_entity_manifests (
@@ -233,4 +240,35 @@ pub fn apply_llm_wiki_v12_edge_index(conn: &rusqlite::Connection) -> rusqlite::R
         "CREATE INDEX IF NOT EXISTS llm_wiki_edges_entity_id_idx ON llm_wiki_edges(entity_id, id);
          DROP INDEX IF EXISTS llm_wiki_edges_entity_idx;",
     )
+}
+
+/// Mirror of core-llm-wiki engine migration 13 (7.8.0) / `setupDatabase`'s
+/// `createTemporalIndexesIfColumnsExist` (7.9.0): the two partial temporal
+/// indexes on `llm_wiki_entries`.
+///
+/// These indexes are created OUTSIDE the engine's `setupDatabase` exec
+/// template, so they must stay out of `LLM_WIKI_PACKAGE_DDL` — `ddl_compat`
+/// compares template statement sets and would flag them as Rust-only drift.
+/// Like the engine's own helper, each index is gated on its columns existing
+/// (`PRAGMA table_info`), so this is safe before V24 has run and a no-op
+/// after the engine's own migration 13 has. Runs on every Rust open so a
+/// brain first opened by the CLI/MCP binaries gets the same index shape.
+pub fn apply_llm_wiki_v13_temporal_indexes(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let existing = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    let has = |col: &str| existing.iter().any(|c| c == col);
+    if has("superseded_by") {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS llm_wiki_entries_superseded_idx
+             ON llm_wiki_entries(entity_id, superseded_by) WHERE superseded_by IS NOT NULL",
+            [],
+        )?;
+    }
+    if has("valid_from") && has("valid_to") {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS llm_wiki_entries_temporal_idx
+             ON llm_wiki_entries(entity_id) WHERE valid_from IS NOT NULL OR valid_to IS NOT NULL",
+            [],
+        )?;
+    }
+    Ok(())
 }

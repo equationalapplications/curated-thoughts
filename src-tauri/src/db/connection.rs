@@ -314,11 +314,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         // so the interpolation is safe; `add_column_if_missing` cannot be
         // reused because its identifier check rejects the multi-word
         // `NOT NULL DEFAULT 0` declaration the package DDL requires.
-        let existing: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(llm_wiki_entries)")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            rows.filter_map(Result::ok).collect()
-        };
+        let existing = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
         const V17_EMBEDDING_FAILURE_COLUMNS: &[(&str, &str)] = &[
             ("embedding_failed_at", "INTEGER"),
             ("embedding_failure_kind", "TEXT"),
@@ -722,6 +718,30 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         )?;
     }
 
+    // V24 — core-llm-wiki 7.9.0 engine migration 13 mirror: temporal fact
+    // columns on `llm_wiki_entries`, `occurred_at` on `llm_wiki_events`, and
+    // the librarian watermark columns on `llm_wiki_checkpoints` (all
+    // nullable; no backfill — upstream reads a NULL `valid_from` as "since
+    // created_at").
+    //
+    // The ALTERs run on every open, ungated like V23's DDL: the startup
+    // schema guard below demands the full 7.9.0 column set, and the JS
+    // package migration that adds these columns only runs once the frontend
+    // boots — too late for CLI/MCP opens. Every name here is a hardcoded
+    // literal with a plain nullable type, so the V17 snapshot-and-ALTER
+    // pattern applies — one `PRAGMA table_info` per table rather than the
+    // two round trips per column `add_column_if_missing` costs, since this
+    // runs on every open forever. Upstream migration 13 is PRAGMA-guarded
+    // the same way, so whichever side runs second no-ops.
+    //
+    // The STAMP is gated on V22 having stamped, exactly like V23 (reusing
+    // the read above: nothing between the two gates can change the answer —
+    // V23's insert only fires when `stamped >= 22` already holds). Stamping
+    // 24 while a rootless open has deferred V22 would make every later
+    // rooted open read MAX(version) >= 24, skip `if version < 22`, and
+    // permanently skip V22's `documents.path` rewrite and its FATAL re-warn.
+    apply_v24_temporal_columns(conn, stamped >= 22)?;
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -752,12 +772,91 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // core-llm-wiki 7.7 engine migration V12, mirrored for Rust-first opens.
     crate::db::okf_ddl::apply_llm_wiki_v12_edge_index(conn)?;
 
+    // core-llm-wiki 7.9 engine migration 13's temporal indexes, mirrored for
+    // Rust-first opens (each gated on its V24 columns existing).
+    crate::db::okf_ddl::apply_llm_wiki_v13_temporal_indexes(conn)?;
+
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
     // Startup canary: report JSON-shaped but unparseable `source_ref` values.
     // See `warn_on_malformed_source_refs` and issue #162.
     let _ = warn_on_malformed_source_refs(conn);
 
+    Ok(())
+}
+
+/// V24 body (see the comment at its call site in `migrate()`): add the
+/// core-llm-wiki 7.9.0 engine migration 13 columns, then stamp 24 when
+/// `stamp` (V22 has stamped) holds. Split out so the concurrent-open guard
+/// can be exercised on its own.
+fn apply_v24_temporal_columns(conn: &Connection, stamp: bool) -> Result<()> {
+    const V24_TEMPORAL_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "llm_wiki_entries",
+            &[
+                ("valid_from", "INTEGER"),
+                ("valid_to", "INTEGER"),
+                ("superseded_by", "TEXT"),
+                ("superseded_at", "INTEGER"),
+            ],
+        ),
+        ("llm_wiki_events", &[("occurred_at", "INTEGER")]),
+        (
+            "llm_wiki_checkpoints",
+            &[
+                ("librarian_watermark_at", "INTEGER"),
+                ("librarian_watermark_id", "TEXT"),
+            ],
+        ),
+    ];
+
+    // Concurrent-migration guard (review finding on PR #252, V21 precedent):
+    // the desktop app and a simultaneously launching `--mcp` server can both
+    // snapshot a column as missing, and the second ALTER would then fail its
+    // open with `duplicate column name`. Any missing column takes BEGIN
+    // IMMEDIATE (the loser blocks on the busy timeout set at open) and
+    // re-inspects UNDER that lock, so exactly one process runs each ALTER.
+    // The unlocked pre-check keeps the steady state — every column present —
+    // from taking the write lock on every open.
+    let v24_missing = |conn: &Connection| -> Result<Vec<(&str, &str, &str)>> {
+        let mut missing = Vec::new();
+        for (table, columns) in V24_TEMPORAL_COLUMNS {
+            let existing = crate::db::ddl_compat::existing_columns(conn, table)?;
+            for (column, declared_type) in *columns {
+                if !existing.iter().any(|c| c == column) {
+                    missing.push((*table, *column, *declared_type));
+                }
+            }
+        }
+        Ok(missing)
+    };
+    let stamp_v24 = |conn: &Connection| -> Result<()> {
+        if stamp {
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (24)",
+                [],
+            )?;
+        }
+        Ok(())
+    };
+    if v24_missing(conn)?.is_empty() {
+        stamp_v24(conn)?;
+    } else {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let applied = (|| -> Result<()> {
+            for (table, column, declared_type) in v24_missing(conn)? {
+                conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {declared_type}"),
+                    [],
+                )?;
+            }
+            stamp_v24(conn)
+        })();
+        if let Err(e) = applied.and_then(|()| Ok(conn.execute_batch("COMMIT;")?)) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -913,6 +1012,9 @@ mod tests {
         // V23 (issue #211) creates `curated_proposal_deleted_sources` on
         // every open but stamps only once V22 has, so a rootless open still
         // caps at 21.
+        // V24 (core-llm-wiki 7.9.0 adoption) mirrors engine migration 13's
+        // temporal/watermark columns on every open but, like V23, stamps
+        // only once V22 has — so this still caps at 21.
         assert_eq!(
             max_version, 21,
             "open_in_memory has no vault root, so V22 refuses to stamp and the schema caps at 21"
@@ -1067,6 +1169,172 @@ mod tests {
             )
             .unwrap();
         assert!(post_version >= 17, "schema_version must reach >= 17");
+    }
+
+    /// Upgraded-DB path for the core-llm-wiki@7.9.0 bump: a database created
+    /// before engine migration 13 (temporal fact columns, event
+    /// `occurred_at`, librarian watermark columns) must open successfully.
+    /// The Rust schema guard rejects the old shape, and the JS package
+    /// migration that adds the columns only runs after the frontend boots —
+    /// so the V24 gate has to add the columns first, and the temporal-index
+    /// mirror has to recreate the two partial indexes.
+    #[test]
+    fn migration_v24_adds_engine_migration_13_columns() {
+        let conn = open_in_memory().unwrap();
+
+        // Rewind to the pre-7.9 shape: drop the seven package columns (the
+        // two temporal indexes first — SQLite refuses to drop an indexed
+        // column), plus the V21 column whose non-idempotent ALTER re-runs
+        // when the DELETE pulls the whole stamp ladder from 17 up. A
+        // pre-existing row proves the added columns backfill NULL.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('e1', 'ent1', 't', 'b', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_entries_superseded_idx;
+             DROP INDEX IF EXISTS llm_wiki_entries_temporal_idx;
+             ALTER TABLE llm_wiki_entries DROP COLUMN valid_from;
+             ALTER TABLE llm_wiki_entries DROP COLUMN valid_to;
+             ALTER TABLE llm_wiki_entries DROP COLUMN superseded_by;
+             ALTER TABLE llm_wiki_entries DROP COLUMN superseded_at;
+             ALTER TABLE llm_wiki_events DROP COLUMN occurred_at;
+             ALTER TABLE llm_wiki_checkpoints DROP COLUMN librarian_watermark_at;
+             ALTER TABLE llm_wiki_checkpoints DROP COLUMN librarian_watermark_id;
+             ALTER TABLE curated_proposals DROP COLUMN reviewed_by;
+             DELETE FROM schema_version WHERE version >= 17;",
+        )
+        .unwrap();
+
+        // Precondition: the guard alone would reject this shape.
+        let guard_err = crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect_err("guard must reject a pre-7.9 entries table");
+        assert!(guard_err.to_string().contains("missing columns"));
+
+        migrate(&conn, None, None).expect("migrate must upgrade a pre-7.9 database");
+
+        for (table, column) in [
+            ("llm_wiki_entries", "valid_from"),
+            ("llm_wiki_entries", "valid_to"),
+            ("llm_wiki_entries", "superseded_by"),
+            ("llm_wiki_entries", "superseded_at"),
+            ("llm_wiki_events", "occurred_at"),
+            ("llm_wiki_checkpoints", "librarian_watermark_at"),
+            ("llm_wiki_checkpoints", "librarian_watermark_id"),
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{column} must exist after migrate()");
+        }
+
+        // The temporal-index mirror must recreate both partial indexes on
+        // the Rust-only path (the engine's createTemporalIndexesIfColumnsExist
+        // would otherwise only run at first frontend boot).
+        for index in [
+            "llm_wiki_entries_superseded_idx",
+            "llm_wiki_entries_temporal_idx",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{index} must exist after migrate()");
+        }
+
+        // No backfill: existing rows read NULL, which upstream defines as
+        // "valid since created_at".
+        let valid_from: Option<i64> = conn
+            .query_row(
+                "SELECT valid_from FROM llm_wiki_entries WHERE id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(valid_from, None);
+
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("guard must accept the upgraded database");
+
+        // Spec §6: the upgrade is a no-op on re-open — a second migrate()
+        // re-runs the ungated V24 ALTERs against the now-existing columns
+        // and must succeed (guards against a future bare-ALTER regression,
+        // the exact non-idempotent-ALTER mistake V21 made).
+        migrate(&conn, None, None).expect("second migrate() must be a no-op");
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("guard must still accept the re-opened database");
+    }
+
+    /// Concurrent-open guard for V24 (review finding on PR #252): the desktop
+    /// app and an `--mcp` server opening the same pre-7.9 brain at once must
+    /// both succeed. Without BEGIN IMMEDIATE plus the under-lock re-inspection,
+    /// both snapshot the columns as missing and the loser's ALTER fails with
+    /// `duplicate column name`. Drives the V24 body directly: the rest of
+    /// `migrate()` has its own, separate concurrent-open behavior.
+    #[test]
+    fn migration_v24_concurrent_opens_do_not_race_on_alter() {
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("brain.db");
+        let open = |path: &std::path::Path| {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")
+                .unwrap();
+            conn
+        };
+
+        {
+            let conn = open(&path);
+            migrate(&conn, None, None).unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS llm_wiki_entries_superseded_idx;
+                 DROP INDEX IF EXISTS llm_wiki_entries_temporal_idx;
+                 ALTER TABLE llm_wiki_entries DROP COLUMN valid_from;
+                 ALTER TABLE llm_wiki_entries DROP COLUMN valid_to;
+                 ALTER TABLE llm_wiki_entries DROP COLUMN superseded_by;
+                 ALTER TABLE llm_wiki_entries DROP COLUMN superseded_at;
+                 ALTER TABLE llm_wiki_events DROP COLUMN occurred_at;
+                 ALTER TABLE llm_wiki_checkpoints DROP COLUMN librarian_watermark_at;
+                 ALTER TABLE llm_wiki_checkpoints DROP COLUMN librarian_watermark_id;",
+            )
+            .unwrap();
+        }
+
+        const OPENERS: usize = 4;
+        let barrier = Arc::new(Barrier::new(OPENERS));
+        let handles: Vec<_> = (0..OPENERS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = open(&path);
+                    barrier.wait();
+                    apply_v24_temporal_columns(&conn, false).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .unwrap()
+                .expect("every concurrent open must migrate cleanly");
+        }
+
+        let conn = open(&path);
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("guard must accept the concurrently upgraded database");
     }
 
     /// V15 widens the `documents.status` CHECK so the deferred-reindex
@@ -2814,8 +3082,8 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 23,
-            "V22 then V23 must be stamped when the migration runs"
+            version, 24,
+            "V22 then V23 then V24 must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -2960,7 +3228,11 @@ mod tests {
             format!("{configured_root}/notes.md"),
             "V22 must still run on the first rooted open"
         );
-        assert_eq!(max_version(&conn), 23, "rooted open stamps 22 then 23");
+        assert_eq!(
+            max_version(&conn),
+            24,
+            "rooted open stamps 22, then 23 and 24 (both gated on V22)"
+        );
     }
 
     fn edge_index_names(conn: &Connection) -> Vec<String> {

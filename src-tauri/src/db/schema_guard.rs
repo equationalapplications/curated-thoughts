@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// Pinned `package.json` dependency — keep in sync with `@equationalapplications/core-llm-wiki`.
-pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.7.4";
+pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.9.0";
 
 struct TableExpectation {
     name: &'static str,
@@ -46,6 +46,10 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "embedding_failed_at",
             "embedding_failure_kind",
             "embedding_attempts",
+            "valid_from",
+            "valid_to",
+            "superseded_by",
+            "superseded_at",
             "tier",
         ],
     },
@@ -92,11 +96,18 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "summary",
             "related_entry_id",
             "created_at",
+            "occurred_at",
         ],
     },
     TableExpectation {
         name: "llm_wiki_checkpoints",
-        columns: &["entity_id", "heal_checkpoint", "memory_checkpoint"],
+        columns: &[
+            "entity_id",
+            "heal_checkpoint",
+            "memory_checkpoint",
+            "librarian_watermark_at",
+            "librarian_watermark_id",
+        ],
     },
     TableExpectation {
         name: "llm_wiki_meta",
@@ -165,7 +176,8 @@ fn verify_table(conn: &Connection, expect: &TableExpectation) -> Result<()> {
         bail!(
             "llm_wiki schema mismatch: table `{}` is missing. \
              Rust expects core-llm-wiki@{PINNED_CORE_LLM_WIKI_VERSION} columns. \
-             The database was not modified.",
+             Additive schema migrations may already have run on this open; \
+             upgrade Curated Thoughts or restore from backup.",
             expect.name
         );
     }
@@ -192,7 +204,8 @@ fn verify_table(conn: &Connection, expect: &TableExpectation) -> Result<()> {
         "llm_wiki schema mismatch: {detail}. \
          Rust expects core-llm-wiki@{PINNED_CORE_LLM_WIKI_VERSION} schema \
          (see src-tauri/src/db/schema_guard.rs). \
-         Upgrade Curated Thoughts or restore from backup; the database was not modified."
+         Additive schema migrations (e.g. V17, V24) may already have run on this open; \
+         upgrade Curated Thoughts or restore from backup."
     );
 }
 
