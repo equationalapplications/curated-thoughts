@@ -166,7 +166,7 @@ pub(crate) fn build_structural_context(conn: &Connection, source_chunks: &[Chunk
     section
 }
 
-fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
+pub(crate) fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
     let mut p = std::path::Path::new(source_path);
     loop {
         let dir = p.parent().unwrap_or(p).to_string_lossy().to_string();
