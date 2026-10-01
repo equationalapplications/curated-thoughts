@@ -1,3 +1,9 @@
+## [2.23.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.23.0...v2.23.1) (2026-10-01)
+
+### Bug Fixes
+
+* **pipeline:** replace AtomicUsize::fetch_update with compare_exchange loop ([#257](https://github.com/equationalapplications/curated-thoughts/issues/257)) ([cec5324](https://github.com/equationalapplications/curated-thoughts/commit/cec5324dc99c6c7280799cd2293a343062f1e8ba))
+
 ## [2.23.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.22.0...v2.23.0) (2026-09-30)
 
 ### Bug Fixes
