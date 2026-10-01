@@ -27,7 +27,7 @@ pub(crate) fn now_ms() -> i64 {
 // Params
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WisdomDepositParams {
     /// Vault-relative deposit path under `immutable-source-files/agents/`.
@@ -42,14 +42,14 @@ pub struct WisdomDepositParams {
     pub tags: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WisdomDepositStatusParams {
     /// Vault-relative deposit path (as returned by `wisdom_deposit`).
     pub path: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct WisdomProposeSupersessionParams {
     /// The target fact's `librarian-…` source_ref token.

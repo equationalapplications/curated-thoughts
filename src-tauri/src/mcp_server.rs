@@ -243,7 +243,7 @@ impl VaultMcpServer {
     )]
     async fn wisdom_deposit(
         &self,
-        args: Parameters<tool_dispatch::WisdomDepositParams>,
+        args: Parameters<crate::wisdom_deposit::WisdomDepositParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(params) = args;
         let value = serde_json::to_value(params)
@@ -261,7 +261,7 @@ impl VaultMcpServer {
     )]
     async fn wisdom_deposit_status(
         &self,
-        args: Parameters<tool_dispatch::WisdomDepositStatusParams>,
+        args: Parameters<crate::wisdom_deposit::WisdomDepositStatusParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(params) = args;
         let value = serde_json::to_value(params)
@@ -279,7 +279,7 @@ impl VaultMcpServer {
     )]
     async fn wisdom_propose_supersession(
         &self,
-        args: Parameters<tool_dispatch::WisdomProposeSupersessionParams>,
+        args: Parameters<crate::wisdom_deposit::WisdomProposeSupersessionParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(params) = args;
         let value = serde_json::to_value(params)
