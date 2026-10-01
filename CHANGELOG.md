@@ -1,3 +1,9 @@
+## [2.23.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.22.0...v2.23.0) (2026-09-30)
+
+### Bug Fixes
+
+* **deps:** adopt @equationalapplications llm-wiki 7.9.0 (engine migration 13 schema sync) ([#252](https://github.com/equationalapplications/curated-thoughts/issues/252)) ([5dc58d1](https://github.com/equationalapplications/curated-thoughts/commit/5dc58d1987d374137fabcb99b051b9ac02e3ec62))
+
 ## [2.22.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.21.0...v2.22.0) (2026-09-30)
 
 ### Features
