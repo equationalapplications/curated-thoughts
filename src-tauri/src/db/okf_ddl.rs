@@ -254,11 +254,7 @@ pub fn apply_llm_wiki_v12_edge_index(conn: &rusqlite::Connection) -> rusqlite::R
 /// after the engine's own migration 13 has. Runs on every Rust open so a
 /// brain first opened by the CLI/MCP binaries gets the same index shape.
 pub fn apply_llm_wiki_v13_temporal_indexes(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let existing: Vec<String> = {
-        let mut stmt = conn.prepare("PRAGMA table_info(llm_wiki_entries)")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        rows.filter_map(Result::ok).collect()
-    };
+    let existing = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     let has = |col: &str| existing.iter().any(|c| c == col);
     if has("superseded_by") {
         conn.execute(

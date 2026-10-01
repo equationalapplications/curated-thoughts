@@ -314,11 +314,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         // so the interpolation is safe; `add_column_if_missing` cannot be
         // reused because its identifier check rejects the multi-word
         // `NOT NULL DEFAULT 0` declaration the package DDL requires.
-        let existing: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(llm_wiki_entries)")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            rows.filter_map(Result::ok).collect()
-        };
+        let existing = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
         const V17_EMBEDDING_FAILURE_COLUMNS: &[(&str, &str)] = &[
             ("embedding_failed_at", "INTEGER"),
             ("embedding_failure_kind", "TEXT"),
@@ -731,33 +727,49 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // The ALTERs run on every open, ungated like V23's DDL: the startup
     // schema guard below demands the full 7.9.0 column set, and the JS
     // package migration that adds these columns only runs once the frontend
-    // boots — too late for CLI/MCP opens. Every declaration here is a plain
-    // nullable type, so `add_column_if_missing` applies (the V17 gate needed
-    // raw ALTERs only because `embedding_attempts` carries a multi-word
-    // `NOT NULL DEFAULT 0`). Upstream migration 13 is PRAGMA-guarded the
-    // same way, so whichever side runs second no-ops.
+    // boots — too late for CLI/MCP opens. Every name here is a hardcoded
+    // literal with a plain nullable type, so the V17 snapshot-and-ALTER
+    // pattern applies — one `PRAGMA table_info` per table rather than the
+    // two round trips per column `add_column_if_missing` costs, since this
+    // runs on every open forever. Upstream migration 13 is PRAGMA-guarded
+    // the same way, so whichever side runs second no-ops.
     //
-    // The STAMP is gated on V22 having stamped, exactly like V23: stamping
+    // The STAMP is gated on V22 having stamped, exactly like V23 (reusing
+    // the read above: nothing between the two gates can change the answer —
+    // V23's insert only fires when `stamped >= 22` already holds). Stamping
     // 24 while a rootless open has deferred V22 would make every later
     // rooted open read MAX(version) >= 24, skip `if version < 22`, and
     // permanently skip V22's `documents.path` rewrite and its FATAL re-warn.
-    const V24_TEMPORAL_COLUMNS: &[(&str, &str, &str)] = &[
-        ("llm_wiki_entries", "valid_from", "INTEGER"),
-        ("llm_wiki_entries", "valid_to", "INTEGER"),
-        ("llm_wiki_entries", "superseded_by", "TEXT"),
-        ("llm_wiki_entries", "superseded_at", "INTEGER"),
-        ("llm_wiki_events", "occurred_at", "INTEGER"),
-        ("llm_wiki_checkpoints", "librarian_watermark_at", "INTEGER"),
-        ("llm_wiki_checkpoints", "librarian_watermark_id", "TEXT"),
+    const V24_TEMPORAL_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "llm_wiki_entries",
+            &[
+                ("valid_from", "INTEGER"),
+                ("valid_to", "INTEGER"),
+                ("superseded_by", "TEXT"),
+                ("superseded_at", "INTEGER"),
+            ],
+        ),
+        ("llm_wiki_events", &[("occurred_at", "INTEGER")]),
+        (
+            "llm_wiki_checkpoints",
+            &[
+                ("librarian_watermark_at", "INTEGER"),
+                ("librarian_watermark_id", "TEXT"),
+            ],
+        ),
     ];
-    for (table, column, declared_type) in V24_TEMPORAL_COLUMNS {
-        crate::db::ddl_compat::add_column_if_missing(conn, table, column, declared_type)?;
+    for (table, columns) in V24_TEMPORAL_COLUMNS {
+        let existing = crate::db::ddl_compat::existing_columns(conn, table)?;
+        for (column, declared_type) in *columns {
+            if !existing.iter().any(|c| c == column) {
+                conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {declared_type}"),
+                    [],
+                )?;
+            }
+        }
     }
-    let stamped: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-        [],
-        |r| r.get(0),
-    )?;
     if stamped >= 22 {
         conn.execute(
             "INSERT OR IGNORE INTO schema_version (version) VALUES (24)",
@@ -1214,6 +1226,14 @@ mod tests {
 
         crate::db::schema_guard::verify_llm_wiki_schema(&conn)
             .expect("guard must accept the upgraded database");
+
+        // Spec §6: the upgrade is a no-op on re-open — a second migrate()
+        // re-runs the ungated V24 ALTERs against the now-existing columns
+        // and must succeed (guards against a future bare-ALTER regression,
+        // the exact non-idempotent-ALTER mistake V21 made).
+        migrate(&conn, None, None).expect("second migrate() must be a no-op");
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("guard must still accept the re-opened database");
     }
 
     /// V15 widens the `documents.status` CHECK so the deferred-reindex
@@ -3108,7 +3128,8 @@ mod tests {
             "V22 must still run on the first rooted open"
         );
         assert_eq!(
-            max_version(&conn), 24,
+            max_version(&conn),
+            24,
             "rooted open stamps 22, then 23 and 24 (both gated on V22)"
         );
     }

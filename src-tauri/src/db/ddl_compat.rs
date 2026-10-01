@@ -110,11 +110,7 @@ pub fn add_column_if_missing(
         anyhow::bail!("add_column_if_missing: table '{table}' does not exist");
     }
 
-    let info: Vec<String> = conn
-        .prepare(&format!("PRAGMA table_info({table})"))?
-        .query_map([], |row| row.get(1))?
-        .filter_map(Result::ok)
-        .collect();
+    let info = existing_columns(conn, table)?;
     if !info.contains(&column.to_string()) {
         conn.execute(
             &format!("ALTER TABLE {table} ADD COLUMN {column} {declared_type}"),
@@ -122,6 +118,17 @@ pub fn add_column_if_missing(
         )?;
     }
     Ok(())
+}
+
+/// Column names of `table` from a single `PRAGMA table_info` snapshot.
+/// Shared by the migration gates (V17, V24) and the temporal-index mirror in
+/// `okf_ddl` so column detection cannot drift between them. Like the PRAGMA
+/// in `add_column_if_missing` above, `table` is interpolated as text — every
+/// caller passes a hardcoded literal.
+pub fn existing_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(rows.filter_map(Result::ok).collect())
 }
 
 /// SQLite has no parameter binding for identifiers, so `PRAGMA table_info` and
