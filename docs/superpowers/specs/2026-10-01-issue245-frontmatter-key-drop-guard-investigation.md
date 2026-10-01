@@ -64,3 +64,10 @@ keys, unless an explicit confirm flag (mirroring #240's `allow_shrink`) is passe
 questions resolved in the design doc: reuse `collect_frontmatter_fence` for the existing-side
 key-set read (yes — the same 64-line-cap fence view the token reader uses); which keys count
 (load-bearing set vs all keys); interaction with intentional key removal.
+
+**Corrigendum (Opus design-c1 M1, 2026-10-01):** this doc's and the issue's "e.g. `tags`,
+`supersedes`, `entity_type`" example overstates the droppable set — `entity_type` (with
+`okf_version`, `profile`, `title`, `created_at`) is a REQUIRED field of `OkfFrontmatter`
+(`okf/mod.rs:35-47`); a payload omitting it fails struct parse before `write_note` runs. The
+droppable keys are exactly `tags`, `supersedes`, and keys outside `KNOWN_KEYS`. The design doc
+carries the corrected analysis.
