@@ -754,8 +754,15 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // (b) create the deposit kick-state ledger (D3/D4 status truth source).
     // The STAMP is gated on V22 having stamped, exactly like V23/V24: a
     // rootless open defers V22, and stamping 25 would make every later
-    // rooted open skip V22's FATAL re-warn permanently.
-    if stamped >= 22 {
+    // rooted open skip V22's FATAL re-warn permanently. Re-read MAX(version)
+    // here (the `stamped` snapshot above predates this open's V22 run — on a
+    // fresh rooted brain it reads 21 while V22 stamps 22 in this same call).
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
         conn.execute_batch(
             "INSERT OR IGNORE INTO folder_rules
                  (folder_path, librarian_mode, auto_approve)
@@ -3142,6 +3149,7 @@ mod tests {
     /// ancestors, so an absent child row would inherit synthesize and
     /// auto-generate facts from supersession proposals), and the
     /// deposit_kick_state ledger exists. Stamps only past a settled V22.
+
     #[test]
     fn v25_seeds_agent_folder_rules_and_kick_state_table() {
         use crate::librarian::get_folder_mode;

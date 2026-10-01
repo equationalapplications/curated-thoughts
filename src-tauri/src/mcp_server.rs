@@ -216,59 +216,8 @@ impl VaultMcpServer {
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 
-    #[tool(
-        name = "curated_add_wisdom",
-        description = "Add a new entry to the wisdom layer of the live brain. WRITES to the live brain: requires an existing active entity and appends a user-stated, confirmed entry."
-    )]
-    async fn curated_add_wisdom(
-        &self,
-        args: Parameters<tool_dispatch::CuratedAddWisdomParams>,
-    ) -> Result<String, rmcp::ErrorData> {
-        let Parameters(params) = args;
-        let value = serde_json::to_value(params)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
-        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_add_wisdom", value)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
-        serde_json::to_string(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
-    }
 
-    #[tool(
-        name = "curated_update_wisdom",
-        description = "Update the body of an existing wisdom layer entry. WRITES to the live brain: the entry is reloaded from the database after the update, so the response reflects stored state, not the request."
-    )]
-    async fn curated_update_wisdom(
-        &self,
-        args: Parameters<tool_dispatch::CuratedUpdateWisdomParams>,
-    ) -> Result<String, rmcp::ErrorData> {
-        let Parameters(params) = args;
-        let value = serde_json::to_value(params)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
-        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_update_wisdom", value)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
-        serde_json::to_string(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
-    }
 
-    #[tool(
-        name = "curated_archive_wisdom",
-        description = "Soft-delete (archive) a wisdom layer entry. WRITES to the live brain: the entry is marked deleted rather than removed."
-    )]
-    async fn curated_archive_wisdom(
-        &self,
-        args: Parameters<tool_dispatch::CuratedArchiveWisdomParams>,
-    ) -> Result<String, rmcp::ErrorData> {
-        let Parameters(params) = args;
-        let value = serde_json::to_value(params)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
-        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_archive_wisdom", value)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
-        serde_json::to_string(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
-    }
 
     #[tool(
         name = "curated_proposals_list",
@@ -289,19 +238,74 @@ impl VaultMcpServer {
     }
 
     #[tool(
-        name = "curated_proposal_decide",
-        description = "Approve or reject a pending proposal after review. decision: approve|reject. note (optional): for rejects, the stored reason (reject_reason); for approves, acknowledged in the result but not stored. Approved entries are stamped user_confirmed with reviewed_by provenance. Errors cleanly if already resolved or superseded."
+        name = "wisdom_deposit",
+        description = "Append-only deposit of a fact file under immutable-source-files/agents/. Writes the file with agent provenance, kicks the per-document ingest+librarian pipeline (vault-lock serialized), and reports honest pending state. The Active Librarian is the sole writer of brain facts (INTENT rule 1); corrections go through wisdom_propose_supersession. Paths outside the agents lane (including agents/supersessions/) are refused; an existing path is refused (append-only, INTENT rule 9)."
     )]
-    async fn curated_proposal_decide(
+    async fn wisdom_deposit(
         &self,
-        args: Parameters<tool_dispatch::CuratedProposalDecideParams>,
+        args: Parameters<tool_dispatch::WisdomDepositParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let Parameters(params) = args;
         let value = serde_json::to_value(params)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
-        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_proposal_decide", value)
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "wisdom_deposit", value)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "wisdom_deposit_status",
+        description = "Ingest state of one deposited file (by its vault-relative path), keyed to librarian_evidence via curated_proposal_sources — never a source_ref guess. States: pending | chunked | ingested | failed | no_ingest_host | queued_watcher; ingested reports fact ids and, when the migration-13 columns are readable, tier/supersession enrichment."
+    )]
+    async fn wisdom_deposit_status(
+        &self,
+        args: Parameters<tool_dispatch::WisdomDepositStatusParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "wisdom_deposit_status", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "wisdom_propose_supersession",
+        description = "Propose superseding an existing fact (INTENT rule 4): writes a supersession deposit under immutable-source-files/agents/supersessions/ with the supersedes token in frontmatter. The Active Librarian applies it automatically for agent-tier targets; human-tier targets become proposals a human resolves in the app. Exactly one of target_source_ref / target_fact_id is required."
+    )]
+    async fn wisdom_propose_supersession(
+        &self,
+        args: Parameters<tool_dispatch::WisdomProposeSupersessionParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result =
+            tool_dispatch::dispatch_tool_call(&self.ctx, "wisdom_propose_supersession", value)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
+                })?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
+        name = "wisdom_pending",
+        description = "Read-only listing of deposits without librarian evidence (chunked or better, including deferred supersession deposits). Never merged into recall or injection (INTENT rule 3)."
+    )]
+    async fn wisdom_pending(&self) -> Result<String, rmcp::ErrorData> {
+        let result = tool_dispatch::dispatch_tool_call(
+            &self.ctx,
+            "wisdom_pending",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
