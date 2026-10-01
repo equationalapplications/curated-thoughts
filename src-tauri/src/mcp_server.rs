@@ -333,33 +333,8 @@ pub fn run() -> anyhow::Result<()> {
 /// Run the migration ladder over the brain database, without ever creating it.
 ///
 /// Failures are reported and swallowed: see the call site.
-fn migrate_brain_for_mcp(db_path: &std::path::Path) {
-    if !db_path.exists() {
-        // `open_brain_readonly` reports the missing file with the actionable
-        // env-var hint; don't pre-empt it with a second, vaguer message.
-        return;
-    }
-    let opened =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE);
-    let conn = match opened {
-        Ok(conn) => conn,
-        Err(e) => {
-            eprintln!(
-                "curated-thoughts [--mcp]: schema check skipped, {} not writable ({e}); \
-                 reads work, writes may fail on a missing column",
-                db_path.display()
-            );
-            return;
-        }
-    };
-    // Tolerate the desktop app or librarian holding the write lock.
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-    if let Err(e) = crate::db::connection::migrate_open_db(&conn, db_path.parent()) {
-        eprintln!(
-            "curated-thoughts [--mcp]: schema migration failed ({e}); \
-             reads work, writes may fail on a missing column"
-        );
-    }
+pub(crate) fn migrate_brain_for_mcp(db_path: &std::path::Path) {
+    crate::db::connection::migrate_brain_db(db_path);
 }
 
 async fn async_run() -> anyhow::Result<()> {

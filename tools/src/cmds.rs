@@ -10,8 +10,6 @@
 //!   - `ingest_run`       — full ingest_vault_once flow
 //!   - `librarian_run`    — full run_librarian_once flow (force / model)
 //!   - `librarian_run_on` — testable inner loop over an open connection
-//!   - `approve_one`      — approve a single pending proposal
-//!   - `approve_all`      — approve every pending proposal
 //!   - `enqueue_vault_event` — vault filesystem event → brain DB row
 //!   - `watch_run`        — long-running vault watcher (`ct watch`)
 //!
@@ -26,6 +24,7 @@
 //! Path-level helpers (`BrainPaths`, `resolve_brain_paths`, `print_json`,
 //! `vault_contains`) live in `crate::paths`.
 
+use std::io::IsTerminal;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,9 +34,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 
-use tauri_app_lib::db::commit::{resolve_proposal, ResolveOptions};
 use tauri_app_lib::db::connection::AppDb;
-use tauri_app_lib::db::proposals::{get_proposal_detail, ItemDecision, ItemDecisionKind};
+use tauri_app_lib::db::proposals::get_proposal_detail;
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
 // Re-export walker types so `curated_thoughts_tools::cmds::WalkedFile` (and
@@ -379,105 +377,12 @@ pub fn librarian_run_on(
 // ---------------------------------------------------------------------------
 
 /// doc, commit result). Extracted from `approve_pending_proposals.rs`.
-pub fn approve_one(proposal_id: &str) -> Result<()> {
-    let paths = retrieval::resolve_brain_paths();
-    let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
-    approve_one_on(&mut db.0, proposal_id)
-}
 
-fn approve_one_on(conn: &mut rusqlite::Connection, pid: &str) -> Result<()> {
-    let detail =
-        get_proposal_detail(conn, pid)?.with_context(|| format!("proposal {pid} not found"))?;
-    if detail.status != "pending" {
-        bail!("proposal {pid} not pending (status={})", detail.status);
-    }
-    let decisions: Vec<ItemDecision> = detail
-        .items
-        .iter()
-        .map(|i| ItemDecision {
-            item_id: i.id.clone(),
-            decision: ItemDecisionKind::Accept,
-            edited_payload: None,
-        })
-        .collect();
-    // Write-time entry embedding: best-effort. Failures fall back to `None` so
-    // the proposal still commits and the runtime `embed_sweep` fills NULLs.
-    // Matches the fallback rule documented in `task-R3-brief.md`.
-    let embed_profile =
-        retrieval::load_embed_profile(&retrieval::resolve_brain_paths().config_path).ok();
-    let result = resolve_proposal(
-        conn,
-        pid,
-        &decisions,
-        None,
-        ResolveOptions {
-            auto_approve: true,
-            embed_profile,
-            // Honour the on-disk `wiki.deposit_default_tier` setting. The CLI
-            // is the only way to approve proposals on a headless deployment,
-            // so a deposit approved through `--approve` must stamp the same
-            // tier as one approved through the Tauri command (which already
-            // plumbs this). Falling back to the constant default would
-            // silently stamp every CLI-approved deposit 'wisdom' even when
-            // the operator has set `wiki.deposit_default_tier: 'fact'`.
-            deposit_default_tier: Some(
-                tauri_app_lib::config::BrainConfig::deposit_default_tier_on_disk(),
-            ),
-            ..Default::default()
-        },
-    )?;
-    println!(
-        "approved {pid}: items={} source={} committed={} conflicts={} dropped_edges={} skipped_unanchored={} status={}",
-        decisions.len(),
-        detail
-            .source_doc_paths
-            .first()
-            .map(String::as_str)
-            .unwrap_or("-"),
-        result.committed.len(),
-        result.conflicts.len(),
-        result.dropped_edges.len(),
-        result.skipped_unanchored,
-        result.proposal_status,
-    );
-    Ok(())
-}
 
 /// Approve every pending proposal via [`approve_one_on`]. Continues past
 /// individual failures so one bad proposal doesn't block the rest. Prints
 /// `approved: N` (N=0 on an empty pending set — still exit 0), or
 /// `approved: N, failed: M` before returning Err when any failed.
-pub fn approve_all() -> Result<()> {
-    let paths = retrieval::resolve_brain_paths();
-    let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
-    let ids: Vec<String> = {
-        let mut stmt =
-            db.0.prepare("SELECT id FROM curated_proposals WHERE status = 'pending'")?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    let mut approved = 0usize;
-    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
-    for pid in &ids {
-        match approve_one_on(&mut db.0, pid) {
-            Ok(()) => approved += 1,
-            Err(e) => failures.push((pid.clone(), e)),
-        }
-    }
-    if failures.is_empty() {
-        println!("approved: {approved}");
-        return Ok(());
-    }
-    println!("approved: {approved}, failed: {}", failures.len());
-    for (pid, e) in &failures {
-        eprintln!("failed {pid}: {e:#}");
-    }
-    bail!(
-        "{} of {} proposal(s) failed to approve",
-        failures.len(),
-        ids.len()
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Librarian observability helpers (private)
@@ -1424,6 +1329,15 @@ pub fn cli_reviewer() -> String {
 /// review is a success even when there is nothing to do. A queue emptied only
 /// by skips reports the skipped count instead (those rows are still pending).
 pub fn proposals_review_cmd() -> Result<()> {
+    // Human Verification Gate: human-at-keyboard by definition. Fail-closed
+    // against piped stdin (`yes y | ct proposals review`). Hygiene, not
+    // authentication — a PTY-allocating agent defeats is_terminal(); the real
+    // boundary is the rule-1 sandbox plus the audit log (spec D7 threat-model).
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "ct proposals review requires an interactive terminal (the Human Verification Gate is human-at-keyboard); piped/redirected stdin is refused"
+        );
+    }
     let paths = retrieval::resolve_brain_paths();
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)?;
     let reviewer = cli_reviewer();

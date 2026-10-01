@@ -3401,3 +3401,37 @@ mod tests {
         );
     }
 }
+
+/// Best-effort schema bring-up for non-app hosts (MCP sidecar, `ct` wisdom
+/// commands): open the brain DB read-write, tolerate locks, migrate, and warn
+/// (not fail) on a read-only or contended database. Reads still work when this
+/// fails; the warning names the cause so a later write failure is not a
+/// mystery.
+pub fn migrate_brain_db(db_path: &std::path::Path) {
+    if !db_path.exists() {
+        // Openers report the missing file with the actionable env-var hint;
+        // don't pre-empt it with a second, vaguer message.
+        return;
+    }
+    let opened =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE);
+    let conn = match opened {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!(
+                "curated-thoughts: schema check skipped, {} not writable ({e}); \
+                 reads work, writes may fail on a missing column",
+                db_path.display()
+            );
+            return;
+        }
+    };
+    // Tolerate the desktop app or librarian holding the write lock.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    if let Err(e) = migrate_open_db(&conn, db_path.parent()) {
+        eprintln!(
+            "curated-thoughts: schema migration failed ({e}); \
+             reads work, writes may fail on a missing column"
+        );
+    }
+}

@@ -66,15 +66,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ProposalsCmd,
     },
-    /// Approve pending proposals (write).
-    Approve {
-        #[arg(long)]
-        all: bool,
-        /// Confirm the bulk write (`--all` with pending items refuses without it).
-        #[arg(long)]
-        yes: bool,
-        proposal_id: Option<String>,
-    },
     /// Ingest the vault into the brain database (write; requires --yes).
     Ingest {
         /// Confirm the write.
@@ -85,6 +76,11 @@ enum Cmd {
         /// non-approvable deny rules.
         #[arg(long)]
         trust_new_links: bool,
+    },
+    /// Wisdom deposit operations (the sanctioned agent write path; INTENT rule 1).
+    Wisdom {
+        #[command(subcommand)]
+        cmd: WisdomCmd,
     },
     /// Librarian operations.
     Librarian {
@@ -245,6 +241,216 @@ enum LibrarianCmd {
         force: bool,
     },
 }
+#[derive(Subcommand)]
+enum WisdomCmd {
+    /// Append-only deposit of a fact file under immutable-source-files/agents/.
+    Deposit {
+        /// Vault-relative path under immutable-source-files/agents/ (supersessions/ refused here).
+        #[arg(long)]
+        path: String,
+        /// Fact title (becomes the file's H1).
+        #[arg(long)]
+        title: String,
+        /// Fact body.
+        #[arg(long)]
+        body: String,
+        /// Optional tags (repeatable).
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Ingest state of one deposited file (by vault-relative path).
+    Status {
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Propose superseding an existing fact (writes a supersession deposit).
+    ProposeSupersession {
+        /// Target fact's librarian source_ref token (exactly one of --ref/--fact-id).
+        #[arg(long = "ref")]
+        target_ref: Option<String>,
+        /// Target fact id (exactly one of --ref/--fact-id).
+        #[arg(long = "fact-id")]
+        fact_id: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        reason: String,
+        /// Confirm the write.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List deposits without librarian evidence (read-only; never in recall).
+    Pending {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Wisdom deposit commands (INTENT rule 1 sanctioned write path)
+// ---------------------------------------------------------------------------
+
+fn require_yes(yes: bool, what: &str) -> Result<()> {
+    if !yes {
+        bail!("refusing: {what} is a write; pass --yes to proceed");
+    }
+    Ok(())
+}
+
+/// Open a migrated brain connection and build the same ToolDispatchContext the
+/// sidecar builds (migrate-first + read connection + lazy RW). Mirrors
+/// `mcp_server::async_run`'s open sequence so CLI and MCP share semantics.
+fn wisdom_ctx() -> Result<(
+    tauri_app_lib::tool_dispatch::ToolDispatchContext,
+    tauri_app_lib::retrieval::BrainPaths,
+)> {
+    use tauri_app_lib::tool_dispatch::ToolDispatchContext;
+
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    if !paths.db_path.exists() {
+        bail!(
+            "brain.db not found at {} — run ingest first",
+            paths.db_path.display()
+        );
+    }
+    tauri_app_lib::db::connection::migrate_brain_db(&paths.db_path);
+
+    let conn = rusqlite::Connection::open_with_flags(
+        &paths.db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(|e| anyhow::anyhow!("open rw {}: {e}", paths.db_path.display()))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+
+    let profile = tauri_app_lib::retrieval::load_embed_profile(&paths.config_path)?;
+    let vault_dir = tauri_app_lib::vault::VaultConfig::new(paths.config_path.clone())
+        .get_vault_path()
+        .ok()
+        .flatten()
+        .map(std::path::PathBuf::from)
+        .and_then(|path| path.canonicalize().ok());
+
+    let ctx = ToolDispatchContext {
+        conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+        profile,
+        vault_dir,
+        client: "ct-cli".into(),
+        db_path: paths.db_path.clone(),
+        rw_conn: Default::default(),
+    };
+    Ok((ctx, paths))
+}
+
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(fut)
+}
+
+fn wisdom_deposit_cmd(
+    path: &str,
+    title: &str,
+    body: &str,
+    tags: &[String],
+    yes: bool,
+) -> Result<i32> {
+    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_deposit, WisdomDepositParams};
+    require_yes(yes, "wisdom deposit")?;
+    let (ctx, _paths) = wisdom_ctx()?;
+    let v = block_on(dispatch_wisdom_deposit(
+        &ctx,
+        WisdomDepositParams {
+            path: path.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            tags: (!tags.is_empty()).then(|| tags.to_vec()),
+        },
+    ))?;
+    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    Ok(0)
+}
+
+fn wisdom_status_cmd(path: &str, json: bool) -> Result<i32> {
+    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_deposit_status, WisdomDepositStatusParams};
+    let (ctx, _paths) = wisdom_ctx()?;
+    let v = block_on(dispatch_wisdom_deposit_status(
+        &ctx,
+        WisdomDepositStatusParams {
+            path: path.to_string(),
+        },
+    ))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    } else {
+        println!(
+            "{}: {:?} (tier: {:?})",
+            path,
+            v.get("state").and_then(|s| s.as_str()).unwrap_or("?"),
+            v.get("tier").and_then(|s| s.as_str()).unwrap_or("?")
+        );
+    }
+    Ok(0)
+}
+
+fn wisdom_supersede_cmd(
+    target_ref: Option<&str>,
+    fact_id: Option<&str>,
+    title: &str,
+    body: &str,
+    reason: &str,
+    yes: bool,
+) -> Result<i32> {
+    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_propose_supersession, WisdomProposeSupersessionParams};
+    require_yes(yes, "wisdom propose-supersession")?;
+    if (target_ref.is_none()) == (fact_id.is_none()) {
+        bail!("exactly one of --ref / --fact-id is required");
+    }
+    let (ctx, _paths) = wisdom_ctx()?;
+    let v = block_on(dispatch_wisdom_propose_supersession(
+        &ctx,
+        WisdomProposeSupersessionParams {
+            target_source_ref: target_ref.map(str::to_string),
+            target_fact_id: fact_id.map(str::to_string),
+            replacement_title: title.to_string(),
+            replacement_body: body.to_string(),
+            reason: reason.to_string(),
+        },
+    ))?;
+    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    Ok(0)
+}
+
+fn wisdom_pending_cmd(json: bool) -> Result<i32> {
+    use tauri_app_lib::wisdom_deposit::dispatch_wisdom_pending;
+    let (ctx, _paths) = wisdom_ctx()?;
+    let v = block_on(dispatch_wisdom_pending(&ctx))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    } else {
+        let empty: Vec<serde_json::Value> = Vec::new();
+        for item in v
+            .get("pending")
+            .and_then(|p| p.as_array())
+            .unwrap_or(&empty)
+        {
+            println!(
+                "{}",
+                item.get("path").and_then(|p| p.as_str()).unwrap_or("?")
+            );
+        }
+    }
+    Ok(0)
+}
 
 fn main() {
     let cmd = match Ct::try_parse() {
@@ -307,11 +513,6 @@ fn run(cmd: Cmd) -> Result<i32> {
                 Ok(0)
             }
         },
-        Cmd::Approve {
-            all,
-            yes,
-            proposal_id,
-        } => approve_cmd(all, yes, proposal_id),
         Cmd::Ingest {
             yes,
             trust_new_links,
@@ -329,6 +530,35 @@ fn run(cmd: Cmd) -> Result<i32> {
             cli_common::ingest_run(trust_new_links)?;
             Ok(0)
         }
+        Cmd::Librarian { cmd } => match cmd {
+            LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
+        },
+        Cmd::Wisdom { cmd } => match cmd {
+            WisdomCmd::Deposit {
+                path,
+                title,
+                body,
+                tags,
+                yes,
+            } => wisdom_deposit_cmd(&path, &title, &body, &tags, yes),
+            WisdomCmd::Status { path, json } => wisdom_status_cmd(&path, json),
+            WisdomCmd::ProposeSupersession {
+                target_ref,
+                fact_id,
+                title,
+                body,
+                reason,
+                yes,
+            } => wisdom_supersede_cmd(
+                target_ref.as_deref(),
+                fact_id.as_deref(),
+                &title,
+                &body,
+                &reason,
+                yes,
+            ),
+            WisdomCmd::Pending { json } => wisdom_pending_cmd(json),
+        },
         Cmd::Librarian { cmd } => match cmd {
             LibrarianCmd::Run { yes, force } => librarian_run_cmd(yes, force),
         },
@@ -544,43 +774,6 @@ fn status(json_mode: bool) -> Result<i32> {
 /// `ct approve` — write command with the SDD confirmation rules:
 /// - `<id>`: approve that proposal (exit 0), or exit 1 if not pending/unknown.
 /// - `--all`: empty pending set exits 0 printing `approved: 0`; with pending
-///   items, refuses (exit 1, listing what would be accepted) unless `--yes`.
-fn approve_cmd(all: bool, yes: bool, proposal_id: Option<String>) -> Result<i32> {
-    if all {
-        let brain = cli_common::resolve()?;
-        let conn = cli_common::open_ro(&brain)?;
-        let pending = cli_common::list_pending_proposals(&conn)?;
-        if pending.is_empty() {
-            println!("approved: 0");
-            return Ok(0);
-        }
-        if !yes {
-            eprintln!(
-                "refusing: --all would approve {} pending proposal(s); pass --yes to proceed:",
-                pending.len()
-            );
-            for p in &pending {
-                eprintln!(
-                    "  {}\t{} items\t{}",
-                    p.id,
-                    p.item_count,
-                    p.source_doc_path.as_deref().unwrap_or("-")
-                );
-            }
-            return Ok(1);
-        }
-        drop(conn);
-        cli_common::approve_all()?;
-        return Ok(0);
-    }
-    match proposal_id {
-        Some(id) => {
-            cli_common::approve_one(&id)?;
-            Ok(0)
-        }
-        None => bail!("specify a proposal id or --all"),
-    }
-}
 
 /// `ct librarian run` — requires --yes; prints the planned action otherwise.
 fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {

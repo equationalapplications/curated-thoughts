@@ -143,7 +143,6 @@ const CLI_DEFAULT_REJECT_REASON: &str = "Rejected during review";
 /// `USER` env var (or `USERNAME`), and "cli-operator" when neither is set.
 /// The review e2e runs strip both, so this is also the value asserted
 /// against `reviewed_by`.
-const CLI_FALLBACK_REVIEWER: &str = "cli-operator";
 
 /// Seed a pending new_entity proposal with one anchored fact_add item via the
 /// real `insert_proposal` path (same seam the librarian synthesis uses). The
@@ -276,25 +275,24 @@ fn proposal_status(dir: &Path, id: &str) -> String {
 }
 
 #[test]
-fn review_command_empty_queue_exits_zero() {
-    common::with_seeded_brain(|| {
-        let out = common::run_ct(&["proposals", "review"]);
+fn review_gate_fires_before_queue_is_even_read() {
+    let brain = tempdir().unwrap();
+    let dir = brain.path().to_path_buf();
+    let dir_str = dir.to_str().unwrap().to_string();
+    with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
+        init_brain_db(&dir);
+        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"");
         assert!(
-            out.status.success(),
-            "review on empty queue must exit 0: {} stderr={}",
-            out.status,
+            !out.status.success(),
+            "gate is fail-closed even with an empty queue: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains("0 pending"),
-            "stdout must report the empty queue: {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-    });
+    })
 }
 
+
 #[test]
-fn review_command_approves_via_piped_y() {
+fn review_gate_refuses_piped_y_and_leaves_proposal_pending() {
     let brain = tempdir().unwrap();
     let dir = brain.path().to_path_buf();
     let dir_str = dir.to_str().unwrap().to_string();
@@ -303,37 +301,31 @@ fn review_command_approves_via_piped_y() {
         insert_anchored_proposal(&dir, "prop-y", 1_000);
         let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"y\n");
         assert!(
-            out.status.success(),
-            "review must exit 0: {} stderr={}",
-            out.status,
+            !out.status.success(),
+            "the Human Verification Gate must refuse piped stdin: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("prop-y"), "card shows the id: {text}");
-        assert!(text.contains("approved"), "decision echo: {text}");
-        assert_eq!(proposal_status(&dir, "prop-y"), "approved");
-        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
-        let reviewed_by: String = conn
-            .query_row(
-                "SELECT reviewed_by FROM curated_proposals WHERE id = 'prop-y'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(reviewed_by, CLI_FALLBACK_REVIEWER);
-        let confirmed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(confirmed, 1, "approved entry is user_confirmed");
-    });
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("interactive terminal"),
+            "refusal names the gate: {text}"
+        );
+        assert_eq!(
+            proposal_status(&dir, "prop-y"),
+            "pending",
+            "no decision may be recorded through a pipe"
+        );
+    })
 }
 
+
 #[test]
-fn review_command_rejects_via_piped_n() {
+fn review_gate_refuses_piped_n() {
     let brain = tempdir().unwrap();
     let dir = brain.path().to_path_buf();
     let dir_str = dir.to_str().unwrap().to_string();
@@ -342,116 +334,66 @@ fn review_command_rejects_via_piped_n() {
         insert_anchored_proposal(&dir, "prop-n", 1_000);
         let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"n\n");
         assert!(
-            out.status.success(),
-            "review must exit 0: {} stderr={}",
-            out.status,
+            !out.status.success(),
+            "piped rejection must also be refused: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("rejected"), "decision echo: {text}");
-        assert_eq!(proposal_status(&dir, "prop-n"), "rejected");
-        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
-        let reason: Option<String> = conn
-            .query_row(
-                "SELECT reject_reason FROM curated_proposals WHERE id = 'prop-n'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
         assert_eq!(
-            reason.as_deref(),
-            Some(CLI_DEFAULT_REJECT_REASON),
-            "reject stores the CLI default reason"
+            proposal_status(&dir, "prop-n"),
+            "pending",
+            "no decision may be recorded through a pipe"
         );
-        let entries: i64 = conn
-            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(entries, 0, "a reject writes no wiki entries");
-    });
+    })
 }
+
 
 /// F1 regression: `s` (skip) must advance past the skipped proposal to the
 /// next queue head instead of re-prompting on the same one forever. Seeds
 /// TWO anchored proposals; piping `s` then `y` must approve the SECOND
 /// proposal and leave the first pending.
 #[test]
-fn review_command_skip_advances_to_next_proposal() {
+fn review_gate_refuses_piped_s_without_state_change() {
     let brain = tempdir().unwrap();
     let dir = brain.path().to_path_buf();
     let dir_str = dir.to_str().unwrap().to_string();
     with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
         init_brain_db(&dir);
-        insert_anchored_proposal(&dir, "prop-s1", 1_000);
-        insert_anchored_proposal(&dir, "prop-s2", 2_000);
-        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"s\ny\n");
+        insert_anchored_proposal(&dir, "prop-a", 1_000);
+        insert_anchored_proposal(&dir, "prop-b", 2_000);
+        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"s\n");
         assert!(
-            out.status.success(),
-            "review must exit 0: {} stderr={}",
-            out.status,
+            !out.status.success(),
+            "piped skip must be refused: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("skipped prop-s1"), "skip echo: {text}");
-        assert!(text.contains("approved"), "decision echo: {text}");
-        assert_eq!(
-            proposal_status(&dir, "prop-s1"),
-            "pending",
-            "skipped proposal must stay pending"
-        );
-        assert_eq!(
-            proposal_status(&dir, "prop-s2"),
-            "approved",
-            "skip must advance to the second proposal"
-        );
-    });
+        assert_eq!(proposal_status(&dir, "prop-a"), "pending");
+        assert_eq!(proposal_status(&dir, "prop-b"), "pending");
+    })
 }
+
 
 #[test]
-fn review_command_survives_a_failed_decision_and_reviews_the_rest() {
+fn review_gate_refusal_exits_nonzero_with_guidance() {
     let brain = tempdir().unwrap();
     let dir = brain.path().to_path_buf();
     let dir_str = dir.to_str().unwrap().to_string();
     with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
         init_brain_db(&dir);
-        insert_anchored_proposal(&dir, "prop-f1", 1_000);
-        insert_anchored_proposal(&dir, "prop-f2", 2_000);
-        // Strip the queue head's items behind the resolver's back — the shape
-        // an older binary (or a librarian bug) could leave in the database.
-        // Every decision on it now fails, which used to end the whole session
-        // via `?` and leave the rest of the queue unreviewed.
-        {
-            let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
-            conn.execute(
-                "DELETE FROM curated_proposal_items WHERE proposal_id = 'prop-f1'",
-                [],
-            )
-            .unwrap();
-        }
-
-        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"y\ny\n");
-        assert!(
-            out.status.success(),
-            "one failed decision must not fail the session: {} stderr={}",
-            out.status,
+        insert_anchored_proposal(&dir, "prop-x", 1_000);
+        let out = run_ct_with_stdin(&dir, &["proposals", "review"], b"y\n");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let text = String::from_utf8_lossy(&out.stdout);
         assert!(
-            text.contains("could not approve prop-f1"),
-            "the failure must be reported to the operator: {text}"
+            text.contains("Human Verification Gate") || text.contains("human-at-keyboard"),
+            "refusal explains why: {text}"
         );
-        assert_eq!(
-            proposal_status(&dir, "prop-f1"),
-            "pending",
-            "the unresolvable proposal stays pending"
-        );
-        assert_eq!(
-            proposal_status(&dir, "prop-f2"),
-            "approved",
-            "the loop must advance and review the rest of the queue"
-        );
-    });
+        assert_eq!(proposal_status(&dir, "prop-x"), "pending");
+    })
 }
+
 
 #[test]
 fn proposals_show_renders_evidence_quotes() {
