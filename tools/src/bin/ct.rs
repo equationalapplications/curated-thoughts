@@ -771,10 +771,6 @@ fn status(json_mode: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// `ct approve` — write command with the SDD confirmation rules:
-/// - `<id>`: approve that proposal (exit 0), or exit 1 if not pending/unknown.
-/// - `--all`: empty pending set exits 0 printing `approved: 0`; with pending
-
 /// `ct librarian run` — requires --yes; prints the planned action otherwise.
 fn librarian_run_cmd(yes: bool, force: bool) -> Result<i32> {
     if !yes {

@@ -137,12 +137,10 @@ use tauri_app_lib::db::proposals::{
 
 /// The CLI's default reject reason — must stay in sync with
 /// `proposals_review_cmd` in `tools/src/cmds.rs`.
-const CLI_DEFAULT_REJECT_REASON: &str = "Rejected during review";
 
 /// The CLI reviewer identity fallback — `proposals_review_cmd` uses the
 /// `USER` env var (or `USERNAME`), and "cli-operator" when neither is set.
 /// The review e2e runs strip both, so this is also the value asserted
-/// against `reviewed_by`.
 
 /// Seed a pending new_entity proposal with one anchored fact_add item via the
 /// real `insert_proposal` path (same seam the librarian synthesis uses). The
