@@ -1,5 +1,37 @@
 # Investigation — wisdom_deposit tool surface + agent write-path removal (2026-10-01)
 
+> **Rev-2 addendum (independent review F1/F2/F15):** the §2.2 [V] claim that
+> "ingest parses them with zero new format code" was WRONG, and this
+> addendum is the citation of record for the corrected picture:
+> - `parse_fact_file`'s only non-test caller is `okf/bundle_read.rs:175`
+>   (OKF bundle import). The ingest pipeline treats a deposit as a plain
+>   text document: chunk → embed → Librarian. It never parses deposit
+>   frontmatter.
+> - Librarian-produced facts get `source_ref = librarian-<hash32>` tokens
+>   (`db/commit.rs:465`, `db/bundle_apply.rs:186`); since V18 the doc-path
+>   link lives in `librarian_evidence.evidence_json` + chunk `doc_path`, NOT
+>   in `llm_wiki_entries.source_ref` (`db/schema.rs` V18 comment).
+> - The Librarian runs only inside the pipeline worker
+>   (`pipeline/mod.rs:243`); the bare `ingest_document_with_vault_root`
+>   produces chunk rows only — no wisdom rows, ever.
+> - `get_folder_mode` defaults to `("summarize", auto_approve=false)`
+>   (`librarian/mod.rs:169-186`): without a seeded `folder_rules` row for
+>   `immutable-source-files/agents/`, Librarian output lands in the
+>   proposals queue behind a human.
+> - Additional agent-reachable paths found by the review:
+>   `tools/src/bin/approve_pending_proposals.rs` (Cargo auto-discovered —
+>   16 bin files vs 13 `[[bin]]` entries — calls `approve_all()`), no TTY
+>   gate on `ct proposals review` (piped stdin approves at human tier),
+>   `vault_write_note` can create AND If-Match-edit files under
+>   `immutable-source-files/agents/` (`NOTE_WRITABLE_SUBDIRS` includes
+>   `AGENTS_DEPOSIT_DIR`), the cloud-bridge deny + agent-audit gates match
+>   only `curated_` prefixes (`tool_dispatch.rs:1432/:1618`), and
+>   `.skills/curated-thoughts/skill.md` advertises `curated_add_wisdom`.
+>
+> The design doc (rev 2) is restructured on these corrected facts. The body
+> below is retained as the rev-1 record; where it contradicts this
+> addendum, this addendum wins.
+
 Constitution: `INTENT.md` v2 (business rules 1–9; this work implements rule 1's
 sanctioned write path and the removals it mandates). Handoff/decision context:
 equational-wiki `records/sessions/2026-10-01-handoff-wisdom-architecture-implementation.md`
