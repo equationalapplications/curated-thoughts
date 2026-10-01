@@ -393,10 +393,13 @@ fn wisdom_status_cmd(path: &str, json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     } else {
         println!(
-            "{}: {:?} (tier: {:?})",
+            "{}: {} (facts: {})",
             path,
             v.get("state").and_then(|s| s.as_str()).unwrap_or("?"),
-            v.get("tier").and_then(|s| s.as_str()).unwrap_or("?")
+            v.get("facts")
+                .and_then(|f| f.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0)
         );
     }
     Ok(0)

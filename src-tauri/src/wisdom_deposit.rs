@@ -183,9 +183,20 @@ pub(crate) fn deposit_status_row(
         )
         .map_err(|e| anyhow!("chunks probe failed: {e}"))?;
 
+    // Live librarian evidence outranks the kick ledger: a recorded 'failed'
+    // from a transient kick error must not permanently misreport a deposit
+    // the Librarian actually ingested (Opus impl-review nit 2). Terminal
+    // ledger states that agree with reality still surface directly.
     let state = match (&kick, facts.is_empty(), chunked > 0) {
-        (Some((s, _, _)), _, _) if s != "pending" && s != "queued_watcher" && s != "no_ingest_host" => s.clone(),
         (_, false, _) => "ingested".to_string(),
+        (Some((s, _, _)), _, _)
+            if s != "pending"
+                && s != "queued_watcher"
+                && s != "no_ingest_host"
+                && s != "failed" =>
+        {
+            s.clone()
+        }
         (_, true, true) => "chunked".to_string(),
         (Some((s, _, _)), _, _) => s.clone(),
         (_, true, false) => "pending".to_string(),
@@ -238,6 +249,13 @@ fn brain_dir_of(db_path: &std::path::Path) -> PathBuf {
 
 /// Run ingest + librarian for one deposit. Called from `spawn_blocking`;
 /// the vault lock serializes against any running `ct watch` / worker.
+/// Bound on lock-contention retries. `VaultLock::acquire` is a try-lock;
+/// depositing while `ct watch` is mid-pass is transient contention (the pass
+/// releases the lock when it finishes), so we wait-and-retry before deciding
+/// the kick failed. Deliberately short: a deposit must resolve quickly.
+const KICK_LOCK_RETRIES: usize = 5;
+const KICK_LOCK_RETRY_MS: u64 = 500;
+
 fn run_kick(
     db_path: PathBuf,
     vault_dir: PathBuf,
@@ -246,8 +264,25 @@ fn run_kick(
     generation_configured: bool,
 ) {
     let outcome = (|| -> Result<String> {
-        let _lock = crate::watcher::VaultLock::acquire(&brain_dir_of(&db_path))
-            .map_err(|e| anyhow!("vault lock: {e:#}"))?;
+        // Retry only on genuine contention ("already locked"), not on
+        // real acquisition errors (permissions etc.) — those fail fast.
+        let mut lock = Err(anyhow!("vault lock: not attempted"));
+        for attempt in 0..=KICK_LOCK_RETRIES {
+            lock = crate::watcher::VaultLock::acquire(&brain_dir_of(&db_path));
+            match &lock {
+                Ok(_) => break,
+                Err(e) => {
+                    let contended = format!("{e:#}").contains("already locked");
+                    if !contended || attempt == KICK_LOCK_RETRIES {
+                        return Err(anyhow!("vault lock: {e:#}"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        KICK_LOCK_RETRY_MS,
+                    ));
+                }
+            }
+        }
+        let _lock = lock?;
         let mut conn = rusqlite::Connection::open(&db_path)
             .with_context(|| format!("open brain {}", db_path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
@@ -308,34 +343,63 @@ pub async fn dispatch_wisdom_deposit(
 ) -> Result<Value> {
     let vault = vault_dir(ctx)?;
     let rel = p.path.replace('\\', "/");
-    if !rel.starts_with(AGENTS_DIR) || rel.starts_with(SUPERSESSIONS_DIR) {
+    // Delimiter-anchored prefix: `agents/` exactly — a byte-prefix check would
+    // admit sibling directories like `agents-archive/` (safe via safe_path's
+    // canonical containment, but the wrong error class). Canonical containment
+    // in safe_vault_path remains the decisive guard; this check just routes
+    // misuse to the clearest message.
+    let in_agents = rel.starts_with(&format!("{AGENTS_DIR}/"));
+    let in_supersessions = rel.starts_with(&format!("{SUPERSESSIONS_DIR}/"));
+    if !in_agents || in_supersessions {
         bail!(
-            "deposit path must be under {AGENTS_DIR} (not {SUPERSESSIONS_DIR}): {}",
+            "deposit path must be under {AGENTS_DIR}/ (not {SUPERSESSIONS_DIR}/): {}",
             p.path
         );
     }
     if p.title.trim().is_empty() || p.body.trim().is_empty() {
         bail!("title and body are required");
     }
-    // Append-only (rule 9) + symlink/traversal guard — one check does both:
-    // MayCreate on an existing path errors in okf::write; here we fail before
-    // any bytes are written.
     let target = vault.join(&rel);
     if target.symlink_metadata().is_ok() {
         bail!("deposit_exists: {} (append-only; supersede instead)", rel);
     }
 
     let content = render_deposit_file(&p.title, &p.body, p.tags.as_deref().unwrap_or(&[]));
-    crate::vault::safe_path::safe_vault_path(
+    // Validate FIRST, then write to the *validated* path (not the raw join):
+    // safe_vault_path canonicalizes every parent and rejects symlinked or
+    // traversal parents (fail-closed), so its return value is the only path
+    // bytes may land on.
+    let validated = crate::vault::safe_path::safe_vault_path(
         &vault,
         &rel,
         &[AGENTS_DIR],
         crate::vault::safe_path::PathMode::MayCreate,
     )
     .map_err(|e| anyhow!("unsafe deposit path: {e}"))?;
-    std::fs::create_dir_all(target.parent().expect("parent under agents/"))?;
-    crate::vault::safe_path::safe_write_bytes(&target, content.as_bytes())
-        .map_err(|e| anyhow!("deposit write failed: {e}"))?;
+    std::fs::create_dir_all(
+        validated
+            .parent()
+            .expect("validated path always has a parent"),
+    )?;
+    // Exclusive create closes the pre-check/rename TOCTOU: two concurrent
+    // same-path deposits can no longer both pass and silently overwrite each
+    // other (append-only, INTENT rule 9). temp+rename replace would.
+    let write_result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&validated)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()
+        });
+    match write_result {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("deposit_exists: {} (append-only; supersede instead)", rel)
+        }
+        Err(e) => return Err(anyhow!("deposit write failed: {e}")),
+    }
 
     // Audit (fail-closed, RW connection, same contract as the removed
     // curated write tools) — `wisdom_` joins the curated audit class.
@@ -368,8 +432,24 @@ pub async fn dispatch_wisdom_deposit(
             let vault2 = vault.clone();
             let rel2 = rel.clone();
             let profile2 = ctx.profile.clone();
-            tokio::task::spawn_blocking(move || {
+            let handle = tokio::task::spawn_blocking(move || {
                 run_kick(db_path2, vault2, rel2, profile2, true)
+            });
+            // Observe the handle: an aborted/panicked kick must not strand
+            // the ledger at 'pending' with no trace (Opus impl-review nit 4).
+            let audit_rel = rel.clone();
+            let audit_db = db_path.clone();
+            tokio::spawn(async move {
+                if let Err(join_err) = handle.await {
+                    if let Ok(conn) = rusqlite::Connection::open(&audit_db) {
+                        let _ = set_kick_state(
+                            &conn,
+                            &audit_rel,
+                            "failed",
+                            Some(&format!("kick task aborted: {join_err}")),
+                        );
+                    }
+                }
             });
         }
         initial.to_string()
@@ -388,7 +468,7 @@ pub async fn dispatch_wisdom_deposit_status(
     p: WisdomDepositStatusParams,
 ) -> Result<Value> {
     let rel = p.path.replace('\\', "/");
-    if !rel.starts_with(AGENTS_DIR) {
+    if !rel.starts_with(&format!("{AGENTS_DIR}/")) {
         bail!("not a deposit path: {}", p.path);
     }
     let audit_path = rel.clone();
@@ -528,15 +608,33 @@ pub async fn dispatch_wisdom_propose_supersession(
     let rel2 = rel.clone();
     let profile2 = ctx.profile.clone();
     let generation_configured = crate::librarian::llm_generation_configured();
-    tokio::task::spawn_blocking(move || {
+
+    // FIX (Opus impl-review nit 5): reply honestly — no generation host means
+    // the kick stops at 'chunked'; report that, not "started".
+    let kick_label = if generation_configured { "started" } else { "no_ingest_host" };
+    let handle = tokio::task::spawn_blocking(move || {
         run_kick(db_path, vault2, rel2, profile2, generation_configured)
+    });
+    let audit_rel = rel.clone();
+    let audit_db = ctx.db_path.clone();
+    tokio::spawn(async move {
+        if let Err(join_err) = handle.await {
+            if let Ok(conn) = rusqlite::Connection::open(&audit_db) {
+                let _ = set_kick_state(
+                    &conn,
+                    &audit_rel,
+                    "failed",
+                    Some(&format!("kick task aborted: {join_err}")),
+                );
+            }
+        }
     });
 
     Ok(json!({
         "path": rel,
         "supersedes": target,
         "pending": true,
-        "kick": "started",
+        "kick": kick_label,
     }))
 }
 
@@ -639,6 +737,94 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("deposit_exists"), "{err}");
+        });
+    }
+
+    #[test]
+    fn deposit_rejects_agents_sibling_dirs_with_lane_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let err = dispatch_wisdom_deposit(
+                &ctx,
+                WisdomDepositParams {
+                    path: "immutable-source-files/agents-archive/note.md".into(),
+                    title: "x".into(),
+                    body: "y".into(),
+                    tags: None,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("deposit path must be under"),
+                "lane error, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn status_failed_kick_does_not_latch_over_live_evidence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            // Deposit (kick will fail or stall without generation, fine).
+            let rel = "immutable-source-files/agents/evidence-note.md";
+            dispatch_wisdom_deposit(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Evidence note".into(),
+                    body: "body".into(),
+                    tags: None,
+                },
+            )
+            .await
+            .unwrap();
+            // Simulate a transient kick failure stamped in the ledger...
+            {
+                let conn = ctx.conn.lock().unwrap();
+                set_kick_state(&conn, rel, "failed", Some("synthetic failure")).unwrap();
+            }
+            // ...then the Librarian actually landing evidence for the doc.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                conn.execute_batch(
+                    "INSERT INTO llm_wiki_entries (
+                         id, entity_id, title, body, tags, confidence, source_type,
+                         source_hash, source_ref, created_at, updated_at,
+                         last_accessed_at, access_count, deleted_at,
+                         embedding_blob, embedding
+                     ) VALUES ('e1', 'ent1', 't', 'b', '[]', 'inferred',
+                               'librarian_inferred', NULL,
+                               'librarian-abc123def456abc123def456abc12345',
+                               100, 100, NULL, 0, NULL, NULL, NULL);
+                     INSERT INTO documents (path, hash, tier, status) VALUES
+                         ('immutable-source-files/agents/evidence-note.md', 'h1',
+                          'user_doc', 'indexed');
+                     INSERT INTO librarian_evidence
+                         (entry_id, proposal_id, evidence_json, created_at)
+                         VALUES ('e1', 'p1',
+                                 '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
+                     INSERT INTO curated_proposals (id, kind, model, status, created_at)
+                         VALUES ('p1', 'new_entity', 'test', 'pending', 0);
+                     INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                         VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence');",
+                )
+                .unwrap();
+            }
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["state"], serde_json::json!("ingested"),
+                "live evidence outranks the failed ledger row: {v}");
         });
     }
 

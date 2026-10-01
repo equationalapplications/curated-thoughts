@@ -890,22 +890,6 @@ pub fn log_agent_access_checked(
     crate::db::commit::log_agent_access_checked(conn, client, tool, entity_id, operation)
 }
 
-/// Reload one live wisdom entry as JSON (per-entry query shape shared with
-/// the coding server). Used by `dispatch_curated_update_wisdom` so the
-/// response is read back from the DB, never echoed from the request.
-/// Add a user-stated wisdom entry through the `db::wisdom` core.
-///
-/// Embedding is precomputed OUTSIDE the RW lock. The mutation and the
-/// fail-closed audit row commit ATOMICALLY on the RW connection: if the
-/// audit INSERT fails, the mutation is rolled back (PR #185 review — an
-/// entry must never exist without its audit trail, and a client retry
-/// must never create a duplicate).
-/// Rewrite a wisdom entry's body through the `db::wisdom` core and return the
-/// RELOADED entry (read back from the DB; `update_wisdom_with_blob` returns
-/// `Result<()>`, so echoing the request would fabricate the response).
-/// Atomic mutation+audit contract matches [`dispatch_curated_add_wisdom`].
-/// Soft-delete a wisdom entry through the `db::wisdom` core.
-/// Atomic mutation+audit contract matches [`dispatch_curated_add_wisdom`].
 #[derive(Clone)]
 pub struct ToolDispatchContext {
     pub conn: Arc<Mutex<Connection>>,
