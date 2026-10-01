@@ -43,7 +43,8 @@ CT cannot adopt blindly. Three CT invariants shape the design:
   `7.7.4`, `core-okf` `7.7.5`); `src-tauri/tests/engine_source_ref_gate.rs:51-62`
   (expected engine version ×3); `src-tauri/src/db/schema_guard.rs:8`
   (`PINNED_CORE_LLM_WIKI_VERSION`) plus the `LLM_WIKI_TABLES` column lists
-  (entries 32 cols incl. `tier`, events 6, checkpoints 3).
+  (entries 31 cols incl. `tier`, events 6, checkpoints 3; after this change
+  35 / 7 / 5).
 - **DDL mirror:** `src-tauri/src/db/okf_ddl.rs::LLM_WIKI_PACKAGE_DDL` (verbatim
   `setupDatabase` with prefix applied) + `apply_llm_wiki_v12_edge_index`
   called from the `migrate()` tail; `verify_llm_wiki_schema(conn)` runs last

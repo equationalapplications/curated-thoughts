@@ -176,7 +176,8 @@ fn verify_table(conn: &Connection, expect: &TableExpectation) -> Result<()> {
         bail!(
             "llm_wiki schema mismatch: table `{}` is missing. \
              Rust expects core-llm-wiki@{PINNED_CORE_LLM_WIKI_VERSION} columns. \
-             The database was not modified.",
+             Additive schema migrations may already have run on this open; \
+             upgrade Curated Thoughts or restore from backup.",
             expect.name
         );
     }
@@ -203,7 +204,8 @@ fn verify_table(conn: &Connection, expect: &TableExpectation) -> Result<()> {
         "llm_wiki schema mismatch: {detail}. \
          Rust expects core-llm-wiki@{PINNED_CORE_LLM_WIKI_VERSION} schema \
          (see src-tauri/src/db/schema_guard.rs). \
-         Upgrade Curated Thoughts or restore from backup; the database was not modified."
+         Additive schema migrations (e.g. V17, V24) may already have run on this open; \
+         upgrade Curated Thoughts or restore from backup."
     );
 }
 

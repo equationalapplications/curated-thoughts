@@ -123,9 +123,14 @@ pub fn add_column_if_missing(
 /// Column names of `table` from a single `PRAGMA table_info` snapshot.
 /// Shared by the migration gates (V17, V24) and the temporal-index mirror in
 /// `okf_ddl` so column detection cannot drift between them. Like the PRAGMA
-/// in `add_column_if_missing` above, `table` is interpolated as text — every
-/// caller passes a hardcoded literal.
+/// in `add_column_if_missing` above, `table` is interpolated as text, so it
+/// gets the same plain-identifier check (see `ensure_plain_identifier`).
 pub fn existing_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    if !is_plain_identifier(table) {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "existing_columns: table '{table}' is not a plain identifier"
+        )));
+    }
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     Ok(rows.filter_map(Result::ok).collect())
@@ -138,16 +143,19 @@ pub fn existing_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<
 /// user-derived name through — at which point the interpolation becomes SQL
 /// injection. Reject anything that is not a plain identifier up front.
 fn ensure_plain_identifier(kind: &str, value: &str) -> anyhow::Result<()> {
-    let valid = !value.is_empty()
-        && value.len() <= 64
-        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !value.starts_with(|c: char| c.is_ascii_digit());
-    if !valid {
+    if !is_plain_identifier(value) {
         anyhow::bail!(
             "add_column_if_missing: {kind} '{value}' is not a plain identifier              (expected ASCII letters, digits, or underscore, not starting with a digit)"
         );
     }
     Ok(())
+}
+
+fn is_plain_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !value.starts_with(|c: char| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -238,6 +246,34 @@ mod tests {
                 "expected rejection for {bad:?}"
             );
         }
+    }
+
+    /// `existing_columns`: same identifier contract as `add_column_if_missing`
+    /// — an injected table name is rejected before the PRAGMA is prepared.
+    #[test]
+    fn existing_columns_rejects_non_identifier_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", [])
+            .unwrap();
+
+        assert_eq!(
+            super::existing_columns(&conn, "t").unwrap(),
+            vec!["id".to_string(), "name".to_string()]
+        );
+
+        for bad in ["t); DROP TABLE t; --", "", "1t", "a b", "t;"] {
+            let err = super::existing_columns(&conn, bad).unwrap_err().to_string();
+            assert!(err.contains("not a plain identifier"), "{bad:?}: {err}");
+        }
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='t'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "table must not be dropped by a rejected identifier");
     }
 
     /// `add_column_if_missing`: fails with a contextual error when the table
