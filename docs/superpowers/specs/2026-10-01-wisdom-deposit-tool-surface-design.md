@@ -35,17 +35,23 @@ string list). The tool — not the calling agent — owns the file shape:
 - `author`/provenance keys stamp the **agent** class. No `human_attestations`
   row is created or implied (B1 is a separate spec; every deposit ingests at
   agent tier per rule 2).
-- `id` is computed deterministically at deposit time:
-  `hash(vault-relative normalized path + content hash)` (extraction index comes
-  in at ingest; rule 5's convergence property is preserved — the same deposit
-  from two hosts computes the same id).
+- `id` written into the file is computed deterministically from
+  `hash(vault-relative normalized path + content hash)` — the extraction
+  index in rule 5's formula is added at ingest, so the **authoritative**
+  fact id is whatever the Librarian stamps; the deposit-time id is
+  informational (and converges for the single-extraction common case).
+  Consumers must key on `source_ref` (as D4 does), never on the
+  deposit-time id, until the Librarian's id lands in the brain.
 - **Append-only enforcement (rule 9):** an existing target path is a hard
   error (`deposit_exists`). Corrections go through
   `wisdom_propose_supersession`. This is the opposite of `vault_write_note`'s
   If-Match editing — deposits have no edit path at all.
 - Path guard reuses the writable-subdir resolution already enforced in
-  `okf/write.rs`; symlink escapes are refused by the existing
-  `trusted_links` verdict path.
+  `okf/write.rs`; symlink escape refusal is expected from the existing
+  path-guard stack (`trusted_links`/walker guards) but the exact wiring is
+  pinned at implementation and gets its own test — if the current write path
+  turns out NOT to refuse escapes, the deposit tool adds the check
+  (fail-closed) rather than assuming it.
 
 Return: `{ path, id, pending: true, kick: <"started" | "no_ingest_host"> }`.
 
@@ -55,9 +61,11 @@ Chosen: **in-process single-document ingest, spawned async**, with honest
 degradation.
 
 - On deposit, the sidecar spawns a background task calling the existing
-  `pipeline::ingest_document_with_vault_root` (investigation §3) for exactly
-  the deposited file — the same code path `ct ingest` uses, so no new ingest
-  semantics and the fleet/ingest benchmark gates stay out of scope.
+  `pipeline::ingest_document_with_vault_root` (investigation §3) — the
+  per-document ingest primitive — for exactly the deposited file. Note `ct
+  ingest` is a full-vault run; the reuse here is of the underlying
+  single-document function, not of the CLI command flow. No new ingest
+  semantics, and the fleet/ingest benchmark gates stay out of scope.
 - If the brain write lock is contended (a watcher/ingest host is mid-run), the
   kick reports `kick: "no_ingest_host"` — the file sits uningested exactly as
   rule 3 prescribes; a running `ct watch` daemon ingests it via its natural
@@ -85,8 +93,9 @@ is still truthful).
 
 ### D5 — `wisdom_propose_supersession` (investigation Q2/Q5 adjacency)
 
-Parameters: `target_source_ref` (the deposited fact's vault-relative path) or
-`target_fact_id`, `replacement_title`, `replacement_body`, `reason`.
+Parameters: `target_source_ref` (the deposited fact's vault-relative path)
+**or** `target_fact_id` — exactly one must be supplied (error otherwise) —
+plus `replacement_title`, `replacement_body`, `reason`.
 
 Writes a supersession deposit file under
 `immutable-source-files/agents/supersessions/` with frontmatter
@@ -132,7 +141,9 @@ lose their last caller and are deleted.
 ## 2. Tests (CI-gated)
 
 1. `mcp_integration.rs`: exact 16-name list (updated); remove the
-   add/update round-trip tests; add deposit round-trip: deposit → file exists
+   direct-write round-trip tests (sweep the file for ALL FOUR removed names —
+   proposal-decide/archive may be exercised outside the add/update block the
+   current excerpt shows); add deposit round-trip: deposit → file exists
    on disk with agent provenance keys → `parse_fact_file` round-trips → status
    `pending` → (with stub embeddings) ingest runs → status `ingested`.
 2. Append-only: deposit to an existing path errors; deposit outside
