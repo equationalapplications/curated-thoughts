@@ -49,7 +49,11 @@ is exactly the drift D2's shared helper exists to prevent.
      as PRESENT and land in the unrepresentable partition (Debug form in the refusal) —
      `check_round_trip` already refuses non-string keys in the rendered output (`write.rs:621`/
      `:634`), so silently dropping them on the
-     existing side would leave that one key class unguarded (Opus design-c3 N3).
+     existing side would leave that one key class unguarded (Opus design-c3 N3). Implementation
+     pin (review 2026-10-02): the helper must NOT copy `check_round_trip`'s key loop
+     (`write.rs:631-637`), which returns `Err` on a non-string key — on the EXISTING side a
+     non-string key is data to protect, not injection to reject, so it is collected (Debug form)
+     and the function never errors on key type.
    - strict parse fails BUT the fence exists (damaged YAML that nevertheless passed staleness via
      `read_existing_token`'s tolerant line-scan fallback, write.rs:95-129) → collect keys with a
      column-0 `^key:` line scan over the SAME fence buffer, mirroring the token reader's fallback
@@ -73,7 +77,14 @@ is exactly the drift D2's shared helper exists to prevent.
      tier 3 even though the strict tier reads it as empty/absent. The tiers disagree only in
      the stricter direction (a false "present" refuses, never silently drops), and the
      comment-stripping alternative would need a YAML-aware scanner to avoid cutting `#` inside
-     quoted values — accepted, not fixed (review 2026-10-02).
+     quoted values — accepted, not fixed (review 2026-10-02). (d) Key-extraction rule, pinned
+     (review 2026-10-02 — a placeholder `^key:` invites an identifier-class regex that would
+     miss `1: x`, the exact class D1 tier 2 promises to guard): a fence line yields a key iff
+     it is non-empty, starts at column 0 with a character other than whitespace, `#` or `-`,
+     and contains `:`. The key is the text before the FIRST `:`, trimmed, with one matching
+     pair of surrounding `"`/`'` quotes stripped. NO character-class restriction — `1`,
+     `my-key`, `some key` are all keys. Over-matching (e.g. a column-0 `:` inside a damaged
+     construct) errs in the stricter direction, same as (a).
 
    Note: `collect_frontmatter_fence` returns only the inner text with no offset and rebuilds via
    `lines()` (drops `\r`) — fine for key-set purposes (keys are `\r`-insensitive after YAML
@@ -93,8 +104,13 @@ is exactly the drift D2's shared helper exists to prevent.
      renderer omits — `check_round_trip` :661); `supersedes` null / `~` (deserializes to
      `None`, omitted via `skip_serializing_if`). `supersedes: ""` also counts ABSENT, but NOT
      because the renderer omits it (it would render `Some("")`): an empty pointer can never be
-     re-sent — `under_deposit("")` refuses it upstream — so counting it present would wedge
-     every edit of that note into a key-drop refusal. **Any other value form counts PRESENT**
+     re-sent — `under_deposit("")` refuses it upstream (`write.rs:447`) — so counting it
+     present would make the note's next edit refuse with `KeyDropRefused` whose advice
+     ("re-send the complete frontmatter") cannot be followed: the ONLY way through would be a
+     forced `allow_key_drop: true` edit for a value that carries no information. (Not a
+     permanent wedge — the flagged edit removes the key — but a refusal with unfollowable
+     advice on a meaningless value; review 2026-10-02 corrected the earlier "wedge every edit"
+     overstatement.) **Any other value form counts PRESENT**
      — including non-list `tags` (`tags: ""`, `tags: foo`, `tags: {}`) and non-empty
      `supersedes`. Such a hand-edited note still passes staleness (the typed parse fails, the
      token reader's line-scan fallback succeeds), and it does not wedge: the caller keeps the
@@ -237,6 +253,14 @@ the pattern.
   `tags` refuses with `KeyDropRefused`; the same edit sending non-empty `tags` succeeds.
 - Tier-3 trailing comment (review 2026-10-02): damaged-YAML `tags: [] # none` counts PRESENT
   — an edit omitting `tags` refuses (pins the accepted stricter-direction divergence).
+- Non-string keys, strict tier (review 2026-10-02): well-formed note with `1: x` → any edit
+  refuses with `KeyDropUnrepresentable` (helper returns the key set, does NOT error — pins the
+  "don't copy `check_round_trip`'s reject loop" rule in D1).
+- Non-string / non-identifier keys, line-scan tier (review 2026-10-02): damaged-YAML note with
+  `1: x` and `my-key: y` → any edit refuses with `KeyDropUnrepresentable` naming both (pins the
+  D1 (d) extraction rule against an identifier-class regex). Plus a unit test on the tier-3
+  extractor: `"quoted": v` yields `quoted`; `# comment`, `- item`, indented lines and blank
+  lines yield nothing.
 - MCP description (review 2026-10-02): assert the `vault_write_note` tool description
   mentions `key_drop_refused` and does NOT contain `allow_key_drop` — via the server's
   registered tool list if it is reachable from a test, otherwise a source-text assertion on
@@ -291,5 +315,9 @@ the pattern.
   non-string-key reference fixed to `check_round_trip` :621/:634 (D1); non-deposit
   `supersedes` documented (D4); tier-3 trailing-comment divergence pinned (D1); non-list
   `tags` value forms count PRESENT (D2) — applied.
+- `/code-review high` 2026-10-02 — tier-3 key-extraction rule pinned with no character-class
+  restriction (D1 (d)); existing-side helper must not copy `check_round_trip`'s non-string-key
+  reject (D1); `supersedes: ""` rationale corrected from "wedge every edit" to
+  "unfollowable refusal advice" (D2); non-string-key tests for both tiers (Testing) — applied.
 
 Fixes #245.
