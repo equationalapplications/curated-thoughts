@@ -95,8 +95,15 @@ bare-`ingest_document_with_vault_root` kick would strand every deposit in
   the duration — the same mutual exclusion every ingest path uses; review
   F8b), (2) runs the per-document ingest + librarian sequence for exactly the
   deposited file, (3) releases the lock. If the lock is already held
-  (watcher/app mid-run), the task does NOT run: the deposit returns
-  `kick: "queued_watcher"` — the watcher's file event covers the file.
+  (watcher/app mid-run), the task does NOT run: the watcher's file event
+  covers the file. Lock acquisition happens inside the spawned task (bounded
+  retry), so the reply's `kick` is decided at spawn time (`started`); a lock
+  still held after the retries is recorded as `queued_watcher` in
+  `deposit_kick_state`, which `wisdom_deposit_status` reports. Kicks within
+  one process are serialized, so a sidecar's own back-to-back deposits never
+  contend with each other and misreport `queued_watcher`. Both lanes
+  (deposits and supersessions) share this contract: with no generation host
+  configured, neither spawns a kick and both record `no_ingest_host`.
 - **Kick values (review F8a):**
   - `started` — task spawned and will run (lock acquired).
   - `queued_watcher` — lock held by a running watcher; its event loop owns

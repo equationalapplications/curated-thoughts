@@ -33,7 +33,7 @@ The librarian's wiki proposals reach the long-term wiki only through the **human
 The app strictly separates your source material from the generated AI memory, managed entirely by a background Rust engine called the **Active Librarian**.
 
 - **`immutable-source-files/` (The Immutable Vault):** Your source of truth. The local file watcher monitors this folder for PDFs, DOCX, and MD files. The app's write tools can write only the `wiki/` folder and the agent deposit (`immutable-source-files/agents/`) — everything else here is read-only to the app. Wiki notes live as `.md` files under `wiki/`. (A vault from the older layout still has `documents/`; it is migrated to `immutable-source-files/` on first run.)
-- **The Review Queue (Human-in-the-Loop):** The Active Librarian synthesizes new episodic data and proposes interconnected wiki pages. Nothing is committed to long-term memory until you approve, edit, or reject it — in the Review desk, headlessly with `ct proposals review` / `ct approve`, or through the MCP `curated_proposal_decide` tool. When a source document is deleted, each proposal built from it records which sources were deleted, and the Review desk marks those deleted and stranded sources.
+- **The Review Queue (Human-in-the-Loop):** The Active Librarian synthesizes new episodic data and proposes interconnected wiki pages. Nothing is committed to long-term memory until you approve, edit, or reject it — in the Review desk, or interactively with `ct proposals review` (requires a real terminal; piped stdin is refused). When a source document is deleted, each proposal built from it records which sources were deleted, and the Review desk marks those deleted and stranded sources.
 - **`.brain/` (The Mutable State):** The knowledge base itself lives in `brain.db` (SQLite) in your brain home — `~/.brain` unless `CURATED_BRAIN_DIR` is set — alongside your `config.json`. The vault's own `.brain/` folder holds runtime state: the ingest error log, pending-proposal staging, and `brain.db` backups. The vault walker and file watcher never ingest a `.brain/` directory. Backup and restore are crash-safe: a restore captures the knowledge replica's obligations before overwriting `brain.db` and re-syncs the replica afterward.
 
 The repo is a single Cargo workspace with two packages: `curated-thoughts` in `src-tauri/` (the desktop app, whose binary doubles as the full MCP server) and `curated-thoughts-tools` in `tools/` (the `ct` headless CLI and helper binaries), sharing the same database layer.
@@ -52,7 +52,7 @@ An optional **Jev classifier** — a dedicated fact-typing model, served by Clou
 - Sends fact titles and bodies to the endpoint you configure.
 
 ### Human-in-the-Loop Verification
-Proposals are gated, not automatic. Approve or reject wiki changes from the UI Review desk, interactively with `ct proposals review`, or in bulk with `ct approve`, or programmatically through the MCP `curated_proposal_decide` tool — every decision is stamped with who reviewed it. Librarian evidence that no longer anchors to a source chunk is re-graded (exported, then purged) by a one-time migration; `ct evidence regrade --yes` re-runs that pass on demand.
+Proposals are gated, not automatic. Approve or reject wiki changes from the UI Review desk or interactively with `ct proposals review` — every decision is stamped with who reviewed it. Agents cannot approve: the review command is gated to interactive terminals and no MCP approval tool exists. Librarian evidence that no longer anchors to a source chunk is re-graded (exported, then purged) by a one-time migration; `ct evidence regrade --yes` re-runs that pass on demand.
 
 ### Wiki Maintenance
 **Settings → Maintenance** lets you:
@@ -145,11 +145,11 @@ The repo builds two **stdio** [Model Context Protocol](https://modelcontextproto
 | **Full server** (what release bundles ship) | the app binary with `--mcp` | read + write (16) |
 | **Read-only dev server** | `curated-thoughts-mcp` from the `tools` package | read-only (7) |
 
-**Full server tools:** `vault_semantic_search`, `vault_related_chunks`, `wiki_search`, `wiki_context`, `wiki_get_ontology`, `wiki_traverse_graph`, `curated_recall_context`, `curated_get_wiki_entry`, `curated_search_code`, `curated_proposals_list` (read); `vault_write_note`, `vault_upsert_index_entry`, `curated_add_wisdom`, `curated_update_wisdom`, `curated_archive_wisdom`, `curated_proposal_decide` (write).
+**Full server tools:** `vault_semantic_search`, `vault_related_chunks`, `wiki_search`, `wiki_context`, `wiki_get_ontology`, `wiki_traverse_graph`, `curated_recall_context`, `curated_get_wiki_entry`, `curated_search_code`, `curated_proposals_list` (read); `vault_write_note`, `vault_upsert_index_entry` (write); `wisdom_deposit`, `wisdom_deposit_status`, `wisdom_propose_supersession`, `wisdom_pending` (agent wisdom deposits — append-only file writes, never direct row inserts).
 
 **Read-only dev server tools:** `vault_semantic_search`, `vault_related_chunks`, `curated_recall_context`, `curated_get_wiki_entry`, `curated_search_code`, `graph_neighbors`, `curated_superpowers_setup`.
 
-**Direct wisdom writes:** the wisdom write tools skip the proposal gate — `curated_add_wisdom` records your agent's entry in the wiki immediately as user-stated, confirmed.
+**Agent wisdom deposits:** `wisdom_deposit` writes an append-only fact file under `immutable-source-files/agents/` with agent provenance; the host ingests it and the Active Librarian processes it. There is no edit or delete path — corrections are new deposits or `wisdom_propose_supersession` (INTENT rule 1: agents never insert, update, approve, or archive brain rows directly).
 
 The source of truth for both lists is the `#[tool(name = …)]` attributes in `src-tauri/src/mcp_server.rs` and `tools/src/bin/curated_thoughts_mcp.rs`.
 
@@ -235,8 +235,9 @@ ct ingest --yes                        # (re-)ingest the vault
 ct librarian run --yes                 # run a synthesis pass on demand
 ct proposals review                    # the human-verification gate, headless;
                                        #   also: proposals list, proposals show
-ct approve <proposal-id>               # approve without the interactive loop
-ct approve --all --yes                 #   ...or every pending proposal at once
+ct wisdom deposit --path immutable-source-files/agents/topic.md \
+  --title "Topic" --body "..." --yes   # append-only agent wisdom deposit
+ct wisdom pending                      # deposits awaiting librarian evidence
 ct evidence regrade --yes              # re-run the V20 evidence re-grade (idempotent)
 ct trust [--list] [--revoke <path>]    # manage symlinks the ingest walker may follow
 ```

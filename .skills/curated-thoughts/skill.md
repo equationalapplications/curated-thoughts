@@ -12,7 +12,10 @@ All tools are exposed via the `curated-thoughts` MCP server:
 | `curated_recall_context` | Recall prioritized context from the wisdom layer (wiki) and vault code chunks for a coding task. Returns wiki entries first, then code chunks ranked by relevance. |
 | `curated_search_code` | Search code chunks (CodeLike strategy) by query or symbol, returning relevant snippets for coding tasks. |
 | `curated_get_wiki_entry` | Fetch full content of a specific wiki (wisdom layer) entry by topic or entity ID. |
-| `curated_add_wisdom` | Add new entries to the wisdom layer for future recall, to persist coding patterns and solutions. |
+| `wisdom_deposit` | Append-only deposit of a fact file under `immutable-source-files/agents/` (the sanctioned agent write path; INTENT rule 1). The host ingests and the Librarian processes it; check progress with `wisdom_deposit_status`. |
+| `wisdom_deposit_status` | Ingest state of one deposit (path-keyed, librarian-evidence-backed). |
+| `wisdom_propose_supersession` | Propose superseding an existing fact (writes a supersession deposit under `agents/supersessions/`; never deletes). |
+| `wisdom_pending` | List deposits without librarian evidence (read-only; never surfaces in recall). |
 | `vault_semantic_search` | Semantic search over all vault chunks using the configured embedding profile. |
 | `vault_related_chunks` | List chunks related to a specific vault document path. |
 | `curated_superpowers_setup` | Get step-by-step setup instructions for Superpowers with Aider and VS Code Copilot. |
@@ -27,8 +30,10 @@ Call `curated_search_code` with the symbol name or query to find related impleme
 > "Search code for function `handleApiRequest`"
 
 ### After Completing Non-Trivial Tasks
-Call `curated_add_wisdom` to save new patterns to the wisdom layer. Example:
-> "Add wisdom entry for topic `typescript-api-error-handling` with text describing the new error handling pattern."
+Call `wisdom_deposit` to append a fact file to the wisdom layer. The deposit is written with agent provenance; the host ingests it and the Librarian turns it into wisdom. Example:
+> "Deposit wisdom for topic `typescript-api-error-handling` with text describing the new error handling pattern."
+
+Note: there is no edit or delete path — corrections are new `wisdom_deposit`s (or `wisdom_propose_supersession` against an existing fact's source_ref). Direct row insertion tools (`curated_add_wisdom` & co.) were removed per INTENT rule 1.
 
 ### Using Superpowers Workflows
 Combine Superpowers workflows (brainstorming, TDD, etc.) with Curated Thoughts context:

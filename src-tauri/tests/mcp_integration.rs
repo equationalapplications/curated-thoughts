@@ -539,15 +539,10 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort();
     let expected = [
-        "curated_add_wisdom",
-        "curated_archive_wisdom",
         "curated_get_wiki_entry",
-        // hvg Task 4: the Human Verification Gate review surface.
-        "curated_proposal_decide",
         "curated_proposals_list",
         "curated_recall_context",
         "curated_search_code",
-        "curated_update_wisdom",
         "vault_related_chunks",
         "vault_semantic_search",
         "vault_upsert_index_entry",
@@ -556,23 +551,60 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
         "wiki_get_ontology",
         "wiki_search",
         "wiki_traverse_graph",
+        // INTENT rule 1: the sanctioned agent write path (direct-insert
+        // curated_* write tools removed).
+        "wisdom_deposit",
+        "wisdom_deposit_status",
+        "wisdom_pending",
+        "wisdom_propose_supersession",
     ];
     assert_eq!(names, expected, "tools/list must expose all 16 names");
 
-    // -- add: creates user-stated wisdom, fail-closed audit row on disk ------
-    let added: serde_json::Value = call_tool(
-        &client,
+    // -- INTENT rule 1: the direct-insert write tools are GONE ---------------
+    for removed in [
         "curated_add_wisdom",
+        "curated_update_wisdom",
+        "curated_archive_wisdom",
+        "curated_proposal_decide",
+    ] {
+        let err = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(removed.to_string())
+                    .with_arguments(serde_json::Map::new()),
+            )
+            .await;
+        assert!(
+            err.is_err(),
+            "{removed} must not be on the agent surface any more"
+        );
+    }
+
+    // -- wisdom_deposit round-trip: file lands with agent provenance ---------
+    let vault = {
+        // vault_path lives in config.json (rooted V22 open in spawn setup)
+        let cfg = std::fs::read_to_string(brain.join("config.json")).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        cfg["vault_path"].as_str().unwrap().to_string()
+    };
+    let deposited: serde_json::Value = call_tool(
+        &client,
+        "wisdom_deposit",
         serde_json::json!({
-            "entity_id": "ent_curated",
-            "body": "integration wisdom: the curated MCP surface round-trips"
+            "path": "immutable-source-files/agents/integration-deposit.md",
+            "title": "Integration deposit",
+            "body": "the wisdom_deposit MCP surface round-trips",
+            "tags": ["integration"]
         }),
     )
     .await
-    .expect("curated_add_wisdom");
-    let wisdom_id = added["id"].as_str().expect("wisdom id").to_string();
-    assert_eq!(added["entity_id"], "ent_curated");
+    .expect("wisdom_deposit");
+    assert_eq!(deposited["pending"], serde_json::json!(true));
+    let rel = deposited["path"].as_str().unwrap();
+    let file = std::fs::read_to_string(std::path::Path::new(&vault).join(rel)).unwrap();
+    assert!(file.contains("the wisdom_deposit MCP surface round-trips"));
 
+    // fail-closed audit row for the deposit write
     let audit_count = {
         let conn = rusqlite::Connection::open_with_flags(
             brain.join("brain.db"),
@@ -581,7 +613,7 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
         .expect("reopen brain.db");
         conn.query_row(
             "SELECT COUNT(*) FROM curated_agent_log
-             WHERE tool = 'curated_add_wisdom' AND operation = 'write' AND client = 'local-mcp'",
+             WHERE tool = 'wisdom_deposit' AND operation = 'write' AND client = 'local-mcp'",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -589,44 +621,37 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     };
     assert_eq!(audit_count, 1, "fail-closed audit row must be persisted");
 
-    // -- read tools see the new entry ----------------------------------------
-    let recalled: serde_json::Value = call_tool(
+    // status is honest (no LLM configured in CI: chunked family, never ingested)
+    let status: serde_json::Value = call_tool(
         &client,
-        "curated_recall_context",
-        serde_json::json!({ "query": "curated MCP surface round-trips" }),
+        "wisdom_deposit_status",
+        serde_json::json!({ "path": rel }),
     )
     .await
-    .expect("curated_recall_context");
-    let wiki_hits = recalled["wiki_entries"].as_array().expect("wiki array");
+    .expect("wisdom_deposit_status");
+    let state = status["state"].as_str().unwrap();
     assert!(
-        wiki_hits
-            .iter()
-            .any(|h| h["id"].as_str() == Some(wisdom_id.as_str())),
-        "recall should surface the fresh wisdom: {recalled}"
-    );
-    assert!(
-        recalled["code_chunks"]
-            .as_array()
-            .expect("code array")
-            .iter()
-            .any(|c| c["symbol"].as_str() == Some("curated_sym")),
-        "recall should include the ast chunk: {recalled}"
+        matches!(state, "chunked" | "pending" | "failed" | "no_ingest_host"),
+        "honest non-ingested state expected, got {state}"
     );
 
-    let entry: serde_json::Value = call_tool(
-        &client,
-        "curated_get_wiki_entry",
-        serde_json::json!({ "entity_id": "ent_curated" }),
-    )
-    .await
-    .expect("curated_get_wiki_entry");
-    assert!(
-        entry["full_text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("round-trips"),
-        "get_wiki_entry should return the stored body: {entry}"
-    );
+    // append-only: same path again errors
+    let dup = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("wisdom_deposit".to_string()).with_arguments(
+                serde_json::json!({
+                    "path": rel,
+                    "title": "dup",
+                    "body": "dup"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    assert!(dup.is_err(), "append-only refusal expected");
 
     let code: serde_json::Value = call_tool(
         &client,
@@ -644,47 +669,19 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
         "search_code should rank the ast chunk: {code}"
     );
 
-    // -- update: response is reloaded from the DB, not echoed -----------------
-    let updated: serde_json::Value = call_tool(
-        &client,
-        "curated_update_wisdom",
-        serde_json::json!({
-            "entity_id": "ent_curated",
-            "wisdom_id": wisdom_id,
-            "body": "integration wisdom: updated through the shipping surface"
-        }),
-    )
-    .await
-    .expect("curated_update_wisdom");
-    assert_eq!(
-        updated["body"], "integration wisdom: updated through the shipping surface",
-        "update returns reloaded entry: {updated}"
-    );
-
-    // -- archive: soft delete hides the entry from reads ----------------------
-    let archived: serde_json::Value = call_tool(
-        &client,
-        "curated_archive_wisdom",
-        serde_json::json!({
-            "entity_id": "ent_curated",
-            "wisdom_id": wisdom_id
-        }),
-    )
-    .await
-    .expect("curated_archive_wisdom");
-    assert_eq!(archived["archived"], true);
-
-    let after: serde_json::Value = call_tool(
-        &client,
-        "curated_get_wiki_entry",
-        serde_json::json!({ "entity_id": "ent_curated" }),
-    )
-    .await
-    .expect("curated_get_wiki_entry after archive");
-    assert_eq!(
-        after["full_text"].as_str().unwrap_or_default().trim(),
-        "",
-        "archived entry must not appear in reads: {after}"
+    // wisdom_pending lists the fresh deposit (no librarian rows: no LLM in CI)
+    let pending: serde_json::Value = call_tool(&client, "wisdom_pending", serde_json::json!({}))
+        .await
+        .expect("wisdom_pending");
+    let pending_paths: Vec<&str> = pending["pending"]
+        .as_array()
+        .expect("pending array")
+        .iter()
+        .filter_map(|p| p["path"].as_str())
+        .collect();
+    assert!(
+        pending_paths.iter().any(|p| p == &rel),
+        "fresh deposit must be pending: {pending}"
     );
 
     client.cancel().await.expect("shutdown");

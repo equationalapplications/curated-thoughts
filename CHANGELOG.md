@@ -1,3 +1,22 @@
+## [Unreleased]
+
+### Changed
+
+- **mcp:** remove the direct-insert write tools `curated_add_wisdom`, `curated_update_wisdom`,
+  `curated_archive_wisdom`, and `curated_proposal_decide` (INTENT rule 1: agents never insert,
+  update, approve, or archive brain rows directly). Replaced by the `wisdom_*` deposit surface:
+  `wisdom_deposit` (append-only fact file under `immutable-source-files/agents/`), 
+  `wisdom_deposit_status`, `wisdom_propose_supersession`, and `wisdom_pending`.
+
+### Added
+
+- **tools:** `ct wisdom deposit|status|propose-supersession|pending`, mirroring the MCP surface.
+
+### Removed
+
+- **tools:** `ct approve` and the stray `approve_pending_proposals` binary; `ct proposals review`
+  now requires an interactive terminal (Human Verification Gate).
+
 ## [2.23.1](https://github.com/equationalapplications/curated-thoughts/compare/v2.23.0...v2.23.1) (2026-10-01)
 
 ### Bug Fixes

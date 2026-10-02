@@ -742,6 +742,49 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // permanently skip V22's `documents.path` rewrite and its FATAL re-warn.
     apply_v24_temporal_columns(conn, stamped >= 22)?;
 
+    // V25 — wisdom-deposit substrate (spec
+    // docs/superpowers/specs/2026-10-01-wisdom-deposit-tool-surface-design.md):
+    // (a) seed the agent deposit folder rules. `get_folder_mode` walks
+    //     ancestors, so the supersessions/ child row is an EXPLICIT override —
+    //     without it the lane would inherit `synthesize` and auto-generate
+    //     standalone facts from supersession proposals (CodeRabbit finding 2
+    //     on the spec PR). Auto-approve is safe here because these folders are
+    //     agent-class: committed rows carry the deposit tier, never
+    //     `user_stated`.
+    // (b) create the deposit kick-state ledger (D3/D4 status truth source).
+    // The STAMP is gated on V22 having stamped, exactly like V23/V24: a
+    // rootless open defers V22, and stamping 25 would make every later
+    // rooted open skip V22's FATAL re-warn permanently. Re-read MAX(version)
+    // here (the `stamped` snapshot above predates this open's V22 run — on a
+    // fresh rooted brain it reads 21 while V22 stamps 22 in this same call).
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO folder_rules
+                 (folder_path, librarian_mode, auto_approve)
+                 VALUES ('immutable-source-files/agents', 'synthesize', 1);
+             INSERT OR IGNORE INTO folder_rules
+                 (folder_path, librarian_mode, auto_approve)
+                 VALUES ('immutable-source-files/agents/supersessions', 'summarize', 1);
+             CREATE TABLE IF NOT EXISTS deposit_kick_state (
+                 path       TEXT PRIMARY KEY,
+                 state      TEXT NOT NULL
+                            CHECK(state IN ('pending','chunked','ingested','failed',
+                                            'no_ingest_host','queued_watcher')),
+                 error      TEXT,
+                 updated_ms INTEGER NOT NULL
+             );",
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (25)",
+            [],
+        )?;
+    }
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -986,6 +1029,39 @@ pub fn open_app_db(path: &Path, _config: Option<&Path>) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
     migrate(&conn, None::<VaultRoots>, path.parent())?;
     Ok(conn)
+}
+/// Best-effort schema bring-up for non-app hosts (MCP sidecar, `ct` wisdom
+/// commands): open the brain DB read-write, tolerate locks, migrate, and warn
+/// (not fail) on a read-only or contended database. Reads still work when this
+/// fails; the warning names the cause so a later write failure is not a
+/// mystery.
+pub fn migrate_brain_db(db_path: &std::path::Path) {
+    if !db_path.exists() {
+        // Openers report the missing file with the actionable env-var hint;
+        // don't pre-empt it with a second, vaguer message.
+        return;
+    }
+    let opened =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE);
+    let conn = match opened {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!(
+                "curated-thoughts: schema check skipped, {} not writable ({e}); \
+                 reads work, writes may fail on a missing column",
+                db_path.display()
+            );
+            return;
+        }
+    };
+    // Tolerate the desktop app or librarian holding the write lock.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    if let Err(e) = migrate_open_db(&conn, db_path.parent()) {
+        eprintln!(
+            "curated-thoughts: schema migration failed ({e}); \
+             reads work, writes may fail on a missing column"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3082,8 +3158,8 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 24,
-            "V22 then V23 then V24 must be stamped when the migration runs"
+            version, 25,
+            "V22 then V23 then V24 then V25 must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -3097,6 +3173,90 @@ mod tests {
             rewritten_path,
             format!("{configured_root}/notes.md"),
             "migrate(Some(VaultRoots)) must rewrite the seeded canonical path"
+        );
+    }
+
+    /// V25 — wisdom-deposit substrate (spec 2026-10-01-wisdom-deposit-tool-surface):
+    /// agent folder rules seeded (synthesize+auto_approve, with an EXPLICIT
+    /// summarize child override on supersessions/ — get_folder_mode walks
+    /// ancestors, so an absent child row would inherit synthesize and
+    /// auto-generate facts from supersession proposals), and the
+    /// deposit_kick_state ledger exists. Stamps only past a settled V22.
+
+    #[test]
+    fn v25_seeds_agent_folder_rules_and_kick_state_table() {
+        use crate::librarian::get_folder_mode;
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
+        migrate(
+            &conn,
+            Some(VaultRoots {
+                configured: "/Users/kurt/vault".to_string(),
+                canonical: "/private/var/vault".to_string(),
+            }),
+            None,
+        )
+        .unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 25, "V25 must stamp on a rooted open");
+
+        let agents: String = conn
+            .query_row(
+                "SELECT librarian_mode || ':' || auto_approve FROM folder_rules
+                  WHERE folder_path = 'immutable-source-files/agents'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(agents, "synthesize:1");
+
+        let supersessions: String = conn
+            .query_row(
+                "SELECT librarian_mode || ':' || auto_approve FROM folder_rules
+                  WHERE folder_path = 'immutable-source-files/agents/supersessions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(supersessions, "summarize:1");
+
+        // The child override wins the ancestor walk — this is the whole
+        // point of the second row (CodeRabbit finding 2 on the spec PR).
+        let (mode, auto) =
+            get_folder_mode(&conn, "immutable-source-files/agents/supersessions/x.md");
+        assert_eq!(
+            (mode.as_str(), auto),
+            ("summarize", true),
+            "supersessions/ must override the parent synthesize rule"
+        );
+
+        // kick-state ledger exists and accepts the state vocabulary
+        conn.execute(
+            "INSERT INTO deposit_kick_state (path, state, error, updated_ms)
+             VALUES ('immutable-source-files/agents/a.md', 'no_ingest_host', NULL, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// Rootless opens must not stamp V25 past a deferred V22 (same masking
+    /// hazard V23/V24 document).
+    #[test]
+    fn v25_never_stamps_past_deferred_v22() {
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
+        migrate(&conn, None::<VaultRoots>, None).unwrap();
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            version < 22,
+            "V22 deferred means nothing past it stamps (got {version})"
         );
     }
 
@@ -3230,8 +3390,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            24,
-            "rooted open stamps 22, then 23 and 24 (both gated on V22)"
+            25,
+            "rooted open stamps 22, then 23/24/25 (the latter gated on V22)"
         );
     }
 
