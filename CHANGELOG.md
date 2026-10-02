@@ -1,3 +1,28 @@
+## [3.0.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.23.1...v3.0.0) (2026-10-02)
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** remove ct approve; add ct wisdom subcommands; TTY-gate proposals review
+* **mcp:** remove direct-insert write tools; wire wisdom_* surface
+
+### Features
+
+* **cli:** remove ct approve; add ct wisdom subcommands; TTY-gate proposals review ([4742300](https://github.com/equationalapplications/curated-thoughts/commit/47423003865c742c3a9d76c8c15bc3943641ea22))
+* **db:** V25 — seed agent deposit folder rules + deposit_kick_state ledger ([613be91](https://github.com/equationalapplications/curated-thoughts/commit/613be918279f571d2c8ed96a4fd6d253756811d7))
+* **mcp:** remove direct-insert write tools; wire wisdom_* surface ([a1fd731](https://github.com/equationalapplications/curated-thoughts/commit/a1fd731fcb505c9c769aa9e3e9ea8cd5f738e890))
+* **wisdom:** wisdom_deposit dispatchers — append-only file deposit, lock-serialized per-doc kick, evidence-keyed status, supersession lane, pending listing ([a8d48a3](https://github.com/equationalapplications/curated-thoughts/commit/a8d48a394fc6fcbc9d395552786adf669ca9dfb4))
+
+### Bug Fixes
+
+* **mcp:** wisdom param structs — Serialize for Parameters<T>, crate-path refs; CI-feature build green ([7081be3](https://github.com/equationalapplications/curated-thoughts/commit/7081be35215d6d472016e12ce503161ba9eab78d))
+* **wisdom:** /code-review high wave — recall-honest status, retryable failures, collision-safe supersessions ([d59e739](https://github.com/equationalapplications/curated-thoughts/commit/d59e739cfa6b97d1d2dc0f2114652f0736c0f364)), closes [#259](https://github.com/equationalapplications/curated-thoughts/issues/259)
+* **wisdom:** address /code-review high findings on PR [#259](https://github.com/equationalapplications/curated-thoughts/issues/259) ([e9e4bda](https://github.com/equationalapplications/curated-thoughts/commit/e9e4bda0e03f7b68c94019c94e3fb6a7c8ff0513)), closes [#178](https://github.com/equationalapplications/curated-thoughts/issues/178)
+* **wisdom:** address PR [#259](https://github.com/equationalapplications/curated-thoughts/issues/259) review — kick reads from vault, nested deposits, honest kick states ([0368c95](https://github.com/equationalapplications/curated-thoughts/commit/0368c9503623120f137e7d227a9f6ee4ee3ab8d5))
+* **wisdom:** address PR [#259](https://github.com/equationalapplications/curated-thoughts/issues/259) review — no-create kick opens, pending supersession status, target token shape gate ([3ee5c79](https://github.com/equationalapplications/curated-thoughts/commit/3ee5c7982d1f21ad9939033fa1f6b030e9bad51f))
+* **wisdom:** bootstrap lane dirs before path validation; exclusive-create supersessions too ([7bf0738](https://github.com/equationalapplications/curated-thoughts/commit/7bf0738e35ff8cfe7f6bbcb2c19e295f0b556f36))
+* **wisdom:** initial kick-state writes via the lazy RW connection ([667f3ee](https://github.com/equationalapplications/curated-thoughts/commit/667f3ee77d2e19dbb9376fd7c908772b481505f6))
+* **wisdom:** Opus impl-review nits — exclusive-create deposits, retryable lock, honest status/kick labels ([bd60bc9](https://github.com/equationalapplications/curated-thoughts/commit/bd60bc9d09317e0d8255a2f61fdfc0aea6998a28))
+
 ## [Unreleased]
 
 ### Changed
