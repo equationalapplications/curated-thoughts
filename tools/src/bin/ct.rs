@@ -364,10 +364,10 @@ fn wisdom_deposit_cmd(
     tags: &[String],
     yes: bool,
 ) -> Result<i32> {
-    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_deposit, WisdomDepositParams};
+    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_deposit_awaiting_kick, WisdomDepositParams};
     require_yes(yes, "wisdom deposit")?;
     let (ctx, _paths) = wisdom_ctx()?;
-    let v = block_on(dispatch_wisdom_deposit(
+    let v = block_on(dispatch_wisdom_deposit_awaiting_kick(
         &ctx,
         WisdomDepositParams {
             path: path.to_string(),
@@ -413,13 +413,13 @@ fn wisdom_supersede_cmd(
     reason: &str,
     yes: bool,
 ) -> Result<i32> {
-    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_propose_supersession, WisdomProposeSupersessionParams};
+    use tauri_app_lib::wisdom_deposit::{dispatch_wisdom_propose_supersession_awaiting_kick, WisdomProposeSupersessionParams};
     require_yes(yes, "wisdom propose-supersession")?;
     if (target_ref.is_none()) == (fact_id.is_none()) {
         bail!("exactly one of --ref / --fact-id is required");
     }
     let (ctx, _paths) = wisdom_ctx()?;
-    let v = block_on(dispatch_wisdom_propose_supersession(
+    let v = block_on(dispatch_wisdom_propose_supersession_awaiting_kick(
         &ctx,
         WisdomProposeSupersessionParams {
             target_source_ref: target_ref.map(str::to_string),

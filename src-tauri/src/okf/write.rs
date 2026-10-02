@@ -352,10 +352,11 @@ fn under_any(path: &str, allowed_subdirs: &[&str]) -> bool {
 /// `mkdir` follows it. Closing that window needs `mkdirat(_, O_NOFOLLOW)` per
 /// component; `create_dir_all` had the identical exposure, so this is a
 /// narrowing, not a guarantee. Local vault write access is required to exploit.
-fn create_parents_no_symlink(vault_root: &Path, rel_parent: &Path) -> std::io::Result<()> {
+pub(crate) fn create_parents_no_symlink(vault_root: &Path, rel_parent: &Path) -> std::io::Result<()> {
     let mut cur = vault_root.to_path_buf();
-    // `rel_parent` is already vetted by safe_vault_path: relative, no `..`, no
-    // prefix components — so every component here is a plain name.
+    // Callers guarantee `rel_parent` is relative with plain-name components
+    // only (no `..`, no prefix) — vetted by safe_vault_path here, by an
+    // explicit `Component::Normal` check in wisdom_deposit.
     for comp in rel_parent.components() {
         cur.push(comp);
         match std::fs::symlink_metadata(&cur) {

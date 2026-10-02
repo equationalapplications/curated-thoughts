@@ -338,10 +338,8 @@ fn review_gate_refuses_piped_n() {
 }
 
 
-/// F1 regression: `s` (skip) must advance past the skipped proposal to the
-/// next queue head instead of re-prompting on the same one forever. Seeds
-/// TWO anchored proposals; piping `s` then `y` must approve the SECOND
-/// proposal and leave the first pending.
+/// Human Verification Gate: piped `s` is refused before the queue is read,
+/// so both seeded proposals stay pending.
 #[test]
 fn review_gate_refuses_piped_s_without_state_change() {
     let brain = tempdir().unwrap();

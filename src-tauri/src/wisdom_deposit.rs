@@ -93,7 +93,9 @@ fn render_supersession_file(
     replacement_body: &str,
     reason: &str,
 ) -> String {
-    let stamp = chrono::DateTime::from_timestamp(now_ms(), 0)
+    // now_ms() is milliseconds; from_timestamp takes seconds and would render
+    // a year-~56000 stamp.
+    let stamp = chrono::DateTime::from_timestamp_millis(now_ms())
         .map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string())
         .unwrap_or_default();
     format!(
@@ -256,6 +258,13 @@ fn brain_dir_of(db_path: &std::path::Path) -> PathBuf {
 const KICK_LOCK_RETRIES: usize = 5;
 const KICK_LOCK_RETRY_MS: u64 = 500;
 
+/// Serializes kicks within this process. Without it, two back-to-back
+/// deposits from one sidecar contend on the (per-open-file) vault lock with
+/// each other, and the loser would misreport itself as `queued_watcher` when
+/// no watcher is running. Cross-process contention still reaches the
+/// VaultLock retry loop below.
+static KICK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn run_kick(
     db_path: PathBuf,
     vault_dir: PathBuf,
@@ -263,6 +272,7 @@ fn run_kick(
     profile: crate::embedder::EmbedProfile,
     generation_configured: bool,
 ) {
+    let _serial = KICK_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let outcome = (|| -> Result<String> {
         // Retry only on genuine contention ("already locked"), not on
         // real acquisition errors (permissions etc.) — those fail fast.
@@ -273,8 +283,18 @@ fn run_kick(
                 Ok(_) => break,
                 Err(e) => {
                     let contended = format!("{e:#}").contains("already locked");
-                    if !contended || attempt == KICK_LOCK_RETRIES {
+                    if !contended {
                         return Err(anyhow!("vault lock: {e:#}"));
+                    }
+                    if attempt == KICK_LOCK_RETRIES {
+                        // Still held by another process (`ct watch` / the app
+                        // worker): its file event owns this deposit (spec D3).
+                        // Not a failure.
+                        let conn = rusqlite::Connection::open(&db_path)
+                            .with_context(|| format!("open brain {}", db_path.display()))?;
+                        conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
+                        set_kick_state(&conn, &rel_path, "queued_watcher", None)?;
+                        return Ok("queued_watcher".to_string());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(
                         KICK_LOCK_RETRY_MS,
@@ -287,10 +307,14 @@ fn run_kick(
             .with_context(|| format!("open brain {}", db_path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
 
-        crate::pipeline::ingest_document_with_vault_root(
+        // `rel_path` stays the document key (status probe, V25 folder rules);
+        // the bytes are read from the vault, not the process CWD.
+        let read_path = vault_dir.join(&rel_path).to_string_lossy().into_owned();
+        crate::pipeline::ingest_document_virtual(
             &conn,
             &profile,
             &rel_path,
+            &read_path,
             false,
             Some(vault_dir.to_string_lossy().as_ref()),
         )
@@ -331,16 +355,102 @@ fn run_kick(
 // Dispatchers
 // ---------------------------------------------------------------------------
 
+type KickHandle = tokio::task::JoinHandle<()>;
+
+/// Record the initial ledger state and spawn the kick when a generation host
+/// is configured. Returns the reply label (`started` | `no_ingest_host`) and
+/// the kick's handle. The ledger write goes through with_rw: ctx.conn is
+/// READ-ONLY in the MCP sidecar.
+async fn start_kick(
+    ctx: &ToolDispatchContext,
+    vault: &std::path::Path,
+    rel: &str,
+) -> Result<(&'static str, Option<KickHandle>)> {
+    let generation_configured = crate::librarian::llm_generation_configured();
+    let initial = if generation_configured { "pending" } else { "no_ingest_host" };
+    let kick_rel = rel.to_string();
+    ctx.with_rw(move |conn| set_kick_state(conn, &kick_rel, initial, None))
+        .await
+        .map_err(|e| anyhow!("kick-state write failed: {e:#}"))?;
+    if !generation_configured {
+        return Ok(("no_ingest_host", None));
+    }
+    let (db_path, vault, rel, profile) = (
+        ctx.db_path.clone(),
+        vault.to_path_buf(),
+        rel.to_string(),
+        ctx.profile.clone(),
+    );
+    let handle = tokio::task::spawn_blocking(move || {
+        run_kick(db_path, vault, rel, profile, true)
+    });
+    Ok(("started", Some(handle)))
+}
+
+/// Await a kick; an aborted/panicked kick must not strand the ledger at
+/// 'pending' with no trace (Opus impl-review nit 4).
+async fn observe_kick(handle: KickHandle, db_path: PathBuf, rel: String) {
+    if let Err(join_err) = handle.await {
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let _ = set_kick_state(
+                &conn,
+                &rel,
+                "failed",
+                Some(&format!("kick task aborted: {join_err}")),
+            );
+        }
+    }
+}
+
+fn reply_path(v: &Value) -> String {
+    v["path"].as_str().unwrap_or_default().to_string()
+}
+
+fn detach_kick(ctx: &ToolDispatchContext, v: &Value, handle: Option<KickHandle>) {
+    if let Some(h) = handle {
+        tokio::spawn(observe_kick(h, ctx.db_path.clone(), reply_path(v)));
+    }
+}
+
+async fn await_kick(ctx: &ToolDispatchContext, v: &Value, handle: Option<KickHandle>) {
+    if let Some(h) = handle {
+        observe_kick(h, ctx.db_path.clone(), reply_path(v)).await;
+    }
+}
+
 fn vault_dir(ctx: &ToolDispatchContext) -> Result<PathBuf> {
     ctx.vault_dir
         .clone()
         .ok_or_else(|| anyhow!("no vault configured (vault_dir unset)"))
 }
 
+/// Deposit (MCP surface): the kick runs in the background, observed so an
+/// aborted task still lands in the ledger.
 pub async fn dispatch_wisdom_deposit(
     ctx: &ToolDispatchContext,
     p: WisdomDepositParams,
 ) -> Result<Value> {
+    let (v, handle) = deposit_inner(ctx, p).await?;
+    detach_kick(ctx, &v, handle);
+    Ok(v)
+}
+
+/// Deposit, then wait for the kick to finish. For short-lived callers (`ct`)
+/// whose runtime is dropped on return: a queued `spawn_blocking` kick may
+/// never start during runtime shutdown, stranding the ledger at `pending`.
+pub async fn dispatch_wisdom_deposit_awaiting_kick(
+    ctx: &ToolDispatchContext,
+    p: WisdomDepositParams,
+) -> Result<Value> {
+    let (v, handle) = deposit_inner(ctx, p).await?;
+    await_kick(ctx, &v, handle).await;
+    Ok(v)
+}
+
+async fn deposit_inner(
+    ctx: &ToolDispatchContext,
+    p: WisdomDepositParams,
+) -> Result<(Value, Option<KickHandle>)> {
     let vault = vault_dir(ctx)?;
     let rel = p.path.replace('\\', "/");
     // Delimiter-anchored prefix: `agents/` exactly — a byte-prefix check would
@@ -371,6 +481,24 @@ pub async fn dispatch_wisdom_deposit(
     // immutable-source-files/agents/ does not exist yet there). Creating the
     // lane dir itself is safe: it is a fixed constant, not user input.
     std::fs::create_dir_all(vault.join(AGENTS_DIR))?;
+    // A deposit may live deeper than the lane dir (e.g. agents/topic/note.md).
+    // Those intermediate dirs must ALSO exist before validation, for the same
+    // MayCreate reason. They are user input, so: plain names only (no `..`,
+    // no root — nothing may be created outside the lane before safe_vault_path
+    // runs), created one component at a time refusing symlinked components.
+    let sub_parent = std::path::Path::new(&rel)
+        .strip_prefix(AGENTS_DIR)
+        .ok()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| std::path::Path::new(""));
+    if !sub_parent
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        bail!("unsafe deposit path: traversal component in {}", p.path);
+    }
+    crate::okf::write::create_parents_no_symlink(&vault.join(AGENTS_DIR), sub_parent)
+        .map_err(|e| anyhow!("unsafe deposit path: {e}"))?;
     // Validate, then write to the *validated* path (not the raw join):
     // safe_vault_path canonicalizes every parent and rejects symlinked or
     // traversal parents (fail-closed), so its return value is the only path
@@ -382,14 +510,6 @@ pub async fn dispatch_wisdom_deposit(
         crate::vault::safe_path::PathMode::MayCreate,
     )
     .map_err(|e| anyhow!("unsafe deposit path: {e}"))?;
-    // A deposit may live one level deeper than the lane dir
-    // (e.g. agents/topic/note.md): create any intermediate directories the
-    // validated parent needs, then exclusive-create below.
-    std::fs::create_dir_all(
-        validated
-            .parent()
-            .expect("validated path always has a parent"),
-    )?;
     // Exclusive create closes the pre-check/rename TOCTOU: two concurrent
     // same-path deposits can no longer both pass and silently overwrite each
     // other (append-only, INTENT rule 9). temp+rename replace would.
@@ -425,53 +545,18 @@ pub async fn dispatch_wisdom_deposit(
     })
     .await?;
 
-    // Kick (D3): full pipeline, lock-serialized. Record the intent first so a
-    // crash between write and spawn leaves an honest ledger row. The initial
-    // ledger write goes through with_rw: ctx.conn is READ-ONLY in the MCP
-    // sidecar (CI caught this — "attempt to write a readonly database").
-    let db_path = ctx.db_path.clone();
-    let generation_configured = crate::librarian::llm_generation_configured();
-    let kick = {
-        let initial = if generation_configured { "pending" } else { "no_ingest_host" };
-        let kick_rel = rel.clone();
-        let initial_label = initial;
-        ctx.with_rw(move |conn| set_kick_state(conn, &kick_rel, initial_label, None))
-            .await
-            .map_err(|e| anyhow!("kick-state write failed: {e:#}"))?;
-        if generation_configured {
-            let db_path2 = db_path.clone();
-            let vault2 = vault.clone();
-            let rel2 = rel.clone();
-            let profile2 = ctx.profile.clone();
-            let handle = tokio::task::spawn_blocking(move || {
-                run_kick(db_path2, vault2, rel2, profile2, true)
-            });
-            // Observe the handle: an aborted/panicked kick must not strand
-            // the ledger at 'pending' with no trace (Opus impl-review nit 4).
-            let audit_rel = rel.clone();
-            let audit_db = db_path.clone();
-            tokio::spawn(async move {
-                if let Err(join_err) = handle.await {
-                    if let Ok(conn) = rusqlite::Connection::open(&audit_db) {
-                        let _ = set_kick_state(
-                            &conn,
-                            &audit_rel,
-                            "failed",
-                            Some(&format!("kick task aborted: {join_err}")),
-                        );
-                    }
-                }
-            });
-        }
-        initial.to_string()
-    };
-    let kick_label = if kick == "pending" { "started" } else { "no_ingest_host" };
+    // Kick (D3): full pipeline, lock-serialized. The ledger row is recorded
+    // before the spawn so a crash in between leaves an honest trace.
+    let (kick_label, handle) = start_kick(ctx, &vault, &rel).await?;
 
-    Ok(json!({
-        "path": rel,
-        "pending": true,
-        "kick": kick_label,
-    }))
+    Ok((
+        json!({
+            "path": rel,
+            "pending": true,
+            "kick": kick_label,
+        }),
+        handle,
+    ))
 }
 
 pub async fn dispatch_wisdom_deposit_status(
@@ -536,10 +621,31 @@ pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value>
     Ok(json!({ "pending": items }))
 }
 
+/// Supersession (MCP surface): background kick, see [`dispatch_wisdom_deposit`].
 pub async fn dispatch_wisdom_propose_supersession(
     ctx: &ToolDispatchContext,
     p: WisdomProposeSupersessionParams,
 ) -> Result<Value> {
+    let (v, handle) = supersession_inner(ctx, p).await?;
+    detach_kick(ctx, &v, handle);
+    Ok(v)
+}
+
+/// Supersession, then wait for the kick (see
+/// [`dispatch_wisdom_deposit_awaiting_kick`]).
+pub async fn dispatch_wisdom_propose_supersession_awaiting_kick(
+    ctx: &ToolDispatchContext,
+    p: WisdomProposeSupersessionParams,
+) -> Result<Value> {
+    let (v, handle) = supersession_inner(ctx, p).await?;
+    await_kick(ctx, &v, handle).await;
+    Ok(v)
+}
+
+async fn supersession_inner(
+    ctx: &ToolDispatchContext,
+    p: WisdomProposeSupersessionParams,
+) -> Result<(Value, Option<KickHandle>)> {
     let target = match (p.target_source_ref.as_deref(), p.target_fact_id.as_deref()) {
         (Some(_), Some(_)) => bail!("supply exactly one of target_source_ref / target_fact_id"),
         (None, None) => bail!("supply exactly one of target_source_ref / target_fact_id"),
@@ -622,48 +728,19 @@ pub async fn dispatch_wisdom_propose_supersession(
     // Kick: supersessions/ is `summarize` — the file ingests and drains with
     // zero facts (V25 override). Librarian APPLICATION of the supersession is
     // the follow-up reconcile spec (rule 4 mechanics); until then status
-    // stays pending.
-    let db_path = ctx.db_path.clone();
-    {
-        // with_rw: ctx.conn is read-only in the MCP sidecar (same as the
-        // deposit lane).
-        let kick_rel = rel.clone();
-        ctx.with_rw(move |conn| set_kick_state(conn, &kick_rel, "pending", None))
-            .await
-            .map_err(|e| anyhow!("kick-state write failed: {e:#}"))?;
-    }
-    let vault2 = vault.clone();
-    let rel2 = rel.clone();
-    let profile2 = ctx.profile.clone();
-    let generation_configured = crate::librarian::llm_generation_configured();
+    // stays pending. Same kick contract as the deposit lane, so the reply
+    // label and the ledger always agree.
+    let (kick_label, handle) = start_kick(ctx, &vault, &rel).await?;
 
-    // FIX (Opus impl-review nit 5): reply honestly — no generation host means
-    // the kick stops at 'chunked'; report that, not "started".
-    let kick_label = if generation_configured { "started" } else { "no_ingest_host" };
-    let handle = tokio::task::spawn_blocking(move || {
-        run_kick(db_path, vault2, rel2, profile2, generation_configured)
-    });
-    let audit_rel = rel.clone();
-    let audit_db = ctx.db_path.clone();
-    tokio::spawn(async move {
-        if let Err(join_err) = handle.await {
-            if let Ok(conn) = rusqlite::Connection::open(&audit_db) {
-                let _ = set_kick_state(
-                    &conn,
-                    &audit_rel,
-                    "failed",
-                    Some(&format!("kick task aborted: {join_err}")),
-                );
-            }
-        }
-    });
-
-    Ok(json!({
-        "path": rel,
-        "supersedes": target,
-        "pending": true,
-        "kick": kick_label,
-    }))
+    Ok((
+        json!({
+            "path": rel,
+            "supersedes": target,
+            "pending": true,
+            "kick": kick_label,
+        }),
+        handle,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,6 +1167,128 @@ mod tests {
             vec!["immutable-source-files/agents/waiting.md"],
             "evidence-backed deposits must NOT be listed (got {paths:?})"
         );
+        });
+    }
+
+    #[test]
+    fn deposit_creates_nested_topic_dirs_under_the_lane() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+        let ctx = wisdom_ctx(&dir);
+        let v = dispatch_wisdom_deposit(
+            &ctx,
+            WisdomDepositParams {
+                path: "immutable-source-files/agents/topic/sub/note.md".into(),
+                title: "Nested".into(),
+                body: "Nested deposits land in fresh topic dirs.".into(),
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["pending"], serde_json::json!(true));
+        assert!(dir
+            .join("immutable-source-files/agents/topic/sub/note.md")
+            .is_file());
+        });
+    }
+
+    #[test]
+    fn deposit_traversal_creates_nothing_outside_the_lane() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+        let ctx = wisdom_ctx(&dir);
+        let err = dispatch_wisdom_deposit(
+            &ctx,
+            WisdomDepositParams {
+                path: "immutable-source-files/agents/../../escaped/note.md".into(),
+                title: "t".into(),
+                body: "b".into(),
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("unsafe deposit path"), "{err}");
+        assert!(!dir.join("escaped").exists(), "no dir may be created outside the lane");
+        });
+    }
+
+    #[test]
+    fn supersession_stamp_is_a_current_utc_date() {
+        let text = render_supersession_file("librarian-x", "T", "B", "r");
+        let year = chrono::Utc::now().format("%Y").to_string();
+        assert!(
+            text.contains(&format!("- deposited_at: {year}-")),
+            "stamp must be this year's ISO date, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn supersession_ledger_matches_reply_label() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+        let ctx = wisdom_ctx(&dir);
+        let v = dispatch_wisdom_propose_supersession_awaiting_kick(
+            &ctx,
+            WisdomProposeSupersessionParams {
+                target_source_ref: Some("librarian-abc".into()),
+                target_fact_id: None,
+                replacement_title: "t".into(),
+                replacement_body: "b".into(),
+                reason: "r".into(),
+            },
+        )
+        .await
+        .unwrap();
+        if v["kick"] == serde_json::json!("no_ingest_host") {
+            let conn = ctx.conn.lock().unwrap();
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                    [v["path"].as_str().unwrap()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, "no_ingest_host");
+        }
+        });
+    }
+
+    /// The kick reads the deposit from the vault, not the process CWD (cargo
+    /// runs tests from the crate dir, never the tempdir vault).
+    #[test]
+    fn kick_ingests_from_vault_not_cwd() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+        let ctx = wisdom_ctx(&dir);
+        let rel = "immutable-source-files/agents/kick-cwd.md";
+        assert_ne!(std::env::current_dir().unwrap(), dir);
+        std::fs::write(dir.join(rel), "# Kick\n\nRead from the vault root.\n").unwrap();
+        run_kick(
+            ctx.db_path.clone(),
+            dir.clone(),
+            rel.to_string(),
+            ctx.profile.clone(),
+            false,
+        );
+        let conn = ctx.conn.lock().unwrap();
+        let (state, error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                [rel],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "chunked", "kick error: {error:?}");
         });
     }
 }
