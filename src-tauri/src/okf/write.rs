@@ -27,6 +27,7 @@
 //!   permanently refused over MCP — use the report-only repair scan to find
 //!   them; the tool never rewrites a file it cannot token-verify.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use chrono::SecondsFormat;
@@ -53,6 +54,23 @@ pub const COMPACTION_MARKERS: &[&str] = &["[SKILL_PRUNED]", "HERMES-CONTEXT-COMP
 /// a legitimate full rewrite of a small note must stay possible without
 /// `allow_shrink` (the incident this guard replays was 12,860 bytes).
 pub const MIN_GUARDED_BODY_BYTES: usize = 1024;
+
+/// Every frontmatter key the typed `OkfFrontmatter` can render. ONE list,
+/// shared by `check_round_trip`, [`rendered_key_set`] and the issue #245
+/// key-drop guard — a second copy is exactly the drift the shared helper
+/// exists to prevent. Pre-sorted ascending (issue #231 review bonus): the
+/// exact-set zip in `check_round_trip` compares against this order directly,
+/// so the literal must never be reshuffled without keeping it sorted.
+const KNOWN_KEYS: [&str; 8] = [
+    "created_at",
+    "entity_type",
+    "okf_version",
+    "profile",
+    "supersedes",
+    "tags",
+    "title",
+    "updated_at",
+];
 
 use super::{
     parse_frontmatter, render_frontmatter, sha256_hash, validate_frontmatter, OkfFrontmatter,
@@ -178,6 +196,117 @@ fn collect_frontmatter_fence(content: &str) -> Option<String> {
         return None;
     }
     Some(inner)
+}
+
+/// Issue #245 D1: the EXISTING note's frontmatter key set, or `None` when
+/// there is no fence (unreachable through `write_note`: `enforce_staleness`
+/// refuses `existing_unparsable:no_fence` first). Reads the SAME fence view
+/// as the token reader. Three tiers:
+/// - strict `serde_yaml::Value` mapping → its keys. NOT `parse_frontmatter`
+///   (that silently drops unknown keys). Non-string keys (`1: x`) are
+///   collected in Debug form — never rejected: on the existing side they are
+///   data to protect, unlike `check_round_trip`'s rendered-output reject.
+/// - parse fails or is not a mapping → column-0 line scan
+///   ([`line_scan_keys`]), so damaged notes stay guarded, never skipped.
+///
+/// Both tiers apply the D2 normalization to the KNOWN optional fields only:
+/// an empty `tags`/`supersedes` counts ABSENT (see [`strict_value_absent`],
+/// [`line_scan_value_absent`]); every other key counts PRESENT.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by enforce_key_preservation (Task 3)
+fn existing_frontmatter_keys(content: &str) -> Option<BTreeSet<String>> {
+    let inner = collect_frontmatter_fence(content)?;
+    if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&inner)
+    {
+        let mut keys = BTreeSet::new();
+        for (key, value) in &map {
+            match key.as_str() {
+                Some(name) if strict_value_absent(name, value) => {}
+                Some(name) => {
+                    keys.insert(name.to_string());
+                }
+                None => {
+                    keys.insert(format!("{key:?}"));
+                }
+            }
+        }
+        return Some(keys);
+    }
+    Some(line_scan_keys(&inner))
+}
+
+/// D2 strict-tier ABSENT forms — KNOWN optional fields only. `tags`: null /
+/// `~` / empty / `[]` (the renderer omits both `None` and `Some(vec![])`).
+/// `supersedes`: null / `~` / `""` (an empty pointer can never be re-sent —
+/// `under_deposit("")` refuses it). Everything else is PRESENT.
+#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
+fn strict_value_absent(key: &str, value: &serde_yaml::Value) -> bool {
+    use serde_yaml::Value;
+    match key {
+        "tags" => matches!(value, Value::Null) || matches!(value, Value::Sequence(s) if s.is_empty()),
+        "supersedes" => {
+            matches!(value, Value::Null) || matches!(value, Value::String(s) if s.is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// D1 tier 3: column-0 line scan over a damaged fence. A key line that is
+/// followed by a continuation (any indented line, or a `-` list item) is
+/// always PRESENT — that keeps block-valued keys from reading as empty.
+#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
+fn line_scan_keys(inner: &str) -> BTreeSet<String> {
+    let lines: Vec<&str> = inner.lines().collect();
+    let mut keys = BTreeSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some((key, rest)) = line_scan_key(line) else {
+            continue;
+        };
+        let continued = lines.get(i + 1).is_some_and(|next| {
+            next.starts_with(char::is_whitespace) || *next == "-" || next.starts_with("- ")
+        });
+        if !continued && line_scan_value_absent(&key, rest.trim()) {
+            continue;
+        }
+        keys.insert(key);
+    }
+    keys
+}
+
+/// D1 (d) key-extraction rule: a line is a key line iff it is non-empty,
+/// starts at column 0 with a character other than whitespace, `#` or `-`,
+/// and contains `:`. Key = text before the FIRST `:`, trimmed, one matching
+/// pair of surrounding `"`/`'` stripped. NO character-class restriction
+/// (`1`, `my-key`, `some key` are keys). Returns the raw rest after the colon.
+#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
+fn line_scan_key(line: &str) -> Option<(String, &str)> {
+    let first = line.chars().next()?;
+    if first.is_whitespace() || first == '#' || first == '-' {
+        return None;
+    }
+    let (raw, rest) = line.split_once(':')?;
+    let raw = raw.trim();
+    let key = ['"', '\'']
+        .iter()
+        .find_map(|q| {
+            raw.strip_prefix(*q)
+                .and_then(|r| r.strip_suffix(*q))
+                .filter(|_| raw.len() >= 2)
+        })
+        .unwrap_or(raw);
+    Some((key.to_string(), rest))
+}
+
+/// D1 (b) tier-3 ABSENT forms — same known-field restriction as the strict
+/// tier. The inline value is compared verbatim after trimming; trailing
+/// comments are NOT stripped (`tags: [] # none` counts PRESENT here — the
+/// accepted stricter-direction divergence, D1 (c)).
+#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
+fn line_scan_value_absent(key: &str, value: &str) -> bool {
+    match key {
+        "tags" => matches!(value, "" | "null" | "~" | "[]"),
+        "supersedes" => matches!(value, "" | "null" | "~" | "\"\""),
+        _ => false,
+    }
 }
 
 /// Split `content` into `(frontmatter_inner, body_start_offset)` where
@@ -583,6 +712,22 @@ fn map_safe_err_note(e: SafePathError) -> WriteNoteError {
     }
 }
 
+/// The key set the renderer emits for `fm`, in [`KNOWN_KEYS`] order. serde
+/// skips `tags` (None or empty), `updated_at` (None) and `supersedes` (None).
+/// Shared by `check_round_trip` and the issue #245 key-drop guard (D2) so
+/// the two computations cannot drift.
+fn rendered_key_set(fm: &OkfFrontmatter) -> Vec<&'static str> {
+    KNOWN_KEYS
+        .iter()
+        .copied()
+        .filter(|k| {
+            !((*k == "tags" && fm.tags.as_ref().is_none_or(|t| t.is_empty()))
+                || (*k == "updated_at" && fm.updated_at.is_none())
+                || (*k == "supersedes" && fm.supersedes.is_none()))
+        })
+        .collect()
+}
+
 /// Pre-write round-trip guard (issue #231): verify the rendered document's
 /// frontmatter fence parses back to exactly the effective frontmatter.
 ///
@@ -637,32 +782,9 @@ fn check_round_trip(effective_fm: &OkfFrontmatter, document: &str) -> Result<(),
         rendered_keys.push(key_str.to_string());
     }
     rendered_keys.sort();
-    // Pre-sorted ascending (issue #231 review bonus): the exact-set zip below
-    // compares against this order directly, so the literal must never be
-    // reshuffled without keeping it sorted.
-    const KNOWN_KEYS: [&str; 8] = [
-        "created_at",
-        "entity_type",
-        "okf_version",
-        "profile",
-        "supersedes",
-        "tags",
-        "title",
-        "updated_at",
-    ];
-    let known_sorted: &[&str] = &KNOWN_KEYS;
-    // Both directions: no unknown key, no missing key (exact set equality;
-    // serde skips `tags`/`updated_at`/`supersedes` when absent, so normalize
-    // the expected set the same way the renderer does).
-    let expected_keys: Vec<&str> = known_sorted
-        .iter()
-        .copied()
-        .filter(|k| {
-            !((*k == "tags" && effective_fm.tags.as_ref().is_none_or(|t| t.is_empty()))
-                || (*k == "updated_at" && effective_fm.updated_at.is_none())
-                || (*k == "supersedes" && effective_fm.supersedes.is_none()))
-        })
-        .collect();
+    // Both directions: no unknown key, no missing key (exact set equality
+    // against the normalized set the renderer emits — shared helper).
+    let expected_keys = rendered_key_set(effective_fm);
     if rendered_keys.len() != expected_keys.len()
         || rendered_keys
             .iter()
@@ -2843,5 +2965,178 @@ mod tests {
             !s.contains("allow_shrink"),
             "must not teach the bypass: {s}"
         );
+    }
+
+    // ---- issue #245: frontmatter key-drop guard ----
+
+    /// Well-formed base frontmatter for key-drop fixtures. Index 2 is the
+    /// title line, swapped for an unquoted-colon title to DAMAGE the YAML
+    /// (strict parse fails; the token reader's tolerant fallback still
+    /// reads `updated_at`).
+    const KD_BASE: &[&str] = &[
+        "okf_version: \"0.1\"",
+        "profile: llm-wiki/1",
+        "title: T",
+        "entity_type: fact",
+        "created_at: \"2026-08-27T00:00:00Z\"",
+        "updated_at: \"2026-09-25T01:00:00Z\"",
+    ];
+
+    /// Build a note: `KD_BASE` (title damaged when `damaged`) + `extra` lines.
+    /// Asserts the fixture's damage flag matches reality, so a "damaged"
+    /// test can never silently run on the strict tier (or vice versa).
+    fn kd_doc(extra: &[&str], damaged: bool) -> String {
+        let mut lines: Vec<&str> = KD_BASE.to_vec();
+        if damaged {
+            lines[2] = "title: Deploy: retro";
+        }
+        lines.extend_from_slice(extra);
+        let doc = format!("---\n{}\n---\nbody\n", lines.join("\n"));
+        let inner = collect_frontmatter_fence(&doc).expect("fixture has a fence");
+        assert_eq!(
+            serde_yaml::from_str::<serde_yaml::Value>(&inner).is_err(),
+            damaged,
+            "fixture damage flag must match the strict parse: {doc}"
+        );
+        doc
+    }
+
+    fn kd_keys(doc: &str) -> BTreeSet<String> {
+        existing_frontmatter_keys(doc).expect("fixture has a fence")
+    }
+
+    #[test]
+    fn known_keys_is_sorted_ascending() {
+        let mut sorted = KNOWN_KEYS;
+        sorted.sort_unstable();
+        assert_eq!(sorted, KNOWN_KEYS);
+    }
+
+    #[test]
+    fn rendered_key_set_omits_none_and_empty_optionals() {
+        let mut m = fm("T", None);
+        m.tags = Some(vec![]);
+        assert_eq!(
+            rendered_key_set(&m),
+            vec!["created_at", "entity_type", "okf_version", "profile", "title"]
+        );
+        let mut m = fm("T", Some("2026-09-25T01:00:00Z"));
+        m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
+        assert_eq!(rendered_key_set(&m), KNOWN_KEYS.to_vec());
+    }
+
+    #[test]
+    fn existing_keys_strict_tier_full_set() {
+        let keys = kd_keys(&kd_doc(&["tags: [a]"], false));
+        let expected: BTreeSet<String> = [
+            "created_at",
+            "entity_type",
+            "okf_version",
+            "profile",
+            "tags",
+            "title",
+            "updated_at",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn existing_keys_strict_tier_known_absent_forms() {
+        // D2: the exhaustive ABSENT list for the KNOWN optional fields.
+        for (line, key) in [
+            ("tags:", "tags"),
+            ("tags: null", "tags"),
+            ("tags: ~", "tags"),
+            ("tags: []", "tags"),
+            ("tags: [] # none", "tags"),
+            ("supersedes:", "supersedes"),
+            ("supersedes: null", "supersedes"),
+            ("supersedes: ~", "supersedes"),
+            ("supersedes: \"\"", "supersedes"),
+        ] {
+            let keys = kd_keys(&kd_doc(&[line], false));
+            assert!(!keys.contains(key), "{line:?} must count ABSENT: {keys:?}");
+        }
+    }
+
+    #[test]
+    fn existing_keys_strict_tier_present_forms() {
+        // D2: any other value form counts PRESENT; unknown keys always do.
+        for (line, key) in [
+            ("tags: \"\"", "tags"),
+            ("tags: foo", "tags"),
+            ("tags: {}", "tags"),
+            ("supersedes: immutable-source-files/agents/v1.md", "supersedes"),
+            ("aliases: []", "aliases"),
+            ("aliases: null", "aliases"),
+        ] {
+            let keys = kd_keys(&kd_doc(&[line], false));
+            assert!(keys.contains(key), "{line:?} must count PRESENT: {keys:?}");
+        }
+    }
+
+    #[test]
+    fn existing_keys_strict_tier_non_string_key_is_collected_not_rejected() {
+        // D1 (review 2026-10-02): unlike check_round_trip's reject loop, the
+        // EXISTING side collects a non-string key (Debug form) and never errors.
+        let keys = kd_keys(&kd_doc(&["1: x"], false));
+        let debug = format!("{:?}", serde_yaml::Value::Number(1.into()));
+        assert!(keys.contains(&debug), "{debug} missing from {keys:?}");
+    }
+
+    #[test]
+    fn existing_keys_line_scan_tier() {
+        // Damaged YAML → tier 3. Title still extracted (key before FIRST ':').
+        let keys = kd_keys(&kd_doc(&[], true));
+        assert!(keys.contains("title") && keys.contains("updated_at"), "{keys:?}");
+
+        // Inline absent forms for known optionals count ABSENT…
+        for line in ["tags: []", "tags:", "tags: null", "tags: ~", "supersedes: \"\""] {
+            let keys = kd_keys(&kd_doc(&[line], true));
+            let key = line.split(':').next().unwrap();
+            assert!(!keys.contains(key), "{line:?} must count ABSENT: {keys:?}");
+        }
+        // …unless continued on the next line (block sequence stays PRESENT).
+        let keys = kd_keys(&kd_doc(&["tags:", "  - a"], true));
+        assert!(keys.contains("tags"), "indented continuation: {keys:?}");
+        let keys = kd_keys(&kd_doc(&["tags:", "- a"], true));
+        assert!(keys.contains("tags"), "`- ` continuation: {keys:?}");
+        // Non-empty inline values, and the accepted trailing-comment divergence.
+        for line in ["tags: foo", "tags: \"\"", "tags: [] # none", "tags: [a]"] {
+            let keys = kd_keys(&kd_doc(&[line], true));
+            assert!(keys.contains("tags"), "{line:?} must count PRESENT: {keys:?}");
+        }
+        // Unknown keys are PRESENT whatever their value.
+        let keys = kd_keys(&kd_doc(&["aliases: []"], true));
+        assert!(keys.contains("aliases"), "{keys:?}");
+        // Nested block mapping: parent key PRESENT, indented child is not a key.
+        let keys = kd_keys(&kd_doc(&["source:", "  url: https://x"], true));
+        assert!(keys.contains("source") && !keys.contains("url"), "{keys:?}");
+        // D1 (d): no character-class restriction.
+        let keys = kd_keys(&kd_doc(&["1: x", "my-key: y"], true));
+        assert!(keys.contains("1") && keys.contains("my-key"), "{keys:?}");
+    }
+
+    #[test]
+    fn line_scan_key_extraction_rule() {
+        // D1 (d): column-0, not whitespace/#/-, contains ':'; key = text
+        // before the FIRST ':', trimmed, one matching quote pair stripped.
+        assert_eq!(line_scan_key("\"quoted\": v").map(|(k, _)| k), Some("quoted".to_string()));
+        assert_eq!(line_scan_key("'single': v").map(|(k, _)| k), Some("single".to_string()));
+        assert_eq!(line_scan_key("a: b: c").map(|(k, r)| (k, r.trim())), Some(("a".to_string(), "b: c")));
+        assert_eq!(line_scan_key("some key: v").map(|(k, _)| k), Some("some key".to_string()));
+        for not_a_key in ["# comment: x", "- item: x", "  indented: x", "\tindented: x", "", "no colon here"] {
+            assert!(line_scan_key(not_a_key).is_none(), "{not_a_key:?}");
+        }
+    }
+
+    #[test]
+    fn existing_keys_fence_less_is_none() {
+        // Unreachable through write_note (enforce_staleness refuses no_fence
+        // first); pinned as defense-in-depth.
+        assert!(existing_frontmatter_keys("no fence\n").is_none());
     }
 }
