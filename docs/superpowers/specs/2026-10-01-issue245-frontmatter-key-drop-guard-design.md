@@ -1,7 +1,7 @@
 # vault_write_note: frontmatter key-drop guard on If-Match edits (issue #245)
 
 **Date:** 2026-10-01
-**Status:** Proposed — review CONVERGED: Opus design-c3 **APPROVE WITH NITS** (N1–N3 applied); c1 REQUEST CHANGES (M1–M3, m1–m6 all REAL, applied); c2 REQUEST CHANGES (MAJOR 1 + 2 minors + 4 nits, applied); **CodeRabbit PR-comment findings 2026-10-02 applied** (M1 existing-side null/empty normalization restricted to KNOWN optional fields; M2 size-guard scope clarified as body-only, frontmatter excluded; follow-up: tier-3 line scan inherits the known-field restriction, "bare scalar" wording fixed, exhaustive absent-form list pinned). GLM self-review findings applied.
+**Status:** Proposed — review converged (Opus design-c3 APPROVE WITH NITS; CodeRabbit 2026-10-02 and Claude review 2026-10-02 applied). See [Revision history](#revision-history).
 **Branch:** `feat/issue-245-frontmatter-key-drop-guard`
 **Priority:** High — silent data loss on the `vault_write_note` edit path (sibling of #240's body-truncation clobber, frontmatter axis).
 
@@ -23,6 +23,13 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
 - any key outside `KNOWN_KEYS` (hand-added/legacy keys the typed struct cannot re-express —
   silently stripped today).
 
+**`KNOWN_KEYS` is hoisted (review 2026-10-02).** Today it is a function-local `const` inside
+`check_round_trip` (`write.rs:644`). This change moves it to module scope in `write.rs` —
+still pre-sorted ascending, keeping its "never reshuffle without keeping it sorted" comment —
+so `check_round_trip`, the new incoming-key normalization helper (D2) and
+`enforce_key_preservation` all read the ONE list. A second copy of the list is forbidden: it
+is exactly the drift D2's shared helper exists to prevent.
+
 ## Approach (all in `src-tauri`; follows the #240 guard pattern exactly)
 
 1. **D1 — existing-side key-set extraction.** New helper
@@ -39,8 +46,9 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
      `OkfFrontmatter` (the token reader's strict parse), which silently drops unknown keys and
      would make `KeyDropUnrepresentable` unable to fire for well-formed legacy notes. If the YAML
      parses but is not a mapping → fall through to the line scan. Non-string keys (`1: x`) count
-     as PRESENT and land in the unrepresentable partition (Debug form in the refusal) — the
-     renderer already refuses non-string keys on output (:521), so silently dropping them on the
+     as PRESENT and land in the unrepresentable partition (Debug form in the refusal) —
+     `check_round_trip` already refuses non-string keys in the rendered output (`write.rs:621`/
+     `:634`), so silently dropping them on the
      existing side would leave that one key class unguarded (Opus design-c3 N3).
    - strict parse fails BUT the fence exists (damaged YAML that nevertheless passed staleness via
      `read_existing_token`'s tolerant line-scan fallback, write.rs:95-129) → collect keys with a
@@ -60,7 +68,12 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
      a continuation (any indented line, or a `- ` line). Any non-empty inline value (`tags: foo`)
      counts as PRESENT. The continuation guard is what keeps a block-sequence `tags:` list
      PRESENT; applying the empty-value check without it would silently drop block-valued keys —
-     the #245 hazard again.
+     the #245 hazard again. (c) Trailing comments are NOT stripped: the inline value is
+     compared verbatim (after trimming whitespace), so `tags: [] # none` counts PRESENT in
+     tier 3 even though the strict tier reads it as empty/absent. The tiers disagree only in
+     the stricter direction (a false "present" refuses, never silently drops), and the
+     comment-stripping alternative would need a YAML-aware scanner to avoid cutting `#` inside
+     quoted values — accepted, not fixed (review 2026-10-02).
 
    Note: `collect_frontmatter_fence` returns only the inner text with no offset and rebuilds via
    `lines()` (drops `\r`) — fine for key-set purposes (keys are `\r`-insensitive after YAML
@@ -81,7 +94,12 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
      `None`, omitted via `skip_serializing_if`). `supersedes: ""` also counts ABSENT, but NOT
      because the renderer omits it (it would render `Some("")`): an empty pointer can never be
      re-sent — `under_deposit("")` refuses it upstream — so counting it present would wedge
-     every edit of that note into a key-drop refusal. Unknown keys
+     every edit of that note into a key-drop refusal. **Any other value form counts PRESENT**
+     — including non-list `tags` (`tags: ""`, `tags: foo`, `tags: {}`) and non-empty
+     `supersedes`. Such a hand-edited note still passes staleness (the typed parse fails, the
+     token reader's line-scan fallback succeeds), and it does not wedge: the caller keeps the
+     key by sending non-empty `tags`, or drops it with the explicit confirmation (review
+     2026-10-02). Unknown keys
      (non-`KNOWN_KEYS`) count as PRESENT regardless of value, so a hand-written `aliases: []`
      cannot be silently stripped on a subsequent edit — it must surface as
      `KeyDropUnrepresentable` rather than vanish. A hand-written `tags: []` or
@@ -106,12 +124,30 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
      (`allow_shrink`, `allow_key_drop`) — easy to swap silently. Keep bare bools (a params struct
      would rewrite every #240-era call site — scope creep), but pin: ALL test call sites bind
      named locals first (`let allow_shrink = false; let allow_key_drop = true;`) and pass the
-     locals, never literals — a swap then reads wrong in review.
+     locals, never literals — a swap then reads wrong in review. This covers BOTH the unit
+     tests in `okf/write.rs` AND the integration binary `src-tauri/tests/mcp_write_integration.rs`
+     (direct `write_note(..., None, false)` calls at :836, :868, :883, :907 today — every one
+     breaks on the signature change; review 2026-10-02).
+   - MCP tool description (`src-tauri/src/mcp_server.rs:127`, review 2026-10-02): the
+     `vault_write_note` description enumerates every refusal and its remedy
+     (`existing_unparsable`, `shrink_refused`, `compaction_marker`) — it is how agents learn
+     the contract. Extend it with both new refusals: `key_drop_refused:{keys}` means the
+     payload omitted frontmatter keys the note has — re-read the note and resend the complete
+     frontmatter; `key_drop_refused:unrepresentable:{keys}` means the note carries keys this
+     tool cannot write — the note must be migrated outside the tool. Same rule as the
+     Displays: the description NEVER names `allow_key_drop` (the schemars param schema is
+     the only place the flag appears).
    - Removal is still possible: retiring a `supersedes` pointer deliberately is an
      `allow_key_drop: true` edit. Edge case (Opus c1 m5): re-sending `supersedes` to KEEP it
      triggers the `supersedes_not_found` check when the target deposit has since been removed —
      in that situation the only edit path is `allow_key_drop: true` (dropping the stale pointer),
-     which is the intended outcome.
+     which is the intended outcome. Sibling case (review 2026-10-02): a NON-deposit note
+     (`records/`, `wiki/`) carrying a hand-added `supersedes:` can never re-send it either —
+     `write_note` refuses `supersedes` on a non-deposit path ("supersedes is deposit-only")
+     before the guard runs. Its `KeyDropRefused` advice ("re-send the complete frontmatter")
+     therefore cannot succeed; as with m5, the only edit path is `allow_key_drop: true`.
+     Accepted as documented (rare: hand-edited, outside the deposit flow) rather than
+     re-partitioning `supersedes` by path.
    - The refusals never name the bypass flag in their Display (same #240 rule: a compacted agent
      reading the flag in the error bypasses in one retry).
 
@@ -164,7 +200,12 @@ callers see the Display via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
 
 ## Testing
 
-(`cargo test -p curated-thoughts okf::write`; existing #240 test suite as the pattern.)
+Verification must match CI's real gates (review 2026-10-02): `cargo test -p curated-thoughts
+--features test-utils,mcp-server` — the full lib suite AND the integration binaries
+(`tests/mcp_write_integration.rs` calls `write_note` directly; `okf::write` alone neither
+builds nor runs it). Iterate with `cargo test -p curated-thoughts --features
+test-utils,mcp-server okf::write`, but the full run is the gate. Existing #240 test suite as
+the pattern.
 
 - Incident replay: existing note with `tags` + `supersedes`; If-Match edit payload omitting both →
   refused with `KeyDropRefused`, Display `starts_with("key_drop_refused:")`, names both keys
@@ -192,6 +233,14 @@ callers see the Display via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
 - Known-field absent forms: existing `tags: null`, `tags: ~`, `supersedes: ~`, and
   `supersedes: ""` each count absent — an edit omitting the key succeeds. Tier-3 non-empty
   scalar: damaged-YAML `tags: foo` counts PRESENT — an edit omitting `tags` refuses.
+- Non-list `tags` (review 2026-10-02): damaged-YAML note with `tags: ""` → edit omitting
+  `tags` refuses with `KeyDropRefused`; the same edit sending non-empty `tags` succeeds.
+- Tier-3 trailing comment (review 2026-10-02): damaged-YAML `tags: [] # none` counts PRESENT
+  — an edit omitting `tags` refuses (pins the accepted stricter-direction divergence).
+- MCP description (review 2026-10-02): assert the `vault_write_note` tool description
+  mentions `key_drop_refused` and does NOT contain `allow_key_drop` — via the server's
+  registered tool list if it is reachable from a test, otherwise a source-text assertion on
+  `mcp_server.rs` (`include_str!`).
 - `allow_key_drop: true` permits both refusal cases; omitted/false behaves identically to today.
 - Boundary: ADDING keys never refuses; dropping zero keys never refuses; drop of exactly one key
   names exactly that key.
@@ -226,5 +275,21 @@ callers see the Display via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
 - Migration of the 17 measured legacy-key notes (D5) — separate housekeeping pass, not this PR.
 - Restore-from-`allow_key_drop:true` accidents — same stance as `allow_shrink`: git history is the
   recovery path; the flag is deliberate, logged in the caller's payload.
+
+## Revision history
+
+- Opus design-c1 — REQUEST CHANGES (M1–M3, m1–m6, all real) — applied.
+- Opus design-c2 — REQUEST CHANGES (MAJOR 1 + 2 minors + 4 nits) — applied.
+- Opus design-c3 — APPROVE WITH NITS (N1–N3) — applied.
+- GLM self-review — applied.
+- CodeRabbit PR comments 2026-10-02 — M1 existing-side null/empty normalization restricted
+  to KNOWN optional fields; M2 size-guard scope is body-only. Follow-up: tier-3 line scan
+  inherits the known-field restriction, "bare scalar" wording fixed, full absent-form list
+  pinned — applied.
+- Claude review 2026-10-02 — MCP tool description update (D4); integration-test call sites +
+  CI-feature test command (D4/Testing); `KNOWN_KEYS` hoisted to module scope (Problem);
+  non-string-key reference fixed to `check_round_trip` :621/:634 (D1); non-deposit
+  `supersedes` documented (D4); tier-3 trailing-comment divergence pinned (D1); non-list
+  `tags` value forms count PRESENT (D2) — applied.
 
 Fixes #245.
