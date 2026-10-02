@@ -15,6 +15,12 @@ use crate::tool_dispatch::ToolDispatchContext;
 
 const AGENTS_DIR: &str = crate::vault::safe_path::AGENTS_DEPOSIT_DIR;
 const SUPERSESSIONS_DIR: &str = "immutable-source-files/agents/supersessions";
+/// `SUPERSESSIONS_DIR` with its trailing separator, so a prefix test cannot
+/// match a sibling directory — the same property
+/// [`crate::vault::safe_path::AGENTS_DEPOSIT_PREFIX`] already guarantees for
+/// the deposit lane; prefix checks here reuse that constant directly instead
+/// of re-deriving `format!("{AGENTS_DIR}/")` at every call site.
+const SUPERSESSIONS_PREFIX: &str = "immutable-source-files/agents/supersessions/";
 
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -71,13 +77,23 @@ pub struct WisdomProposeSupersessionParams {
 // Deposit file rendering
 // ---------------------------------------------------------------------------
 
+/// Titles, tags, and reasons are single-line slots in the rendered file
+/// (H1, inline-code list item, bullet). A newline inside one would inject
+/// structure — a second `# ` heading, or a line the supersession readers
+/// parse as file framing rather than content — so any line break is
+/// collapsed to a space before interpolation. Only `body` is multi-line.
+fn flatten_line(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
+}
+
 fn render_deposit_file(title: &str, body: &str, tags: &[String]) -> String {
+    let title = flatten_line(title);
     let mut out = String::new();
     out.push_str(&format!("# {title}\n\n"));
     if !tags.is_empty() {
         let list = tags
             .iter()
-            .map(|t| format!("`{t}`"))
+            .map(|t| format!("`{}`", flatten_line(t)))
             .collect::<Vec<_>>()
             .join(" ");
         out.push_str(&format!("{list}\n\n"));
@@ -93,6 +109,8 @@ fn render_supersession_file(
     replacement_body: &str,
     reason: &str,
 ) -> String {
+    let replacement_title = flatten_line(replacement_title);
+    let reason = flatten_line(reason);
     // now_ms() is milliseconds, so the _millis variant is required: the
     // plain seconds-based `from_timestamp` fed this value would render a
     // year-~56000 stamp.
@@ -196,6 +214,24 @@ pub(crate) fn deposit_status_row(
         )
         .map_err(|e| anyhow!("chunks probe failed: {e}"))?;
 
+    // A path with no kick row, no document row, and no chunks was never
+    // deposited (typo, wrong vault): reporting `pending` here would send the
+    // caller into an endless poll for an ingest that will never happen. Error
+    // instead — a hand-placed file the watcher already ingested still has a
+    // documents/chunks row and flows through the state machine below.
+    if kick.is_none() && chunked == 0 {
+        let known_doc: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                [vault_relative_path],
+                |r| r.get(0),
+            )
+            .map_err(|e| anyhow!("documents probe failed: {e}"))?;
+        if known_doc == 0 {
+            bail!("no deposit record for path: {vault_relative_path}");
+        }
+    }
+
     // Live librarian evidence outranks the kick ledger: a recorded 'failed'
     // from a transient kick error must not permanently misreport a deposit
     // the Librarian actually ingested (Opus impl-review nit 2). The inverse
@@ -206,7 +242,7 @@ pub(crate) fn deposit_status_row(
     // `pending` — application is the Active Librarian's follow-up spec (D5),
     // so no supersession is 'ingested' until that lands. The raw ledger
     // state stays visible in the `kick` field.
-    let supersession_lane = vault_relative_path.starts_with(&format!("{SUPERSESSIONS_DIR}/"));
+    let supersession_lane = vault_relative_path.starts_with(SUPERSESSIONS_PREFIX);
     let state = match (&kick, facts.is_empty(), chunked > 0) {
         (_, false, _) => "ingested".to_string(),
         (Some((s, _, _)), _, _) if s == "ingested" && supersession_lane => "pending".to_string(),
@@ -355,10 +391,11 @@ fn run_kick(
         // (agents = synthesize + auto_approve after V25); with no configured
         // generation provider it errors — that's `chunked` (no librarian
         // host), not `failed`. Config is re-checked HERE rather than passed
-        // in from `start_kick` so the ledger decision always matches the
+        // in from the spawn site so the ledger decision always matches the
         // config this kick actually runs under.
         if !crate::librarian::llm_generation_configured() {
-            set_kick_state(&conn, &rel_path, "chunked", None)?;
+            // The ledger already reads `chunked` from the ingest leg above —
+            // this check only decides whether the librarian leg runs.
             return Ok("chunked".to_string());
         }
         let model = crate::librarian::active_generation_model(crate::setup::recommended_model());
@@ -394,27 +431,64 @@ fn run_kick(
 
 type KickHandle = tokio::task::JoinHandle<()>;
 
-/// Record the initial ledger state and spawn the kick when a generation host
-/// is configured. Returns the reply label (`started` | `no_ingest_host`) and
-/// the kick's handle. The ledger write goes through with_rw: ctx.conn is
-/// READ-ONLY in the MCP sidecar.
-async fn start_kick(
+/// Fail-closed audit row + initial kick-ledger row in ONE transaction.
+///
+/// The ledger write goes through with_rw (ctx.conn is READ-ONLY in the MCP
+/// sidecar). Committing both rows atomically matters in both directions: two
+/// separate writes could leave an audit row whose ledger write failed right
+/// after it — an audit trail asserting a durable write that was compensated
+/// away — or, had the order been reversed, a ledger row with no audit. If
+/// this fails, the caller removes the file, so file, audit, and ledger land
+/// or vanish together.
+async fn audit_and_seed_kick(
     ctx: &ToolDispatchContext,
-    vault: &std::path::Path,
-    rel: &str,
-) -> Result<(&'static str, Option<KickHandle>)> {
-    let generation_configured = crate::librarian::llm_generation_configured();
-    let initial = if generation_configured {
+    tool: &'static str,
+    path: String,
+    initial_state: &'static str,
+) -> Result<()> {
+    let client = ctx.client.clone();
+    let audit_path = path.clone();
+    let kick_rel = path;
+    ctx.with_rw(move |conn| {
+        let tx = conn
+            .transaction()
+            .map_err(|e| anyhow!("kick ledger tx open failed: {e}"))?;
+        crate::tool_dispatch::log_agent_access_checked(
+            &tx,
+            &client,
+            tool,
+            Some(audit_path.as_str()),
+            "write",
+        )?;
+        set_kick_state(&tx, &kick_rel, initial_state, None)?;
+        tx.commit()
+            .map_err(|e| anyhow!("kick ledger tx commit failed: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow!("kick-state write failed: {e:#}"))
+}
+
+/// The initial ledger state recorded before the kick spawns (D3): a crash
+/// between the ledger commit and the spawn leaves an honest trace.
+fn initial_kick_state(generation_configured: bool) -> &'static str {
+    if generation_configured {
         "pending"
     } else {
         "no_ingest_host"
-    };
-    let kick_rel = rel.to_string();
-    ctx.with_rw(move |conn| set_kick_state(conn, &kick_rel, initial, None))
-        .await
-        .map_err(|e| anyhow!("kick-state write failed: {e:#}"))?;
+    }
+}
+
+/// Spawn the pipeline kick when a generation host is configured. The caller
+/// already committed the initial ledger row (see [`audit_and_seed_kick`]);
+/// spawning cannot fail, so file, audit row, and ledger row cannot diverge.
+fn spawn_kick_if(
+    generation_configured: bool,
+    ctx: &ToolDispatchContext,
+    vault: &std::path::Path,
+    rel: &str,
+) -> Option<KickHandle> {
     if !generation_configured {
-        return Ok(("no_ingest_host", None));
+        return None;
     }
     let (db_path, vault, rel, profile) = (
         ctx.db_path.clone(),
@@ -422,8 +496,9 @@ async fn start_kick(
         rel.to_string(),
         ctx.profile.clone(),
     );
-    let handle = tokio::task::spawn_blocking(move || run_kick(db_path, vault, rel, profile));
-    Ok(("started", Some(handle)))
+    Some(tokio::task::spawn_blocking(move || {
+        run_kick(db_path, vault, rel, profile)
+    }))
 }
 
 /// Await a kick; an aborted/panicked kick must not strand the ledger at
@@ -495,15 +570,13 @@ async fn deposit_inner(
 ) -> Result<(Value, Option<KickHandle>)> {
     let vault = vault_dir(ctx)?;
     let rel = p.path.replace('\\', "/");
-    // Delimiter-anchored prefix: `{AGENTS_DIR}/` exactly (the constant is the
-    // full lane path `immutable-source-files/agents`, so the check carries
-    // the `immutable-source-files/` parent too) — a byte-prefix check would
-    // admit sibling directories like `agents-archive/` (safe via safe_path's
-    // canonical containment, but the wrong error class). Canonical
-    // containment in safe_vault_path remains the decisive guard; this check
-    // just routes misuse to the clearest message.
-    let in_agents = rel.starts_with(&format!("{AGENTS_DIR}/"));
-    let in_supersessions = rel.starts_with(&format!("{SUPERSESSIONS_DIR}/"));
+    // Delimiter-anchored prefixes (`safe_path::AGENTS_DEPOSIT_PREFIX` /
+    // `SUPERSESSIONS_PREFIX` carry the trailing separator, so the checks
+    // cannot match sibling directories like `agents-archive/`; canonical
+    // containment in safe_vault_path remains the decisive guard — this
+    // routes misuse to the clearest message).
+    let in_agents = rel.starts_with(crate::vault::safe_path::AGENTS_DEPOSIT_PREFIX);
+    let in_supersessions = rel.starts_with(SUPERSESSIONS_PREFIX);
     if !in_agents || in_supersessions {
         bail!(
             "deposit path must be under {AGENTS_DIR}/ (not {SUPERSESSIONS_DIR}/): {}",
@@ -519,17 +592,17 @@ async fn deposit_inner(
     }
 
     let content = render_deposit_file(&p.title, &p.body, p.tags.as_deref().unwrap_or(&[]));
-    // The sanctioned lane directory must exist before validation:
-    // safe_vault_path's MayCreate canonicalizes the parent and reports
-    // "parent directory not found" for a fresh vault (CI caught this —
-    // immutable-source-files/agents/ does not exist yet there). Creating the
-    // lane dir itself is safe: it is a fixed constant, not user input.
-    std::fs::create_dir_all(vault.join(AGENTS_DIR))?;
-    // A deposit may live deeper than the lane dir (e.g. agents/topic/note.md).
-    // Those intermediate dirs must ALSO exist before validation, for the same
-    // MayCreate reason. They are user input, so: plain names only (no `..`,
-    // no root — nothing may be created outside the lane before safe_vault_path
-    // runs), created one component at a time refusing symlinked components.
+    // The whole lane chain down to the deposit's parent must exist before
+    // validation: safe_vault_path's MayCreate canonicalizes the parent and
+    // reports "parent directory not found" for a fresh vault (CI caught this
+    // — immutable-source-files/agents/ does not exist yet there). It is
+    // created one component at a time FROM THE VAULT ROOT refusing symlinked
+    // components: `create_dir_all` would follow a symlink planted at
+    // `immutable-source-files` (or `agents`) and materialize the lane tree
+    // outside the vault before safe_vault_path rejects the write. The
+    // user-controlled sub-parent (a deposit may live deeper, e.g.
+    // agents/topic/note.md) is vetted first: plain names only — no `..`, no
+    // root — so nothing is created outside the lane before validation runs.
     let sub_parent = std::path::Path::new(&rel)
         .strip_prefix(AGENTS_DIR)
         .ok()
@@ -541,7 +614,8 @@ async fn deposit_inner(
     {
         bail!("unsafe deposit path: traversal component in {}", p.path);
     }
-    crate::okf::write::create_parents_no_symlink(&vault.join(AGENTS_DIR), sub_parent)
+    let lane_rel = std::path::Path::new(AGENTS_DIR).join(sub_parent);
+    crate::okf::write::create_parents_no_symlink(&vault, &lane_rel)
         .map_err(|e| anyhow!("unsafe deposit path: {e}"))?;
     // Validate, then write to the *validated* path (not the raw join):
     // safe_vault_path canonicalizes every parent and rejects symlinked or
@@ -574,39 +648,37 @@ async fn deposit_inner(
         Err(e) => return Err(anyhow!("deposit write failed: {e}")),
     }
 
-    // Audit (fail-closed, RW connection, same contract as the removed
-    // curated write tools) — `wisdom_` joins the curated audit class.
+    // Audit + initial kick-ledger row (fail-closed, ONE RW transaction, same
+    // contract as the removed curated write tools) — `wisdom_` joins the
+    // curated audit class.
     //
-    // The file write above cannot share the audit's transaction, so a failed
-    // audit — or kick-ledger write below — compensates by removing the
-    // just-created file: the caller must be able to retry the same path
-    // instead of wedging on `deposit_exists` forever.
-    let audit_path = rel.clone();
-    let client = ctx.client.clone();
-    if let Err(e) = ctx
-        .with_rw(move |conn| {
-            crate::tool_dispatch::log_agent_access_checked(
-                conn,
-                &client,
-                "wisdom_deposit",
-                Some(audit_path.as_str()),
-                "write",
-            )
-        })
-        .await
+    // The file write above cannot share the audit's transaction, so a failure
+    // here compensates by removing the just-created file: the caller must be
+    // able to retry the same path instead of wedging on `deposit_exists`
+    // forever. Seeding the ledger in the same transaction closes the inverse
+    // hole: an audit row can no longer outlive a deposit whose kick-ledger
+    // write failed right after the audit commit.
+    let generation_configured = crate::librarian::llm_generation_configured();
+    if let Err(e) = audit_and_seed_kick(
+        ctx,
+        "wisdom_deposit",
+        rel.clone(),
+        initial_kick_state(generation_configured),
+    )
+    .await
     {
         let _ = std::fs::remove_file(&validated);
         return Err(e);
     }
 
-    // Kick (D3): full pipeline, lock-serialized. The ledger row is recorded
-    // before the spawn so a crash in between leaves an honest trace.
-    let (kick_label, handle) = match start_kick(ctx, &vault, &rel).await {
-        Ok(ok) => ok,
-        Err(e) => {
-            let _ = std::fs::remove_file(&validated);
-            return Err(e);
-        }
+    // Kick (D3): full pipeline, lock-serialized. The ledger row is committed
+    // above, before the spawn, so a crash in between leaves an honest trace.
+    // Reply label per spec D3: `started` when a kick spawned.
+    let handle = spawn_kick_if(generation_configured, ctx, &vault, &rel);
+    let kick_label: &str = if generation_configured {
+        "started"
+    } else {
+        "no_ingest_host"
     };
 
     Ok((
@@ -624,7 +696,7 @@ pub async fn dispatch_wisdom_deposit_status(
     p: WisdomDepositStatusParams,
 ) -> Result<Value> {
     let rel = p.path.replace('\\', "/");
-    if !rel.starts_with(&format!("{AGENTS_DIR}/")) {
+    if !rel.starts_with(crate::vault::safe_path::AGENTS_DEPOSIT_PREFIX) {
         bail!("not a deposit path: {}", p.path);
     }
     let audit_path = rel.clone();
@@ -762,7 +834,20 @@ async fn supersession_inner(
                     other => Err(other),
                 })
                 .map_err(|e| anyhow!("target lookup failed: {e}"))?;
-            token.ok_or_else(|| anyhow!("target_fact_id not found or archived: {id}"))?
+            let token =
+                token.ok_or_else(|| anyhow!("target_fact_id not found or archived: {id}"))?;
+            // Same shape gate as the target_source_ref path: a legacy or
+            // path-shaped source_ref would render a `supersedes:` line the
+            // Active Librarian's application pass (which keys on the exact
+            // token shape, D5) can never match — the supersession dead-ends
+            // while status honestly reads pending. Refuse instead.
+            if !crate::db::commit::is_librarian_source_ref_token(&token) {
+                bail!(
+                    "target_fact_id {id} resolves to a source_ref that is not a \
+                     librarian token: {token}"
+                );
+            }
+            token
         }
     };
 
@@ -773,9 +858,13 @@ async fn supersession_inner(
         &p.replacement_body,
         &p.reason,
     );
-    // Lane dir first (fixed constant, not user input), then validate, then
-    // exclusive-create on the validated path — same contract as deposits.
-    std::fs::create_dir_all(vault.join(SUPERSESSIONS_DIR))?;
+    // Lane chain first (fixed constant, not user input), created one
+    // component at a time from the vault root refusing symlinked components
+    // (a symlinked `immutable-source-files`/`agents` must not be followed
+    // outside the vault), then validate, then exclusive-create on the
+    // validated path — same contract as deposits.
+    crate::okf::write::create_parents_no_symlink(&vault, std::path::Path::new(SUPERSESSIONS_DIR))
+        .map_err(|e| anyhow!("unsafe supersession path: {e}"))?;
 
     // The filename is server-generated (`supersession-{now_ms}.md`): two
     // proposals inside one millisecond would collide on the exclusive
@@ -818,22 +907,17 @@ async fn supersession_inner(
     let (rel, validated) = landed
         .ok_or_else(|| anyhow!("supersession filename collision: 8 attempts in one millisecond"))?;
 
-    // Audit, with the same compensating file removal as the deposit lane: a
-    // failed audit (or kick-ledger write below) must leave the caller able
-    // to retry rather than wedged on a path it never chose.
-    let audit_path = rel.clone();
-    let client = ctx.client.clone();
-    if let Err(e) = ctx
-        .with_rw(move |conn| {
-            crate::tool_dispatch::log_agent_access_checked(
-                conn,
-                &client,
-                "wisdom_propose_supersession",
-                Some(audit_path.as_str()),
-                "write",
-            )
-        })
-        .await
+    // Audit + initial kick-ledger row in one transaction, with the same
+    // compensating file removal as the deposit lane: a failure must leave
+    // the caller able to retry rather than wedged on a path it never chose.
+    let generation_configured = crate::librarian::llm_generation_configured();
+    if let Err(e) = audit_and_seed_kick(
+        ctx,
+        "wisdom_propose_supersession",
+        rel.clone(),
+        initial_kick_state(generation_configured),
+    )
+    .await
     {
         let _ = std::fs::remove_file(&validated);
         return Err(e);
@@ -844,12 +928,11 @@ async fn supersession_inner(
     // the follow-up reconcile spec (rule 4 mechanics); until then status
     // stays pending. Same kick contract as the deposit lane, so the reply
     // label and the ledger always agree.
-    let (kick_label, handle) = match start_kick(ctx, &vault, &rel).await {
-        Ok(ok) => ok,
-        Err(e) => {
-            let _ = std::fs::remove_file(&validated);
-            return Err(e);
-        }
+    let handle = spawn_kick_if(generation_configured, ctx, &vault, &rel);
+    let kick_label: &str = if generation_configured {
+        "started"
+    } else {
+        "no_ingest_host"
     };
 
     Ok((
@@ -1273,7 +1356,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_ref, created_at, updated_at)
-                 VALUES ('fact_z', 'ent', 'T', 'B', 'librarian-deadbeef', 0, 0)",
+                 VALUES ('fact_z', 'ent', 'T', 'B', 'librarian-abc123def456abc123def456abc12345', 0, 0)",
                 [],
             )
             .unwrap();
@@ -1289,8 +1372,168 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(v["supersedes"], serde_json::json!("librarian-deadbeef"));
+            assert_eq!(
+                v["supersedes"],
+                serde_json::json!("librarian-abc123def456abc123def456abc12345")
+            );
         });
+    }
+
+    /// The fact-id path must apply the SAME token-shape gate as the
+    /// target_source_ref path: a legacy/short source_ref would render a
+    /// `supersedes:` line the Active Librarian application pass (D5) can
+    /// never match, dead-ending the supersession while status reads pending.
+    #[test]
+    fn supersession_by_fact_id_rejects_legacy_source_ref_shapes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            ctx.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_ref, created_at, updated_at)
+                     VALUES ('fact_legacy', 'ent', 'T', 'B', 'librarian-deadbeef', 0, 0)",
+                    [],
+                )
+                .unwrap();
+            let err = dispatch_wisdom_propose_supersession(
+                &ctx,
+                WisdomProposeSupersessionParams {
+                    target_source_ref: None,
+                    target_fact_id: Some("fact_legacy".into()),
+                    replacement_title: "t".into(),
+                    replacement_body: "b".into(),
+                    reason: "r".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not a librarian token"),
+                "legacy-shaped source_ref must be refused, got: {err}"
+            );
+        });
+    }
+
+    /// A path that was never deposited (typo, wrong vault) must ERROR, not
+    /// report `pending` — an agent would otherwise poll forever for an
+    /// ingest that will never happen.
+    #[test]
+    fn status_errors_for_never_deposited_paths() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let err = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams {
+                    path: "immutable-source-files/agents/note-l.md".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no deposit record"),
+                "unknown path must surface a not-found error, got: {err}"
+            );
+        });
+    }
+
+    /// A symlink planted on a lane path component must not be followed: no
+    /// directory may be created outside the vault as a side effect of a
+    /// deposit/supersession that safe_vault_path then rejects.
+    #[test]
+    #[cfg(unix)]
+    fn deposit_and_supersession_refuse_symlinked_lane_components() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let outside = tempfile::TempDir::new().unwrap();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            // Re-point the `agents` lane at an outside directory AFTER the
+            // ctx helper built the real tree.
+            std::fs::remove_dir_all(dir.join(AGENTS_DIR)).unwrap();
+            symlink(outside.path(), dir.join(AGENTS_DIR)).unwrap();
+
+            let err = dispatch_wisdom_deposit(
+                &ctx,
+                WisdomDepositParams {
+                    path: "immutable-source-files/agents/sneaky.md".into(),
+                    title: "t".into(),
+                    body: "b".into(),
+                    tags: None,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("unsafe deposit path"), "{err}");
+            let err = dispatch_wisdom_propose_supersession(
+                &ctx,
+                WisdomProposeSupersessionParams {
+                    target_source_ref: Some("librarian-abc123def456abc123def456abc12345".into()),
+                    target_fact_id: None,
+                    replacement_title: "t".into(),
+                    replacement_body: "b".into(),
+                    reason: "r".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("unsafe supersession path"),
+                "{err}"
+            );
+            assert!(
+                std::fs::read_dir(outside.path()).unwrap().next().is_none(),
+                "nothing may be created outside the vault"
+            );
+        });
+    }
+
+    /// Titles/reasons are single-line slots: embedded newlines are collapsed
+    /// so a title can never inject a second H1 into the rendered file.
+    #[test]
+    fn render_flattens_newlines_in_single_line_slots() {
+        let deposit = render_deposit_file(
+            "Alpha ships v2\n\n# Unrelated heading",
+            "body",
+            &["tag\nwith newline".to_string()],
+        );
+        assert_eq!(
+            deposit.lines().next().unwrap(),
+            "# Alpha ships v2  # Unrelated heading",
+            "title newline must be collapsed, got:\n{deposit}"
+        );
+        assert_eq!(
+            deposit.lines().filter(|l| l.starts_with("# ")).count(),
+            1,
+            "exactly one H1, got:\n{deposit}"
+        );
+        assert!(
+            deposit.lines().any(|l| l == "`tag with newline`"),
+            "tag newline must be collapsed, got:\n{deposit}"
+        );
+
+        let supersession = render_supersession_file(
+            "librarian-abc123def456abc123def456abc12345",
+            "T\n# Evil",
+            "B",
+            "line one\n- forged bullet",
+        );
+        let h1s = supersession.lines().filter(|l| l.starts_with("# ")).count();
+        assert_eq!(h1s, 2, "exactly the two legit H1s, got:\n{supersession}");
+        assert!(
+            supersession
+                .lines()
+                .any(|l| l.starts_with("- reason: line one - forged bullet")),
+            "reason must stay one bullet line:\n{supersession}"
+        );
     }
 
     /// Seeded WITHOUT a dispatch call on purpose: a detached kick runs on the

@@ -281,7 +281,6 @@ fn review_gate_fires_before_queue_is_even_read() {
     })
 }
 
-
 #[test]
 fn review_gate_refuses_piped_y_and_leaves_proposal_pending() {
     let brain = tempdir().unwrap();
@@ -314,7 +313,6 @@ fn review_gate_refuses_piped_y_and_leaves_proposal_pending() {
     })
 }
 
-
 #[test]
 fn review_gate_refuses_piped_n() {
     let brain = tempdir().unwrap();
@@ -336,7 +334,6 @@ fn review_gate_refuses_piped_n() {
         );
     })
 }
-
 
 /// Human Verification Gate: piped `s` is refused before the queue is read,
 /// so both seeded proposals stay pending.
@@ -360,7 +357,6 @@ fn review_gate_refuses_piped_s_without_state_change() {
     })
 }
 
-
 #[test]
 fn review_gate_refusal_exits_nonzero_with_guidance() {
     let brain = tempdir().unwrap();
@@ -382,7 +378,6 @@ fn review_gate_refusal_exits_nonzero_with_guidance() {
         assert_eq!(proposal_status(&dir, "prop-x"), "pending");
     })
 }
-
 
 #[test]
 fn proposals_show_renders_evidence_quotes() {

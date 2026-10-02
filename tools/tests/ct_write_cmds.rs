@@ -31,7 +31,6 @@ fn with_seeded_proposals<F: FnOnce(&std::path::Path)>(f: F) {
     });
 }
 
-
 fn proposal_status(dir: &std::path::Path, id: &str) -> String {
     let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
     conn.query_row(
@@ -68,7 +67,6 @@ fn approve_subcommand_is_gone() {
     })
 }
 
-
 #[test]
 fn approve_subcommand_is_gone_on_empty_queue_too() {
     with_seeded_proposals(|dir| {
@@ -79,7 +77,6 @@ fn approve_subcommand_is_gone_on_empty_queue_too() {
         );
     })
 }
-
 
 #[test]
 fn approve_removal_leaves_proposals_untouched() {
@@ -97,10 +94,12 @@ fn approve_removal_leaves_proposals_untouched() {
             )
             .unwrap()
         };
-        assert_eq!(confirmed, 0, "no wisdom rows may appear from the removed path");
+        assert_eq!(
+            confirmed, 0,
+            "no wisdom rows may appear from the removed path"
+        );
     })
 }
-
 
 #[test]
 fn approve_all_is_gone_even_with_yes() {
@@ -114,7 +113,6 @@ fn approve_all_is_gone_even_with_yes() {
         assert_eq!(proposal_status(dir, "prop-b"), "pending");
     })
 }
-
 
 /// Run `f` with a brain-dir fixture (config.json pointing `vault_path` at a
 /// temp vault containing one markdown file) as CURATED_BRAIN_DIR.

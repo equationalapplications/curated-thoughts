@@ -24,8 +24,8 @@
 //! Path-level helpers (`BrainPaths`, `resolve_brain_paths`, `print_json`,
 //! `vault_contains`) live in `crate::paths`.
 
-use std::io::IsTerminal;
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -102,10 +102,8 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 
     // Walk assembly (root resolution, trust re-walk, surfacing, sort/dedup)
     // is shared with `ct drift` — see walk_list.rs (issue #241, spec M4).
-    let (vault_root, files, surfacing) = crate::walk_list::build_ingest_file_list(
-        &paths_b,
-        trust_new_links,
-    )?;
+    let (vault_root, files, surfacing) =
+        crate::walk_list::build_ingest_file_list(&paths_b, trust_new_links)?;
 
     // Heal offline moves before ingesting. A file that was `git mv`'d while
     // the app was closed otherwise leaves its old row -- and every chunk

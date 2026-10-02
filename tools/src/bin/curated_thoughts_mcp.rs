@@ -581,7 +581,9 @@ impl VaultMcpServer {
         );
         instructions.push_str("4. `curated_get_wiki_entry`: Fetch full wiki entry content.\n");
         instructions.push_str("5. `curated_search_code`: Search code chunks by query or symbol.\n");
-        instructions.push_str("6. `graph_neighbors`: Walk the code call/import graph from a root symbol.\n");
+        instructions.push_str(
+            "6. `graph_neighbors`: Walk the code call/import graph from a root symbol.\n",
+        );
         instructions.push_str(
             "7. `curated_superpowers_setup`: Get this setup instructions (you just ran this!).\n",
         );

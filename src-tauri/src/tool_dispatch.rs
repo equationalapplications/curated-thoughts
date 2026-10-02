@@ -832,21 +832,6 @@ impl ToolDispatchContext {
         .await
         .map_err(|e| anyhow::anyhow!("rw task join error: {e}"))?
     }
-
-    /// Compute the wisdom embedding blob OFF any DB lock and OFF the tokio
-    /// worker thread (the Local profile is a blocking HTTP round-trip with a
-    /// long timeout, and `embed_batch` builds a `reqwest::blocking` client —
-    /// same contract as `embed_query`). Provider failures collapse to `None`;
-    /// the embedding sweep fills the blob later.
-    pub async fn precompute_wisdom_embedding(&self, body: &str) -> Option<Vec<u8>> {
-        let profile = self.profile.clone();
-        let body = body.to_string();
-        tokio::task::spawn_blocking(move || {
-            crate::db::wisdom::precompute_entry_embedding(Some(&profile), &body)
-        })
-        .await
-        .ok()?
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,33 +1029,9 @@ pub async fn dispatch_curated_proposals_list(
     Ok(items)
 }
 
-/// Reviewer identity recorded for a decision made over MCP.
-///
-/// `ctx.client` alone is a per-connection LABEL (`local-mcp`), not a person:
-/// it is fixed at startup and identical for everyone who ever talks to this
-/// server, so on its own it cannot answer the question `reviewed_by` exists to
-/// answer. A local stdio MCP server is spawned per host and runs as one OS
-/// account, so qualifying the label with that account makes the stamp as
-/// specific as the CLI's (`cli_reviewer`) while still naming the surface.
-/// Falls back to the bare label where the environment names no account.
-/// Entry embeddings for an approve decision, computed with NO database lock
-/// held (spec: the blocking embedder round-trip must never run under a lock).
-///
-/// Phase 1 loads items + decisions under the read guard; the guard is dropped
-/// before phase 2 issues the provider call. The whole thing runs on a blocking
-/// thread because both phases are synchronous. The loaded inputs are returned
-/// alongside the embeddings so the caller can also hand the preloaded
-/// decision set to the resolver and keep its `get_proposal_detail` pass
-/// (per-evidence hydration) out of the write lock (PR #201 review finding 6).
-/// hvg Task 4: approve or reject a pending proposal after human review.
-/// Routes through the lazy RW connection exactly like curated_add_wisdom;
-/// the review core (db::proposals_review) enforces the in-transaction
-/// pending guard so already-resolved or superseded proposals error cleanly.
-///
-/// Audit posture matches the other curated write tools: the
-/// `curated_agent_log` row is written INSIDE the resolution transaction (via
-/// `ReviewOptions::audit`), not in a second one afterwards, so a decision can
-/// never be durable while its audit row is missing (spec §7 fail-closed).
+/// Compute a query embedding OFF the tokio worker thread (`embed_one` is a
+/// blocking HTTP round-trip with a long timeout and builds a
+/// `reqwest::blocking` client — it must never run on the async runtime).
 async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> {
     let profile = profile.clone();
     tokio::task::spawn_blocking(move || crate::embedder::embed_one(&profile, query)).await?
