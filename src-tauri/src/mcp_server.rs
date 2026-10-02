@@ -216,9 +216,6 @@ impl VaultMcpServer {
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }
 
-
-
-
     #[tool(
         name = "curated_proposals_list",
         description = "List curated proposals by status (default: pending — the review queue). Each item: proposal_id, proposed_name, kind, item_count, evidence chunk count, source docs, created_at. Statuses: pending|approved|rejected|partial|superseded. Empty array on a fresh brain."
@@ -299,13 +296,12 @@ impl VaultMcpServer {
         description = "Read-only listing of deposits without librarian evidence (chunked or better, including deferred supersession deposits). Never merged into recall or injection (INTENT rule 3)."
     )]
     async fn wisdom_pending(&self) -> Result<String, rmcp::ErrorData> {
-        let result = tool_dispatch::dispatch_tool_call(
-            &self.ctx,
-            "wisdom_pending",
-            serde_json::json!({}),
-        )
-        .await
-        .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        let result =
+            tool_dispatch::dispatch_tool_call(&self.ctx, "wisdom_pending", serde_json::json!({}))
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None)
+                })?;
         serde_json::to_string(&result)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
     }

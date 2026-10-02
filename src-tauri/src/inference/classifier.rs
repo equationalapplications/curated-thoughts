@@ -535,8 +535,8 @@ fn persist_merged_config(
     store: &dyn ClassifierSecretStore,
     config: ClassifierConfig,
 ) -> Result<()> {
-    let stored = read_classifier_config(paths, store)
-        .context("reading stored classifier config")?;
+    let stored =
+        read_classifier_config(paths, store).context("reading stored classifier config")?;
     let merged = merge_stored(config, Some(stored));
     write_classifier_config(paths, &merged, store)
 }
@@ -640,7 +640,10 @@ mod tests {
     #[test]
     fn jev_http_blank_model_falls_back_to_default() {
         for blank in [Some(String::new()), Some("   ".into())] {
-            let cfg = ClassifierConfig { model: blank, ..jev_cfg("https://x") };
+            let cfg = ClassifierConfig {
+                model: blank,
+                ..jev_cfg("https://x")
+            };
             assert_eq!(request_body(&cfg, &choice_req())["model"], JEV_HTTP_MODEL);
         }
     }
@@ -925,7 +928,10 @@ mod tests {
     #[test]
     fn merge_stored_none_model_keeps_stored_pin() {
         let merged = merge_stored(
-            ClassifierConfig { model: None, ..stored_cfg() },
+            ClassifierConfig {
+                model: None,
+                ..stored_cfg()
+            },
             Some(stored_cfg()),
         );
         assert_eq!(merged.model.as_deref(), Some("jev-1.13.0"));
@@ -934,12 +940,18 @@ mod tests {
     #[test]
     fn merge_stored_blank_model_unpins_after_merge() {
         let merged = merge_stored(
-            ClassifierConfig { model: Some("".into()), ..stored_cfg() },
+            ClassifierConfig {
+                model: Some("".into()),
+                ..stored_cfg()
+            },
             Some(stored_cfg()),
         );
         assert_eq!(merged.model, None);
         let merged = merge_stored(
-            ClassifierConfig { model: Some("  ".into()), ..stored_cfg() },
+            ClassifierConfig {
+                model: Some("  ".into()),
+                ..stored_cfg()
+            },
             Some(stored_cfg()),
         );
         assert_eq!(merged.model, None);
@@ -948,7 +960,10 @@ mod tests {
     #[test]
     fn merge_stored_trims_a_padded_pin_instead_of_persisting_whitespace() {
         let merged = merge_stored(
-            ClassifierConfig { model: Some(" jev-1.13.0 ".into()), ..stored_cfg() },
+            ClassifierConfig {
+                model: Some(" jev-1.13.0 ".into()),
+                ..stored_cfg()
+            },
             None,
         );
         // The padded value is canonicalized to the trimmed pin: what is
@@ -959,7 +974,10 @@ mod tests {
     #[test]
     fn merge_stored_explicit_pin_replaces_stored() {
         let merged = merge_stored(
-            ClassifierConfig { model: Some("jev-1.12".into()), ..stored_cfg() },
+            ClassifierConfig {
+                model: Some("jev-1.12".into()),
+                ..stored_cfg()
+            },
             Some(stored_cfg()),
         );
         assert_eq!(merged.model.as_deref(), Some("jev-1.12"));
@@ -967,7 +985,10 @@ mod tests {
 
     #[test]
     fn merge_stored_without_stored_keeps_incoming() {
-        let incoming = ClassifierConfig { model: Some("jev-1.12".into()), ..stored_cfg() };
+        let incoming = ClassifierConfig {
+            model: Some("jev-1.12".into()),
+            ..stored_cfg()
+        };
         let merged = merge_stored(incoming.clone(), None);
         assert_eq!(merged, incoming);
     }
@@ -977,7 +998,11 @@ mod tests {
         let mut stored = stored_cfg();
         stored.api_key = Some("tok".into());
         let merged = merge_stored(
-            ClassifierConfig { api_key: None, model: None, ..stored_cfg() },
+            ClassifierConfig {
+                api_key: None,
+                model: None,
+                ..stored_cfg()
+            },
             Some(stored),
         );
         assert_eq!(merged.api_key.as_deref(), Some("tok"));
@@ -1002,11 +1027,7 @@ mod tests {
             db_path: dir.path().join("brain.db"),
         };
         std::fs::write(&paths.config_path, "{}").unwrap();
-        (
-            dir,
-            paths,
-            InMemoryClassifierSecretStore(Mutex::new(None)),
-        )
+        (dir, paths, InMemoryClassifierSecretStore(Mutex::new(None)))
     }
 
     #[test]
@@ -1021,8 +1042,14 @@ mod tests {
         write_classifier_config(&paths, &pinned, &store).unwrap();
 
         // Unpin: blank model through merge_stored, like the command does.
-        let incoming = ClassifierConfig { model: Some("".into()), ..pinned.clone() };
-        let merged = merge_stored(incoming, Some(read_classifier_config(&paths, &store).unwrap()));
+        let incoming = ClassifierConfig {
+            model: Some("".into()),
+            ..pinned.clone()
+        };
+        let merged = merge_stored(
+            incoming,
+            Some(read_classifier_config(&paths, &store).unwrap()),
+        );
         write_classifier_config(&paths, &merged, &store).unwrap();
         // Backend-verifiable: the pin is GONE on a fresh read.
         assert_eq!(read_classifier_config(&paths, &store).unwrap().model, None);
@@ -1040,11 +1067,20 @@ mod tests {
         write_classifier_config(&paths, &pinned, &store).unwrap();
 
         // `model: None` = untouched: the stored pin must survive the trip.
-        let incoming = ClassifierConfig { model: None, ..pinned.clone() };
-        let merged = merge_stored(incoming, Some(read_classifier_config(&paths, &store).unwrap()));
+        let incoming = ClassifierConfig {
+            model: None,
+            ..pinned.clone()
+        };
+        let merged = merge_stored(
+            incoming,
+            Some(read_classifier_config(&paths, &store).unwrap()),
+        );
         write_classifier_config(&paths, &merged, &store).unwrap();
         assert_eq!(
-            read_classifier_config(&paths, &store).unwrap().model.as_deref(),
+            read_classifier_config(&paths, &store)
+                .unwrap()
+                .model
+                .as_deref(),
             Some("jev-1.13.0")
         );
     }

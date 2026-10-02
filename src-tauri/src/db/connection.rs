@@ -3226,7 +3226,8 @@ mod tests {
 
         // The child override wins the ancestor walk — this is the whole
         // point of the second row (CodeRabbit finding 2 on the spec PR).
-        let (mode, auto) = get_folder_mode(&conn, "immutable-source-files/agents/supersessions/x.md");
+        let (mode, auto) =
+            get_folder_mode(&conn, "immutable-source-files/agents/supersessions/x.md");
         assert_eq!(
             (mode.as_str(), auto),
             ("summarize", true),

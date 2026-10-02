@@ -35,9 +35,9 @@ pub mod trusted_links;
 pub mod vault;
 pub mod walk_vault;
 pub mod watcher;
-pub mod wisdom_deposit;
 pub mod wiki_diagnostics;
 pub mod wiki_graph;
+pub mod wisdom_deposit;
 
 use crate::embedder::embed_batch;
 use crate::inference::{

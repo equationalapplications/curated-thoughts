@@ -1121,9 +1121,7 @@ pub async fn dispatch_tool_call(
     // nonexistence is not an authorization boundary (a file could exist at the
     // sentinel path, and the curated READ tools query the real RO connection
     // before their audit insert). This explicit deny is the actual gate.
-    if client == "clanker-bridge"
-        && (tool.starts_with("curated_") || tool.starts_with("wisdom_"))
-    {
+    if client == "clanker-bridge" && (tool.starts_with("curated_") || tool.starts_with("wisdom_")) {
         anyhow::bail!("curated memory tools are not available to cloud-bridge sessions: {tool}");
     }
 
@@ -1283,7 +1281,8 @@ pub async fn dispatch_tool_call(
             crate::wisdom_deposit::dispatch_wisdom_deposit(ctx, p).await
         }
         "wisdom_deposit_status" => {
-            let p: crate::wisdom_deposit::WisdomDepositStatusParams = serde_json::from_value(params)?;
+            let p: crate::wisdom_deposit::WisdomDepositStatusParams =
+                serde_json::from_value(params)?;
             crate::wisdom_deposit::dispatch_wisdom_deposit_status(ctx, p).await
         }
         "wisdom_propose_supersession" => {
@@ -2031,11 +2030,6 @@ mod curated_memory_tests {
         .await
         .unwrap();
     }
-
-
-
-
-
 }
 
 #[cfg(test)]
@@ -2204,5 +2198,4 @@ mod curated_proposals_tests {
             );
         });
     }
-
 }

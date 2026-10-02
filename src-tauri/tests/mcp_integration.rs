@@ -561,7 +561,12 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     assert_eq!(names, expected, "tools/list must expose all 16 names");
 
     // -- INTENT rule 1: the direct-insert write tools are GONE ---------------
-    for removed in ["curated_add_wisdom", "curated_update_wisdom", "curated_archive_wisdom", "curated_proposal_decide"] {
+    for removed in [
+        "curated_add_wisdom",
+        "curated_update_wisdom",
+        "curated_archive_wisdom",
+        "curated_proposal_decide",
+    ] {
         let err = client
             .peer()
             .call_tool(
@@ -634,17 +639,16 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     let dup = client
         .peer()
         .call_tool(
-            CallToolRequestParams::new("wisdom_deposit".to_string())
-                .with_arguments(
-                    serde_json::json!({
-                        "path": rel,
-                        "title": "dup",
-                        "body": "dup"
-                    })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                ),
+            CallToolRequestParams::new("wisdom_deposit".to_string()).with_arguments(
+                serde_json::json!({
+                    "path": rel,
+                    "title": "dup",
+                    "body": "dup"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
         )
         .await;
     assert!(dup.is_err(), "append-only refusal expected");
@@ -666,13 +670,9 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     );
 
     // wisdom_pending lists the fresh deposit (no librarian rows: no LLM in CI)
-    let pending: serde_json::Value = call_tool(
-        &client,
-        "wisdom_pending",
-        serde_json::json!({}),
-    )
-    .await
-    .expect("wisdom_pending");
+    let pending: serde_json::Value = call_tool(&client, "wisdom_pending", serde_json::json!({}))
+        .await
+        .expect("wisdom_pending");
     let pending_paths: Vec<&str> = pending["pending"]
         .as_array()
         .expect("pending array")
