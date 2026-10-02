@@ -3603,7 +3603,7 @@ mod tests {
 
     #[test]
     fn key_drop_unknown_key_strict_and_line_scan_tiers() {
-        for damaged in [NO_SHRINK, NO_KEY_DROP, true] {
+        for damaged in [false, true] {
             let (_g, root) = vault();
             let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["aliases: []"], damaged));
             let err = kd_edit(
@@ -3989,6 +3989,32 @@ mod tests {
         assert!(
             !s.contains("allow_key_drop"),
             "must not teach the bypass: {s}"
+        );
+    }
+
+    #[test]
+    fn mcp_vault_write_note_description_teaches_refusals_not_flag() {
+        let src = include_str!("../mcp_server.rs");
+        let tool = src
+            .find("name = \"vault_write_note\"")
+            .expect("vault_write_note tool attribute present");
+        let after = &src[tool..];
+        let open =
+            after.find("description = \"").expect("description present") + "description = \"".len();
+        let len = after[open..].find('"').expect("description closes");
+        let desc = &after[open..open + len];
+        assert!(desc.contains("key_drop_refused:{keys}"), "{desc}");
+        assert!(
+            desc.contains("key_drop_refused:unrepresentable:{keys}"),
+            "{desc}"
+        );
+        assert!(
+            !desc.contains("allow_key_drop"),
+            "must not teach the bypass: {desc}"
+        );
+        assert!(
+            !desc.contains("allow_shrink"),
+            "must not teach the bypass: {desc}"
         );
     }
 }

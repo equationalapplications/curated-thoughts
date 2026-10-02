@@ -1,7 +1,7 @@
 # vault_write_note: frontmatter key-drop guard on If-Match edits (issue #245)
 
 **Date:** 2026-10-01
-**Status:** Proposed — review converged (Opus design-c3 APPROVE WITH NITS; CodeRabbit 2026-10-02 and Claude review 2026-10-02 applied). See [Revision history](#revision-history).
+**Status:** Implemented on `feat/issue-245-frontmatter-key-drop-guard` — plan `docs/superpowers/plans/2026-10-02-issue245-frontmatter-key-drop-guard.md`. Review converged before implementation (Opus design-c3 APPROVE WITH NITS; CodeRabbit, Claude review and `/code-review high` 2026-10-02 applied). See [Revision history](#revision-history).
 **Branch:** `feat/issue-245-frontmatter-key-drop-guard`
 **Priority:** High — silent data loss on the `vault_write_note` edit path (sibling of #240's body-truncation clobber, frontmatter axis).
 
