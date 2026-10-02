@@ -439,6 +439,47 @@ fn enforce_size_drop(
     })
 }
 
+/// Issue #245: refuse an edit whose payload drops frontmatter keys the
+/// existing note carries, unless the caller explicitly confirmed. Compares
+/// the existing key set ([`existing_frontmatter_keys`]) against the keys the
+/// INCOMING struct renders ([`rendered_key_set`]); `updated_at` is exempt
+/// (rotated on every write). KNOWN dropped keys are reported before UNKNOWN
+/// ones — `allow_key_drop` bypasses BOTH, so this precedence is what keeps
+/// known keys from being lost behind an unrepresentable-key message.
+#[cfg_attr(not(test), allow(dead_code))] // wired into write_note in Task 3
+fn enforce_key_preservation(
+    existing: Option<&str>,
+    incoming: &OkfFrontmatter,
+    allow_key_drop: bool,
+) -> Result<(), WriteNoteError> {
+    let Some(existing_keys) = existing.and_then(existing_frontmatter_keys) else {
+        return Ok(()); // create path, or fence-less (refused upstream)
+    };
+    if allow_key_drop {
+        return Ok(());
+    }
+    let incoming_keys = rendered_key_set(incoming);
+    let (mut known, mut unknown) = (Vec::new(), Vec::new());
+    // BTreeSet iteration is sorted, so both partitions come out sorted.
+    for key in existing_keys {
+        if key == "updated_at" || incoming_keys.contains(&key.as_str()) {
+            continue;
+        }
+        if KNOWN_KEYS.contains(&key.as_str()) {
+            known.push(key);
+        } else {
+            unknown.push(key);
+        }
+    }
+    if !known.is_empty() {
+        return Err(WriteNoteError::KeyDropRefused { keys: known });
+    }
+    if !unknown.is_empty() {
+        return Err(WriteNoteError::KeyDropUnrepresentable { keys: unknown });
+    }
+    Ok(())
+}
+
 /// True iff `path` is inside the deposit folder at any depth (incl. subfolders,
 /// allowed per Kurt's Aug 29 2026 directive; amended spec
 /// `2026-08-27-agent-deposit-write-path.md` §AMENDED 2026-08-29).
@@ -3138,5 +3179,89 @@ mod tests {
         // Unreachable through write_note (enforce_staleness refuses no_fence
         // first); pinned as defense-in-depth.
         assert!(existing_frontmatter_keys("no fence\n").is_none());
+    }
+
+    fn fm_without_tags(token: Option<&str>) -> OkfFrontmatter {
+        let mut m = fm("T", token);
+        m.tags = None;
+        m
+    }
+
+    #[test]
+    fn key_drop_refused_display_has_pinned_shape_without_flag_name() {
+        let e = WriteNoteError::KeyDropRefused {
+            keys: vec!["supersedes".into(), "tags".into()],
+        };
+        assert_eq!(
+            e.to_string(),
+            "key_drop_refused:supersedes,tags: re-send the complete frontmatter or pass an explicit key-drop confirmation"
+        );
+        assert!(!e.to_string().contains("allow_key_drop"));
+    }
+
+    #[test]
+    fn key_drop_unrepresentable_display_has_pinned_shape_without_flag_name() {
+        let e = WriteNoteError::KeyDropUnrepresentable {
+            keys: vec!["aliases".into(), "type".into()],
+        };
+        assert_eq!(
+            e.to_string(),
+            "key_drop_refused:unrepresentable:aliases,type: this note carries keys the writer cannot re-emit; migrate the note to the OKF schema outside this tool, or pass an explicit key-drop confirmation"
+        );
+        assert!(!e.to_string().contains("allow_key_drop"));
+    }
+
+    #[test]
+    fn key_preservation_create_path_and_fence_less_pass() {
+        assert!(enforce_key_preservation(None, &fm_without_tags(None), false).is_ok());
+        // Defense-in-depth: unreachable post-staleness, must not panic.
+        assert!(enforce_key_preservation(Some("no fence\n"), &fm_without_tags(None), false).is_ok());
+    }
+
+    #[test]
+    fn key_preservation_refuses_known_drop_names_exactly_that_key() {
+        let doc = kd_doc(&["tags: [a]"], false);
+        let err = enforce_key_preservation(Some(&doc), &fm_without_tags(None), false).unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropRefused { keys } if keys == &["tags"]),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn key_preservation_known_partition_reported_first() {
+        // D5 precedence pin (Opus design-c2 MAJOR 1): legacy `type:` + `tags`,
+        // payload drops `tags` → KeyDropRefused naming ONLY `tags`.
+        let doc = kd_doc(&["type: fact", "tags: [a]"], false);
+        let err = enforce_key_preservation(Some(&doc), &fm_without_tags(None), false).unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropRefused { keys } if keys == &["tags"]),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("type"), "{err}");
+    }
+
+    #[test]
+    fn key_preservation_unknown_only_is_unrepresentable() {
+        let doc = kd_doc(&["aliases: []"], false);
+        let err = enforce_key_preservation(Some(&doc), &fm("T", None), false).unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropUnrepresentable { keys } if keys == &["aliases"]),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn key_preservation_updated_at_exempt_and_adding_keys_never_refuses() {
+        // Existing has no tags; incoming adds tags and carries no updated_at.
+        let doc = kd_doc(&[], false);
+        assert!(enforce_key_preservation(Some(&doc), &fm("T", None), false).is_ok());
+    }
+
+    #[test]
+    fn key_preservation_flag_bypasses_both_partitions() {
+        let allow_key_drop = true;
+        let doc = kd_doc(&["type: fact", "aliases: []", "tags: [a]"], false);
+        assert!(enforce_key_preservation(Some(&doc), &fm_without_tags(None), allow_key_drop).is_ok());
     }
 }

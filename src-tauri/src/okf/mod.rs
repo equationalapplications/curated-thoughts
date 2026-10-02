@@ -105,6 +105,24 @@ pub enum WriteNoteError {
     /// persisted; the escape is to rephrase, not to override.
     #[error("compaction_marker:{marker}: rephrase and resend without compaction artifacts")]
     CompactionMarkerRejected { marker: String },
+    /// Issue #245: an If-Match edit omitted frontmatter keys (in `KNOWN_KEYS`)
+    /// the existing note carries, and the caller did not confirm the drop.
+    /// Keys sorted, joined with `,`. Like `ShrinkRefused`, the Display never
+    /// names the override flag.
+    #[error(
+        "key_drop_refused:{}: re-send the complete frontmatter or pass an explicit key-drop confirmation",
+        .keys.join(",")
+    )]
+    KeyDropRefused { keys: Vec<String> },
+    /// Issue #245: the edit would drop keys OUTSIDE `KNOWN_KEYS` — legacy or
+    /// hand-added keys the typed struct cannot re-emit, so "re-send the
+    /// frontmatter" can never fix it. Reported only after the known
+    /// partition is clean (D5 precedence pin).
+    #[error(
+        "key_drop_refused:unrepresentable:{}: this note carries keys the writer cannot re-emit; migrate the note to the OKF schema outside this tool, or pass an explicit key-drop confirmation",
+        .keys.join(",")
+    )]
+    KeyDropUnrepresentable { keys: Vec<String> },
     #[error("Write error: {0}")]
     WriteError(String),
 }
