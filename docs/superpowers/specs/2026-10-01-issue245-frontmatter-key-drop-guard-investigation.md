@@ -36,10 +36,11 @@ helper).
 ### 3. The #240 body guard does not cover this axis
 
 `enforce_size_drop` (write.rs:291) compares **body** bytes only (`body_bytes(existing)` vs
-`body_bytes(document)`); a key-drop that leaves the body intact shrinks the document by only the
-frontmatter lines (typically < `MIN_GUARDED_BODY_BYTES` worth of drift relative to a large body)
-and, regardless, `allow_shrink` is an intentional opt-out for legitimate body rewrites — not a key
-guarantee. `enforce_compaction_markers` (272) is marker-scoped. Neither reads frontmatter keys.
+`body_bytes(document)`); frontmatter is **completely outside its measurement scope** (CodeRabbit
+PR-comment finding 2026-10-02), so a key-only drop — body unchanged — registers as exactly
+**zero** measured shrinkage and never trips the body guard on its own. `allow_shrink` is an
+intentional opt-out for legitimate body rewrites — not a key guarantee.
+`enforce_compaction_markers` (272) is marker-scoped. Neither reads frontmatter keys.
 
 ### 4. Failure simulation (reasoned from code paths; all gates pass for a key-dropping edit)
 

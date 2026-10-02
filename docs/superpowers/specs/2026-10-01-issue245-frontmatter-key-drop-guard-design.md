@@ -1,7 +1,7 @@
 # vault_write_note: frontmatter key-drop guard on If-Match edits (issue #245)
 
 **Date:** 2026-10-01
-**Status:** Proposed — review CONVERGED: Opus design-c3 **APPROVE WITH NITS** (N1–N3 applied); c1 REQUEST CHANGES (M1–M3, m1–m6 all REAL, applied); c2 REQUEST CHANGES (MAJOR 1 + 2 minors + 4 nits, applied). GLM self-review findings applied.
+**Status:** Proposed — review CONVERGED: Opus design-c3 **APPROVE WITH NITS** (N1–N3 applied); c1 REQUEST CHANGES (M1–M3, m1–m6 all REAL, applied); c2 REQUEST CHANGES (MAJOR 1 + 2 minors + 4 nits, applied); **CodeRabbit PR-comment findings 2026-10-02 applied** (M1 existing-side null/empty normalization restricted to KNOWN optional fields; M2 size-guard scope clarified as body-only, frontmatter excluded). GLM self-review findings applied.
 **Branch:** `feat/issue-245-frontmatter-key-drop-guard`
 **Priority:** High — silent data loss on the `vault_write_note` edit path (sibling of #240's body-truncation clobber, frontmatter axis).
 
@@ -69,10 +69,14 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
    - Incoming keys = the key-set implied by the INCOMING struct: `KNOWN_KEYS` minus the `Option`
      fields currently `None`/empty — the same normalization `check_round_trip` already performs
      at :657–665 (extract that normalization into a shared helper so the two computations cannot
-     drift). Existing-side normalization mirror (Opus c1 m3): an existing key whose value is
-     null or an empty sequence counts as ABSENT (matching how the renderer omits
-     empty-`tags`/`None` fields) — a hand-written `tags: []` or `supersedes: null` must not
-     wedge every later edit into a false drop.
+     drift). Existing-side normalization mirror (Opus c1 m3), RESTRICTED per CodeRabbit PR-
+     comment finding 2026-10-02 to KNOWN optional fields only: an existing key counts as
+     ABSENT only when it is a `KNOWN_KEYS` `Option` field whose null/empty value the renderer
+     itself omits — i.e. `tags` empty sequence, `supersedes` null/empty. Unknown keys
+     (non-`KNOWN_KEYS`) count as PRESENT regardless of value, so a hand-written `aliases: []`
+     cannot be silently stripped on a subsequent edit — it must surface as
+     `KeyDropUnrepresentable` rather than vanish. A hand-written `tags: []` or
+     `supersedes: null` still does not wedge every later edit into a false drop.
    - Partition `dropped = existing_keys − incoming_keys` into KNOWN dropped keys and
      UNKNOWN (non-`KNOWN_KEYS`) dropped keys. Refuse if `!dropped.is_empty() && !allow_key_drop`.
 
