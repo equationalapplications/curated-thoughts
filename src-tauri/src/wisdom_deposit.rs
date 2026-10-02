@@ -200,15 +200,16 @@ pub(crate) fn deposit_status_row(
     // from a transient kick error must not permanently misreport a deposit
     // the Librarian actually ingested (Opus impl-review nit 2). The inverse
     // holds too: an 'ingested' ledger row must NOT read as recall presence
-    // once every fact backed by this deposit has been archived — except on
-    // the supersession lane, whose deposits drain to zero facts BY DESIGN
-    // (V25: summarize only), where the completed librarian pass IS the
-    // outcome. Terminal ledger states that agree with reality still surface
-    // directly.
+    // once every fact backed by this deposit has been archived. The one
+    // exception is the supersession lane, whose deposits drain to zero facts
+    // BY DESIGN (V25: summarize only): its terminal ledger state still reads
+    // `pending` — application is the Active Librarian's follow-up spec (D5),
+    // so no supersession is 'ingested' until that lands. The raw ledger
+    // state stays visible in the `kick` field.
     let supersession_lane = vault_relative_path.starts_with(&format!("{SUPERSESSIONS_DIR}/"));
     let state = match (&kick, facts.is_empty(), chunked > 0) {
         (_, false, _) => "ingested".to_string(),
-        (Some((s, _, _)), _, _) if s == "ingested" && supersession_lane => s.clone(),
+        (Some((s, _, _)), _, _) if s == "ingested" && supersession_lane => "pending".to_string(),
         (Some((s, _, _)), _, _)
             if s != "pending"
                 && s != "queued_watcher"
@@ -315,8 +316,11 @@ fn run_kick(
                         // Still held by another process (`ct watch` / the app
                         // worker): its file event owns this deposit (spec D3).
                         // Not a failure.
-                        let conn = rusqlite::Connection::open(&db_path)
-                            .with_context(|| format!("open brain {}", db_path.display()))?;
+                        let conn = rusqlite::Connection::open_with_flags(
+                            &db_path,
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                        )
+                        .with_context(|| format!("open brain {}", db_path.display()))?;
                         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
                         set_kick_state(&conn, &rel_path, "queued_watcher", None)?;
                         return Ok("queued_watcher".to_string());
@@ -326,8 +330,11 @@ fn run_kick(
             }
         }
         let _lock = lock?;
-        let mut conn = rusqlite::Connection::open(&db_path)
-            .with_context(|| format!("open brain {}", db_path.display()))?;
+        let mut conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .with_context(|| format!("open brain {}", db_path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
 
         // `rel_path` stays the document key (status probe, V25 folder rules);
@@ -370,7 +377,12 @@ fn run_kick(
     // Persist the outcome outside the closure (needs its own connection when
     // the closure failed before opening one).
     if let Err(err) = outcome {
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        // No-create open (with_rw contract): a vanished brain must not be
+        // resurrected as an empty database just to record a kick outcome.
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        ) {
             let _ = set_kick_state(&conn, &rel_path, "failed", Some(&format!("{err:#}")));
         }
     }
@@ -418,7 +430,10 @@ async fn start_kick(
 /// 'pending' with no trace (Opus impl-review nit 4).
 async fn observe_kick(handle: KickHandle, db_path: PathBuf, rel: String) {
     if let Err(join_err) = handle.await {
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        ) {
             let _ = set_kick_state(
                 &conn,
                 &rel,
@@ -715,7 +730,15 @@ async fn supersession_inner(
     let target = match (p.target_source_ref.as_deref(), p.target_fact_id.as_deref()) {
         (Some(_), Some(_)) => bail!("supply exactly one of target_source_ref / target_fact_id"),
         (None, None) => bail!("supply exactly one of target_source_ref / target_fact_id"),
-        (Some(r), None) => r.to_string(),
+        // Shape-check only (plan: `^librarian-[0-9a-f]{32}$`): application is
+        // deferred to the Active Librarian, so a valid-shaped token with no
+        // live row today is NOT rejected here — the file must still land.
+        (Some(r), None) => {
+            if !crate::db::commit::is_librarian_source_ref_token(r) {
+                bail!("target_source_ref must match ^librarian-[0-9a-f]{{32}}$");
+            }
+            r.to_string()
+        }
         (None, Some(id)) => {
             // Resolve the brain id to its librarian token (supersession files
             // carry the stable token; the Librarian's application spec keys
@@ -1034,6 +1057,46 @@ mod tests {
         });
     }
 
+    /// Spec D5: until the Librarian application spec lands, a supersession
+    /// file's status reads `pending` even after its kick reached `ingested`
+    /// — the raw ledger state stays visible in the `kick` field.
+    #[test]
+    fn status_supersession_lane_stays_pending_after_ingested_kick() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let v = dispatch_wisdom_propose_supersession(
+                &ctx,
+                WisdomProposeSupersessionParams {
+                    target_source_ref: Some("librarian-abc123def456abc123def456abc12345".into()),
+                    target_fact_id: None,
+                    replacement_title: "t".into(),
+                    replacement_body: "b".into(),
+                    reason: "r".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let rel = v["path"].as_str().unwrap().to_string();
+            // Simulate a fully-drained kick (V25 folder rule: zero facts, so
+            // only the ledger can carry this state).
+            {
+                let conn = ctx.conn.lock().unwrap();
+                set_kick_state(&conn, &rel, "ingested", None).unwrap();
+            }
+            let s = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.clone() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(s["state"], serde_json::json!("pending"), "{s}");
+            assert_eq!(s["kick"], serde_json::json!("ingested"), "{s}");
+        });
+    }
+
     #[test]
     fn deposit_refuses_wrong_lanes_and_empty_fields() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1124,7 +1187,7 @@ mod tests {
             let err = dispatch_wisdom_propose_supersession(
                 &ctx,
                 WisdomProposeSupersessionParams {
-                    target_source_ref: Some("librarian-abc".into()),
+                    target_source_ref: Some("librarian-abc123def456abc123def456abc12345".into()),
                     target_fact_id: Some("fact_x".into()),
                     replacement_title: "t".into(),
                     replacement_body: "b".into(),
@@ -1134,6 +1197,32 @@ mod tests {
             .await
             .unwrap_err();
             assert!(err.to_string().contains("exactly one"), "{err}");
+            // Malformed tokens are refused before any file lands (plan:
+            // `^librarian-[0-9a-f]{32}$`; readers classify librarian refs by
+            // this exact shape).
+            for bad in [
+                "librarian-abc",
+                "librarian-notes.md",
+                "librarian-ABC123DEF456ABC123DEF456ABC12345",
+                "",
+            ] {
+                let err = dispatch_wisdom_propose_supersession(
+                    &ctx,
+                    WisdomProposeSupersessionParams {
+                        target_source_ref: Some(bad.into()),
+                        target_fact_id: None,
+                        replacement_title: "t".into(),
+                        replacement_body: "b".into(),
+                        reason: "r".into(),
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    err.to_string().contains("target_source_ref must match"),
+                    "bad token {bad:?} refused: {err}"
+                );
+            }
             let err = dispatch_wisdom_propose_supersession(
                 &ctx,
                 WisdomProposeSupersessionParams {
@@ -1151,7 +1240,7 @@ mod tests {
             let v = dispatch_wisdom_propose_supersession(
                 &ctx,
                 WisdomProposeSupersessionParams {
-                    target_source_ref: Some("librarian-abc".into()),
+                    target_source_ref: Some("librarian-abc123def456abc123def456abc12345".into()),
                     target_fact_id: None,
                     replacement_title: "Gamma v3".into(),
                     replacement_body: "Gamma v3 replaced v2.".into(),
@@ -1162,9 +1251,12 @@ mod tests {
             .unwrap();
             let path = v["path"].as_str().unwrap();
             assert!(path.starts_with("immutable-source-files/agents/supersessions/"));
-            assert_eq!(v["supersedes"], serde_json::json!("librarian-abc"));
+            assert_eq!(
+                v["supersedes"],
+                serde_json::json!("librarian-abc123def456abc123def456abc12345")
+            );
             let file = std::fs::read_to_string(dir.join(path)).unwrap();
-            assert!(file.contains("supersedes: `librarian-abc`"));
+            assert!(file.contains("supersedes: `librarian-abc123def456abc123def456abc12345`"));
             assert!(file.contains("# Gamma v3"));
         });
     }
@@ -1336,7 +1428,9 @@ mod tests {
                 let v = dispatch_wisdom_propose_supersession(
                     &ctx,
                     WisdomProposeSupersessionParams {
-                        target_source_ref: Some("librarian-abc".into()),
+                        target_source_ref: Some(
+                            "librarian-abc123def456abc123def456abc12345".into(),
+                        ),
                         target_fact_id: None,
                         replacement_title: "t".into(),
                         replacement_body: "b".into(),
@@ -1509,7 +1603,7 @@ mod tests {
             let v = dispatch_wisdom_propose_supersession_awaiting_kick(
                 &ctx,
                 WisdomProposeSupersessionParams {
-                    target_source_ref: Some("librarian-abc".into()),
+                    target_source_ref: Some("librarian-abc123def456abc123def456abc12345".into()),
                     target_fact_id: None,
                     replacement_title: "t".into(),
                     replacement_body: "b".into(),
