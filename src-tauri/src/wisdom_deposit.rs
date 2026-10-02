@@ -426,16 +426,18 @@ pub async fn dispatch_wisdom_deposit(
     .await?;
 
     // Kick (D3): full pipeline, lock-serialized. Record the intent first so a
-    // crash between write and spawn leaves an honest ledger row.
+    // crash between write and spawn leaves an honest ledger row. The initial
+    // ledger write goes through with_rw: ctx.conn is READ-ONLY in the MCP
+    // sidecar (CI caught this — "attempt to write a readonly database").
     let db_path = ctx.db_path.clone();
+    let generation_configured = crate::librarian::llm_generation_configured();
     let kick = {
-        let conn = ctx
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("conn mutex poisoned"))?;
-        let generation_configured = crate::librarian::llm_generation_configured();
         let initial = if generation_configured { "pending" } else { "no_ingest_host" };
-        set_kick_state(&conn, &rel, initial, None)?;
+        let kick_rel = rel.clone();
+        let initial_label = initial;
+        ctx.with_rw(move |conn| set_kick_state(conn, &kick_rel, initial_label, None))
+            .await
+            .map_err(|e| anyhow!("kick-state write failed: {e:#}"))?;
         if generation_configured {
             let db_path2 = db_path.clone();
             let vault2 = vault.clone();
@@ -623,11 +625,12 @@ pub async fn dispatch_wisdom_propose_supersession(
     // stays pending.
     let db_path = ctx.db_path.clone();
     {
-        let guard = ctx
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("conn mutex poisoned"))?;
-        set_kick_state(&guard, &rel, "pending", None)?;
+        // with_rw: ctx.conn is read-only in the MCP sidecar (same as the
+        // deposit lane).
+        let kick_rel = rel.clone();
+        ctx.with_rw(move |conn| set_kick_state(conn, &kick_rel, "pending", None))
+            .await
+            .map_err(|e| anyhow!("kick-state write failed: {e:#}"))?;
     }
     let vault2 = vault.clone();
     let rel2 = rel.clone();
