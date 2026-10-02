@@ -365,7 +365,13 @@ pub async fn dispatch_wisdom_deposit(
     }
 
     let content = render_deposit_file(&p.title, &p.body, p.tags.as_deref().unwrap_or(&[]));
-    // Validate FIRST, then write to the *validated* path (not the raw join):
+    // The sanctioned lane directory must exist before validation:
+    // safe_vault_path's MayCreate canonicalizes the parent and reports
+    // "parent directory not found" for a fresh vault (CI caught this —
+    // immutable-source-files/agents/ does not exist yet there). Creating the
+    // lane dir itself is safe: it is a fixed constant, not user input.
+    std::fs::create_dir_all(vault.join(AGENTS_DIR))?;
+    // Validate, then write to the *validated* path (not the raw join):
     // safe_vault_path canonicalizes every parent and rejects symlinked or
     // traversal parents (fail-closed), so its return value is the only path
     // bytes may land on.
@@ -376,6 +382,9 @@ pub async fn dispatch_wisdom_deposit(
         crate::vault::safe_path::PathMode::MayCreate,
     )
     .map_err(|e| anyhow!("unsafe deposit path: {e}"))?;
+    // A deposit may live one level deeper than the lane dir
+    // (e.g. agents/topic/note.md): create any intermediate directories the
+    // validated parent needs, then exclusive-create below.
     std::fs::create_dir_all(
         validated
             .parent()
@@ -568,16 +577,32 @@ pub async fn dispatch_wisdom_propose_supersession(
         &p.replacement_body,
         &p.reason,
     );
-    crate::vault::safe_path::safe_vault_path(
+    // Lane dir first (fixed constant, not user input), then validate, then
+    // exclusive-create on the validated path — same contract as deposits.
+    std::fs::create_dir_all(vault.join(SUPERSESSIONS_DIR))?;
+    let validated = crate::vault::safe_path::safe_vault_path(
         &vault,
         &rel,
         &[SUPERSESSIONS_DIR],
         crate::vault::safe_path::PathMode::MayCreate,
     )
     .map_err(|e| anyhow!("unsafe supersession path: {e}"))?;
-    std::fs::create_dir_all(vault.join(SUPERSESSIONS_DIR))?;
-    crate::vault::safe_path::safe_write_bytes(&target_abs, content.as_bytes())
-        .map_err(|e| anyhow!("supersession write failed: {e}"))?;
+    let write_result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&validated)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()
+        });
+    match write_result {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("deposit_exists: {rel}")
+        }
+        Err(e) => return Err(anyhow!("supersession write failed: {e}")),
+    }
 
     let audit_path = rel.clone();
     let client = ctx.client.clone();
