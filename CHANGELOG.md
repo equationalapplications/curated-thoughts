@@ -1,3 +1,12 @@
+## [3.1.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.0.0...v3.1.0) (2026-10-02)
+
+### Features
+
+* **mcp:** vault_write_note description documents key_drop_refused (issue [#245](https://github.com/equationalapplications/curated-thoughts/issues/245)) ([f7d9f56](https://github.com/equationalapplications/curated-thoughts/commit/f7d9f56d360dfa30d5c8145532a7d3a2afeebcf5))
+* **okf:** enforce frontmatter key preservation on If-Match edits (issue [#245](https://github.com/equationalapplications/curated-thoughts/issues/245)) ([c1c32db](https://github.com/equationalapplications/curated-thoughts/commit/c1c32dbe4a40ff3c2218a48017cc9f0ab99db1af))
+* **okf:** existing-side frontmatter key-set extraction (issue [#245](https://github.com/equationalapplications/curated-thoughts/issues/245)) ([495fb02](https://github.com/equationalapplications/curated-thoughts/commit/495fb02d80da896ccaeecf6e03afdaa52717be8d))
+* **okf:** KeyDropRefused/KeyDropUnrepresentable + enforce_key_preservation (issue [#245](https://github.com/equationalapplications/curated-thoughts/issues/245)) ([cf7304b](https://github.com/equationalapplications/curated-thoughts/commit/cf7304b4dd629f2de557dd7601dbefe15381fcde))
+
 ## [3.0.0](https://github.com/equationalapplications/curated-thoughts/compare/v2.23.1...v3.0.0) (2026-10-02)
 
 ### ⚠ BREAKING CHANGES
