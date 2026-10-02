@@ -1,7 +1,7 @@
 # vault_write_note: frontmatter key-drop guard on If-Match edits (issue #245)
 
 **Date:** 2026-10-01
-**Status:** Proposed — review CONVERGED: Opus design-c3 **APPROVE WITH NITS** (N1–N3 applied); c1 REQUEST CHANGES (M1–M3, m1–m6 all REAL, applied); c2 REQUEST CHANGES (MAJOR 1 + 2 minors + 4 nits, applied); **CodeRabbit PR-comment findings 2026-10-02 applied** (M1 existing-side null/empty normalization restricted to KNOWN optional fields; M2 size-guard scope clarified as body-only, frontmatter excluded). GLM self-review findings applied.
+**Status:** Proposed — review CONVERGED: Opus design-c3 **APPROVE WITH NITS** (N1–N3 applied); c1 REQUEST CHANGES (M1–M3, m1–m6 all REAL, applied); c2 REQUEST CHANGES (MAJOR 1 + 2 minors + 4 nits, applied); **CodeRabbit PR-comment findings 2026-10-02 applied** (M1 existing-side null/empty normalization restricted to KNOWN optional fields; M2 size-guard scope clarified as body-only, frontmatter excluded; follow-up: tier-3 line scan inherits the known-field restriction, "bare scalar" wording fixed, exhaustive absent-form list pinned). GLM self-review findings applied.
 **Branch:** `feat/issue-245-frontmatter-key-drop-guard`
 **Priority:** High — silent data loss on the `vault_write_note` edit path (sibling of #240's body-truncation clobber, frontmatter axis).
 
@@ -50,12 +50,17 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
      "present" keys only make the guard stricter, and the alternative — skipping the guard on
      exactly the notes most likely to be hand-edited — is the #245 hazard itself; (b) the line
      scan applies the SAME null/empty normalization as tier 2 (Opus design-c2 finding 2,
-     wording per design-c3 N1): an empty INLINE value counts as ABSENT only if the next line in
-     the fence is not a continuation (any indented line, or a `- ` line) — so a block-sequence
-     `tags:` list and a nested block mapping (`source:` followed by an indented `url:`) both
-     count as PRESENT; an inline `[]`, `null`, `~`, or a bare scalar counts as absent. Applying
-     the EOL check without the continuation guard would silently drop block-valued keys — the
-     #245 hazard again.
+     wording per design-c3 N1), INCLUDING its D2 restriction to the KNOWN optional fields
+     (CodeRabbit follow-up 2026-10-02): only a `tags:` or `supersedes:` line can count as
+     ABSENT. Every other key — unknown/legacy keys above all — counts as PRESENT whenever its
+     column-0 `^key:` line exists, whatever its value (so a damaged-YAML note's `aliases: []`
+     still refuses as `KeyDropUnrepresentable`). For `tags`/`supersedes`, the line counts as
+     ABSENT only when its inline value is one of the D2 absent forms — nothing after the colon,
+     `null`, `~`, `[]` (`tags`), or `""` (`supersedes`) — AND the next line in the fence is not
+     a continuation (any indented line, or a `- ` line). Any non-empty inline value (`tags: foo`)
+     counts as PRESENT. The continuation guard is what keeps a block-sequence `tags:` list
+     PRESENT; applying the empty-value check without it would silently drop block-valued keys —
+     the #245 hazard again.
 
    Note: `collect_frontmatter_fence` returns only the inner text with no offset and rebuilds via
    `lines()` (drops `\r`) — fine for key-set purposes (keys are `\r`-insensitive after YAML
@@ -70,9 +75,13 @@ one fails struct parse before `write_note` ever runs. The droppable keys are exa
      fields currently `None`/empty — the same normalization `check_round_trip` already performs
      at :657–665 (extract that normalization into a shared helper so the two computations cannot
      drift). Existing-side normalization mirror (Opus c1 m3), RESTRICTED per CodeRabbit PR-
-     comment finding 2026-10-02 to KNOWN optional fields only: an existing key counts as
-     ABSENT only when it is a `KNOWN_KEYS` `Option` field whose null/empty value the renderer
-     itself omits — i.e. `tags` empty sequence, `supersedes` null/empty. Unknown keys
+     comment finding 2026-10-02 to KNOWN optional fields only. The exhaustive ABSENT list:
+     `tags` null / `~` / `[]` (deserializes to `None` or `Some(vec![])`, both of which the
+     renderer omits — `check_round_trip` :661); `supersedes` null / `~` (deserializes to
+     `None`, omitted via `skip_serializing_if`). `supersedes: ""` also counts ABSENT, but NOT
+     because the renderer omits it (it would render `Some("")`): an empty pointer can never be
+     re-sent — `under_deposit("")` refuses it upstream — so counting it present would wedge
+     every edit of that note into a key-drop refusal. Unknown keys
      (non-`KNOWN_KEYS`) count as PRESENT regardless of value, so a hand-written `aliases: []`
      cannot be silently stripped on a subsequent edit — it must surface as
      `KeyDropUnrepresentable` rather than vanish. A hand-written `tags: []` or
@@ -172,8 +181,17 @@ callers see the Display via `anyhow!("{}", e)` (`tool_dispatch.rs:304`).
   fails, existing contains `tags: []` (inline empty) → edit omitting `tags` succeeds (line-scan
   tier counts it absent); same fixture with a block-sequence `tags:` list → edit refuses.
 - Nested block mapping in tier 3 (Opus design-c3 N1): damaged-YAML note with `source:` followed
-  by an indented `url:` line → any edit dropping `source` refuses (continuation guard counts the
-  block mapping present; a bare EOL check alone would silently strip it).
+  by an indented `url:` line → any edit dropping `source` refuses with `KeyDropUnrepresentable`
+  (unknown keys always count PRESENT in tier 3 — the continuation guard is not what saves it).
+- Unknown empty-valued key, strict tier (CodeRabbit 2026-10-02): well-formed note with
+  `aliases: []` → any edit refuses with `KeyDropUnrepresentable` naming `aliases` (the D2
+  normalization must not apply to unknown keys).
+- Unknown empty-valued key, line-scan tier (CodeRabbit follow-up 2026-10-02): same fixture with
+  damaged YAML (strict parse fails, staleness passes) → still refuses with
+  `KeyDropUnrepresentable` naming `aliases`.
+- Known-field absent forms: existing `tags: null`, `tags: ~`, `supersedes: ~`, and
+  `supersedes: ""` each count absent — an edit omitting the key succeeds. Tier-3 non-empty
+  scalar: damaged-YAML `tags: foo` counts PRESENT — an edit omitting `tags` refuses.
 - `allow_key_drop: true` permits both refusal cases; omitted/false behaves identically to today.
 - Boundary: ADDING keys never refuses; dropping zero keys never refuses; drop of exactly one key
   names exactly that key.
