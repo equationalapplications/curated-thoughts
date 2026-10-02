@@ -18,7 +18,9 @@
 //!   `index_not_found:{path}`, `invalid_entry_name`, `write_error:{io}`,
 //!   `shrink_refused:{existing}:{new}: re-read the note and resend the full
 //!   body`, `compaction_marker:{marker}: rephrase and resend without
-//!   compaction artifacts`. Display strings ARE the contract; see each
+//!   compaction artifacts`, `key_drop_refused:{keys}: …` and
+//!   `key_drop_refused:unrepresentable:{keys}: …` (issue #245 — an edit
+//!   dropping existing frontmatter keys). Display strings ARE the contract; see each
 //!   variant's `#[error]` for the authoritative shape.
 //!   When the EXISTING file's frontmatter cannot be read for the If-Match
 //!   check, the write is refused with `invalid_frontmatter:existing_unparsable:{parse|no_fence|no_token}`
@@ -212,11 +214,9 @@ fn collect_frontmatter_fence(content: &str) -> Option<String> {
 /// Both tiers apply the D2 normalization to the KNOWN optional fields only:
 /// an empty `tags`/`supersedes` counts ABSENT (see [`strict_value_absent`],
 /// [`line_scan_value_absent`]); every other key counts PRESENT.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by enforce_key_preservation (Task 3)
 fn existing_frontmatter_keys(content: &str) -> Option<BTreeSet<String>> {
     let inner = collect_frontmatter_fence(content)?;
-    if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&inner)
-    {
+    if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&inner) {
         let mut keys = BTreeSet::new();
         for (key, value) in &map {
             match key.as_str() {
@@ -238,11 +238,12 @@ fn existing_frontmatter_keys(content: &str) -> Option<BTreeSet<String>> {
 /// `~` / empty / `[]` (the renderer omits both `None` and `Some(vec![])`).
 /// `supersedes`: null / `~` / `""` (an empty pointer can never be re-sent —
 /// `under_deposit("")` refuses it). Everything else is PRESENT.
-#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
 fn strict_value_absent(key: &str, value: &serde_yaml::Value) -> bool {
     use serde_yaml::Value;
     match key {
-        "tags" => matches!(value, Value::Null) || matches!(value, Value::Sequence(s) if s.is_empty()),
+        "tags" => {
+            matches!(value, Value::Null) || matches!(value, Value::Sequence(s) if s.is_empty())
+        }
         "supersedes" => {
             matches!(value, Value::Null) || matches!(value, Value::String(s) if s.is_empty())
         }
@@ -253,7 +254,6 @@ fn strict_value_absent(key: &str, value: &serde_yaml::Value) -> bool {
 /// D1 tier 3: column-0 line scan over a damaged fence. A key line that is
 /// followed by a continuation (any indented line, or a `-` list item) is
 /// always PRESENT — that keeps block-valued keys from reading as empty.
-#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
 fn line_scan_keys(inner: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = inner.lines().collect();
     let mut keys = BTreeSet::new();
@@ -277,7 +277,6 @@ fn line_scan_keys(inner: &str) -> BTreeSet<String> {
 /// and contains `:`. Key = text before the FIRST `:`, trimmed, one matching
 /// pair of surrounding `"`/`'` stripped. NO character-class restriction
 /// (`1`, `my-key`, `some key` are keys). Returns the raw rest after the colon.
-#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
 fn line_scan_key(line: &str) -> Option<(String, &str)> {
     let first = line.chars().next()?;
     if first.is_whitespace() || first == '#' || first == '-' {
@@ -300,7 +299,6 @@ fn line_scan_key(line: &str) -> Option<(String, &str)> {
 /// tier. The inline value is compared verbatim after trimming; trailing
 /// comments are NOT stripped (`tags: [] # none` counts PRESENT here — the
 /// accepted stricter-direction divergence, D1 (c)).
-#[cfg_attr(not(test), allow(dead_code))] // consumed via existing_frontmatter_keys (Task 3)
 fn line_scan_value_absent(key: &str, value: &str) -> bool {
     match key {
         "tags" => matches!(value, "" | "null" | "~" | "[]"),
@@ -446,7 +444,6 @@ fn enforce_size_drop(
 /// (rotated on every write). KNOWN dropped keys are reported before UNKNOWN
 /// ones — `allow_key_drop` bypasses BOTH, so this precedence is what keeps
 /// known keys from being lost behind an unrepresentable-key message.
-#[cfg_attr(not(test), allow(dead_code))] // wired into write_note in Task 3
 fn enforce_key_preservation(
     existing: Option<&str>,
     incoming: &OkfFrontmatter,
@@ -583,6 +580,9 @@ fn first_path_segment(path: &str) -> Option<String> {
 /// * `body` — markdown body; normalized to end with exactly one `\n`.
 /// * `expected_updated_at` — If-Match token: required to equal the existing
 ///   file's token when the file already exists (see [`enforce_staleness`]).
+/// * `allow_shrink` — issue #240 confirmation for a >50% body shrink.
+/// * `allow_key_drop` — issue #245 confirmation for dropping frontmatter keys
+///   the existing note carries (see [`enforce_key_preservation`]).
 pub fn write_note(
     vault_root: &Path,
     path: &str,
@@ -590,6 +590,7 @@ pub fn write_note(
     body: &str,
     expected_updated_at: Option<&str>,
     allow_shrink: bool,
+    allow_key_drop: bool,
 ) -> Result<WriteNoteResult, WriteNoteError> {
     validate_frontmatter(frontmatter).map_err(WriteNoteError::InvalidFrontmatter)?;
 
@@ -722,10 +723,12 @@ pub fn write_note(
     let document = render_document(&effective_fm, body);
     check_round_trip(&effective_fm, &document)?;
 
-    // Issue #240 guards — AFTER render (the measurement basis is the
-    // rendered body) and BEFORE any bytes hit disk. Order pinned: marker
-    // check first, then shrink.
+    // Issue #240/#245 guards — AFTER render (the shrink measurement basis is
+    // the rendered body) and BEFORE any bytes hit disk. Order pinned (#245
+    // D6): marker (root cause, no bypass) → key-drop (more specific than a
+    // shrink) → shrink.
     enforce_compaction_markers(&document, existing.as_deref())?;
+    enforce_key_preservation(existing.as_deref(), frontmatter, allow_key_drop)?;
     enforce_size_drop(existing.as_deref(), &document, allow_shrink)?;
 
     crate::vault::safe_write_bytes(&target, document.as_bytes())
@@ -1064,6 +1067,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Issue #245 D4: `write_note` takes two adjacent guard bools — pass them
+    /// by NAME, never as literals, so a swap reads wrong in review.
+    const NO_SHRINK: bool = false;
+    const NO_KEY_DROP: bool = false;
+
     #[test]
     fn token_read_strict_parse_wins_on_clean_fence() {
         let doc = "---\nokf_version: 0.1\nprofile: llm-wiki/1\ntitle: T\nentity_type: fact\ncreated_at: 2026-09-25T00:00:00Z\nupdated_at: 2026-09-25T01:00:00Z # trailing comment\n---\n";
@@ -1161,7 +1169,8 @@ mod tests {
             &fm("CRLF Note", None),
             "v1\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .expect("create succeeds");
         let lf = fs::read_to_string(root.join("wiki/crlf.md")).unwrap();
@@ -1177,7 +1186,8 @@ mod tests {
             &fm("CRLF Note", None),
             "v2\n",
             Some(&token),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         );
         assert!(
             edit.is_ok(),
@@ -1250,7 +1260,8 @@ mod tests {
             &fm("Clobber", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .expect_err("non-UTF-8 target must be refused, not overwritten");
         assert!(
@@ -1351,7 +1362,8 @@ mod tests {
             &fm("T", None),
             "Body line.\nSecond.\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert_eq!(result.path, "wiki/test-note.md");
@@ -1375,7 +1387,16 @@ mod tests {
     #[test]
     fn write_note_result_carries_fresh_token() {
         let (_g, root) = vault();
-        let result = write_note(&root, "wiki/tok.md", &fm("T", None), "x\n", None, false).unwrap();
+        let result = write_note(
+            &root,
+            "wiki/tok.md",
+            &fm("T", None),
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
         assert!(result.success);
         assert!(!result.updated_at.is_empty());
         chrono::DateTime::parse_from_rfc3339(&result.updated_at).unwrap();
@@ -1385,12 +1406,30 @@ mod tests {
     #[test]
     fn d2_edit_requires_exact_token() {
         let (_g, root) = vault();
-        write_note(&root, "wiki/n.md", &fm("T", None), "v1\n", None, false).unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            "v1\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
         let current =
             read_existing_token(&fs::read_to_string(root.join("wiki/n.md")).unwrap()).unwrap();
 
         // No token → refused (cannot prove freshness).
-        let err = write_note(&root, "wiki/n.md", &fm("T", None), "v2\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            "v2\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, WriteNoteError::StaleUpdate { ref updated_at } if updated_at == &current)
         );
@@ -1402,7 +1441,8 @@ mod tests {
             &fm("T", None),
             "v2\n",
             Some("1999-01-01T00:00:00Z"),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(
@@ -1416,7 +1456,8 @@ mod tests {
             &fm("T", None),
             "v2\n",
             Some(&current),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let bumped =
@@ -1428,10 +1469,27 @@ mod tests {
     #[test]
     fn d3_traversal_rejected() {
         let (_g, root) = vault();
-        let err =
-            write_note(&root, "../outside.md", &fm("T", None), "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "../outside.md",
+            &fm("T", None),
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
-        let err = write_note(&root, "/etc/passwd", &fm("T", None), "x\n", None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "/etc/passwd",
+            &fm("T", None),
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
     }
 
@@ -1445,7 +1503,8 @@ mod tests {
             &fm("Deep", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(root.join("wiki/deep/er/note.md").is_file());
@@ -1455,7 +1514,16 @@ mod tests {
     #[test]
     fn d5_upsert_no_duplicates() {
         let (_g, root) = vault();
-        write_note(&root, "wiki/a.md", &fm("A", None), "x\n", None, false).unwrap();
+        write_note(
+            &root,
+            "wiki/a.md",
+            &fm("A", None),
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
         fs::write(
             root.join("wiki/INDEX.md"),
             "# Index\n\n## other\n[[b.md]]\n- Type: doc\n",
@@ -1576,7 +1644,8 @@ mod tests {
             &fm("Agent memory", None),
             "deposited\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(result.success);
@@ -1594,7 +1663,8 @@ mod tests {
             &fm("Nested", None),
             "deposited\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(result.success);
@@ -1614,7 +1684,8 @@ mod tests {
             &fm("Deep", None),
             "deposited\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(result.success);
@@ -1633,7 +1704,8 @@ mod tests {
             &fm("T", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
@@ -1651,7 +1723,8 @@ mod tests {
             &fm("T", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
@@ -1671,7 +1744,8 @@ mod tests {
             &fm("Dot", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(root.join("wiki/deep/er/dot.md").is_file());
@@ -1682,7 +1756,8 @@ mod tests {
             &fm("Dot", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(root
@@ -1709,7 +1784,8 @@ mod tests {
             &fm("T", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
 
@@ -1733,7 +1809,8 @@ mod tests {
             &fm("Session", None),
             "deposited\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(result.success);
@@ -1752,7 +1829,8 @@ mod tests {
             &fm("T", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         match &err {
@@ -1786,7 +1864,8 @@ mod tests {
             &fm("T", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(
@@ -1802,7 +1881,16 @@ mod tests {
     fn root_lookalikes_are_rejected() {
         let (_g, root) = vault();
         for path in ["records-evil/x.md", "wiki-adjacent/x.md", "my.records/x.md"] {
-            let err = write_note(&root, path, &fm("T", None), "x\n", None, false).unwrap_err();
+            let err = write_note(
+                &root,
+                path,
+                &fm("T", None),
+                "x\n",
+                None,
+                NO_SHRINK,
+                NO_KEY_DROP,
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, WriteNoteError::DisallowedRoot { .. }),
                 "{path}: expected DisallowedRoot, got {err:?}"
@@ -1824,7 +1912,8 @@ mod tests {
             &fm("T", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::PathOutsideVault));
@@ -1835,14 +1924,24 @@ mod tests {
     #[test]
     fn dot_prefix_does_not_bypass_root_allowlist() {
         let (_g, root) = vault();
-        write_note(&root, "./wiki/ok.md", &fm("D", None), "x\n", None, false).unwrap();
+        write_note(
+            &root,
+            "./wiki/ok.md",
+            &fm("D", None),
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
         let err = write_note(
             &root,
             "./agents/tessera/m.md",
             &fm("D", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(
@@ -1861,7 +1960,8 @@ mod tests {
             &fm("First", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         assert!(root
@@ -1880,7 +1980,8 @@ mod tests {
             &fm("V1", None),
             "old\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let mut m = fm("V2", None);
@@ -1891,7 +1992,8 @@ mod tests {
             &m,
             "new\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let raw = fs::read_to_string(root.join("immutable-source-files/agents/v2.md")).unwrap();
@@ -1915,7 +2017,8 @@ mod tests {
             &fm("V1", None),
             "old\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let mut m = fm("V2", None);
@@ -1926,7 +2029,8 @@ mod tests {
             &m,
             "new\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let raw =
@@ -1944,7 +2048,16 @@ mod tests {
     #[test]
     fn ad6_supersedes_outside_deposit_rejected() {
         let (_g, root) = deposit_vault();
-        write_note(&root, "wiki/target.md", &fm("T", None), "x\n", None, false).unwrap();
+        write_note(
+            &root,
+            "wiki/target.md",
+            &fm("T", None),
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
         let mut m = fm("Evil", None);
         m.supersedes = Some("wiki/target.md".to_string());
         let err = write_note(
@@ -1953,7 +2066,8 @@ mod tests {
             &m,
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
@@ -1971,7 +2085,8 @@ mod tests {
             &m,
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         match err {
@@ -1997,7 +2112,8 @@ mod tests {
             &m,
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
@@ -2013,12 +2129,14 @@ mod tests {
             &fm("V1", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let mut m = fm("W", None);
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
-        let err = write_note(&root, "wiki/w.md", &m, "x\n", None, false).unwrap_err();
+        let err =
+            write_note(&root, "wiki/w.md", &m, "x\n", None, NO_SHRINK, NO_KEY_DROP).unwrap_err();
         assert!(matches!(err, WriteNoteError::InvalidFrontmatter(_)));
     }
 
@@ -2032,7 +2150,8 @@ mod tests {
             &fm("T3 Note", None),
             "x\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         );
         assert!(
             result.is_ok(),
@@ -2049,7 +2168,15 @@ mod tests {
         let (_g, root) = vault();
         let mut m = fm("T3 Empty Tags", None);
         m.tags = Some(vec![]);
-        let result = write_note(&root, "wiki/t3-b.md", &m, "x\n", None, false);
+        let result = write_note(
+            &root,
+            "wiki/t3-b.md",
+            &m,
+            "x\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        );
         assert!(
             result.is_ok(),
             "Some(vec![]) tags must normalize to None and pass: {:?}",
@@ -2191,7 +2318,15 @@ mod tests {
     /// way the issue-#231 reporter did), and edit again with that token.
     fn write_and_edit(title: &str) -> Result<(WriteNoteResult, WriteNoteResult), WriteNoteError> {
         let (_guard, root) = vault();
-        let create = write_note(&root, "wiki/note.md", &fm(title, None), "v1\n", None, false)?;
+        let create = write_note(
+            &root,
+            "wiki/note.md",
+            &fm(title, None),
+            "v1\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )?;
         let on_disk = fs::read_to_string(root.join("wiki/note.md")).unwrap();
         let token = read_existing_token(&on_disk).expect("token readable after create");
         let edit = write_note(
@@ -2200,7 +2335,8 @@ mod tests {
             &fm(title, None),
             "v2\n",
             Some(&token),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )?;
         Ok((create, edit))
     }
@@ -2232,8 +2368,16 @@ mod tests {
             "2026-09-25T14:00:00Z: deploy retro",
         ] {
             let (_g, root) = vault();
-            write_note(&root, "wiki/n.md", &fm(title, None), "x\n", None, false)
-                .unwrap_or_else(|e| panic!("{title:?}: create failed: {e}"));
+            write_note(
+                &root,
+                "wiki/n.md",
+                &fm(title, None),
+                "x\n",
+                None,
+                NO_SHRINK,
+                NO_KEY_DROP,
+            )
+            .unwrap_or_else(|e| panic!("{title:?}: create failed: {e}"));
             let on_disk = fs::read_to_string(root.join("wiki/n.md")).unwrap();
             let parsed = extract_fm(&on_disk);
             assert_eq!(
@@ -2260,7 +2404,8 @@ mod tests {
             &fm("Deploy: retro", None),
             "body v2\n",
             Some(&token),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .expect("legacy broken fixture must heal on its next edit");
         assert!(result.success);
@@ -2299,7 +2444,15 @@ mod tests {
             "x\nstatus: approved",
         ] {
             let (_g, root) = vault();
-            let outcome = write_note(&root, "wiki/inj.md", &fm(title, None), "x\n", None, false);
+            let outcome = write_note(
+                &root,
+                "wiki/inj.md",
+                &fm(title, None),
+                "x\n",
+                None,
+                NO_SHRINK,
+                NO_KEY_DROP,
+            );
             let on_disk = match outcome {
                 Ok(result) => {
                     assert!(result.success, "{title:?}");
@@ -2407,12 +2560,28 @@ mod tests {
             let (_g, root) = vault();
             let mut m = fm("Tagged note", None);
             m.tags = Some(tags.iter().map(|s| s.to_string()).collect());
-            write_note(&root, "wiki/tags.md", &m, "v1\n", None, false)
-                .unwrap_or_else(|e| panic!("create {tags:?}: {e}"));
+            write_note(
+                &root,
+                "wiki/tags.md",
+                &m,
+                "v1\n",
+                None,
+                NO_SHRINK,
+                NO_KEY_DROP,
+            )
+            .unwrap_or_else(|e| panic!("create {tags:?}: {e}"));
             let on_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
             let token = read_existing_token(&on_disk).expect("token readable after create");
-            let edit = write_note(&root, "wiki/tags.md", &m, "v2\n", Some(&token), false)
-                .unwrap_or_else(|e| panic!("edit {tags:?}: {e}"));
+            let edit = write_note(
+                &root,
+                "wiki/tags.md",
+                &m,
+                "v2\n",
+                Some(&token),
+                NO_SHRINK,
+                NO_KEY_DROP,
+            )
+            .unwrap_or_else(|e| panic!("edit {tags:?}: {e}"));
             assert!(edit.success, "{tags:?}");
             let final_disk = fs::read_to_string(root.join("wiki/tags.md")).unwrap();
             let parsed = extract_fm(&final_disk);
@@ -2489,7 +2658,8 @@ mod tests {
                 &fm("Edited", None),
                 "x\n",
                 Some("1999-01-01T00:00:00Z"),
-                false,
+                NO_SHRINK,
+                NO_KEY_DROP,
             )
             .expect_err("edit of unparsable note must be refused");
             assert!(
@@ -2504,7 +2674,8 @@ mod tests {
             &fm("Fine", None),
             "edited\n",
             Some("2026-09-25T01:00:00Z"),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .expect("clean note stays editable");
     }
@@ -2544,7 +2715,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let err = write_note(
@@ -2553,7 +2725,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             &new_body,
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         let s = err.to_string();
@@ -2577,7 +2750,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         write_note(
@@ -2586,7 +2760,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             &new_body,
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
     }
@@ -2606,7 +2781,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let err = write_note(
@@ -2615,7 +2791,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             &new_body,
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(err.to_string().starts_with("shrink_refused:1025:512"));
@@ -2640,7 +2817,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         write_note(
@@ -2649,7 +2827,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             &new_body,
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
     }
@@ -2663,7 +2842,8 @@ mod tests {
             &fm("T", None),
             &"x".repeat(200),
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         write_note(
@@ -2672,7 +2852,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             "tiny\n",
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
     }
@@ -2686,16 +2867,20 @@ mod tests {
             &fm("T", None),
             &long_body(400),
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
+        let allow_shrink = true;
+        let allow_key_drop = false;
         write_note(
             &root,
             "wiki/n.md",
             &fm("T", Some(&created.updated_at)),
             "deliberate full rewrite\n",
             Some(&created.updated_at),
-            true,
+            allow_shrink,
+            allow_key_drop,
         )
         .unwrap();
     }
@@ -2704,7 +2889,16 @@ mod tests {
     fn create_with_marker_is_rejected() {
         let (_g, root) = vault(); // review M1: dir is unused; `_g` matches existing test style
         let body = "text [SKILL_PRUNED] more text\n";
-        let err = write_note(&root, "wiki/n.md", &fm("T", None), body, None, false).unwrap_err();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            body,
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .starts_with("compaction_marker:[SKILL_PRUNED]"),
@@ -2721,16 +2915,20 @@ mod tests {
             &fm("T", None),
             "clean body\n",
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
+        let allow_shrink = true;
+        let allow_key_drop = false;
         let err = write_note(
             &root,
             "wiki/n.md",
             &fm("T", Some(&created.updated_at)),
             "clean body\nHERMES-CONTEXT-COMPRESSION\n",
             Some(&created.updated_at),
-            true,
+            allow_shrink,
+            allow_key_drop,
         )
         .unwrap_err();
         assert!(
@@ -2769,7 +2967,16 @@ mod tests {
         // locked (spec D2). Use fm("note about [SKILL_PRUNED]", …) so the new
         // document carries the same markers the existing one has.
         let note = fm("note about [SKILL_PRUNED]", Some(&token));
-        write_note(&root, "wiki/n.md", &note, "body two\n", Some(&token), false).unwrap();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &note,
+            "body two\n",
+            Some(&token),
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2799,7 +3006,8 @@ mod tests {
             &fm("t", Some(&token)),
             "clean replacement\n",
             Some(&token),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
     }
@@ -2813,7 +3021,8 @@ mod tests {
             &fm("T", None),
             &long_body(400),
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let err = write_note(
@@ -2822,7 +3031,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             "[SKILL_PRUNED]\n",
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         assert!(
@@ -2878,7 +3088,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         // Rendered new body 100+1 = 101 → 202 < 2049 → shrink_refused.
@@ -2888,7 +3099,8 @@ mod tests {
             "wiki/n.md",
             &fm("T", Some(&created.updated_at)),
             &new_body,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         let s = err.to_string();
@@ -2915,7 +3127,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         write_note(
@@ -2924,7 +3137,8 @@ mod tests {
             &fm("T", Some(&created.updated_at)),
             &new_body,
             Some(&created.updated_at),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
     }
@@ -2942,7 +3156,8 @@ mod tests {
             &fm("T", None),
             &existing_body,
             None,
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap();
         let on_disk = std::fs::read_to_string(root.join("wiki/n.md")).unwrap();
@@ -2966,7 +3181,8 @@ mod tests {
             &fm("T", Some(&token)),
             &new_body,
             Some(&token),
-            false,
+            NO_SHRINK,
+            NO_KEY_DROP,
         )
         .unwrap_err();
         let s = err.to_string();
@@ -3059,7 +3275,13 @@ mod tests {
         m.tags = Some(vec![]);
         assert_eq!(
             rendered_key_set(&m),
-            vec!["created_at", "entity_type", "okf_version", "profile", "title"]
+            vec![
+                "created_at",
+                "entity_type",
+                "okf_version",
+                "profile",
+                "title"
+            ]
         );
         let mut m = fm("T", Some("2026-09-25T01:00:00Z"));
         m.supersedes = Some("immutable-source-files/agents/v1.md".to_string());
@@ -3110,7 +3332,10 @@ mod tests {
             ("tags: \"\"", "tags"),
             ("tags: foo", "tags"),
             ("tags: {}", "tags"),
-            ("supersedes: immutable-source-files/agents/v1.md", "supersedes"),
+            (
+                "supersedes: immutable-source-files/agents/v1.md",
+                "supersedes",
+            ),
             ("aliases: []", "aliases"),
             ("aliases: null", "aliases"),
         ] {
@@ -3132,10 +3357,19 @@ mod tests {
     fn existing_keys_line_scan_tier() {
         // Damaged YAML → tier 3. Title still extracted (key before FIRST ':').
         let keys = kd_keys(&kd_doc(&[], true));
-        assert!(keys.contains("title") && keys.contains("updated_at"), "{keys:?}");
+        assert!(
+            keys.contains("title") && keys.contains("updated_at"),
+            "{keys:?}"
+        );
 
         // Inline absent forms for known optionals count ABSENT…
-        for line in ["tags: []", "tags:", "tags: null", "tags: ~", "supersedes: \"\""] {
+        for line in [
+            "tags: []",
+            "tags:",
+            "tags: null",
+            "tags: ~",
+            "supersedes: \"\"",
+        ] {
             let keys = kd_keys(&kd_doc(&[line], true));
             let key = line.split(':').next().unwrap();
             assert!(!keys.contains(key), "{line:?} must count ABSENT: {keys:?}");
@@ -3148,7 +3382,10 @@ mod tests {
         // Non-empty inline values, and the accepted trailing-comment divergence.
         for line in ["tags: foo", "tags: \"\"", "tags: [] # none", "tags: [a]"] {
             let keys = kd_keys(&kd_doc(&[line], true));
-            assert!(keys.contains("tags"), "{line:?} must count PRESENT: {keys:?}");
+            assert!(
+                keys.contains("tags"),
+                "{line:?} must count PRESENT: {keys:?}"
+            );
         }
         // Unknown keys are PRESENT whatever their value.
         let keys = kd_keys(&kd_doc(&["aliases: []"], true));
@@ -3165,11 +3402,30 @@ mod tests {
     fn line_scan_key_extraction_rule() {
         // D1 (d): column-0, not whitespace/#/-, contains ':'; key = text
         // before the FIRST ':', trimmed, one matching quote pair stripped.
-        assert_eq!(line_scan_key("\"quoted\": v").map(|(k, _)| k), Some("quoted".to_string()));
-        assert_eq!(line_scan_key("'single': v").map(|(k, _)| k), Some("single".to_string()));
-        assert_eq!(line_scan_key("a: b: c").map(|(k, r)| (k, r.trim())), Some(("a".to_string(), "b: c")));
-        assert_eq!(line_scan_key("some key: v").map(|(k, _)| k), Some("some key".to_string()));
-        for not_a_key in ["# comment: x", "- item: x", "  indented: x", "\tindented: x", "", "no colon here"] {
+        assert_eq!(
+            line_scan_key("\"quoted\": v").map(|(k, _)| k),
+            Some("quoted".to_string())
+        );
+        assert_eq!(
+            line_scan_key("'single': v").map(|(k, _)| k),
+            Some("single".to_string())
+        );
+        assert_eq!(
+            line_scan_key("a: b: c").map(|(k, r)| (k, r.trim())),
+            Some(("a".to_string(), "b: c"))
+        );
+        assert_eq!(
+            line_scan_key("some key: v").map(|(k, _)| k),
+            Some("some key".to_string())
+        );
+        for not_a_key in [
+            "# comment: x",
+            "- item: x",
+            "  indented: x",
+            "\tindented: x",
+            "",
+            "no colon here",
+        ] {
             assert!(line_scan_key(not_a_key).is_none(), "{not_a_key:?}");
         }
     }
@@ -3215,7 +3471,9 @@ mod tests {
     fn key_preservation_create_path_and_fence_less_pass() {
         assert!(enforce_key_preservation(None, &fm_without_tags(None), false).is_ok());
         // Defense-in-depth: unreachable post-staleness, must not panic.
-        assert!(enforce_key_preservation(Some("no fence\n"), &fm_without_tags(None), false).is_ok());
+        assert!(
+            enforce_key_preservation(Some("no fence\n"), &fm_without_tags(None), false).is_ok()
+        );
     }
 
     #[test]
@@ -3262,6 +3520,475 @@ mod tests {
     fn key_preservation_flag_bypasses_both_partitions() {
         let allow_key_drop = true;
         let doc = kd_doc(&["type: fact", "aliases: []", "tags: [a]"], false);
-        assert!(enforce_key_preservation(Some(&doc), &fm_without_tags(None), allow_key_drop).is_ok());
+        assert!(
+            enforce_key_preservation(Some(&doc), &fm_without_tags(None), allow_key_drop).is_ok()
+        );
+    }
+
+    /// Seed `rel` with raw `doc` bytes (bypasses write_note — needed for
+    /// legacy/damaged/hand-edited fixtures) and return its If-Match token.
+    fn kd_seed(root: &Path, rel: &str, doc: &str) -> String {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, doc).unwrap();
+        read_existing_token(doc).expect("seed fixture carries a readable token")
+    }
+
+    /// Edit with the seed's own body ("body\n") so the shrink guard is inert.
+    fn kd_edit(
+        root: &Path,
+        rel: &str,
+        m: &OkfFrontmatter,
+        token: &str,
+        allow_key_drop: bool,
+    ) -> Result<WriteNoteResult, WriteNoteError> {
+        let allow_shrink = false;
+        write_note(
+            root,
+            rel,
+            m,
+            "body\n",
+            Some(token),
+            allow_shrink,
+            allow_key_drop,
+        )
+    }
+
+    #[test]
+    fn key_drop_incident_replay_tags_and_supersedes() {
+        let (_g, root) = deposit_vault();
+        let v1 = "immutable-source-files/agents/v1.md";
+        let v2 = "immutable-source-files/agents/v2.md";
+        write_note(
+            &root,
+            v1,
+            &fm("V1", None),
+            "old\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
+        let mut m = fm("V2", None);
+        m.supersedes = Some(v1.to_string());
+        let created = write_note(&root, v2, &m, "body\n", None, NO_SHRINK, NO_KEY_DROP).unwrap();
+        // Mangled payload: both optional keys gone.
+        let mut mangled = fm_without_tags(Some(&created.updated_at));
+        mangled.supersedes = None;
+        let err = kd_edit(&root, v2, &mangled, &created.updated_at, NO_KEY_DROP).unwrap_err();
+        let s = err.to_string();
+        assert!(s.starts_with("key_drop_refused:supersedes,tags:"), "{s}");
+        assert!(!s.contains("allow_key_drop"), "{s}");
+        // Refused write left the file untouched.
+        let on_disk = fs::read_to_string(root.join(v2)).unwrap();
+        assert_eq!(read_existing_token(&on_disk).unwrap(), created.updated_at);
+    }
+
+    #[test]
+    fn key_drop_required_field_omission_fails_at_parse_not_guard() {
+        // Opus c1 M1: required fields can't reach the guard.
+        let v = serde_json::json!({
+            "path": "wiki/n.md",
+            "frontmatter": {
+                "okf_version": "0.1", "profile": "llm-wiki/1", "title": "T",
+                "created_at": "2026-09-01T00:00:00Z"
+            },
+            "body": "b"
+        });
+        let err = serde_json::from_value::<crate::tool_dispatch::VaultWriteNoteParams>(v)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("entity_type"), "{err}");
+    }
+
+    #[test]
+    fn key_drop_unknown_key_strict_and_line_scan_tiers() {
+        for damaged in [NO_SHRINK, NO_KEY_DROP, true] {
+            let (_g, root) = vault();
+            let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["aliases: []"], damaged));
+            let err = kd_edit(
+                &root,
+                "wiki/n.md",
+                &fm("T", Some(&token)),
+                &token,
+                NO_KEY_DROP,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, WriteNoteError::KeyDropUnrepresentable { keys } if keys == &["aliases"]),
+                "damaged={damaged}: {err}"
+            );
+            assert!(err.to_string().contains("unrepresentable"), "{err}");
+        }
+    }
+
+    #[test]
+    fn key_drop_mixed_reports_known_first_end_to_end() {
+        let (_g, root) = vault();
+        let token = kd_seed(
+            &root,
+            "wiki/n.md",
+            &kd_doc(&["type: fact", "tags: [a]"], false),
+        );
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropRefused { keys } if keys == &["tags"]),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn key_drop_damaged_yaml_inline_empty_vs_block_tags() {
+        // Inline `tags: []` counts absent → dropping it succeeds.
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["tags: []"], true));
+        kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .expect("inline-empty tags must count absent");
+        // Block-sequence tags is PRESENT → dropping it refuses (guard NOT skipped).
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["tags:", "  - a"], true));
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().starts_with("key_drop_refused:tags:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn key_drop_damaged_nested_block_mapping_unknown_key() {
+        let (_g, root) = vault();
+        let token = kd_seed(
+            &root,
+            "wiki/n.md",
+            &kd_doc(&["source:", "  url: https://x"], true),
+        );
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropUnrepresentable { keys } if keys == &["source"]),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn key_drop_known_absent_forms_never_false_drop() {
+        for line in [
+            "tags: null",
+            "tags: ~",
+            "tags: []",
+            "supersedes: ~",
+            "supersedes: null",
+            "supersedes: \"\"",
+        ] {
+            let (_g, root) = vault();
+            let token = kd_seed(&root, "wiki/n.md", &kd_doc(&[line], false));
+            kd_edit(
+                &root,
+                "wiki/n.md",
+                &fm_without_tags(Some(&token)),
+                &token,
+                NO_KEY_DROP,
+            )
+            .unwrap_or_else(|e| panic!("{line:?} must count absent: {e}"));
+        }
+    }
+
+    #[test]
+    fn key_drop_damaged_present_scalar_forms_refuse() {
+        // `tags: foo`, `tags: ""` (non-list), `tags: [] # none` (trailing
+        // comment — accepted stricter-direction divergence) all PRESENT.
+        for line in ["tags: foo", "tags: \"\"", "tags: [] # none"] {
+            let (_g, root) = vault();
+            let token = kd_seed(&root, "wiki/n.md", &kd_doc(&[line], true));
+            let err = kd_edit(
+                &root,
+                "wiki/n.md",
+                &fm_without_tags(Some(&token)),
+                &token,
+                NO_KEY_DROP,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, WriteNoteError::KeyDropRefused { keys } if keys == &["tags"]),
+                "{line:?}: {err}"
+            );
+        }
+        // Non-list tags does not wedge: re-sending non-empty tags succeeds.
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["tags: \"\""], true));
+        kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .expect("sending non-empty tags keeps the key");
+    }
+
+    #[test]
+    fn key_drop_non_string_keys_both_tiers() {
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["1: x"], false));
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        let debug = format!("{:?}", serde_yaml::Value::Number(1.into()));
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropUnrepresentable { keys } if keys == std::slice::from_ref(&debug)),
+            "{err}"
+        );
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["1: x", "my-key: y"], true));
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropUnrepresentable { keys } if keys == &["1", "my-key"]),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn key_drop_non_deposit_supersedes_drop_needs_flag() {
+        // Spec D4 sibling case: a wiki note with a hand-added `supersedes`
+        // cannot re-send it (deposit-only), so only the flag gets through.
+        // Also pins "drop exactly one key names exactly that key".
+        let (_g, root) = vault();
+        let token = kd_seed(
+            &root,
+            "wiki/n.md",
+            &kd_doc(
+                &[
+                    "tags: [a]",
+                    "supersedes: immutable-source-files/agents/v1.md",
+                ],
+                false,
+            ),
+        );
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, WriteNoteError::KeyDropRefused { keys } if keys == &["supersedes"]),
+            "{err}"
+        );
+        let allow_key_drop = true;
+        kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            allow_key_drop,
+        )
+        .expect("explicit confirmation drops the stale pointer");
+    }
+
+    #[test]
+    fn key_drop_flag_permits_known_and_unrepresentable() {
+        let allow_key_drop = true;
+        let (_g, root) = vault();
+        let token = kd_seed(
+            &root,
+            "wiki/n.md",
+            &kd_doc(&["type: fact", "tags: [a]"], false),
+        );
+        kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&token)),
+            &token,
+            allow_key_drop,
+        )
+        .expect("flag bypasses both partitions");
+        let on_disk = fs::read_to_string(root.join("wiki/n.md")).unwrap();
+        // Line-prefix check: a bare `contains("type:")` would match `entity_type:`.
+        assert!(
+            !on_disk
+                .lines()
+                .any(|l| l.starts_with("type:") || l.starts_with("tags:")),
+            "{on_disk}"
+        );
+    }
+
+    #[test]
+    fn key_drop_adding_keys_never_refuses() {
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&[], false));
+        kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm("T", Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .expect("adding tags is not a drop");
+    }
+
+    #[test]
+    fn key_drop_crlf_note_refused() {
+        let (_g, root) = vault();
+        write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            "body\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
+        let lf = fs::read_to_string(root.join("wiki/n.md")).unwrap();
+        let crlf = lf.replace('\n', "\r\n");
+        fs::write(root.join("wiki/n.md"), &crlf).unwrap();
+        let token = read_existing_token(&crlf).unwrap();
+        let err = kd_edit(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&token)),
+            &token,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().starts_with("key_drop_refused:tags:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn marker_check_runs_before_key_drop_check() {
+        // D6: marker > key-drop.
+        let (_g, root) = vault();
+        let token = kd_seed(&root, "wiki/n.md", &kd_doc(&["tags: [a]"], false));
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&token)),
+            "[SKILL_PRUNED]\n",
+            Some(&token),
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(err.to_string().starts_with("compaction_marker:"), "{err}");
+    }
+
+    #[test]
+    fn key_drop_check_runs_before_shrink_check() {
+        // D6: key-drop > shrink.
+        let (_g, root) = vault();
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            &long_body(400),
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
+        let err = write_note(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&created.updated_at)),
+            "tiny\n",
+            Some(&created.updated_at),
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().starts_with("key_drop_refused:"),
+            "key-drop must win: {err}"
+        );
+    }
+
+    #[test]
+    fn params_allow_key_drop_omitted_defaults_false_and_true_parses() {
+        let fm_json = serde_json::json!({
+            "okf_version": "0.1",
+            "profile": "llm-wiki/1",
+            "title": "T",
+            "entity_type": "fact",
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+        let v = serde_json::json!({ "path": "wiki/n.md", "frontmatter": fm_json, "body": "b" });
+        let p: crate::tool_dispatch::VaultWriteNoteParams = serde_json::from_value(v).unwrap();
+        assert!(!p.allow_key_drop);
+        let v = serde_json::json!({ "path": "wiki/n.md", "frontmatter": fm_json, "body": "b", "allow_key_drop": true });
+        let p: crate::tool_dispatch::VaultWriteNoteParams = serde_json::from_value(v).unwrap();
+        assert!(p.allow_key_drop);
+    }
+
+    #[test]
+    fn key_drop_refusal_reaches_mcp_surface_via_anyhow() {
+        let (_g, root) = vault();
+        let created = write_note(
+            &root,
+            "wiki/n.md",
+            &fm("T", None),
+            "body\n",
+            None,
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap();
+        let err = crate::tool_dispatch::dispatch_vault_write_note(
+            &root,
+            "wiki/n.md",
+            &fm_without_tags(Some(&created.updated_at)),
+            "body\n",
+            NO_SHRINK,
+            NO_KEY_DROP,
+        )
+        .unwrap_err();
+        let s = err.to_string();
+        assert!(s.starts_with("key_drop_refused:tags:"), "{s}");
+        assert!(
+            !s.contains("allow_key_drop"),
+            "must not teach the bypass: {s}"
+        );
     }
 }

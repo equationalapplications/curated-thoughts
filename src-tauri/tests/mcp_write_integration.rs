@@ -820,6 +820,10 @@ fn e3_upsert_index_outside_vault_fails() {
 
 use tauri_app_lib::okf::write::write_note;
 
+/// Issue #245 D4: name the two adjacent guard bools — never pass literals.
+const NO_SHRINK: bool = false;
+const NO_KEY_DROP: bool = false;
+
 /// The live repro from issue #119: a wiki-shaped vault carrying
 /// `immutable-source-files/` but neither `wiki/` nor `agents/`. Both allowed
 /// subdirs are absent, so `safe_vault_path`'s allowlist is empty; before the
@@ -839,7 +843,8 @@ fn first_deposit_succeeds_on_vault_with_neither_wiki_nor_agents() {
         &create_test_frontmatter("Deposit On Bare Vault"),
         "Deposited without a manual mkdir -p.",
         None,
-        false,
+        NO_SHRINK,
+        NO_KEY_DROP,
     )
     .expect("deposit should succeed on a vault with no writable subdir yet");
     assert!(!res.sha256.is_empty(), "sha256 should be populated");
@@ -871,7 +876,8 @@ fn first_write_succeeds_on_vault_with_no_subdirs_at_all() {
         &create_test_frontmatter("Deep Deposit"),
         "Two levels of parents bootstrapped.",
         None,
-        false,
+        NO_SHRINK,
+        NO_KEY_DROP,
     )
     .expect("nested deposit should succeed");
     assert!(
@@ -886,7 +892,8 @@ fn first_write_succeeds_on_vault_with_no_subdirs_at_all() {
         &create_test_frontmatter("First Page"),
         "wiki/ bootstrapped too.",
         None,
-        false,
+        NO_SHRINK,
+        NO_KEY_DROP,
     )
     .expect("wiki write should succeed");
     assert!(
@@ -910,7 +917,8 @@ fn bootstrap_refuses_sibling_prefix_dir() {
         &create_test_frontmatter("Sibling Prefix"),
         "should never land",
         None,
-        false,
+        NO_SHRINK,
+        NO_KEY_DROP,
     );
     assert!(err.is_err(), "sibling-prefix path must be rejected");
     assert!(

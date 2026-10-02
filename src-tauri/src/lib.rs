@@ -881,11 +881,14 @@ fn vault_write_note(
     frontmatter: okf::OkfFrontmatter,
     body: String,
     allow_shrink: Option<bool>,
+    allow_key_drop: Option<bool>,
 ) -> Result<okf::WriteNoteResult, String> {
     let vault_root = vault_root_from_state(&vault_root_state)?;
     // The request frontmatter's `updated_at` is the If-Match token; on success
     // the core stamps a fresh token so the next edit must observe the new one.
     // allow_shrink (issue #240): omitted ⇒ false — the guard is opt-out only.
+    // allow_key_drop (issue #245): omitted ⇒ false — Tauri command params do
+    // not honor #[serde(default)], hence Option + unwrap_or.
     okf::write::write_note(
         &vault_root,
         &path,
@@ -893,6 +896,7 @@ fn vault_write_note(
         &body,
         frontmatter.updated_at.as_deref(),
         allow_shrink.unwrap_or(false),
+        allow_key_drop.unwrap_or(false),
     )
     .map_err(|e| e.to_string())
 }

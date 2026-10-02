@@ -140,7 +140,10 @@ is exactly the drift D2's shared helper exists to prevent.
      (`allow_shrink`, `allow_key_drop`) — easy to swap silently. Keep bare bools (a params struct
      would rewrite every #240-era call site — scope creep), but pin: ALL test call sites bind
      named locals first (`let allow_shrink = false; let allow_key_drop = true;`) and pass the
-     locals, never literals — a swap then reads wrong in review. This covers BOTH the unit
+     locals, never literals — a swap then reads wrong in review. (Implementation: default-
+     valued sites pass module-level named consts `NO_SHRINK`/`NO_KEY_DROP` instead of two
+     `let` lines at each of ~80 sites — same swap-visibility; `true` sites bind locals.)
+     This covers BOTH the unit
      tests in `okf/write.rs` AND the integration binary `src-tauri/tests/mcp_write_integration.rs`
      (direct `write_note(..., None, false)` calls at :836, :868, :883, :907 today — every one
      breaks on the signature change; review 2026-10-02).
