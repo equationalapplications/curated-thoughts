@@ -109,7 +109,33 @@ const VERSION_MATRIX = [
   },
   { name: 'feat -> minor', message: 'feat(vault): add bootstrap', expected: 'minor' },
   { name: 'fix -> patch', message: 'fix(vault): correct allowlist gate', expected: 'patch' },
+  // First-party dependency adoptions (issue #253): the `deps` scope is
+  // human-first-party-only by convention — `.github/dependabot.yml` writes
+  // bot bumps as `chore(bot)`. Exact `deps` scope match: `deps` never
+  // generalizes to `deps*` (that would re-match `deps-dev`).
+  {
+    name: 'chore(deps) first-party adoption -> patch',
+    message:
+      'chore(deps): adopt @equationalapplications llm-wiki 7.9.0 (engine migration 13 schema sync) (#252)',
+    expected: 'patch',
+  },
+  {
+    name: 'chore(bot) dependabot bump -> no release',
+    message: 'chore(bot): bump the minor-and-patch group with 11 updates',
+    expected: null,
+  },
+  {
+    name: 'chore(deps-dev) legacy bot subject -> no release',
+    message: 'chore(deps-dev): bump vitest from 4.1.11 to 5.0.0',
+    expected: null,
+  },
+  {
+    name: 'plain chore -> no release',
+    message: 'chore: tidy config',
+    expected: null,
+  },
   { name: 'perf -> no release', message: 'perf(embed): speed up embedding', expected: null },
+  { name: 'style -> patch', message: 'style(vault): format imports', expected: 'patch' },
   { name: 'revert -> no release', message: 'revert: undo change', expected: null },
 ];
 
@@ -169,6 +195,55 @@ if (notesError === null) {
   );
   check('no "[object Object]" leaked into notes', !notes.includes('[object Object]'));
   check('no bare "undefined" leaked into notes', !/\bundefined\b/.test(notes));
+}
+
+// Pure-adoption release (issue #253): a version cut whose only commits are a
+// first-party `chore(deps)` adoption plus bot chores must still render a
+// non-empty body. The preset REPLACES its default types with presetConfig
+// types, and `findTypeEntry` is first-match-wins, so the scoped
+// `{ type: 'chore', scope: 'deps' }` entry MUST precede the unscoped hidden
+// `chore` entry — a wrongly ordered list fails here with empty notes.
+const ADOPTION_COMMITS = [
+  commit(
+    'chore(deps): adopt @equationalapplications llm-wiki 7.9.0 (engine migration 13 schema sync) (#252)',
+  ),
+  commit('chore(bot): bump the minor-and-patch group with 11 updates'),
+];
+
+let adoptionNotes = '';
+let adoptionError = null;
+try {
+  adoptionNotes = await generateNotes(
+    pluginConfig('@semantic-release/release-notes-generator'),
+    context(ADOPTION_COMMITS),
+  );
+} catch (error) {
+  adoptionError = error;
+}
+
+check(
+  'adoption-only notes render without throwing',
+  adoptionError === null,
+  adoptionError ? adoptionError.message : '',
+);
+
+if (adoptionError === null) {
+  check(
+    'adoption-only notes are non-empty',
+    typeof adoptionNotes === 'string' && adoptionNotes.trim().length > 0,
+  );
+  check(
+    'adoption notes have a Dependencies section',
+    adoptionNotes.includes('Dependencies'),
+  );
+  check(
+    'adoption subject rendered under Dependencies',
+    adoptionNotes.includes('llm-wiki 7.9.0'),
+  );
+  check(
+    'chore(bot) subject absent from notes',
+    !adoptionNotes.includes('bump the minor-and-patch group'),
+  );
 }
 
 let failed = 0;
