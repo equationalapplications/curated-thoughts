@@ -1,8 +1,8 @@
 version: 2
 updates:
-  # The `deps` commit scope is HUMAN-FIRST-PARTY-ONLY by convention (issue
-  # #253): `.releaserc.json` releases `chore(deps)` at patch, so automation
-  # must never use that scope. Dependabot writes `chore(bot): bump ...`
+  # The `deps` commit scope is HUMAN-ONLY by convention (issue #253): first-
+  # party adoptions AND human security bumps are written `chore(deps)` and
+  # release at patch; automation must never use that scope. Dependabot writes `chore(bot): bump ...`
   # instead (analyzes as no-release). Pins:
   #   - `prefix` (not `prefix-development`): dev-dependency bumps get the
   #     same prefix — no `deps-dev` scope variants.

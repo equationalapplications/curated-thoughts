@@ -198,11 +198,13 @@ if (notesError === null) {
 }
 
 // Pure-adoption release (issue #253): a version cut whose only commits are a
-// first-party `chore(deps)` adoption plus bot chores must still render a
-// non-empty body. The preset REPLACES its default types with presetConfig
-// types, and `findTypeEntry` is first-match-wins, so the scoped
+// first-party `chore(deps)` adoption plus bot chores must still render its
+// Dependencies section. The preset REPLACES its default types with
+// presetConfig types, and `findTypeEntry` is first-match-wins, so the scoped
 // `{ type: 'chore', scope: 'deps' }` entry MUST precede the unscoped hidden
-// `chore` entry — a wrongly ordered list fails here with empty notes.
+// `chore` entry. A wrongly ordered list does NOT fail the non-empty check
+// (the header always renders) — it fails the two checks below that look for
+// the Dependencies section and the adoption subject.
 const ADOPTION_COMMITS = [
   commit(
     'chore(deps): adopt @equationalapplications llm-wiki 7.9.0 (engine migration 13 schema sync) (#252)',
@@ -237,8 +239,8 @@ if (adoptionError === null) {
     adoptionNotes.includes('Dependencies'),
   );
   check(
-    'adoption subject rendered under Dependencies',
-    adoptionNotes.includes('llm-wiki 7.9.0'),
+    'adoption subject rendered under the Dependencies heading',
+    /### Dependencies[\s\S]*llm-wiki 7\.9\.0/.test(adoptionNotes),
   );
   check(
     'chore(bot) subject absent from notes',
