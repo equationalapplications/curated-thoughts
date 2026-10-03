@@ -1,3 +1,13 @@
+## [3.2.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.1.0...v3.2.0) (2026-10-03)
+
+### Features
+
+* **ci:** release first-party chore(deps) adoptions ([#253](https://github.com/equationalapplications/curated-thoughts/issues/253)) ([435c63b](https://github.com/equationalapplications/curated-thoughts/commit/435c63b29e27e914081e067585a67582ed5446e9))
+
+### Dependencies
+
+* **deps:** security bump undici and brace-expansion via pnpm overrides ([f0bbeb1](https://github.com/equationalapplications/curated-thoughts/commit/f0bbeb1f0674e174ef0ba64304a2464eef68b319)), closes [#72](https://github.com/equationalapplications/curated-thoughts/issues/72) [74/#76](https://github.com/74/curated-thoughts/issues/76) [#82](https://github.com/equationalapplications/curated-thoughts/issues/82) [#81](https://github.com/equationalapplications/curated-thoughts/issues/81)
+
 ## [3.1.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.0.0...v3.1.0) (2026-10-02)
 
 ### Features
