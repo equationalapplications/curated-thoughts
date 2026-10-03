@@ -110,8 +110,9 @@ const VERSION_MATRIX = [
   { name: 'feat -> minor', message: 'feat(vault): add bootstrap', expected: 'minor' },
   { name: 'fix -> patch', message: 'fix(vault): correct allowlist gate', expected: 'patch' },
   // First-party dependency adoptions (issue #253): the `deps` scope is
-  // human-first-party-only by convention — `.github/dependabot.yml` writes
-  // bot bumps as `chore(bot)`. Exact `deps` scope match: `deps` never
+  // HUMAN-ONLY by convention — first-party adoptions AND human security
+  // bumps release at patch; `.github/dependabot.yml` writes bot bumps as
+  // `chore(bot)`. Exact `deps` scope match: `deps` never
   // generalizes to `deps*` (that would re-match `deps-dev`).
   {
     name: 'chore(deps) first-party adoption -> patch',
@@ -236,7 +237,7 @@ if (adoptionError === null) {
   );
   check(
     'adoption notes have a Dependencies section',
-    adoptionNotes.includes('Dependencies'),
+    adoptionNotes.includes('### Dependencies'),
   );
   check(
     'adoption subject rendered under the Dependencies heading',

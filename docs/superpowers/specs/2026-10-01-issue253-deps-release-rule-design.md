@@ -20,7 +20,11 @@ commit. Verified live: the actual `5dc58d1` adoption subject analyzes `null` thr
 ## Approach (all config + CI; no app code)
 
 1. **D1 — separate the two `chore(deps)` classes at the source.** Dependabot is moved off the
-   `deps` scope so the scope becomes human-first-party-only. `.github/dependabot.yml`: add
+   `deps` scope so the scope becomes HUMAN-ONLY (implementation note, Opus r1/r2 on PR #261:
+   widened from the original "human-first-party-only" wording — human third-party security bumps
+   such as `f0bbeb1` (undici/brace-expansion) are also written `chore(deps)` and release at
+   patch by design; classification is by commit author, not package origin).
+   `.github/dependabot.yml`: add
    `commit-message: { prefix: "chore(bot)" }` to ALL FOUR ecosystems (npm, cargo `/src-tauri`,
    cargo `/tools`, github-actions). Result: bot subjects become `chore(bot): bump …` — type
    `chore`, scope `bot`. Pins (Opus c1): (a) with an explicit `prefix`, dev-dependency bumps use
