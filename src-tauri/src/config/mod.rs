@@ -1018,14 +1018,17 @@ impl BrainConfig {
         paths: &BrainPaths,
     ) -> Result<()> {
         self.raw_ontology = None;
-        // A non-object on-disk `ontology` value is ALSO parked under the
-        // `ontology` key in `preserved_keys` (the load_lenient salvage
-        // below), and `write()` merges `preserved_keys` into the root LAST —
-        // after the typed ontology block is inserted. Without this purge the
-        // stale parked value would overwrite the block set here: the
-        // deliberate change silently never reaches disk (and a stale
-        // snapshot would sit over the user's manual fix). Only the
-        // deliberate-change escape hatch may drop it.
+        // DEFENSIVE purge (opus re-review m2): the loader NO LONGER parks
+        // non-object `ontology` values into `preserved_keys` — with
+        // `raw_ontology` set, `write()` already leaves the on-disk
+        // `ontology` value untouched (it starts from the file it read), so
+        // parking was redundant. This purge guards only LEGACY files
+        // written by older builds that may have parked one there, and
+        // `write()` merges `preserved_keys` into the root LAST — after the
+        // typed ontology block is inserted — so without it a stale parked
+        // value would overwrite the block set here: the deliberate change
+        // silently never reaches disk. Only the deliberate-change escape
+        // hatch may drop it.
         if let Some(pk) = self.preserved_keys.as_mut() {
             if let Some(map) = pk.as_object_mut() {
                 map.remove("ontology");
@@ -1574,10 +1577,20 @@ impl BrainConfig {
         // and `raw_ontology` marks the degraded state so `write()` leaves
         // the on-disk block untouched (otherwise any unrelated writer
         // overwrites the bad value with `{"schema": null}` and the next
-        // load silently un-degrades). Note: an unknown `schema` VARIANT
-        // fails the WHOLE block deserialize — values do NOT "load as None";
-        // the comment on `OntologyConfigBlock.schema` in
-        // ontology_config.rs says exactly this now.
+        // load silently un-degrades). NOTE (opus re-review m2): non-object
+        // `ontology` values are deliberately NOT parked into
+        // `preserved_keys` here — with `raw_ontology` set, `write()`
+        // already leaves the on-disk `ontology` value untouched (it starts
+        // from the file it read), so parking would round-trip a value that
+        // the write guard preserves anyway. Only the deliberate-change
+        // escape hatch (`replace_ontology`) writes past that guard, and it
+        // still purges any legacy parked key defensively (older builds
+        // parked one).
+        //
+        // Note: an unknown `schema` VARIANT fails the WHOLE block
+        // deserialize — values do NOT "load as None"; the comment on
+        // `OntologyConfigBlock.schema` in ontology_config.rs says exactly
+        // this now.
         if let Some(ont) = obj.get("ontology") {
             match serde_json::from_value::<OntologyConfigBlock>(ont.clone()) {
                 Ok(o) => report.config.ontology = o,
@@ -1587,21 +1600,6 @@ impl BrainConfig {
                         .push(format!("ontology block unparseable: {}", e));
                     report.ontology_unparseable = true;
                     report.config.raw_ontology = Some(ont.clone());
-                    // A non-object `ontology` value cannot be merged as a
-                    // block; park it in preserved keys so an unrelated write
-                    // round-trips it instead of dropping it silently.
-                    if !ont.is_object() {
-                        let mut pk = report.config.preserved_keys.take();
-                        let map = match pk.as_mut().and_then(|v| v.as_object_mut()) {
-                            Some(m) => m,
-                            None => {
-                                pk = Some(serde_json::Value::Object(Default::default()));
-                                pk.as_mut().and_then(|v| v.as_object_mut()).unwrap()
-                            }
-                        };
-                        map.insert("ontology".to_string(), ont.clone());
-                        report.config.preserved_keys = pk;
-                    }
                 }
             }
         }
@@ -2985,30 +2983,39 @@ mod tests {
         );
     }
 
-    /// Opus tier-3 MAJOR-1: a NON-OBJECT on-disk `ontology` value is parked
-    /// into `preserved_keys` by the load salvage, and `write()` merges
-    /// `preserved_keys` LAST — after the typed ontology block insert. The
-    /// pre-fix `replace_ontology` cleared `raw_ontology` only, so the stale
-    /// parked value overwrote the deliberate change on disk (onboarding
-    /// silently dropped the user's schema choice). The purge must land the
-    /// new schema AND leave unrelated preserved keys (trusted_links isn't
-    /// preserved, but other unknown top-level keys are) intact.
+    /// Opus tier-3 MAJOR-1: a NON-OBJECT on-disk `ontology` value used to be
+    /// parked into `preserved_keys` by the load salvage (parking since
+    /// removed — opus re-review m2), and `write()` merges `preserved_keys`
+    /// LAST — after the typed ontology block insert. The pre-fix
+    /// `replace_ontology` cleared `raw_ontology` only, so the stale parked
+    /// value overwrote the deliberate change on disk (onboarding silently
+    /// dropped the user's schema choice). The purge must land the new schema
+    /// AND leave unrelated preserved keys (trusted_links isn't preserved,
+    /// but other unknown top-level keys are) intact.
     #[test]
     fn replace_ontology_purges_parked_preserved_ontology_key() {
         let (tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
-            r#"{"ontology":5,"trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":0}]}"#,
+            r#"{"ontology":5,"trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":0}],"x_custom":1}"#,
         );
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
         let mut cfg = BrainConfig::load_lenient(&paths).unwrap().config;
         assert!(cfg.raw_ontology.is_some());
-        // The non-object value is parked under `ontology` in preserved_keys.
+        // Parking removed: the loader no longer parks the non-object value.
+        assert!(
+            cfg.preserved_keys
+                .as_ref()
+                .and_then(|v| v.get("ontology"))
+                .is_none(),
+            "loader must not park non-object ontology into preserved_keys anymore"
+        );
+        // The unknown top-level key IS parked (it feeds preserved_keys).
         assert_eq!(
-            cfg.preserved_keys.as_ref().and_then(|v| v.get("ontology")),
-            Some(&serde_json::json!(5)),
-            "non-object ontology must be parked in preserved_keys for the test to be honest"
+            cfg.preserved_keys.as_ref().and_then(|v| v.get("x_custom")),
+            Some(&serde_json::json!(1)),
+            "unknown top-level key must be parked in preserved_keys for the test to be honest"
         );
         cfg.replace_ontology(
             crate::ontology_config::OntologyConfigBlock {
@@ -3031,7 +3038,13 @@ mod tests {
             &serde_json::json!("docs/specs"),
             "trusted_links entry must survive the replace_ontology write: {after}"
         );
-        // And the file is now healthy: no parked `5`, no degraded reload.
+        // And the unknown top-level key survives the purge too.
+        assert_eq!(
+            root.get("x_custom"),
+            Some(&serde_json::json!(1)),
+            "unknown top-level key must survive replace_ontology's purge: {after}"
+        );
+        // And the file is now healthy: no degraded reload.
         assert_ne!(root.get("ontology"), Some(&serde_json::json!(5)));
         let report = BrainConfig::load_lenient(&paths).unwrap();
         assert!(!report.ontology_unparseable);
@@ -3134,58 +3147,63 @@ mod tests {
         );
     }
 
-    /// Opus tier-3 MINOR-5: raw-key marker collision safety. The keys `""`
-    /// and `"raw:"` must hash deterministically across insertion orders
-    /// (the pre-fix `raw:` marker gave key `""` the slot `raw:` itself — a
-    /// HashMap-iteration-order winner) and both keys must participate in
-    /// the hashed payload.
+    /// Opus tier-3 MINOR-5 + re-review m1: the keys `""` and `"raw:"` must
+    /// both FEED `ontology_config_watermark_hash` through the real function
+    /// (no self-checking rebuild of its map) and hash deterministically
+    /// across insertion orders (`""` is unmatchable → synthetic `/raw:`
+    /// slot; a literal `raw:` key is MATCHABLE → normalized `raw:` slot;
+    /// the `/raw:` marker keeps the two apart, unlike the pre-fix `raw:`
+    /// marker where insertion order decided whose value won the slot).
     #[test]
     fn watermark_hash_raw_marker_no_collision() {
-        let build = |empty_first: bool| {
+        // Flipping ONE unmatchable key's value changes the hash: the key
+        // participates in the hashed payload via the real function.
+        let build = |empty: OntologyMode, raw: OntologyMode| {
             let mut cfg = IngestConfig::default();
-            if empty_first {
-                cfg.folder_ontology
-                    .insert("".to_string(), OntologyMode::Off);
-                cfg.folder_ontology
-                    .insert("raw:".to_string(), OntologyMode::Strict);
-            } else {
-                cfg.folder_ontology
-                    .insert("raw:".to_string(), OntologyMode::Strict);
-                cfg.folder_ontology
-                    .insert("".to_string(), OntologyMode::Off);
-            }
+            cfg.folder_ontology.insert("".to_string(), empty);
+            cfg.folder_ontology.insert("raw:".to_string(), raw);
             cfg
         };
-        let a = build(true);
-        let b = build(false);
-        let h_a = ontology_config_watermark_hash(&a, None, false);
-        let h_b = ontology_config_watermark_hash(&b, None, false);
+        let base = build(OntologyMode::Off, OntologyMode::Strict);
+        let base_hash = ontology_config_watermark_hash(&base, None, false);
+
+        // Flip only the unmatchable "" key.
+        let mut empty_flip = base.clone();
+        empty_flip
+            .folder_ontology
+            .insert("".to_string(), OntologyMode::Strict);
+        assert_ne!(
+            base_hash,
+            ontology_config_watermark_hash(&empty_flip, None, false),
+            "the unmatchable empty key must feed the watermark hash"
+        );
+
+        // Flip only the raw:-named key.
+        let mut raw_flip = base.clone();
+        raw_flip
+            .folder_ontology
+            .insert("raw:".to_string(), OntologyMode::Off);
+        assert_ne!(
+            base_hash,
+            ontology_config_watermark_hash(&raw_flip, None, false),
+            "the literal raw: key must feed the watermark hash"
+        );
+
+        // Determinism: same map built in both insertion orders, same hash
+        // (guards the old HashMap-iteration-order flakiness).
+        let mut c = IngestConfig::default();
+        c.folder_ontology.insert("".to_string(), OntologyMode::Off);
+        c.folder_ontology
+            .insert("raw:".to_string(), OntologyMode::Strict);
+        let mut d = IngestConfig::default();
+        d.folder_ontology
+            .insert("raw:".to_string(), OntologyMode::Strict);
+        d.folder_ontology.insert("".to_string(), OntologyMode::Off);
         assert_eq!(
-            h_a, h_b,
+            ontology_config_watermark_hash(&c, None, false),
+            ontology_config_watermark_hash(&d, None, false),
             "raw-key marker collision: insertion order decided the hash"
         );
-        // Both keys participate in the hashed payload (rebuild the map the
-        // hash builds and check the synthetic slots exist).
-        let mut map = std::collections::BTreeMap::new();
-        for (k, v) in &a.folder_ontology {
-            if crate::config::key_is_matchable(k) {
-                map.insert(normalize_key(k), serde_json::to_value(v).unwrap());
-            } else {
-                map.insert(format!("/raw:{k}"), serde_json::to_value(v).unwrap());
-            }
-        }
-        assert!(
-            map.contains_key("/raw:"),
-            "empty raw key hashes under /raw:"
-        );
-        // A literal `raw:` key is MATCHABLE (normalizes to itself), so it
-        // participates under `raw:` — the exact slot the OLD marker gave
-        // the empty key. With `/raw:` the two slots are distinct.
-        assert!(
-            map.contains_key("raw:"),
-            "literal raw: key is matchable and hashes under raw:"
-        );
-        assert!(!map.contains_key("/raw:raw:"));
         // And the marker form can never equal a matchable key's normalized
         // form (the collision-safety argument itself).
         assert_ne!(normalize_key(""), "/raw:");
@@ -3252,8 +3270,9 @@ mod tests {
         );
     }
 
-    /// R2.2.4 (r5-M1 matrix): inference rollback preserves on-disk ingest
-    /// and ontology blocks (opt-outs must not vanish on provider failure).
+    /// R2.2.4 (r5-M1 matrix): the inference failed-save rollback preserves
+    /// on-disk ingest and ontology blocks (opt-outs must not vanish on
+    /// provider failure).
     #[test]
     fn inference_rollback_style_write_preserves_ingest_and_ontology() {
         let (tmp, paths) = degraded_fixture_dir();
@@ -3263,9 +3282,9 @@ mod tests {
         );
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
-        // Simulate the fixed rollback: load_lenient → reset generation → write.
-        let mut fallback = BrainConfig::load_lenient(&paths).unwrap().config;
-        fallback.generation = crate::inference::config::GenerationConfig::default();
+        // Simulate the fixed rollback: load_lenient → write (the failed
+        // write never touched the file, so nothing is reset).
+        let fallback = BrainConfig::load_lenient(&paths).unwrap().config;
         fallback.write(&paths).unwrap();
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
         // plan-p4-m6: parsed-value assertions (pretty-printed write output).
@@ -3279,6 +3298,61 @@ mod tests {
             root.pointer("/ontology/schema").unwrap(),
             &serde_json::json!("emergent"),
             "ontology block survived rollback: {after}"
+        );
+    }
+
+    /// Opus re-review M1: the failed-save rollback must NOT reset the
+    /// on-disk generation block — the failed write never changed the file,
+    /// so the user's previous generation config (provider External, legacy
+    /// plaintext `api_key`, `timeout_secs`) must survive byte-identical.
+    /// The previous fix child added a `GenerationConfig::default()` reset
+    /// here, which turned a temporary save failure into lost credentials.
+    #[test]
+    fn rollback_write_preserves_on_disk_generation() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"generation":{"provider":"external","model_name":"qwen","model_path":null,"external_url":"http://127.0.0.1:8080","api_key":"sk-legacy-secret","timeout_secs":42},"ingest":{"folder_ontology":{"ops":"off"}},"ontology":{"schema":"emergent"},"vault_path":"/v"}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        // Run the rollback path exactly as the failed-save handler does:
+        // load_lenient → write, with NO generation reset.
+        let fallback = BrainConfig::load_lenient(&paths).unwrap().config;
+        fallback.write(&paths).unwrap();
+        // plan-p4-m6: parsed-value assertions (pretty-printed write output).
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let expected_gen: serde_json::Value = serde_json::from_str(
+            r#"{"provider":"external","model_name":"qwen","model_path":null,"external_url":"http://127.0.0.1:8080","api_key":"sk-legacy-secret","timeout_secs":42}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            root.get("generation"),
+            Some(&expected_gen),
+            "on-disk generation block must survive the failed-save rollback byte-identical: {after}"
+        );
+        // Related blocks survive too.
+        assert_eq!(
+            root.pointer("/ingest/folder_ontology/ops").unwrap(),
+            &serde_json::json!("off"),
+            "ingest block survived rollback: {after}"
+        );
+        assert_eq!(
+            root.pointer("/ontology/schema").unwrap(),
+            &serde_json::json!("emergent"),
+            "ontology block survived rollback: {after}"
+        );
+        // And the file reloads healthy (no degraded state from the rollback).
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(!report.ontology_unparseable);
+        assert_eq!(
+            report.config.generation.provider,
+            crate::inference::config::GenerationProviderKind::External
+        );
+        assert_eq!(
+            report.config.generation.api_key.as_deref(),
+            Some("sk-legacy-secret")
         );
     }
 

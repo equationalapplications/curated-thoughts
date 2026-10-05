@@ -240,8 +240,11 @@ pub fn update_provider_with_brain_path(
             // the next `heal --yes` retypes opted-out folders, breaking D8)
             // and `ontology.schema` alongside it.
             //
-            // Generation handling on this site (M-1, same on the post-write
-            // site below): the fallback RESETS `generation` to the shipped
+            // Generation handling on this site (M-1; note the post-write
+            // site below diverges — it KEEPS the on-disk generation block,
+            // because there the failed write never changed the file; see
+            // that site's comment): the fallback RESETS `generation` to
+            // the shipped
             // default rather than restoring the raw on-disk block — this is
             // a DELIBERATE divergence from the raw-block restoration used
             // for `raw_generation`/`raw_embedding`/`raw_privacy` (which
@@ -291,21 +294,33 @@ pub fn update_provider_with_brain_path(
     cfg.generation = config_for_disk;
 
     if let Err(e) = cfg.write(&paths) {
-        // Roll back ONLY the generation block (r5-M1) — a wholesale
-        // `BrainConfig::default()` would erase the on-disk `ingest` block
-        // (folder_ontology opt-outs) and `ontology.schema`.
+        // Roll back ONLY what the failed save may have partially clobbered
+        // (r5-M1) — a wholesale `BrainConfig::default()` would erase the
+        // on-disk `ingest` block (folder_ontology opt-outs) and
+        // `ontology.schema`.
         //
-        // M-1: the generation handling here (reset to the shipped default,
-        // NOT a raw-block restore) deliberately mirrors the pre-write site
-        // above — see the full rationale in that comment block. Diverging
-        // here (e.g. re-restoring the just-written raw block) would put the
-        // panel's half-written generation block back on disk while the
-        // in-memory state machine reports Unconfigured.
-        let mut fallback = match crate::config::BrainConfig::load_lenient(&paths) {
+        // M-1 (opus re-review): this rollback deliberately KEEPS the
+        // previous generation block on disk — including any legacy
+        // plaintext `api_key`. The failed write never changed the file
+        // (`write()` renames only on success), so the on-disk generation
+        // block is still the user's last valid configuration; resetting it
+        // to the shipped default here would turn a temporary save failure
+        // into lost credentials and lost provider settings, breaking the
+        // "a panel save can neither wipe nor replace a pre-existing
+        // credential" promise above. The rollback write exists only to
+        // restore anything the failed write partially clobbered.
+        //
+        // In-memory, the state machine still goes to `Unconfigured` below:
+        // the panel's values were NOT persisted, so reporting them active
+        // would lie. This is a DELIBERATE divergence from the pre-write
+        // site above, which DOES reset `generation` on disk — there the
+        // disk write SUCCEEDED with the new values, so the reset undoes a
+        // real on-disk change; here nothing was changed on disk, so there
+        // is nothing to undo. See the rationale block on that site.
+        let fallback = match crate::config::BrainConfig::load_lenient(&paths) {
             Ok(report) => report.config,
             Err(_) => crate::config::BrainConfig::default(),
         };
-        fallback.generation = crate::config::GenerationConfig::default();
         let rollback_err = fallback.write(&paths).err();
         if let Some(rollback_err) = rollback_err {
             return Err(format!(
