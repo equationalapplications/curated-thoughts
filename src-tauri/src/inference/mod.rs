@@ -301,10 +301,11 @@ pub fn update_provider_with_brain_path(
         // here (e.g. re-restoring the just-written raw block) would put the
         // panel's half-written generation block back on disk while the
         // in-memory state machine reports Unconfigured.
-        let fallback = match crate::config::BrainConfig::load_lenient(&paths) {
+        let mut fallback = match crate::config::BrainConfig::load_lenient(&paths) {
             Ok(report) => report.config,
             Err(_) => crate::config::BrainConfig::default(),
         };
+        fallback.generation = crate::config::GenerationConfig::default();
         let rollback_err = fallback.write(&paths).err();
         if let Some(rollback_err) = rollback_err {
             return Err(format!(

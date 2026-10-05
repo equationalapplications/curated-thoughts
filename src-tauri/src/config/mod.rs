@@ -153,13 +153,15 @@ pub fn key_is_matchable(key: &str) -> bool {
 }
 
 /// The prefix a DROPPED `folder_ontology` key can honestly hold under
-/// (M-2): [`normalize_key`] plus stripping per-segment `.` noise, i.e. the
-/// same trimming the queried-path side of [`match_prefixes`] applies. A
-/// key like `"./ops"` is unmatchable (a load-time diagnostic fires) but
-/// still has a usable path form — the resolver's dropped-prefix hold must
-/// work on it, or the "mints under it hold until fixed" diagnostic
-/// over-promises. Keys with NO usable form (empty, `/`, or any `..`
-/// segment) return "" and hold nothing.
+/// (M-2): [`normalize_key`] plus stripping per-segment `.` noise. This is
+/// DELIBERATELY stricter than [`match_prefixes`]' queried-path trimming,
+/// which strips only a LEADING `./` — `usable_prefix` removes EVERY `.`
+/// segment wherever it appears, and rejects any key carrying a `..`
+/// segment outright. A key like `"./ops"` is unmatchable (a load-time
+/// diagnostic fires) but still has a usable path form — the resolver's
+/// dropped-prefix hold must work on it, or the "mints under it hold until
+/// fixed" diagnostic over-promises. Keys with NO usable form (empty, `/`,
+/// or any `..` segment) return "" and hold nothing.
 fn usable_prefix(key: &str) -> String {
     let k = normalize_key(key);
     let segs: Vec<&str> = k
@@ -547,6 +549,15 @@ impl IngestConfig {
                 // entry, any tie, or any degraded/dropped state — a silent
                 // climb would let heal --yes retype folders the user
                 // marked off. NEVER a climb (D8).
+                //
+                // (3b) Same 2b gate as NoMatch below: absent default +
+                // unreadable schema intent → Hold. An unplaceable path is
+                // strictly LESS known than a NoMatch path (we cannot even
+                // compute a vault-relative form to match against), so it
+                // must hold whenever NoMatch would.
+                if self.ontology_default.is_none() && schema.is_none() && schema_unparseable {
+                    return OntologyLookup::Hold;
+                }
                 let has_off = self
                     .folder_ontology
                     .values()
@@ -590,8 +601,9 @@ impl IngestConfig {
 #[derive(Debug, Clone, Default)]
 pub struct OntologyDegradedState {
     /// Load-failed route (malformed JSON, non-object root, UTF-8 failure,
-    /// `VaultPathNotString`, non-NotFound read error, non-object `ingest`).
-    /// Holds EVERYTHING.
+    /// `VaultPathNotString`, non-NotFound read error, non-object `ingest`,
+    /// or a non-object `folder_ontology` value inside an otherwise valid
+    /// `ingest` block). Holds EVERYTHING.
     pub global: bool,
     /// `folder_ontology` prefixes whose VALUE failed to salvage (scoped
     /// hold: only mints under them hold).
@@ -722,12 +734,15 @@ type PolicyCache = std::collections::HashMap<std::path::PathBuf, (Vec<u8>, Inges
 /// tie-degraded therefore always changes the hash. UNMATCHABLE keys
 /// (`"./ops"`, `"/"`, empty-after-normalization) COUNT (plan-p14-m5):
 /// retagging or adding/removing an inert key is a semantic config change.
-/// They are hashed under the synthetic key `raw:` + the raw key string;
+/// They are hashed under the synthetic key `/raw:` + the raw key string;
 /// matchable keys keep their normalized form, which can never collide
-/// with that marker (a raw `raw:…` key normalizes to itself — only
-/// backslash replacement and slash trimming — and stays MATCHABLE, so
-/// normalized matchable keys never take the `raw:`-prefixed synthetic
-/// form reserved here for unmatchable ones).
+/// with that marker: `normalize_key` output never STARTS with a slash
+/// (`\` → `/` replacement cannot create a leading one, and leading/trailing
+/// slashes are trimmed), so a matchable key can never take the
+/// `/raw:`-prefixed synthetic form reserved here for unmatchable ones.
+/// (The older `raw:` marker was not collision-safe: the raw key `""` hashed
+/// to exactly `raw:`, the same slot the marker form itself produced — a
+/// HashMap-iteration-order winner decided which key's value survived.)
 ///
 /// Uses the SAME `normalize_key` as the resolver, `tier_for`, and
 /// `ontology_ties` — one normalization rule, no drift between them.
@@ -748,13 +763,14 @@ pub fn ontology_config_watermark_hash(
             if tied.contains(&nk.as_str()) {
                 continue;
             }
-            // `nk` cannot start with the synthetic `raw:` marker (see the
-            // doc comment): normalized matchable keys never take that form.
+            // `nk` cannot start with the synthetic `/raw:` marker (see the
+            // doc comment): normalized matchable keys never start with a
+            // slash.
             map.insert(nk, value);
         } else {
             // Unmatchable keys COUNT (plan-p14-m5) under the synthetic
-            // `raw:` + raw-key form — collision-safe per the doc comment.
-            map.insert(format!("raw:{k}"), value);
+            // `/raw:` + raw-key form — collision-safe per the doc comment.
+            map.insert(format!("/raw:{k}"), value);
         }
     }
     let payload = serde_json::json!({
@@ -1002,6 +1018,19 @@ impl BrainConfig {
         paths: &BrainPaths,
     ) -> Result<()> {
         self.raw_ontology = None;
+        // A non-object on-disk `ontology` value is ALSO parked under the
+        // `ontology` key in `preserved_keys` (the load_lenient salvage
+        // below), and `write()` merges `preserved_keys` into the root LAST —
+        // after the typed ontology block is inserted. Without this purge the
+        // stale parked value would overwrite the block set here: the
+        // deliberate change silently never reaches disk (and a stale
+        // snapshot would sit over the user's manual fix). Only the
+        // deliberate-change escape hatch may drop it.
+        if let Some(pk) = self.preserved_keys.as_mut() {
+            if let Some(map) = pk.as_object_mut() {
+                map.remove("ontology");
+            }
+        }
         self.ontology = block;
         self.write(paths)
     }
@@ -1647,8 +1676,9 @@ impl BrainConfig {
         // skip-field), never salvaged into a legal value: `{"x":"Off"}`
         // must not become strict, and a dropped `off` entry must not
         // silently climb. Unknown sub-keys go to `preserved_ingest` (kept
-        // on write). Only a NON-OBJECT `ingest` value degrades globally
-        // (`raw_ingest` set → write leaves the on-disk block untouched).
+        // on write). A NON-OBJECT `ingest` value OR a non-object
+        // `folder_ontology` value degrades globally (`raw_ingest` set →
+        // write leaves the on-disk block untouched).
         // Note the `ingest` BLOCK is `#[serde(default)]` on BrainConfig, so
         // an absent block never enters this branch — no diagnostic.
         if let Some(ing) = obj.get("ingest") {
@@ -1659,8 +1689,9 @@ impl BrainConfig {
                 ));
                 report.config.raw_ingest = Some(ing.clone());
                 report.config.ontology_degraded.global = true;
-                // I-1: NO further early return — the trusted_links salvage
-                // block has ALREADY run above this block, so the loaded
+                // I-1: this return is safe BECAUSE `ingest` is now the LAST
+                // processed block — the trusted_links salvage block runs
+                // ABOVE it (the I-1 fix moved it there), so the loaded
                 // config carries the on-disk ledger and a subsequent
                 // write() re-serializes it faithfully. (The pre-I-1 early
                 // return here skipped trusted_links parsing below, wiping
@@ -2380,6 +2411,51 @@ mod tests {
         );
     }
 
+    /// Opus tier-3 MAJOR-2: the Unplaceable branch (absolute path, no vault
+    /// root) must run the SAME 2b gate as NoMatch — absent default +
+    /// unreadable schema intent → Hold. An unplaceable path is strictly
+    /// LESS known than a NoMatch path; the pre-fix code Climbed here.
+    #[test]
+    fn unplaceable_path_holds_when_schema_intent_unparseable() {
+        let cfg = IngestConfig::default();
+        // Absolute path + no vault root → Unplaceable.
+        assert_eq!(
+            cfg.ontology_lookup(
+                "/elsewhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                true
+            ),
+            OntologyLookup::Hold,
+            "unplaceable + absent default + unparseable schema must Hold (pre-fix: Climbed)"
+        );
+        // Control: parseable schema intent on the same unplaceable path
+        // still climbs (nothing to hold on).
+        assert_eq!(
+            cfg.ontology_lookup(
+                "/elsewhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Climb
+        );
+        // Parity with NoMatch: a relative path under the same degraded
+        // inputs also holds (the 2b check the branch mirrors).
+        assert_eq!(
+            cfg.ontology_lookup(
+                "elsewhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                true
+            ),
+            OntologyLookup::Hold
+        );
+    }
+
     /// D8: every degraded/off state resolves to Hold, never a climb.
     #[test]
     fn degraded_states_hold_never_climb() {
@@ -2909,6 +2985,62 @@ mod tests {
         );
     }
 
+    /// Opus tier-3 MAJOR-1: a NON-OBJECT on-disk `ontology` value is parked
+    /// into `preserved_keys` by the load salvage, and `write()` merges
+    /// `preserved_keys` LAST — after the typed ontology block insert. The
+    /// pre-fix `replace_ontology` cleared `raw_ontology` only, so the stale
+    /// parked value overwrote the deliberate change on disk (onboarding
+    /// silently dropped the user's schema choice). The purge must land the
+    /// new schema AND leave unrelated preserved keys (trusted_links isn't
+    /// preserved, but other unknown top-level keys are) intact.
+    #[test]
+    fn replace_ontology_purges_parked_preserved_ontology_key() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ontology":5,"trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":0}]}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let mut cfg = BrainConfig::load_lenient(&paths).unwrap().config;
+        assert!(cfg.raw_ontology.is_some());
+        // The non-object value is parked under `ontology` in preserved_keys.
+        assert_eq!(
+            cfg.preserved_keys.as_ref().and_then(|v| v.get("ontology")),
+            Some(&serde_json::json!(5)),
+            "non-object ontology must be parked in preserved_keys for the test to be honest"
+        );
+        cfg.replace_ontology(
+            crate::ontology_config::OntologyConfigBlock {
+                schema: Some(OntologySelection::Emergent),
+            },
+            &paths,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        // plan-p4-m6: parsed-value assertion (pretty-printed write output).
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.pointer("/ontology/schema").unwrap(),
+            &serde_json::json!("emergent"),
+            "replace_ontology's typed block must reach disk, not lose to the parked value: {after}"
+        );
+        // The trusted_links ledger survives the round-trip.
+        assert_eq!(
+            root.pointer("/trusted_links/0/link").unwrap(),
+            &serde_json::json!("docs/specs"),
+            "trusted_links entry must survive the replace_ontology write: {after}"
+        );
+        // And the file is now healthy: no parked `5`, no degraded reload.
+        assert_ne!(root.get("ontology"), Some(&serde_json::json!(5)));
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(!report.ontology_unparseable);
+        assert_eq!(
+            report.config.ontology.schema,
+            Some(OntologySelection::Emergent)
+        );
+    }
+
     /// R2.2.4: non-NotFound I/O errors are DEGRADED, missing config is not.
     #[test]
     fn unreadable_config_is_degraded_but_missing_is_not() {
@@ -3000,6 +3132,64 @@ mod tests {
             ontology_config_watermark_hash(&a, None, false),
             ontology_config_watermark_hash(&c, None, false)
         );
+    }
+
+    /// Opus tier-3 MINOR-5: raw-key marker collision safety. The keys `""`
+    /// and `"raw:"` must hash deterministically across insertion orders
+    /// (the pre-fix `raw:` marker gave key `""` the slot `raw:` itself — a
+    /// HashMap-iteration-order winner) and both keys must participate in
+    /// the hashed payload.
+    #[test]
+    fn watermark_hash_raw_marker_no_collision() {
+        let build = |empty_first: bool| {
+            let mut cfg = IngestConfig::default();
+            if empty_first {
+                cfg.folder_ontology
+                    .insert("".to_string(), OntologyMode::Off);
+                cfg.folder_ontology
+                    .insert("raw:".to_string(), OntologyMode::Strict);
+            } else {
+                cfg.folder_ontology
+                    .insert("raw:".to_string(), OntologyMode::Strict);
+                cfg.folder_ontology
+                    .insert("".to_string(), OntologyMode::Off);
+            }
+            cfg
+        };
+        let a = build(true);
+        let b = build(false);
+        let h_a = ontology_config_watermark_hash(&a, None, false);
+        let h_b = ontology_config_watermark_hash(&b, None, false);
+        assert_eq!(
+            h_a, h_b,
+            "raw-key marker collision: insertion order decided the hash"
+        );
+        // Both keys participate in the hashed payload (rebuild the map the
+        // hash builds and check the synthetic slots exist).
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in &a.folder_ontology {
+            if crate::config::key_is_matchable(k) {
+                map.insert(normalize_key(k), serde_json::to_value(v).unwrap());
+            } else {
+                map.insert(format!("/raw:{k}"), serde_json::to_value(v).unwrap());
+            }
+        }
+        assert!(
+            map.contains_key("/raw:"),
+            "empty raw key hashes under /raw:"
+        );
+        // A literal `raw:` key is MATCHABLE (normalizes to itself), so it
+        // participates under `raw:` — the exact slot the OLD marker gave
+        // the empty key. With `/raw:` the two slots are distinct.
+        assert!(
+            map.contains_key("raw:"),
+            "literal raw: key is matchable and hashes under raw:"
+        );
+        assert!(!map.contains_key("/raw:raw:"));
+        // And the marker form can never equal a matchable key's normalized
+        // form (the collision-safety argument itself).
+        assert_ne!(normalize_key(""), "/raw:");
+        assert_ne!(normalize_key("raw:"), "/raw:");
     }
 
     /// R2.2.8 (r20-m2): entering/leaving tie-degraded changes the hash;
@@ -3322,10 +3512,16 @@ mod tests {
             "non-object folder_ontology degrades globally (no per-key scope to point at)"
         );
         assert!(report.config.raw_ingest.is_some());
-        // …and via the policy surface.
-        let mut full = BASE_CFG.trim_end_matches('}').to_string();
-        full.push_str(r#",""ingest":{"folder_ontology":"off"}}"#);
-        write_cfg(&paths, &full);
+        // …and via the policy surface. Built via Value manipulation: the old
+        // string-splice fixture (`BASE_CFG.trim_end_matches('}') + …`) ate
+        // privacy's closing brace too and produced MALFORMED JSON, so the
+        // test passed via the parse-error path, not the non-object
+        // folder_ontology path. Parse, set `ingest.folder_ontology` to the
+        // non-object string "off", re-serialize — an otherwise valid config
+        // whose only fault is the non-object VALUE.
+        let mut root: serde_json::Value = serde_json::from_str(BASE_CFG).unwrap();
+        root["ingest"]["folder_ontology"] = serde_json::json!("off");
+        write_cfg(&paths, &root.to_string());
         let db = paths.db_path.to_str().unwrap().to_string();
         let policy = ingest_policy_for_db(Some(&db));
         assert!(policy.ingest_ontology_degraded);
