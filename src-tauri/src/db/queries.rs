@@ -276,6 +276,10 @@ pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<
     // §2.1). The drift watermark row in `llm_wiki_meta` is deliberately NOT
     // touched here: it describes the host's config, not vault content, and
     // wiping it would re-arm first-run suppression.
+    // The `tier_working::%` match is by prefix: entity ids are `ent_*` or
+    // path-derived `entity::<hex>` (`okf_migration.rs`), so no entity row
+    // can begin with the literal `tier_working::` partition prefix — the
+    // id-shape assumption that makes the prefix form safe.
     tx.execute(
         "DELETE FROM llm_wiki_entity_manifests
           WHERE entity_id <> 'tier_fact'
@@ -1124,6 +1128,10 @@ mod clear_vault_tables_tests {
     fn clear_vault_tables_rolls_back_leaving_no_outbox_rows() {
         let mut conn = open_in_memory().unwrap();
         seed_full_vault(&conn);
+        // (seed_full_vault already seeds one row in each wave-1 table —
+        // entity_type_origin / entity_redirects / ct_entity_optouts — so the
+        // assertions below pin that those rows SURVIVE the failed clear with
+        // the rest of the vault: the clear is one transaction.)
         // Induce a mid-ceremony failure AFTER the outbox inserts: the
         // straight-delete batch names this table, so the statement errors.
         conn.execute_batch("DROP TABLE folder_rules;").unwrap();
@@ -1140,6 +1148,21 @@ mod clear_vault_tables_tests {
             count(&conn, "llm_wiki_entries"),
             3,
             "rollback must restore the entries"
+        );
+        assert_eq!(
+            count(&conn, "entity_type_origin"),
+            1,
+            "origin ledger row survives the failed clear"
+        );
+        assert_eq!(
+            count(&conn, "entity_redirects"),
+            1,
+            "redirect row survives the failed clear"
+        );
+        assert_eq!(
+            count(&conn, "ct_entity_optouts"),
+            1,
+            "opt-out row survives the failed clear"
         );
     }
 

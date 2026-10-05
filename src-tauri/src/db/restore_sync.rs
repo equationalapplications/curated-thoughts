@@ -1071,12 +1071,20 @@ mod tests {
         drop(live);
 
         // Backup vault (the one being restored): the tier vocabulary plus a
-        // DIFFERENT entity-level override.
+        // DIFFERENT entity-level override, plus a `tier_working::` partition
+        // row (vault-root-keyed leg of the tier vocabulary).
         let backup = crate::db::connection::open_app_db(&backup_path, None).unwrap();
         backup
             .execute(
                 "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
                  VALUES ('tier_fact', 'strict', 1)",
+                [],
+            )
+            .unwrap();
+        backup
+            .execute(
+                "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+                 VALUES ('tier_working::0123456789abcdef', 'strict', 1)",
                 [],
             )
             .unwrap();
@@ -1102,10 +1110,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             manifest_ids,
-            ["ent_backup_override".to_string(), "tier_fact".to_string()],
+            [
+                "ent_backup_override".to_string(),
+                "tier_fact".to_string(),
+                "tier_working::0123456789abcdef".to_string(),
+            ],
             "the restore reinstalls the BACKUP's manifest rows — tier vocabulary \
-             intact, the backup's entity-level override present, the outgoing \
-             vault's gone"
+             intact (both the tier_fact seed and the tier_working:: partition), \
+             the backup's entity-level override present, the outgoing vault's gone"
         );
     }
 
