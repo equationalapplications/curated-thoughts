@@ -3227,7 +3227,10 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 26, "V25 must stamp on a rooted open");
+        assert_eq!(
+            version, 26,
+            "rooted open stamps 25 (V25 included) and 26; MAX must be 26"
+        );
 
         let agents: String = conn
             .query_row(
