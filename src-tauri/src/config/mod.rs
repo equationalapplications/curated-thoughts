@@ -110,6 +110,21 @@ pub enum OntologyMode {
     Strict,
 }
 
+impl OntologyMode {
+    /// Conservatism ranking: `off` < `strict`. A same-normalized-prefix
+    /// conflict resolves to the more conservative `strict` if a caller
+    /// must break the tie WITHOUT the hold (resolver step (2) currently
+    /// Holds instead — `strict`-wins is the documented fallback rule,
+    /// D8-fail-closed); kept adjacent to [`IngestTier::tie_rank`] for the
+    /// symmetry the tier tie diagnostic names.
+    pub fn tie_rank(self) -> u8 {
+        match self {
+            OntologyMode::Off => 0,
+            OntologyMode::Strict => 1,
+        }
+    }
+}
+
 /// Normalize a configured folder-map key so key comparisons (tie detection,
 /// watermark hash) and prefix matching agree: `\` → `/`, then trim leading
 /// and trailing `/`. Deliberately does NOT trim a leading `./` — configured
@@ -135,6 +150,26 @@ pub fn key_is_matchable(key: &str) -> bool {
     }
     k.split('/')
         .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
+/// The prefix a DROPPED `folder_ontology` key can honestly hold under
+/// (M-2): [`normalize_key`] plus stripping per-segment `.` noise, i.e. the
+/// same trimming the queried-path side of [`match_prefixes`] applies. A
+/// key like `"./ops"` is unmatchable (a load-time diagnostic fires) but
+/// still has a usable path form — the resolver's dropped-prefix hold must
+/// work on it, or the "mints under it hold until fixed" diagnostic
+/// over-promises. Keys with NO usable form (empty, `/`, or any `..`
+/// segment) return "" and hold nothing.
+fn usable_prefix(key: &str) -> String {
+    let k = normalize_key(key);
+    let segs: Vec<&str> = k
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if segs.iter().any(|s| *s == "..") {
+        return String::new();
+    }
+    segs.join("/")
 }
 
 /// Outcome of the shared longest-prefix resolver over a folder map
@@ -338,15 +373,25 @@ fn scan_ingest_ties(ingest: &IngestConfig) -> (bool, Vec<String>) {
 /// Load-time unmatchable-key diagnostics for `folder_ontology` (see
 /// [`key_is_matchable`]). `folder_tiers` keeps its historical silence —
 /// an inert tier key degrades to `full`, never to a stricter gate.
+/// M-2 accuracy: a key with a usable path form (`./ops`) now holds under
+/// that form (see [`usable_prefix`]); only a key with NO usable form
+/// truly "stays inert" — the message names which.
 fn unmatchable_ontology_key_msgs(ingest: &IngestConfig) -> Vec<String> {
     ingest
         .folder_ontology
         .keys()
         .filter(|k| !key_is_matchable(k))
         .map(|k| {
-            format!(
-                "ingest.folder_ontology key {k:?} cannot match any path (empty, or contains '.', '..', or a leading './' segment); it stays inert"
-            )
+            if usable_prefix(k).is_empty() {
+                format!(
+                    "ingest.folder_ontology key {k:?} cannot match any path (empty, or contains '.', '..', or a leading './' segment); it stays inert"
+                )
+            } else {
+                format!(
+                    "ingest.folder_ontology key {k:?} cannot match any path (contains a leading './' or '.' segment); mints under {:?} hold until it is fixed",
+                    usable_prefix(k)
+                )
+            }
         })
         .collect()
 }
@@ -454,15 +499,22 @@ impl IngestConfig {
 
         // (1) At-or-under a dropped prefix → Hold, unless a VALID entry
         // deeper than the dropped one also matches (then the child wins).
+        // Dropped keys are matched on a USABLE normalized prefix (M-2):
+        // the drop diagnostic promises "mints under it hold until fixed",
+        // which for an unmatchable raw key like "./ops" is only honest if
+        // the wrapper strips the leading-`./` noise and holds under the
+        // residual prefix. A key with NO usable path form (empty, "/",
+        // or any `..` segment — the latter would root the prefix above
+        // the vault) legitimately holds nothing.
         if let Some(rel) = &detailed.rel_path {
             let mut deepest_dropped: Option<usize> = None;
             for dropped in &degraded.dropped_prefixes {
-                let d = normalize_key(dropped);
-                if !key_is_matchable(dropped) || d.is_empty() {
+                let usable = usable_prefix(dropped);
+                if usable.is_empty() {
                     continue;
                 }
-                if rel == &d || rel.starts_with(&format!("{d}/")) {
-                    let depth = d.split('/').count();
+                if rel == &usable || rel.starts_with(&format!("{usable}/")) {
+                    let depth = usable.split('/').count();
                     if deepest_dropped.is_none_or(|prev| depth > prev) {
                         deepest_dropped = Some(depth);
                     }
@@ -483,20 +535,27 @@ impl IngestConfig {
         }
 
         match detailed.outcome {
-            // (2) Same-normalized-prefix conflict → Hold (r18-m1).
+            // (2) Same-normalized-prefix conflict → Hold (r18-m1). With I-3
+            // scoping ties out of the global flag, this per-path Hold is
+            // what keeps tied prefixes protected (unrelated paths resolve
+            // normally); refuse sites consult `ontology_ties` separately.
             PrefixOutcome::Tie(_) => OntologyLookup::Hold,
             PrefixOutcome::Match(mode) => OntologyLookup::Mode(mode),
             PrefixOutcome::Unplaceable => {
                 // (3) Absolute path couldn't be placed (vault moved, no
                 // effective root). Hold when the map carries any off
-                // entry or any degraded/dropped state — a silent climb
-                // would let heal --yes retype folders the user marked
-                // off. NEVER a climb (D8).
+                // entry, any tie, or any degraded/dropped state — a silent
+                // climb would let heal --yes retype folders the user
+                // marked off. NEVER a climb (D8).
                 let has_off = self
                     .folder_ontology
                     .values()
                     .any(|m| *m == OntologyMode::Off);
-                if has_off || !degraded.dropped_prefixes.is_empty() || degraded.default_dropped {
+                if has_off
+                    || !crate::config::ontology_ties(self).is_empty()
+                    || !degraded.dropped_prefixes.is_empty()
+                    || degraded.default_dropped
+                {
                     OntologyLookup::Hold
                 } else {
                     OntologyLookup::Climb
@@ -521,11 +580,18 @@ impl IngestConfig {
 
 /// The degraded/failed state carried OUT of config loading, consumed by
 /// [`IngestConfig::ontology_lookup`]. Empty = healthy load.
+///
+/// I-3: a load-time ontology TIE is deliberately NOT part of this state —
+/// the plan's complete global-trigger list (plan-p11-m2) excludes ties.
+/// Ties surface through [`ontology_ties`] instead (the plan's queryable
+/// source of truth): resolver step (2) Holds tied prefixes per-path, and
+/// refuse sites (e.g. `ct ontology set`, heal) refuse while
+/// `ontology_degraded.any()` OR `!ontology_ties(..).is_empty()`.
 #[derive(Debug, Clone, Default)]
 pub struct OntologyDegradedState {
     /// Load-failed route (malformed JSON, non-object root, UTF-8 failure,
-    /// `VaultPathNotString`, non-NotFound read error, non-object `ingest`)
-    /// or a load-time ontology tie. Holds EVERYTHING.
+    /// `VaultPathNotString`, non-NotFound read error, non-object `ingest`).
+    /// Holds EVERYTHING.
     pub global: bool,
     /// `folder_ontology` prefixes whose VALUE failed to salvage (scoped
     /// hold: only mints under them hold).
@@ -539,6 +605,15 @@ impl OntologyDegradedState {
     pub fn is_degraded(&self) -> bool {
         self.global || !self.dropped_prefixes.is_empty() || self.default_dropped
     }
+}
+
+/// The plan-p5-m1 refuse predicate (r8-m3/r17-m1): refuse while the config
+/// is degraded OR carries a tie (ties hold scoped, but no ingest-mutating
+/// writer may run while the map is ambiguous). Ties are NOT part of
+/// [`OntologyDegradedState`] (I-3) — they are queried live from the
+/// config so the flag never conflates them with load failures.
+pub fn ontology_degraded_or_tied(degraded: &OntologyDegradedState, ingest: &IngestConfig) -> bool {
+    degraded.is_degraded() || !ontology_ties(ingest).is_empty()
 }
 
 /// Config-level outcome of the ontology lookup (plan Task 1). Tasks 3/5
@@ -605,6 +680,29 @@ impl IngestPolicy {
     }
 }
 
+/// Paths whose non-NotFound config read error has already been reported.
+/// I-5: `ingest_policy_for_db` runs per document on hot paths; without this
+/// memo an unreadable config (EACCES, EISDIR, …) eprints once PER DOCUMENT.
+/// The degraded policy return itself stays per-call — only the stderr line
+/// is memoized.
+static REPORTED_READ_ERRORS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::OnceLock::new();
+
+fn report_config_read_error_once(path: &std::path::Path, err: &std::io::Error) {
+    let set = REPORTED_READ_ERRORS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut guard) = set.lock() {
+        if !guard.insert(path.to_path_buf()) {
+            return; // already reported for this path
+        }
+    }
+    eprintln!(
+        "config: could not read ingest policy ({}); degraded (ontology holds)",
+        err
+    );
+}
+
 type PolicyCache = std::collections::HashMap<std::path::PathBuf, (Vec<u8>, IngestPolicy)>;
 
 /// Canonical hash input for the ontology-drift watermark (spec R2.2.8,
@@ -616,10 +714,20 @@ type PolicyCache = std::collections::HashMap<std::path::PathBuf, (Vec<u8>, Inges
 /// When `ontology_default` is ABSENT, the effective rung-3 inputs join the
 /// hash (`ontology.schema` + `ontology_unparseable`) — a schema
 /// Off↔strict switch must fire a drift report even with no explicit
-/// ontology config. When the config is TIE-DEGRADED, the hash input is
-/// `{degraded: true}` with the conflicting keys EXCLUDED (their surviving
-/// value would depend on HashMap insertion order); entering or leaving
-/// tie-degraded therefore always changes the hash.
+/// ontology config. When the config is TIE-DEGRADED (r18-MAJOR-1/r20-m2),
+/// ONLY the conflicting keys are excluded from the hashed map (their
+/// surviving value would depend on HashMap insertion order) and
+/// `"degraded": true` flips — every other key still participates, so a
+/// legitimate edit elsewhere is not masked; entering or leaving
+/// tie-degraded therefore always changes the hash. UNMATCHABLE keys
+/// (`"./ops"`, `"/"`, empty-after-normalization) COUNT (plan-p14-m5):
+/// retagging or adding/removing an inert key is a semantic config change.
+/// They are hashed under the synthetic key `raw:` + the raw key string;
+/// matchable keys keep their normalized form, which can never collide
+/// with that marker (a raw `raw:…` key normalizes to itself — only
+/// backslash replacement and slash trimming — and stays MATCHABLE, so
+/// normalized matchable keys never take the `raw:`-prefixed synthetic
+/// form reserved here for unmatchable ones).
 ///
 /// Uses the SAME `normalize_key` as the resolver, `tier_for`, and
 /// `ontology_ties` — one normalization rule, no drift between them.
@@ -628,18 +736,25 @@ pub fn ontology_config_watermark_hash(
     schema: Option<crate::ontology_config::OntologySelection>,
     ontology_unparseable: bool,
 ) -> String {
-    let degraded = !ontology_ties(ingest).is_empty();
+    let ties = ontology_ties(ingest);
+    let degraded = !ties.is_empty();
+    let tied: std::collections::BTreeSet<&str> = ties.iter().map(|(k, _)| k.as_str()).collect();
     let mut map = std::collections::BTreeMap::new();
-    if !degraded {
-        for (k, v) in &ingest.folder_ontology {
+    for (k, v) in &ingest.folder_ontology {
+        let value = serde_json::to_value(v).expect("OntologyMode serializes");
+        if key_is_matchable(k) {
             let nk = normalize_key(k);
-            if !key_is_matchable(k) || nk.is_empty() {
+            // Tie-degraded encoding: exclude ONLY the conflicting keys.
+            if tied.contains(&nk.as_str()) {
                 continue;
             }
-            map.insert(
-                nk,
-                serde_json::to_value(v).expect("OntologyMode serializes"),
-            );
+            // `nk` cannot start with the synthetic `raw:` marker (see the
+            // doc comment): normalized matchable keys never take that form.
+            map.insert(nk, value);
+        } else {
+            // Unmatchable keys COUNT (plan-p14-m5) under the synthetic
+            // `raw:` + raw-key form — collision-safe per the doc comment.
+            map.insert(format!("raw:{k}"), value);
         }
     }
     let payload = serde_json::json!({
@@ -703,11 +818,10 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         // EACCES, EISDIR, …: NOT "missing". A degraded policy keeps the
         // gate from climbing (unreadable config + heal --yes → zero
         // retypes); silently defaulting would retype opted-out folders.
+        // The stderr line is memoized per path (I-5): this fn runs per
+        // document, and one line per document would flood the log.
         Err(e) => {
-            eprintln!(
-                "config: could not read ingest policy ({}); degraded (ontology holds)",
-                e
-            );
+            report_config_read_error_once(&paths.config_path, &e);
             let mut policy = IngestPolicy::default();
             policy.ingest_ontology_degraded = true;
             return policy;
@@ -767,13 +881,12 @@ fn parse_ingest_policy_from_bytes(contents: &[u8]) -> IngestPolicy {
             return policy;
         }
     };
-    // The load-time tie scan sets `global` on the skip-field state; mirror
-    // it into the policy flag (checked once here, not per lookup).
-    if policy.tiers.folder_ontology.len() >= 2
-        && !crate::config::ontology_ties(&policy.tiers).is_empty()
-    {
-        policy.ingest_ontology_degraded = true;
-    }
+    // Ties deliberately do NOT set `ingest_ontology_degraded` (I-3: the
+    // plan's complete global-trigger list, plan-p11-m2, EXCLUDES them).
+    // Per-path tie holds come from the resolver's Tie→Hold arm, which this
+    // global flag previously shadowed; refuse sites query
+    // `ontology_ties(&policy.tiers)` directly (plan-p5-m1). The diagnostics
+    // already fired inside `load_lenient_from_str`.
     policy
 }
 
@@ -1124,16 +1237,16 @@ impl BrainConfig {
                 // Load-time tie scans for the strict path (r19-m1: a
                 // salvage-free config never runs the lenient scanner, so
                 // the same scan runs here). The resolver stays silent.
-                // A tie sets the global degraded flag (scoped holds + heal
-                // refusal downstream); nothing was DROPPED, so `raw_ingest`
-                // stays unset — re-emitting the tied map on write is
-                // lossless.
-                let (tie_degraded, tie_msgs) = scan_ingest_ties(&cfg.ingest);
-                if tie_degraded {
-                    cfg.ontology_degraded.global = true;
-                    for m in tie_msgs {
-                        eprintln!("config: {m}");
-                    }
+                // A tie does NOT set the global degraded flag (I-3: the
+                // plan's complete global-trigger list, plan-p11-m2,
+                // EXCLUDES ties — a tie holds only paths under the tied
+                // prefixes via the resolver's Tie→Hold arm, and refuse
+                // sites consult `ontology_ties` directly, plan-p5-m1).
+                // Nothing was DROPPED, so `raw_ingest` stays unset —
+                // re-emitting the tied map on write is lossless.
+                let (_, tie_msgs) = scan_ingest_ties(&cfg.ingest);
+                for m in tie_msgs {
+                    eprintln!("config: {m}");
                 }
                 let unmatchable = unmatchable_ontology_key_msgs(&cfg.ingest);
                 for m in unmatchable {
@@ -1480,6 +1593,48 @@ impl BrainConfig {
             }
         }
 
+        // trusted_links: lenient — an unparseable entry is dropped, the rest
+        // survive. This is the only mutable-from-config surface for the
+        // ledger; a corruption in one entry must not nuke the whole list.
+        //
+        // ORDER (I-1): this block runs BEFORE the `ingest` block below.
+        // The non-object-`ingest` early-return skips everything after it,
+        // so trusted_links parsing must already have happened — otherwise
+        // the config loads with the empty default ledger and a subsequent
+        // `write()` re-serializes `trusted_links: []`, erasing the
+        // on-disk approvals. Block processing order is otherwise free.
+        //
+        // Beyond JSON validity, each entry's `link` must be vault-relative
+        // (issue #140). `TrustedLink::link` feeds the walker's
+        // `vault_root.join(link)`, and `Path::join` replaces the base on an
+        // absolute/rooted argument, so a hand-edited ledger must not smuggle
+        // one past the approval write path's guard (PR #144). Same predicate
+        // as the write path — one rule, two boundaries. Non-conforming
+        // entries are dropped with a diagnostic (fail-closed: the symlink
+        // reverts to `Pending` and is never followed), matching the block's
+        // existing drop-one-keep-the-rest semantics.
+        if let Some(tl) = obj.get("trusted_links").and_then(|v| v.as_array()) {
+            let mut kept = Vec::with_capacity(tl.len());
+            for entry in tl {
+                match serde_json::from_value::<TrustedLink>(entry.clone()) {
+                    Ok(e) => {
+                        if crate::trusted_links::is_vault_relative_link(&e.link) {
+                            kept.push(e);
+                        } else {
+                            report.diagnostics.push(format!(
+                                "trusted_links entry rejected: link {:?} is not vault-relative (absolute, rooted, or contains `..`)",
+                                truncate_for_diag(&e.link)
+                            ));
+                        }
+                    }
+                    Err(err) => report
+                        .diagnostics
+                        .push(format!("trusted_links entry unparseable: {}", err)),
+                }
+            }
+            report.config.trusted_links = kept;
+        }
+
         // ingest: lenient (F4 + R2.2.4). Same known_keys reasoning as
         // `wiki`: the block is modeled, so it must not leak into
         // `preserved_keys`. Each modeled key (`folder_tiers`,
@@ -1504,6 +1659,12 @@ impl BrainConfig {
                 ));
                 report.config.raw_ingest = Some(ing.clone());
                 report.config.ontology_degraded.global = true;
+                // I-1: NO further early return — the trusted_links salvage
+                // block has ALREADY run above this block, so the loaded
+                // config carries the on-disk ledger and a subsequent
+                // write() re-serializes it faithfully. (The pre-I-1 early
+                // return here skipped trusted_links parsing below, wiping
+                // the ledger on the next write.)
                 return Ok(report);
             };
             // Unknown sub-keys → preserved_ingest (always kept).
@@ -1617,50 +1778,16 @@ impl BrainConfig {
 
             // Load-time tie scans + unmatchable-key diagnostics (the
             // resolver itself is silent — strict-parse configs reach these
-            // only here).
-            let (tie_degraded, tie_msgs) = scan_ingest_ties(&report.config.ingest);
-            if tie_degraded {
-                report.config.ontology_degraded.global = true;
-            }
+            // only here). A tie does NOT set the global degraded flag
+            // (I-3: the plan's complete global-trigger list, plan-p11-m2,
+            // EXCLUDES ties — the tied prefixes hold via the resolver's
+            // Tie→Hold arm (2), unrelated paths resolve normally, and
+            // refuse sites consult `ontology_ties` directly, plan-p5-m1).
+            let (_, tie_msgs) = scan_ingest_ties(&report.config.ingest);
             report.diagnostics.extend(tie_msgs);
             report
                 .diagnostics
                 .extend(unmatchable_ontology_key_msgs(&report.config.ingest));
-        }
-
-        // trusted_links: lenient — an unparseable entry is dropped, the rest
-        // survive. This is the only mutable-from-config surface for the
-        // ledger; a corruption in one entry must not nuke the whole list.
-        //
-        // Beyond JSON validity, each entry's `link` must be vault-relative
-        // (issue #140). `TrustedLink::link` feeds the walker's
-        // `vault_root.join(link)`, and `Path::join` replaces the base on an
-        // absolute/rooted argument, so a hand-edited ledger must not smuggle
-        // one past the approval write path's guard (PR #144). Same predicate
-        // as the write path — one rule, two boundaries. Non-conforming
-        // entries are dropped with a diagnostic (fail-closed: the symlink
-        // reverts to `Pending` and is never followed), matching the block's
-        // existing drop-one-keep-the-rest semantics.
-        if let Some(tl) = obj.get("trusted_links").and_then(|v| v.as_array()) {
-            let mut kept = Vec::with_capacity(tl.len());
-            for entry in tl {
-                match serde_json::from_value::<TrustedLink>(entry.clone()) {
-                    Ok(e) => {
-                        if crate::trusted_links::is_vault_relative_link(&e.link) {
-                            kept.push(e);
-                        } else {
-                            report.diagnostics.push(format!(
-                                "trusted_links entry rejected: link {:?} is not vault-relative (absolute, rooted, or contains `..`)",
-                                truncate_for_diag(&e.link)
-                            ));
-                        }
-                    }
-                    Err(err) => report
-                        .diagnostics
-                        .push(format!("trusted_links entry unparseable: {}", err)),
-                }
-            }
-            report.config.trusted_links = kept;
         }
 
         Ok(report)
@@ -2399,10 +2526,14 @@ mod tests {
         );
     }
 
-    /// The load path (lenient) detects the tie and flags degraded + loud
-    /// diagnostic (r19-m1: strict-parse configs never pass through salvage).
+    /// The load path (lenient) detects the tie and emits the loud
+    /// diagnostic, but does NOT set the global degraded flag (I-3: the
+    /// plan's complete global-trigger list, plan-p11-m2, EXCLUDES ties —
+    /// a tie holds scoped via resolver step (2) and refuse sites consult
+    /// `ontology_ties`, plan-p5-m1). r19-m1: strict-parse configs never
+    /// pass through salvage, so the scan runs in both arms.
     #[test]
-    fn load_flags_tie_degraded_with_diagnostic() {
+    fn load_flags_tie_diagnostic_without_global_degrade() {
         let (tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
@@ -2411,7 +2542,10 @@ mod tests {
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
         let report = BrainConfig::load_lenient(&paths).unwrap();
-        assert!(report.config.ontology_degraded.global, "tie sets degraded");
+        assert!(
+            !report.config.ontology_degraded.global,
+            "tie must NOT set global degraded (I-3 scoped-tie rule)"
+        );
         assert!(
             report
                 .diagnostics
@@ -2420,6 +2554,82 @@ mod tests {
             "tie diagnostic present: {:?}",
             report.diagnostics
         );
+        // Strict arm: same shape (no global, diagnostic on stderr).
+        let cfg = BrainConfig::load(&paths).unwrap();
+        assert!(!cfg.ontology_degraded.global);
+        // The tie stays queryable for refuse sites (plan-p5-m1) and the
+        // combined refuse predicate fires on it.
+        assert!(!ontology_ties(&cfg.ingest).is_empty());
+        assert!(ontology_degraded_or_tied(
+            &cfg.ontology_degraded,
+            &cfg.ingest
+        ));
+    }
+
+    /// I-3 anti-over-hold pin: a tie under "ops" must NOT hold an
+    /// unrelated path — "docs/x.md" resolves normally (climb — no folder
+    /// entry covers it), while paths under the tied prefixes DO hold
+    /// (resolver step (2)).
+    #[test]
+    fn tie_holds_tied_prefixes_but_not_unrelated_paths() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_ontology":{"ops":"off","ops/":"strict"}}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(report.config.ontology_degraded.global == false);
+        assert!(!ontology_ties(&report.config.ingest).is_empty());
+        // Tied prefixes: Hold (step (2)).
+        assert_eq!(
+            report.config.ingest.ontology_lookup(
+                "ops/a.md",
+                None,
+                &report.config.ontology_degraded,
+                None,
+                false
+            ),
+            OntologyLookup::Hold,
+            "paths under tied prefixes hold (step 2)"
+        );
+        // Unrelated path: resolves normally (no map entry → climb; NOT the
+        // brain-wide Hold the old global flag produced).
+        assert_eq!(
+            report.config.ingest.ontology_lookup(
+                "docs/x.md",
+                None,
+                &report.config.ontology_degraded,
+                None,
+                false
+            ),
+            OntologyLookup::Climb,
+            "anti-over-hold: unrelated path must NOT hold because of a tie elsewhere"
+        );
+    }
+
+    /// I-3 via the policy surface (`ingest_policy_for_db`): a tied config
+    /// does NOT flag `ingest_ontology_degraded` (the mint-time step-(0)
+    /// global Hold), so resolver step (2) stays the reachable per-path
+    /// tie hold; the policy still carries the tied tiers for refuse sites.
+    #[test]
+    fn policy_does_not_globally_degrade_on_tie() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_ontology":{"ops":"off","ops/":"strict"}},"vault_path":"/v"}"#,
+        );
+        let db = paths.db_path.to_str().unwrap().to_string();
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let policy = ingest_policy_for_db(Some(&db));
+        assert!(
+            !policy.ingest_ontology_degraded,
+            "tie must not set the global policy flag (I-3)"
+        );
+        // The tied map still carries through, so refuse sites can query it.
+        assert!(!ontology_ties(&policy.tiers).is_empty());
     }
 
     /// R2.2.3: `off`/`strict` vocabulary; values are lowercase,
@@ -2879,6 +3089,311 @@ mod tests {
             root.pointer("/ontology/schema").unwrap(),
             &serde_json::json!("emergent"),
             "ontology block survived rollback: {after}"
+        );
+    }
+
+    // ── Tier-2 review fixes (task-1-review-fixes) ─────────────────────────
+
+    /// I-1 regression: a config with a NON-OBJECT `ingest` AND a
+    /// trusted_links array → load_lenient → write() → the on-disk
+    /// trusted_links value survives (parsed Value equality). The pre-fix
+    /// early-return skipped trusted_links parsing below it, so the loaded
+    /// config carried the empty default and write() erased the ledger.
+    #[test]
+    fn non_object_ingest_does_not_erase_trusted_links() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":"bogus","trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":1}],"vault_path":"/v"}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let mut cfg = BrainConfig::load_lenient(&paths).unwrap().config;
+        assert!(cfg.ontology_degraded.global, "non-object ingest degrades");
+        assert_eq!(
+            cfg.trusted_links.len(),
+            1,
+            "ledger must be salvaged even when ingest is non-object"
+        );
+        cfg.write(&paths).unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.get("trusted_links").unwrap(),
+            &serde_json::json!([{"link":"docs/specs","target":"/vault/docs/specs","approved_at":1}]),
+            "on-disk trusted_links survived the degraded write cycle: {after}"
+        );
+    }
+
+    /// I-2 pin (plan-p14-m5): unmatchable keys COUNT in the watermark
+    /// hash — retagging an inert key changes it, and adding/removing an
+    /// inert key changes it.
+    #[test]
+    fn watermark_hash_counts_unmatchable_keys() {
+        let build = |inert: Option<&str>| {
+            let mut cfg = IngestConfig::default();
+            cfg.folder_ontology
+                .insert("ops".to_string(), OntologyMode::Off);
+            if let Some(k) = inert {
+                cfg.folder_ontology.insert(k.to_string(), OntologyMode::Off);
+            }
+            cfg
+        };
+        // Retagging an inert key ("./ops" → "/junk") CHANGES the hash.
+        assert_ne!(
+            ontology_config_watermark_hash(&build(Some("./ops")), None, false),
+            ontology_config_watermark_hash(&build(Some("/junk")), None, false)
+        );
+        // Adding an inert key changes it (compared against the base).
+        let base = ontology_config_watermark_hash(&build(None), None, false);
+        assert_ne!(
+            base,
+            ontology_config_watermark_hash(&build(Some("./ops")), None, false)
+        );
+        // A map with ONLY an inert key still hashes (not dropped from the
+        // payload), and inert keys are collision-safe against matchable
+        // ones: "./ops" hashes under the synthetic raw: form, "ops" under
+        // its normalized form — never the same map.
+        let mut inert_only = IngestConfig::default();
+        inert_only
+            .folder_ontology
+            .insert("./ops".to_string(), OntologyMode::Off);
+        let mut matchable_only = IngestConfig::default();
+        matchable_only
+            .folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        assert_ne!(
+            ontology_config_watermark_hash(&inert_only, None, false),
+            ontology_config_watermark_hash(&matchable_only, None, false)
+        );
+    }
+
+    /// I-4: a tie in one folder must NOT mask a legitimate
+    /// `ontology_default`-style edit elsewhere — the tie-degraded hash
+    /// encoding keeps non-conflicting keys and only "degraded" flips.
+    #[test]
+    fn watermark_hash_tie_does_not_mask_unrelated_edit() {
+        // Tied map + unrelated live key.
+        let build = |other: Option<(&str, OntologyMode)>| {
+            let mut cfg = IngestConfig::default();
+            cfg.folder_ontology
+                .insert("ops".to_string(), OntologyMode::Off);
+            cfg.folder_ontology
+                .insert("ops/".to_string(), OntologyMode::Strict);
+            if let Some((k, m)) = other {
+                cfg.folder_ontology.insert(k.to_string(), m);
+            }
+            cfg
+        };
+        let tied = ontology_config_watermark_hash(&build(None), None, false);
+        let tied_plus = ontology_config_watermark_hash(
+            &build(Some(("people", OntologyMode::Off))),
+            None,
+            false,
+        );
+        assert_ne!(
+            tied, tied_plus,
+            "tie in one folder must not mask an unrelated map edit (I-4)"
+        );
+        // Flipping the unrelated key's VALUE also changes the hash.
+        let tied_alt = ontology_config_watermark_hash(
+            &build(Some(("people", OntologyMode::Strict))),
+            None,
+            false,
+        );
+        assert_ne!(tied_plus, tied_alt);
+        // Tie-degraded is stable across insertion orders (excluded keys'
+        // surviving value cannot leak HashMap order into the hash).
+        let mut a = IngestConfig::default();
+        a.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        a.folder_ontology
+            .insert("ops/".to_string(), OntologyMode::Strict);
+        a.folder_ontology
+            .insert("people".to_string(), OntologyMode::Off);
+        let mut b = IngestConfig::default();
+        b.folder_ontology
+            .insert("people".to_string(), OntologyMode::Off);
+        b.folder_ontology
+            .insert("ops/".to_string(), OntologyMode::Strict);
+        b.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        assert_eq!(
+            ontology_config_watermark_hash(&a, None, false),
+            ontology_config_watermark_hash(&b, None, false)
+        );
+    }
+
+    /// M-3(a): tier tie conservative-wins via min_by_key, including the
+    /// diagnostic string naming the ranking.
+    #[test]
+    fn tier_tie_conservative_wins_with_diagnostic() {
+        let mut cfg = IngestConfig::default();
+        cfg.folder_tiers.insert("ops".to_string(), IngestTier::Full);
+        cfg.folder_tiers
+            .insert("ops/".to_string(), IngestTier::None);
+        // Both keys normalize to `ops` at the same depth; conservative wins.
+        assert_eq!(cfg.tier_for_path("ops/a.md", None), IngestTier::None);
+        assert_eq!(
+            cfg.tier_for("ops/a.md"),
+            IngestTier::None,
+            "min_by_key(tie_rank): none < chunks-only < full"
+        );
+        // chunks-only vs full → chunks-only.
+        let mut cfg2 = IngestConfig::default();
+        cfg2.folder_tiers
+            .insert("ops".to_string(), IngestTier::Full);
+        cfg2.folder_tiers
+            .insert("ops/".to_string(), IngestTier::ChunksOnly);
+        assert_eq!(cfg2.tier_for("ops/a.md"), IngestTier::ChunksOnly);
+        // The load path emits the ranking-naming diagnostic.
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_tiers":{"ops":"full","ops/":"none"}}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(
+            report.diagnostics.iter().any(|d| {
+                d.contains("folder_tiers tie")
+                    && d.contains("most conservative wins")
+                    && d.contains("none < chunks-only < full")
+            }),
+            "tier tie diagnostic present: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// M-3(b): folder_tiers `full` + folder_ontology `off` on the SAME
+    /// prefix → ingest normally (tier full) AND the mint skips the gate
+    /// (lookup → Mode(Off)). The two maps gate different layers.
+    #[test]
+    fn full_tier_and_off_ontology_same_prefix_ingest_and_skip_gate() {
+        let mut cfg = IngestConfig::default();
+        cfg.folder_tiers.insert("ops".to_string(), IngestTier::Full);
+        cfg.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        assert_eq!(
+            cfg.tier_for_path("ops/a.md", None),
+            IngestTier::Full,
+            "tier full: documents ingest normally"
+        );
+        assert_eq!(
+            cfg.ontology_lookup(
+                "ops/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Off),
+            "gate off: mints in the subtree skip the gate"
+        );
+    }
+
+    /// M-3(d): truncated/malformed-JSON config.json → degraded policy
+    /// through `parse_ingest_policy_from_bytes` (same-bytes parse rule).
+    #[test]
+    fn malformed_json_config_degrades_policy() {
+        let policy = parse_ingest_policy_from_bytes(b"{\"ingest\":{\"folder_on");
+        assert!(
+            policy.ingest_ontology_degraded,
+            "malformed JSON must degrade, never silently default"
+        );
+        // Non-UTF-8 bytes degrade too.
+        let policy = parse_ingest_policy_from_bytes(&[0xff, 0xfe, 0x00]);
+        assert!(policy.ingest_ontology_degraded);
+    }
+
+    /// M-3(e): a non-object `folder_ontology` VALUE (the string "off" as
+    /// the whole folder_ontology value) → global degrade (raw_ingest set,
+    /// write leaves the block untouched).
+    #[test]
+    fn non_object_folder_ontology_value_degrades_globally() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(&paths, r#"{"ingest":{"folder_ontology":"off"}}"#);
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(
+            report.config.ontology_degraded.global,
+            "non-object folder_ontology degrades globally (no per-key scope to point at)"
+        );
+        assert!(report.config.raw_ingest.is_some());
+        // …and via the policy surface.
+        let mut full = BASE_CFG.trim_end_matches('}').to_string();
+        full.push_str(r#",""ingest":{"folder_ontology":"off"}}"#);
+        write_cfg(&paths, &full);
+        let db = paths.db_path.to_str().unwrap().to_string();
+        let policy = ingest_policy_for_db(Some(&db));
+        assert!(policy.ingest_ontology_degraded);
+    }
+
+    /// M-3(f): dropped-child-under-valid-parent direction — dropped
+    /// "ops/sub" + valid "ops" → paths under ops/sub HOLD, ops itself
+    /// follows "ops" (the valid parent's mode still decides).
+    #[test]
+    fn dropped_child_under_valid_parent_holds_only_under_child() {
+        let mut cfg = IngestConfig::default();
+        cfg.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        let dropped = OntologyDegradedState {
+            dropped_prefixes: vec!["ops/sub".to_string()],
+            ..Default::default()
+        };
+        // Under the dropped child → Hold, despite the valid parent.
+        assert_eq!(
+            cfg.ontology_lookup("ops/sub/a.md", None, &dropped, None, false),
+            OntologyLookup::Hold
+        );
+        // Deeper than the dropped child with no valid deeper entry → Hold.
+        assert_eq!(
+            cfg.ontology_lookup("ops/sub/deep/b.md", None, &dropped, None, false),
+            OntologyLookup::Hold
+        );
+        // ops itself (NOT under the dropped child) follows "ops".
+        assert_eq!(
+            cfg.ontology_lookup("ops/a.md", None, &dropped, None, false),
+            OntologyLookup::Mode(OntologyMode::Off)
+        );
+    }
+
+    /// M-2: a dropped UNMATCHABLE key with a usable path form ("./ops")
+    /// holds under its usable prefix — the diagnostic's "mints under it
+    /// hold" promise is honest. A key with NO usable form ("/", "..")
+    /// holds nothing and its diagnostic says "stays inert".
+    #[test]
+    fn dropped_unmatchable_key_holds_under_usable_form_or_nothing() {
+        // "./ops" dropped → paths under ops (usable form) hold.
+        let dot = OntologyDegradedState {
+            dropped_prefixes: vec!["./ops".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            IngestConfig::default().ontology_lookup("ops/a.md", None, &dot, None, false),
+            OntologyLookup::Hold,
+            "usable form of './ops' holds"
+        );
+        assert_eq!(
+            IngestConfig::default().ontology_lookup("ops/sub/deep.md", None, &dot, None, false),
+            OntologyLookup::Hold
+        );
+        // Unrelated path still resolves (climb).
+        assert_eq!(
+            IngestConfig::default().ontology_lookup("other/x.md", None, &dot, None, false),
+            OntologyLookup::Climb
+        );
+        // "/" or ".." dropped → no usable prefix → holds nothing.
+        let slash = OntologyDegradedState {
+            dropped_prefixes: vec!["/".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            IngestConfig::default().ontology_lookup("ops/a.md", None, &slash, None, false),
+            OntologyLookup::Climb,
+            "a key with no usable path form holds nothing"
         );
     }
 }

@@ -239,6 +239,21 @@ pub fn update_provider_with_brain_path(
             // whole on-disk `ingest` block (folder_ontology opt-outs gone →
             // the next `heal --yes` retypes opted-out folders, breaking D8)
             // and `ontology.schema` alongside it.
+            //
+            // Generation handling on this site (M-1, same on the post-write
+            // site below): the fallback RESETS `generation` to the shipped
+            // default rather than restoring the raw on-disk block — this is
+            // a DELIBERATE divergence from the raw-block restoration used
+            // for `raw_generation`/`raw_embedding`/`raw_privacy` (which
+            // `BrainConfig::load()`'s strict-arm fallback applies). Here the
+            // provider init already FAILED, so the pre-existing on-disk
+            // generation block is stale-but-parseable at best; reverting to
+            // the shipped default guarantees the state machine
+            // (`GenerationProvider::Unconfigured`) and the disk agree: no
+            // half-configured provider block survives a failed init. The
+            // ingest/ontology blocks are still preserved untouched by the
+            // lenient load + raw_* write guards, which is what r5-M1
+            // actually requires.
             let paths = crate::retrieval::brain_paths_for(brain_path);
             let mut fallback = match crate::config::BrainConfig::load_lenient(&paths) {
                 Ok(report) => report.config,
@@ -279,6 +294,13 @@ pub fn update_provider_with_brain_path(
         // Roll back ONLY the generation block (r5-M1) — a wholesale
         // `BrainConfig::default()` would erase the on-disk `ingest` block
         // (folder_ontology opt-outs) and `ontology.schema`.
+        //
+        // M-1: the generation handling here (reset to the shipped default,
+        // NOT a raw-block restore) deliberately mirrors the pre-write site
+        // above — see the full rationale in that comment block. Diverging
+        // here (e.g. re-restoring the just-written raw block) would put the
+        // panel's half-written generation block back on disk while the
+        // in-memory state machine reports Unconfigured.
         let fallback = match crate::config::BrainConfig::load_lenient(&paths) {
             Ok(report) => report.config,
             Err(_) => crate::config::BrainConfig::default(),
