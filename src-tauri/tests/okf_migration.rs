@@ -467,6 +467,93 @@ fn apply_v19(conn: &Connection) {
     .unwrap();
 }
 
+/// V26 (ontology node-type gate wave 1, spec §2.9.1/§3): the three CT-owned
+/// tables exist post-migration on a plain open, with the columns Tasks 3/5/6/9
+/// will bind to — the origin ledger carries BOTH the original label and the
+/// source directory (plan-p11-MAJOR-2: the stale-hash off-sourced mint record
+/// needs the directory, else it climbs to rung 4 and gets retyped), redirects
+/// carry loser + survivor, optouts are keyed by entity_id.
+#[test]
+fn v26_creates_the_three_ontology_gate_tables() {
+    let conn = open_in_memory().unwrap();
+
+    for table in [
+        "entity_type_origin",
+        "entity_redirects",
+        "ct_entity_optouts",
+    ] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "{table} must exist after migration");
+    }
+
+    let cols = |table: &str| -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    };
+
+    for expected in [
+        "entity_id",
+        "original_type",
+        "source_directory",
+        "recorded_at",
+    ] {
+        assert!(
+            cols("entity_type_origin").iter().any(|c| c == expected),
+            "entity_type_origin missing column {expected}"
+        );
+    }
+    for expected in ["entity_id", "merged_into", "created_at"] {
+        assert!(
+            cols("entity_redirects").iter().any(|c| c == expected),
+            "entity_redirects missing column {expected}"
+        );
+    }
+    for expected in ["entity_id", "reason", "created_at"] {
+        assert!(
+            cols("ct_entity_optouts").iter().any(|c| c == expected),
+            "ct_entity_optouts missing column {expected}"
+        );
+    }
+
+    // Each table is live, not a stub: a row round-trips through its PK.
+    conn.execute(
+        "INSERT INTO entity_type_origin (entity_id, original_type, source_directory, recorded_at)
+         VALUES ('ent_a', 'character', 'notes/agents', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+         VALUES ('ent_loser', 'ent_a', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ct_entity_optouts (entity_id, reason, created_at)
+         VALUES ('ent_a', 'deliberate', 1)",
+        [],
+    )
+    .unwrap();
+    // NULL source_directory is legal: a bundle-imported fallback has none.
+    conn.execute(
+        "INSERT INTO entity_type_origin (entity_id, original_type, source_directory, recorded_at)
+         VALUES ('ent_b', 'concept', NULL, 1)",
+        [],
+    )
+    .unwrap();
+}
+
 #[test]
 fn v18_creates_librarian_evidence_with_json_check() {
     let conn = open_in_memory().unwrap();

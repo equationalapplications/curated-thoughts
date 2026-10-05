@@ -233,12 +233,26 @@ pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<
     // Everything else per the D2 matrix. Edges are not replicated and every
     // endpoint they could reference is doomed, so one unconditional sweep
     // empties the table. Children before parents throughout.
+    //
+    // Wave-1 ontology-gate tables (spec §2.9.1): the origin ledger, merge
+    // redirects, and entity-level opt-outs are all vault CONTENT — the
+    // off-sourced mint record, the merge survivor, and the deliberate
+    // opt-out belong to the outgoing vault, and an entity id reused in the
+    // next vault must not inherit any of them.
+    //
+    // The `alias_remap_completed` marker goes too (r19-m2): it lives in
+    // `llm_wiki_meta` (which survives the clear) but vouches for remap rows
+    // that this transaction just destroyed, so letting it through would let
+    // `merge-duplicates` run against an un-remapped vocabulary.
     tx.execute_batch(
         "DELETE FROM llm_wiki_edges;
          DELETE FROM llm_wiki_events;
          DELETE FROM llm_wiki_source_ref_index;
          DELETE FROM llm_wiki_checkpoints;
          DELETE FROM curated_agent_log;
+         DELETE FROM entity_type_origin;
+         DELETE FROM entity_redirects;
+         DELETE FROM ct_entity_optouts;
          DELETE FROM curated_entities;
          DELETE FROM curated_proposal_items;
          DELETE FROM curated_proposal_sources;
@@ -252,6 +266,28 @@ pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<
          DELETE FROM wiki_pages;
          DELETE FROM folder_rules;
          DELETE FROM stall_strikes;",
+    )?;
+
+    // ENTITY-LEVEL manifest clear (spec R2.9.2, plan-p2-M7): drop every
+    // per-entity override but KEEP the tier vocabulary — `tier_fact`,
+    // `tier_wisdom`, and the `tier_working::%` hash rows. A bare DELETE
+    // would wipe the resolved vocabulary and DISARM the gate on every
+    // clear-branch switch (no `tier_fact` row resolves to SKIP per spec
+    // §2.1). The drift watermark row in `llm_wiki_meta` is deliberately NOT
+    // touched here: it describes the host's config, not vault content, and
+    // wiping it would re-arm first-run suppression.
+    tx.execute(
+        "DELETE FROM llm_wiki_entity_manifests
+          WHERE entity_id <> 'tier_fact'
+            AND entity_id <> 'tier_wisdom'
+            AND entity_id NOT LIKE 'tier_working::%'",
+        [],
+    )?;
+
+    // The remap marker dies AFTER the vault rows it vouched for are gone.
+    tx.execute(
+        "DELETE FROM llm_wiki_meta WHERE key = 'alias_remap_completed'",
+        [],
     )?;
 
     tx.commit()?;
@@ -818,9 +854,69 @@ mod clear_vault_tables_tests {
             [],
         )
         .unwrap();
+        // The drift watermark (spec §2.2.8): describes the HOST's config, not
+        // vault content — it must SURVIVE the clear (plan-p4-m5), so this
+        // seeds it and the assertion below pins the survival.
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value)
+             VALUES ('ontology_config_watermark', '{\"hash\":\"abc\"}')",
+            [],
+        )
+        .unwrap();
+        // The alias-remap marker: vouches for rows that the clear destroys —
+        // this row must NOT survive (r19-m2).
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES ('alias_remap_completed', '1')",
+            [],
+        )
+        .unwrap();
+        // Tier vocabulary manifests: engine-owned rows that MUST survive the
+        // clear — a bare DELETE here would disarm the gate on every
+        // clear-branch switch (spec R2.9.2).
         conn.execute(
             "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
              VALUES ('tier_fact', 'strict', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+             VALUES ('tier_wisdom', 'strict', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+             VALUES ('tier_working::0123456789abcdef', 'off', 1)",
+            [],
+        )
+        .unwrap();
+        // An ENTITY-LEVEL manifest override: vault content — must NOT survive
+        // (spec R2.9.2).
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+             VALUES ('ent_a', 'strict', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Wave-1 ontology-gate tables (spec §2.9.1): all three are clear-list
+        // rows, seeded here and asserted empty below.
+        conn.execute(
+            "INSERT INTO entity_type_origin (entity_id, original_type, source_directory, recorded_at)
+             VALUES ('ent_a', 'character', 'notes/agents', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent_loser', 'ent_a', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at)
+             VALUES ('ent_a', 'deliberate: legacy folder', 1)",
             [],
         )
         .unwrap();
@@ -868,6 +964,10 @@ mod clear_vault_tables_tests {
             "curated_proposal_items",
             "curated_proposal_sources",
             "curated_proposal_deleted_sources",
+            // Wave-1 ontology-gate tables (spec §2.9.1).
+            "entity_type_origin",
+            "entity_redirects",
+            "ct_entity_optouts",
         ] {
             assert_eq!(
                 count(&conn, table),
@@ -876,12 +976,57 @@ mod clear_vault_tables_tests {
             );
         }
 
-        // Keep-rows survive.
-        assert_eq!(count(&conn, "llm_wiki_meta"), 1, "meta marker must survive");
+        // Keep-rows survive. The meta count is TWO: the okf marker and the
+        // drift watermark — the watermark describes the HOST's config, not
+        // vault content, and wiping it would re-arm first-run suppression
+        // (plan-p4-m5). The alias_remap_completed marker is the third meta
+        // row the seed adds and is asserted GONE below: it vouches for remap
+        // rows the clear just destroyed (r19-m2).
         assert_eq!(
-            count(&conn, "llm_wiki_entity_manifests"),
-            1,
-            "ontology manifests must survive"
+            count(&conn, "llm_wiki_meta"),
+            2,
+            "okf marker + drift watermark must survive; the remap marker must not"
+        );
+        let remap_marker: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_meta WHERE key = 'alias_remap_completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            remap_marker, 0,
+            "alias_remap_completed must be deleted by the clear (r19-m2)"
+        );
+        let watermark: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'ontology_config_watermark'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            watermark.as_deref(),
+            Some("{\"hash\":\"abc\"}"),
+            "the drift watermark row must survive the clear verbatim"
+        );
+        // Only the TIER vocabulary survives; the entity-level row is gone
+        // (spec R2.9.2 — pin both directions, not just a count).
+        let manifest_ids: Vec<String> = conn
+            .prepare("SELECT entity_id FROM llm_wiki_entity_manifests ORDER BY entity_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            manifest_ids,
+            [
+                "tier_fact".to_string(),
+                "tier_wisdom".to_string(),
+                "tier_working::0123456789abcdef".to_string()
+            ],
+            "tier vocabulary rows survive; ent_* rows are cleared"
         );
         assert!(
             count(&conn, "schema_version") > 0,

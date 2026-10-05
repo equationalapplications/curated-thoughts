@@ -483,6 +483,63 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
     ON curated_proposal_deleted_sources(doc_hash);
 ";
 
+/// V26 — ontology node-type gate wave-1 tables (spec
+/// `2026-10-03-ontology-node-type-gate-and-heal-design.md` §2.9.1/§3).
+///
+/// Three CT-owned tables, one per wave-1 concern:
+///
+/// * `entity_type_origin` — the degrade/import ORIGIN LEDGER (R2.4.6,
+///   plan-p6-m5 chose the ledger-table option over a column). Every degrade
+///   and every bundle-imported fallback landing records the entity's
+///   original label here so heal can surface origin-tagged rows and a
+///   stale-hash off entity never silently climbs to a strict rung and gets
+///   retyped (the D8 case). `source_directory` sits beside the original
+///   label because R2.3.5's off-sourced mint record needs the directory:
+///   without it the stale-hash climb above is undetectable. Nullable — a
+///   bundle-imported fallback has no source directory.
+/// * `entity_redirects` — merge-duplicates loser→survivor redirects
+///   (R2.7.5). One row per loser (`entity_id` PK; chain compression keeps
+///   it pointing at the FINAL survivor); the loser row itself stays live in
+///   `curated_entities` and is excluded by readers, never dropped.
+/// * `ct_entity_optouts` — deliberate entity-level opt-outs (r6-M5/r12-M1:
+///   a TABLE, never a manifest-row column or a `manifest_json` key — the
+///   engine UPSERTs manifest rows in place today but is versioned
+///   independently, and a future `INSERT OR REPLACE` there would silently
+///   reset any CT column). A row here is rung 1(a) of the ordered skip
+///   rule: checked FIRST, SKIP.
+///
+/// Deliberately NO foreign keys to `curated_entities`: redirect losers and
+/// origin records must be insertable/deletable in any order across
+/// connections whose `PRAGMA foreign_keys` state CT does not control (the
+/// same reason `librarian_evidence` pairs every cascade with explicit
+/// deletes), and `clear_vault_tables` deletes these tables alongside —
+/// not after — their parent rows.
+///
+/// Like V23/V24/V25, this DDL runs UNGATED on every `migrate()` call and
+/// carries no version stamp: the stamp is written by the apply site in
+/// `connection.rs`, gated on V22 having stamped. All statements are
+/// idempotent (`IF NOT EXISTS`), so the every-open replay is free.
+pub const MIGRATION_V26: &str = "
+CREATE TABLE IF NOT EXISTS entity_type_origin (
+    entity_id        TEXT PRIMARY KEY,
+    original_type    TEXT NOT NULL,
+    source_directory TEXT,
+    recorded_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entity_redirects (
+    entity_id   TEXT PRIMARY KEY,
+    merged_into TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ct_entity_optouts (
+    entity_id  TEXT PRIMARY KEY,
+    reason     TEXT,
+    created_at INTEGER NOT NULL
+);
+";
+
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
 ///
 /// The V16 CHECK is the database-level floor; this is the same set expressed

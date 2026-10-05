@@ -1045,6 +1045,70 @@ mod tests {
         assert_eq!(ids, ["fact_from_backup"], "the backup is what landed");
     }
 
+    /// Restore-branch half of spec R2.9.2 (the clear-branch half lives in
+    /// queries.rs): the restore branch NEVER calls `clear_vault_tables` — it
+    /// reinstalls the backup FILE via `stage_backup`, so the vault-keyed
+    /// behavior comes from the backup's own rows. The backup carries
+    /// `llm_wiki_entity_manifests` rows (tier vocabulary AND any entity-level
+    /// overrides of the vault being restored); the install must land exactly
+    /// those, not the outgoing vault's. This pins the mechanism every later
+    /// `--entity` test relies on: entity-level rows are vault-scoped by
+    /// construction because the whole file swaps.
+    #[test]
+    fn stage_backup_install_carries_the_backup_vaults_manifest_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let backup_path = tmp.path().join("brain.db.bak");
+
+        // Outgoing vault: an entity-level manifest override its owner set here.
+        let live = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        live.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+             VALUES ('ent_live_only', 'strict', 1)",
+            [],
+        )
+        .unwrap();
+        drop(live);
+
+        // Backup vault (the one being restored): the tier vocabulary plus a
+        // DIFFERENT entity-level override.
+        let backup = crate::db::connection::open_app_db(&backup_path, None).unwrap();
+        backup
+            .execute(
+                "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+                 VALUES ('tier_fact', 'strict', 1)",
+                [],
+            )
+            .unwrap();
+        backup
+            .execute(
+                "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, updated_at)
+                 VALUES ('ent_backup_override', 'off', 1)",
+                [],
+            )
+            .unwrap();
+        drop(backup);
+
+        let staged = stage_backup(&backup_path, &db_path).unwrap();
+        commit_staged_backup(&staged, &db_path).unwrap();
+
+        let installed = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let manifest_ids: Vec<String> = installed
+            .prepare("SELECT entity_id FROM llm_wiki_entity_manifests ORDER BY entity_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            manifest_ids,
+            ["ent_backup_override".to_string(), "tier_fact".to_string()],
+            "the restore reinstalls the BACKUP's manifest rows — tier vocabulary \
+             intact, the backup's entity-level override present, the outgoing \
+             vault's gone"
+        );
+    }
+
     #[test]
     fn capture_and_repush_preserve_drain_order_within_one_millisecond() {
         // The wedge: an Insert and a Delete for the same record share a

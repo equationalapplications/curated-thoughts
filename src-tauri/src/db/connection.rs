@@ -2,7 +2,8 @@ use crate::db::okf_ddl;
 use crate::db::schema::{
     DELETED_SOURCES_DDL, MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13,
     MIGRATION_V14, MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2,
-    MIGRATION_V21, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V21, MIGRATION_V26, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+    MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -785,6 +786,26 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         )?;
     }
 
+    // V26 — ontology node-type gate wave-1 tables
+    // (spec docs/superpowers/specs/2026-10-03-ontology-node-type-gate-and-heal-design.md
+    // §2.9.1/§3): `entity_type_origin` (type-origin ledger),
+    // `entity_redirects` (merge loser→survivor), `ct_entity_optouts`
+    // (entity-level opt-out marker).
+    //
+    // Ungated DDL on every open, stamp gated on V22 having stamped — the
+    // V23/V24/V25 pattern exactly. Stamping 26 while a rootless open has
+    // deferred V22 would make every later rooted open read MAX(version) >= 26,
+    // skip `if version < 22`, and permanently skip V22's `documents.path`
+    // rewrite and its FATAL re-warn. (This ALSO caps a rootless open at 21:
+    // V22's stamp gate reads MAX(version), so 26 must never land before 22.)
+    conn.execute_batch(MIGRATION_V26)?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (26)",
+            [],
+        )?;
+    }
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -1091,6 +1112,10 @@ mod tests {
         // V24 (core-llm-wiki 7.9.0 adoption) mirrors engine migration 13's
         // temporal/watermark columns on every open but, like V23, stamps
         // only once V22 has — so this still caps at 21.
+        // V26 (ontology node-type gate wave 1) creates the three CT-owned
+        // tables (`entity_type_origin`, `entity_redirects`,
+        // `ct_entity_optouts`) on every open but, like V23–V25, stamps only
+        // once V22 has — still capped at 21 here.
         assert_eq!(
             max_version, 21,
             "open_in_memory has no vault root, so V22 refuses to stamp and the schema caps at 21"
@@ -3158,8 +3183,8 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 25,
-            "V22 then V23 then V24 then V25 must be stamped when the migration runs"
+            version, 26,
+            "V22 then V23 then V24 then V25 then V26 must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -3202,7 +3227,7 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 25, "V25 must stamp on a rooted open");
+        assert_eq!(version, 26, "V25 must stamp on a rooted open");
 
         let agents: String = conn
             .query_row(
@@ -3390,8 +3415,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            25,
-            "rooted open stamps 22, then 23/24/25 (the latter gated on V22)"
+            26,
+            "rooted open stamps 22, then 23/24/25/26 (the latter gated on V22)"
         );
     }
 
