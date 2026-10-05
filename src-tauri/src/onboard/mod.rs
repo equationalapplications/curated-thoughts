@@ -202,10 +202,17 @@ pub fn create_layout_and_onboard(config: OnboardConfig) -> Result<()> {
     cfg.vault_path = Some(config.vault_root.to_string_lossy().into_owned());
     cfg.embed_profile = Some(config.embed_profile);
     cfg.generation = config.generation;
-    cfg.ontology.schema = Some(config.ontology);
-
-    cfg.write(&paths)
-        .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
+    // Deliberate schema change (r17-MAJOR-2): the onboarding merge goes
+    // through `replace_ontology` so an unparseable on-disk ontology block
+    // (raw_ontology set) is cleared and re-written instead of silently
+    // discarded by the leave-untouched write guard.
+    cfg.replace_ontology(
+        crate::ontology_config::OntologyConfigBlock {
+            schema: Some(config.ontology),
+        },
+        &paths,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
 
     // ── print agent-client snippet ─────────────────────────────────────────────
     println!("\nSetup complete.");

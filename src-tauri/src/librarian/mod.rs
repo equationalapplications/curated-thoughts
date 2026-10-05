@@ -581,6 +581,7 @@ mod tests {
         BrainConfig {
             ingest: IngestConfig {
                 folder_tiers: tiers.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+                ..Default::default()
             },
             ..Default::default()
         }

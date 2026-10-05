@@ -81,6 +81,274 @@ impl IngestTier {
     pub fn skips_fact_extraction(self) -> bool {
         matches!(self, IngestTier::ChunksOnly | IngestTier::None)
     }
+
+    /// Explicit conservatism ranking used ONLY by tie resolution:
+    /// `none` < `chunks-only` < `full`. When two configured keys normalize
+    /// to the same prefix with different tiers, the most conservative wins.
+    /// (Deliberately not called "conservatism" on `Full` — `Full` is the
+    /// LEAST conservative tier under this ranking.)
+    pub fn tie_rank(self) -> u8 {
+        match self {
+            IngestTier::None => 0,
+            IngestTier::ChunksOnly => 1,
+            IngestTier::Full => 2,
+        }
+    }
+}
+
+/// Directory-level gate mode for the node/edge ontology gate (spec
+/// 2026-10-03-ontology-node-type-gate-and-heal §2.2, R2.2.1/R2.2.3).
+/// Values are LOWERCASE and case-sensitive: a hand-edited `"Off"` is a bad
+/// value — dropped by salvage with `ingest_ontology_degraded` set, never
+/// silently parsed into a legal value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OntologyMode {
+    /// No gating: mints in this subtree skip the node/edge type gate.
+    Off,
+    /// Strict gating: mints in this subtree must match the manifest.
+    Strict,
+}
+
+/// Normalize a configured folder-map key so key comparisons (tie detection,
+/// watermark hash) and prefix matching agree: `\` → `/`, then trim leading
+/// and trailing `/`. Deliberately does NOT trim a leading `./` — configured
+/// keys get no `./`-normalization (asymmetry with the queried path, see
+/// [`IngestConfig::tier_for`]), so `{"./ops": …}` stays inert and is
+/// flagged by the load-time unmatchable-key diagnostic.
+pub fn normalize_key(key: &str) -> String {
+    key.replace('\\', "/").trim_matches('/').to_string()
+}
+
+/// True when a (raw) configured key can ever match a vault-relative path.
+/// Unmatchable keys — empty after normalization, a leading `./`, or any
+/// segment that is empty, `.`, or `..` — are INERT (the resolver skips
+/// them, same drop-one parity as the historical empty-key skip) and get a
+/// load-time diagnostic: silently inert `folder_ontology` keys would leave
+/// a subtree gated strict when the user meant `off` (the D8 harm).
+/// Segment-based per the `..` rule: `v1..v2` is a real folder name and
+/// stays matchable.
+pub fn key_is_matchable(key: &str) -> bool {
+    let k = normalize_key(key);
+    if k.is_empty() {
+        return false;
+    }
+    k.split('/')
+        .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
+/// Outcome of the shared longest-prefix resolver over a folder map
+/// (`folder_tiers` / `folder_ontology`). Four states because two state
+/// pairs must not be conflated: "no prefix matched" (`NoMatch`) is
+/// different from "an absolute path couldn't be placed inside the vault"
+/// (`Unplaceable`), and a resolving value (`Match`) is different from a
+/// same-normalized-key conflict (`Tie`, which the ontology caller maps to
+/// a hold and the tier caller resolves conservative-wins).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrefixOutcome<T> {
+    /// Deepest matching prefix won; all same-depth keys agree on the value.
+    Match(T),
+    /// No configured prefix matches the path.
+    NoMatch,
+    /// Absolute path with no effective vault root, or outside the vault
+    /// (`relativize_to_vault` → None). Relative paths are NEVER
+    /// `Unplaceable` — the `is_absolute()` check runs first.
+    Unplaceable,
+    /// ≥2 configured keys normalize to the longest matched prefix with
+    /// conflicting values. Carries the values so the tier caller can pick
+    /// the most conservative (`IngestTier::tie_rank`) and the ontology
+    /// caller can hold. Same-VALUE keys resolve to `Match` (harmless).
+    Tie(Vec<T>),
+}
+
+/// One resolver call, with the detail the ontology wrapper needs for its
+/// dropped-prefix scoped-hold checks.
+pub struct PrefixMatch<T> {
+    /// Normalized vault-relative path (`\` → `/`, leading `./` trimmed).
+    /// `None` only for `Unplaceable` (no relative path could be computed).
+    pub rel_path: Option<String>,
+    pub outcome: PrefixOutcome<T>,
+    /// `(normalized key, component depth)` of the deepest matched prefix,
+    /// when one matched (set for `Match` and `Tie`).
+    pub matched: Option<(String, usize)>,
+}
+
+/// The shared prefix resolver. SILENT by contract: tie and unmatchable-key
+/// diagnostics fire once at load time (`load_lenient` / `load()`'s strict
+/// arm), never here — `tier_for_path` runs per document on the walk hot
+/// path and an in-resolver diagnostic would spam stderr per document.
+pub fn resolve_prefix<T: PartialEq + Copy>(
+    map: &std::collections::HashMap<String, T>,
+    path: &str,
+    vault_root: Option<&std::path::Path>,
+) -> PrefixOutcome<T> {
+    resolve_prefix_detailed(map, path, vault_root).outcome
+}
+
+pub fn resolve_prefix_detailed<T: PartialEq + Copy>(
+    map: &std::collections::HashMap<String, T>,
+    path: &str,
+    vault_root: Option<&std::path::Path>,
+) -> PrefixMatch<T> {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        // Absolute paths MUST be relativized against the effective vault
+        // root before any key can match; an absolute path that cannot be
+        // placed inside the vault is `Unplaceable`, never a silent `Full`
+        // or a random-winner match.
+        let rel = vault_root.and_then(|root| crate::walk_vault::relativize_to_vault(p, root));
+        let Some(rel) = rel else {
+            return PrefixMatch {
+                rel_path: None,
+                outcome: PrefixOutcome::Unplaceable,
+                matched: None,
+            };
+        };
+        match_prefixes(map, &rel.to_string_lossy())
+    } else {
+        match_prefixes(map, path)
+    }
+}
+
+fn match_prefixes<T: PartialEq + Copy>(
+    map: &std::collections::HashMap<String, T>,
+    path: &str,
+) -> PrefixMatch<T> {
+    let normalized = path.replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./");
+    let mut best: Option<(String, usize, Vec<T>)> = None;
+    for (key, val) in map {
+        let prefix = normalize_key(key);
+        // Inert keys (empty after normalization, or unmatchable segments)
+        // are skipped — same parity as the historical empty-key skip, now
+        // extended to `.`/`..`/leading-`./` keys, which get a load-time
+        // diagnostic instead of a silent skip.
+        if !key_is_matchable(key) {
+            continue;
+        }
+        if normalized.starts_with(&format!("{prefix}/")) {
+            let depth = prefix.split('/').count();
+            best = match best {
+                None => Some((prefix, depth, vec![*val])),
+                Some((_, d, _)) if depth > d => Some((prefix, depth, vec![*val])),
+                Some((k, d, mut vals)) if depth == d => {
+                    vals.push(*val);
+                    Some((k, d, vals))
+                }
+                Some(kept) => Some(kept),
+            };
+        }
+    }
+    let rel_path = Some(normalized.to_string());
+    match best {
+        None => PrefixMatch {
+            rel_path,
+            outcome: PrefixOutcome::NoMatch,
+            matched: None,
+        },
+        Some((key, depth, vals)) => {
+            let first = vals[0];
+            if vals.iter().all(|v| *v == first) {
+                PrefixMatch {
+                    rel_path,
+                    outcome: PrefixOutcome::Match(first),
+                    matched: Some((key, depth)),
+                }
+            } else {
+                PrefixMatch {
+                    rel_path,
+                    outcome: PrefixOutcome::Tie(vals),
+                    matched: Some((key, depth)),
+                }
+            }
+        }
+    }
+}
+
+/// Group a folder map by [`normalize_key`] and report conflicting
+/// same-normalized-key groups as `(normalized key, value)` pairs, one pair
+/// per conflicting value. Only MATCHABLE keys participate: unmatchable
+/// keys are inert (the resolver skips them), so a conflict between two
+/// inert keys must not degrade the config. Used by the load-time tie
+/// scans, the `ontology_ties` helper, and the watermark hash's degraded
+/// encoding.
+fn normalized_key_ties<T: PartialEq>(map: &std::collections::HashMap<String, T>) -> Vec<(String, T)>
+where
+    T: Copy,
+{
+    let mut groups: std::collections::BTreeMap<String, Vec<T>> = std::collections::BTreeMap::new();
+    for (k, v) in map {
+        if !key_is_matchable(k) {
+            continue;
+        }
+        groups.entry(normalize_key(k)).or_default().push(*v);
+    }
+    let mut out = Vec::new();
+    for (k, vals) in groups {
+        let first = vals[0];
+        if vals.iter().any(|v| *v != first) {
+            for v in vals {
+                out.push((k.clone(), v));
+            }
+        }
+    }
+    out
+}
+
+/// Map-wide `folder_ontology` tie scan: same-normalized-key conflicting
+/// modes anywhere in the map. A strict parse never passes through salvage,
+/// so ties must be detected by this standalone scan at load time; the
+/// watermark hash's degraded encoding also consumes it (conflicting keys
+/// excluded from the hashed map).
+pub fn ontology_ties(cfg: &IngestConfig) -> Vec<(String, OntologyMode)> {
+    normalized_key_ties(&cfg.folder_ontology)
+}
+
+/// Tier tie scan — same shape as [`ontology_ties`] over `folder_tiers`.
+/// Resolution is NOT degraded for tiers: the most conservative tier wins
+/// (`IngestTier::tie_rank`); the load path just emits the loud diagnostic.
+fn tier_ties(cfg: &IngestConfig) -> Vec<(String, IngestTier)> {
+    normalized_key_ties(&cfg.folder_tiers)
+}
+
+/// Load-time diagnostics shared by BOTH load paths (`load()`'s strict
+/// success arm never calls `load_lenient`, so each arm runs the scans
+/// itself). Returns the ontology-tie degraded flag plus the diagnostic
+/// lines; callers route them to `LoadReport.diagnostics` (lenient) or
+/// stderr (strict).
+fn scan_ingest_ties(ingest: &IngestConfig) -> (bool, Vec<String>) {
+    let mut degraded = false;
+    let mut msgs = Vec::new();
+    let ties = ontology_ties(ingest);
+    if !ties.is_empty() {
+        degraded = true;
+        let keys: std::collections::BTreeSet<&str> = ties.iter().map(|(k, _)| k.as_str()).collect();
+        msgs.push(format!(
+            "ingest.folder_ontology tie: keys {keys:?} normalize to the same prefix with conflicting modes; affected mints hold until the config is fixed"
+        ));
+    }
+    for (k, v) in tier_ties(ingest) {
+        msgs.push(format!(
+            "ingest.folder_tiers tie on prefix {k:?}: most conservative wins ({v:?}; ranking none < chunks-only < full)"
+        ));
+    }
+    (degraded, msgs)
+}
+
+/// Load-time unmatchable-key diagnostics for `folder_ontology` (see
+/// [`key_is_matchable`]). `folder_tiers` keeps its historical silence —
+/// an inert tier key degrades to `full`, never to a stricter gate.
+fn unmatchable_ontology_key_msgs(ingest: &IngestConfig) -> Vec<String> {
+    ingest
+        .folder_ontology
+        .keys()
+        .filter(|k| !key_is_matchable(k))
+        .map(|k| {
+            format!(
+                "ingest.folder_ontology key {k:?} cannot match any path (empty, or contains '.', '..', or a leading './' segment); it stays inert"
+            )
+        })
+        .collect()
 }
 
 /// Ingestion-policy block. Absent from config.json = every path `full`.
@@ -91,6 +359,18 @@ pub struct IngestConfig {
     /// (path-component aware: `ops` never matches `ops-archive`).
     #[serde(default)]
     pub folder_tiers: std::collections::HashMap<String, IngestTier>,
+    /// Map of vault-relative folder prefix → node/edge gate mode
+    /// (spec R2.2.1). Same longest-prefix resolution core as
+    /// `folder_tiers` (`resolve_prefix`); absent = the §2.3 ladder
+    /// decides (no default from this map).
+    #[serde(default)]
+    pub folder_ontology: std::collections::HashMap<String, OntologyMode>,
+    /// Host-wide default gate mode (spec R2.2.3). `None` = ABSENT (never
+    /// chosen) — rung 3 then resolves LIVE from `ontology.schema == Off`;
+    /// a set value wins over the schema-derived default. A hand-written
+    /// `null` parses as `None` = absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology_default: Option<OntologyMode>,
 }
 
 impl IngestConfig {
@@ -104,23 +384,16 @@ impl IngestConfig {
     /// configured keys (config.json is hand-edited). Absolute paths never
     /// match — relativize first via [`IngestConfig::tier_for_path`].
     pub fn tier_for(&self, rel_path: &str) -> IngestTier {
-        let normalized = rel_path.replace('\\', "/");
-        let normalized = normalized.trim_start_matches("./");
-        let mut best: Option<(usize, IngestTier)> = None;
-        for (prefix, tier) in &self.folder_tiers {
-            let prefix = prefix.replace('\\', "/");
-            let prefix = prefix.trim_matches('/');
-            if prefix.is_empty() {
-                continue;
-            }
-            if normalized.starts_with(&format!("{prefix}/")) {
-                let depth = prefix.split('/').count();
-                if best.is_none_or(|(d, _)| depth > d) {
-                    best = Some((depth, *tier));
-                }
-            }
+        match resolve_prefix(&self.folder_tiers, rel_path, None) {
+            PrefixOutcome::Tie(vals) => vals
+                .into_iter()
+                .min_by_key(|t| t.tie_rank())
+                .unwrap_or(IngestTier::Full),
+            PrefixOutcome::Match(t) => t,
+            // Unplaceable cannot arise: a relative path never enters the
+            // absolute branch, so the vault root is never consulted.
+            PrefixOutcome::NoMatch | PrefixOutcome::Unplaceable => IngestTier::Full,
         }
-        best.map_or(IngestTier::Full, |(_, t)| t)
     }
 
     /// Resolve the tier for a vault-relative OR absolute path. An absolute
@@ -128,21 +401,154 @@ impl IngestConfig {
     /// the vault's own ancestors (`/home/operations/vault/…`) can never
     /// match a tier key. An absolute path that cannot be placed inside the
     /// vault (or with no root known) resolves to [`IngestTier::Full`] —
-    /// the shipped behavior.
+    /// the shipped behavior (wording deliberate: `Full` is the LEAST
+    /// conservative tier in the `none` < `chunks-only` < `full` ranking —
+    /// do NOT "fix" this to `None`).
+    ///
+    /// The empty-map short-circuit stays BEFORE the core call: on the
+    /// per-document walk hot path an empty map must not pay up to two
+    /// `fs::canonicalize` calls inside `relativize_to_vault` for a `Full`
+    /// answer either way.
     pub fn tier_for_path(&self, path: &str, vault_root: Option<&std::path::Path>) -> IngestTier {
         if self.folder_tiers.is_empty() {
             return IngestTier::Full;
         }
-        let p = std::path::Path::new(path);
-        if !p.is_absolute() {
-            return self.tier_for(path);
+        match resolve_prefix(&self.folder_tiers, path, vault_root) {
+            PrefixOutcome::Tie(vals) => vals
+                .into_iter()
+                .min_by_key(|t| t.tie_rank())
+                .unwrap_or(IngestTier::Full),
+            PrefixOutcome::Match(t) => t,
+            // D8-adjacent parity: an unplaceable absolute path keeps the
+            // shipped `Full`, exactly as before this resolver existed.
+            PrefixOutcome::NoMatch | PrefixOutcome::Unplaceable => IngestTier::Full,
         }
-        vault_root
-            .and_then(|root| crate::walk_vault::relativize_to_vault(p, root))
-            .map_or(IngestTier::Full, |rel| {
-                self.tier_for(&rel.to_string_lossy())
-            })
     }
+
+    /// Resolve the gate mode for a vault-relative OR absolute path —
+    /// the CONFIG-LEVEL core behind the gate's ladder (spec R2.2.1/R2.2.6).
+    ///
+    /// Degraded inputs — the load-failed/global flag, a dropped
+    /// `folder_ontology` prefix, or a dropped `ontology_default` value —
+    /// resolve to [`OntologyLookup::Hold`] for any mint whose resolution
+    /// would reach them (D8: a degraded or off state never climbs to a
+    /// stricter rung). The resolver never sees dropped entries (salvage
+    /// removed them), so this wrapper checks the dropped lists ITSELF:
+    /// a valid entry DEEPER than a dropped parent wins (the user's
+    /// narrower choice is intact), anything at-or-under a dropped prefix
+    /// with no deeper valid entry holds.
+    pub fn ontology_lookup(
+        &self,
+        path: &str,
+        vault_root: Option<&std::path::Path>,
+        degraded: &OntologyDegradedState,
+        schema: Option<crate::ontology_config::OntologySelection>,
+        schema_unparseable: bool,
+    ) -> OntologyLookup {
+        // (0) Global degraded (load-failed / non-object parts) → Hold.
+        if degraded.global {
+            return OntologyLookup::Hold;
+        }
+
+        let detailed = resolve_prefix_detailed(&self.folder_ontology, path, vault_root);
+
+        // (1) At-or-under a dropped prefix → Hold, unless a VALID entry
+        // deeper than the dropped one also matches (then the child wins).
+        if let Some(rel) = &detailed.rel_path {
+            let mut deepest_dropped: Option<usize> = None;
+            for dropped in &degraded.dropped_prefixes {
+                let d = normalize_key(dropped);
+                if !key_is_matchable(dropped) || d.is_empty() {
+                    continue;
+                }
+                if rel == &d || rel.starts_with(&format!("{d}/")) {
+                    let depth = d.split('/').count();
+                    if deepest_dropped.is_none_or(|prev| depth > prev) {
+                        deepest_dropped = Some(depth);
+                    }
+                }
+            }
+            if let Some(dropped_depth) = deepest_dropped {
+                let deeper_valid = match &detailed.outcome {
+                    PrefixOutcome::Match(_) => detailed
+                        .matched
+                        .map(|(_, depth)| depth > dropped_depth)
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if !deeper_valid {
+                    return OntologyLookup::Hold;
+                }
+            }
+        }
+
+        match detailed.outcome {
+            // (2) Same-normalized-prefix conflict → Hold (r18-m1).
+            PrefixOutcome::Tie(_) => OntologyLookup::Hold,
+            PrefixOutcome::Match(mode) => OntologyLookup::Mode(mode),
+            PrefixOutcome::Unplaceable => {
+                // (3) Absolute path couldn't be placed (vault moved, no
+                // effective root). Hold when the map carries any off
+                // entry or any degraded/dropped state — a silent climb
+                // would let heal --yes retype folders the user marked
+                // off. NEVER a climb (D8).
+                let has_off = self
+                    .folder_ontology
+                    .values()
+                    .any(|m| *m == OntologyMode::Off);
+                if has_off || !degraded.dropped_prefixes.is_empty() || degraded.default_dropped {
+                    OntologyLookup::Hold
+                } else {
+                    OntologyLookup::Climb
+                }
+            }
+            PrefixOutcome::NoMatch => {
+                // (2a) The default scalar was dropped by salvage → Hold
+                // (else `{"ontology_default":"Off"}` dropped → climbs to
+                // schema strict → heal retypes an opted-out brain).
+                if degraded.default_dropped {
+                    return OntologyLookup::Hold;
+                }
+                // (2b) Absent default + unreadable schema intent → Hold.
+                if self.ontology_default.is_none() && schema.is_none() && schema_unparseable {
+                    return OntologyLookup::Hold;
+                }
+                OntologyLookup::Climb
+            }
+        }
+    }
+}
+
+/// The degraded/failed state carried OUT of config loading, consumed by
+/// [`IngestConfig::ontology_lookup`]. Empty = healthy load.
+#[derive(Debug, Clone, Default)]
+pub struct OntologyDegradedState {
+    /// Load-failed route (malformed JSON, non-object root, UTF-8 failure,
+    /// `VaultPathNotString`, non-NotFound read error, non-object `ingest`)
+    /// or a load-time ontology tie. Holds EVERYTHING.
+    pub global: bool,
+    /// `folder_ontology` prefixes whose VALUE failed to salvage (scoped
+    /// hold: only mints under them hold).
+    pub dropped_prefixes: Vec<String>,
+    /// The `ontology_default` scalar failed to salvage (holds every mint
+    /// that would climb to rung 3).
+    pub default_dropped: bool,
+}
+
+impl OntologyDegradedState {
+    pub fn is_degraded(&self) -> bool {
+        self.global || !self.dropped_prefixes.is_empty() || self.default_dropped
+    }
+}
+
+/// Config-level outcome of the ontology lookup (plan Task 1). Tasks 3/5
+/// map `Hold` → their `HadEvidenceUnresolved` report-or-hold class;
+/// `Climb` means "no directory mode decided — the §2.3 ladder continues".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OntologyLookup {
+    Mode(OntologyMode),
+    Hold,
+    Climb,
 }
 
 /// The ingest policy in force for one brain: the tier map plus the
@@ -151,6 +557,18 @@ impl IngestConfig {
 pub struct IngestPolicy {
     pub tiers: IngestConfig,
     pub vault_root: Option<std::path::PathBuf>,
+    /// Rung-3 carrier (r6-M4): `ontology.schema` so the gate can resolve
+    /// rung 3 LIVE when `ingest.ontology_default` is absent.
+    pub ontology_selection: Option<crate::ontology_config::OntologySelection>,
+    /// The `ontology` block was present but failed to parse — schema intent
+    /// is UNKNOWN, distinct from `Some(..)`/`None`.
+    pub ontology_unparseable: bool,
+    /// Degraded/failed ontology config (see [`OntologyDegradedState`]).
+    pub ingest_ontology_degraded: bool,
+    /// `folder_ontology` prefixes dropped by salvage (scoped-hold detail).
+    pub dropped_ontology_prefixes: Vec<String>,
+    /// The `ontology_default` scalar was dropped by salvage.
+    pub ontology_default_dropped: bool,
 }
 
 impl IngestPolicy {
@@ -160,9 +578,87 @@ impl IngestPolicy {
         self.tiers
             .tier_for_path(path, vault_root.or(self.vault_root.as_deref()))
     }
+
+    /// The degraded state consumed by [`IngestConfig::ontology_lookup`].
+    pub fn ontology_degraded_state(&self) -> OntologyDegradedState {
+        OntologyDegradedState {
+            global: self.ingest_ontology_degraded,
+            dropped_prefixes: self.dropped_ontology_prefixes.clone(),
+            default_dropped: self.ontology_default_dropped,
+        }
+    }
+
+    /// Resolve the gate mode for a path, threading this policy's carrier
+    /// fields (vault root override, schema, degraded state).
+    pub fn ontology_lookup(
+        &self,
+        path: &str,
+        vault_root: Option<&std::path::Path>,
+    ) -> OntologyLookup {
+        self.tiers.ontology_lookup(
+            path,
+            vault_root.or(self.vault_root.as_deref()),
+            &self.ontology_degraded_state(),
+            self.ontology_selection,
+            self.ontology_unparseable,
+        )
+    }
 }
 
 type PolicyCache = std::collections::HashMap<std::path::PathBuf, (Vec<u8>, IngestPolicy)>;
+
+/// Canonical hash input for the ontology-drift watermark (spec R2.2.8,
+/// r18-MAJOR-1). `folder_ontology` is a `HashMap`, so plain serialization
+/// yields different bytes per process; this normalizes keys exactly like
+/// `tier_for` (`\` → `/`, trimmed `/`), sorts them (BTreeMap), and emits a
+/// fixed field order with `null`/absent identical.
+///
+/// When `ontology_default` is ABSENT, the effective rung-3 inputs join the
+/// hash (`ontology.schema` + `ontology_unparseable`) — a schema
+/// Off↔strict switch must fire a drift report even with no explicit
+/// ontology config. When the config is TIE-DEGRADED, the hash input is
+/// `{degraded: true}` with the conflicting keys EXCLUDED (their surviving
+/// value would depend on HashMap insertion order); entering or leaving
+/// tie-degraded therefore always changes the hash.
+///
+/// Uses the SAME `normalize_key` as the resolver, `tier_for`, and
+/// `ontology_ties` — one normalization rule, no drift between them.
+pub fn ontology_config_watermark_hash(
+    ingest: &IngestConfig,
+    schema: Option<crate::ontology_config::OntologySelection>,
+    ontology_unparseable: bool,
+) -> String {
+    let degraded = !ontology_ties(ingest).is_empty();
+    let mut map = std::collections::BTreeMap::new();
+    if !degraded {
+        for (k, v) in &ingest.folder_ontology {
+            let nk = normalize_key(k);
+            if !key_is_matchable(k) || nk.is_empty() {
+                continue;
+            }
+            map.insert(
+                nk,
+                serde_json::to_value(v).expect("OntologyMode serializes"),
+            );
+        }
+    }
+    let payload = serde_json::json!({
+        "degraded": degraded,
+        "folder_ontology": map,
+        "ontology_default": ingest.ontology_default,
+        "schema": if ingest.ontology_default.is_none() {
+            serde_json::to_value(schema).expect("OntologySelection serializes")
+        } else {
+            serde_json::Value::Null
+        },
+        "schema_unparseable": if ingest.ontology_default.is_none() {
+            ontology_unparseable
+        } else {
+            false
+        },
+    });
+    crate::hasher::hash_bytes(payload.to_string().as_bytes())
+}
 
 /// The ingest policy for the brain that owns the database at `db_path`
 /// (`Connection::path()`), resolved exactly as the pipeline worker resolves
@@ -174,9 +670,20 @@ type PolicyCache = std::collections::HashMap<std::path::PathBuf, (Vec<u8>, Inges
 /// the contents change. Bytes, not mtime/length — `full` ↔ `none` is a
 /// same-length edit, and `BrainConfig::write`'s temp-file rename can keep a
 /// coarse (1–2 s) mtime unchanged, so a metadata stamp could serve a stale
-/// policy. Hand-edits take effect on the next document. An
-/// in-memory or path-less database, a missing config, or a load error all
-/// yield the default policy (every folder `full`, the shipped behavior).
+/// policy. Hand-edits take effect on the next document.
+///
+/// The policy is parsed from the SAME bytes that key the cache (the
+/// `:read` here, not a second `load_lenient` read — a concurrent write
+/// could otherwise store a policy under bytes it was never parsed from).
+/// An in-memory or path-less database resolves the default policy with NO
+/// degraded flags (no path = no config file to read).
+///
+/// Degradation rules (spec R2.2.4): a missing config (`NotFound` ONLY)
+/// resolves normally — no map is no explicit ontology config. Any OTHER
+/// read error, malformed JSON, a non-object root, or a non-UTF-8 file
+/// yields a DEGRADED policy (`ingest_ontology_degraded = true`) — never
+/// `IngestPolicy::default()`, whose all-clear fields would let the gate
+/// climb to strict rungs (D8).
 pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
@@ -188,8 +695,23 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         return IngestPolicy::default();
     };
     let paths = crate::retrieval::brain_paths_for(brain_dir);
-    let Ok(contents) = fs::read(&paths.config_path) else {
-        return IngestPolicy::default();
+    let contents = match fs::read(&paths.config_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return IngestPolicy::default();
+        }
+        // EACCES, EISDIR, …: NOT "missing". A degraded policy keeps the
+        // gate from climbing (unreadable config + heal --yes → zero
+        // retypes); silently defaulting would retype opted-out folders.
+        Err(e) => {
+            eprintln!(
+                "config: could not read ingest policy ({}); degraded (ontology holds)",
+                e
+            );
+            let mut policy = IngestPolicy::default();
+            policy.ingest_ontology_degraded = true;
+            return policy;
+        }
     };
 
     let cache = CACHE.get_or_init(|| Mutex::new(PolicyCache::new()));
@@ -201,18 +723,56 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         }
     }
 
-    let policy = match BrainConfig::load_lenient(&paths) {
-        Ok(report) => IngestPolicy {
-            tiers: report.config.ingest,
-            vault_root: report.config.vault_path.map(std::path::PathBuf::from),
-        },
-        Err(e) => {
-            eprintln!("config: could not read ingest tiers ({e}); assuming full");
-            return IngestPolicy::default();
-        }
-    };
+    let policy = parse_ingest_policy_from_bytes(&contents);
     if let Ok(mut guard) = cache.lock() {
         guard.insert(paths.config_path, (contents, policy.clone()));
+    }
+    policy
+}
+
+/// Parse the ingest policy from the EXACT bytes read for the cache key —
+/// the same-bytes parse rule (r11-m5). Lenient parse errors degrade to a
+/// flagged policy instead of the silent default.
+fn parse_ingest_policy_from_bytes(contents: &[u8]) -> IngestPolicy {
+    let text = match std::str::from_utf8(contents) {
+        Ok(t) => t,
+        Err(_) => {
+            eprintln!("config: ingest policy file is not valid UTF-8; degraded (ontology holds)");
+            let mut policy = IngestPolicy::default();
+            policy.ingest_ontology_degraded = true;
+            return policy;
+        }
+    };
+    let mut policy = match BrainConfig::load_lenient_from_str(text) {
+        Ok(report) => {
+            let degraded = report.config.ontology_degraded.clone();
+            IngestPolicy {
+                tiers: report.config.ingest,
+                vault_root: report
+                    .config
+                    .vault_path
+                    .clone()
+                    .map(std::path::PathBuf::from),
+                ontology_selection: report.config.ontology.schema,
+                ontology_unparseable: report.ontology_unparseable,
+                ingest_ontology_degraded: degraded.global,
+                dropped_ontology_prefixes: degraded.dropped_prefixes,
+                ontology_default_dropped: degraded.default_dropped,
+            }
+        }
+        Err(e) => {
+            eprintln!("config: could not parse ingest policy ({e}); degraded (ontology holds)");
+            let mut policy = IngestPolicy::default();
+            policy.ingest_ontology_degraded = true;
+            return policy;
+        }
+    };
+    // The load-time tie scan sets `global` on the skip-field state; mirror
+    // it into the policy flag (checked once here, not per lookup).
+    if policy.tiers.folder_ontology.len() >= 2
+        && !crate::config::ontology_ties(&policy.tiers).is_empty()
+    {
+        policy.ingest_ontology_degraded = true;
     }
     policy
 }
@@ -285,6 +845,53 @@ pub struct BrainConfig {
     /// Raw privacy block JSON used when typed deserialization fails.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_privacy: Option<serde_json::Value>,
+    /// Unknown `ingest` sub-keys (the `preserved_wiki` pattern), captured in
+    /// BOTH load arms. `IngestConfig` has no `deny_unknown_fields`, so
+    /// without this `write()`'s whole-block re-serialization drops them.
+    /// Unknown ingest sub-keys are ALWAYS kept — future-binary keys must
+    /// survive every load/write cycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_ingest: Option<serde_json::Value>,
+    /// VERBATIM on-disk `ingest` block marker, set ONLY when salvage dropped
+    /// something (degraded load). While set, `write()` LEAVES THE ON-DISK
+    /// `ingest` VALUE UNTOUCHED (never re-emits a load-time captured copy —
+    /// that would put the user's OLD broken block back over their
+    /// in-between fix). This is the only mechanism that preserves a dropped
+    /// entry INSIDE the known `folder_ontology` map. ALL ingest-mutating
+    /// writers must refuse while this is set: typed mutations would be
+    /// silently discarded.
+    #[serde(skip)]
+    pub raw_ingest: Option<serde_json::Value>,
+    /// VERBATIM on-disk `ontology` block marker, set when the ontology block
+    /// failed to parse. While set, `write()` leaves the on-disk `ontology`
+    /// value untouched — otherwise any unrelated writer overwrites the bad
+    /// value with `{"schema": null}` and the degraded state silently
+    /// disappears. Cleared ONLY by `replace_ontology` (the deliberate-change
+    /// escape hatch).
+    #[serde(skip)]
+    pub raw_ontology: Option<serde_json::Value>,
+    /// Degraded ontology-config state (spec R2.2.4), set by `load_lenient`
+    /// and surfaced through `ingest_policy_for_db`. `#[serde(skip)]` — this
+    /// is load-time state about the file, not persisted config.
+    #[serde(skip)]
+    pub ontology_degraded: OntologyDegradedState,
+}
+
+impl BrainConfig {
+    /// The deliberate schema-change escape hatch (r17-MAJOR-2): clears the
+    /// `raw_ontology` degraded marker, sets the typed ontology block, and
+    /// writes — bypassing the leave-untouched rule. ONLY
+    /// `set_ontology_selection` (Desktop settings) and the onboarding merge
+    /// may call this; every other writer leaves the degraded marker alone.
+    pub fn replace_ontology(
+        &mut self,
+        block: crate::ontology_config::OntologyConfigBlock,
+        paths: &BrainPaths,
+    ) -> Result<()> {
+        self.raw_ontology = None;
+        self.ontology = block;
+        self.write(paths)
+    }
 }
 
 /// Report from lenient load, detailing which fields were silently defaulted.
@@ -338,31 +945,6 @@ fn truncate_for_diag(value: &str) -> String {
         cut.push('…');
         cut
     }
-}
-
-/// Salvage an `IngestConfig` from a lenient load report's raw context.
-///
-/// The test surface mirrors `ingest_from_value_lenient` usage in the
-/// lenient-path tests: given the raw `serde_json::Value` of an `ingest`
-/// block, parse tier values entry-by-entry, dropping (with a diagnostic to
-/// stderr) any value outside the tier vocabulary. Valid entries survive —
-/// one typo must not nuke the whole policy.
-pub fn ingest_from_value_lenient(raw: &serde_json::Value) -> IngestConfig {
-    let mut out = IngestConfig::default();
-    let Some(map) = raw.get("folder_tiers").and_then(|v| v.as_object()) else {
-        return out;
-    };
-    for (k, v) in map {
-        match serde_json::from_value::<IngestTier>(v.clone()) {
-            Ok(tier) => {
-                out.folder_tiers.insert(k.clone(), tier);
-            }
-            Err(e) => {
-                eprintln!("config: ingest.folder_tiers entry {k:?} dropped: {e}");
-            }
-        }
-    }
-    out
 }
 
 impl BrainConfig {
@@ -520,6 +1102,44 @@ impl BrainConfig {
                     };
                 }
 
+                // Extract nested unknown keys from ingest block (r13-m2:
+                // `IngestConfig` has no `deny_unknown_fields`, so unknown
+                // sub-keys parse clean here and `write()`'s whole-block
+                // re-serialization would drop them unless the strict arm
+                // captures them too — mirroring `preserved_wiki`).
+                if let Some(ing_val) = obj.get("ingest").and_then(|v| v.as_object()) {
+                    let known_ingest_keys = ["folder_tiers", "folder_ontology", "ontology_default"];
+                    let unknown: serde_json::Map<String, serde_json::Value> = ing_val
+                        .iter()
+                        .filter(|(k, _)| !known_ingest_keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    cfg.preserved_ingest = if unknown.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(unknown))
+                    };
+                }
+
+                // Load-time tie scans for the strict path (r19-m1: a
+                // salvage-free config never runs the lenient scanner, so
+                // the same scan runs here). The resolver stays silent.
+                // A tie sets the global degraded flag (scoped holds + heal
+                // refusal downstream); nothing was DROPPED, so `raw_ingest`
+                // stays unset — re-emitting the tied map on write is
+                // lossless.
+                let (tie_degraded, tie_msgs) = scan_ingest_ties(&cfg.ingest);
+                if tie_degraded {
+                    cfg.ontology_degraded.global = true;
+                    for m in tie_msgs {
+                        eprintln!("config: {m}");
+                    }
+                }
+                let unmatchable = unmatchable_ontology_key_msgs(&cfg.ingest);
+                for m in unmatchable {
+                    eprintln!("config: {m}");
+                }
+
                 // On the typed-success path, the typed fields are authoritative.
                 // Only the lenient-fallback path (below) sets `raw_*`, so callers
                 // who mutate `cfg.generation` / `cfg.embedding` / `cfg.privacy`
@@ -551,22 +1171,30 @@ impl BrainConfig {
         }
     }
 
+    /// Load config with per-field leniency from an ALREADY-READ string.
+    ///
+    /// Exists for the same-bytes parse rule (r11-m5): `ingest_policy_for_db`
+    /// keys its cache on the exact bytes it read and must parse THOSE bytes
+    /// — calling a path-based loader would re-read the file and let a
+    /// concurrent write store a policy under bytes it was never parsed
+    /// from. Same contract as [`Self::load_lenient`], minus the read.
+    pub fn load_lenient_from_str(text: &str) -> Result<LoadReport, ConfigError> {
+        let value: serde_json::Value = serde_json::from_str(text).map_err(ConfigError::from)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| ConfigError::NonObjectRoot {
+                actual: root_kind(&value),
+            })?
+            .clone();
+        Self::load_lenient_from_object(obj)
+    }
+
     /// Load config from disk with per-field leniency.
     /// Malformed top-level JSON or a non-object root is fatal and returned as
     /// `Err(ConfigError)`. Missing or unparseable fields (except `vault_path`)
     /// are dropped to defaults; a missing file is `Ok` with all `*_missing`
     /// flags set (callers decide whether missing config is a hard error).
     pub fn load_lenient(paths: &BrainPaths) -> Result<LoadReport, ConfigError> {
-        let mut report = LoadReport {
-            config: BrainConfig::default(),
-            diagnostics: vec![],
-            generation_missing: false,
-            embedding_missing: false,
-            vault_path_missing: false,
-            privacy_missing: false,
-            ontology_unparseable: false,
-        };
-
         let text = match fs::read_to_string(&paths.config_path) {
             Ok(t) => t,
             // The only IO condition treated as "absent configuration" is a
@@ -576,6 +1204,7 @@ impl BrainConfig {
             // surfaces the real failure instead of silently re-onboarding.
             // Matches the contract documented on `ConfigError` above.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut report = Self::load_lenient_from_str("{}")?;
                 report
                     .diagnostics
                     .push(format!("config.json not found: {}", e));
@@ -588,13 +1217,22 @@ impl BrainConfig {
             Err(e) => return Err(ConfigError::Io(e)),
         };
 
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(ConfigError::from)?;
-        let obj = value
-            .as_object()
-            .ok_or_else(|| ConfigError::NonObjectRoot {
-                actual: root_kind(&value),
-            })?
-            .clone();
+        Self::load_lenient_from_str(&text)
+    }
+
+    /// The lenient-parse core shared by the disk and from-string loaders.
+    fn load_lenient_from_object(
+        obj: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<LoadReport, ConfigError> {
+        let mut report = LoadReport {
+            config: BrainConfig::default(),
+            diagnostics: vec![],
+            generation_missing: false,
+            embedding_missing: false,
+            vault_path_missing: false,
+            privacy_missing: false,
+            ontology_unparseable: false,
+        };
 
         // Preserve unknown keys for round-trip
         let known_keys = [
@@ -788,9 +1426,16 @@ impl BrainConfig {
 
         // ontology: an unparseable block is NOT the same as "never chosen" —
         // it must not silently fall back to the desktop default (that would
-        // start an ontology the user never selected). Flag it via
-        // `ontology_unparseable` so `get_ontology_selection` can propagate
-        // the failure instead of masking it.
+        // start an ontology the user never selected). The typed block is
+        // left at default, `ontology_unparseable` flags it for rung 3
+        // (schema intent UNKNOWN → holds, never a silent climb to strict),
+        // and `raw_ontology` marks the degraded state so `write()` leaves
+        // the on-disk block untouched (otherwise any unrelated writer
+        // overwrites the bad value with `{"schema": null}` and the next
+        // load silently un-degrades). Note: an unknown `schema` VARIANT
+        // fails the WHOLE block deserialize — values do NOT "load as None";
+        // the comment on `OntologyConfigBlock.schema` in
+        // ontology_config.rs says exactly this now.
         if let Some(ont) = obj.get("ontology") {
             match serde_json::from_value::<OntologyConfigBlock>(ont.clone()) {
                 Ok(o) => report.config.ontology = o,
@@ -799,6 +1444,22 @@ impl BrainConfig {
                         .diagnostics
                         .push(format!("ontology block unparseable: {}", e));
                     report.ontology_unparseable = true;
+                    report.config.raw_ontology = Some(ont.clone());
+                    // A non-object `ontology` value cannot be merged as a
+                    // block; park it in preserved keys so an unrelated write
+                    // round-trips it instead of dropping it silently.
+                    if !ont.is_object() {
+                        let mut pk = report.config.preserved_keys.take();
+                        let map = match pk.as_mut().and_then(|v| v.as_object_mut()) {
+                            Some(m) => m,
+                            None => {
+                                pk = Some(serde_json::Value::Object(Default::default()));
+                                pk.as_mut().and_then(|v| v.as_object_mut()).unwrap()
+                            }
+                        };
+                        map.insert("ontology".to_string(), ont.clone());
+                        report.config.preserved_keys = pk;
+                    }
                 }
             }
         }
@@ -819,37 +1480,152 @@ impl BrainConfig {
             }
         }
 
-        // ingest: lenient (F4). Same known_keys reasoning as `wiki`: the
-        // block is modeled, so it must not leak into `preserved_keys`. An
-        // entirely unparseable block falls back to full; within a parseable
-        // block, one bad tier VALUE drops only that entry (same
-        // drop-one-keep-the-rest semantics as `trusted_links`), so a
-        // hand-edit typo cannot silently disable or nuke whole trees.
+        // ingest: lenient (F4 + R2.2.4). Same known_keys reasoning as
+        // `wiki`: the block is modeled, so it must not leak into
+        // `preserved_keys`. Each modeled key (`folder_tiers`,
+        // `folder_ontology`, `ontology_default`) salvages INDEPENDENTLY,
+        // present-or-not — a bad tier value must not erase or disable
+        // `folder_ontology` entries, and a typical config has no
+        // `folder_tiers` at all (the old "all folders full" branch fired
+        // for it and would have degraded EVERY mint on the brain). A bad
+        // entry is DROPPED (with a diagnostic + the matching degraded
+        // skip-field), never salvaged into a legal value: `{"x":"Off"}`
+        // must not become strict, and a dropped `off` entry must not
+        // silently climb. Unknown sub-keys go to `preserved_ingest` (kept
+        // on write). Only a NON-OBJECT `ingest` value degrades globally
+        // (`raw_ingest` set → write leaves the on-disk block untouched).
         // Note the `ingest` BLOCK is `#[serde(default)]` on BrainConfig, so
         // an absent block never enters this branch — no diagnostic.
         if let Some(ing) = obj.get("ingest") {
-            match serde_json::from_value::<IngestConfig>(ing.clone()) {
-                Ok(cfg) => report.config.ingest = cfg,
-                Err(_) => {
-                    // Block-level parse failed: salvage entry by entry.
-                    if let Some(map) = ing.get("folder_tiers").and_then(|v| v.as_object()) {
-                        for (k, v) in map {
-                            match serde_json::from_value::<IngestTier>(v.clone()) {
-                                Ok(tier) => {
-                                    report.config.ingest.folder_tiers.insert(k.clone(), tier);
+            let Some(ing_obj) = ing.as_object() else {
+                report.diagnostics.push(format!(
+                    "ingest block unparseable ({}); ontology config holds, tiers full",
+                    root_kind(ing)
+                ));
+                report.config.raw_ingest = Some(ing.clone());
+                report.config.ontology_degraded.global = true;
+                return Ok(report);
+            };
+            // Unknown sub-keys → preserved_ingest (always kept).
+            let known_ingest_keys = ["folder_tiers", "folder_ontology", "ontology_default"];
+            let unknown: serde_json::Map<String, serde_json::Value> = ing_obj
+                .iter()
+                .filter(|(k, _)| !known_ingest_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            report.config.preserved_ingest = if unknown.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(unknown))
+            };
+
+            if let Some(ft) = ing_obj.get("folder_tiers") {
+                match serde_json::from_value::<std::collections::HashMap<String, IngestTier>>(
+                    ft.clone(),
+                ) {
+                    Ok(m) => report.config.ingest.folder_tiers = m,
+                    Err(_) => {
+                        // Entry-by-entry salvage; drop only bad entries.
+                        if let Some(map) = ft.as_object() {
+                            for (k, v) in map {
+                                match serde_json::from_value::<IngestTier>(v.clone()) {
+                                    Ok(tier) => {
+                                        report.config.ingest.folder_tiers.insert(k.clone(), tier);
+                                    }
+                                    Err(e) => report.diagnostics.push(format!(
+                                        "ingest.folder_tiers entry {k:?} dropped: {e}"
+                                    )),
                                 }
-                                Err(e) => report
-                                    .diagnostics
-                                    .push(format!("ingest.folder_tiers entry {k:?} dropped: {e}")),
                             }
+                        } else {
+                            report.diagnostics.push(
+                                "ingest.folder_tiers unparseable (not an object); tiers full"
+                                    .to_string(),
+                            );
                         }
-                    } else {
-                        report
-                            .diagnostics
-                            .push("ingest block unparseable; all folders full".to_string());
                     }
                 }
             }
+
+            if let Some(fo) = ing_obj.get("folder_ontology") {
+                match serde_json::from_value::<std::collections::HashMap<String, OntologyMode>>(
+                    fo.clone(),
+                ) {
+                    Ok(m) => report.config.ingest.folder_ontology = m,
+                    Err(_) => {
+                        if let Some(map) = fo.as_object() {
+                            for (k, v) in map {
+                                match serde_json::from_value::<OntologyMode>(v.clone()) {
+                                    Ok(mode) => {
+                                        report
+                                            .config
+                                            .ingest
+                                            .folder_ontology
+                                            .insert(k.clone(), mode);
+                                    }
+                                    Err(e) => {
+                                        // r15-m1: salvage dropped something →
+                                        // raw_ingest set so write() leaves the
+                                        // ON-DISK block (bad entry included)
+                                        // untouched — the user's hand fix must
+                                        // not be overwritten out from under
+                                        // them, and the dropped `off` entry
+                                        // must not be silently erased.
+                                        report.config.raw_ingest = Some(ing.clone());
+                                        report
+                                            .config
+                                            .ontology_degraded
+                                            .dropped_prefixes
+                                            .push(normalize_key(k));
+                                        report.diagnostics.push(format!(
+                                            "ingest.folder_ontology entry {k:?} dropped: {e}; mints under it hold until fixed"
+                                        ));
+                                    }
+                                }
+                            }
+                        } else {
+                            report.diagnostics.push(
+                                "ingest.folder_ontology unparseable (not an object); ontology config holds"
+                                    .to_string(),
+                            );
+                            report.config.raw_ingest = Some(ing.clone());
+                            report.config.ontology_degraded.global = true;
+                        }
+                    }
+                }
+            }
+
+            if let Some(od) = ing_obj.get("ontology_default") {
+                if od.is_null() {
+                    // A hand-written null parses as None = absent (r19-m3).
+                } else {
+                    match serde_json::from_value::<OntologyMode>(od.clone()) {
+                        Ok(mode) => report.config.ingest.ontology_default = Some(mode),
+                        Err(e) => {
+                            // r15-m1: salvage dropped something → raw_ingest
+                            // set (same leave-untouched write rule as a
+                            // dropped folder_ontology entry).
+                            report.config.raw_ingest = Some(ing.clone());
+                            report.config.ontology_degraded.default_dropped = true;
+                            report.diagnostics.push(format!(
+                                "ingest.ontology_default dropped: {e}; mints that climb to the default hold until fixed"
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Load-time tie scans + unmatchable-key diagnostics (the
+            // resolver itself is silent — strict-parse configs reach these
+            // only here).
+            let (tie_degraded, tie_msgs) = scan_ingest_ties(&report.config.ingest);
+            if tie_degraded {
+                report.config.ontology_degraded.global = true;
+            }
+            report.diagnostics.extend(tie_msgs);
+            report
+                .diagnostics
+                .extend(unmatchable_ontology_key_msgs(&report.config.ingest));
         }
 
         // trusted_links: lenient — an unparseable entry is dropped, the rest
@@ -970,16 +1746,25 @@ impl BrainConfig {
             priv_value
         };
 
-        // Ontology section
-        let mut ont_value = serde_json::to_value(&self.ontology)?;
-        if let Some(ref preserved) = self.preserved_ontology {
-            if let (Some(ont_obj), Some(preserved_obj)) =
-                (ont_value.as_object_mut(), preserved.as_object())
-            {
-                for (k, v) in preserved_obj {
-                    ont_obj.insert(k.clone(), v.clone());
+        // Ontology section. When the ontology block failed to parse
+        // (`raw_ontology` set), leave the ON-DISK `ontology` value in
+        // `root` untouched: the typed block is a default and re-emitting it
+        // would overwrite the user's bad-but-mine value with
+        // `{"schema": null}`, silently clearing the degraded state. Only
+        // `replace_ontology` (the deliberate-change escape hatch) writes a
+        // typed ontology block past this guard.
+        if self.raw_ontology.is_none() {
+            let mut ont_value = serde_json::to_value(&self.ontology)?;
+            if let Some(ref preserved) = self.preserved_ontology {
+                if let (Some(ont_obj), Some(preserved_obj)) =
+                    (ont_value.as_object_mut(), preserved.as_object())
+                {
+                    for (k, v) in preserved_obj {
+                        ont_obj.insert(k.clone(), v.clone());
+                    }
                 }
             }
+            obj.insert("ontology".to_string(), ont_value);
         }
 
         // Insert modeled sections with preserved nested keys merged in.
@@ -998,7 +1783,6 @@ impl BrainConfig {
         obj.insert("generation".to_string(), gen_value);
         obj.insert("embedding".to_string(), emb_value);
         obj.insert("privacy".to_string(), priv_value);
-        obj.insert("ontology".to_string(), ont_value);
         let mut wiki_value = serde_json::to_value(&self.wiki)?;
         if let Some(ref preserved) = self.preserved_wiki {
             if let (Some(wiki_obj), Some(preserved_obj)) =
@@ -1010,9 +1794,25 @@ impl BrainConfig {
             }
         }
         obj.insert("wiki".to_string(), wiki_value);
-        // F4: persist the ingest-policy block (empty map serializes as `{}`,
-        // keeping the block visible and hand-editable).
-        obj.insert("ingest".to_string(), serde_json::to_value(&self.ingest)?);
+        // F4/R2.2.4: persist the ingest-policy block (empty maps serialize
+        // as `{}`, keeping the block visible and hand-editable) — UNLESS the
+        // load was degraded (`raw_ingest` set): then leave the ON-DISK
+        // `ingest` value in `root` untouched. Typed mutations made while
+        // degraded would be silently discarded, which is exactly why every
+        // ingest-mutating writer must REFUSE while degraded (r8-m3) — the
+        // guard here is the backstop, and callers check the flag first.
+        if self.raw_ingest.is_none() {
+            let mut ingest_value = serde_json::to_value(&self.ingest)?;
+            if let (Some(ingest_obj), Some(preserved_obj)) = (
+                ingest_value.as_object_mut(),
+                self.preserved_ingest.as_ref().and_then(|v| v.as_object()),
+            ) {
+                for (k, v) in preserved_obj {
+                    ingest_obj.insert(k.clone(), v.clone());
+                }
+            }
+            obj.insert("ingest".to_string(), ingest_value);
+        }
         obj.insert(
             "trusted_links".to_string(),
             serde_json::to_value(&self.trusted_links)?,
@@ -1229,15 +2029,25 @@ mod tests {
     }
 
     /// An unparseable tier VALUE falls back to full (config is hand-editable;
-    /// garbage must not disable ingestion of a whole tree).
+    /// garbage must not disable ingestion of a whole tree). Driven through
+    /// `load_lenient_from_str` via a tempdir fixture (r20-m5 — the deleted
+    /// `ingest_from_value_lenient` raw-Value surface had no production
+    /// caller; the salvage lives inside the lenient loader).
     #[test]
     fn unparseable_tier_value_falls_back_to_full() {
-        let report = serde_json::from_str::<serde_json::Value>(
-            r#"{"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true},
-                "ingest":{"folder_tiers":{"operations":"bogus-tier","notes":"chunks-only"}}}"#,
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = BrainPaths {
+            brain_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.json"),
+            db_path: tmp.path().join("brain.db"),
+        };
+        std::fs::write(
+            &paths.config_path,
+            r#"{"ingest":{"folder_tiers":{"operations":"bogus-tier","notes":"chunks-only"}}}"#,
         )
         .unwrap();
-        let cfg = crate::config::ingest_from_value_lenient(report.get("ingest").unwrap());
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        let cfg = &report.config.ingest;
         // The bogus entry is dropped; the valid one survives.
         assert!(!cfg.folder_tiers.contains_key("operations"));
         assert_eq!(cfg.folder_tiers.get("notes"), Some(&IngestTier::ChunksOnly));
@@ -1247,6 +2057,7 @@ mod tests {
     fn tiers(entries: &[(&str, IngestTier)]) -> IngestConfig {
         IngestConfig {
             folder_tiers: entries.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ..Default::default()
         }
     }
 
@@ -1343,6 +2154,731 @@ mod tests {
                 assert!(ingest_policy_for_db(None).tiers.folder_tiers.is_empty());
                 assert!(ingest_policy_for_db(Some("")).tiers.folder_tiers.is_empty());
             },
+        );
+    }
+
+    // ── R2.2.x config-core tests (Task 1) ──────────────────────────────────
+
+    use crate::ontology_config::OntologySelection;
+
+    /// Write a config fixture into a tempdir brain and return its paths.
+    fn degraded_fixture_dir() -> (tempfile::TempDir, BrainPaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = BrainPaths {
+            brain_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.json"),
+            db_path: tmp.path().join("brain.db"),
+        };
+        (tmp, paths)
+    }
+
+    fn write_cfg(paths: &BrainPaths, json: &str) {
+        std::fs::write(&paths.config_path, json).unwrap();
+    }
+
+    const BASE_CFG: &str = r#"{"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}"#;
+
+    /// R2.2.1/R2.2.2: the four-state resolver mapping — off/strict match,
+    /// no-match climb, and empty map short-circuit.
+    #[test]
+    fn folder_ontology_resolution_modes() {
+        let mut cfg = IngestConfig::default();
+        cfg.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        cfg.folder_ontology
+            .insert("people".to_string(), OntologyMode::Strict);
+
+        assert_eq!(
+            cfg.ontology_lookup(
+                "ops/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Off)
+        );
+        assert_eq!(
+            cfg.ontology_lookup(
+                "ops/sub/deep.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Off)
+        );
+        assert_eq!(
+            cfg.ontology_lookup(
+                "people/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Strict)
+        );
+        // No match → climb (no off entries, healthy).
+        assert_eq!(
+            cfg.ontology_lookup(
+                "other/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Climb
+        );
+        // `ops` must not capture sibling `ops-archive` (component boundary).
+        assert_eq!(
+            cfg.ontology_lookup(
+                "ops-archive/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Climb
+        );
+        // Empty map short-circuits (climb), mirroring `tier_for_path`.
+        assert_eq!(
+            IngestConfig::default().ontology_lookup(
+                "ops/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Climb
+        );
+    }
+
+    /// D8: every degraded/off state resolves to Hold, never a climb.
+    #[test]
+    fn degraded_states_hold_never_climb() {
+        let mut cfg = IngestConfig::default();
+        cfg.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+
+        // (0) global degraded → Hold everywhere.
+        assert_eq!(
+            cfg.ontology_lookup(
+                "ops/a.md",
+                None,
+                &OntologyDegradedState {
+                    global: true,
+                    ..Default::default()
+                },
+                None,
+                false
+            ),
+            OntologyLookup::Hold
+        );
+
+        // (1) dropped prefix → Hold under it; a deeper VALID child wins.
+        let dropped = OntologyDegradedState {
+            dropped_prefixes: vec!["ops".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.ontology_lookup("ops/a.md", None, &dropped, None, false),
+            OntologyLookup::Hold
+        );
+        let mut child = IngestConfig::default();
+        child
+            .folder_ontology
+            .insert("ops/sub".to_string(), OntologyMode::Strict);
+        assert_eq!(
+            child.ontology_lookup("ops/sub/x.md", None, &dropped, None, false),
+            OntologyLookup::Mode(OntologyMode::Strict)
+        );
+        // Sibling of the dropped prefix gates normally.
+        assert_eq!(
+            cfg.ontology_lookup("elsewhere/x.md", None, &dropped, None, false),
+            OntologyLookup::Climb
+        );
+
+        // (3) unplaceable absolute path + any off entry in the map → Hold.
+        assert_eq!(
+            cfg.ontology_lookup(
+                "/nowhere/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Hold
+        );
+        // …but with NO off entries and nothing dropped, unplaceable climbs
+        // (the pre-existing shipped behavior for tiers is full; the gate
+        // has nothing to protect).
+        assert_eq!(
+            IngestConfig::default().ontology_lookup(
+                "/nowhere/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Climb
+        );
+
+        // (2a) dropped ontology_default + no folder match → Hold.
+        assert_eq!(
+            IngestConfig::default().ontology_lookup(
+                "other/x.md",
+                None,
+                &OntologyDegradedState {
+                    default_dropped: true,
+                    ..Default::default()
+                },
+                None,
+                false
+            ),
+            OntologyLookup::Hold
+        );
+
+        // (2b) absent default + unparseable schema → Hold (degraded, r15-M2).
+        assert_eq!(
+            IngestConfig::default().ontology_lookup(
+                "other/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                true
+            ),
+            OntologyLookup::Hold
+        );
+        // Same but schema present → climb (intent readable).
+        assert_eq!(
+            IngestConfig::default().ontology_lookup(
+                "other/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                Some(OntologySelection::SchemaOrg),
+                true
+            ),
+            OntologyLookup::Climb
+        );
+    }
+
+    /// R2.2.2 (r18-m1): two keys normalizing to the same prefix with
+    /// conflicting modes → tie → Hold; same-value ties resolve to that value.
+    #[test]
+    fn ontology_tie_conflict_holds_and_same_value_ties_resolve() {
+        let mut cfg = IngestConfig::default();
+        cfg.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        cfg.folder_ontology
+            .insert("ops/".to_string(), OntologyMode::Strict);
+        assert_eq!(
+            cfg.ontology_lookup(
+                "ops/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Hold
+        );
+
+        let mut same = IngestConfig::default();
+        same.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        same.folder_ontology
+            .insert("ops/".to_string(), OntologyMode::Off);
+        assert_eq!(
+            same.ontology_lookup(
+                "ops/a.md",
+                None,
+                &OntologyDegradedState::default(),
+                None,
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Off)
+        );
+    }
+
+    /// The load path (lenient) detects the tie and flags degraded + loud
+    /// diagnostic (r19-m1: strict-parse configs never pass through salvage).
+    #[test]
+    fn load_flags_tie_degraded_with_diagnostic() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_ontology":{"ops":"off","ops/":"strict"}}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(report.config.ontology_degraded.global, "tie sets degraded");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("folder_ontology tie")),
+            "tie diagnostic present: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// R2.2.3: `off`/`strict` vocabulary; values are lowercase,
+    /// case-sensitive (`Off` is a bad value → dropped → degraded).
+    #[test]
+    fn ontology_mode_values_are_lowercase_and_case_sensitive() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"ontology_default":"Off","folder_ontology":{"x":"Off"}}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert_eq!(report.config.ingest.ontology_default, None);
+        assert!(report.config.ingest.folder_ontology.is_empty());
+        // Both keys dropped by salvage — DEGRADED, but scoped (per
+        // OntologyDegradedState: `global` is reserved for load-failed /
+        // non-object ingest / tie routes, never per-key salvage drops).
+        assert!(report.config.ontology_degraded.is_degraded());
+        assert!(!report.config.ontology_degraded.global);
+        assert!(report.config.ontology_degraded.default_dropped);
+        assert_eq!(report.config.ontology_degraded.dropped_prefixes, vec!["x"]);
+
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"ontology_default":"strict","folder_ontology":{"x":"off"}}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert_eq!(
+            report.config.ingest.ontology_default,
+            Some(OntologyMode::Strict)
+        );
+        assert_eq!(
+            report.config.ingest.folder_ontology.get("x"),
+            Some(&OntologyMode::Off)
+        );
+        assert!(!report.config.ontology_degraded.global);
+    }
+
+    /// R2.2.4 (r15-M1): keys salvage INDEPENDENTLY — a bad folder_ontology
+    /// entry does not touch folder_tiers, and a config with no folder_tiers
+    /// does not degrade globally.
+    #[test]
+    fn salvage_keys_are_independent() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_ontology":{"good":"off","bad":"Bogus"}}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        // Only the bad prefix dropped; global NOT degraded.
+        assert!(!report.config.ontology_degraded.global);
+        assert_eq!(
+            report.config.ontology_degraded.dropped_prefixes,
+            vec!["bad"]
+        );
+        assert_eq!(
+            report.config.ingest.folder_ontology.get("good"),
+            Some(&OntologyMode::Off)
+        );
+        // Scoped hold: mints under `bad` hold; `good` resolves.
+        let pol = report.config.ontology_degraded.clone();
+        assert_eq!(
+            report
+                .config
+                .ingest
+                .ontology_lookup("bad/a.md", None, &pol, None, false),
+            OntologyLookup::Hold
+        );
+        assert_eq!(
+            report
+                .config
+                .ingest
+                .ontology_lookup("good/a.md", None, &pol, None, false),
+            OntologyLookup::Mode(OntologyMode::Off)
+        );
+    }
+
+    /// R2.2.4 (r3-m5 scope): an ingest value that is not an object at all
+    /// → GLOBAL degraded.
+    #[test]
+    fn non_object_ingest_block_degrades_globally() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(&paths, r#"{"ingest":[1,2,3]}"#);
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(report.config.ontology_degraded.global);
+    }
+
+    /// R2.2.4: degraded load + write → the on-disk ingest block survives
+    /// byte-for-byte (raw_ingest leave-untouched rule, r15-m1).
+    #[test]
+    fn degraded_write_leaves_ingest_block_untouched() {
+        let (tmp, paths) = degraded_fixture_dir();
+        let raw = r#"{"ingest":{"folder_ontology":{"x":"Off"}},"vault_path":"/v"}"#;
+        write_cfg(&paths, raw);
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        // Strict load() routes through lenient salvage → degraded.
+        let mut cfg = BrainConfig::load(&paths).unwrap();
+        assert!(cfg.raw_ingest.is_some());
+        cfg.write(&paths).unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        // The ingest sub-object is preserved verbatim inside the written doc
+        // (plan-p4-m6: `write()` re-serializes pretty-printed, so compare
+        // parsed `serde_json::Value`s on `root["ingest"]`, not file bytes).
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.get("ingest").unwrap(),
+            &serde_json::json!({"folder_ontology": {"x": "Off"}}),
+            "raw ingest survived verbatim: {after}"
+        );
+        // Next load is still degraded (nothing erased).
+        let again = BrainConfig::load(&paths).unwrap();
+        assert!(again.raw_ingest.is_some());
+    }
+
+    /// Write protection: a typed folder_tiers mutation made while degraded
+    /// must NOT silently erase the broken block (r8-m3/r17-m1 refusal
+    /// precondition: write() leaves on-disk ingest untouched).
+    #[test]
+    fn degraded_write_discards_typed_ingest_mutations() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_ontology":{"x":"Off"}},"vault_path":"/v"}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let mut cfg = BrainConfig::load(&paths).unwrap();
+        cfg.ingest
+            .folder_ontology
+            .insert("y".to_string(), OntologyMode::Strict);
+        cfg.write(&paths).unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(
+            !after.contains(r#""y""#),
+            "typed mutation while degraded must not land: {after}"
+        );
+    }
+
+    /// Healthy config: raw_ingest is never set and writes persist normally
+    /// (matrix: healthy config + typed edit survives a write).
+    #[test]
+    fn healthy_write_persists_typed_ingest() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(&paths, BASE_CFG);
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let mut cfg = BrainConfig::load(&paths).unwrap();
+        assert!(cfg.raw_ingest.is_none());
+        cfg.ingest
+            .folder_ontology
+            .insert("dir".to_string(), OntologyMode::Off);
+        cfg.write(&paths).unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        // plan-p4-m6: compare parsed values — `write()` re-serializes
+        // pretty-printed, so compact substring checks never match.
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.pointer("/ingest/folder_ontology/dir").unwrap(),
+            &serde_json::json!("off"),
+            "{after}"
+        );
+    }
+
+    /// R2.2.4 (r13-m2): unknown ingest sub-keys survive BOTH load arms.
+    #[test]
+    fn unknown_ingest_subkeys_survive_both_load_arms() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"future_key":1,"folder_tiers":{"a":"full"}},"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        // Strict arm.
+        let cfg = BrainConfig::load(&paths).unwrap();
+        assert_eq!(cfg.preserved_ingest.as_ref().unwrap()["future_key"], 1);
+        cfg.write(&paths).unwrap();
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("future_key"),
+            "future key survives strict arm write"
+        );
+        // Lenient arm (break a typed block to force the fallback).
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"future_key":1,"folder_tiers":{"a":"full"}},"generation":{"provider":"no-such-provider","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null}}"#,
+        );
+        let cfg = BrainConfig::load(&paths).unwrap();
+        assert_eq!(cfg.preserved_ingest.as_ref().unwrap()["future_key"], 1);
+        cfg.write(&paths).unwrap();
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("future_key"),
+            "future key survives lenient arm write"
+        );
+    }
+
+    /// R2.2.5 (r16-MAJOR-1): an unparseable ontology block sets raw_ontology;
+    /// an UNRELATED writer leaves the on-disk ontology value untouched.
+    #[test]
+    fn unparseable_ontology_survives_unrelated_write() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ontology":{"schema":"bogus-selection"},"vault_path":"/v"}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(report.ontology_unparseable);
+        let mut cfg = report.config;
+        assert!(cfg.raw_ontology.is_some());
+        // Unrelated mutation + write (e.g. approve_link).
+        cfg.vault_path = Some("/v2".to_string());
+        cfg.write(&paths).unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        // plan-p4-m6: parsed-value assertion — `write()` re-serializes
+        // pretty-printed, so compact substring checks never match.
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.pointer("/ontology/schema").unwrap(),
+            &serde_json::json!("bogus-selection"),
+            "bad schema value must survive an unrelated write: {after}"
+        );
+        // Next load still degraded.
+        assert!(
+            BrainConfig::load_lenient(&paths)
+                .unwrap()
+                .ontology_unparseable
+        );
+    }
+
+    /// R2.2.5 (r17-MAJOR-2): `replace_ontology` is the only escape hatch.
+    #[test]
+    fn replace_ontology_clears_degraded_marker_and_writes() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ontology":{"schema":"bogus-selection"},"vault_path":"/v"}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let mut cfg = BrainConfig::load_lenient(&paths).unwrap().config;
+        assert!(cfg.raw_ontology.is_some());
+        cfg.replace_ontology(
+            crate::ontology_config::OntologyConfigBlock {
+                schema: Some(OntologySelection::Emergent),
+            },
+            &paths,
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        // plan-p4-m6: parsed-value assertion (pretty-printed write output).
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.pointer("/ontology/schema").unwrap(),
+            &serde_json::json!("emergent"),
+            "deliberate change persisted: {after}"
+        );
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(!report.ontology_unparseable);
+        assert_eq!(
+            report.config.ontology.schema,
+            Some(OntologySelection::Emergent)
+        );
+    }
+
+    /// R2.2.4: non-NotFound I/O errors are DEGRADED, missing config is not.
+    #[test]
+    fn unreadable_config_is_degraded_but_missing_is_not() {
+        let (tmp, paths) = degraded_fixture_dir();
+        let cfg_path = paths.config_path.clone();
+        std::fs::create_dir_all(&cfg_path).unwrap(); // EISDIR on read
+        let db = paths.db_path.to_str().unwrap().to_string();
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        let policy = ingest_policy_for_db(Some(&db));
+        assert!(
+            policy.ingest_ontology_degraded,
+            "unreadable config must degrade, not silently default"
+        );
+        // Missing config (NotFound): healthy default, no degraded flag.
+        let policy = ingest_policy_for_db(Some("/nonexistent-brain/brain.db"));
+        assert!(!policy.ingest_ontology_degraded);
+        assert!(policy.ontology_selection.is_none());
+    }
+
+    /// R2.2.4: cache is invalidated by a config whose ONLY change is the
+    /// ontology block (byte-keyed cache carries the carrier fields).
+    #[test]
+    fn policy_cache_invalidates_on_ontology_only_change() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(&paths, BASE_CFG);
+        let db = paths.db_path.to_str().unwrap().to_string();
+        let cfg_path = paths.config_path.clone();
+        let _ = tmp;
+
+        let p1 = ingest_policy_for_db(Some(&db));
+        assert!(!p1.ingest_ontology_degraded);
+        assert!(p1.ontology_selection.is_none());
+
+        // Ontology-only change (same length not required — bytes differ).
+        std::fs::write(
+            &cfg_path,
+            &format!(
+                r#"{{"ontology":{{"schema":"off"}},"vault_path":"/v","migrated_to_v2":false,"generation":{{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null}},"embedding":{{"provider":"fastembed","external_url":null}},"privacy":{{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}}}"#
+            ),
+        )
+        .unwrap();
+        let p2 = ingest_policy_for_db(Some(&db));
+        assert_eq!(p2.ontology_selection, Some(OntologySelection::Off));
+        // The ONLY delta between the two configs is the ontology block, so
+        // the stale-cache failure mode is a policy without the carrier:
+        // `ontology_selection` still None means the cache served p1.
+        assert_ne!(
+            p1.ontology_selection, p2.ontology_selection,
+            "cache served stale policy (ontology_selection not refreshed)"
+        );
+    }
+
+    /// R2.2.8 (r18-MAJOR-1): the watermark hash is canonical — same map in
+    /// two insertion orders hashes identically.
+    #[test]
+    fn watermark_hash_is_insertion_order_independent() {
+        // Same key→value mapping, different insertion SEQUENCE (HashMap
+        // iteration order follows insertion with serde_json's
+        // `preserve_order`; the BTreeMap canonical form must erase it).
+        let build = |ops_first: bool| {
+            let mut cfg = IngestConfig::default();
+            if ops_first {
+                cfg.folder_ontology
+                    .insert("ops".to_string(), OntologyMode::Off);
+                cfg.folder_ontology
+                    .insert("people".to_string(), OntologyMode::Strict);
+            } else {
+                cfg.folder_ontology
+                    .insert("people".to_string(), OntologyMode::Strict);
+                cfg.folder_ontology
+                    .insert("ops".to_string(), OntologyMode::Off);
+            }
+            cfg
+        };
+        let a = build(true);
+        let b = build(false);
+        assert_eq!(
+            ontology_config_watermark_hash(&a, None, false),
+            ontology_config_watermark_hash(&b, None, false)
+        );
+        // Key spellings that normalize together hash identically too.
+        let mut c = IngestConfig::default();
+        c.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        c.folder_ontology
+            .insert("people/".to_string(), OntologyMode::Strict);
+        assert_eq!(
+            ontology_config_watermark_hash(&a, None, false),
+            ontology_config_watermark_hash(&c, None, false)
+        );
+    }
+
+    /// R2.2.8 (r20-m2): entering/leaving tie-degraded changes the hash;
+    /// an ontology_default edit changes it; an absent default wires in the
+    /// rung-3 inputs (schema switch fires a report).
+    #[test]
+    fn watermark_hash_tracks_ontology_relevant_inputs() {
+        let mut healthy = IngestConfig::default();
+        healthy
+            .folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+
+        // Tie-degraded: hash changes AND is stable across insertion orders
+        // (conflicting keys excluded).
+        let mut tied = IngestConfig::default();
+        tied.folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        tied.folder_ontology
+            .insert("ops/".to_string(), OntologyMode::Strict);
+        let mut tied_alt = IngestConfig::default();
+        tied_alt
+            .folder_ontology
+            .insert("ops/".to_string(), OntologyMode::Strict);
+        tied_alt
+            .folder_ontology
+            .insert("ops".to_string(), OntologyMode::Off);
+        let h_tie = ontology_config_watermark_hash(&tied, None, false);
+        assert_ne!(h_tie, ontology_config_watermark_hash(&healthy, None, false));
+        assert_eq!(
+            h_tie,
+            ontology_config_watermark_hash(&tied_alt, None, false)
+        );
+
+        // ontology_default set vs absent differs.
+        let mut with_default = healthy.clone();
+        with_default.ontology_default = Some(OntologyMode::Strict);
+        assert_ne!(
+            ontology_config_watermark_hash(&healthy, None, false),
+            ontology_config_watermark_hash(&with_default, None, false)
+        );
+
+        // Absent default: schema participates (Off vs SchemaOrg differ);
+        // set default: schema does not.
+        assert_ne!(
+            ontology_config_watermark_hash(&healthy, Some(OntologySelection::Off), false),
+            ontology_config_watermark_hash(&healthy, Some(OntologySelection::SchemaOrg), false)
+        );
+        assert_eq!(
+            ontology_config_watermark_hash(&with_default, Some(OntologySelection::Off), false),
+            ontology_config_watermark_hash(
+                &with_default,
+                Some(OntologySelection::SchemaOrg),
+                false
+            )
+        );
+        // Unparseable flag participates when the default is absent.
+        assert_ne!(
+            ontology_config_watermark_hash(&healthy, None, false),
+            ontology_config_watermark_hash(&healthy, None, true)
+        );
+    }
+
+    /// R2.2.4 (r5-M1 matrix): inference rollback preserves on-disk ingest
+    /// and ontology blocks (opt-outs must not vanish on provider failure).
+    #[test]
+    fn inference_rollback_style_write_preserves_ingest_and_ontology() {
+        let (tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"ingest":{"folder_ontology":{"ops":"off"}},"ontology":{"schema":"emergent"},"vault_path":"/v"}"#,
+        );
+        // tmp stays alive until end of test: dropping it deletes the
+        // fixture directory the loads below must read.
+        // Simulate the fixed rollback: load_lenient → reset generation → write.
+        let mut fallback = BrainConfig::load_lenient(&paths).unwrap().config;
+        fallback.generation = crate::inference::config::GenerationConfig::default();
+        fallback.write(&paths).unwrap();
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        // plan-p4-m6: parsed-value assertions (pretty-printed write output).
+        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            root.pointer("/ingest/folder_ontology/ops").unwrap(),
+            &serde_json::json!("off"),
+            "ingest block survived rollback: {after}"
+        );
+        assert_eq!(
+            root.pointer("/ontology/schema").unwrap(),
+            &serde_json::json!("emergent"),
+            "ontology block survived rollback: {after}"
         );
     }
 }

@@ -4792,8 +4792,17 @@ fn set_ontology_selection(selection: String) -> Result<(), String> {
 
     let paths = retrieval::resolve_brain_paths();
     let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
-    cfg.ontology.schema = Some(parsed);
-    cfg.write(&paths).map_err(|e| e.to_string())?;
+    // Deliberate schema change (r17-MAJOR-2): goes through `replace_ontology`
+    // so an unparseable on-disk ontology block (raw_ontology set, degraded)
+    // is cleared and re-written instead of silently discarded by the
+    // leave-untouched write guard.
+    cfg.replace_ontology(
+        crate::ontology_config::OntologyConfigBlock {
+            schema: Some(parsed),
+        },
+        &paths,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

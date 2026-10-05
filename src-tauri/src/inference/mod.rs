@@ -234,10 +234,17 @@ pub fn update_provider_with_brain_path(
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {
-            // Roll back to a default config via the unified writer so the
-            // panel state is cleared even when provider init fails.
+            // Roll back ONLY the generation block via the unified writer
+            // (r5-M1): the old `BrainConfig::default()`-then-write erased the
+            // whole on-disk `ingest` block (folder_ontology opt-outs gone →
+            // the next `heal --yes` retypes opted-out folders, breaking D8)
+            // and `ontology.schema` alongside it.
             let paths = crate::retrieval::brain_paths_for(brain_path);
-            let fallback = crate::config::BrainConfig::default();
+            let mut fallback = match crate::config::BrainConfig::load_lenient(&paths) {
+                Ok(report) => report.config,
+                Err(_) => crate::config::BrainConfig::default(),
+            };
+            fallback.generation = crate::config::GenerationConfig::default();
             let rollback_err = fallback.write(&paths).err();
             if let Some(rollback_err) = rollback_err {
                 return Err(format!(
@@ -269,7 +276,13 @@ pub fn update_provider_with_brain_path(
     cfg.generation = config_for_disk;
 
     if let Err(e) = cfg.write(&paths) {
-        let fallback = crate::config::BrainConfig::default();
+        // Roll back ONLY the generation block (r5-M1) — a wholesale
+        // `BrainConfig::default()` would erase the on-disk `ingest` block
+        // (folder_ontology opt-outs) and `ontology.schema`.
+        let fallback = match crate::config::BrainConfig::load_lenient(&paths) {
+            Ok(report) => report.config,
+            Err(_) => crate::config::BrainConfig::default(),
+        };
         let rollback_err = fallback.write(&paths).err();
         if let Some(rollback_err) = rollback_err {
             return Err(format!(
