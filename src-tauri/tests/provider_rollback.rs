@@ -107,7 +107,7 @@ fn update_provider_rolls_back_to_unconfigured_when_config_write_fails() {
 
 #[cfg(unix)]
 #[test]
-fn update_provider_preserves_state_when_config_and_rollback_fail() {
+fn update_provider_write_failure_from_external_reports_unconfigured_without_rollback_suffix() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = TempDir::new().expect("tempdir");
@@ -138,18 +138,14 @@ fn update_provider_preserves_state_when_config_and_rollback_fail() {
 
     std::fs::set_permissions(brain_path, original_perms).expect("restore permissions");
 
-    assert!(err.contains("rollback failed"));
-    let guard = state.0.lock().unwrap();
-    if let GenerationProvider::External {
-        base_url,
-        api_key,
-        model_name,
-    } = &*guard
-    {
-        assert_eq!(base_url, "https://api.openai.com/v1");
-        assert_eq!(api_key.as_deref(), Some("sk-test"));
-        assert_eq!(model_name, "gpt-3.5-turbo");
-    } else {
-        panic!("expected state to preserve existing external provider");
-    }
+    // m4 contract: a failed write is the ONLY failure — there is no
+    // separate rollback write, and errors never carry a "rollback failed"
+    // suffix. The panel's values were never persisted, so the state
+    // machine reports Unconfigured regardless of the prior provider.
+    assert!(err.contains("settings could not be saved to disk"));
+    assert!(!err.contains("rollback failed"));
+    assert!(matches!(
+        *state.0.lock().unwrap(),
+        GenerationProvider::Unconfigured
+    ));
 }

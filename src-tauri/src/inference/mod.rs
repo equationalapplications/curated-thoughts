@@ -234,41 +234,19 @@ pub fn update_provider_with_brain_path(
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {
-            // Roll back ONLY the generation block via the unified writer
-            // (r5-M1): the old `BrainConfig::default()`-then-write erased the
-            // whole on-disk `ingest` block (folder_ontology opt-outs gone →
-            // the next `heal --yes` retypes opted-out folders, breaking D8)
-            // and `ontology.schema` alongside it.
-            //
-            // Generation handling on this site (M-1; note the post-write
-            // site below diverges — it KEEPS the on-disk generation block,
-            // because there the failed write never changed the file; see
-            // that site's comment): the fallback RESETS `generation` to
-            // the shipped
-            // default rather than restoring the raw on-disk block — this is
-            // a DELIBERATE divergence from the raw-block restoration used
-            // for `raw_generation`/`raw_embedding`/`raw_privacy` (which
-            // `BrainConfig::load()`'s strict-arm fallback applies). Here the
-            // provider init already FAILED, so the pre-existing on-disk
-            // generation block is stale-but-parseable at best; reverting to
-            // the shipped default guarantees the state machine
-            // (`GenerationProvider::Unconfigured`) and the disk agree: no
-            // half-configured provider block survives a failed init. The
-            // ingest/ontology blocks are still preserved untouched by the
-            // lenient load + raw_* write guards, which is what r5-M1
-            // actually requires.
-            let paths = crate::retrieval::brain_paths_for(brain_path);
-            let mut fallback = match crate::config::BrainConfig::load_lenient(&paths) {
-                Ok(report) => report.config,
-                Err(_) => crate::config::BrainConfig::default(),
-            };
-            fallback.generation = crate::config::GenerationConfig::default();
-            let rollback_err = fallback.write(&paths).err();
-            if let Some(rollback_err) = rollback_err {
-                return Err(format!(
-                    "provider init failed: {e}; rollback failed: {rollback_err}"
-                ));
-            }
+            // No disk write on this failure path (M1, opus confirming
+            // review): initialize_provider_inner failed BEFORE any disk
+            // write, so the on-disk config — including the generation
+            // block with any legacy plaintext api_key — is already
+            // exactly the user's last valid state. A rollback write here
+            // (commit f9998dc reset `generation` to the shipped default
+            // and rewrote the file) wiped real credentials and provider
+            // settings on a failed init. NEITHER failure path in this
+            // function writes to disk: the in-memory state machine
+            // reports `Unconfigured` because the panel's values were
+            // never persisted, and the file keeps the last valid
+            // configuration untouched (same contract as the post-write
+            // site below).
             let mut guard = state.0.lock().unwrap();
             *guard = GenerationProvider::Unconfigured;
             return Err(e.to_string());
@@ -294,39 +272,20 @@ pub fn update_provider_with_brain_path(
     cfg.generation = config_for_disk;
 
     if let Err(e) = cfg.write(&paths) {
-        // Roll back ONLY what the failed save may have partially clobbered
-        // (r5-M1) — a wholesale `BrainConfig::default()` would erase the
-        // on-disk `ingest` block (folder_ontology opt-outs) and
-        // `ontology.schema`.
+        // No rollback write on this failure path (m4, opus confirming
+        // review): `BrainConfig::write` is atomic — it writes a unique
+        // temp file and renames only on success — so a failed write never
+        // changed the file. There is nothing to undo, and re-writing the
+        // just-loaded config could only add a second failure mode.
         //
-        // M-1 (opus re-review): this rollback deliberately KEEPS the
-        // previous generation block on disk — including any legacy
-        // plaintext `api_key`. The failed write never changed the file
-        // (`write()` renames only on success), so the on-disk generation
-        // block is still the user's last valid configuration; resetting it
-        // to the shipped default here would turn a temporary save failure
-        // into lost credentials and lost provider settings, breaking the
-        // "a panel save can neither wipe nor replace a pre-existing
-        // credential" promise above. The rollback write exists only to
-        // restore anything the failed write partially clobbered.
+        // This matches the pre-write site above: NEITHER failure path in
+        // this function writes to disk. The on-disk config — including
+        // the generation block with any legacy plaintext api_key — keeps
+        // the user's last valid configuration untouched.
         //
         // In-memory, the state machine still goes to `Unconfigured` below:
         // the panel's values were NOT persisted, so reporting them active
-        // would lie. This is a DELIBERATE divergence from the pre-write
-        // site above, which DOES reset `generation` on disk — there the
-        // disk write SUCCEEDED with the new values, so the reset undoes a
-        // real on-disk change; here nothing was changed on disk, so there
-        // is nothing to undo. See the rationale block on that site.
-        let fallback = match crate::config::BrainConfig::load_lenient(&paths) {
-            Ok(report) => report.config,
-            Err(_) => crate::config::BrainConfig::default(),
-        };
-        let rollback_err = fallback.write(&paths).err();
-        if let Some(rollback_err) = rollback_err {
-            return Err(format!(
-                "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"
-            ));
-        }
+        // would lie.
         let mut guard = state.0.lock().unwrap();
         *guard = GenerationProvider::Unconfigured;
         return Err(format!("settings could not be saved to disk: {e}"));
@@ -744,5 +703,134 @@ mod tests {
         assert!(resp.missing_blocks.generation);
         assert!(resp.missing_blocks.embedding);
         assert!(resp.missing_blocks.vault_path);
+    }
+
+    /// m3 (opus confirming review): exercise the REAL failure paths of
+    /// `update_provider_with_brain_path` — not hand-rolled re-creations.
+    ///
+    /// Both failure paths must leave the on-disk config.json byte-identical:
+    /// NEITHER failure path may write to disk (M1/m4), so the user's last
+    /// valid configuration — including the generation block with any legacy
+    /// plaintext api_key — survives a failed save untouched, while the
+    /// in-memory state machine reports `Unconfigured` (the panel's values
+    /// were never persisted, so reporting them active would lie).
+    #[test]
+    fn update_provider_init_failure_leaves_disk_untouched() {
+        use crate::config::BrainConfig;
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+        // Privacy is pre-chosen + ephemeral so resolve_privacy_state neither
+        // queries the keyring nor writes the Strict default into the file —
+        // the only disk mutation under test is the handler's own.
+        std::fs::write(
+            &config_path,
+            r#"{"generation":{"provider":"unconfigured"},"privacy":{"mode":"ephemeral","chosen":true},"x_custom":1}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        // External + empty external_url fails inside initialize_provider_inner
+        // BEFORE any disk write (the pre-write failure path).
+        let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
+        let err = update_provider_with_brain_path(
+            temp.path(),
+            GenerationConfig {
+                provider: GenerationProviderKind::External,
+                external_url: Some(String::new()),
+                ..GenerationConfig::default()
+            },
+            &state,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("external URL must not be empty"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            before,
+            "pre-write failure path must not touch config.json"
+        );
+        assert!(matches!(
+            *state.0.lock().unwrap(),
+            GenerationProvider::Unconfigured
+        ));
+        // Sanity: the file is still loadable and carries the unknown key.
+        let cfg = BrainConfig::load_lenient(
+            &crate::retrieval::brain_paths_for(temp.path()),
+        )
+        .unwrap()
+        .config;
+        assert_eq!(
+            cfg.preserved_keys.as_ref().and_then(|v| v.get("x_custom")),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    /// m3 twin-site companion (opus confirming review): the POST-write
+    /// failure path (cfg.write fails) must also leave the on-disk file
+    /// byte-identical and drop the state machine to `Unconfigured`. The
+    /// brain dir is made read-only AFTER the config is written, so the
+    /// atomic write fails creating its temp file while every read in the
+    /// handler still succeeds; the pre-chosen privacy block keeps
+    /// resolve_privacy_state from writing.
+    #[test]
+    fn update_provider_write_failure_leaves_disk_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"generation":{"provider":"unconfigured"},"privacy":{"mode":"ephemeral","chosen":true},"x_custom":1}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        std::fs::set_permissions(
+            temp.path(),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+
+        let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
+        let err = update_provider_with_brain_path(
+            temp.path(),
+            GenerationConfig {
+                provider: GenerationProviderKind::External,
+                external_url: Some("http://localhost:11434/v1".to_string()),
+                ..GenerationConfig::default()
+            },
+            &state,
+            None,
+        )
+        .unwrap_err();
+
+        // Restore before TempDir drop (remove_dir_all needs write access).
+        std::fs::set_permissions(
+            temp.path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        assert!(
+            err.starts_with("settings could not be saved to disk:"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !err.contains("rollback failed:"),
+            "no rollback write exists, so no rollback-failure suffix: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            before,
+            "post-write failure path must not touch config.json"
+        );
+        assert!(matches!(
+            *state.0.lock().unwrap(),
+            GenerationProvider::Unconfigured
+        ));
     }
 }

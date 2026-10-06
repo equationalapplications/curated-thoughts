@@ -1018,17 +1018,18 @@ impl BrainConfig {
         paths: &BrainPaths,
     ) -> Result<()> {
         self.raw_ontology = None;
-        // DEFENSIVE purge (opus re-review m2): the loader NO LONGER parks
-        // non-object `ontology` values into `preserved_keys` — with
-        // `raw_ontology` set, `write()` already leaves the on-disk
-        // `ontology` value untouched (it starts from the file it read), so
-        // parking was redundant. This purge guards only LEGACY files
-        // written by older builds that may have parked one there, and
-        // `write()` merges `preserved_keys` into the root LAST — after the
-        // typed ontology block is inserted — so without it a stale parked
-        // value would overwrite the block set here: the deliberate change
-        // silently never reaches disk. Only the deliberate-change escape
-        // hatch may drop it.
+        // Belt-and-braces purge (opus confirming review m1): the loader can
+        // never park `preserved_keys["ontology"]` — "ontology" is in BOTH
+        // known_keys lists (`load` ~:1131 and `load_lenient_from_object`
+        // ~:1390), so an `ontology` value is consumed by the typed block /
+        // raw_ontology salvage, never parked as unknown. Nothing in the
+        // crate inserts that key either. This purge is therefore dead code
+        // for current writers; it is kept as cheap insurance against a
+        // future loader regression re-parking the key, because `write()`
+        // merges `preserved_keys` into the root LAST — after the typed
+        // ontology block is inserted — so a stale parked value would
+        // overwrite the block set here and the deliberate change would
+        // silently never reach disk.
         if let Some(pk) = self.preserved_keys.as_mut() {
             if let Some(map) = pk.as_object_mut() {
                 map.remove("ontology");
@@ -2983,34 +2984,43 @@ mod tests {
         );
     }
 
-    /// Opus tier-3 MAJOR-1: a NON-OBJECT on-disk `ontology` value used to be
-    /// parked into `preserved_keys` by the load salvage (parking since
-    /// removed — opus re-review m2), and `write()` merges `preserved_keys`
-    /// LAST — after the typed ontology block insert. The pre-fix
-    /// `replace_ontology` cleared `raw_ontology` only, so the stale parked
-    /// value overwrote the deliberate change on disk (onboarding silently
-    /// dropped the user's schema choice). The purge must land the new schema
-    /// AND leave unrelated preserved keys (trusted_links isn't preserved,
-    /// but other unknown top-level keys are) intact.
+    /// Opus tier-3 MAJOR-1: the loader can no longer park
+    /// `preserved_keys["ontology"]` (parking removed — opus re-review m2),
+    /// so the purge in `replace_ontology` is belt-and-braces. This test
+    /// hand-injects a parked value (m2, opus confirming review) to exercise
+    /// the purge for real: `write()` merges `preserved_keys` LAST — after
+    /// the typed ontology block insert — so without the purge the stale
+    /// value would overwrite the deliberate change on disk (onboarding
+    /// silently dropped the user's schema choice). The purge must land the
+    /// new schema AND leave unrelated preserved keys intact.
     #[test]
     fn replace_ontology_purges_parked_preserved_ontology_key() {
         let (tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
-            r#"{"ontology":5,"trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":0}],"x_custom":1}"#,
+            r#"{"ontology":{"schema":"emergent"},"trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":0}],"x_custom":1}"#,
         );
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
         let mut cfg = BrainConfig::load_lenient(&paths).unwrap().config;
-        assert!(cfg.raw_ontology.is_some());
-        // Parking removed: the loader no longer parks the non-object value.
+        // The loader never parks "ontology" (it is in known_keys) — assert
+        // that honestly, then hand-inject the parked value the purge exists
+        // to defend against, simulating a future loader regression.
         assert!(
             cfg.preserved_keys
                 .as_ref()
                 .and_then(|v| v.get("ontology"))
                 .is_none(),
-            "loader must not park non-object ontology into preserved_keys anymore"
+            "loader must not park ontology into preserved_keys"
         );
+        {
+            let pk = cfg
+                .preserved_keys
+                .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            pk.as_object_mut()
+                .unwrap()
+                .insert("ontology".to_string(), serde_json::json!(5));
+        }
         // The unknown top-level key IS parked (it feeds preserved_keys).
         assert_eq!(
             cfg.preserved_keys.as_ref().and_then(|v| v.get("x_custom")),
@@ -3019,7 +3029,7 @@ mod tests {
         );
         cfg.replace_ontology(
             crate::ontology_config::OntologyConfigBlock {
-                schema: Some(OntologySelection::Emergent),
+                schema: Some(OntologySelection::SchemaOrg),
             },
             &paths,
         )
@@ -3029,7 +3039,7 @@ mod tests {
         let root: serde_json::Value = serde_json::from_str(&after).unwrap();
         assert_eq!(
             root.pointer("/ontology/schema").unwrap(),
-            &serde_json::json!("emergent"),
+            &serde_json::json!("schema-org"),
             "replace_ontology's typed block must reach disk, not lose to the parked value: {after}"
         );
         // The trusted_links ledger survives the round-trip.
@@ -3050,7 +3060,7 @@ mod tests {
         assert!(!report.ontology_unparseable);
         assert_eq!(
             report.config.ontology.schema,
-            Some(OntologySelection::Emergent)
+            Some(OntologySelection::SchemaOrg)
         );
     }
 
@@ -3270,91 +3280,14 @@ mod tests {
         );
     }
 
-    /// R2.2.4 (r5-M1 matrix): the inference failed-save rollback preserves
-    /// on-disk ingest and ontology blocks (opt-outs must not vanish on
-    /// provider failure).
-    #[test]
-    fn inference_rollback_style_write_preserves_ingest_and_ontology() {
-        let (tmp, paths) = degraded_fixture_dir();
-        write_cfg(
-            &paths,
-            r#"{"ingest":{"folder_ontology":{"ops":"off"}},"ontology":{"schema":"emergent"},"vault_path":"/v"}"#,
-        );
-        // tmp stays alive until end of test: dropping it deletes the
-        // fixture directory the loads below must read.
-        // Simulate the fixed rollback: load_lenient → write (the failed
-        // write never touched the file, so nothing is reset).
-        let fallback = BrainConfig::load_lenient(&paths).unwrap().config;
-        fallback.write(&paths).unwrap();
-        let after = std::fs::read_to_string(&paths.config_path).unwrap();
-        // plan-p4-m6: parsed-value assertions (pretty-printed write output).
-        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
-        assert_eq!(
-            root.pointer("/ingest/folder_ontology/ops").unwrap(),
-            &serde_json::json!("off"),
-            "ingest block survived rollback: {after}"
-        );
-        assert_eq!(
-            root.pointer("/ontology/schema").unwrap(),
-            &serde_json::json!("emergent"),
-            "ontology block survived rollback: {after}"
-        );
-    }
-
-    /// Opus re-review M1: the failed-save rollback must NOT reset the
-    /// on-disk generation block — the failed write never changed the file,
-    /// so the user's previous generation config (provider External, legacy
-    /// plaintext `api_key`, `timeout_secs`) must survive byte-identical.
-    /// The previous fix child added a `GenerationConfig::default()` reset
-    /// here, which turned a temporary save failure into lost credentials.
-    #[test]
-    fn rollback_write_preserves_on_disk_generation() {
-        let (tmp, paths) = degraded_fixture_dir();
-        write_cfg(
-            &paths,
-            r#"{"generation":{"provider":"external","model_name":"qwen","model_path":null,"external_url":"http://127.0.0.1:8080","api_key":"sk-legacy-secret","timeout_secs":42},"ingest":{"folder_ontology":{"ops":"off"}},"ontology":{"schema":"emergent"},"vault_path":"/v"}"#,
-        );
-        // tmp stays alive until end of test: dropping it deletes the
-        // fixture directory the loads below must read.
-        // Run the rollback path exactly as the failed-save handler does:
-        // load_lenient → write, with NO generation reset.
-        let fallback = BrainConfig::load_lenient(&paths).unwrap().config;
-        fallback.write(&paths).unwrap();
-        // plan-p4-m6: parsed-value assertions (pretty-printed write output).
-        let after = std::fs::read_to_string(&paths.config_path).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&after).unwrap();
-        let expected_gen: serde_json::Value = serde_json::from_str(
-            r#"{"provider":"external","model_name":"qwen","model_path":null,"external_url":"http://127.0.0.1:8080","api_key":"sk-legacy-secret","timeout_secs":42}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            root.get("generation"),
-            Some(&expected_gen),
-            "on-disk generation block must survive the failed-save rollback byte-identical: {after}"
-        );
-        // Related blocks survive too.
-        assert_eq!(
-            root.pointer("/ingest/folder_ontology/ops").unwrap(),
-            &serde_json::json!("off"),
-            "ingest block survived rollback: {after}"
-        );
-        assert_eq!(
-            root.pointer("/ontology/schema").unwrap(),
-            &serde_json::json!("emergent"),
-            "ontology block survived rollback: {after}"
-        );
-        // And the file reloads healthy (no degraded state from the rollback).
-        let report = BrainConfig::load_lenient(&paths).unwrap();
-        assert!(!report.ontology_unparseable);
-        assert_eq!(
-            report.config.generation.provider,
-            crate::inference::config::GenerationProviderKind::External
-        );
-        assert_eq!(
-            report.config.generation.api_key.as_deref(),
-            Some("sk-legacy-secret")
-        );
-    }
+    // NOTE (m3, opus confirming review): the former hand-rolled rollback
+    // tests (`inference_rollback_style_write_preserves_ingest_and_ontology`,
+    // `rollback_write_preserves_on_disk_generation`) re-created the rollback
+    // by hand (load_lenient → write) instead of driving the real handler;
+    // with the rollback writes removed (M1/m4) there is no rollback left to
+    // exercise here. Real-handler coverage lives in
+    // `inference::tests::{update_provider_init_failure_leaves_disk_untouched,
+    // update_provider_write_failure_leaves_disk_untouched}`.
 
     // ── Tier-2 review fixes (task-1-review-fixes) ─────────────────────────
 
