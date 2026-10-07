@@ -84,6 +84,11 @@ pub struct MergeDuplicatesReport {
     /// hand-reversal handle (R2.7.5 r21: deleting a loser's row fully
     /// restores it).
     pub redirects_written: Vec<(String, String)>,
+    /// Pre-existing rows REWRITTEN by path compression (r2-m6): `(entity_id,
+    /// old merged_into, new merged_into)`. Part of the same hand-reversal
+    /// handle (R2.7.5 r21): reverting a merge by hand must restore these
+    /// rows' ORIGINAL targets, not just delete the fresh ones.
+    pub redirects_rewritten: Vec<(String, String, String)>,
     /// Edges between group members that become resolved self-loops on
     /// read (R2.7.5): `(edge id, source, target)` — listed so the user
     /// can prune; never auto-hidden.
@@ -474,9 +479,18 @@ fn apply_group(
     let tx = ImmediateTx::begin(conn)?;
     let now = crate::db::commit::now_timestamps().0;
     let mut wrote: Vec<(String, String)> = Vec::new();
+    let mut rewritten: Vec<(String, String, String)> = Vec::new();
     let mut cycles: Vec<String> = Vec::new();
     let mut self_loops: Vec<(String, String, String)> = Vec::new();
-    let result = write_group_redirects(&tx, group, now, &mut wrote, &mut cycles, &mut self_loops);
+    let result = write_group_redirects(
+        &tx,
+        group,
+        now,
+        &mut wrote,
+        &mut rewritten,
+        &mut cycles,
+        &mut self_loops,
+    );
     match result {
         Err(e) => {
             // Roll back this GROUP only; the sweep continues (one tx per
@@ -488,6 +502,7 @@ fn apply_group(
         Ok(()) => {
             tx.commit()?;
             report.redirects_written.extend(wrote);
+            report.redirects_rewritten.extend(rewritten);
             report.cycles.extend(cycles);
             report.self_loops.extend(self_loops);
         }
@@ -501,6 +516,10 @@ fn write_group_redirects(
     group: &MergeGroup,
     now: i64,
     wrote: &mut Vec<(String, String)>,
+    // Compression rewrites, `(entity_id, old merged_into, new merged_into)`
+    // — reported so hand-reversal can restore the ORIGINAL target
+    // (R2.7.5 r21: the report lists every redirect row it touched).
+    rewritten: &mut Vec<(String, String, String)>,
     cycles: &mut Vec<String>,
     self_loops: &mut Vec<(String, String, String)>,
 ) -> Result<()> {
@@ -564,6 +583,7 @@ fn write_group_redirects(
                         "UPDATE entity_redirects SET merged_into = ?1 WHERE entity_id = ?2",
                         params![final_id, entity_id],
                     )?;
+                    rewritten.push((entity_id, merged_into, final_id));
                 } else if final_id == entity_id {
                     // Compressing onto itself would forge a self-loop
                     // cycle — refuse and surface instead.
@@ -824,6 +844,14 @@ mod tests {
             merged_into(&conn, "m_a").as_deref(),
             Some("m_x"),
             "A's row must rewrite to the FINAL survivor"
+        );
+        // The rewrite is part of the hand-reversal handle (R2.7.5 r21):
+        // the report must record (id, OLD target, NEW target) so a row
+        // can be restored by hand, not just deleted.
+        assert_eq!(
+            r.redirects_rewritten,
+            vec![("m_a".to_string(), "m_y".to_string(), "m_x".to_string())],
+            "{r:?}"
         );
     }
 
