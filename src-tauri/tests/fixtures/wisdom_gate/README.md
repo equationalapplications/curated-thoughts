@@ -67,7 +67,49 @@ for f in FACTS:
         "Reply with the message only.\n\nFACT: " + f["title"] + " — " + f["body"])
     probes.append({"text": text.strip(), "expect": [f["id"]]})
 
-# ... see the plan for the irrelevant-probe generator
+# Irrelevant probes — 2026-10-07 WARNING: the plan's original wording here
+# ("They must share vocabulary with these topics but ask something NONE of
+# them answers") produced 9/100 probes that a fact actually answered
+# (WAL mode, busy_timeout, VACUUM, JSON expression indexes, brotli…). GLM
+# latches onto topic vocabulary and drifts into answered territory. Use the
+# fully off-topic wording below, then still hand-check every "irrelevant"
+# probe against the facts and drop any that returns a match under the
+# calibrated floor.
+topics = sorted({f["title"] for f in FACTS})
+for batch in range(4):
+    text = ask(
+        "Write 25 short developer messages to a coding agent, one per line, no numbering. "
+        "They must be about everyday development topics unrelated to git, CI, Rust, "
+        "Python packaging, Docker, SQL, HTTP APIs, testing, releases or shell. "
+        "Do not mention any of these topics either: "
+        + "; ".join(topics))
+    probes += [{"text": l.strip(), "expect": []} for l in text.splitlines() if l.strip()][:25]
+with open("src-tauri/tests/fixtures/wisdom_gate/probes.jsonl", "w") as fh:
+    for p in probes:
+        fh.write(json.dumps(p, ensure_ascii=False) + "\n")
+
+# Post-generation check — run AFTER the calibration sweep below: the sweep
+# embeds every CURRENT probe, so the fresh vectors.json.gz covers the new
+# probes (a missing vector means the sweep wasn't rerun — fail, don't skip).
+# No "irrelevant" probe may score at or above the calibrated floor against
+# any fact vector; any that does is a fact-answer in disguise and would
+# inflate FP and drag the chosen floor down.
+import gzip
+sweep = json.load(gzip.open("src-tauri/tests/fixtures/wisdom_gate/vectors.json.gz"))
+floor = json.load(open("src-tauri/tests/fixtures/wisdom_gate/expected.json"))["floor"]
+by_text = {v["text"]: v["vector"] for v in sweep["probes"]}
+def cos(a, b):
+    d = sum(x*y for x, y in zip(a, b)); na = sum(x*x for x in a) ** .5; nb = sum(x*x for x in b) ** .5
+    return d / (na * nb) if na and nb else 0.0
+bad = []
+for p in probes:
+    if p["expect"]:
+        continue
+    if p["text"] not in by_text:
+        raise SystemExit(f"no vector for irrelevant probe — rerun the sweep first: {p['text'][:60]!r}")
+    if any(cos(by_text[p["text"]], f["vector"]) >= floor for f in sweep["facts"]):
+        bad.append(p["text"])
+print("probes that a fact answers — DROP AND REGENERATE:", bad)
 ```
 
 ## Calibration sweep

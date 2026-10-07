@@ -1115,12 +1115,19 @@ for f in FACTS:
     probes.append({"text": text.strip(), "expect": [f["id"]]})
 topics = sorted({f["title"] for f in FACTS})
 for batch in range(4):
+    # 2026-10-07 foot-gun fix: the original wording ("They must share
+    # vocabulary with these topics but ask something NONE of them answers")
+    # made GLM produce 9/100 "irrelevant" probes a fact actually answered
+    # (WAL mode, busy_timeout, VACUUM, JSON expression indexes, brotli).
+    # Fully off-topic wording below; the fixture README also carries a
+    # post-generation cosine check — run it on the fresh sweep before
+    # committing the new calibration.
     text = ask(
         "Write 25 short developer messages to a coding agent, one per line, no numbering. "
-        + ("They must share vocabulary with these topics but ask something NONE of them "
-           "answers: " + "; ".join(topics[batch*25:(batch+1)*25]) if batch < 2 else
-           "They must be about everyday development topics unrelated to git, CI, Rust, "
-           "Python packaging, Docker, SQL, HTTP APIs, testing, releases or shell."))
+        "They must be about everyday development topics unrelated to git, CI, Rust, "
+        "Python packaging, Docker, SQL, HTTP APIs, testing, releases or shell. "
+        "Do not mention any of these topics either: "
+        + "; ".join(topics))
     probes += [{"text": l.strip(), "expect": []} for l in text.splitlines() if l.strip()][:25]
 with open("src-tauri/tests/fixtures/wisdom_gate/probes.jsonl", "w") as fh:
     for p in probes:
