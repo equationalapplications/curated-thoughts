@@ -405,9 +405,12 @@ fn load_live_curated_entity(
     if !table_exists(conn, "curated_entities")? {
         return Ok(None);
     }
+    // Task 7 (R2.7.5): a seed id may be a merged-away loser — resolve the
+    // redirect first (single shared helper), then read live_entities.
+    let resolved = crate::db::entities::resolve_entity_id(conn, id)?;
     let mut stmt =
-        conn.prepare("SELECT id, name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL")?;
-    let mut rows = stmt.query(rusqlite::params![id])?;
+        conn.prepare("SELECT id, name FROM live_entities WHERE id = ?1 AND deleted_at IS NULL")?;
+    let mut rows = stmt.query(rusqlite::params![resolved])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
@@ -615,11 +618,24 @@ fn fetch_entity_neighbors(
     } else {
         ("t", "e.source_id")
     };
+    // Task 7 (R2.7.5 / r3-m8): endpoint ids that are merged-away losers
+    // resolve to the survivor on read — the single-hop COALESCE through
+    // entity_redirects. A survivor→loser edge therefore appears as the
+    // survivor→survivor self-loop it resolves to, SHOWN with its original
+    // attributes (real pre-merge provenance; the merge report lists
+    // self-loops for pruning). Merge-time path compression keeps healthy
+    // redirects one hop deep, so one hop is the complete resolution.
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, {neighbor_alias}.id
          FROM llm_wiki_edges e
-         JOIN curated_entities s ON s.id = e.source_id AND s.deleted_at IS NULL
-         JOIN curated_entities t ON t.id = e.target_id AND t.deleted_at IS NULL
+         JOIN live_entities s
+           ON s.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                               WHERE r.entity_id = e.source_id), e.source_id)
+          AND s.deleted_at IS NULL
+         JOIN live_entities t
+           ON t.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                               WHERE r.entity_id = e.target_id), e.target_id)
+          AND t.deleted_at IS NULL
          WHERE e.entity_id = ?1 AND {anchor_col} = ?2{edge_filter}"
     );
     // Cached, not re-compiled: cross-partition mode calls this up to
@@ -1630,6 +1646,66 @@ mod unit_tests {
             wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
         assert!(result.truncated);
         assert!(result.nodes.len() <= MAX_TRAVERSAL_NODES);
+    }
+
+    /// Task 7 (spec R2.7.5 / §6 item 4): redirected-loser edge endpoints
+    /// resolve to the SURVIVOR on read — a survivor→loser edge surfaces as
+    /// the survivor→survivor self-loop it resolves to, shown with its
+    /// original attributes (real pre-merge provenance, r3-m8), and the
+    /// loser itself is never surfaced as a node.
+    #[test]
+    fn redirected_loser_endpoints_resolve_to_survivor_on_read() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('e_surv','Adrian','concept','s',100,100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('e_lose','Adrian','concept','s',100,100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose','e_surv',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('ed1','e_surv','e_surv','e_lose','related_to',1)",
+            [],
+        )
+        .unwrap();
+
+        // Seeding from the loser id itself: it must resolve to the survivor.
+        let result = wiki_traverse_graph(
+            &conn,
+            Some("e_surv"),
+            "e_lose",
+            2,
+            TraverseDirection::Both,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            result
+                .edges
+                .iter()
+                .any(|e| e.source_id == "e_surv" && e.target_id == "e_lose"),
+            "the resolved self-loop is SHOWN with its original edge row"
+        );
+        assert!(
+            result.nodes.iter().all(|n| n.id != "e_lose"),
+            "the loser is never surfaced as a node"
+        );
+        assert!(
+            result.nodes.iter().any(|n| n.id == "e_surv"),
+            "the survivor anchors the walk"
+        );
     }
 }
 

@@ -315,24 +315,84 @@ fn order_clause(sort: EntitySort) -> &'static str {
     }
 }
 
-fn fact_count(conn: &Connection, entity_id: &str) -> Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM llm_wiki_entries
-         WHERE entity_id = ?1 AND deleted_at IS NULL",
-        [entity_id],
-        |r| r.get(0),
-    )
-    .map_err(Into::into)
+/// Resolve a possibly-redirected entity id to its FINAL survivor (Task 7,
+/// spec R2.7.5 / r13-MAJOR-1).
+///
+/// This is the ONE shared resolution helper every read AND mutate path
+/// goes through — it reuses Task 6's cycle-guarded chain walk
+/// (`merge_duplicates::resolve_redirect_chain`); resolution is never
+/// re-implemented at a call site. A hand-crafted cycle is an error (never
+/// an infinite loop, never a guess): the caller surfaces it and the row is
+/// repaired by hand. `ChainResolution::None` (no redirect row) returns the
+/// input id unchanged.
+pub(crate) fn resolve_entity_id(conn: &Connection, entity_id: &str) -> Result<String> {
+    match crate::db::merge_duplicates::resolve_redirect_chain(conn, entity_id)? {
+        crate::db::merge_duplicates::ChainResolution::None => Ok(entity_id.to_string()),
+        crate::db::merge_duplicates::ChainResolution::Survivor(s) => Ok(s),
+        crate::db::merge_duplicates::ChainResolution::Cycle(on_loop) => bail!(
+            "entity {entity_id} sits on an entity_redirects cycle (loop member \
+             {on_loop}); delete the looping rows by hand — refusing to guess a \
+             survivor"
+        ),
+    }
 }
 
-fn open_task_count(conn: &Connection, entity_id: &str) -> Result<i64> {
-    conn.query_row(
+/// The survivor plus every loser whose redirect resolves to it — the
+/// TRANSITIVE FACT CLOSURE id set (spec R2.7.5 / r13-m3): reads for a
+/// survivor must cover `entity_id IN (survivor ∪ redirected losers)`.
+///
+/// Merge-time path compression keeps healthy chains one hop deep, so the
+/// first reverse hop (`merged_into = survivor`) finds every merge-written
+/// loser; the loop to a fixpoint additionally collects hand-crafted
+/// multi-hop rows that terminate at the survivor, and is bounded by the
+/// table size (each iteration must add at least one NEW id or it stops).
+pub(crate) fn cluster_ids(conn: &Connection, survivor: &str) -> Result<Vec<String>> {
+    let mut ids = vec![survivor.to_string()];
+    loop {
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql =
+            format!("SELECT entity_id FROM entity_redirects WHERE merged_into IN ({placeholders})");
+        let params: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params_from_iter(params), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let grew = rows.iter().any(|r| !ids.contains(r));
+        for r in rows {
+            if !ids.contains(&r) {
+                ids.push(r);
+            }
+        }
+        if !grew {
+            return Ok(ids);
+        }
+    }
+}
+
+/// Build an `IN (…)` placeholder list for `ids`. The caller binds the ids
+/// positionally in the same order.
+fn in_placeholders(ids: &[String]) -> String {
+    vec!["?"; ids.len()].join(",")
+}
+
+fn fact_count(conn: &Connection, ids: &[String]) -> Result<i64> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM llm_wiki_entries
+         WHERE entity_id IN ({}) AND deleted_at IS NULL",
+        in_placeholders(ids)
+    );
+    let n = conn.query_row(&sql, rusqlite::params_from_iter(ids.iter()), |r| r.get(0))?;
+    Ok(n)
+}
+
+fn open_task_count(conn: &Connection, ids: &[String]) -> Result<i64> {
+    let sql = format!(
         "SELECT COUNT(*) FROM llm_wiki_tasks
-         WHERE entity_id = ?1 AND status = 'pending' AND deleted_at IS NULL",
-        [entity_id],
-        |r| r.get(0),
-    )
-    .map_err(Into::into)
+         WHERE entity_id IN ({}) AND status = 'pending' AND deleted_at IS NULL",
+        in_placeholders(ids)
+    );
+    let n = conn.query_row(&sql, rusqlite::params_from_iter(ids.iter()), |r| r.get(0))?;
+    Ok(n)
 }
 
 /// List non-archived entities (unless `filter.include_archived`).
@@ -361,7 +421,7 @@ pub fn list_entities(
 
     let sql = format!(
         "SELECT id, name, entity_type, summary, created_at, updated_at
-         FROM curated_entities
+         FROM live_entities
          {where_clause}
          ORDER BY {}",
         order_clause(sort)
@@ -389,13 +449,17 @@ pub fn list_entities(
 
     let mut out = Vec::with_capacity(rows.len());
     for (id, name, entity_type, summary, created_at, updated_at) in rows {
+        // Transitive fact closure (r13-m3): counts cover the survivor ∪ its
+        // redirected losers. `id` comes from live_entities, so it is always
+        // a terminal survivor.
+        let cluster = cluster_ids(conn, &id)?;
         out.push(EntitySummary {
             id: id.clone(),
             name,
             entity_type,
             summary_snippet: summary_snippet(&summary),
-            fact_count: fact_count(conn, &id)?,
-            open_task_count: open_task_count(conn, &id)?,
+            fact_count: fact_count(conn, &cluster)?,
+            open_task_count: open_task_count(conn, &cluster)?,
             created_at,
             updated_at,
         });
@@ -403,16 +467,20 @@ pub fn list_entities(
     Ok(out)
 }
 
-fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
-    let mut stmt = conn.prepare(
+/// Load facts for a cluster (`survivor ∪ redirected losers`, r13-m3
+/// transitive closure). Callers pass [`cluster_ids`].
+fn load_facts(conn: &Connection, ids: &[String]) -> Result<Vec<EntityWisdom>> {
+    let sql = format!(
         "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at,
                 lifecycle_status, stale_after, generated_by, okf_sources, okf_verified,
                 okf_usage_window, last_verified_at, last_verified_by
          FROM llm_wiki_entries
-         WHERE entity_id = ?1 AND deleted_at IS NULL
+         WHERE entity_id IN ({}) AND deleted_at IS NULL
          ORDER BY updated_at DESC",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+        in_placeholders(ids)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -478,14 +546,16 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
     Ok(out)
 }
 
-fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<EntityTask>> {
-    let mut stmt = conn.prepare(
+fn load_tasks(conn: &Connection, ids: &[String]) -> Result<Vec<EntityTask>> {
+    let sql = format!(
         "SELECT id, description, status, priority, created_at
          FROM llm_wiki_tasks
-         WHERE entity_id = ?1 AND deleted_at IS NULL AND status = 'pending'
+         WHERE entity_id IN ({}) AND deleted_at IS NULL AND status = 'pending'
          ORDER BY priority DESC, created_at ASC",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+        in_placeholders(ids)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -508,7 +578,7 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<EntityTask>> {
     Ok(out)
 }
 
-fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
+fn load_events(conn: &Connection, ids: &[String]) -> Result<Vec<EntityEvent>> {
     // TODO(pr-followup): `ORDER BY created_at DESC` has no secondary
     // tiebreaker (e.g. `, id DESC`). When two events for the same entity
     // share a millisecond timestamp, SQLite returns rows in rowid/insertion
@@ -518,14 +588,16 @@ fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
     // is scoped by entity_id and returns a list, not a single row), but
     // worth a sweep across the codebase. See
     // procedures/curated-thoughts-improvement-backlog.md.
-    let mut stmt = conn.prepare(
+    // RECENT_EVENTS_LIMIT is a compile-time constant, formatted not bound.
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, event_type, summary, related_entry_id, created_at
          FROM llm_wiki_events
-         WHERE entity_id = ?1
+         WHERE entity_id IN ({})
          ORDER BY created_at DESC
-         LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![entity_id, RECENT_EVENTS_LIMIT], |r| {
+         LIMIT {RECENT_EVENTS_LIMIT}",
+        in_placeholders(ids)
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -549,12 +621,22 @@ fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
 }
 
 /// Entity + facts + open tasks + recent events.
+///
+/// Task 7 (spec R2.7.5 / r13-m3 / r11-M4): a loser id REDIRECTS to its
+/// survivor — `EntityDetail.id` is always the SURVIVOR id, never the
+/// requested loser id (else the GUI pins the loser and later mutations
+/// re-hit r13-MAJOR-1). The redirect is followed REGARDLESS of the
+/// survivor's `deleted_at` (r21): an archived survivor is returned exactly
+/// as `get_entity(survivor)` returns it — archived detail, `deleted_at`
+/// populated — never `None` (a live-only hop would make a stale loser link
+/// look like a deleted entity the user never archived).
 pub fn get_entity(conn: &Connection, entity_id: &str) -> Result<Option<EntityDetail>> {
+    let survivor_id = resolve_entity_id(conn, entity_id)?;
     let row = conn
         .query_row(
             "SELECT name, entity_type, summary, created_at, updated_at, deleted_at
-             FROM curated_entities WHERE id = ?1",
-            [entity_id],
+             FROM live_entities WHERE id = ?1",
+            [&survivor_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -572,17 +654,20 @@ pub fn get_entity(conn: &Connection, entity_id: &str) -> Result<Option<EntityDet
         return Ok(None);
     };
 
+    // Transitive fact closure (r13-m3): the survivor's reads cover the
+    // loser rows' facts/tasks/events too.
+    let cluster = cluster_ids(conn, &survivor_id)?;
     Ok(Some(EntityDetail {
-        id: entity_id.to_string(),
+        id: survivor_id,
         name,
         entity_type,
         summary,
         created_at,
         updated_at,
         deleted_at,
-        facts: load_facts(conn, entity_id)?,
-        tasks: load_tasks(conn, entity_id)?,
-        events: load_events(conn, entity_id)?,
+        facts: load_facts(conn, &cluster)?,
+        tasks: load_tasks(conn, &cluster)?,
+        events: load_events(conn, &cluster)?,
     }))
 }
 
@@ -665,13 +750,19 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
 }
 
 /// Replace entity summary; clears `summary_embedding` for lazy re-embed.
+///
+/// Task 7 (r13-MAJOR-1 / r15-m3): a loser id resolves to the survivor
+/// BEFORE acting — a mutator keyed by a stale loser link edits the
+/// SURVIVOR (rejecting loser ids was rejected as hostile to stale GUI
+/// state).
 pub fn update_entity_summary(conn: &Connection, entity_id: &str, summary: &str) -> Result<()> {
+    let resolved = resolve_entity_id(conn, entity_id)?;
     let now = now_secs();
     let changes = conn.execute(
         "UPDATE curated_entities
          SET summary = ?1, summary_embedding = NULL, updated_at = ?2
          WHERE id = ?3 AND deleted_at IS NULL",
-        params![summary, now, entity_id],
+        params![summary, now, resolved],
     )?;
     if changes == 0 {
         bail!("entity not found or archived: {entity_id}");
@@ -680,12 +771,27 @@ pub fn update_entity_summary(conn: &Connection, entity_id: &str, summary: &str) 
 }
 
 /// Soft-delete entity (`deleted_at` set; facts/tasks remain for audit).
+///
+/// Task 7 (r13-MAJOR-1): archiving a SURVIVOR archives the whole cluster —
+/// the survivor AND its redirected losers — so bundle export (which maps
+/// loser facts onto the survivor, r2-M8) consistently excludes the entire
+/// archived cluster with zero orphaned facts. `entity_redirects` rows are
+/// KEPT (r21): archiving touches only `curated_entities.deleted_at`, so a
+/// stale loser link still resolves to the (archived) survivor and the
+/// loser never reappears as a standalone row. Archive via a loser id acts
+/// on the survivor's cluster (r15-m3).
 pub fn archive_entity(conn: &Connection, entity_id: &str) -> Result<()> {
+    let resolved = resolve_entity_id(conn, entity_id)?;
+    let cluster = cluster_ids(conn, &resolved)?;
     let now = now_secs();
-    let changes = conn.execute(
-        "UPDATE curated_entities SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-        params![now, entity_id],
-    )?;
+    let mut changes = 0usize;
+    for id in &cluster {
+        changes += conn.execute(
+            "UPDATE curated_entities SET deleted_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NULL",
+            params![now, id],
+        )?;
+    }
     if changes == 0 {
         bail!("entity not found or already archived: {entity_id}");
     }
@@ -1281,5 +1387,199 @@ mod tests {
         );
         // No documents table at all → the chunks query errors.
         assert!(r.is_err(), "a DB fault must propagate, not swallow");
+    }
+
+    // ---- Task 7 (spec R2.7.5): read/write redirect resolution ----------
+
+    fn redirect(conn: &Connection, loser: &str, survivor: &str) {
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, survivor],
+        )
+        .unwrap();
+    }
+
+    fn seed_pair() -> (rusqlite::Connection, String, String) {
+        let mut conn = open_in_memory().unwrap();
+        let a = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Adrian".into(),
+                entity_type: None,
+                summary: Some("same".into()),
+            },
+        )
+        .unwrap();
+        let b = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Adrian".into(),
+                entity_type: None,
+                summary: Some("same".into()),
+            },
+        )
+        .unwrap();
+        (conn, a.id, b.id)
+    }
+
+    /// r11-M4 (§6 item 10): after a merge, `get_entity(loser)` returns the
+    /// SURVIVOR (`EntityDetail.id` = survivor), the survivor's reads cover
+    /// the loser's facts/tasks (transitive closure, r13-m3), counts include
+    /// them, and the loser never appears in `list_entities`.
+    #[test]
+    fn get_entity_loser_redirects_to_survivor_with_transitive_closure() {
+        let (conn, surv, loser) = seed_pair();
+        seed_fact(&conn, &loser, "fact-loser", "Loser fact.");
+        seed_fact(&conn, &surv, "fact-surv", "Survivor fact.");
+        seed_task(&conn, &loser, "task-loser", "pending");
+        redirect(&conn, &loser, &surv);
+
+        // get_entity(loser) → survivor detail (r13-m3: id is the SURVIVOR).
+        let via_loser = get_entity(&conn, &loser).unwrap().unwrap();
+        assert_eq!(via_loser.id, surv, "EntityDetail.id must be the survivor");
+        assert_eq!(via_loser.facts.len(), 2, "closure covers both facts");
+        assert_eq!(via_loser.tasks.len(), 1);
+        assert!(via_loser.facts.iter().any(|f| f.id == "fact-loser"));
+
+        // get_entity(survivor) covers the loser's facts too.
+        let via_surv = get_entity(&conn, &surv).unwrap().unwrap();
+        assert_eq!(via_surv.id, surv);
+        assert!(via_surv.facts.iter().any(|f| f.id == "fact-loser"));
+
+        // list_entities: loser never listed; survivor's counts include the
+        // loser's fact + open task.
+        let list = list_entities(&conn, EntitySort::default(), &EntityListFilter::default())
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id == surv)
+            .collect::<Vec<_>>();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].fact_count, 2, "{:?}", list[0]);
+        assert_eq!(list[0].open_task_count, 1);
+        let listed_ids: Vec<String> =
+            list_entities(&conn, EntitySort::default(), &EntityListFilter::default())
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        assert!(!listed_ids.contains(&loser), "loser is never returned");
+    }
+
+    /// r21: the redirect hop is followed REGARDLESS of the survivor's
+    /// `deleted_at` — an archived survivor returns archived detail, never
+    /// `None` (a stale loser link must not look like a deleted entity).
+    #[test]
+    fn get_entity_loser_follows_redirect_to_archived_survivor() {
+        let (conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        archive_entity(&conn, &surv).unwrap();
+
+        let detail = get_entity(&conn, &loser).unwrap();
+        let detail = detail.expect("archived survivor is returned, never None");
+        assert_eq!(detail.id, surv);
+        assert!(detail.deleted_at.is_some(), "archived detail as-is");
+    }
+
+    /// r13-MAJOR-1 / r15-m3: a mutator keyed by a loser id acts on the
+    /// SURVIVOR — editing via a stale loser link edits the survivor.
+    #[test]
+    fn update_entity_summary_via_loser_hits_survivor() {
+        let (conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        update_entity_summary(&conn, &loser, "Edited via loser").unwrap();
+        let summary: String = conn
+            .query_row(
+                "SELECT summary FROM curated_entities WHERE id = ?1",
+                [&surv],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(summary, "Edited via loser");
+    }
+
+    /// r13-MAJOR-1: archiving a survivor archives the WHOLE cluster
+    /// (survivor + losers); redirect rows are KEPT (r21) so a stale loser
+    /// link still resolves.
+    #[test]
+    fn archive_entity_archives_whole_cluster_and_keeps_redirects() {
+        let (conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        // Archive via the LOSER link (r15-m3): acts on the survivor cluster.
+        archive_entity(&conn, &loser).unwrap();
+        let surv_deleted: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM curated_entities WHERE id = ?1",
+                [&surv],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let loser_deleted: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM curated_entities WHERE id = ?1",
+                [&loser],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(surv_deleted.is_some(), "survivor archived with the cluster");
+        assert!(loser_deleted.is_some(), "loser archived with the cluster");
+        let redirects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entity_redirects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(redirects, 1, "archive keeps the redirect row (r21)");
+    }
+
+    /// r21 merge reversal: deleting the loser's redirect row fully restores
+    /// it as a standalone entity — reads, recall, and export exactly as
+    /// before the merge (the merge's only state is the redirect row).
+    #[test]
+    fn deleting_redirect_row_restores_loser() {
+        let (conn, surv, loser) = seed_pair();
+        seed_fact(&conn, &loser, "fact-loser", "Loser fact.");
+        redirect(&conn, &loser, &surv);
+        // Merged state: loser hidden.
+        assert_eq!(get_entity(&conn, &loser).unwrap().unwrap().id, surv);
+
+        conn.execute(
+            "DELETE FROM entity_redirects WHERE entity_id = ?1",
+            [&loser],
+        )
+        .unwrap();
+
+        let detail = get_entity(&conn, &loser).unwrap().unwrap();
+        assert_eq!(detail.id, loser, "loser reads as itself again");
+        assert_eq!(detail.facts.len(), 1);
+        assert_eq!(detail.facts[0].id, "fact-loser");
+        let listed: Vec<String> =
+            list_entities(&conn, EntitySort::default(), &EntityListFilter::default())
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        assert!(listed.contains(&loser), "loser lists again");
+        // Export ships it standalone again with its facts.
+        let exported = crate::db::bundle_io::load_export_entities(&conn, None).unwrap();
+        assert_eq!(exported.len(), 2);
+        let restored = exported.iter().find(|e| e.entity_id == loser).unwrap();
+        assert_eq!(restored.facts.len(), 1);
+    }
+
+    /// r2-m6 read-side cycle guard: a hand-crafted cycle errors (reported),
+    /// never loops, never returns a guessed survivor.
+    #[test]
+    fn redirect_cycle_errors_not_loops() {
+        let (conn, a, b) = seed_pair();
+        redirect(&conn, &a, &b);
+        redirect(&conn, &b, &a);
+        assert!(get_entity(&conn, &a).is_err());
+        assert!(resolve_entity_id(&conn, &a).is_err());
+        // A self-cycle too.
+        conn.execute(
+            "INSERT OR REPLACE INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?1, 1)",
+            params![b],
+        )
+        .unwrap();
+        assert!(resolve_entity_id(&conn, &b).is_err());
     }
 }

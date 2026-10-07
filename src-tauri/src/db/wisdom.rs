@@ -20,18 +20,23 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 // point. NULL sits outside the engine's selector entirely. The V18 migration
 // normalizes pre-existing sentinel/mangled rows on upgraded brains.
 
-fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<()> {
+fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<String> {
+    // Task 7 (r13-MAJOR-1): a fact mutator keyed by a merged-away loser id
+    // resolves to the survivor BEFORE acting — the fact lands on the entity
+    // recall shows, never on a row no reader surfaces. Returns the resolved
+    // survivor id so callers key every write to it.
+    let resolved = crate::db::entities::resolve_entity_id(conn, entity_id)?;
     let exists: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
-            [entity_id],
+            "SELECT 1 FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
+            [&resolved],
             |r| r.get(0),
         )
         .optional()?;
     if exists.is_none() {
         bail!("entity not found or archived: {entity_id}");
     }
-    Ok(())
+    Ok(resolved)
 }
 
 fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()> {
@@ -133,7 +138,7 @@ pub fn add_wisdom_in_tx(
     let wisdom_id = generate_llm_id("fact_");
     let title = fact_title_from_body(body);
 
-    assert_entity_active(tx, entity_id)?;
+    let entity_id = assert_entity_active(tx, entity_id)?;
     tx.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
@@ -144,12 +149,12 @@ pub fn add_wisdom_in_tx(
     )?;
     push_entries_outbox(
         tx,
-        entity_id,
+        &entity_id,
         &wisdom_id,
         OutboxOperation::Insert,
         wiki_fact_outbox_payload(
             &wisdom_id,
-            entity_id,
+            &entity_id,
             &title,
             body,
             &[],
@@ -181,7 +186,7 @@ pub fn add_wisdom_in_tx(
         ),
         now_ms,
     )?;
-    touch_entity(tx, entity_id, now_secs)?;
+    touch_entity(tx, &entity_id, now_secs)?;
 
     Ok(EntityWisdom {
         id: wisdom_id,
@@ -271,16 +276,26 @@ pub fn update_wisdom_in_tx(
     let (now_secs, now_ms) = now_timestamps();
     let title = fact_title_from_body(body);
 
-    assert_entity_active(tx, entity_id)?;
+    let entity_id = assert_entity_active(tx, entity_id)?;
+    // Transitive fact closure (r13-m3): the row being updated may still be
+    // keyed to a redirected loser from before the merge.
+    let cluster = crate::db::entities::cluster_ids(tx, &entity_id)?;
+    let placeholders = vec!["?"; cluster.len()].join(",");
     let existing = tx
         .query_row(
-            "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
-                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
-                    lifecycle_status, stale_after, generated_by,
-                    last_verified_at, last_verified_by
-             FROM llm_wiki_entries
-             WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
-            params![wisdom_id, entity_id],
+            &format!(
+                "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
+                        source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                        lifecycle_status, stale_after, generated_by,
+                        last_verified_at, last_verified_by
+                 FROM llm_wiki_entries
+                 WHERE id = ? AND entity_id IN ({placeholders}) AND deleted_at IS NULL"
+            ),
+            rusqlite::params_from_iter(
+                std::iter::once(wisdom_id)
+                    .map(String::from)
+                    .chain(cluster.iter().cloned()),
+            ),
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -335,12 +350,12 @@ pub fn update_wisdom_in_tx(
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
         tx,
-        entity_id,
+        &entity_id,
         wisdom_id,
         OutboxOperation::Update,
         wiki_fact_outbox_payload(
             wisdom_id,
-            entity_id,
+            &entity_id,
             &title,
             body,
             &tags,
@@ -363,7 +378,7 @@ pub fn update_wisdom_in_tx(
         ),
         now_ms,
     )?;
-    touch_entity(tx, entity_id, now_secs)?;
+    touch_entity(tx, &entity_id, now_secs)?;
     Ok(())
 }
 

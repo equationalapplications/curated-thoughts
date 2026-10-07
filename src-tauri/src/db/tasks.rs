@@ -26,10 +26,17 @@ pub fn list_tasks(
     status: Option<&str>,
     include_archived: bool,
 ) -> Result<Vec<TaskRow>> {
+    // Task 7 (R2.7.5): a task keyed by a merged-away loser entity maps
+    // through its redirect (single hop — merge-time path compression keeps
+    // healthy chains one hop deep) onto the survivor, whose live_entities
+    // row supplies the name. Loser-keyed tasks therefore stay visible under
+    // the survivor instead of vanishing from the JOIN.
     let mut stmt = conn.prepare(
         "SELECT t.id, t.entity_id, ce.name, t.description, t.status, t.priority, t.created_at, t.resolved_at
          FROM llm_wiki_tasks t
-         JOIN curated_entities ce ON ce.id = t.entity_id
+         JOIN live_entities ce
+           ON ce.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                                WHERE r.entity_id = t.entity_id), t.entity_id)
          WHERE (t.status = :status OR :status IS NULL)
            AND (t.deleted_at IS NULL OR :include_archived)
          ORDER BY ce.name COLLATE NOCASE ASC, t.priority DESC, t.created_at ASC",
@@ -73,11 +80,14 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    // Verify entity exists and is not archived.
+    // Verify entity exists and is not archived. Task 7 (r13-MAJOR-1): a
+    // loser id resolves to the survivor BEFORE the task is keyed to it, so
+    // a task created via a stale loser link lands on the survivor.
+    let resolved = crate::db::entities::resolve_entity_id(&tx, entity_id)?;
     let entity_name: Option<String> = tx
         .query_row(
-            "SELECT name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
-            [entity_id],
+            "SELECT name FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
+            [&resolved],
             |r| r.get(0),
         )
         .optional()?;
@@ -91,12 +101,12 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
             id, entity_id, description, status, priority,
             created_at, updated_at, resolved_at, deleted_at
          ) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?5, NULL, NULL)",
-        params![task_id, entity_id, description, priority, now_ms],
+        params![task_id, resolved, description, priority, now_ms],
     )?;
 
     push_tasks_outbox(
         &tx,
-        entity_id,
+        &resolved,
         &task_id,
         OutboxOperation::Insert,
         wiki_task_outbox_payload(

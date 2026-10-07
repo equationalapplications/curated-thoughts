@@ -230,18 +230,21 @@ pub fn preview_import(
 ) -> Result<ImportPreview> {
     let mut entities = Vec::new();
     for entity in &bundle.entities {
+        // Task 7: preview resolves bundle source ids through redirects the
+        // same way apply does, so a merged-away id previews as its survivor.
+        let resolved = crate::db::entities::resolve_entity_id(conn, &entity.entity_id)?;
         let entity_exists = row_exists(
             conn,
             "SELECT 1 FROM curated_entities WHERE id=?1",
-            &[&entity.entity_id],
+            &[&resolved],
         )?;
         let local_summary: Option<String> = conn
             .query_row(
                 "SELECT summary FROM curated_entities WHERE id=?1",
-                [&entity.entity_id],
+                [&resolved],
                 |r| r.get(0),
             )
-            .ok();
+            .optional()?;
 
         let (mut facts_new, mut facts_existing) = (0i64, 0i64);
         for fact in &entity.facts {
@@ -340,7 +343,13 @@ pub fn apply_import(
         let mut id_map: HashMap<String, String> = HashMap::new();
         let target_entity_id = match mode {
             ImportMode::Clone => generate_id("ent_"),
-            _ => entity.entity_id.clone(),
+            // Task 7 (r15-m4 / r2-m9): a bundle carries SOURCE-HOST ids; a
+            // peer import of an id this host merged away must land on the
+            // local survivor, else new facts attach to a loser recall can
+            // never see (and cross-host re-imports recreate the duplicates
+            // the merge removed). Resolution PROPAGATES errors — a DB fault
+            // aborts the import, never mints a duplicate.
+            _ => crate::db::entities::resolve_entity_id(&tx, &entity.entity_id)?,
         };
         if mode == ImportMode::Clone {
             for fact in &entity.facts {
@@ -727,13 +736,18 @@ fn ensure_entity(
         .clone()
         .unwrap_or_else(|| entity.entity_id.clone());
     let bundle_summary = entity.summary.clone().unwrap_or_default();
+    // r2-m9: the existence probe PROPAGATES DB faults (the pre-Task-7
+    // `.ok()` swallowed them as "not found", so a transient fault during
+    // import minted a duplicate). `optional()` keeps only the genuinely
+    // no-row case as `None`. The caller already resolved the id through
+    // the redirect chain, so this probe is on a terminal survivor.
     let existing: Option<String> = tx
         .query_row(
             "SELECT summary FROM curated_entities WHERE id=?1",
             [target_entity_id],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
 
     // Bundle import path (spec §2.5 / R2.4.2). Wave-1 bundles carry NO
     // graph type label — the gate's caller supplies `None` for the

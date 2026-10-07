@@ -325,13 +325,10 @@ fn remap_pass(
     // census does not re-surface a merged-away row (§2.7.1).
     let rows: Vec<(String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT e.id, e.entity_type FROM curated_entities e
+            "SELECT e.id, e.entity_type FROM live_entities e
              WHERE e.deleted_at IS NULL
                AND e.entity_type IS NOT NULL
-               AND e.entity_type != ''
-               AND NOT EXISTS (
-                   SELECT 1 FROM entity_redirects r WHERE r.entity_id = e.id
-               )",
+               AND e.entity_type != ''",
         )?;
         let mut out = Vec::new();
         let mut rs = stmt.query([])?;

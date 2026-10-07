@@ -387,3 +387,107 @@ fn bundle_apply_normalizes_legacy_json_source_ref() {
         "salvaged blob has no live chunk in dest, so unanchored must be computed to 1"
     );
 }
+
+/// Task 7 (spec R2.7.5 / r2-M8): a merged pair exports as ONE entity — the
+/// loser's facts map through the redirect onto the survivor at export time
+/// (a read-side projection; excluded-entirely would silently lose the
+/// loser's facts from bundle backups), and the archived-cluster matrix case
+/// (merge → archive survivor → export + re-import → zero orphans) holds.
+#[test]
+fn merged_pair_exports_as_one_entity_and_archived_cluster_exports_nothing() {
+    use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::connection::open_in_memory;
+
+    let conn = open_in_memory().unwrap();
+    for (id, fact) in [("ent_surv", "fact_s"), ("ent_lose", "fact_l")] {
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1,'Adrian','concept','same summary',100,100)",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, created_at, updated_at)
+             VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'user_confirmed', 100, 100)",
+            rusqlite::params![fact, id],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+         VALUES ('ent_lose','ent_surv',1)",
+        [],
+    )
+    .unwrap();
+
+    // ONE entity, carrying BOTH entities' facts, loser facts keyed to the
+    // survivor.
+    let exported = load_export_entities(&conn, None).unwrap();
+    assert_eq!(exported.len(), 1, "a merged pair exports as one entity");
+    assert_eq!(exported[0].entity_id, "ent_surv");
+    let fact_ids: Vec<&str> = exported[0].facts.iter().map(|f| f.id.as_str()).collect();
+    assert!(fact_ids.contains(&"fact_s") && fact_ids.contains(&"fact_l"));
+    assert!(
+        exported[0].facts.iter().all(|f| f.entity_id == "ent_surv"),
+        "loser facts map to the survivor (r2-M8)"
+    );
+
+    // Matrix case: archive the survivor → the whole cluster is excluded —
+    // zero entity rows, zero orphaned facts.
+    conn.execute(
+        "UPDATE curated_entities SET deleted_at = 9 WHERE id IN ('ent_surv','ent_lose')",
+        [],
+    )
+    .unwrap();
+    let exported = load_export_entities(&conn, None).unwrap();
+    assert!(exported.is_empty(), "archived cluster ships nothing");
+}
+
+/// r2-M8 pinned end-to-end: after a merge, export + re-import on a FRESH
+/// brain yields ONE entity carrying BOTH entities' facts — the peer never
+/// re-creates the duplicates cross-host.
+#[test]
+fn merged_pair_export_reimport_yields_one_entity_with_both_fact_sets() {
+    use tauri_app_lib::db::bundle_apply::{apply_import, ImportMode};
+    use tauri_app_lib::db::bundle_io::load_export_entities;
+    use tauri_app_lib::db::connection::open_in_memory;
+
+    let src = open_in_memory().unwrap();
+    for (id, fact) in [("ent_surv", "fact_s"), ("ent_lose", "fact_l")] {
+        src.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1,'Adrian','concept','same summary',100,100)",
+            [id],
+        )
+        .unwrap();
+        src.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, created_at, updated_at)
+             VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'user_confirmed', 100, 100)",
+            rusqlite::params![fact, id],
+        )
+        .unwrap();
+    }
+    src.execute(
+        "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+         VALUES ('ent_lose','ent_surv',1)",
+        [],
+    )
+    .unwrap();
+
+    let entities = load_export_entities(&src, None).unwrap();
+    let files = tauri_app_lib::okf::bundle_write::write_bundle(&entities).unwrap();
+    let bundle = parse_bundle(&files).unwrap();
+    let mut dest = open_in_memory().unwrap();
+    apply_import(&mut dest, &bundle, ImportMode::Merge).unwrap();
+
+    let entity_rows: i64 = dest
+        .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(entity_rows, 1, "one entity on the fresh brain");
+    let facts: i64 = dest
+        .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(facts, 2, "both fact sets survived the transfer");
+}

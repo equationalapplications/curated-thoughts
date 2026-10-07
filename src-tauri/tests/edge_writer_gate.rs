@@ -58,7 +58,7 @@ const EXPECTED_FIXTURE_COUNTS: &[(&str, usize)] = &[
     ("src/db/wiki_forget.rs", 1),
     ("src/db/wisdom.rs", 3),
     ("src/lib.rs", 3),
-    ("src/wiki_graph.rs", 1),
+    ("src/wiki_graph.rs", 2), // +1 Task 7 redirected-loser endpoint-resolution test fixture
 ];
 
 const REMEDIATION: &str = "\n\

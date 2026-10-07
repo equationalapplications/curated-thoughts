@@ -442,8 +442,7 @@ fn name_match_entities(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let mut stmt =
-        conn.prepare("SELECT id, name FROM curated_entities WHERE deleted_at IS NULL")?;
+    let mut stmt = conn.prepare("SELECT id, name FROM live_entities WHERE deleted_at IS NULL")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let haystack = format!("{chunk_text}\n{stem}").to_lowercase();
     let mut matched = Vec::new();
@@ -474,7 +473,7 @@ fn load_candidate_entities(
 
     if let Some(query) = mean_embedding {
         let mut stmt = conn.prepare(
-            "SELECT id, summary_embedding FROM curated_entities
+            "SELECT id, summary_embedding FROM live_entities
              WHERE deleted_at IS NULL AND summary_embedding IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -500,7 +499,7 @@ fn load_candidate_entities(
     let mut out = Vec::new();
     for (entity_id, _) in ranked {
         let row = conn.query_row(
-            "SELECT name, entity_type, summary FROM curated_entities
+            "SELECT name, entity_type, summary FROM live_entities
              WHERE id = ?1 AND deleted_at IS NULL",
             [&entity_id],
             |r| {
@@ -513,13 +512,18 @@ fn load_candidate_entities(
         );
         if let Ok((name, entity_type, summary)) = row {
             let snippet: String = summary.chars().take(200).collect();
-            let mut fact_stmt = conn.prepare(
+            // Transitive fact closure (r13-m3): the candidate's facts cover
+            // the survivor ∪ its redirected losers, so recall on a survivor
+            // returns the losers' facts too.
+            let cluster = crate::db::entities::cluster_ids(conn, &entity_id)?;
+            let placeholders = vec!["?"; cluster.len()].join(",");
+            let mut fact_stmt = conn.prepare(&format!(
                 "SELECT id, body FROM llm_wiki_entries
-                 WHERE entity_id = ?1 AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT ?2",
-            )?;
+                 WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL
+                 ORDER BY updated_at DESC LIMIT {MAX_FACTS_PER_CANDIDATE}"
+            ))?;
             let facts = fact_stmt
-                .query_map(params![entity_id, MAX_FACTS_PER_CANDIDATE], |r| {
+                .query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
                     Ok(CandidateFact {
                         id: r.get(0)?,
                         body: r.get(1)?,

@@ -519,6 +519,8 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
 ///   recorded ONLY after the write commits (r11-m4: an in-transaction memo
 ///   + rollback would leave the row un-ensured but memo-marked until
 ///     restart).
+/// * the `live_entities` VIEW (Task 7, R2.7.5 r21) — the one shared
+///   read-side exclusion of redirected merge losers; see the DDL below.
 ///
 /// Deliberately NO foreign keys to `curated_entities`: redirect losers and
 /// origin records must be insertable/deletable in any order across
@@ -557,6 +559,21 @@ CREATE TABLE IF NOT EXISTS manifest_ensure_memo (
     manifest_hash  TEXT NOT NULL,
     recorded_at    INTEGER NOT NULL,
     PRIMARY KEY (entity_id, manifest_hash)
+);
+
+-- Task 7 (spec R2.7.5 r21): the ONE shared read-side exclusion predicate.
+-- `live_entities` = curated_entities rows with no entity_redirects row; it
+-- does NOT filter deleted_at (readers keep their own archived-row rules --
+-- get_entity deliberately returns archived detail). Every READER selects
+-- from live_entities; writers and the few readers that must see redirected
+-- rows (redirect resolution, the merge sweep, clear_vault_tables, edge
+-- endpoint-liveness) keep the base table -- pinned by the source-scan test
+-- in db::redirect_scan.
+CREATE VIEW IF NOT EXISTS live_entities AS
+SELECT ce.*
+FROM curated_entities ce
+WHERE NOT EXISTS (
+    SELECT 1 FROM entity_redirects r WHERE r.entity_id = ce.id
 );
 ";
 

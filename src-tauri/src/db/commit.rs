@@ -1522,7 +1522,11 @@ fn resolve_edge_ref(
         // unresolvable-endpoint branch; the log makes the drop attributable,
         // since a dead id is otherwise indistinguishable from a live one in
         // the proposal payload.
-        if !crate::db::edge_purge::endpoint_is_live(conn, id)? {
+        // Task 7 (r15-m4): a candidate echoed back by id may name a
+        // merged-away loser — resolve to the survivor first so the edge
+        // anchors on the entity recall shows.
+        let resolved_id = crate::db::entities::resolve_entity_id(conn, id)?;
+        if !crate::db::edge_purge::endpoint_is_live(conn, &resolved_id)? {
             eprintln!(
                 "[commit] edge endpoint {id:?} names no live row in llm_wiki_entries, \
                  curated_entities, or llm_wiki_tasks; dropping the edge item for entity \
@@ -1530,12 +1534,12 @@ fn resolve_edge_ref(
             );
             return Ok(None);
         }
-        return Ok(Some(id.to_string()));
+        return Ok(Some(resolved_id));
     }
     if let Some(name) = value.get("new_name").and_then(|v| v.as_str()) {
         let resolved: Option<String> = conn
             .query_row(
-                "SELECT id FROM curated_entities
+                "SELECT id FROM live_entities
                  WHERE name = ?1 AND deleted_at IS NULL
                  LIMIT 1",
                 [name],
@@ -2494,7 +2498,15 @@ pub fn resolve_proposal(
 
     let (minted_entity, entity_was_created_here) =
         create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?;
-    let mut entity_id = minted_entity.or(proposal.entity_id.clone());
+    // Task 7 (r13-MAJOR-1 / r15-m4): a proposal naming a merged-away loser
+    // (or a model echoing back a stale candidate id) resolves to the
+    // survivor BEFORE any item commits — every fact/task/edge/summary
+    // mutation below keys on ctx.entity_id, so this one resolution covers
+    // the whole commit. A redirect cycle errors the commit loudly.
+    let mut entity_id = match minted_entity.or(proposal.entity_id.clone()) {
+        Some(eid) => Some(crate::db::entities::resolve_entity_id(&tx, &eid)?),
+        None => None,
+    };
 
     let mut ctx = CommitContext {
         proposal_id: proposal_id.to_string(),
@@ -6367,6 +6379,72 @@ mod tests {
             outcome.is_none(),
             "opt-out on target endpoint must disarm the edge gate"
         );
+    }
+    // ── Task 7 (spec R2.7.5 / r13-MAJOR-1): commit-path redirect write
+    // resolution — a fact naming a merged-away loser lands on the SURVIVOR.
+
+    /// r15-m4 required test: commit a fact naming a merged-away loser,
+    /// assert it lands on the survivor (resolution happens once, where
+    /// ctx.entity_id is fixed, so every item type in the commit inherits
+    /// it).
+    #[test]
+    fn commit_fact_naming_loser_lands_on_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_surv", "Adrian", "same summary", 100);
+        seed_entity(&conn, "ent_lose", "Adrian", "same summary", 100);
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent_lose','ent_surv',1)",
+            [],
+        )
+        .unwrap();
+
+        let doc_id = seed_document(&conn, "/vault/documents/notes.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-redir",
+            ProposalKind::UpdateEntity,
+            Some("ent_lose"),
+            vec![fact_item(
+                "item-redir",
+                chunk_id,
+                "Fact via a stale loser id.",
+            )],
+            doc_id,
+        );
+
+        let decisions = all_accept_decisions(&conn, "prop-redir");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-redir",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.proposal_status, "approved");
+
+        let owner: String = conn
+            .query_row(
+                "SELECT entity_id FROM llm_wiki_entries
+                 WHERE entity_id IN ('ent_surv','ent_lose') AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "ent_surv", "the fact must land on the survivor");
+        let loser_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent_lose'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(loser_rows, 0, "nothing attaches to the loser");
     }
 }
 

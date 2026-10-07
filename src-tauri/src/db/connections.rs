@@ -165,10 +165,13 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
         }
     }
 
+    // Task 7 (R2.7.5): a stale loser link resolves to the survivor before
+    // the name lookup; live_entities keeps redirected rows out.
+    let resolved = crate::db::entities::resolve_entity_id(conn, entity_id)?;
     let name: Option<String> = conn
         .query_row(
-            "SELECT name FROM curated_entities WHERE id = ?1",
-            [entity_id],
+            "SELECT name FROM live_entities WHERE id = ?1",
+            [&resolved],
             |r| r.get(0),
         )
         .optional()?;
@@ -181,7 +184,7 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
 
     let pattern = format!("%[[{}]]%", escape_like(&name));
     let mut stmt = conn.prepare(
-        "SELECT e.id, e.name, e.entity_type FROM curated_entities e
+        "SELECT e.id, e.name, e.entity_type FROM live_entities e
          WHERE e.id != ?1 AND e.deleted_at IS NULL
            AND (e.summary LIKE ?2 ESCAPE '\\'
                 OR EXISTS (SELECT 1 FROM llm_wiki_entries f
