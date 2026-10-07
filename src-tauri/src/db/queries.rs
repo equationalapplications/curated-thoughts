@@ -877,7 +877,13 @@ mod clear_vault_tables_tests {
         }
 
         // Keep-rows survive.
-        assert_eq!(count(&conn, "llm_wiki_meta"), 1, "meta marker must survive");
+        // V26 seeds `wisdom_active_scheme` alongside the pre-existing
+        // keep-marker; both are meta keep-rows that must survive a clear.
+        assert_eq!(
+            count(&conn, "llm_wiki_meta"),
+            2,
+            "meta marker + V26 scheme seed must survive"
+        );
         assert_eq!(
             count(&conn, "llm_wiki_entity_manifests"),
             1,

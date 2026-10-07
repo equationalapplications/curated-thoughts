@@ -22,6 +22,7 @@ use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use crate::embed_scheme::{floor_key_for, Scheme};
 use crate::embedder::{CloudProvider, EmbedProfile};
 use crate::search::{bytes_to_f32, cosine_similarity};
 use crate::wiki_graph::tier_weight;
@@ -55,6 +56,10 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // Calibrated 2026-10-07 (OpenRouter, GLM-5.3-flash probes): hit@2 0.44, FP 0.05
     // — docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md
     ("external:qwen/qwen3-embedding-4b", 0.70),
+    // instr1 scheme (both-side instruction prefix, spec-rev2 cell E): hit@2 0.57 at
+    // this floor — docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md.
+    // Key form: <raw gate key>:instr1 (see embed_scheme::floor_key_for).
+    ("external:qwen/qwen3-embedding-4b:instr1", 0.64),
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -112,6 +117,18 @@ pub fn gate_model_key(profile: &EmbedProfile, stub: Option<&str>) -> String {
             format!("external:{}", profile.model.to_lowercase())
         }
     }
+}
+
+/// Gate key under an active read scheme: the raw key, with `:instr1` appended
+/// when the read scheme is `instr1` (spec: the floor key is scheme-defining).
+/// Raw keys are byte-identical to `gate_model_key`, so pre-#265 behavior is
+/// unchanged until the cutover flips `wisdom_active_scheme`.
+pub fn gate_model_key_for_scheme(
+    profile: &EmbedProfile,
+    stub: Option<&str>,
+    scheme: Scheme,
+) -> String {
+    floor_key_for(&gate_model_key(profile, stub), scheme)
 }
 
 /// True for an id usable with `--exclude`: `^[A-Za-z0-9._:-]{1,128}$`.
@@ -702,6 +719,39 @@ mod tests {
         assert_eq!(gate_floor("stub:constant8"), Some(0.5));
         assert_eq!(gate_floor("external:qwen/qwen3-embedding-4b"), Some(0.70));
         assert_eq!(gate_floor("local:nomic-embed-code"), None);
+    }
+
+    #[test]
+    fn gate_keys_per_scheme() {
+        let ext = EmbedProfile::External {
+            profile: ExternalEmbedProfile {
+                base_url: "https://x".into(),
+                model: "qwen/qwen3-embedding-4b".into(),
+                api_key: None,
+            },
+        };
+        assert_eq!(
+            gate_model_key_for_scheme(&ext, None, Scheme::Raw),
+            "external:qwen/qwen3-embedding-4b"
+        );
+        assert_eq!(
+            gate_model_key_for_scheme(&ext, None, Scheme::Instr1),
+            "external:qwen/qwen3-embedding-4b:instr1"
+        );
+        // The stub overrides the profile whatever the scheme.
+        assert_eq!(
+            gate_model_key_for_scheme(&ext, Some("constant8"), Scheme::Instr1),
+            "stub:constant8:instr1"
+        );
+        // Both calibrated floors resolve through the scheme-aware key.
+        assert_eq!(
+            gate_floor(&gate_model_key_for_scheme(&ext, None, Scheme::Raw)),
+            Some(0.70)
+        );
+        assert_eq!(
+            gate_floor(&gate_model_key_for_scheme(&ext, None, Scheme::Instr1)),
+            Some(0.64)
+        );
     }
 
     #[test]

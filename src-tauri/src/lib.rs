@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod doctor;
 mod drafts_api;
+pub mod embed_scheme;
 pub mod embed_sweep;
 pub mod embedder;
 mod entities_api;
