@@ -98,7 +98,7 @@ commit, never touch the live brain).
   subcommand: `status` (counts per scheme, active read scheme) and
   `activate instr1` (refuses unless raw non-null count = 0, prints count otherwise;
   atomic meta flip; idempotent). Integration tests over a scratch DB.
-- [ ] **Task 5 — Snapshot + bench (regeneration).** Re-run the calibrator with the
+- [x] **Task 5 — Snapshot + bench (regeneration).** (692176a) Re-run the calibrator with the
   committed prefix flags on the committed fixtures; commit the new `expected.json` +
   `vectors.json.gz` together, stamped with the scheme (the ONLY task allowed to
   regenerate fixtures — per the Task 2 guardrail). Extend `wisdom_gate_bench.rs` to
