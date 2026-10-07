@@ -36,7 +36,11 @@ pub struct OkfFrontmatter {
     pub okf_version: String,
     pub profile: String,
     pub title: String,
-    pub entity_type: EntityType,
+    /// Document kind; unrelated to graph node type. Serialized to disk and
+    /// to MCP JSON under the legacy key `entity_type` (no alias: a
+    /// `doc_kind:` key FAILS to parse, so no other spelling is blessed).
+    #[serde(rename = "entity_type")]
+    pub doc_kind: DocKind,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
     pub created_at: String,
@@ -46,11 +50,12 @@ pub struct OkfFrontmatter {
     pub supersedes: Option<String>,
 }
 
-/// Entity types for OKF documents
+/// Document kinds for OKF documents; unrelated to graph node type. Serialized
+/// under the legacy wire name `entity_type` (variants/values unchanged).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum EntityType {
+pub enum DocKind {
     Fact,
     Task,
     Event,
@@ -58,14 +63,14 @@ pub enum EntityType {
     Doc,
 }
 
-impl std::fmt::Display for EntityType {
+impl std::fmt::Display for DocKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            EntityType::Fact => "fact",
-            EntityType::Task => "task",
-            EntityType::Event => "event",
-            EntityType::Concept => "concept",
-            EntityType::Doc => "doc",
+            DocKind::Fact => "fact",
+            DocKind::Task => "task",
+            DocKind::Event => "event",
+            DocKind::Concept => "concept",
+            DocKind::Doc => "doc",
         };
         write!(f, "{}", s)
     }
@@ -293,7 +298,8 @@ pub fn render_frontmatter(fm: &OkfFrontmatter) -> String {
     doc.push_str(&format!("okf_version: {}\n", fm.okf_version));
     doc.push_str(&format!("profile: {}\n", fm.profile));
     doc.push_str(&format!("title: {}\n", render_scalar(&fm.title)));
-    doc.push_str(&format!("entity_type: {}\n", fm.entity_type));
+    // On-disk key stays `entity_type` (r14-m3) — only the Rust field renamed.
+    doc.push_str(&format!("entity_type: {}\n", fm.doc_kind));
     if let Some(ref tags) = fm.tags {
         if !tags.is_empty() {
             let tags_str = tags
@@ -334,7 +340,7 @@ pub(crate) fn test_fm_with_title(title: &str) -> OkfFrontmatter {
         okf_version: "0.1".to_string(),
         profile: "llm-wiki/1".to_string(),
         title: title.to_string(),
-        entity_type: EntityType::Fact,
+        doc_kind: DocKind::Fact,
         tags: None,
         created_at: "2026-09-25T00:00:00Z".to_string(),
         updated_at: None,
@@ -428,9 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_type_display() {
-        assert_eq!(EntityType::Fact.to_string(), "fact");
-        assert_eq!(EntityType::Task.to_string(), "task");
+    fn test_doc_kind_display() {
+        assert_eq!(DocKind::Fact.to_string(), "fact");
+        assert_eq!(DocKind::Task.to_string(), "task");
     }
 
     #[test]
@@ -439,7 +445,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: Some(vec!["tag1".to_string(), "tag2".to_string()]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
@@ -454,7 +460,7 @@ mod tests {
             okf_version: "0.2".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
@@ -474,7 +480,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/2".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
@@ -494,7 +500,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "   ".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
@@ -514,7 +520,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: None,
             created_at: "not-a-date".to_string(),
             updated_at: None,
@@ -534,7 +540,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: Some("not-a-date".to_string()),
@@ -554,7 +560,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: Some(vec!["a".repeat(101)]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
@@ -575,7 +581,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: Some(tags),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
@@ -604,7 +610,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: "Test Note".to_string(),
-            entity_type: EntityType::Fact,
+            doc_kind: DocKind::Fact,
             tags: Some(vec!["tag1".to_string(), "tag2".to_string()]),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: Some("2024-01-02T00:00:00Z".to_string()),
@@ -634,9 +640,66 @@ updated_at: "2024-01-02T00:00:00Z""#;
         assert_eq!(fm.okf_version, "0.1");
         assert_eq!(fm.profile, "llm-wiki/1");
         assert_eq!(fm.title, "Test Note");
-        assert_eq!(fm.entity_type, EntityType::Fact);
+        assert_eq!(fm.doc_kind, DocKind::Fact);
         assert_eq!(fm.tags, Some(vec!["tag1".to_string(), "tag2".to_string()]));
         assert_eq!(fm.created_at, "2024-01-01T00:00:00Z");
         assert_eq!(fm.updated_at, Some("2024-01-02T00:00:00Z".to_string()));
+    }
+
+    /// r11-m3: the field is required and has NO alias — a bare `doc_kind:`
+    /// key must FAIL to parse, so no vault spelling other than
+    /// `entity_type:` is ever blessed on input.
+    #[test]
+    fn doc_kind_key_fails_to_parse_no_alias() {
+        let yaml = r#"okf_version: "0.1"
+profile: "llm-wiki/1"
+title: "Test Note"
+doc_kind: fact
+created_at: "2024-01-01T00:00:00Z""#;
+        assert!(
+            parse_frontmatter(yaml).is_err(),
+            "bare `doc_kind:` key must not parse (no serde alias)"
+        );
+    }
+
+    /// §6 item 5: the Serialize direction keeps the legacy `entity_type` key
+    /// (serde_json::to_value), so MCP JSON round-trips existing vaults.
+    #[test]
+    fn serialize_round_trip_keeps_entity_type_key() {
+        let fm = test_fm_with_title("Round Trip");
+        let v = serde_json::to_value(&fm).unwrap();
+        assert!(v.get("entity_type").is_some(), "no entity_type key: {v}");
+        assert!(v.get("doc_kind").is_none(), "doc_kind leaked: {v}");
+        assert_eq!(v["entity_type"], "fact");
+        let back: OkfFrontmatter = serde_json::from_value(v).unwrap();
+        assert_eq!(back, fm);
+    }
+
+    /// SG9 / §6 item 5 (mcp-server builds only): the schemars `$defs` key is
+    /// DocKind (derived from the Rust type name; renaming the $defs entry
+    /// back is REJECTED) and the doc comments surface as descriptions.
+    #[cfg(feature = "mcp-server")]
+    #[test]
+    fn mcp_schema_defs_doc_kind_and_description() {
+        let schema = schemars::schema_for!(OkfFrontmatter);
+        let v = serde_json::to_value(&schema).unwrap();
+        let defs = v
+            .get("$defs")
+            .expect("schema must carry $defs")
+            .as_object()
+            .expect("$defs must be an object");
+        assert!(
+            defs.contains_key("DocKind"),
+            "DocKind missing from $defs: {v}"
+        );
+        assert!(
+            !defs.contains_key("EntityType"),
+            "stale EntityType $defs entry: {v}"
+        );
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(
+            text.contains("unrelated to graph node type"),
+            "doc-comment description missing from schema"
+        );
     }
 }
