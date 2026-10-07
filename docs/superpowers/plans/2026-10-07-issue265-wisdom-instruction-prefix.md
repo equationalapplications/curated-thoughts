@@ -92,7 +92,7 @@ commit, never touch the live brain).
   DB; assert which rows are candidates and which floor/filter/prefix mode was
   selected. No network, no real embedder (that would require feature-gating, which
   is forbidden for these tests).**
-- [ ] **Task 4 — Sweep + admin command.** Scheme-filtered sweep mode: re-embed rows
+- [x] **Task 4 — Sweep + admin command.** (f555e43) Scheme-filtered sweep mode: re-embed rows
   WHERE `embedding_blob IS NOT NULL AND embed_scheme != 'instr1'`, stamping as it
   goes (idempotent resume; stamping re-affirmed per F1c). `ct wisdom scheme`
   subcommand: `status` (counts per scheme, active read scheme) and
