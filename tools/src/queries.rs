@@ -694,6 +694,59 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
 // tools/tests/).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// `ct wisdom match` — issue #265 (consumer: CTI live wisdom delivery).
+// ---------------------------------------------------------------------------
+
+/// Relevance-gated, read-only wisdom match (spec 2026-10-06-issue265).
+/// Exit 0 on success including zero matches and an uncalibrated gate;
+/// every error propagates (exit 1). Never returns EXIT_NO_RESULTS.
+pub fn wisdom_match_cmd(
+    text: &str,
+    max: usize,
+    exclude: &[String],
+    json_mode: bool,
+) -> Result<i32> {
+    use tauri_app_lib::wisdom_match as wm;
+
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    let profile = retrieval::load_embed_profile(&brain.paths.config_path)
+        .context("loading embed profile from vault config.json")?;
+    let stub = std::env::var("CURATED_EMBED_STUB").ok();
+    let key = wm::gate_model_key(&profile, stub.as_deref());
+    let text = wm::truncate_text(text);
+    // Embed only when entries can actually be produced: an uncalibrated
+    // gate, --max 0, or an empty text never needs the embedding backend.
+    let query_vec = if text.trim().is_empty() || max == 0 || wm::gate_floor(&key).is_none() {
+        Vec::new()
+    } else {
+        embed_one(&profile, text.to_string()).context("failed to embed query")?
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let result = wm::wisdom_match(&conn, &query_vec, &key, max, exclude, now_ms)?;
+    if json_mode {
+        print_json(&result);
+    } else {
+        println!("gate: {}", result.gate);
+        for c in &result.corrections {
+            println!(
+                "correction {} (supersedes {}): {}",
+                c.id,
+                c.supersedes.join(", "),
+                c.title
+            );
+        }
+        for e in &result.entries {
+            println!("{:.4} {}: {}", e.score.unwrap_or(0.0), e.id, e.title);
+        }
+    }
+    Ok(0)
+}
+
 // The historic cli_common.rs does not carry a `mod tests` block for the
 // read-side fns; integration coverage lives under tools/tests/. We keep the
 // file self-contained but only assert on the units that are cheap to test

@@ -238,6 +238,7 @@ ct proposals review                    # the human-verification gate, headless;
 ct wisdom deposit --path immutable-source-files/agents/topic.md \
   --title "Topic" --body "..." --yes   # append-only agent wisdom deposit
 ct wisdom pending                      # deposits awaiting librarian evidence
+ct wisdom match --json -- <message>    # relevance-gated wisdom facts for a message (CTI live delivery)
 ct evidence regrade --yes              # re-run the V20 evidence re-grade (idempotent)
 ct trust [--list] [--revoke <path>]    # manage symlinks the ingest walker may follow
 ```

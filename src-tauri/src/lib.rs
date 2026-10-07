@@ -38,6 +38,7 @@ pub mod watcher;
 pub mod wiki_diagnostics;
 pub mod wiki_graph;
 pub mod wisdom_deposit;
+pub mod wisdom_match;
 
 use crate::embedder::embed_batch;
 use crate::inference::{

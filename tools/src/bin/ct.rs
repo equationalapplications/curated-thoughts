@@ -290,6 +290,21 @@ enum WisdomCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Relevance-gated, read-only match of wisdom facts against a message
+    /// (issue #265; consumer: CTI live delivery). The text goes after `--`.
+    Match {
+        #[arg(long)]
+        json: bool,
+        /// Most relevance-gated entries to return (clamped to 0..=10; corrections are extra).
+        #[arg(long, default_value_t = 2)]
+        max: usize,
+        /// Fact id already in the caller's context (repeatable; use the --exclude=<id> form).
+        #[arg(long = "exclude", value_parser = parse_fact_id, action = clap::ArgAction::Append)]
+        exclude: Vec<String>,
+        /// The message to match. Only accepted after `--`.
+        #[arg(last = true, required = true)]
+        text: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +316,17 @@ fn require_yes(yes: bool, what: &str) -> Result<()> {
         bail!("refusing: {what} is a write; pass --yes to proceed");
     }
     Ok(())
+}
+
+/// clap value parser for `--exclude`: `^[A-Za-z0-9._:-]{1,128}$`.
+fn parse_fact_id(s: &str) -> Result<String, String> {
+    if tauri_app_lib::wisdom_match::valid_fact_id(s) {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "invalid fact id {s:?} (expected ^[A-Za-z0-9._:-]{{1,128}}$)"
+        ))
+    }
 }
 
 /// Open a migrated brain connection and build the same ToolDispatchContext the
@@ -565,6 +591,20 @@ fn run(cmd: Cmd) -> Result<i32> {
                 yes,
             ),
             WisdomCmd::Pending { json } => wisdom_pending_cmd(json),
+            WisdomCmd::Match {
+                json,
+                max,
+                exclude,
+                text,
+            } => {
+                if exclude.len() > tauri_app_lib::wisdom_match::MAX_EXCLUDES {
+                    bail!(
+                        "at most {} --exclude values",
+                        tauri_app_lib::wisdom_match::MAX_EXCLUDES
+                    );
+                }
+                cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json)
+            }
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
         Cmd::Heal { yes } => {
