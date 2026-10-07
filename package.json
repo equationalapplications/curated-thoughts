@@ -1,7 +1,7 @@
 {
   "name": "curated-thoughts",
   "private": true,
-  "version": "3.2.0",
+  "version": "3.3.0",
   "packageManager": "pnpm@10.33.2",
   "pnpm": {
     "overrides": {
@@ -42,15 +42,15 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@blocknote/core": "0.54.2",
-    "@blocknote/mantine": "0.54.2",
-    "@blocknote/react": "0.54.2",
+    "@blocknote/core": "0.55.0",
+    "@blocknote/mantine": "0.55.0",
+    "@blocknote/react": "0.55.0",
     "@equationalapplications/core-llm-wiki": "7.9.0",
     "@equationalapplications/react-llm-wiki": "7.9.0",
     "@equationalapplications/schema-org-llm-wiki": "7.9.0",
     "@equationalapplications/schema-software-org": "7.9.0",
-    "@mantine/core": "9.6.1",
-    "@mantine/hooks": "9.6.1",
+    "@mantine/core": "9.6.2",
+    "@mantine/hooks": "9.6.2",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.3",
     "@tauri-apps/plugin-notification": "2.4.0",
@@ -67,10 +67,10 @@
     "@semantic-release/commit-analyzer": "13.0.1",
     "@semantic-release/exec": "7.1.0",
     "@semantic-release/git": "11.0.1",
-    "@semantic-release/github": "12.0.9",
-    "@semantic-release/npm": "13.1.5",
+    "@semantic-release/github": "12.0.10",
+    "@semantic-release/npm": "13.2.0",
     "@semantic-release/release-notes-generator": "14.1.1",
-    "@tauri-apps/cli": "2.11.4",
+    "@tauri-apps/cli": "2.11.5",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.7",
@@ -81,10 +81,10 @@
     "eslint": "9.39.4",
     "eslint-plugin-jsx-a11y": "6.10.2",
     "eslint-plugin-react": "7.37.5",
-    "jsdom": "30.0.1",
+    "jsdom": "30.1.1",
     "semantic-release": "25.0.9",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.70.0",
+    "typescript-eslint": "8.70.1",
     "vite": "8.3.0",
     "vitest": "5.0.1"
   }

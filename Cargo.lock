@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "curated-thoughts"
-version = "3.2.0"
+version = "3.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1266,6 +1266,7 @@ dependencies = [
  "dirs",
  "flate2",
  "fs4",
+ "hex",
  "notify",
  "rmcp",
  "rusqlite",
