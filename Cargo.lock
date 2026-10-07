@@ -1266,6 +1266,7 @@ dependencies = [
  "dirs",
  "flate2",
  "fs4",
+ "hex",
  "notify",
  "rmcp",
  "rusqlite",
