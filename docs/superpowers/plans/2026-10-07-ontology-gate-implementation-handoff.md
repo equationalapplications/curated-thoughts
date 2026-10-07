@@ -44,8 +44,10 @@ the code. This file only adds what the skill can't know.
 - **Resume at:** Task 3 fix round 1 — dispatch the fix from
   `task-3-review.md` to the Task 3 implementer's report context (report:
   `task-3-report.md` in the same workspace), then scoped re-review, then
-  push `8c3e83b` + fix commit(s) together, verify CI, ledger, and continue
-  at Task 4.
+  push the fix commit, verify CI, ledger, and continue at Task 4.
+  (`8c3e83b` itself was pushed inadvertently together with this handoff's
+  commit `3faa2ad` — harmless; the review already ran against it and CI on
+  the tip must still be verified before Task 4.)
 - Before you start: `git log --oneline -5` and `git status`. If git has
   moved past what this file says, trust git and the ledger (§2) over this
   file.
