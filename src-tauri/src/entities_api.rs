@@ -56,8 +56,8 @@ pub fn update_entity_summary_cmd(
 
 #[tauri::command]
 pub fn archive_entity_cmd(entity_id: String, db_state: State<DbState>) -> Result<(), String> {
-    let guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    archive_entity(&guard.0, &entity_id).map_err(|e| e.to_string())
+    let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    archive_entity(&mut guard.0, &entity_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

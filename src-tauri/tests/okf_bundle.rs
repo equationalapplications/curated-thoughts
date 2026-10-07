@@ -420,6 +420,15 @@ fn merged_pair_exports_as_one_entity_and_archived_cluster_exports_nothing() {
         [],
     )
     .unwrap();
+    // An entity-space survivor→loser edge: its ENDPOINTS must re-key to the
+    // survivor at export (fix round 1, Important 3) — a verbatim loser
+    // endpoint dangles on any peer and is silently dropped at import.
+    conn.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('ed_sl','ent_surv','ent_surv','ent_lose','related_to',1)",
+        [],
+    )
+    .unwrap();
 
     // ONE entity, carrying BOTH entities' facts, loser facts keyed to the
     // survivor.
@@ -431,6 +440,21 @@ fn merged_pair_exports_as_one_entity_and_archived_cluster_exports_nothing() {
     assert!(
         exported[0].facts.iter().all(|f| f.entity_id == "ent_surv"),
         "loser facts map to the survivor (r2-M8)"
+    );
+    assert!(
+        exported[0]
+            .edges
+            .iter()
+            .any(|(s, t, _)| s == "ent_surv" && t == "ent_surv"),
+        "edge endpoints re-key to the survivor (Important 3): {:?}",
+        exported[0].edges
+    );
+    assert!(
+        exported[0]
+            .edges
+            .iter()
+            .all(|(s, t, _)| s != "ent_lose" && t != "ent_lose"),
+        "no endpoint ships as the merged-away loser"
     );
 
     // Matrix case: archive the survivor → the whole cluster is excluded —
@@ -475,8 +499,25 @@ fn merged_pair_export_reimport_yields_one_entity_with_both_fact_sets() {
         [],
     )
     .unwrap();
+    // A pre-merge edge still ANCHORED on the loser, with fact endpoints —
+    // it must ship under the survivor (cluster-closed anchor) and survive
+    // the re-import (fix round 1, Important 3 coverage for edges).
+    src.execute(
+        "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+         VALUES ('ed_ll','ent_lose','fact_s','fact_l','related_to',2)",
+        [],
+    )
+    .unwrap();
 
     let entities = load_export_entities(&src, None).unwrap();
+    assert!(
+        entities[0]
+            .edges
+            .iter()
+            .any(|(s, t, _)| s == "fact_s" && t == "fact_l"),
+        "the loser-anchored edge ships under the survivor: {:?}",
+        entities[0].edges
+    );
     let files = tauri_app_lib::okf::bundle_write::write_bundle(&entities).unwrap();
     let bundle = parse_bundle(&files).unwrap();
     let mut dest = open_in_memory().unwrap();
@@ -490,4 +531,14 @@ fn merged_pair_export_reimport_yields_one_entity_with_both_fact_sets() {
         .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
         .unwrap();
     assert_eq!(facts, 2, "both fact sets survived the transfer");
+    let (edge_anchor, edge_count): (String, i64) = dest
+        .query_row(
+            "SELECT entity_id, COUNT(*) FROM llm_wiki_edges
+             WHERE source_id = 'fact_s' AND target_id = 'fact_l'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(edge_count, 1, "the edge survived the round trip");
+    assert_eq!(edge_anchor, "ent_surv", "re-anchored on the survivor");
 }

@@ -31,7 +31,7 @@ pub struct EntityConnections {
 /// Batch-load endpoint labels (facts + tasks) to avoid N+1 queries.
 fn get_endpoint_labels_batch(
     conn: &Connection,
-    entity_id: &str,
+    cluster: &[String],
     record_ids: &[String],
 ) -> Result<HashMap<String, String>> {
     let mut labels = HashMap::new();
@@ -40,15 +40,19 @@ fn get_endpoint_labels_batch(
         return Ok(labels);
     }
 
-    // Load fact titles in one batch
+    let cluster_ph = vec!["?"; cluster.len()].join(",");
+
+    // Load fact titles in one batch (cluster-closed: labels for the
+    // survivor's redirected losers' rows resolve identically).
     let placeholders = record_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let query_str = format!(
-        "SELECT id, title FROM llm_wiki_entries WHERE entity_id = ? AND id IN ({})",
+        "SELECT id, title FROM llm_wiki_entries WHERE entity_id IN ({cluster_ph}) AND id IN ({})",
         placeholders
     );
 
     let mut stmt = conn.prepare(&query_str)?;
-    let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&entity_id];
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> =
+        cluster.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     for id in record_ids {
         params_vec.push(id);
     }
@@ -74,12 +78,13 @@ fn get_endpoint_labels_batch(
             .collect::<Vec<_>>()
             .join(",");
         let query_str = format!(
-            "SELECT id, description FROM llm_wiki_tasks WHERE entity_id = ? AND id IN ({})",
+            "SELECT id, description FROM llm_wiki_tasks WHERE entity_id IN ({cluster_ph}) AND id IN ({})",
             placeholders
         );
 
         let mut stmt = conn.prepare(&query_str)?;
-        let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&entity_id];
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> =
+            cluster.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         for id in &remaining_ids {
             params_vec.push(*id);
         }
@@ -111,6 +116,14 @@ fn escape_like(input: &str) -> String {
 
 /// Outgoing edges (endpoint labels resolved) + name-based wikilink backlinks.
 pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<EntityConnections> {
+    // Fix round 1 (Important 2, spec R2.7.5 / r13-m3): the WHOLE lookup
+    // resolves redirects and is cluster-closed — a stale loser link must
+    // yield the survivor's edges, name, and backlinks consistently (never
+    // the loser's edges under the survivor's name), and pre-merge edges
+    // still anchored on a loser must surface under the survivor.
+    let resolved = crate::db::entities::resolve_entity_id(conn, entity_id)?;
+    let cluster = crate::db::entities::cluster_ids(conn, &resolved)?;
+
     // Read-side manifest filter (issue #158). Mirrors the gate
     // `wiki_graph::fetch_neighbors` applies on the traversal path: when the
     // entity has a strict ontology, off-manifest edges are grandfathered
@@ -118,17 +131,18 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
     // Brain Connections is exactly the surface a stale row is most visible.
     // Without a strict ontology, every edge is admitted (the gate is
     // closed, so the filter is a no-op).
-    let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
+    let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, &resolved);
 
     let mut outgoing = Vec::new();
     {
-        let mut stmt = conn.prepare(
+        let placeholders = vec!["?"; cluster.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, source_id, target_id, edge_type FROM llm_wiki_edges
-             WHERE entity_id = ?1
-             ORDER BY edge_type, created_at",
-        )?;
+             WHERE entity_id IN ({placeholders})
+             ORDER BY edge_type, created_at"
+        ))?;
         let rows: Vec<(String, String, String, String)> = stmt
-            .query_map([entity_id], |r| {
+            .query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -149,8 +163,9 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
         }
         let all_record_ids: Vec<String> = dedup_ids.into_iter().collect();
 
-        // Batch-load all labels in two queries (facts, then tasks)
-        let labels = get_endpoint_labels_batch(conn, entity_id, &all_record_ids)?;
+        // Batch-load all labels in two queries (facts, then tasks) —
+        // cluster-closed like the anchor lookup above.
+        let labels = get_endpoint_labels_batch(conn, &cluster, &all_record_ids)?;
 
         // Build edges using pre-loaded labels
         for (id, source_id, target_id, edge_type) in rows {
@@ -165,9 +180,6 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
         }
     }
 
-    // Task 7 (R2.7.5): a stale loser link resolves to the survivor before
-    // the name lookup; live_entities keeps redirected rows out.
-    let resolved = crate::db::entities::resolve_entity_id(conn, entity_id)?;
     let name: Option<String> = conn
         .query_row(
             "SELECT name FROM live_entities WHERE id = ?1",
@@ -193,7 +205,7 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
          ORDER BY e.name COLLATE NOCASE",
     )?;
     let backlinks = stmt
-        .query_map(params![entity_id, pattern], |r| {
+        .query_map(params![resolved, pattern], |r| {
             Ok(EntityBacklink {
                 entity_id: r.get(0)?,
                 name: r.get(1)?,
@@ -394,5 +406,52 @@ mod tests {
             vec!["depends_on", "fabricated"],
             "non-strict brains must not be filtered"
         );
+    }
+
+    /// Fix round 1 (Important 2, r13-m3): a stale loser link yields the
+    /// SURVIVOR's connections consistently — loser-anchored pre-merge edges
+    /// surface under the survivor, labels resolve for loser-keyed rows, and
+    /// the name is the survivor's.
+    #[test]
+    fn get_entity_connections_via_loser_is_resolved_and_cluster_closed() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn, "Adrian", "");
+        let loser = make_entity(&mut conn, "Adrian", "");
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+        // One edge anchored on the SURVIVOR, one still anchored on the
+        // LOSER (pre-merge), endpoints are each entity's own fact.
+        seed_fact(&conn, &surv, "fact_s", "Survivor fact", "s body");
+        seed_fact(&conn, &loser, "fact_l", "Loser fact", "l body");
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_surv', ?1, 'fact_s', 'fact_s', 'related', 1)",
+            [&surv],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_lose', ?1, 'fact_l', 'fact_l', 'related', 2)",
+            [&loser],
+        )
+        .unwrap();
+
+        let connections = get_entity_connections(&conn, &loser).unwrap();
+        let edge_ids: Vec<&str> = connections.outgoing.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            edge_ids.contains(&"edge_surv") && edge_ids.contains(&"edge_lose"),
+            "both cluster-anchored edges surface under the survivor: {edge_ids:?}"
+        );
+        // Labels resolve for the loser-anchored row too.
+        let loser_edge = connections
+            .outgoing
+            .iter()
+            .find(|e| e.id == "edge_lose")
+            .unwrap();
+        assert_eq!(loser_edge.source_label, "Loser fact");
     }
 }

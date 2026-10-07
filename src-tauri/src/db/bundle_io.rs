@@ -163,10 +163,31 @@ fn load_edges(
             None => true,
         };
         if keep {
+            // Fix round 1 (Important 3, r2-M8): ENDPOINTS are re-keyed
+            // through their redirects to the survivor at export time — an
+            // endpoint shipping verbatim as a merged-away loser dangles on
+            // a fresh brain (no such id) and is silently dropped by the
+            // import's dead-endpoint rule. A cycle keeps the ORIGINAL id:
+            // export never silently drops data.
+            let source_id = rekey_endpoint(conn, &source_id)?;
+            let target_id = rekey_endpoint(conn, &target_id)?;
             out.push((source_id, target_id, edge_type));
         }
     }
     Ok(out)
+}
+
+/// Map one edge endpoint id through its redirect (if any) to the final id.
+fn rekey_endpoint(conn: &Connection, id: &str) -> Result<String> {
+    Ok(
+        match crate::db::merge_duplicates::resolve_redirect_chain(conn, id)? {
+            crate::db::merge_duplicates::ChainResolution::Survivor(s) => s,
+            crate::db::merge_duplicates::ChainResolution::None => id.to_string(),
+            // Hand-crafted cycle: keep the original id verbatim rather than
+            // guess — the merge report surfaces cycles for hand repair.
+            crate::db::merge_duplicates::ChainResolution::Cycle(_) => id.to_string(),
+        },
+    )
 }
 
 fn load_events(conn: &Connection, _survivor: &str, cluster: &[String]) -> Result<Vec<ExportEvent>> {

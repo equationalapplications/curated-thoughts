@@ -111,7 +111,11 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
         OutboxOperation::Insert,
         wiki_task_outbox_payload(
             &task_id,
-            entity_id,
+            // Fix round 1 (Important 1): the replica payload must carry the
+            // SAME resolved survivor id the row persists under — a payload
+            // keyed to the loser diverges the prisma-outbox replica (#132
+            // class).
+            &resolved,
             description,
             "pending",
             priority,
@@ -141,7 +145,9 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
 
     Ok(TaskRow {
         id: task_id,
-        entity_id: entity_id.to_string(),
+        // Fix round 1 (Important 1): report the row's ACTUAL owner, the
+        // resolved survivor — never the stale loser link.
+        entity_id: resolved.clone(),
         entity_name,
         description: description.to_string(),
         status: "pending".into(),
@@ -517,5 +523,44 @@ mod tests {
 
         let outbox_count_val = outbox_count(&conn, &task.id, "UPDATE");
         assert_eq!(outbox_count_val, 1);
+    }
+
+    /// Fix round 1 (Important 1): a task created via a stale loser link
+    /// persists on the survivor AND its outbox payload + TaskRow carry the
+    /// survivor id — a payload keyed to the loser diverges the prisma-outbox
+    /// replica (#132 class).
+    #[test]
+    fn create_task_via_loser_keys_row_outbox_and_result_to_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn);
+        let loser = make_entity(&mut conn);
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+
+        let row = create_task(&mut conn, &loser, "Via a stale loser link").unwrap();
+        assert_eq!(row.entity_id, surv, "TaskRow reports the survivor owner");
+
+        let (stored_entity, payload): (String, String) = conn
+            .query_row(
+                "SELECT t.entity_id, o.payload FROM llm_wiki_tasks t
+                 JOIN llm_wiki_outbox o ON o.record_id = t.id
+                 WHERE t.id = ?1 AND o.table_name = 'tasks'
+                 ORDER BY o.id DESC LIMIT 1",
+                [&row.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_entity, surv, "the row persists on the survivor");
+        let payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload_json["entity_id"].as_str().unwrap(),
+            surv,
+            "the replica payload is keyed to the survivor, never the loser"
+        );
+        assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
     }
 }

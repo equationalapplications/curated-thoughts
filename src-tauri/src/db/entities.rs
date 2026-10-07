@@ -780,21 +780,28 @@ pub fn update_entity_summary(conn: &Connection, entity_id: &str, summary: &str) 
 /// stale loser link still resolves to the (archived) survivor and the
 /// loser never reappears as a standalone row. Archive via a loser id acts
 /// on the survivor's cluster (r15-m3).
-pub fn archive_entity(conn: &Connection, entity_id: &str) -> Result<()> {
-    let resolved = resolve_entity_id(conn, entity_id)?;
-    let cluster = cluster_ids(conn, &resolved)?;
+pub fn archive_entity(conn: &mut Connection, entity_id: &str) -> Result<()> {
+    // Fix round 1 (Important 4, Global Constraints): the whole cluster
+    // archives in ONE ImmediateTx — N separate autocommitted writes would
+    // leave a half-archived cluster (survivor archived, losers live) if
+    // interrupted mid-way.
+    let tx = crate::db::entity_gate::ImmediateTx::begin(conn)?;
+    let resolved = resolve_entity_id(&tx, entity_id)?;
+    let cluster = cluster_ids(&tx, &resolved)?;
     let now = now_secs();
     let mut changes = 0usize;
     for id in &cluster {
-        changes += conn.execute(
+        changes += tx.execute(
             "UPDATE curated_entities SET deleted_at = ?1, updated_at = ?1
              WHERE id = ?2 AND deleted_at IS NULL",
             params![now, id],
         )?;
     }
     if changes == 0 {
+        let _ = tx.rollback();
         bail!("entity not found or already archived: {entity_id}");
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1081,7 +1088,7 @@ mod tests {
             },
         )
         .unwrap();
-        archive_entity(&conn, &archived.id).unwrap();
+        archive_entity(&mut conn, &archived.id).unwrap();
 
         let list = list_entities(&conn, EntitySort::NameAsc, &EntityListFilter::default()).unwrap();
         assert_eq!(list.len(), 1);
@@ -1471,9 +1478,9 @@ mod tests {
     /// `None` (a stale loser link must not look like a deleted entity).
     #[test]
     fn get_entity_loser_follows_redirect_to_archived_survivor() {
-        let (conn, surv, loser) = seed_pair();
+        let (mut conn, surv, loser) = seed_pair();
         redirect(&conn, &loser, &surv);
-        archive_entity(&conn, &surv).unwrap();
+        archive_entity(&mut conn, &surv).unwrap();
 
         let detail = get_entity(&conn, &loser).unwrap();
         let detail = detail.expect("archived survivor is returned, never None");
@@ -1503,10 +1510,10 @@ mod tests {
     /// link still resolves.
     #[test]
     fn archive_entity_archives_whole_cluster_and_keeps_redirects() {
-        let (conn, surv, loser) = seed_pair();
+        let (mut conn, surv, loser) = seed_pair();
         redirect(&conn, &loser, &surv);
         // Archive via the LOSER link (r15-m3): acts on the survivor cluster.
-        archive_entity(&conn, &loser).unwrap();
+        archive_entity(&mut conn, &loser).unwrap();
         let surv_deleted: Option<i64> = conn
             .query_row(
                 "SELECT deleted_at FROM curated_entities WHERE id = ?1",
@@ -1581,5 +1588,43 @@ mod tests {
         )
         .unwrap();
         assert!(resolve_entity_id(&conn, &b).is_err());
+    }
+
+    /// Fix round 1 (Important 4, Global Constraints): the cluster archive is
+    /// ONE transaction — a failure on ANY member's UPDATE (simulated here
+    /// with an aborting trigger, the interruption-equivalent) rolls back
+    /// every member, never leaving a half-archived cluster.
+    #[test]
+    fn archive_cluster_rolls_back_entirely_when_one_member_fails() {
+        let (mut conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        // Abort any UPDATE that would archive the survivor — whichever
+        // order the cluster is walked in, the other member's write must not
+        // survive.
+        // Triggers cannot bind parameters — inline the id (ent ids are
+        // `ent_<hex>`, so no quoting hazards).
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER forbid_surv_archive BEFORE UPDATE ON curated_entities
+             WHEN NEW.id = '{surv}' AND NEW.deleted_at IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'simulated interruption'); END"
+        ))
+        .unwrap();
+
+        assert!(archive_entity(&mut conn, &loser).is_err());
+
+        for id in [&surv, &loser] {
+            let deleted: Option<i64> = conn
+                .query_row(
+                    "SELECT deleted_at FROM curated_entities WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                deleted.is_none(),
+                "cluster member {id} must not be archived when the tx aborts"
+            );
+        }
+        // The guard trigger stays for this connection only (in-memory).
     }
 }
