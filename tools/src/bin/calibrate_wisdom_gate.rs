@@ -40,6 +40,22 @@ struct Args {
     /// Write vectors.json.gz + expected.json here (the regression fixture).
     #[arg(long)]
     freeze: Option<PathBuf>,
+    /// Qwen3-style query instruction prepended to each PROBE text before
+    /// embedding. Documents (facts) are always embedded raw, matching Qwen3
+    /// guidance that only the query side takes an instruction. Empty
+    /// (default) = the historical raw-query behavior. Diagnostic for the
+    /// 2026-10-07 handoff: adopting a prefix in production additionally
+    /// requires the gate's query-embed path (tools/src/queries.rs) to apply
+    /// the same string — the flag alone changes calibration only.
+    #[arg(long, default_value = "")]
+    query_prefix: String,
+    /// Optional instruction prepended to each FACT (document-side) text
+    /// before embedding. Diagnostic only for the 2026-10-07 2x2: Qwen3
+    /// guidance is that documents do NOT take an instruction, so production
+    /// adoption is expected to be query-side only. Recorded in expected.json
+    /// as `doc_prefix` when non-empty.
+    #[arg(long, default_value = "")]
+    doc_prefix: String,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -109,10 +125,29 @@ fn main() -> Result<()> {
         &profile,
         facts
             .iter()
-            .map(|f| embed_text_for_entry(&f.title, &f.body))
+            .map(|f| {
+                let text = embed_text_for_entry(&f.title, &f.body);
+                if args.doc_prefix.is_empty() {
+                    text
+                } else {
+                    format!("{}{}", args.doc_prefix, text)
+                }
+            })
             .collect(),
     )?;
-    let probe_vecs = embed_all(&profile, probes.iter().map(|p| p.text.clone()).collect())?;
+    let probe_vecs = embed_all(
+        &profile,
+        probes
+            .iter()
+            .map(|p| {
+                if args.query_prefix.is_empty() {
+                    p.text.clone()
+                } else {
+                    format!("{}{}", args.query_prefix, p.text)
+                }
+            })
+            .collect(),
+    )?;
     for (f, v) in facts.iter_mut().zip(fact_vecs) {
         f.vector = v;
     }
@@ -158,11 +193,19 @@ fn main() -> Result<()> {
     let Some((pct, hit, fp)) = best else {
         bail!("no floor meets FP <= {FP_BOUND}; model stays uncalibrated");
     };
-    let expected = serde_json::json!({
+    let mut expected = serde_json::json!({
         "model_key": key, "floor": pct as f64 / 100.0, "hit_at_2": hit, "fp_rate": fp,
         "n_relevant": n_rel, "n_irrelevant": n_irr,
         "facts_sha256": facts_sha, "probes_sha256": probes_sha,
     });
+    if !args.query_prefix.is_empty() {
+        // Recorded so the bench reader and future sessions can tell a
+        // prefix-calibrated snapshot from a raw-query one at a glance.
+        expected["query_prefix"] = serde_json::json!(args.query_prefix);
+    }
+    if !args.doc_prefix.is_empty() {
+        expected["doc_prefix"] = serde_json::json!(args.doc_prefix);
+    }
     println!("{}", serde_json::to_string_pretty(&expected)?);
 
     if let Some(dir) = args.freeze {

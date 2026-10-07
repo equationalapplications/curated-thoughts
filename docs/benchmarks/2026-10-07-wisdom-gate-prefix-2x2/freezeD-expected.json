@@ -1,0 +1,12 @@
+{
+  "doc_prefix": "Instruct: Given a user or agent message, retrieve stored wisdom entries that help answer or act on it\nQuery:",
+  "facts_sha256": "63c0349c8d95902769b50d9635c933108f33cfbc451fba3ae24caac714533f51",
+  "floor": 0.74,
+  "fp_rate": 0.04,
+  "hit_at_2": 0.58,
+  "model_key": "external:qwen/qwen3-embedding-4b",
+  "n_irrelevant": 100,
+  "n_relevant": 100,
+  "probes_sha256": "6124b38562c5c6340a769b242bfa781397ffde7549d5ea78074af2f226a00ac1",
+  "query_prefix": "Instruct: Given a user or agent message, retrieve stored wisdom entries that help answer or act on it\nQuery:"
+}
