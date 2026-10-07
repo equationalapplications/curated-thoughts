@@ -906,7 +906,17 @@ through `Connection::transaction_with_behavior(TransactionBehavior::
 Immediate)` — the redirect check + fallback lookup + insert sequence must
 be atomic (read-check-insert races re-create duplicates the merge sweep
 just removed), and a plain `&Connection` caller is a compile-time
-impossibility. Callers that already hold an IMMEDIATE transaction wrap
+impossibility. **Lock hold time (r21):** IMMEDIATE takes the write
+lock at BEGIN, which rules out SQLite's deferred-upgrade deadlock;
+concurrent writers (GUI vs. background import/heal) wait on the
+connection's busy timeout (rusqlite's 5 s default, or the explicit
+5 s set on the watcher/reconcile/MCP connections) rather than
+deadlock. The cost is contention, so the helper's transaction holds
+ONLY the redirect check, vocabulary lookup, insert, and ledger row —
+no LLM calls, network, or filesystem I/O inside it (synthesis output
+is complete before `resolve_proposal` opens its transaction). Bundle
+import already holds one IMMEDIATE transaction for the whole bundle
+(`bundle_apply.rs:320`); wave 1 adds no longer hold than that. Callers that already hold an IMMEDIATE transaction wrap
 it: `commit.rs:2362` and `bundle_apply.rs:320` (both
 `transaction_with_behavior(Immediate)`) — wrapping an EXISTING
 `Transaction` cannot guarantee the newtype's invariant (rusqlite exposes
@@ -1327,9 +1337,23 @@ survivor must not silently win with the wrong type.
   curated_entities' src-tauri/src` and cover every hit — the list
   above omits `connections.rs` (×2), `okf_migration.rs` (×2),
   `review_shim.rs`, `proposals_review.rs` (×2), `queries.rs`,
-  `bundle_io.rs` (r20-m6)); implement as a `live_entities` view or a
-  `NOT EXISTS (SELECT 1 FROM entity_redirects …)` predicate applied at
-  every reader, and add a required test that a merged pair EXPORTS as one
+  `bundle_io.rs` (r20-m6)); implement as a `live_entities` VIEW
+  (r21 — pinned; the per-reader `NOT EXISTS` alternative is dropped:
+  ~36 hand-patched predicates is the error-prone path).
+  `live_entities` = `curated_entities` rows with no `entity_redirects`
+  row; it does NOT filter `deleted_at` (readers keep their own
+  archived-row rules — `get_entity` deliberately returns archived
+  detail). Every READER selects from `live_entities`; writers
+  (`INSERT`/`UPDATE`/`DELETE`) and the few readers that must see
+  redirected rows (redirect resolution itself, the merge sweep,
+  `clear_vault_tables`) keep the base table. **Structural guard
+  (r21):** a required source-scan test walks `src-tauri/src` and
+  `tools/src` and fails on any `FROM curated_entities` / `JOIN
+  curated_entities` read that is not on an explicit allowlist (each
+  entry names its file and a one-line reason) — a newly added query
+  fails CI instead of silently resurrecting losers. The outcome tests
+  below stay as the end-to-end check; the scan is what catches a missed
+  SELECT. Also add a required test that a merged pair EXPORTS as one
   entity (bundle export `bundle_io.rs:16-17` selects
   `deleted_at IS NULL` rows — an unpatched export ships each loser with
   its facts, and the peer re-imports both with source ids, recreating
@@ -1415,6 +1439,16 @@ survivor must not silently win with the wrong type.
   fault during import aborts the import, never mints a duplicate.
   Required test: commit a fact naming a merged-away loser, assert it
   lands on the survivor.
+- **A merge is reversible (r21):** because no facts, edges, or entity
+  rows move, deleting a loser's `entity_redirects` row fully restores it
+  as a standalone entity — the merge's only state. Required test: merge
+  a pair, delete the redirect row, assert the loser reads, recalls, and
+  exports exactly as before the merge. Consequently a mistaken
+  merge-then-archive is NOT a new permanent loss: the losers were already
+  hidden by their redirects, and archive is one-way for EVERY entity
+  today (no un-archive path exists — pre-existing, out of wave-1 scope).
+  No `unmerge` command ships in wave 1; the merge report lists every
+  redirect written so a row can be removed by hand.
 - Wave-1 merges emit NO re-points, NO tombstones, NO outbox rows, and no
   bundle-format anything. (The replica converges via the wave-2 outbox
   graph export.)

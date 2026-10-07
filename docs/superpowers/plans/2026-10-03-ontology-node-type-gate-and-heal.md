@@ -197,7 +197,7 @@ CLEAR branch's non-tier DELETE and the three new tables only).
       all three tables + marker + manifest rows (§6 item 6 SLICE: the
       clear/restore rows only — plan-p4-m4; the watermark/migration rows
       are Task 5's and Task 9's).
-- [ ] **r21 addendum — V26 origin-ledger revision (spec R2.4.6; land
+- [x] **r21 addendum — V26 origin-ledger revision (DONE `6f5ada2`) (spec R2.4.6; land
       BEFORE Task 3, the ledger's first writer):** edit `MIGRATION_V26`
       in place — `original_type TEXT` (nullable: NULL = no label
       supplied), new `reason TEXT NOT NULL`; add the `OriginReason` enum
@@ -797,10 +797,18 @@ chains + cycle guard r2-m6).
 r13-m3 survivor-id rule, transitive fact closure, r15-m3 reject-vs-follow
 decision (follow + pin), r20-m6 `rg` audit covering all 15 files.
 
-- [ ] Shared redirect-resolution helper; apply at every reader hit (the
-      audit list); `EntityDetail.id` = survivor; archive-the-cluster;
-      export maps facts through redirects (r2-M8) + exclusion test.
-- [ ] Tests: §6 item 4 read/write rows + export/re-import.
+- [ ] `live_entities` VIEW (spec r21 — no per-reader `NOT EXISTS`);
+      move every reader hit (the audit list) onto it; writers and the
+      redirect/merge/clear readers stay on the base table.
+- [ ] Source-scan test: fail on any `FROM`/`JOIN curated_entities`
+      read in `src-tauri/src` + `tools/src` not on the allowlist
+      (file + one-line reason per entry).
+- [ ] Shared redirect-resolution helper; `EntityDetail.id` = survivor
+      (archived survivors returned as-is); archive-the-cluster (redirect
+      rows kept); export maps facts through redirects (r2-M8) +
+      exclusion test.
+- [ ] Tests: §6 item 4 read/write rows + export/re-import; merge
+      reversal (delete redirect row → loser restored, spec r21).
 
 ### Task 8: CLI (`ct ontology`/`ct heal`/`ct wiki merge-duplicates`) + MCP
 
