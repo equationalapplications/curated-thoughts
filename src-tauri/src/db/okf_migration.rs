@@ -7,6 +7,14 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Component, Path};
 
+/// One-shot owner of the IMMEDIATE transaction for okf_migration (Task 2).
+///
+/// `run_okf_migration` opens its own `ImmediateTx` here so the gate call
+/// (Task 3) at every minted row sees the same IMMEDIATE contract the helper
+/// demands. No other path opens an IMMEDIATE transaction with raw
+/// `BEGIN IMMEDIATE;` after Task 2 ships.
+use crate::db::entity_gate::ImmediateTx;
+
 pub const OKF_MIGRATED_META_KEY: &str = "okf_migrated_at";
 
 fn normalize_wiki_relative_path(path: &str) -> String {
@@ -160,7 +168,12 @@ fn mark_okf_migrated(conn: &Connection, now: i64) -> Result<()> {
 }
 
 /// Run V7 data conversion when vault path is known. Safe to call repeatedly.
-pub fn run_okf_migration(conn: &Connection, vault_root: &Path) -> Result<()> {
+///
+/// Takes `&mut Connection` (Task 2): the body opens an IMMEDIATE transaction
+/// through [`ImmediateTx::begin`] so the gate call (Task 3) at every minted
+/// row sees the same IMMEDIATE contract. Callers must hold a mutable borrow
+/// (the `let mut conn` fixup at the call site in `connection.rs`).
+pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()> {
     if okf_migration_complete(conn)? {
         return Ok(());
     }
@@ -170,19 +183,22 @@ pub fn run_okf_migration(conn: &Connection, vault_root: &Path) -> Result<()> {
         .context("system clock before unix epoch")?
         .as_secs() as i64;
 
-    conn.execute_batch("BEGIN IMMEDIATE;")?;
-    let result = (|| -> Result<()> {
+    let tx = ImmediateTx::begin(conn)?;
+    let commit_result = (|| -> Result<()> {
+        let conn: &Connection = &tx;
         migrate_approved_wiki_pages(conn, vault_root, now)?;
         drop_pending_wiki_proposals(conn, vault_root)?;
         purge_wiki_tier_documents(conn)?;
         mark_okf_migrated(conn, now)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = conn.execute_batch("ROLLBACK;");
-        return result;
-    }
-    conn.execute_batch("COMMIT;")?;
+    match commit_result {
+        Ok(()) => tx.commit(),
+        Err(e) => {
+            let _ = tx.rollback();
+            Err(e)
+        }
+    }?;
 
     conn.execute_batch("VACUUM;")?;
     Ok(())
@@ -229,7 +245,7 @@ mod tests {
         std::fs::create_dir_all(vault.join("wiki")).unwrap();
         std::fs::write(vault.join("wiki/page.md"), "# Page\n\nBody.").unwrap();
 
-        let conn = open_v7_db();
+        let mut conn = open_v7_db();
         conn.execute(
             "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
              VALUES ('page.md', '[]', 'test', 'approved')",
@@ -237,12 +253,12 @@ mod tests {
         )
         .unwrap();
 
-        run_okf_migration(&conn, vault).unwrap();
+        run_okf_migration(&mut conn, vault).unwrap();
         let count1: i64 = conn
             .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
             .unwrap();
 
-        run_okf_migration(&conn, vault).unwrap();
+        run_okf_migration(&mut conn, vault).unwrap();
         let count2: i64 = conn
             .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
             .unwrap();

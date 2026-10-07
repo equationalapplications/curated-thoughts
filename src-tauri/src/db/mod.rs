@@ -8,6 +8,7 @@ pub mod ddl_compat;
 pub mod drafts;
 pub mod edge_purge;
 pub mod entities;
+pub mod entity_gate;
 pub mod events;
 pub mod evidence_regrade;
 pub mod evidence_repair;

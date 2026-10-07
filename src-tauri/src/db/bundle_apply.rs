@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::db::entity_gate::ImmediateTx;
 use serde::{Deserialize, Serialize};
 
 use crate::db::commit::{
@@ -317,7 +319,12 @@ pub fn apply_import(
     mode: ImportMode,
 ) -> Result<ImportResult> {
     let (now_secs, now_ms) = now_timestamps();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Swap (plan-p7-m4): the newtype guarantees IMMEDIATE at the type level
+    // so the shared insert helper's `&ImmediateTx` parameter type-checks once
+    // Task 3 calls it from `ensure_entity`. Existing callers (`tx.commit()`,
+    // `&tx` → &Connection helpers) work unchanged because Transaction derefs
+    // transitively to Connection.
+    let tx = ImmediateTx::begin(conn)?;
     let mut result = ImportResult::default();
 
     // v0.1 → v0.2 fallback (upstream §4.8): if a profile-1 fact has no `sources` key
@@ -709,7 +716,7 @@ pub fn apply_import(
 }
 
 fn ensure_entity(
-    tx: &Connection,
+    tx: &ImmediateTx<'_>,
     entity: &ParsedEntity,
     target_entity_id: &str,
     mode: ImportMode,

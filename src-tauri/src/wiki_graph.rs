@@ -65,6 +65,12 @@ pub struct WikiEdgeType {
 pub struct WikiManifest {
     pub node_types: Vec<WikiNodeType>,
     pub edge_types: Vec<WikiEdgeType>,
+    /// Manifest's declared fallback node type (spec R2.4.4 / §2.4.5):
+    /// degrade ladder's final rung when an undeclared label lands. None
+    /// means "no fallback declared" — a strict manifest without a fallback
+    /// is a §2.4.5 configuration error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_node_type: Option<String>,
 }
 
 impl WikiManifest {
@@ -157,9 +163,12 @@ fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
         })
         .collect();
 
+    let fallback_node_type = field(&root, "fallback_node_type");
+
     Ok(WikiManifest {
         node_types,
         edge_types,
+        fallback_node_type,
     })
 }
 

@@ -5,8 +5,10 @@ use crate::db::proposals::{ItemDecision, ItemDecisionKind, ProposalKind, StoredE
 use crate::embedder::EmbedProfile;
 use anyhow::{bail, Context, Result};
 use rand::Rng;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+
+use crate::db::entity_gate::ImmediateTx;
 
 #[derive(Debug, Clone, Default)]
 pub struct ResolveOptions {
@@ -2359,7 +2361,7 @@ pub fn resolve_proposal(
         precompute_entry_embeddings(&items, decisions, options.embed_profile.as_ref())
     });
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = ImmediateTx::begin(conn)?;
 
     let (minted_entity, entity_was_created_here) =
         create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?;

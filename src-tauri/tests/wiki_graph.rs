@@ -90,6 +90,7 @@ fn wiki_get_ontology_tolerates_bare_string_manifest_entries() {
                     type_name: "supports".into(),
                     ..Default::default()
                 }],
+                fallback_node_type: None,
             }),
         }
     );

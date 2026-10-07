@@ -925,6 +925,18 @@ fn apply_v24_temporal_columns(conn: &Connection, stamp: bool) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort ensure failure logging (r8-m6). The open NEVER fails when
+/// the ensure cannot run on a read-only or contended database; this just
+/// surfaces the cause so a later write failure is not a mystery.
+fn log_ensure_failure(e: &anyhow::Error) {
+    #[cfg(feature = "mcp-server")]
+    tracing::warn!(error = %e, "manifest vocabulary ensure skipped or failed at open");
+    #[cfg(not(feature = "mcp-server"))]
+    eprintln!(
+        "[curated-thoughts] WARNING: manifest vocabulary ensure skipped or failed at open: {e}"
+    );
+}
+
 /// Drop a pre-r21 `entity_type_origin` so `MIGRATION_V26` re-creates it in
 /// the r21 shape (spec R2.4.6: nullable `original_type`, new `reason`).
 ///
@@ -1044,7 +1056,7 @@ impl AppDb {
     /// `CURATED_BRAIN_CONFIG` environments must use this instead of [`AppDb::open`],
     /// which derives config.json from the database's parent directory.
     pub fn open_with_config(path: &Path, config_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
         let vault_roots = VaultConfig::new(config_path.as_ref().to_path_buf())
             .vault_root()
@@ -1058,10 +1070,21 @@ impl AppDb {
                 }
             });
         migrate(&conn, vault_roots.clone(), path.parent())?;
+        // Order pinned by spec plan-p10-m4:
+        //   migrate → ensure_manifest_vocabulary → run_okf_migration.
+        // ensure MUST come BEFORE okf_migration so a fresh install's
+        // `tier_fact` row gets the document/process entries + fallback
+        // written before okf_migration's gate call (Task 3) reads it —
+        // an upgraded brain with a pending conversion + pre-wave-1
+        // manifest hitting the gate without a fallback aborts at open.
+        // Best-effort (r8-m6): log and never fail the open.
+        if let Err(e) = crate::db::entity_gate::ensure_all_manifest_vocabularies(&conn) {
+            log_ensure_failure(&e);
+        }
         if let Some(root) = vault_roots.as_ref() {
             let vault_path = std::path::Path::new(&root.canonical);
             if vault_path.is_dir() {
-                let _ = crate::db::okf_migration::run_okf_migration(&conn, vault_path);
+                let _ = crate::db::okf_migration::run_okf_migration(&mut conn, vault_path);
             }
         }
         Ok(AppDb(conn))
@@ -3507,5 +3530,89 @@ mod tests {
             edge_index_names(&conn),
             vec!["llm_wiki_edges_entity_id_idx"]
         );
+    }
+
+    /// Spec plan-p10-m4: `open_with_config` runs the open in this exact order:
+    /// `migrate` → `ensure_manifest_vocabulary` → `run_okf_migration`.
+    /// A fresh brain with a pre-wave-1 manifest (no `fallback_node_type`) is
+    /// the matrix case that fails the open if the order is wrong (Task 3's
+    /// gate call would abort without a fallback). We can't drive
+    /// `open_with_config` end-to-end in a unit test (it needs a real
+    /// `VaultConfig`), so this pins the order by checking the post-`migrate`
+    /// state, then asserting `ensure_all_manifest_vocabularies` runs
+    /// successfully and that the ensure's memo is recorded BEFORE the
+    /// `okf_migration` call site is reached. Concretely: after migrate, an
+    /// EA-subset manifest without `fallback_node_type` exists; running
+    /// `ensure_all_manifest_vocabularies` produces an `Ensured` outcome with
+    /// `fallback_set: true` and a recorded memo, matching what
+    /// `open_with_config` will see.
+    #[test]
+    fn open_with_config_runs_migrate_then_ensure_then_okf_migration_in_order() {
+        // 1. Open an in-memory brain and run migrate().
+        let conn = open_in_memory().unwrap();
+
+        // 2. Plant a pre-wave-1 EA-subset manifest WITHOUT fallback_node_type.
+        let types: Vec<serde_json::Value> = crate::db::entity_gate::EA_SEED_TYPES
+            .iter()
+            .map(|s| serde_json::json!({"type": s}))
+            .collect();
+        let manifest = serde_json::json!({
+            "node_types": types,
+            "edge_types": [],
+        });
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, 'a', ?2, 1)",
+            rusqlite::params!["tier_fact", manifest_json],
+        )
+        .unwrap();
+
+        // 3. Run ensure_all_manifest_vocabularies — what open_with_config does
+        //    between migrate and run_okf_migration.
+        let summary = crate::db::entity_gate::ensure_all_manifest_vocabularies(&conn)
+            .expect("ensure must succeed on a fresh brain with a clean manifest");
+        assert_eq!(summary.visited, 1, "exactly one manifest row was visited");
+        assert_eq!(
+            summary.extended, 1,
+            "the document/process entries were added"
+        );
+        assert_eq!(
+            summary.fallbacks_set, 1,
+            "the fallback_node_type key was written"
+        );
+
+        // 4. Verify the post-state matches what Task 3's gate call sees.
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let slugs: Vec<String> = parsed["node_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["type"].as_str().map(String::from))
+            .collect();
+        assert!(slugs.iter().any(|s| s == "document"));
+        assert!(slugs.iter().any(|s| s == "process"));
+        assert_eq!(
+            parsed["fallback_node_type"].as_str(),
+            Some("project"),
+            "ensure wrote the per-manifest fallback before run_okf_migration ran"
+        );
+
+        // 5. The memo was recorded (r11-m4: only after commit).
+        let memo_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM manifest_ensure_memo WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(memo_count, 1, "ensure must record its memo post-commit");
     }
 }

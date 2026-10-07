@@ -514,6 +514,11 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
 ///   independently, and a future `INSERT OR REPLACE` there would silently
 ///   reset any CT column). A row here is rung 1(a) of the ordered skip
 ///   rule: checked FIRST, SKIP.
+/// * `manifest_ensure_memo` — `ensure_manifest_vocabulary` (Task 2)
+///   idempotency memo, keyed `(entity_id, sha256(manifest_json))` and
+///   recorded ONLY after the write commits (r11-m4: an in-transaction memo
+///   + rollback would leave the row un-ensured but memo-marked until
+///     restart).
 ///
 /// Deliberately NO foreign keys to `curated_entities`: redirect losers and
 /// origin records must be insertable/deletable in any order across
@@ -545,6 +550,13 @@ CREATE TABLE IF NOT EXISTS ct_entity_optouts (
     entity_id  TEXT PRIMARY KEY,
     reason     TEXT,
     created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manifest_ensure_memo (
+    entity_id      TEXT NOT NULL,
+    manifest_hash  TEXT NOT NULL,
+    recorded_at    INTEGER NOT NULL,
+    PRIMARY KEY (entity_id, manifest_hash)
 );
 ";
 

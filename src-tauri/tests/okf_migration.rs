@@ -53,10 +53,10 @@ fn approved_page_with_h1_becomes_entity_and_event() {
     std::fs::create_dir_all(vault.join("wiki")).unwrap();
     std::fs::write(vault.join("wiki/foo.md"), "# My Entity\n\nFull body.").unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_v6_wiki_page(&conn, "foo.md", "approved", "[]");
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let entity_id = entity_id_from_wiki_path("foo.md");
     let (name, summary): (String, String) = conn
@@ -85,10 +85,10 @@ fn approved_page_missing_file_uses_empty_summary_and_stem_name() {
     let vault = tmp.path();
     std::fs::create_dir_all(vault.join("wiki")).unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_v6_wiki_page(&conn, "missing.md", "approved", "[]");
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let entity_id = entity_id_from_wiki_path("missing.md");
     let (name, summary): (String, String) = conn
@@ -110,7 +110,7 @@ fn pending_proposals_orphaned_and_sources_requeued() {
     std::fs::create_dir_all(&proposed).unwrap();
     std::fs::write(proposed.join("draft.md"), "# Draft").unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     conn.execute(
         "INSERT INTO documents (path, hash, tier, status) VALUES ('/v/documents/a.pdf', 'h', 'user_doc', 'indexed')",
         [],
@@ -120,7 +120,7 @@ fn pending_proposals_orphaned_and_sources_requeued() {
     let sources = format!("[{doc_id}]");
     seed_v6_wiki_page(&conn, "draft.md", "pending_review", &sources);
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let status: String = conn
         .query_row(
@@ -147,10 +147,10 @@ fn wiki_tier_documents_and_chunks_purged() {
     let tmp = TempDir::new().unwrap();
     let vault = tmp.path();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_wiki_tier_document(&conn, "/vault/wiki/old-page.md");
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let wiki_docs: i64 = conn
         .query_row(
@@ -177,11 +177,11 @@ fn migration_idempotent_no_duplicate_entities() {
     std::fs::create_dir_all(vault.join("wiki")).unwrap();
     std::fs::write(vault.join("wiki/x.md"), "# X\n").unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_v6_wiki_page(&conn, "x.md", "approved", "[]");
 
-    run_okf_migration(&conn, vault).unwrap();
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))

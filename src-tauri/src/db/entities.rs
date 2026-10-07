@@ -1,5 +1,6 @@
 //! CRUD for `curated_entities` — OKF entity surface for Brain mode (Phase 4).
 
+use crate::db::commit::{evidence_json_for_entry, is_librarian_source_ref_token};
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -192,39 +193,59 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
     serde_json::from_str(raw).ok()
 }
 
-/// Resolve an entry's `source_ref` evidence to `(document path, content hash)`
-/// pairs, deduplicated by path.
+/// The three outcomes of the shared source-resolution core (spec R2.3.2a).
 ///
-/// `pub(crate)` so `wiki_graph::wiki_context` can build its provenance list
-/// from the same resolution the entity reader uses — two implementations of
-/// "where did this fact come from" would be free to disagree.
-pub(crate) fn source_docs_from_ref(
+/// Distinct on purpose: today's empty-Vec hides all of them and lets a DB
+/// fault masquerade as "no source", which would let a stale hash climb to
+/// strict and get retyped (the spec L792 case). The classification table is
+/// authoritative; this enum is the Rust mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceResolution {
+    /// ≥1 evidence entry resolved to a document path (the healthy case).
+    Resolved(Vec<(String, Option<String>)>),
+    /// Had at least one evidence entry that did NOT resolve, OR the shape was
+    /// an unknown provenance shape — never a silent climb.
+    HadEvidenceUnresolved,
+    /// Ref was absent (`None` or an explicitly-listed non-provenance value) —
+    /// nothing claimed.
+    NoEvidence,
+}
+
+/// Shared source-resolution core (spec L756-764, L795-815, plan-p11-MAJOR-1).
+///
+/// Both the write-time gate (Task 3) and the heal census (Task 5) consume
+/// THIS function. [`source_docs_from_ref`] remains a second DISPLAY wrapper
+/// that degrades on error (spec L792).
+///
+/// ORDER pinned (R2.3.2a): librarian-token shape FIRST, then JSON-parse the
+/// rest. The two orders agree today (a `librarian-<hex>` token is never
+/// valid JSON) but "one resolver" must not grow a second ordering.
+pub(crate) fn resolve_source_core(
     conn: &Connection,
     entry_id: &str,
     source_ref: Option<&str>,
-) -> Vec<(String, Option<String>)> {
-    // Librarian rows carry a token; their evidence is CT-owned. Spec §2.3.
-    // Strict shape match — see `is_librarian_source_ref_token` for why a
-    // prefix test is not enough.
-    let raw = match source_ref {
-        Some(r) if crate::db::commit::is_librarian_source_ref_token(r) => {
-            match crate::db::commit::evidence_json_for_entry(conn, entry_id) {
+) -> rusqlite::Result<SourceResolution> {
+    let raw: String = match source_ref {
+        None => return Ok(SourceResolution::NoEvidence),
+        Some(r) if is_librarian_source_ref_token(r) => {
+            // The two split-arm sites from entities.rs:213-217 — errors do not
+            // masquerade as "no source" (spec L792).
+            match evidence_json_for_entry(conn, entry_id) {
                 Ok(Some(json)) => json,
-                // Read-path degradation only (review round 5): a DB fault is
-                // not "no provenance", but this feeds the entity reader/UI,
-                // which degrades defensively everywhere else. Export and
-                // destructive callers of the same helper propagate.
-                _ => return Vec::new(),
+                Ok(None) => return Ok(SourceResolution::HadEvidenceUnresolved),
+                Err(e) => return Err(e),
             }
         }
         Some(r) => r.to_string(),
-        None => return Vec::new(),
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
+
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(SourceResolution::HadEvidenceUnresolved),
     };
     let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
-        return Vec::new();
+        // JSON object with NO `evidence` key → HadEvidenceUnresolved.
+        return Ok(SourceResolution::HadEvidenceUnresolved);
     };
     let mut out: Vec<(String, Option<String>)> = Vec::new();
     for entry in evidence {
@@ -233,12 +254,8 @@ pub(crate) fn source_docs_from_ref(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         else {
-            // Pre-migration writes still carry chunk_id (legacy rowid) —
-            // the migration in Task 3 rewrites these. During the
-            // migration window (or for malformed evidence), skip the
-            // entry rather than try to resolve by rowid (the rowid is
-            // unstable across re-chunks).
-            continue;
+            // Pre-migration chunk-id-only entries (legacy) → unresolved.
+            return Ok(SourceResolution::HadEvidenceUnresolved);
         };
         let resolved: Option<String> = conn
             .query_row(
@@ -247,15 +264,46 @@ pub(crate) fn source_docs_from_ref(
                 [hash],
                 |r| r.get(0),
             )
-            .optional()
-            .unwrap_or(None);
+            .optional()?; // propagate DB faults (entities.rs:251 swallow site)
         if let Some(path) = resolved {
             if !out.iter().any(|(existing, _)| existing == &path) {
                 out.push((path, Some(hash.to_string())));
             }
+        } else {
+            // ≥1 entry did not resolve → HadEvidenceUnresolved.
+            return Ok(SourceResolution::HadEvidenceUnresolved);
         }
     }
-    out
+    if out.is_empty() {
+        // JSON with `"evidence": []` (the V20 doomed-row shape) → unresolved.
+        Ok(SourceResolution::HadEvidenceUnresolved)
+    } else {
+        Ok(SourceResolution::Resolved(out))
+    }
+}
+
+/// Resolve an entry's `source_ref` evidence to `(document path, content hash)`
+/// pairs, deduplicated by path.
+///
+/// `pub(crate)` so `wiki_graph::wiki_context` can build its provenance list
+/// from the same resolution the entity reader uses — two implementations of
+/// "where did this fact come from" would be free to disagree.
+///
+/// DISPLAY wrapper only (spec L795-815): the shared resolver core lives in
+/// this module as [`resolve_source_core`] and returns a `SourceResolution`
+/// with `Resolved`/`HadEvidenceUnresolved`/`NoEvidence` kept distinct. A DB
+/// fault is propagated by the core (Task 2) and caught here to degrade the
+/// display, not to let "no source" climb to strict.
+pub(crate) fn source_docs_from_ref(
+    conn: &Connection,
+    entry_id: &str,
+    source_ref: Option<&str>,
+) -> Vec<(String, Option<String>)> {
+    match resolve_source_core(conn, entry_id, source_ref) {
+        Ok(SourceResolution::Resolved(paths)) => paths,
+        Ok(_) => Vec::new(),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn order_clause(sort: EntitySort) -> &'static str {
@@ -725,18 +773,21 @@ mod tests {
 
     #[test]
     fn source_docs_from_ref_handles_evidence_without_chunk_id() {
-        // Evidence entry with no content_hash is skipped; a valid sibling still resolves.
+        // Spec R2.3.2a (Task 2): ANY evidence entry that lacks content_hash is
+        // an unresolved entry — the WHOLE ref resolves to
+        // `SourceResolution::HadEvidenceUnresolved`, which the display
+        // wrapper degrades to `[]`. Pre-wave-1 semantics used to skip the
+        // entry and keep the sibling; the spec r10-MINOR-4 consolidated both
+        // cases (chunk-id legacy, malformed JSON, empty hash) under one
+        // report-only outcome, so a sibling's resolution cannot be trusted
+        // when one entry is unverifiable.
         let conn = open_in_memory().unwrap();
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
         let source_ref = format!(
             r#"{{"proposal_id":"prop_1","evidence":[{{"quote":"no chunk id","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
-        assert_eq!(
-            docs,
-            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
-        );
+        assert!(source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).is_empty());
     }
 
     #[test]
@@ -806,17 +857,19 @@ mod tests {
 
     #[test]
     fn source_docs_from_ref_skips_evidence_with_empty_content_hash() {
+        // Spec R2.3.2a: empty content_hash is an unresolved entry — the WHOLE
+        // ref degrades to `[]`. The pre-wave-1 "skip and continue" behavior is
+        // gone: spec r10-MINOR-4 unified chunk-id legacy / malformed JSON /
+        // empty hash under one report-only outcome.
         let conn = open_in_memory().unwrap();
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
         let source_ref = format!(
             r#"{{"proposal_id":"prop_1","evidence":[{{"content_hash":"","quote":"empty","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
-        assert_eq!(
-            docs,
-            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))],
-            "empty content_hash entries must be skipped"
+        assert!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).is_empty(),
+            "any unresolved evidence entry must degrade the whole ref"
         );
     }
 
@@ -1070,5 +1123,104 @@ mod tests {
         // 2026-07-02T00:00:00.000Z = 1782950400000 ms; exact value locked in to
         // catch silent deserializer regressions.
         assert_eq!(fact.okf_verified[0].at, 1782950400000);
+    }
+
+    /// `resolve_source_core` distinguishes all three outcomes for the matrix.
+    #[test]
+    fn resolve_source_core_distinguishes_three_outcomes() {
+        let conn = open_in_memory().unwrap();
+
+        // 1. Resolved — librarian token + valid evidence + matching chunk.
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('/v/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy, entity_id)
+             VALUES (?1, 'c', 0, 1, 1, 'prose', 'tier_wisdom')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'deadbeef' WHERE id = ?1",
+            [chunk_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact1', 'ent1', 't', 'b', '[]', 'inferred', 'librarian_inferred',
+                     'librarian-deadbeefdeadbeefdeadbeefdeadbeef', 1, 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+             VALUES ('fact1', 'p1', '{\"proposal_id\":\"p1\",\"evidence\":[{\"content_hash\":\"deadbeef\"}]}', 0, 1)",
+            [],
+        )
+        .unwrap();
+        let r = resolve_source_core(
+            &conn,
+            "fact1",
+            Some("librarian-deadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .unwrap();
+        assert!(matches!(r, SourceResolution::Resolved(_)), "got {r:?}");
+
+        // 2. HadEvidenceUnresolved — librarian token but evidence row missing.
+        let r = resolve_source_core(
+            &conn,
+            "fact_missing",
+            Some("librarian-deadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .unwrap();
+        assert_eq!(r, SourceResolution::HadEvidenceUnresolved);
+
+        // 3. NoEvidence — source_ref is None.
+        let r = resolve_source_core(&conn, "fact1", None).unwrap();
+        assert_eq!(r, SourceResolution::NoEvidence);
+    }
+
+    /// Plain path ref (non-librarian, non-JSON) → HadEvidenceUnresolved
+    /// (spec R2.3.2a: not a NoEvidence).
+    #[test]
+    fn resolve_source_core_plain_path_is_unresolved() {
+        let conn = open_in_memory().unwrap();
+        let r = resolve_source_core(&conn, "fact1", Some("documents/notes.md")).unwrap();
+        assert_eq!(r, SourceResolution::HadEvidenceUnresolved);
+    }
+
+    /// JSON with `evidence: []` → HadEvidenceUnresolved (the V20 doomed-row
+    /// shape).
+    #[test]
+    fn resolve_source_core_empty_evidence_is_unresolved() {
+        let conn = open_in_memory().unwrap();
+        let r = resolve_source_core(
+            &conn,
+            "fact1",
+            Some(r#"{"proposal_id":null,"evidence":[]}"#),
+        )
+        .unwrap();
+        assert_eq!(r, SourceResolution::HadEvidenceUnresolved);
+    }
+
+    /// DB fault in the chunks query → propagates the error (R2.3.2: a DB
+    /// fault must NOT masquerade as "no source").
+    #[test]
+    fn resolve_source_core_propagates_db_faults() {
+        // Open an in-memory connection WITHOUT running migrations to force a
+        // fault on the chunk join. The helper expects a librarian token, so
+        // the chunks query is the first DB call.
+        let conn = Connection::open_in_memory().unwrap();
+        let r = resolve_source_core(
+            &conn,
+            "fact1",
+            Some("librarian-deadbeefdeadbeefdeadbeefdeadbeef"),
+        );
+        // No documents table at all → the chunks query errors.
+        assert!(r.is_err(), "a DB fault must propagate, not swallow");
     }
 }
