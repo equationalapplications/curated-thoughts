@@ -82,7 +82,7 @@ commit, never touch the live brain).
   snapshots are NOT touched in this task — regeneration is Task 5's alone; if a
   raw-text fixture test goes red here, the sanctioned move is to mark it
   scheme-dependent and fix it in Task 5, never to regenerate or hand-edit fixtures.**
-- [ ] **Task 3 — Read path.** Gate: SELECT filter + query prefix at
+- [x] **Task 3 — Read path.** (80071e9) Gate: SELECT filter + query prefix at
   `queries.rs:724` + floor via `floor_key_for`, all from the READ scheme.
   `wiki_graph`: same filter + query prefix at its scoring query. Test (b)
   (dual-stamp DB, both readers, both schemes) and test (d) (coupling: raw→
