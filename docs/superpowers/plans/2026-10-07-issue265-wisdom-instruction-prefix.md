@@ -58,7 +58,7 @@ commit, never touch the live brain).
 
 ## Tasks (SERIAL)
 
-- [ ] **Task 1 — Migration + scheme module + floor keys.** V+1: add
+- [x] **Task 1 — Migration + scheme module + floor keys.** (817ce8a) V+1: add
   `embed_scheme TEXT NOT NULL DEFAULT 'raw'` (SQLite ADD COLUMN with NOT NULL
   DEFAULT backfills existing rows — the migration file must still contain the
   explicit backfill UPDATE the spec pinned, not rely on engine semantics), set meta
@@ -68,7 +68,7 @@ commit, never touch the live brain).
   `external:qwen/qwen3-embedding-4b:instr1 → 0.64` entry to `WISDOM_GATE_FLOORS`
   HERE (plan-review F1: test (d) in Task 3 needs it; the raw key stays).** Unit
   tests for resolution + fail-closed paths + both floor keys.
-- [ ] **Task 2 — Write path.** `embed_text_for_entry` applies the doc prefix per the
+- [x] **Task 2 — Write path.** (526ff4d) `embed_text_for_entry` applies the doc prefix per the
   WRITE scheme; all blob-writing paths stamp `embed_scheme` from the WRITE constant
   in the same statement; parity
   (`commit.rs:1534-1538, 1721-1725`) compares against the same WRITE-scheme text
