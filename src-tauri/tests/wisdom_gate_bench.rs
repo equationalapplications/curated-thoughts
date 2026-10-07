@@ -12,7 +12,7 @@ const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wisdom_ga
 #[test]
 fn wisdom_gate_floor_still_holds() {
     // The freeze files are produced by `calibrate_wisdom_gate --freeze <dir>`
-    // on the Linux reference machine with Ollama (spec § "Calibration").
+    // against the real embedder (spec § "Calibration").
     // Until they land there is nothing to replay, but the skip stays fail-closed:
     // a half-written freeze, or a production floor without its snapshot, fails.
     let expected_path = format!("{DIR}/expected.json");
@@ -36,7 +36,7 @@ fn wisdom_gate_floor_still_holds() {
         eprintln!(
             "wisdom_gate_floor_still_holds: SKIPPED (no freeze files in {DIR}). Run \
              `calibrate_wisdom_gate --facts facts.jsonl --probes probes.jsonl --freeze <DIR>` \
-             on the Linux reference machine and commit expected.json + vectors.json.gz."
+             with OPENROUTER_API_KEY set and commit expected.json + vectors.json.gz."
         );
         return;
     }

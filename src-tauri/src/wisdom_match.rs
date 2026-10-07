@@ -52,6 +52,9 @@ pub const PROVENANCE_VOCAB: &[&str] = &[
 pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // Test-only key: reachable only with CURATED_EMBED_STUB=constant8.
     ("stub:constant8", 0.5),
+    // Calibrated 2026-10-07 (OpenRouter, GLM-5.3-flash probes): hit@2 0.44, FP 0.05
+    // — docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md
+    ("external:qwen/qwen3-embedding-4b", 0.70),
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -697,6 +700,7 @@ mod tests {
         };
         assert_eq!(gate_model_key(&ext, None), "external:qwen3-embed");
         assert_eq!(gate_floor("stub:constant8"), Some(0.5));
+        assert_eq!(gate_floor("external:qwen/qwen3-embedding-4b"), Some(0.70));
         assert_eq!(gate_floor("local:nomic-embed-code"), None);
     }
 

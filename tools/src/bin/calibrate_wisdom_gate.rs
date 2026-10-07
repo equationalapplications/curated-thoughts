@@ -30,7 +30,12 @@ struct Args {
     #[arg(long)]
     probes: PathBuf,
     /// EmbedProfile JSON (as in vault config.json `embed_profile`).
-    #[arg(long, default_value = r#"{"type":"local","model":"nomic-embed-code"}"#)]
+    /// Default is the production embedder: OpenRouter `qwen/qwen3-embedding-4b`
+    /// (key from `OPENROUTER_API_KEY` or `EMBED_API_KEY`).
+    #[arg(
+        long,
+        default_value = r#"{"type":"external","base_url":"https://openrouter.ai/api/v1","model":"qwen/qwen3-embedding-4b"}"#
+    )]
     profile: String,
     /// Write vectors.json.gz + expected.json here (the regression fixture).
     #[arg(long)]

@@ -1,200 +1,200 @@
-{"text": "the client always re-downloads the same large response. i send an etag header but the server doesn't honor it. how does conditional get work?", "expect": ["fact_wg_066"]}
-{"text": "is property-based testing worth the learning curve?", "expect": []}
-{"text": "i'm redesigning my portfolio site, what font pairing do you suggest?", "expect": []}
-{"text": "what's a good changelog format?", "expect": []}
-{"text": "i'm picking a domain name for my side project. any registrar recs?", "expect": []}
-{"text": "how do i write a good bug report that gets fixed fast?", "expect": []}
-{"text": "one matrix leg fails and the others all get cancelled. i actually want them all to keep going so i can see every failure at once.", "expect": ["fact_wg_013"]}
-{"text": "production started crashing three days ago. i have a script that prints non-zero on the broken commit. can git walk the range for me?", "expect": ["fact_wg_002"]}
-{"text": "the browser refuses my cross-origin POST and the server logs a 405 on a separate method. what's the missing preflight?", "expect": ["fact_wg_064"]}
-{"text": "depends_on starts the db before it's ready, so the first migration test fails. how do i wait for the container to be healthy?", "expect": ["fact_wg_044"]}
-{"text": "should i put side projects on my resume?", "expect": []}
-{"text": "docker desktop is heavy on mac. is there a lighter alternative?", "expect": []}
-{"text": "i'm at a conference and want to take notes on paper. any good notebook recs?", "expect": []}
-{"text": "i marked a flaky test `#[ignore]` and now nobody's looking at it. how do i make ignored tests visible?", "expect": ["fact_wg_076"]}
-{"text": "i'm choosing between circleci and github actions for a new project. thoughts?", "expect": []}
-{"text": "is poetry or uv the modern python package manager?", "expect": []}
-{"text": "requests to a dockerized service sometimes land on one replica and sometimes another, even though i'm using the same DNS name.", "expect": ["fact_wg_045"]}
-{"text": "is there a good book on technical writing for engineers?", "expect": []}
-{"text": "modern pip has a way to point at a private index without passing --index-url every time, right? something in pyproject.toml?", "expect": ["fact_wg_030"]}
-{"text": "i want to fix a bug on a different branch but i don't want to stash this WIP. is there a way to have two branches checked out at once?", "expect": ["fact_wg_003"]}
-{"text": "is there a way to run ci on my own hardware for free?", "expect": []}
-{"text": "i told github actions to run on a self-hosted runner and it still spun up a hosted one. i think i typo'd a label. how do i verify?", "expect": ["fact_wg_015"]}
-{"text": "docker compose has env_file and environment. what's the precedence and why are my values wrong?", "expect": ["fact_wg_042"]}
-{"text": "any tips for negotiating a starting salary at a small startup?", "expect": []}
-{"text": "tdd or bdd or just write the test after? what do you actually do?", "expect": []}
-{"text": "is rust a good first systems language?", "expect": []}
-{"text": "i'm using docker context to point at a remote daemon and accidentally pushed an image to production. how do i confirm the active context?", "expect": ["fact_wg_047"]}
-{"text": "my monitor flickers when i wake it from sleep. troubleshooting?", "expect": []}
-{"text": "this monorepo is 20 GB and i only ever touch three folders. cloning the whole thing takes my laptop fifteen minutes.", "expect": ["fact_wg_005"]}
-{"text": "i'm picking a version for my first release. 0.1.0 or 1.0.0?", "expect": []}
-{"text": "in a docker container with a read-only $HOME, pip is failing because it can't write to the cache. how do i redirect the cache?", "expect": ["fact_wg_037"]}
-{"text": "what's a good way to estimate a feature without a track record?", "expect": []}
-{"text": "when the cache restore fails our build is now red instead of green. can we treat restore failure as a warning?", "expect": ["fact_wg_012"]}
-{"text": "i set a minimum python version in pyproject but pip is still installing my wheel on an older interpreter. did i miss a config field?", "expect": ["fact_wg_036"]}
-{"text": "what's the difference between gitlab and github and bitbucket for self-hosted teams?", "expect": []}
-{"text": "i have a deadline and i want each request to fit inside it. how is per-request timeout different from overall deadline?", "expect": ["fact_wg_069"]}
-{"text": "my service rate-limited me with 429 but my client kept hammering it. shouldn't the server tell me when to retry?", "expect": ["fact_wg_061"]}
-{"text": "is bash a good default shell for new engineers?", "expect": []}
-{"text": "i want to upgrade only the packages in requirements.in and have it rewrite requirements.txt. what's the tool?", "expect": ["fact_wg_032"]}
-{"text": "is docker compose obsolete now that kubernetes exists?", "expect": []}
-{"text": "docker vs podman for production — pros and cons?", "expect": []}
-{"text": "i retried my POST after a timeout and got two charges. isn't there a way for the client to retry safely?", "expect": ["fact_wg_060"]}
-{"text": "every ci run reinstalls all the pnpm packages from scratch. there has to be a way to cache the install step.", "expect": ["fact_wg_010"]}
-{"text": "i'm picking between intellij and vs code for kotlin. any strong opinions?", "expect": []}
-{"text": "i'm learning rust. should i start with the official book or a tutorial?", "expect": []}
-{"text": "my hot loop prepares the same statement every iteration and the explain plan shows prepare cost. should i be reusing the prepared statement?", "expect": ["fact_wg_052"]}
-{"text": "how do you decide between a code review and a pair-programming session?", "expect": []}
-{"text": "i'm choosing between postgres and mysql for a side project. thoughts?", "expect": []}
-{"text": "my test changes the process cwd and now parallel siblings fail because they depend on cwd-resolved paths. how do i isolate?", "expect": ["fact_wg_073"]}
-{"text": "any good podcasts about distributed systems?", "expect": []}
-{"text": "how do i add a favicon to a vite app?", "expect": []}
-{"text": "i'm running `(cd /tmp && ./run.sh)` and then `./next.sh` in the parent. did the cd leak out?", "expect": ["fact_wg_095"]}
-{"text": "my team is split on tabs vs spaces. what's the consensus now?", "expect": []}
-{"text": "should i include certifications on my resume or only experience?", "expect": []}
-{"text": "the bind-mounted volume is owned by a different uid than the container expects and every write returns EACCES at runtime.", "expect": ["fact_wg_043"]}
-{"text": "my history is full of fixup commits from correcting my own typos. can you get rid of them without me clicking around for half an hour?", "expect": ["fact_wg_000"]}
-{"text": "rust's borrow checker rejects my code. what's a good resource to learn ownership?", "expect": []}
-{"text": "is there a good way to write release notes automatically?", "expect": []}
-{"text": "the build artifacts from last week's run are gone. how long do they hang around by default and can i extend it?", "expect": ["fact_wg_016"]}
-{"text": "what commit message prefix tells semantic-release to bump minor vs patch vs major? and what happens if i forget the prefix?", "expect": ["fact_wg_080"]}
-{"text": "should i learn vim or emacs first?", "expect": []}
-{"text": "pip install hangs for minutes on a backtracking solver log. can i keep the modern resolver but make this fast?", "expect": ["fact_wg_038"]}
-{"text": "is there a ci service that doesn't bill by the minute?", "expect": []}
-{"text": "sqlite vs duckdb for analytics workloads?", "expect": []}
-{"text": "what's the best way to onboard a new engineer to a team?", "expect": []}
-{"text": "i have a function i'm calling with 5 different inputs to assert the same behavior. instead of 5 separate tests, is there a way to parametrize?", "expect": ["fact_wg_078"]}
-{"text": "should i use a mechanical keyboard or is a regular laptop keyboard fine?", "expect": []}
-{"text": "every push to my feature branch kicks off a new run and now i have five pending for the same ref. can i cancel the old ones automatically?", "expect": ["fact_wg_019"]}
-{"text": "i added a secret at the job level and now it's leaking into steps where it shouldn't be visible. how do i scope a secret to one step?", "expect": ["fact_wg_014"]}
-{"text": "is sqlite good enough for a small saas?", "expect": []}
-{"text": "is it okay to break the build on friday afternoon?", "expect": []}
-{"text": "can sqlite handle 100 GB of data?", "expect": []}
-{"text": "my api returns `{error, message}` and clients switch on the message text. i want to rename the message and the world breaks. is there a stable contract?", "expect": ["fact_wg_065"]}
-{"text": "i want to release from a feature branch. how do i whitelist branches in semantic-release?", "expect": ["fact_wg_084"]}
-{"text": "i'm new to python. is 3.12 different from 3.11 in a way that matters?", "expect": []}
-{"text": "docker stop waits the full 10 seconds before sigkill, because my pid 1 ignores sigterm. how do i fix that in the image?", "expect": ["fact_wg_046"]}
-{"text": "i want to add a 404 page to my static site. what's a clean way?", "expect": []}
-{"text": "my random test passed locally and every run and then flaked in ci. i think the rng is unseeded. how do i make randomness testable?", "expect": ["fact_wg_079"]}
-{"text": "i have a transaction that reads then writes, and the read returns ok but the write gets BUSY. should i upgrade the transaction at BEGIN?", "expect": ["fact_wg_054"]}
-{"text": "i keep making the same typo in a long pipeline. any shell habits?", "expect": []}
-{"text": "i'm switching my tag format from v-prefixed to no-prefix and now every install script that hardcoded `v3.2.0` is broken. how is the format set?", "expect": ["fact_wg_085"]}
-{"text": "any good youtube channels for learning about algorithms?", "expect": []}
-{"text": "what's the difference between a linter and a formatter? can one tool do both?", "expect": []}
-{"text": "is it okay to ask questions in a PR review? or should i just approve?", "expect": []}
-{"text": "any good podcasts about open source maintainership?", "expect": []}
-{"text": "starting a fresh library today, what's the modern build backend? setuptools has been around forever but i hear there's something newer.", "expect": ["fact_wg_033"]}
-{"text": "the integration test step always fails because the database container isn't actually ready yet, even though docker says it started.", "expect": ["fact_wg_018"]}
-{"text": "i'm rewriting my old jquery code in modern js. what's the closest equivalent to $(document).ready?", "expect": []}
-{"text": "is 100% test coverage a reasonable goal for a new repo?", "expect": []}
-{"text": "postgres vs sqlite for a side project — when does it matter?", "expect": []}
-{"text": "i logged the request url with the auth token in the query string and now it's in the cdn cache. shouldn't tokens be in a header instead?", "expect": ["fact_wg_063"]}
-{"text": "is there a ci flag that tells semantic-release it's running on a real run? what happens without the flag?", "expect": ["fact_wg_083"]}
-{"text": "i'm thinking of going freelance. how do i price my first project?", "expect": []}
-{"text": "any recommendations for a dark theme for vs code?", "expect": []}
-{"text": "is github actions better than jenkins for small teams?", "expect": []}
-{"text": "i asserted `0.1 + 0.2 == 0.3` and the value came out `0.30000000000000004`. what's the safe way to compare floats?", "expect": ["fact_wg_072"]}
-{"text": "my release binary is huge. i heard link-time optimization shrinks it a lot but the build is slow. what's the middle ground?", "expect": ["fact_wg_027"]}
-{"text": "i'm building a webhook receiver. any pitfalls?", "expect": []}
-{"text": "is it rude to use github copilot at work? what's the policy at your company?", "expect": []}
-{"text": "my writer gets SQLITE_BUSY when a long reader holds the lock. is there a wait-and-retry setting on the connection?", "expect": ["fact_wg_051"]}
-{"text": "i'm moving from docker to a serverless platform. any gotchas?", "expect": []}
-{"text": "i just blew away a commit with a hard reset and i can't find it in git log. there's gotta be a way to recover it.", "expect": ["fact_wg_004"]}
-{"text": "i'm installing a rust tool from a published crate and the install is silently bumping past the pinned version. how do i lock the install?", "expect": ["fact_wg_029"]}
-{"text": "what's a good way to document an api without writing everything twice?", "expect": []}
-{"text": "i'm backgrounding a child in a ci script and `wait` returns immediately. did job control get disabled?", "expect": ["fact_wg_099"]}
-{"text": "my script checks for jq with `which jq` and it works on macOS but not on linux. is there a portable builtin?", "expect": ["fact_wg_098"]}
-{"text": "what's the difference between a library and a framework?", "expect": []}
-{"text": "my manager wants daily standups. is that too often?", "expect": []}
-{"text": "is there a way to undo a `rm -rf`?", "expect": []}
-{"text": "any good tools for sketching a database diagram?", "expect": []}
-{"text": "what's the difference between a json column and a jsonb column in postgres?", "expect": []}
-{"text": "is there a way to use git without a github account?", "expect": []}
-{"text": "my wheel fails to install on a centos machine that runs an older glibc. how do i find the lowest glibc a wheel supports?", "expect": ["fact_wg_034"]}
-{"text": "my buildx cache is split across multiple cache images and it's hard to find the right one. is there an inline cache mode?", "expect": ["fact_wg_048"]}
-{"text": "what's a good python library for parsing html?", "expect": []}
-{"text": "is there a difference between a tech lead and an engineering manager?", "expect": []}
-{"text": "any tips for public speaking at a developer conference?", "expect": []}
-{"text": "i'm picking a name for my new open-source project. tips?", "expect": []}
-{"text": "what's a good way to track time without it becoming a tax?", "expect": []}
-{"text": "my crate has a feature flag and clippy in strict mode says my import is unused. how do i tell clippy the import is conditional?", "expect": ["fact_wg_021"]}
-{"text": "i'm switching from one release plugin to another and CHANGELOG.md got rewritten differently. what controls the format?", "expect": ["fact_wg_081"]}
-{"text": "is there a cargo subcommand for coverage, and do we run it in ci? if not, where should it run?", "expect": ["fact_wg_077"]}
-{"text": "the diff is unreadable because every line was reflowed to a slightly different column. how do i ignore whitespace when reviewing?", "expect": ["fact_wg_009"]}
-{"text": "i want to see what semantic-release would do without pushing a tag. is there a dry-run mode?", "expect": ["fact_wg_082"]}
-{"text": "is there a way to do async/await in rust without tokio?", "expect": []}
-{"text": "what's the difference between yarn and npm and pnpm — do i have to pick one?", "expect": []}
-{"text": "semantic-release failed at the npm publish step and now there's a tag with no package. what was missing and how do i rotate?", "expect": ["fact_wg_089"]}
-{"text": "my paginated feed shifts the items every time someone inserts a new row, so a client page request skips or repeats items. is there a stable pagination?", "expect": ["fact_wg_068"]}
-{"text": "sqlite fts5 isn't matching diacritics in european text. is there a tokenizer option that strips them?", "expect": ["fact_wg_053"]}
-{"text": "i have a script with errexit on and `false | true` — the script exits 0. shouldn't errexit catch that?", "expect": ["fact_wg_090"]}
-{"text": "i'm passing filenames from find to xargs and a filename with a quote breaks the whole pipeline. how do i make this safe?", "expect": ["fact_wg_094"]}
-{"text": "my final docker image is 800 MB because i never extracted it from a build stage. how do multi-stage build work have to be written?", "expect": ["fact_wg_041"]}
-{"text": "my script fails halfway through and leaves a tempdir behind. how do i make sure cleanup runs even on error?", "expect": ["fact_wg_093"]}
-{"text": "my laptop fan is loud when compiling. is there a quieter machine?", "expect": []}
-{"text": "any good linux distros for a developer laptop?", "expect": []}
-{"text": "ci jobs are flaky on monday mornings. is this a known issue?", "expect": []}
-{"text": "cargo doc is failing in ci with a link error i can't see locally. i added a docstring with a backtick in it; is that it?", "expect": ["fact_wg_025"]}
-{"text": "i want to build a rest api. which framework should i use?", "expect": []}
-{"text": "what's the best way to ask for help on a forum without sounding demanding?", "expect": []}
-{"text": "i set std::env::set_var in a test and another test reads it before the first one finishes. is there a scoped env primitive?", "expect": ["fact_wg_074"]}
-{"text": "i'm querying a json column by a key and the full table scan kills perf. can sqlite index into a json column?", "expect": ["fact_wg_058"]}
-{"text": "can git work without a remote?", "expect": []}
-{"text": "git blame inside our ci step returns 'no such file or directory' for every line. i think the checkout is shallow. how do i deepen it?", "expect": ["fact_wg_017"]}
-{"text": "i have a seed job in docker-compose that i don't want running on a normal `docker compose up`. is there a way to hide a service?", "expect": ["fact_wg_049"]}
-{"text": "i want to debug a script that's doing something weird. how do i get a trace of every command the script runs?", "expect": ["fact_wg_092"]}
-{"text": "my cli test asserts the JSON stdout is right and i call it, but i notice the test logs are full of warnings from the lib. what's the clean fix?", "expect": ["fact_wg_075"]}
-{"text": "is it worth learning assembly in 2026?", "expect": []}
-{"text": "every worktree i open fails cargo build because the root manifest doesn't list it. how do i tell cargo to ignore worktrees?", "expect": ["fact_wg_020"]}
-{"text": "i have a single string as input. is there a cleaner way to feed it to `while read` than a temp file?", "expect": ["fact_wg_096"]}
-{"text": "i want to edit my library and have the changes show up in my service without reinstalling. is that -e? and is that safe for prod?", "expect": ["fact_wg_031"]}
-{"text": "i'm thinking of starting a blog. any platform recommendations?", "expect": []}
-{"text": "i'm learning rust. is it okay to use unwrap() while i'm still learning?", "expect": []}
-{"text": "my ubuntu job hangs for hours and then times out, no error message, on apt-get install. what's the default timeout and how do i set one?", "expect": ["fact_wg_011"]}
-{"text": "my api serves a lot of JSON. is brotli actually worth the cpu vs gzip? when do you pick which?", "expect": ["fact_wg_067"]}
-{"text": "i'm cutting a beta off main. how do i get `1.3.0-beta.1` instead of `1.3.0` and route it to a different channel?", "expect": ["fact_wg_088"]}
-{"text": "my filename has a space and the for-loop with `$file` processes it as two separate arguments. how do i fix this?", "expect": ["fact_wg_091"]}
-{"text": "i have a binary and a library in the same workspace depending on the same crate. cargo update only updates one. how does the lockfile view work?", "expect": ["fact_wg_024"]}
-{"text": "my script uses `#!/bin/bash` and fails to find bash on alpine. what's the portable shebang?", "expect": ["fact_wg_097"]}
-{"text": "how do you version a public api?", "expect": []}
-{"text": "what's the difference between semver and calver? when do you pick?", "expect": []}
-{"text": "i switched the analyzer preset and the next release's version changed. what's the default and what does changing it do?", "expect": ["fact_wg_086"]}
-{"text": "graphql vs rest — when does graphql actually pay off?", "expect": []}
-{"text": "i want to know what pip install would do — just print it, don't actually install. can i dry-run a pip install?", "expect": ["fact_wg_039"]}
-{"text": "i have a python script and i want to ship it as a single binary. how?", "expect": []}
-{"text": "the first release of a brand-new repo is 1.0.0 by default. i want 0.1.0. how do i override?", "expect": ["fact_wg_087"]}
-{"text": "what's the difference between unit and integration tests in practice?", "expect": []}
-{"text": "docker builds feel slow. i heard buildkit caches layers across runs. is that on by default now and how do i use it?", "expect": ["fact_wg_040"]}
-{"text": "every rebase of this long-lived feature branch re-opens the same merge conflict i resolved last week. there's gotta be a way to remember that answer.", "expect": ["fact_wg_001"]}
-{"text": "our convention for naming test functions — what reads well in a failure log? implementation-y names like `test_threshold` or behavior-y names?", "expect": ["fact_wg_071"]}
-{"text": "git is slow on windows. is there an alternative vcs that's faster on ntfs?", "expect": []}
-{"text": "what's the best way to take notes during meetings?", "expect": []}
-{"text": "i deleted 90% of the rows and the file didn't shrink. how do i reclaim the disk space in sqlite?", "expect": ["fact_wg_056"]}
-{"text": "any tips for staying focused during a long pair-programming call?", "expect": []}
-{"text": "how do you decide when to ship a major version bump?", "expect": []}
-{"text": "python's pip is being deprecated, right? what's replacing it?", "expect": []}
-{"text": "my sqlite reader is blocked while a writer is committing. i heard wal mode lets readers proceed without blocking. how do i enable it?", "expect": ["fact_wg_050"]}
-{"text": "what's the most underrated feature in fzf?", "expect": []}
-{"text": "what's the difference between bash, fish, and zsh?", "expect": []}
-{"text": "github copilot keeps suggesting things in a style i don't like. can i configure its tone?", "expect": []}
-{"text": "should i put my dotfiles on github? any privacy concerns?", "expect": []}
-{"text": "i need to copy a live sqlite db to a backup location without taking writers offline. is there an online backup api?", "expect": ["fact_wg_059"]}
-{"text": "i'm building a SELECT with an IN clause from a list of ids. i know not to interpolate them as text — what's the right pattern with rusqlite?", "expect": ["fact_wg_055"]}
-{"text": "every cargo build rebuilds my native dependency even when i didn't touch the c source. how do i tell build.rs to only re-run on changes?", "expect": ["fact_wg_023"]}
-{"text": "windows devs keep committing CRLF into our python files and the linter chokes. how do i tell git to normalize?", "expect": ["fact_wg_007"]}
-{"text": "i ran git stash but my new untracked files are still sitting in the working tree confusing me when i switch branches.", "expect": ["fact_wg_008"]}
-{"text": "i'm new to typescript — what's a good starter book?", "expect": []}
-{"text": "i'm planning my team's branch strategy. gitflow vs trunk-based — pros and cons?", "expect": []}
-{"text": "i put a directory at the root of my workspace and now cargo thinks it's a member. how do i exclude it from the workspace glob?", "expect": ["fact_wg_022"]}
-{"text": "any good resources for learning about database indexes conceptually?", "expect": []}
-{"text": "can i run docker without root on linux?", "expect": []}
-{"text": "cargo test stops at the first failing test in the bin target. i need every regression in one ci run, not one at a time.", "expect": ["fact_wg_026"]}
-{"text": "i'm setting up code coverage in ci. which tool do you use?", "expect": []}
-{"text": "i ran pip install without an active venv and now i have packages in ~/.local that i can't import when i activate the venv. what did i do?", "expect": ["fact_wg_035"]}
-{"text": "i declared a foreign key in sqlite but the constraint isn't enforced. i think i need a pragma but i can't recall which one.", "expect": ["fact_wg_057"]}
-{"text": "the streaming api returns chunked responses with no content-length header and my http library is hanging. how do i detect chunked?", "expect": ["fact_wg_062"]}
-{"text": "my tests share one sqlite fixture across `#[test]` functions and they flake under parallel execution. what's the right isolation?", "expect": ["fact_wg_070"]}
-{"text": "can you write tests for a legacy codebase that has none?", "expect": []}
-{"text": "my team requires signed commits and my last commit got refused. what config do i need to set so gpg finds my key?", "expect": ["fact_wg_006"]}
-{"text": "i want a tool that reads the workspace graph to find all the bins and their features. is there a structured output cargo emits?", "expect": ["fact_wg_028"]}
-{"text": "what's the difference between `String` and `&str` in rust?", "expect": []}
+{"text": "I've got a bunch of small follow-up commits that each patch an earlier commit, and moving every one into place by hand in the todo editor is tedious. Is there a flag that tells git to slot them in automatically?", "expect": ["fact_wg_000"]}
+{"text": "Every time I sync this feature branch with main, I have to manually fix the same handful of merge conflicts over again. Is there a way to make git remember how I resolved them last time and apply that automatically going forward?", "expect": ["fact_wg_001"]}
+{"text": "This regression showed up somewhere in the last 50 commits or so, and I have a script that exits with an error only when the bug is present — can you automatically pinpoint the exact commit that introduced it instead of making me test them manually?", "expect": ["fact_wg_002"]}
+{"text": "I'm deep in changes on this branch, but an urgent fix just came in for release/2.4 — is there a way to have that branch available in a separate folder at the same time so I don't have to stash or lose what I'm working on here?", "expect": ["fact_wg_003"]}
+{"text": "I accidentally rewound my branch too far and lost a bunch of unpushed work — is there any way to dig those lost commits back out?", "expect": ["fact_wg_004"]}
+{"text": "This repo is huge and cloning it takes forever, but I only actually work in the frontend and api folders — can you set up my local checkout so it only pulls down those directories (and skips downloading all the file history blobs I don't need)?", "expect": ["fact_wg_005"]}
+{"text": "My commit keeps getting rejected with a GPG error about a missing key—can you fix up my git config so commits go through, and then double-check the latest commit is actually valid?", "expect": ["fact_wg_006"]}
+{"text": "Every time a teammate on Windows pulls the repo, git marks all the files as modified even though nothing changed, and occasionally an image gets mangled by a commit. Is there a repo-level config file we can add to make git stop rewriting file contents and leave images alone?", "expect": ["fact_wg_007"]}
+{"text": "I shelved my changes before switching branches, but the new files I'd just created got left behind in the working directory and now the branch switch is complaining about conflicts. Is there a way to save those fresh files along with everything else?", "expect": ["fact_wg_008"]}
+{"text": "The diff on this branch is drowning in reformatting noise from my editor — can you show me just the actual code changes, skipping all the indentation and trailing-space stuff?", "expect": ["fact_wg_009"]}
+{"text": "CI keeps re-downloading all our dependencies on every run even when nothing relevant changed. Can you set up the cache so it's keyed off a checksum of the file that pins our exact dependency versions, plus the runner OS, so it only invalidates when that file actually updates?", "expect": ["fact_wg_010"]}
+{"text": "Our Ubuntu CI job sometimes hangs forever on the package install step when the repo server stalls — can you make it give up after about a minute with a couple of retries, and wrap the whole step in a hard wall-clock cap so we don't burn runner minutes on a stuck pipeline?", "expect": ["fact_wg_011"]}
+{"text": "Our nightly build went red this morning just because the step that pulls our saved dependencies couldn't fetch them — shouldn't that be non-fatal and simply fall back to downloading everything from scratch? Also, is there an easy way to see how often we're actually getting matches on those saved dependencies, because it feels like we never do?", "expect": ["fact_wg_012"]}
+{"text": "Our CI cancels the remaining jobs the moment one OS variant breaks, so I never get the Windows output I actually need to debug — can you change the workflow so every variant runs to completion even when one fails? Just don't make it noticeably slower on passing runs.", "expect": ["fact_wg_013"]}
+{"text": "Make sure the deploy token is only exposed to the publish action — right now the lint and test commands appear to have access to it too, and I'd rather they didn't.", "expect": ["fact_wg_014"]}
+{"text": "The CI job I meant to route to our own Linux box keeps executing on GitHub's paid machines instead, and our bill spiked — can you check the workflow config and figure out why it isn't picking up our in-house machine?", "expect": ["fact_wg_015"]}
+{"text": "The benchmark numbers and screenshots from our pipeline runs keep disappearing after a couple of weeks, so QA can't reference evidence from older builds. How can we make those outputs stick around long-term?", "expect": ["fact_wg_016"]}
+{"text": "The CI step that diffs the current commit against its parent keeps failing with \"no history found,\" and I suspect the workflow is only pulling the latest commit when it clones. Can you update it so the job gets the full repository history?", "expect": ["fact_wg_017"]}
+{"text": "Our CI job keeps failing on the very first DB query — looks like the database isn't fully booted before the tests kick off, so the initial connection just dies. Can you make the pipeline wait until the database is actually ready to accept connections before running any steps?", "expect": ["fact_wg_018"]}
+{"text": "Every push to my feature branch queues another full CI build even though the previous one is now pointless, and each takes like 15 minutes — can you set up the workflow so a new push automatically kills the stale build that's still running for the same branch?", "expect": ["fact_wg_019"]}
+{"text": "Every time I try to build from one of my extra git checkouts, cargo walks up to the root manifest and errors out saying that directory isn't part of the workspace — is there a way to make cargo ignore those directories entirely?", "expect": ["fact_wg_020"]}
+{"text": "CI keeps failing the lint step on an unused import that only shows up when the optional feature is disabled — locally everything passes since I test with all features enabled. What's the clean way to fix this so the build isn't broken in the default configuration?", "expect": ["fact_wg_021"]}
+{"text": "The native crate recompiles from scratch on every single build even when nothing under its C source folder changed — can you tweak its build script so it only re-runs when those source files actually change instead of whenever the parent directory is touched?", "expect": ["fact_wg_023"]}
+{"text": "I bumped our shared dependency for the lib, but when I build the binary it still resolves the old version — do I need to run the update command once per target, or is there a single invocation that refreshes both?", "expect": ["fact_wg_024"]}
+{"text": "Our docs pipeline keeps passing even when a doc comment references a type or method that doesn't actually exist. Can you make CI fail the build on any link like that instead of just letting it slide through as a warning?", "expect": ["fact_wg_025"]}
+{"text": "The test run keeps bailing out after the first failure, so I only see one problem at a time. Can you change it so every test gets executed and all the failures are reported together in a single pass?", "expect": ["fact_wg_026"]}
+{"text": "The binary we ship from release builds is way bigger than I expected for a simple CLI—can we shrink it? I don't mind if full-release compiles get slower, but CI shouldn't crawl.", "expect": ["fact_wg_027"]}
+{"text": "I'm writing a tool that needs to figure out which binaries and features each crate in the workspace exposes — is there a reliable, structured way to get that info, or do I have to scrape the output of running a build?", "expect": ["fact_wg_028"]}
+{"text": "Every few weeks our CI pipeline breaks right after it installs the linter with cargo, and I suspect it's pulling in newer crate versions than the ones the tool was developed against. Is there a way to force it to build from the exact resolutions already committed in the repo instead of grabbing the freshest ones?", "expect": ["fact_wg_029"]}
+{"text": "We keep passing our internal package registry URL as a CLI flag every time we install dependencies—can you move that into the project config so it's picked up automatically? Also make sure CI pins a recent enough pip version for that setup to work reliably.", "expect": ["fact_wg_030"]}
+{"text": "I keep making small tweaks to the library code and it's frustrating that I have to reinstall the package after every change before my test runs pick them up — is there a way to avoid that?", "expect": ["fact_wg_031"]}
+{"text": "Can you bump all our Python dependencies to their latest versions? Regenerate the lockfile from the top-level spec file, keeping the checksums in place so installs don't drift to whatever's newest at resolution time.", "expect": ["fact_wg_032"]}
+{"text": "Starting a brand-new Python package from scratch — what's the current best choice for the packaging backend instead of the old default, and can you wire that up for me?", "expect": ["fact_wg_033"]}
+{"text": "We need the built packages to install cleanly on some old CentOS 7 servers, so can you check which minimum compatibility level our release artifacts are currently targeting and lower it if needed?", "expect": ["fact_wg_034"]}
+{"text": "Ever since I switched to a newer Python version, my script suddenly can't find packages I definitely installed before — could they have landed somewhere the current environment doesn't look?", "expect": ["fact_wg_035"]}
+{"text": "Our library keeps getting installed into Python 3.9 environments and then crashes on import. Can you update the build metadata so anything older than 3.10 is blocked from installing the package?", "expect": ["fact_wg_036"]}
+{"text": "Our CI container mounts the home directory as non-writable, so pip keeps crashing partway through the dependency install. Can you configure it to stash its downloaded files somewhere writable like /tmp and make that setting stick across builds?", "expect": ["fact_wg_037"]}
+{"text": "The install step has been spinning for ten minutes trying to sort out conflicting version pins — instead of switching the package manager back to its old mode, could you split our dependency list into separate per-feature files?", "expect": ["fact_wg_038"]}
+{"text": "Our build keeps wasting time and disk space installing packages that turn out to be incompatible with each other. Is there a way to have pip just show what it would install so we can catch version clashes before anything actually gets installed?", "expect": ["fact_wg_039"]}
+{"text": "Our CI rebuilds the entire image from scratch on every run and it's painfully slow. Can you set things up so unchanged parts of the image get reused across builds instead of being rebuilt from zero?", "expect": ["fact_wg_040"]}
+{"text": "Our Docker image is way bigger than it needs to be because the compilers and build dependencies all end up shipped alongside the app. Can you restructure the Dockerfile so compilation happens separately and only the finished binary gets carried into a slim minimal base?", "expect": ["fact_wg_041"]}
+{"text": "I'm loading a bunch of variables for my service from a separate vars file in my compose setup, but the few I also listed inline in the service definition seem to take precedence and the file values never show up inside the container. Is that expected behavior, or am I wiring something up wrong?", "expect": ["fact_wg_042"]}
+{"text": "I'm mounting my local ./data folder into the container but the app inside crashes with permission denied whenever it tries to write there. What's the right way to make the container's process able to access that mounted directory?", "expect": ["fact_wg_043"]}
+{"text": "My API container keeps crashing on startup because it tries to connect to Postgres before the database is actually accepting connections, even though compose starts the db container first. How can I make it wait until the db is truly ready rather than just running?", "expect": ["fact_wg_044"]}
+{"text": "We're running three instances of our API under the same hostname in a compose setup, but users keep getting logged out because their requests land on a different instance each time. Is there a way to make a client always connect to the same container?", "expect": ["fact_wg_045"]}
+{"text": "When I shut down my container it just hangs until the timeout forcibly kills it, and my app never exits cleanly. Any idea why it's not reacting to the shutdown signal?", "expect": ["fact_wg_046"]}
+{"text": "When we deploy to production, the push should go straight to the remote machine without building the images all over again. Can you also have the pipeline log which target is currently active right before it ships, so we never accidentally publish to the wrong host?", "expect": ["fact_wg_047"]}
+{"text": "We want the build cache to travel inside the pushed image itself rather than maintaining a separate cache repo in CI. Since we build for both amd64 and arm64, will that approach still let layers be reused across platforms, or should we handle it differently?", "expect": ["fact_wg_048"]}
+{"text": "The load-test service keeps starting along with everything else when I bring the stack up locally — can you make it opt-in so it only runs when I explicitly ask for it?", "expect": ["fact_wg_049"]}
+{"text": "Every time our nightly import runs, the app throws \"database is locked\" on any read query, and that companion file next to the database just keeps growing until we restart. Can you set things up so reads can still happen while writes are in progress, and make sure that file gets flushed back into the main database periodically?", "expect": ["fact_wg_050"]}
+{"text": "We're seeing \"database is locked\" errors whenever two processes try to write at the same time — can you make the connection wait a few seconds for the lock to clear instead of failing immediately?", "expect": ["fact_wg_051"]}
+{"text": "The bulk insert loop in `sync_records` is a lot slower than it should be — can you restructure it so the SQL gets set up once outside the loop and we just bind new parameters each iteration?", "expect": ["fact_wg_052"]}
+{"text": "My FTS5 full-text search misses rows when the query contains accented letters, and I also want it to match a term appearing in the middle of a word. How should I configure the virtual table to handle both cases?", "expect": ["fact_wg_053"]}
+{"text": "We read a row to compute the new value and then write it back within the same transaction, and under concurrent load we intermittently fail with a locked-database error partway through. Can you open the transaction in a mode that claims the lock up front instead of waiting until the first modification?", "expect": ["fact_wg_054"]}
+{"text": "I need to run a query against rusqlite where the set of matching user IDs is only known at runtime and can vary in size. How can I build that safely without string-concatenating the values into the SQL itself?", "expect": ["fact_wg_055"]}
+{"text": "We just purged millions of old rows from our SQLite database but the file size barely budged — what's the proper way to compact it, and can that run safely while the app is still serving traffic?", "expect": ["fact_wg_056"]}
+{"text": "We declared FK constraints in our SQLite schema, but inserting child rows with nonexistent parent IDs still succeeds instead of failing — is there something that needs to be enabled every time the app opens a new connection?", "expect": ["fact_wg_057"]}
+{"text": "I'm storing semi-structured documents in a column of my SQLite database — can I query into those nested fields directly, and is there a way to index them so lookups don't require a full table scan?", "expect": ["fact_wg_058"]}
+{"text": "Our app writes to the SQLite database continuously, so is it safe to take a snapshot while it's live, and will the snapshot include rows inserted mid-copy? Also, is there anything we need to do before opening the copied file so it's not missing recent writes?", "expect": ["fact_wg_059"]}
+{"text": "When our checkout request times out and the frontend retries, customers sometimes end up with duplicate charges. What's the standard way to make the server recognize a retry of the same POST so it doesn't process it twice?", "expect": ["fact_wg_060"]}
+{"text": "Our client keeps firing requests again immediately after getting throttled, which just makes the blocking last longer. How should we read and honor the wait hint the server sends back, and should we add any randomness to it?", "expect": ["fact_wg_061"]}
+{"text": "Our HTTP client seems to bail out whenever a response doesn't declare its body size up front, but the /events endpoint streams data without announcing it. Can you change the reader to just keep consuming bytes until the connection closes instead of erroring out?", "expect": ["fact_wg_062"]}
+{"text": "Please change the API client so the auth token is sent in a request header instead of being appended to the URL — anything embedded in the URL gets captured in server logs and proxy/CDN records, which is a real security risk.", "expect": ["fact_wg_063"]}
+{"text": "When my frontend sends a JSON POST to the API from a different domain, the request never actually happens — the browser blocks it and I see an error instead. Could it be that the server doesn't handle that initial check request browsers send before allowing such calls?", "expect": ["fact_wg_064"]}
+{"text": "Our API's failure responses are inconsistent right now — every endpoint seems to invent its own payload shape, and clients end up branching on free-text descriptions that could get reworded at any time. Can you standardize all error payloads into one well-defined, spec-based format with a stable machine-readable identifier clients can safely switch on?", "expect": ["fact_wg_065"]}
+{"text": "Our API already includes a hash-based validator header on responses, but clients still seem to re-download the full payload every time — can you make the server check the matching request header and return the short \"unchanged\" status instead of the body when nothing has changed?", "expect": ["fact_wg_066"]}
+{"text": "We're about to enable compression on our web server and want to shrink responses as much as possible. Should we just apply the strongest compression method to everything, or does it make sense to use a different one depending on whether the content is pre-generated versus built on the fly per request?", "expect": ["fact_wg_067"]}
+{"text": "Users are complaining that our infinite-scroll feed sometimes repeats or skips posts when new items land while they're scrolling, and we're currently loading by page number and page size — what should we switch to for the feed, and is the current approach still fine for the static admin list?", "expect": ["fact_wg_068"]}
+{"text": "Before you finalize the retry logic, can you check that the overall wait time still respects our 30-second SLA? Right now it looks like each individual call gets its own 30-second cap, so three tries could drag the whole request way past what the caller is willing to wait.", "expect": ["fact_wg_069"]}
+{"text": "Since Rust runs tests concurrently by default, having every test hit the same on-disk database is going to cause flaky, order-dependent failures — can you restructure it so each test spins up its own isolated database from scratch instead of sharing one?", "expect": ["fact_wg_070"]}
+{"text": "Add unit tests for the retry logic in the scheduler — and when one of them goes red in CI, I want the failure output to make it obvious what scenario broke without me having to open the test file.", "expect": ["fact_wg_071"]}
+{"text": "My unit test keeps failing because the computed value comes out as 0.30000000000000004 when I expect 0.3 — can you fix how that check is written so it stops tripping on tiny rounding differences?", "expect": ["fact_wg_072"]}
+{"text": "Tests that change the working directory are stepping on each other when the suite runs in parallel — anything relying on relative paths starts flaking. Can you isolate each directory-switching test in its own temporary directory and make sure the original location is restored automatically afterward?", "expect": ["fact_wg_073"]}
+{"text": "Some of my unit tests tweak environment variables and it's causing flaky failures when the suite runs them in parallel within one process. Can you refactor them so each test's changes are scoped and the original values are put back afterward, even if a test blows up midway?", "expect": ["fact_wg_074"]}
+{"text": "For the CLI test, can we also check that nothing gets written to the error stream on a successful run? I want the test to fail if a dependency spams warnings on every invocation, not just verify the JSON output.", "expect": ["fact_wg_075"]}
+{"text": "This test fails intermittently in CI and nobody has time to fix it right now — can we just disable it so the suite stays green?", "expect": ["fact_wg_076"]}
+{"text": "We should start tracking how much of the codebase our tests actually exercise as part of the pipeline, but keep it off the main merge path so a slow report doesn't hold up everyday PRs — maybe fold it into the heavier checks and fail if new changes drag the number below a minimum.", "expect": ["fact_wg_077"]}
+{"text": "We've got a bunch of near-identical test functions in Rust that differ only in their input values — can you consolidate them into a single test where each set of inputs shows up as its own entry, so a failure points straight at the offending values instead of somewhere inside a loop?", "expect": ["fact_wg_078"]}
+{"text": "The test that generates sample data keeps failing on CI every few runs but always passes locally — can you make its output consistent across runs so we stop chasing these phantom failures?", "expect": ["fact_wg_079"]}
+{"text": "Why did that cleanup commit with no prefix at the start still ship a release yesterday? I thought only actual feature or bug fixes were supposed to bump our version.", "expect": ["fact_wg_080"]}
+{"text": "I rewrote history on the branch to tidy up our release automation config — reordered some steps and swapped the commit-convention style — and now the very next CI run bumped the version unexpectedly and regenerated the whole notes file. What happened?", "expect": ["fact_wg_081"]}
+{"text": "Can I preview locally what version the release tool would publish from this branch before I push, without it actually tagging anything? I don't want a docs-only tweak to accidentally trigger a major version bump.", "expect": ["fact_wg_082"]}
+{"text": "When I ran our release script locally just to test it, it went ahead and cut a new version and pushed a tag to GitHub, which I really didn't want. Can you update the pipeline config so real publishes only happen from CI runs, and running it by hand stays harmless?", "expect": ["fact_wg_083"]}
+{"text": "Semantic-release only ever publishes when I merge to the default branch, but I'd like it to also cut prerelease versions from my long-lived staging branch. How do I configure that?", "expect": ["fact_wg_084"]}
+{"text": "I'm thinking of switching our release pipeline to cut tags as bare version numbers, like 3.2.0, instead of the default style that sticks a letter in front. Will that break anything for downstream consumers whose install scripts hardcode the current tag naming?", "expect": ["fact_wg_085"]}
+{"text": "Some of my commit messages don't seem to be triggering the version levels I expect from our automated releases. Could you check which commit-message convention the release config is currently set to parse, and explain how switching to a different convention might affect how past commits are classified and what version comes out next?", "expect": ["fact_wg_086"]}
+{"text": "We want the project's very first published version to come out as a 0.x release instead of jumping straight to v1 — can you tweak the release tooling config to make that happen?", "expect": ["fact_wg_087"]}
+{"text": "We're publishing test builds from a separate branch (like 2.1.0-rc.1), but I want the next stable patch that comes off main afterwards to land under a dedicated npm dist-tag instead of defaulting to latest. Can you adjust the branch config so releases from different branches route to the right tags?", "expect": ["fact_wg_088"]}
+{"text": "semantic-release pushed the new version tag but then the publish step blew up in CI saying it couldn't authenticate, so the package never actually landed in the registry. Do I need to add some kind of registry secret for the release to work?", "expect": ["fact_wg_089"]}
+{"text": "The CI script needs to fail fast — right now, when the first command in a pipeline blows up but the last one succeeds, the whole thing reports success and keeps running. Make it abort immediately on any failure, including mid-pipeline.", "expect": ["fact_wg_090"]}
+{"text": "My shell script keeps choking on files with spaces in their names — each one ends up being treated as two separate paths. Can you find where that's happening and make it handle those filenames correctly?", "expect": ["fact_wg_091"]}
+{"text": "When I turn on shell tracing in the script, the trace lines end up polluting my command substitution output — can you make the tracing go to the error stream instead so the captured result stays clean?", "expect": ["fact_wg_092"]}
+{"text": "The script creates a temp directory for test data — can you make sure it gets removed even when the run fails partway or gets interrupted, not just when it finishes normally?", "expect": ["fact_wg_093"]}
+{"text": "The cleanup script you wrote keeps mangling files whose names contain spaces or apostrophes—looks like the command pipeline mishandles them. Can you fix it so it works safely with any filename?", "expect": ["fact_wg_094"]}
+{"text": "Those setup commands switch to a different working directory, but I don't want that change bleeding into the rest of the script — can you contain it so it only applies while that one command runs?", "expect": ["fact_wg_095"]}
+{"text": "I'm trying to iterate over a multi-line variable in bash, but my loop treats the whole thing as one chunk — how should I be feeding that data in so each line gets processed separately?", "expect": ["fact_wg_096"]}
+{"text": "My build script runs fine on my laptop but fails with \"bad interpreter: No such file or directory\" inside our slim CI container. What's the most portable way to point scripts at bash without hardcoding an absolute path?", "expect": ["fact_wg_097"]}
+{"text": "Add a check at the top of the script so it exits with a clear error message if jq isn't installed, and make sure that check behaves consistently on macOS and Linux rather than only working on one platform.", "expect": ["fact_wg_098"]}
+{"text": "My script spawns a helper server and tries to terminate it after a deadline, but the termination signal never reaches it when it runs in our pipeline. Can you make the cleanup actually work?", "expect": ["fact_wg_099"]}
+{"text": "I didn't add any new packages, but the build suddenly errors out saying there's one in my workspace it can't locate. Could an auto-generated folder under crates/ that happens to contain its own manifest be getting swept in by the wildcard pattern in my config?", "expect": ["fact_wg_022"]}
+{"text": "Should we add a fallback pip index-url so CI stops failing when our internal package mirror is down?", "expect": []}
+{"text": "What's the max size an artifact can be before upload is rejected, and can we split the test reports?", "expect": []}
+{"text": "Can we still save the dependency cache when the test step fails so the next run gets a restore hit?", "expect": []}
+{"text": "Can checkout fetch just the tags we need instead of the full history?", "expect": []}
+{"text": "How do I exclude a known-broken combo from the matrix without killing the whole run?", "expect": []}
+{"text": "Do our self-hosted runners need ephemeral disks so state doesn't leak between jobs?", "expect": []}
+{"text": "Are secrets masked in the logs if they show up inside an error message?", "expect": []}
+{"text": "The service container isn't reachable—do I need explicit port mapping instead of the default?", "expect": []}
+{"text": "Besides Retry-After, should 429 responses include remaining-quota headers so clients can self-throttle?", "expect": []}
+{"text": "Our cookie-session endpoints still need CSRF tokens even with CORS configured correctly, right?", "expect": []}
+{"text": "When the bearer token expires, should the client silently exchange the refresh token for a new one?", "expect": []}
+{"text": "For chunked uploads with no Content-Length, where do we enforce the max body size and return 413?", "expect": []}
+{"text": "Can we use Last-Modified with If-Modified-Since instead of an etag for the large export endpoints?", "expect": []}
+{"text": "How long should we remember an idempotency key before a replay counts as a brand-new request?", "expect": []}
+{"text": "Do the cursor pages need a total-count header for the UI, and is COUNT(*) too slow to provide it?", "expect": []}
+{"text": "Should every problem+json response carry a correlation id we can grep for in the server logs?", "expect": []}
+{"text": "Is a circuit breaker around the payment provider a better fit than per-request deadlines?", "expect": []}
+{"text": "Can we boost bm25 weights on the title column of our FTS5 index to improve ranking?", "expect": []}
+{"text": "Should we set page_size before the first insert instead of relying on VACUUM to apply it later?", "expect": []}
+{"text": "Why does my SQLite query get slower over time until I run ANALYZE, and should I schedule it?", "expect": []}
+{"text": "Does SQLite's UPSERT fire update triggers, and how do I tell whether the row was inserted or updated?", "expect": []}
+{"text": "Can I use RETURNING to get the autoincrement id of an inserted row in SQLite across versions?", "expect": []}
+{"text": "How do savepoints work for nested transactions, and can I roll back to an inner savepoint only?", "expect": []}
+{"text": "Will a CHECK constraint added in a migration validate pre-existing rows in SQLite?", "expect": []}
+{"text": "How can I override opt-level just for a slow-compiling dependency under [profile.dev.package]?", "expect": []}
+{"text": "What's the workflow to vendor all crates into the repo so CI builds fully offline?", "expect": []}
+{"text": "How do I point Cargo at my fork of a crate using [patch] without breaking version resolution?", "expect": []}
+{"text": "How do I declare a dependency that only compiles when targeting Windows?", "expect": []}
+{"text": "Does cargo fix apply clippy's machine-applicable suggestions too, or just compiler fixes?", "expect": []}
+{"text": "How do I skip doctests for a binary-only crate in Cargo.toml?", "expect": []}
+{"text": "Can I preview exactly which files cargo publish would package without actually uploading?", "expect": []}
+{"text": "Why does cargo tree show the same crate pinned at two versions, and how do I converge them?", "expect": []}
+{"text": "Can workspace members inherit a shared [profile] section, or do rustflags need duplicating per crate?", "expect": []}
+{"text": "How do I run my container as a non-root USER but still listen on port 80?", "expect": []}
+{"text": "My build context is huge despite .dockerignore — how do I debug what's actually being sent?", "expect": []}
+{"text": "How do I set CPU and memory limits per service in compose so one container can't starve the host?", "expect": []}
+{"text": "How do I configure json-file log rotation so a chatty container doesn't fill the disk?", "expect": []}
+{"text": "When should args go in ENTRYPOINT versus CMD so users can still override them at run time?", "expect": []}
+{"text": "How do I pass a token to one RUN step as a build secret without it landing in the image layers?", "expect": []}
+{"text": "Can compose publish a UDP port range, and does the protocol need to be declared explicitly?", "expect": []}
+{"text": "Does docker system prune delete named volumes, and how do I opt specific ones out?", "expect": []}
+{"text": "Rename that variable, `d` tells me nothing about what it holds.", "expect": []}
+{"text": "Extract the tax calculation into its own helper function, it's buried in the loop.", "expect": []}
+{"text": "This function is 200 lines long, break it into smaller pieces.", "expect": []}
+{"text": "Replace the magic number 86400 with a named constant.", "expect": []}
+{"text": "Handle the case where the list is empty before you index into it.", "expect": []}
+{"text": "That date parsing breaks on timezones, be explicit about UTC.", "expect": []}
+{"text": "You introduced a race condition, guard the shared counter with a lock.", "expect": []}
+{"text": "Swap the nested loops for a hash map lookup, this is O(n²) right now.", "expect": []}
+{"text": "Remove the dead code behind that old feature flag.", "expect": []}
+{"text": "The error message just says \"failed\", include what actually went wrong.", "expect": []}
+{"text": "Make this class immutable, too many call sites mutate it.", "expect": []}
+{"text": "The recursion is blowing the stack on deep inputs, rewrite it iteratively.", "expect": []}
+{"text": "Cache the parsed config so we don't read the file on every call.", "expect": []}
+{"text": "That regex catastrophic backtracks on long strings, simplify it.", "expect": []}
+{"text": "Use the enum instead of raw strings for the order status.", "expect": []}
+{"text": "Split the utils module, it's become a dumping ground.", "expect": []}
+{"text": "Fix the off-by-one in the pagination slice.", "expect": []}
+{"text": "Memoize that expensive computation, it runs thousands of times per run.", "expect": []}
+{"text": "The serializer silently drops null fields, make that behavior configurable.", "expect": []}
+{"text": "Add type annotations to the public methods of this module.", "expect": []}
+{"text": "This module leaks memory, the event listeners are never detached.", "expect": []}
+{"text": "Escape user input before embedding it in the template.", "expect": []}
+{"text": "The queue grows unbounded under load, add backpressure or a max size.", "expect": []}
+{"text": "Deduplicate the copy-pasted validation logic across these three classes.", "expect": []}
+{"text": "Move those hardcoded credentials into the secrets manager.", "expect": []}
+{"text": "Refactor parse_config into smaller functions, it's over 200 lines.", "expect": []}
+{"text": "There's a memory leak in the image cache; find and fix it.", "expect": []}
+{"text": "Add TypeScript types to the utils module.", "expect": []}
+{"text": "The retry loop is off by one and drops the last item.", "expect": []}
+{"text": "Rename the variable `d` in the scheduler, it's cryptic.", "expect": []}
+{"text": "Remove the dead code behind that obsolete feature flag.", "expect": []}
+{"text": "Handle the case where the config file is missing instead of crashing.", "expect": []}
+{"text": "Fix the race condition when two threads update the shared counter.", "expect": []}
+{"text": "The dark mode styles are broken on the settings page.", "expect": []}
+{"text": "Replace the nested loops with a map lookup, this is O(n²).", "expect": []}
+{"text": "Add structured logging to the payment worker.", "expect": []}
+{"text": "The event timestamps show the wrong timezone for European users; fix the conversion.", "expect": []}
+{"text": "Debounce the search input so we don't re-render on every keystroke.", "expect": []}
+{"text": "Extract the duplicated validation logic into a shared helper.", "expect": []}
+{"text": "Fix the infinite loop when the queue is empty.", "expect": []}
+{"text": "Use a proper date library instead of hand-rolling date arithmetic.", "expect": []}
+{"text": "Money totals drift due to floating point; switch to decimal arithmetic.", "expect": []}
+{"text": "Improve the error messages so they say what actually failed and where.", "expect": []}
+{"text": "Make the modal focus-trappable and fully keyboard navigable.", "expect": []}
+{"text": "This regex hangs on certain inputs; rewrite it so it can't backtrack catastrophically.", "expect": []}
+{"text": "The worker pool deadlocks under load; investigate and fix.", "expect": []}
+{"text": "Add docstrings to the public functions in the auth module.", "expect": []}
+{"text": "UTF-8 characters get mangled when reading that file; fix the encoding handling.", "expect": []}
+{"text": "Reduce the cyclomatic complexity of the discount calculator.", "expect": []}
+{"text": "Cache the expensive tree walk; it currently runs on every keystroke.", "expect": []}
+{"text": "Rename the processData function to something that describes what it actually does.", "expect": []}
+{"text": "Split that 400-line function into smaller helpers.", "expect": []}
+{"text": "Fix the off-by-one error in the pagination loop.", "expect": []}
+{"text": "Add proper error handling around the file read instead of letting it crash.", "expect": []}
+{"text": "The retry logic should use exponential backoff with jitter.", "expect": []}
+{"text": "Extract the duplicated validation code into a shared utility.", "expect": []}
+{"text": "Make the config object immutable so nothing mutates it accidentally.", "expect": []}
+{"text": "Use a map instead of nested if-else chains for the status lookup.", "expect": []}
+{"text": "Handle the case where the input list is empty.", "expect": []}
