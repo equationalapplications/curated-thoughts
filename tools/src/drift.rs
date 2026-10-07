@@ -84,8 +84,9 @@ pub fn drift_report(
             .collect(),
         ambiguous_warnings: classified.plan.ambiguous.clone(),
     };
-    let pending =
-        !report.gone.is_empty() || !report.repointed.is_empty() || !report.excluded_deletes.is_empty();
+    let pending = !report.gone.is_empty()
+        || !report.repointed.is_empty()
+        || !report.excluded_deletes.is_empty();
     Ok((report, if pending { 3 } else { 0 }))
 }
 
@@ -110,8 +111,7 @@ pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
     let paths = tauri_app_lib::retrieval::resolve_brain_paths();
     // trust_links: false — drift reports what a plain ingest would see;
     // promoting pending links is a `ct trust` decision, not drift's.
-    let (vault_root, files, surfacing) =
-        crate::walk_list::build_ingest_file_list(&paths, false)?;
+    let (vault_root, files, surfacing) = crate::walk_list::build_ingest_file_list(&paths, false)?;
 
     // trust_links=false means nothing was auto-promoted, so a non-empty
     // `pending` list is content this walk SKIPPED awaiting `ct trust` —
@@ -140,7 +140,13 @@ pub fn drift_cmd(json: bool) -> anyhow::Result<i32> {
         // exit 5 alone emitted nothing under --json, leaving jq with empty
         // stdout and no way to tell indeterminate from clean (CR review).
         if json {
-            println!("{}", serde_json::to_string(&DriftReport { walk_incomplete: true, ..report })?);
+            println!(
+                "{}",
+                serde_json::to_string(&DriftReport {
+                    walk_incomplete: true,
+                    ..report
+                })?
+            );
         }
         return Ok(5);
     }

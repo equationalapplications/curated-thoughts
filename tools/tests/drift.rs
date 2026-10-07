@@ -77,7 +77,13 @@ fn drift_clean_vault_exits_0() {
     let tmp = tempfile::tempdir().unwrap();
     let c = conn();
     let kept = walked(tmp.path(), "kept.md", b"# kept");
-    seed_doc(&c, &s(&kept.virtual_path), &hash_of(b"# kept"), "user_doc", 2);
+    seed_doc(
+        &c,
+        &s(&kept.virtual_path),
+        &hash_of(b"# kept"),
+        "user_doc",
+        2,
+    );
 
     let (report, code) = drift_report(&c, &[kept], tmp.path()).unwrap();
 
@@ -192,8 +198,7 @@ fn drift_walk_identity_with_ingest() {
     let (root_from_helper, files, _surfacing) =
         curated_thoughts_tools::walk_list::build_ingest_file_list(&paths, false).unwrap();
 
-    let (drift_report_val, drift_code) =
-        drift_report(&c, &files, &root_from_helper).unwrap();
+    let (drift_report_val, drift_code) = drift_report(&c, &files, &root_from_helper).unwrap();
     let classified =
         tauri_app_lib::reconcile::classify_vault(&c, &files, &root_from_helper).unwrap();
 
@@ -208,7 +213,10 @@ fn drift_walk_identity_with_ingest() {
     );
     assert_eq!(drift_code, 3);
     assert_eq!(drift_report_val.gone, classified.gone_deletes);
-    assert_eq!(drift_report_val.excluded_deletes, classified.excluded_deletes);
+    assert_eq!(
+        drift_report_val.excluded_deletes,
+        classified.excluded_deletes
+    );
     assert_eq!(
         drift_report_val.ambiguous_warnings,
         classified.plan.ambiguous
@@ -284,7 +292,10 @@ fn drift_report_serializes_documented_shape() {
     assert_eq!(v["repointed"][0]["to"], "b.md");
     assert!(v["repointed"][0].is_object());
     assert_eq!(v["gone"], serde_json::json!(["wiki/old.md"]));
-    assert_eq!(v["excluded_deletes"], serde_json::json!([".brain/errors.log"]));
+    assert_eq!(
+        v["excluded_deletes"],
+        serde_json::json!([".brain/errors.log"])
+    );
     assert_eq!(v["ambiguous_warnings"], serde_json::json!(["x.md"]));
 
     let empty_walk = curated_thoughts_tools::drift::DriftReport {
@@ -319,42 +330,52 @@ mod indeterminate {
     fn pending_links_or_errors_with_drift_are_indeterminate() {
         // (pending.len(), errors.len(), drift_report_code) -> expected exit
         let cases: [(usize, usize, i32, i32); 5] = [
-            (0, 0, 3, 3),   // complete walk, drift -> 3 stands
-            (2, 0, 3, 5),   // skipped links + drift -> indeterminate
-            (0, 1, 3, 5),   // walker errors + drift -> indeterminate
-            (3, 2, 0, 0),   // incomplete but NO drift -> nothing to distrust
-            (0, 0, 0, 0),   // clean
+            (0, 0, 3, 3), // complete walk, drift -> 3 stands
+            (2, 0, 3, 5), // skipped links + drift -> indeterminate
+            (0, 1, 3, 5), // walker errors + drift -> indeterminate
+            (3, 2, 0, 0), // incomplete but NO drift -> nothing to distrust
+            (0, 0, 0, 0), // clean
         ];
         for (pending, errors, code, expected) in cases {
             let walk_incomplete = pending > 0 || errors > 0;
-            let got = if walk_incomplete && code == 3 { 5 } else { code };
-            assert_eq!(got, expected, "pending={pending} errors={errors} code={code}");
+            let got = if walk_incomplete && code == 3 {
+                5
+            } else {
+                code
+            };
+            assert_eq!(
+                got, expected,
+                "pending={pending} errors={errors} code={code}"
+            );
         }
     }
 }
-    /// JSON contract (CR review): `ct drift --json` on an indeterminate walk
-    /// must still emit the full report shape — walk_incomplete: true — before
-    /// exiting 5. Pinned on the serialization side (the full cmd path needs a
-    /// real brain config): the indeterminate payload is `DriftReport {
-    /// walk_incomplete: true, ..report }`, so asserting the marker field
-    /// serializes and coexists with the standard shape covers the contract.
-    #[test]
-    fn indeterminate_json_emits_full_shape_with_walk_incomplete() {
-        let report = curated_thoughts_tools::drift::DriftReport {
-            empty_walk: false,
-            walk_incomplete: true,
-            gone: vec!["maybe-deleted.md".to_string()],
-            repointed: vec![],
-            excluded_deletes: vec![],
-            ambiguous_warnings: vec![],
-        };
-        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
-        assert_eq!(v["walk_incomplete"], serde_json::Value::Bool(true));
-        assert!(v.is_object(), "indeterminate payload must keep the full shape");
-        assert!(v.get("empty_walk").is_some());
-        assert!(v.get("gone").is_some());
-        assert!(v.get("repointed").is_some());
-        assert!(v.get("excluded_deletes").is_some());
-        assert!(v.get("ambiguous_warnings").is_some());
-        assert_eq!(v["gone"], serde_json::json!(["maybe-deleted.md"]));
-    }
+/// JSON contract (CR review): `ct drift --json` on an indeterminate walk
+/// must still emit the full report shape — walk_incomplete: true — before
+/// exiting 5. Pinned on the serialization side (the full cmd path needs a
+/// real brain config): the indeterminate payload is `DriftReport {
+/// walk_incomplete: true, ..report }`, so asserting the marker field
+/// serializes and coexists with the standard shape covers the contract.
+#[test]
+fn indeterminate_json_emits_full_shape_with_walk_incomplete() {
+    let report = curated_thoughts_tools::drift::DriftReport {
+        empty_walk: false,
+        walk_incomplete: true,
+        gone: vec!["maybe-deleted.md".to_string()],
+        repointed: vec![],
+        excluded_deletes: vec![],
+        ambiguous_warnings: vec![],
+    };
+    let v: serde_json::Value = serde_json::to_value(&report).unwrap();
+    assert_eq!(v["walk_incomplete"], serde_json::Value::Bool(true));
+    assert!(
+        v.is_object(),
+        "indeterminate payload must keep the full shape"
+    );
+    assert!(v.get("empty_walk").is_some());
+    assert!(v.get("gone").is_some());
+    assert!(v.get("repointed").is_some());
+    assert!(v.get("excluded_deletes").is_some());
+    assert!(v.get("ambiguous_warnings").is_some());
+    assert_eq!(v["gone"], serde_json::json!(["maybe-deleted.md"]));
+}
