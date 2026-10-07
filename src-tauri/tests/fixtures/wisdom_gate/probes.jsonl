@@ -1,0 +1,200 @@
+{"text": "the client always re-downloads the same large response. i send an etag header but the server doesn't honor it. how does conditional get work?", "expect": ["fact_wg_066"]}
+{"text": "is property-based testing worth the learning curve?", "expect": []}
+{"text": "i'm redesigning my portfolio site, what font pairing do you suggest?", "expect": []}
+{"text": "what's a good changelog format?", "expect": []}
+{"text": "i'm picking a domain name for my side project. any registrar recs?", "expect": []}
+{"text": "how do i write a good bug report that gets fixed fast?", "expect": []}
+{"text": "one matrix leg fails and the others all get cancelled. i actually want them all to keep going so i can see every failure at once.", "expect": ["fact_wg_013"]}
+{"text": "production started crashing three days ago. i have a script that prints non-zero on the broken commit. can git walk the range for me?", "expect": ["fact_wg_002"]}
+{"text": "the browser refuses my cross-origin POST and the server logs a 405 on a separate method. what's the missing preflight?", "expect": ["fact_wg_064"]}
+{"text": "depends_on starts the db before it's ready, so the first migration test fails. how do i wait for the container to be healthy?", "expect": ["fact_wg_044"]}
+{"text": "should i put side projects on my resume?", "expect": []}
+{"text": "docker desktop is heavy on mac. is there a lighter alternative?", "expect": []}
+{"text": "i'm at a conference and want to take notes on paper. any good notebook recs?", "expect": []}
+{"text": "i marked a flaky test `#[ignore]` and now nobody's looking at it. how do i make ignored tests visible?", "expect": ["fact_wg_076"]}
+{"text": "i'm choosing between circleci and github actions for a new project. thoughts?", "expect": []}
+{"text": "is poetry or uv the modern python package manager?", "expect": []}
+{"text": "requests to a dockerized service sometimes land on one replica and sometimes another, even though i'm using the same DNS name.", "expect": ["fact_wg_045"]}
+{"text": "is there a good book on technical writing for engineers?", "expect": []}
+{"text": "modern pip has a way to point at a private index without passing --index-url every time, right? something in pyproject.toml?", "expect": ["fact_wg_030"]}
+{"text": "i want to fix a bug on a different branch but i don't want to stash this WIP. is there a way to have two branches checked out at once?", "expect": ["fact_wg_003"]}
+{"text": "is there a way to run ci on my own hardware for free?", "expect": []}
+{"text": "i told github actions to run on a self-hosted runner and it still spun up a hosted one. i think i typo'd a label. how do i verify?", "expect": ["fact_wg_015"]}
+{"text": "docker compose has env_file and environment. what's the precedence and why are my values wrong?", "expect": ["fact_wg_042"]}
+{"text": "any tips for negotiating a starting salary at a small startup?", "expect": []}
+{"text": "tdd or bdd or just write the test after? what do you actually do?", "expect": []}
+{"text": "is rust a good first systems language?", "expect": []}
+{"text": "i'm using docker context to point at a remote daemon and accidentally pushed an image to production. how do i confirm the active context?", "expect": ["fact_wg_047"]}
+{"text": "my monitor flickers when i wake it from sleep. troubleshooting?", "expect": []}
+{"text": "this monorepo is 20 GB and i only ever touch three folders. cloning the whole thing takes my laptop fifteen minutes.", "expect": ["fact_wg_005"]}
+{"text": "i'm picking a version for my first release. 0.1.0 or 1.0.0?", "expect": []}
+{"text": "in a docker container with a read-only $HOME, pip is failing because it can't write to the cache. how do i redirect the cache?", "expect": ["fact_wg_037"]}
+{"text": "what's a good way to estimate a feature without a track record?", "expect": []}
+{"text": "when the cache restore fails our build is now red instead of green. can we treat restore failure as a warning?", "expect": ["fact_wg_012"]}
+{"text": "i set a minimum python version in pyproject but pip is still installing my wheel on an older interpreter. did i miss a config field?", "expect": ["fact_wg_036"]}
+{"text": "what's the difference between gitlab and github and bitbucket for self-hosted teams?", "expect": []}
+{"text": "i have a deadline and i want each request to fit inside it. how is per-request timeout different from overall deadline?", "expect": ["fact_wg_069"]}
+{"text": "my service rate-limited me with 429 but my client kept hammering it. shouldn't the server tell me when to retry?", "expect": ["fact_wg_061"]}
+{"text": "is bash a good default shell for new engineers?", "expect": []}
+{"text": "i want to upgrade only the packages in requirements.in and have it rewrite requirements.txt. what's the tool?", "expect": ["fact_wg_032"]}
+{"text": "is docker compose obsolete now that kubernetes exists?", "expect": []}
+{"text": "docker vs podman for production — pros and cons?", "expect": []}
+{"text": "i retried my POST after a timeout and got two charges. isn't there a way for the client to retry safely?", "expect": ["fact_wg_060"]}
+{"text": "every ci run reinstalls all the pnpm packages from scratch. there has to be a way to cache the install step.", "expect": ["fact_wg_010"]}
+{"text": "i'm picking between intellij and vs code for kotlin. any strong opinions?", "expect": []}
+{"text": "i'm learning rust. should i start with the official book or a tutorial?", "expect": []}
+{"text": "my hot loop prepares the same statement every iteration and the explain plan shows prepare cost. should i be reusing the prepared statement?", "expect": ["fact_wg_052"]}
+{"text": "how do you decide between a code review and a pair-programming session?", "expect": []}
+{"text": "i'm choosing between postgres and mysql for a side project. thoughts?", "expect": []}
+{"text": "my test changes the process cwd and now parallel siblings fail because they depend on cwd-resolved paths. how do i isolate?", "expect": ["fact_wg_073"]}
+{"text": "any good podcasts about distributed systems?", "expect": []}
+{"text": "how do i add a favicon to a vite app?", "expect": []}
+{"text": "i'm running `(cd /tmp && ./run.sh)` and then `./next.sh` in the parent. did the cd leak out?", "expect": ["fact_wg_095"]}
+{"text": "my team is split on tabs vs spaces. what's the consensus now?", "expect": []}
+{"text": "should i include certifications on my resume or only experience?", "expect": []}
+{"text": "the bind-mounted volume is owned by a different uid than the container expects and every write returns EACCES at runtime.", "expect": ["fact_wg_043"]}
+{"text": "my history is full of fixup commits from correcting my own typos. can you get rid of them without me clicking around for half an hour?", "expect": ["fact_wg_000"]}
+{"text": "rust's borrow checker rejects my code. what's a good resource to learn ownership?", "expect": []}
+{"text": "is there a good way to write release notes automatically?", "expect": []}
+{"text": "the build artifacts from last week's run are gone. how long do they hang around by default and can i extend it?", "expect": ["fact_wg_016"]}
+{"text": "what commit message prefix tells semantic-release to bump minor vs patch vs major? and what happens if i forget the prefix?", "expect": ["fact_wg_080"]}
+{"text": "should i learn vim or emacs first?", "expect": []}
+{"text": "pip install hangs for minutes on a backtracking solver log. can i keep the modern resolver but make this fast?", "expect": ["fact_wg_038"]}
+{"text": "is there a ci service that doesn't bill by the minute?", "expect": []}
+{"text": "sqlite vs duckdb for analytics workloads?", "expect": []}
+{"text": "what's the best way to onboard a new engineer to a team?", "expect": []}
+{"text": "i have a function i'm calling with 5 different inputs to assert the same behavior. instead of 5 separate tests, is there a way to parametrize?", "expect": ["fact_wg_078"]}
+{"text": "should i use a mechanical keyboard or is a regular laptop keyboard fine?", "expect": []}
+{"text": "every push to my feature branch kicks off a new run and now i have five pending for the same ref. can i cancel the old ones automatically?", "expect": ["fact_wg_019"]}
+{"text": "i added a secret at the job level and now it's leaking into steps where it shouldn't be visible. how do i scope a secret to one step?", "expect": ["fact_wg_014"]}
+{"text": "is sqlite good enough for a small saas?", "expect": []}
+{"text": "is it okay to break the build on friday afternoon?", "expect": []}
+{"text": "can sqlite handle 100 GB of data?", "expect": []}
+{"text": "my api returns `{error, message}` and clients switch on the message text. i want to rename the message and the world breaks. is there a stable contract?", "expect": ["fact_wg_065"]}
+{"text": "i want to release from a feature branch. how do i whitelist branches in semantic-release?", "expect": ["fact_wg_084"]}
+{"text": "i'm new to python. is 3.12 different from 3.11 in a way that matters?", "expect": []}
+{"text": "docker stop waits the full 10 seconds before sigkill, because my pid 1 ignores sigterm. how do i fix that in the image?", "expect": ["fact_wg_046"]}
+{"text": "i want to add a 404 page to my static site. what's a clean way?", "expect": []}
+{"text": "my random test passed locally and every run and then flaked in ci. i think the rng is unseeded. how do i make randomness testable?", "expect": ["fact_wg_079"]}
+{"text": "i have a transaction that reads then writes, and the read returns ok but the write gets BUSY. should i upgrade the transaction at BEGIN?", "expect": ["fact_wg_054"]}
+{"text": "i keep making the same typo in a long pipeline. any shell habits?", "expect": []}
+{"text": "i'm switching my tag format from v-prefixed to no-prefix and now every install script that hardcoded `v3.2.0` is broken. how is the format set?", "expect": ["fact_wg_085"]}
+{"text": "any good youtube channels for learning about algorithms?", "expect": []}
+{"text": "what's the difference between a linter and a formatter? can one tool do both?", "expect": []}
+{"text": "is it okay to ask questions in a PR review? or should i just approve?", "expect": []}
+{"text": "any good podcasts about open source maintainership?", "expect": []}
+{"text": "starting a fresh library today, what's the modern build backend? setuptools has been around forever but i hear there's something newer.", "expect": ["fact_wg_033"]}
+{"text": "the integration test step always fails because the database container isn't actually ready yet, even though docker says it started.", "expect": ["fact_wg_018"]}
+{"text": "i'm rewriting my old jquery code in modern js. what's the closest equivalent to $(document).ready?", "expect": []}
+{"text": "is 100% test coverage a reasonable goal for a new repo?", "expect": []}
+{"text": "postgres vs sqlite for a side project — when does it matter?", "expect": []}
+{"text": "i logged the request url with the auth token in the query string and now it's in the cdn cache. shouldn't tokens be in a header instead?", "expect": ["fact_wg_063"]}
+{"text": "is there a ci flag that tells semantic-release it's running on a real run? what happens without the flag?", "expect": ["fact_wg_083"]}
+{"text": "i'm thinking of going freelance. how do i price my first project?", "expect": []}
+{"text": "any recommendations for a dark theme for vs code?", "expect": []}
+{"text": "is github actions better than jenkins for small teams?", "expect": []}
+{"text": "i asserted `0.1 + 0.2 == 0.3` and the value came out `0.30000000000000004`. what's the safe way to compare floats?", "expect": ["fact_wg_072"]}
+{"text": "my release binary is huge. i heard link-time optimization shrinks it a lot but the build is slow. what's the middle ground?", "expect": ["fact_wg_027"]}
+{"text": "i'm building a webhook receiver. any pitfalls?", "expect": []}
+{"text": "is it rude to use github copilot at work? what's the policy at your company?", "expect": []}
+{"text": "my writer gets SQLITE_BUSY when a long reader holds the lock. is there a wait-and-retry setting on the connection?", "expect": ["fact_wg_051"]}
+{"text": "i'm moving from docker to a serverless platform. any gotchas?", "expect": []}
+{"text": "i just blew away a commit with a hard reset and i can't find it in git log. there's gotta be a way to recover it.", "expect": ["fact_wg_004"]}
+{"text": "i'm installing a rust tool from a published crate and the install is silently bumping past the pinned version. how do i lock the install?", "expect": ["fact_wg_029"]}
+{"text": "what's a good way to document an api without writing everything twice?", "expect": []}
+{"text": "i'm backgrounding a child in a ci script and `wait` returns immediately. did job control get disabled?", "expect": ["fact_wg_099"]}
+{"text": "my script checks for jq with `which jq` and it works on macOS but not on linux. is there a portable builtin?", "expect": ["fact_wg_098"]}
+{"text": "what's the difference between a library and a framework?", "expect": []}
+{"text": "my manager wants daily standups. is that too often?", "expect": []}
+{"text": "is there a way to undo a `rm -rf`?", "expect": []}
+{"text": "any good tools for sketching a database diagram?", "expect": []}
+{"text": "what's the difference between a json column and a jsonb column in postgres?", "expect": []}
+{"text": "is there a way to use git without a github account?", "expect": []}
+{"text": "my wheel fails to install on a centos machine that runs an older glibc. how do i find the lowest glibc a wheel supports?", "expect": ["fact_wg_034"]}
+{"text": "my buildx cache is split across multiple cache images and it's hard to find the right one. is there an inline cache mode?", "expect": ["fact_wg_048"]}
+{"text": "what's a good python library for parsing html?", "expect": []}
+{"text": "is there a difference between a tech lead and an engineering manager?", "expect": []}
+{"text": "any tips for public speaking at a developer conference?", "expect": []}
+{"text": "i'm picking a name for my new open-source project. tips?", "expect": []}
+{"text": "what's a good way to track time without it becoming a tax?", "expect": []}
+{"text": "my crate has a feature flag and clippy in strict mode says my import is unused. how do i tell clippy the import is conditional?", "expect": ["fact_wg_021"]}
+{"text": "i'm switching from one release plugin to another and CHANGELOG.md got rewritten differently. what controls the format?", "expect": ["fact_wg_081"]}
+{"text": "is there a cargo subcommand for coverage, and do we run it in ci? if not, where should it run?", "expect": ["fact_wg_077"]}
+{"text": "the diff is unreadable because every line was reflowed to a slightly different column. how do i ignore whitespace when reviewing?", "expect": ["fact_wg_009"]}
+{"text": "i want to see what semantic-release would do without pushing a tag. is there a dry-run mode?", "expect": ["fact_wg_082"]}
+{"text": "is there a way to do async/await in rust without tokio?", "expect": []}
+{"text": "what's the difference between yarn and npm and pnpm — do i have to pick one?", "expect": []}
+{"text": "semantic-release failed at the npm publish step and now there's a tag with no package. what was missing and how do i rotate?", "expect": ["fact_wg_089"]}
+{"text": "my paginated feed shifts the items every time someone inserts a new row, so a client page request skips or repeats items. is there a stable pagination?", "expect": ["fact_wg_068"]}
+{"text": "sqlite fts5 isn't matching diacritics in european text. is there a tokenizer option that strips them?", "expect": ["fact_wg_053"]}
+{"text": "i have a script with errexit on and `false | true` — the script exits 0. shouldn't errexit catch that?", "expect": ["fact_wg_090"]}
+{"text": "i'm passing filenames from find to xargs and a filename with a quote breaks the whole pipeline. how do i make this safe?", "expect": ["fact_wg_094"]}
+{"text": "my final docker image is 800 MB because i never extracted it from a build stage. how do multi-stage build work have to be written?", "expect": ["fact_wg_041"]}
+{"text": "my script fails halfway through and leaves a tempdir behind. how do i make sure cleanup runs even on error?", "expect": ["fact_wg_093"]}
+{"text": "my laptop fan is loud when compiling. is there a quieter machine?", "expect": []}
+{"text": "any good linux distros for a developer laptop?", "expect": []}
+{"text": "ci jobs are flaky on monday mornings. is this a known issue?", "expect": []}
+{"text": "cargo doc is failing in ci with a link error i can't see locally. i added a docstring with a backtick in it; is that it?", "expect": ["fact_wg_025"]}
+{"text": "i want to build a rest api. which framework should i use?", "expect": []}
+{"text": "what's the best way to ask for help on a forum without sounding demanding?", "expect": []}
+{"text": "i set std::env::set_var in a test and another test reads it before the first one finishes. is there a scoped env primitive?", "expect": ["fact_wg_074"]}
+{"text": "i'm querying a json column by a key and the full table scan kills perf. can sqlite index into a json column?", "expect": ["fact_wg_058"]}
+{"text": "can git work without a remote?", "expect": []}
+{"text": "git blame inside our ci step returns 'no such file or directory' for every line. i think the checkout is shallow. how do i deepen it?", "expect": ["fact_wg_017"]}
+{"text": "i have a seed job in docker-compose that i don't want running on a normal `docker compose up`. is there a way to hide a service?", "expect": ["fact_wg_049"]}
+{"text": "i want to debug a script that's doing something weird. how do i get a trace of every command the script runs?", "expect": ["fact_wg_092"]}
+{"text": "my cli test asserts the JSON stdout is right and i call it, but i notice the test logs are full of warnings from the lib. what's the clean fix?", "expect": ["fact_wg_075"]}
+{"text": "is it worth learning assembly in 2026?", "expect": []}
+{"text": "every worktree i open fails cargo build because the root manifest doesn't list it. how do i tell cargo to ignore worktrees?", "expect": ["fact_wg_020"]}
+{"text": "i have a single string as input. is there a cleaner way to feed it to `while read` than a temp file?", "expect": ["fact_wg_096"]}
+{"text": "i want to edit my library and have the changes show up in my service without reinstalling. is that -e? and is that safe for prod?", "expect": ["fact_wg_031"]}
+{"text": "i'm thinking of starting a blog. any platform recommendations?", "expect": []}
+{"text": "i'm learning rust. is it okay to use unwrap() while i'm still learning?", "expect": []}
+{"text": "my ubuntu job hangs for hours and then times out, no error message, on apt-get install. what's the default timeout and how do i set one?", "expect": ["fact_wg_011"]}
+{"text": "my api serves a lot of JSON. is brotli actually worth the cpu vs gzip? when do you pick which?", "expect": ["fact_wg_067"]}
+{"text": "i'm cutting a beta off main. how do i get `1.3.0-beta.1` instead of `1.3.0` and route it to a different channel?", "expect": ["fact_wg_088"]}
+{"text": "my filename has a space and the for-loop with `$file` processes it as two separate arguments. how do i fix this?", "expect": ["fact_wg_091"]}
+{"text": "i have a binary and a library in the same workspace depending on the same crate. cargo update only updates one. how does the lockfile view work?", "expect": ["fact_wg_024"]}
+{"text": "my script uses `#!/bin/bash` and fails to find bash on alpine. what's the portable shebang?", "expect": ["fact_wg_097"]}
+{"text": "how do you version a public api?", "expect": []}
+{"text": "what's the difference between semver and calver? when do you pick?", "expect": []}
+{"text": "i switched the analyzer preset and the next release's version changed. what's the default and what does changing it do?", "expect": ["fact_wg_086"]}
+{"text": "graphql vs rest — when does graphql actually pay off?", "expect": []}
+{"text": "i want to know what pip install would do — just print it, don't actually install. can i dry-run a pip install?", "expect": ["fact_wg_039"]}
+{"text": "i have a python script and i want to ship it as a single binary. how?", "expect": []}
+{"text": "the first release of a brand-new repo is 1.0.0 by default. i want 0.1.0. how do i override?", "expect": ["fact_wg_087"]}
+{"text": "what's the difference between unit and integration tests in practice?", "expect": []}
+{"text": "docker builds feel slow. i heard buildkit caches layers across runs. is that on by default now and how do i use it?", "expect": ["fact_wg_040"]}
+{"text": "every rebase of this long-lived feature branch re-opens the same merge conflict i resolved last week. there's gotta be a way to remember that answer.", "expect": ["fact_wg_001"]}
+{"text": "our convention for naming test functions — what reads well in a failure log? implementation-y names like `test_threshold` or behavior-y names?", "expect": ["fact_wg_071"]}
+{"text": "git is slow on windows. is there an alternative vcs that's faster on ntfs?", "expect": []}
+{"text": "what's the best way to take notes during meetings?", "expect": []}
+{"text": "i deleted 90% of the rows and the file didn't shrink. how do i reclaim the disk space in sqlite?", "expect": ["fact_wg_056"]}
+{"text": "any tips for staying focused during a long pair-programming call?", "expect": []}
+{"text": "how do you decide when to ship a major version bump?", "expect": []}
+{"text": "python's pip is being deprecated, right? what's replacing it?", "expect": []}
+{"text": "my sqlite reader is blocked while a writer is committing. i heard wal mode lets readers proceed without blocking. how do i enable it?", "expect": ["fact_wg_050"]}
+{"text": "what's the most underrated feature in fzf?", "expect": []}
+{"text": "what's the difference between bash, fish, and zsh?", "expect": []}
+{"text": "github copilot keeps suggesting things in a style i don't like. can i configure its tone?", "expect": []}
+{"text": "should i put my dotfiles on github? any privacy concerns?", "expect": []}
+{"text": "i need to copy a live sqlite db to a backup location without taking writers offline. is there an online backup api?", "expect": ["fact_wg_059"]}
+{"text": "i'm building a SELECT with an IN clause from a list of ids. i know not to interpolate them as text — what's the right pattern with rusqlite?", "expect": ["fact_wg_055"]}
+{"text": "every cargo build rebuilds my native dependency even when i didn't touch the c source. how do i tell build.rs to only re-run on changes?", "expect": ["fact_wg_023"]}
+{"text": "windows devs keep committing CRLF into our python files and the linter chokes. how do i tell git to normalize?", "expect": ["fact_wg_007"]}
+{"text": "i ran git stash but my new untracked files are still sitting in the working tree confusing me when i switch branches.", "expect": ["fact_wg_008"]}
+{"text": "i'm new to typescript — what's a good starter book?", "expect": []}
+{"text": "i'm planning my team's branch strategy. gitflow vs trunk-based — pros and cons?", "expect": []}
+{"text": "i put a directory at the root of my workspace and now cargo thinks it's a member. how do i exclude it from the workspace glob?", "expect": ["fact_wg_022"]}
+{"text": "any good resources for learning about database indexes conceptually?", "expect": []}
+{"text": "can i run docker without root on linux?", "expect": []}
+{"text": "cargo test stops at the first failing test in the bin target. i need every regression in one ci run, not one at a time.", "expect": ["fact_wg_026"]}
+{"text": "i'm setting up code coverage in ci. which tool do you use?", "expect": []}
+{"text": "i ran pip install without an active venv and now i have packages in ~/.local that i can't import when i activate the venv. what did i do?", "expect": ["fact_wg_035"]}
+{"text": "i declared a foreign key in sqlite but the constraint isn't enforced. i think i need a pragma but i can't recall which one.", "expect": ["fact_wg_057"]}
+{"text": "the streaming api returns chunked responses with no content-length header and my http library is hanging. how do i detect chunked?", "expect": ["fact_wg_062"]}
+{"text": "my tests share one sqlite fixture across `#[test]` functions and they flake under parallel execution. what's the right isolation?", "expect": ["fact_wg_070"]}
+{"text": "can you write tests for a legacy codebase that has none?", "expect": []}
+{"text": "my team requires signed commits and my last commit got refused. what config do i need to set so gpg finds my key?", "expect": ["fact_wg_006"]}
+{"text": "i want a tool that reads the workspace graph to find all the bins and their features. is there a structured output cargo emits?", "expect": ["fact_wg_028"]}
+{"text": "what's the difference between `String` and `&str` in rust?", "expect": []}
