@@ -11,6 +11,8 @@ redirect behavior pinned, R2.7.6 wording, citations re-anchored.
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
+Citations into `connection.rs` that implementation tasks keep editing are
+by SYMBOL, not line (they drifted twice in one day).
 EXCEPTION — every line citation inside §2.2 (into `config/mod.rs`,
 `ontology_config.rs`, `inference/mod.rs`, `onboard/mod.rs`, `lib.rs`,
 `queries.rs`, `tools/src/bin/ct.rs`) describes the PRE-wave-1 code that
@@ -829,7 +831,7 @@ Additional rules:
   | Librarian token, evidence row MISSING (`Ok(None)` at `:217`) | `HadEvidenceUnresolved` |
   | JSON object with `"evidence": []` (e.g. the V20 doomed-row shape `{"proposal_id":null,"evidence":[]}`) | `HadEvidenceUnresolved` (provenance deliberately nulled; live census: 0 such refs on live facts today, pinned so it stays 0) |
   | JSON object with NO `evidence` key | `HadEvidenceUnresolved` (unknown provenance shape) |
-  | Any non-JSON ref that is not an explicitly known non-provenance value — INCLUDING plain path refs (`documents/notes.md` — the shape seeded by the test fixture at `connection.rs:2734`), truncated inline JSON (`{"evidence":[{"content_hash":"ab`), and free text | `HadEvidenceUnresolved` (r10-M2: wave 1 does NOT resolve path refs — `source_docs_from_ref` has no path-resolution branch today; adding one is out of scope — and a naming ref must never silently climb) |
+  | Any non-JSON ref that is not an explicitly known non-provenance value — INCLUDING plain path refs (`documents/notes.md` — the shape seeded by the `documents/notes.md` test fixture in `connection.rs`'s source-ref canary test), truncated inline JSON (`{"evidence":[{"content_hash":"ab`), and free text | `HadEvidenceUnresolved` (r10-M2: wave 1 does NOT resolve path refs — `source_docs_from_ref` has no path-resolution branch today; adding one is out of scope — and a naming ref must never silently climb) |
   | Ref ABSENT (`None`) — today including the V20 sentinel, which MIGRATION_V18 already NULLed (`connection.rs:345-356`) — or any other explicitly-listed non-provenance value | `NoEvidence` (nothing claimed; DISJOINT from the empty-evidence row above: empty array = claimed-but-unresolved, NULL = never claimed) |
   | Any DB fault | propagate / stop heal — malformed evidence JSON is NOT a DB fault: it is `HadEvidenceUnresolved` (report-only), r10-MINOR-4. The `:217` arm splits THREE ways (r14-m4): `Ok(None)` -> unresolved, `Err` -> propagates, `Ok(Some)` -> parses; the SECOND display wrapper is `wiki_graph::wiki_context` (why `source_docs_from_ref` is `pub(crate)`, `entities.rs:198-201`), degrading on error like the reader |
   Unclassified → `HadEvidenceUnresolved`. Rows are DISJOINT (r10-M2):
@@ -973,7 +975,7 @@ hard-coded literal). Single consolidated rule:
     one-shot-migration design): `ensure_manifest_vocabulary(conn, entity_id)` runs
     whenever the gate or heal RESOLVES a manifest (memoized per
     entity+generation, where generation = sha256 of `manifest_json`,
-    r10-MINOR-3) and — best-effort (r8-m6) — at DB open, invoked BEFORE `run_okf_migration` (`connection.rs:1018`) and after `migrate()` (the ensure runs best-effort at DB open in the `AppDb` path — `connection.rs:1014-1019`, the ONLY path that also runs the OKF migration, which is the ordering that matters; `migrate_open_db`/`migrate_brain_db` wrappers noted r19-m5;
+    r10-MINOR-3) and — best-effort (r8-m6) — at DB open, invoked BEFORE `run_okf_migration` (the `let _ = run_okf_migration(...)` call in `AppDb::open_with_config`, `connection.rs`) and after `migrate()` (the ensure runs best-effort at DB open in the `AppDb` path — `AppDb::open_with_config` in `connection.rs` (its `migrate()` + `run_okf_migration` block), the ONLY path that also runs the OKF migration, which is the ordering that matters; `migrate_open_db`/`migrate_brain_db` wrappers noted r19-m5;
     resolution-time is the real guarantee) — so fresh installs (whose
     `tier_fact` is
     seeded AFTER migration by `seedManifestsIfAbsent`,
@@ -981,7 +983,7 @@ hard-coded literal). Single consolidated rule:
     on first gate/heal resolution, and no deployed brain ships without
     a fallback for long. The ensure is a no-op when its work is already
     done. On a READ-ONLY or contended connection the ensure's write
-    may fail (non-app hosts open best-effort via `migrate_brain_db`, `connection.rs:1054-1059`, which warns rather than fails on a read-only or contended DB):
+    may fail (non-app hosts open best-effort via `migrate_brain_db`, `connection.rs`, which warns rather than fails on a read-only or contended DB):
     then it computes the ensured vocabulary IN MEMORY for the current
     resolution and the heal report says "ensure pending (read-only)"
     instead of a §2.4.5 error (r12-m4 — never a false loud
@@ -1188,7 +1190,7 @@ nowhere to go):**
   reaches a dropped key — a degraded-but-irrelevant ingest block does
   not block the migration. **The abort
  must be OBSERVABLE (r6-M2):** the only production caller discards the
- error (`let _ = run_okf_migration(...)`, `connection.rs:1018`) —
+ error (the `let _ = run_okf_migration(...)` call in `AppDb::open_with_config`, `connection.rs`) —
  change the caller to log loudly and record a diagnostic (heal report
  surfaces it); test: no-fallback abort → diagnostic visible, retry
  succeeds after the manifest gains a fallback.
