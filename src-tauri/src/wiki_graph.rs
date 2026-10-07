@@ -295,10 +295,26 @@ pub fn wiki_search(
         None => String::new(),
     };
     let tier_filter = if tier.is_some() { "tier = ? AND " } else { "" };
+    // READ-scheme SELECT filter, tuple member of the same `wisdom_active_scheme`
+    // value the gate floor and the query prefix derive from (spec §Scheme
+    // architecture): rows stamped under another scheme are never candidates.
+    // The pre-V26 shape (no `embed_scheme` column) omits the filter — those
+    // rows are de-facto raw — mirroring the temporal-column degradation.
+    let scheme_filter = if crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?
+        .iter()
+        .any(|c| c == "embed_scheme")
+    {
+        format!(
+            "AND embed_scheme = '{}'",
+            crate::embed_scheme::read_scheme(conn)?.as_str()
+        )
+    } else {
+        String::new()
+    };
     let sql = format!(
         "SELECT id, entity_id, title, embedding_blob, tier
          FROM llm_wiki_entries
-         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL"
+         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL {scheme_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
     // Bind order matches the clause order built above: entity ids, then tier.
@@ -1621,6 +1637,83 @@ mod unit_tests {
             wiki_traverse_graph(&conn, None, "nodeA", 1, TraverseDirection::Both, &[]).unwrap();
         assert!(result.truncated);
         assert!(result.nodes.len() <= MAX_TRAVERSAL_NODES);
+    }
+
+    // ---- Read-scheme SELECT filter (spec §Scheme architecture; test b) ----
+
+    /// Flip `wisdom_active_scheme` through the vocabulary constant.
+    fn set_active_scheme(conn: &Connection, value: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![crate::embed_scheme::ACTIVE_SCHEME_META_KEY, value],
+        )
+        .unwrap();
+    }
+
+    /// Test (b), `wiki_search`/`wiki_context` leg: a dual-stamped DB — `raw`
+    /// and `instr1` rows in the same table — must surface only the ACTIVE
+    /// scheme's rows under both meta values, with identical vectors (the
+    /// SELECT filter, not the score, decides).
+    #[test]
+    fn wiki_search_sees_only_active_scheme_rows_dual_stamped() {
+        let conn = open_in_memory().unwrap();
+        // `seed_entry` lands under the default 'raw' stamp; flip the second
+        // row to `instr1` so the table is dual-stamped with identical vectors.
+        seed_entry(&conn, "ent_scheme", "raw_row");
+        seed_entry(&conn, "ent_scheme", "instr_row");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embed_scheme = 'instr1' WHERE id = 'instr_row'",
+            [],
+        )
+        .unwrap();
+
+        let qv = [1.0f32; 8];
+        set_active_scheme(&conn, "raw");
+        let hits = wiki_search(&conn, &qv, None, None, 25).unwrap();
+        let got: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(got, vec!["raw_row"]);
+
+        set_active_scheme(&conn, "instr1");
+        let hits = wiki_search(&conn, &qv, None, None, 25).unwrap();
+        let got: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(got, vec!["instr_row"]);
+    }
+
+    /// Fail-closed leg for the wiki_search reader: an unknown
+    /// `wisdom_active_scheme` value is a hard error, never a silent fallback.
+    #[test]
+    fn wiki_search_unknown_active_scheme_is_hard_error() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "ent_scheme", "raw_row");
+        set_active_scheme(&conn, "bogus-scheme");
+        let err = wiki_search(&conn, &[1.0f32; 8], None, None, 25).unwrap_err();
+        assert!(
+            err.to_string().contains("bogus-scheme"),
+            "error should name the scheme: {err}"
+        );
+    }
+
+    /// Pre-V26 shape (no `embed_scheme` column): the filter degrades off and
+    /// rows are read verbatim, mirroring the temporal-column degradation.
+    #[test]
+    fn wiki_search_pre_v26_table_reads_without_scheme_filter() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT,
+                embedding_blob BLOB, tier TEXT, deleted_at INTEGER)",
+        )
+        .unwrap();
+        let blob: Vec<u8> = [1.0f32; 8].iter().flat_map(|f| f.to_le_bytes()).collect();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries VALUES ('a', 'ent', 'T', ?1, NULL, NULL)",
+            params![blob],
+        )
+        .unwrap();
+        let hits = wiki_search(&conn, &[1.0f32; 8], None, None, 25).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "a");
     }
 }
 

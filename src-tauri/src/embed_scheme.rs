@@ -83,6 +83,16 @@ impl Scheme {
             Scheme::Instr1 => SCHEME_SUFFIX_INSTR1,
         }
     }
+
+    /// The scheme's stored representation (`llm_wiki_entries.embed_scheme`
+    /// values). Readers bind this — never an inline literal — so the filter
+    /// and the stamps cannot drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scheme::Raw => SCHEME_RAW,
+            Scheme::Instr1 => WRITE_SCHEME,
+        }
+    }
 }
 
 /// Resolve the active read scheme from `llm_wiki_meta`. A missing key is the
@@ -107,6 +117,20 @@ pub fn read_scheme(conn: &Connection) -> Result<Scheme> {
 /// are exactly the pre-#265 keys. `model_key` is a `gate_model_key` result.
 pub fn floor_key_for(model_key: &str, scheme: Scheme) -> String {
     format!("{model_key}{}", scheme.floor_key_suffix())
+}
+
+/// Query text under a read scheme: under `instr1` the byte-exact instruction
+/// is prepended (direct concatenation, IFF the read scheme is `instr1`);
+/// under `raw` the text is verbatim. The prefix lands AFTER truncation — it
+/// never consumes the 2000-char budget (`truncate_text` runs first on the
+/// caller side). This is the read-side parity of `doc_text_for_entry`: both
+/// query-prefix call sites derive their text through this one function, so a
+/// scheme drift cannot desync the gate from `wiki_search`/`wiki_context`.
+pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
+    match scheme {
+        Scheme::Raw => truncated_query.to_string(),
+        Scheme::Instr1 => format!("{QUERY_INSTRUCTION_PREFIX}{truncated_query}"),
+    }
 }
 
 #[cfg(test)]

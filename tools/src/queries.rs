@@ -714,19 +714,29 @@ pub fn wisdom_match_cmd(
     let profile = retrieval::load_embed_profile(&brain.paths.config_path)
         .context("loading embed profile from vault config.json")?;
     let stub = std::env::var("CURATED_EMBED_STUB").ok();
-    let key = wm::gate_model_key(&profile, stub.as_deref());
     let text = wm::truncate_text(text);
+    // The read scheme resolves ONCE, here: the floor key below and the query
+    // prefix are both tuple members of this one value (spec §Scheme
+    // architecture). The prefix lands AFTER truncation — it never consumes
+    // the 2000-char budget — and only under `instr1`.
+    let read_scheme = tauri_app_lib::embed_scheme::read_scheme(&conn)?;
+    let scheme_key = wm::gate_model_key_for_scheme(&profile, stub.as_deref(), read_scheme);
+    let query_text = tauri_app_lib::embed_scheme::query_text_for_scheme(text, read_scheme);
     // Embed only when entries can actually be produced: an uncalibrated
     // gate, --max 0, or an empty text never needs the embedding backend.
-    let query_vec = if text.trim().is_empty() || max == 0 || wm::gate_floor(&key).is_none() {
+    let query_vec = if text.trim().is_empty() || max == 0 || wm::gate_floor(&scheme_key).is_none() {
         Vec::new()
     } else {
-        embed_one(&profile, text.to_string()).context("failed to embed query")?
+        embed_one(&profile, query_text).context("failed to embed query")?
     };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
+    // The gate derives its own floor from the same stored
+    // `wisdom_active_scheme` value (unsuffixed key in, `floor_key_for` inside),
+    // so caller and library can never disagree about the active scheme.
+    let key = wm::gate_model_key(&profile, stub.as_deref());
     let result = wm::wisdom_match(&conn, &query_vec, &key, max, exclude, now_ms)?;
     if json_mode {
         print_json(&result);
