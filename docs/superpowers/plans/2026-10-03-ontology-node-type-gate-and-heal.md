@@ -197,6 +197,17 @@ CLEAR branch's non-tier DELETE and the three new tables only).
       all three tables + marker + manifest rows (§6 item 6 SLICE: the
       clear/restore rows only — plan-p4-m4; the watermark/migration rows
       are Task 5's and Task 9's).
+- [ ] **r21 addendum — V26 origin-ledger revision (spec R2.4.6; land
+      BEFORE Task 3, the ledger's first writer):** edit `MIGRATION_V26`
+      in place — `original_type TEXT` (nullable: NULL = no label
+      supplied), new `reason TEXT NOT NULL`; add the `OriginReason` enum
+      (`degraded`/`unlabeled_landing`/`gate_skipped`/`alias_retype`/
+      `queue_retype`) as the single writer-side owner (no SQL CHECK).
+      V26 apply site: if `PRAGMA table_info(entity_type_origin)` lacks
+      `reason`, DROP + re-CREATE when empty, fail loudly when non-empty.
+      Update the `queries.rs` clear-list seed insert to the new shape.
+      Tests: pre-r21 empty table rebuilt on open; pre-r21 non-empty
+      table → open errors.
 
 ### Task 1: Config core — keys, generic resolver, salvage, degraded state, watermark hash
 
@@ -552,7 +563,9 @@ EDGES (commit.rs:364-369), §6 item 1b's per-direction matrix rows.
       `let _ =` at `connection.rs:997`.
 - [ ] Degrade ladder implementation + origin-ledger UNTYPED records;
       off-sourced mints write the R2.3.5 directory row (source
-      directory path + original label — plan-p11-MAJOR-2 write side).
+      directory path + original label — plan-p11-MAJOR-2 write side); every
+      write is `INSERT OR IGNORE` with its `OriginReason` per the
+      R2.4.6 table (first origin wins).
 - [ ] Edge gating (R2.3.0): gate an edge when EITHER endpoint resolves
       strict; entity-level opt-out on an endpoint short-circuits the edge
       cascade (§2.1, commit.rs:364-369); per-direction matrix tests
@@ -645,6 +658,14 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       fallback pattern, `ct.rs:584-599`) — `ct heal` without `--yes`
       included (its read-only census cannot migrate). Test per entry
       point against an old-schema database.
+- [ ] Retype provenance (spec R2.4.6/R2.3.6, r21): every heal retype
+      writes its origin row in the SAME per-row IMMEDIATE transaction —
+      `alias_retype` for signed-alias remaps, `queue_retype` for approved
+      queue items — `INSERT OR IGNORE` with the pre-retype label (first
+      origin wins). Heal surfacing filters by `reason` per the R2.4.6
+      table (`alias_retype`/`queue_retype` never surface as drift). Test:
+      `heal --yes` remap of a ledger-less `agent` row → `alias_retype`
+      row with `original_type = 'agent'`; re-run → no new surfacing.
 - [ ] Census → drift report (echo old+new hash → STDERR per the stdout
       contract above) → remap (signed table,
       target-declaredness → queue; `concept` disposition per r8-M2 +

@@ -4,8 +4,21 @@
 consecutive, all nits applied. NOTE: inline `rN-*` tags cite the
 review round that introduced/verified each rule — they are provenance,
 not normative; the normative text is the full sentence around them.)
-**Date:** 2026-10-03 (written 2026-10-04)
-**Baseline:** `main` @ `9c2281b` (v3.2.0)
+r21 (2026-10-07, post-Task-1 code alignment): origin-ledger contract
+pinned (R2.4.6 — `reason` column, nullable `original_type`, first-origin-
+wins), R2.3.5/R2.3.6 scope + reversibility corrected, R2.7.5 archive ×
+redirect behavior pinned, R2.7.6 wording, citations re-anchored.
+**Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
+**Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
+re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
+EXCEPTION — every line citation inside §2.2 (into `config/mod.rs`,
+`ontology_config.rs`, `inference/mod.rs`, `onboard/mod.rs`, `lib.rs`,
+`queries.rs`, `tools/src/bin/ct.rs`) describes the PRE-wave-1 code that
+plan Task 1 implemented §2.2 against; those stay anchored at `9c2281b`
+(`git show 9c2281b:<path>`) because much of the cited code was rewritten
+and no longer exists in that form. Citations into files unchanged since
+`9c2281b` (`commit.rs`, `entities.rs`, `synthesis.rs`, `bundle_*.rs`,
+`okf_migration.rs`, `wiki_graph.rs`, …) are valid at both commits.
 **Source of design:** frozen investigation
 `records/operations/2026-10-03-ontology-gate-investigation.md` (Rev 50) in the
 Equational vault, plus Kurt's rulings of 2026-10-03
@@ -169,7 +182,7 @@ duplicate consolidation).
 - The edge-mode cascade is two steps: entity's own manifest row →
   `tier_fact` (`commit.rs:361-382`). There is NO partition leg.
   `tier_working::<hash>` rows are vault-root-keyed
-  (`connection.rs:236-241`) and sit OUTSIDE the cascade.
+  (`connection.rs:237-242`) and sit OUTSIDE the cascade.
 - `off` cannot be distinguished from absent:
   `wiki_get_ontology` returns `mode:"off"` when no row exists
   (`wiki_graph.rs:242-246`), and the cascade deliberately does NOT
@@ -189,16 +202,22 @@ duplicate consolidation).
 
 - The brain DB is global; knowledge is per-vault
   (`queries.rs:178-182`, issue #213). `clear_vault_tables` deliberately
-  KEEPS manifest rows (omitted from the delete batch
-  `queries.rs:236-255`; asserted by the test at `:881-885`).
-- **Latent pre-existing bug (r9-M2):** entity-level
+  KEEPS the tier vocabulary manifest rows (`tier_fact`, `tier_wisdom`,
+  `tier_working::%`) — omitted from the delete batch
+  `queries.rs:247-269`; asserted by
+  `clear_vault_tables_empties_every_clear_row_in_the_d2_matrix`
+  (`queries.rs:943`, keep-row assertions `:983-1034`).
+- **FIXED by plan Task 0 (r21; was a latent pre-existing bug, r9-M2):**
+  the clear now deletes entity-level manifest rows while keeping the
+  tier rows (`queries.rs:271-289`). The original finding, kept for
+  provenance: entity-level
   manifest rows already leak across vaults (clear list omits
   `llm_wiki_entity_manifests`; path-derived OKF ids are identical across
   vaults). Latent today (no production writer, ThinkPad census found zero
   `ent_*` rows), becomes LIVE the moment wave 1's `ct ontology set
   --entity` ships. The split-clear fix is a PREREQUISITE of shipping
   `--entity` (§2.9.2).
-- `switch_vault` has two behaviors (`lib.rs:2021-2088`): restore branch
+- `switch_vault` has two behaviors (`lib.rs:2022-2089`): restore branch
   (swaps whole DB — manifests effectively per-vault) and clear branch
   (manifests per-host). Both paths need tests (§2.9.2).
 
@@ -810,8 +829,8 @@ Additional rules:
   | Librarian token, evidence row MISSING (`Ok(None)` at `:217`) | `HadEvidenceUnresolved` |
   | JSON object with `"evidence": []` (e.g. the V20 doomed-row shape `{"proposal_id":null,"evidence":[]}`) | `HadEvidenceUnresolved` (provenance deliberately nulled; live census: 0 such refs on live facts today, pinned so it stays 0) |
   | JSON object with NO `evidence` key | `HadEvidenceUnresolved` (unknown provenance shape) |
-  | Any non-JSON ref that is not an explicitly known non-provenance value — INCLUDING plain path refs (`documents/notes.md`, `connection.rs:2709`), truncated inline JSON (`{"evidence":[{"content_hash":"ab`), and free text | `HadEvidenceUnresolved` (r10-M2: wave 1 does NOT resolve path refs — `source_docs_from_ref` has no path-resolution branch today; adding one is out of scope — and a naming ref must never silently climb) |
-  | Ref ABSENT (`None`) — today including the V20 sentinel, which MIGRATION_V18 already NULLed (`connection.rs:344-355`) — or any other explicitly-listed non-provenance value | `NoEvidence` (nothing claimed; DISJOINT from the empty-evidence row above: empty array = claimed-but-unresolved, NULL = never claimed) |
+  | Any non-JSON ref that is not an explicitly known non-provenance value — INCLUDING plain path refs (`documents/notes.md` — the shape seeded by the test fixture at `connection.rs:2734`), truncated inline JSON (`{"evidence":[{"content_hash":"ab`), and free text | `HadEvidenceUnresolved` (r10-M2: wave 1 does NOT resolve path refs — `source_docs_from_ref` has no path-resolution branch today; adding one is out of scope — and a naming ref must never silently climb) |
+  | Ref ABSENT (`None`) — today including the V20 sentinel, which MIGRATION_V18 already NULLed (`connection.rs:345-356`) — or any other explicitly-listed non-provenance value | `NoEvidence` (nothing claimed; DISJOINT from the empty-evidence row above: empty array = claimed-but-unresolved, NULL = never claimed) |
   | Any DB fault | propagate / stop heal — malformed evidence JSON is NOT a DB fault: it is `HadEvidenceUnresolved` (report-only), r10-MINOR-4. The `:217` arm splits THREE ways (r14-m4): `Ok(None)` -> unresolved, `Err` -> propagates, `Ok(Some)` -> parses; the SECOND display wrapper is `wiki_graph::wiki_context` (why `source_docs_from_ref` is `pub(crate)`, `entities.rs:198-201`), degrading on error like the reader |
   Unclassified → `HadEvidenceUnresolved`. Rows are DISJOINT (r10-M2):
   shape tests apply in order — None/known-non-provenance → JSON parse
@@ -843,14 +862,25 @@ Additional rules:
   PATH (not the mode — nothing is stamped that could be "revived"), and
   heal resolves from the ledger when live resolution returns empty. A
   fact with a `source_ref` that no longer resolves is REPORT-ONLY, never
-  auto-retyped. Matrix case: off-directory entity + note edit +
-  `heal --yes` → zero retypes.
+  auto-retyped — UNDER THE R2.3.2 SCOPE RULE (r21): this applies when
+  the resolved `folder_ontology` map has at least one `off` (or
+  degraded/dropped) entry, OR the entity has a ledger row carrying a
+  `source_directory` (an off-sourced mint, R2.4.6). With an empty map
+  and no such ledger row an unresolved source cannot flip any mode, and
+  the ladder decides normally (R2.3.2's empty-map remap case). Matrix
+  case: off-directory entity + note edit + `heal --yes` → zero retypes
+  (the ledger row keeps it report-only even if the off entry is later
+  removed from the map).
 - **R2.3.6 Heal interaction with off.** An entity with ANY off-directory
   source is REPORT-or-QUEUE for heal, never auto-retyped — strict-wins
   flips the entity's mode when a strict source appears later, and an
   automatic retype at that moment would destroy a type the user
-  deliberately left unchecked (D8). The origin ledger covers heal retypes
-  too, so any eventual retype is reversible. Matrix case: off-minted
+  deliberately left unchecked (D8). Every heal retype — an alias retype
+  OR an approved queue retype — writes an `alias_retype`/`queue_retype`
+  origin row (R2.4.6) carrying the pre-retype label, so any eventual
+  retype is reversible; under first-origin-wins an entity that already
+  has a ledger row keeps it, and its `original_type` is still the
+  reversal target. Matrix case: off-minted
   entity later gains a strict source → no automatic retype, heal queues a
   proposal.
 
@@ -933,7 +963,7 @@ hard-coded literal). Single consolidated rule:
     one-shot-migration design): `ensure_manifest_vocabulary(conn, entity_id)` runs
     whenever the gate or heal RESOLVES a manifest (memoized per
     entity+generation, where generation = sha256 of `manifest_json`,
-    r10-MINOR-3) and — best-effort (r8-m6) — at DB open, invoked BEFORE `run_okf_migration` (`connection.rs:997`) and after `migrate()` (the ensure runs best-effort at DB open in the `AppDb` path — `connection.rs:993-998`, the ONLY path that also runs the OKF migration, which is the ordering that matters; `migrate_open_db`/`migrate_brain_db` wrappers noted r19-m5;
+    r10-MINOR-3) and — best-effort (r8-m6) — at DB open, invoked BEFORE `run_okf_migration` (`connection.rs:1018`) and after `migrate()` (the ensure runs best-effort at DB open in the `AppDb` path — `connection.rs:1014-1019`, the ONLY path that also runs the OKF migration, which is the ordering that matters; `migrate_open_db`/`migrate_brain_db` wrappers noted r19-m5;
     resolution-time is the real guarantee) — so fresh installs (whose
     `tier_fact` is
     seeded AFTER migration by `seedManifestsIfAbsent`,
@@ -941,7 +971,7 @@ hard-coded literal). Single consolidated rule:
     on first gate/heal resolution, and no deployed brain ships without
     a fallback for long. The ensure is a no-op when its work is already
     done. On a READ-ONLY or contended connection the ensure's write
-    may fail (non-app hosts open best-effort, `connection.rs:1033-1037`):
+    may fail (non-app hosts open best-effort via `migrate_brain_db`, `connection.rs:1054-1059`, which warns rather than fails on a read-only or contended DB):
     then it computes the ensured vocabulary IN MEMORY for the current
     resolution and the heal report says "ensure pending (read-only)"
     instead of a §2.4.5 error (r12-m4 — never a false loud
@@ -1061,12 +1091,54 @@ held proposals live in `curated_proposals`, which clear_vault wipes —
 they survive until a vault switch on the clear path (per-vault by
 design).
 
-**R2.4.6 Type-origin provenance.** Every degrade AND every
-bundle-imported fallback landing is recorded as UNTYPED in the DB (new
-`entity_type_origin` column or degrade-ledger table holding the original
-label) — logs-only is invisible to heal. Heal surfaces origin-tagged
-rows; the proposal queue takes the ambiguous ones; bundle-imported
-fallbacks are explicitly "untyped", never "typed concept".
+**R2.4.6 Type-origin provenance.** Every degrade, every
+bundle-imported fallback landing, every SKIP-path landing, and every heal
+retype is recorded in the DB — logs-only is invisible to heal. The record
+is the `entity_type_origin` LEDGER TABLE (plan Task 0 chose the table
+over a column; V26). Heal surfaces origin-tagged rows; the proposal queue
+takes the ambiguous ones; bundle-imported fallbacks are explicitly
+"untyped", never "typed concept". **Ledger contract (r21 — the V26 DDL as
+first landed had `original_type TEXT NOT NULL` and no reason column, so a
+label-less landing had no legal value and §2.5's `mode:off` reason had
+nowhere to go):**
+
+- Columns: `entity_id TEXT PRIMARY KEY`, `original_type TEXT` (NULLABLE —
+  NULL means "no label was supplied", e.g. a bundle import, which carries
+  no graph type; never `''` and never an invented sentinel string, which
+  a reader could mistake for a real label), `reason TEXT NOT NULL`,
+  `source_directory TEXT` (NULL unless the mint's mode came from an `off`
+  `folder_ontology` entry, R2.3.5), `recorded_at INTEGER NOT NULL`.
+- `reason` is a closed set owned by ONE Rust enum (`OriginReason`; no SQL
+  CHECK, so adding a reason never needs a table rebuild — writers go
+  through the enum, mirroring `VALID_TIERS`):
+
+  | `reason` | Written when | `original_type` | Heal treatment |
+  |---|---|---|---|
+  | `degraded` | the gate degrades an undeclared label to `fallback_node_type` (R2.4.4) | the label as proposed (trimmed, pre-canonicalization) | surfaced; queue item references the row |
+  | `unlabeled_landing` | bundle import lands a label-less entity as the fallback (§2.5) | NULL | surfaced; queue item references the row |
+  | `gate_skipped` | the gate SKIPs and the `'concept'` literal lands (GUI blank-type, bundle, `okf_migration`, §2.5), OR any mint whose mode came from an `off` `folder_ontology` entry (R2.3.5; `source_directory` set) | the label written (the literal `concept` for literal paths; NULL for a label-less bundle entity) | surfaced only once the entity resolves GATE AND its `entity_type` ∉ the declared set |
+  | `alias_retype` | heal applies a signed alias (R2.6.2) | the pre-retype label | never surfaced as drift — a reversibility record (R2.3.6) |
+  | `queue_retype` | an approved queue item retypes an entity | the pre-retype label | never surfaced as drift — a reversibility record |
+
+- FIRST ORIGIN WINS: writes are `INSERT OR IGNORE` on `entity_id` — the
+  ledger records an entity's ORIGIN and later transitions never
+  overwrite it. A heal retype of an entity that already has a row adds
+  nothing; its `original_type` remains the reversal target, and a
+  `source_directory` recorded at mint is never lost (R2.3.5).
+- "Recorded as UNTYPED" elsewhere in this spec means a row with reason
+  `degraded`, `unlabeled_landing`, or `gate_skipped`.
+- V26 revision (unreleased — V26 exists only on this PR's branch and has
+  no writer before plan Task 3, so no shipped brain holds a row): the
+  `MIGRATION_V26` DDL is edited in place to the shape above. A dev brain
+  that already ran the pre-r21 DDL is detected at the V26 apply site
+  (`PRAGMA table_info(entity_type_origin)` lacks `reason`): if the table
+  is empty it is dropped and re-created; if it is non-empty the open
+  fails loudly — never guess a `reason`. Matrix cases: bundle import with
+  a declared fallback → `unlabeled_landing` row, `original_type` NULL;
+  `heal --yes` alias remap of a pre-wave-1 `agent` row → `alias_retype`
+  row with `original_type = 'agent'`; a degraded entity later retyped by
+  an approved queue item keeps its `degraded` row; pre-r21 empty table →
+  rebuilt on open.
 
 ### 2.5 Gate behavior per mint path
 
@@ -1083,8 +1155,9 @@ fallbacks are explicitly "untyped", never "typed concept".
   review queue — the queue cost is ACCEPTED for wave 1. **When the gate
   SKIPs** (off folder / off host / no manifest, r2-M2a): today's
   `'concept'` literal stands (no vocabulary to violate — SKIP means no
-  gate), AND the origin ledger records UNTYPED with the reason
-  (`mode:off`), so a later strict flip surfaces these rows to heal as
+  gate), AND the origin ledger records a `gate_skipped` row
+  (R2.4.6; `source_directory` set when an `off` folder caused the
+  SKIP), so a later strict flip surfaces these rows to heal as
   ledger-tagged, not as invented types.
 - **`okf_migration`:** ids are path-derived, so it resolves the
   `folder_ontology` mode from the note's path like any ingest (NOT a
@@ -1105,7 +1178,7 @@ fallbacks are explicitly "untyped", never "typed concept".
   reaches a dropped key — a degraded-but-irrelevant ingest block does
   not block the migration. **The abort
  must be OBSERVABLE (r6-M2):** the only production caller discards the
- error (`let _ = run_okf_migration(...)`, `connection.rs:997`) —
+ error (`let _ = run_okf_migration(...)`, `connection.rs:1018`) —
  change the caller to log loudly and record a diagnostic (heal report
  surfaces it); test: no-fallback abort → diagnostic visible, retry
  succeeds after the manifest gains a fallback.
@@ -1202,7 +1275,7 @@ one type after the remap, not a conflict). Heal itself never merges
 **R2.7.1 Shape:** the standalone command `ct wiki merge-duplicates` —
 ONE-TIME: NOT SCHEDULED and not a recurring heal duty; it CAN be
 re-run manually (survivors get demoted by later Clone imports,
-r9-m1). It REFUSES until the signed-alias remap has run for THIS vault (the `alias_remap_completed` marker is DELETED by `clear_vault_tables` — r19-m2: the marker lives in `llm_wiki_meta` which survives the clear, but the rows it vouched for do not; extend the `queries.rs:849-885` clear-list test to assert the marker is gone) — the
+r9-m1). It REFUSES until the signed-alias remap has run for THIS vault (the `alias_remap_completed` marker is DELETED by `clear_vault_tables` — r19-m2: the marker lives in `llm_wiki_meta` which survives the clear, but the rows it vouched for do not; the clear-list test asserts the marker is gone — both landed in plan Task 0: delete at `queries.rs:293`, assertion at `queries.rs:994-1004`) — the
   `alias_remap_completed` marker in `llm_wiki_meta`, set at the end of
   a successful `heal --yes` remap pass (a MARKER, not a live-row
   predicate: report-only rows must not block merging forever,
@@ -1292,7 +1365,12 @@ survivor must not silently win with the wrong type.
   (`:270-288`, `:349-350`). `get_entity(loser_id)` (`:504-508`, no
   `deleted_at` filter) REDIRECTS to the survivor (HTTP-style: return
   the survivor's detail; the GUI follows it — a stored link to a loser
-  opens the survivor). Without this, the loser's facts vanish from recall the
+  opens the survivor). The redirect is followed REGARDLESS of the
+  survivor's `deleted_at` (r21): an archived survivor is returned exactly
+  as `get_entity(survivor)` returns it today — archived detail, its
+  `deleted_at` populated — never `None`/"not found" (a live-only filter
+  on the redirect hop would make a stale loser link look like a deleted
+  entity the user never archived). Without this, the loser's facts vanish from recall the
   moment the loser is hidden (nine entities' knowledge disappears —
   fails D0). Required test: after a merge, recall on the survivor returns
   the losers' facts; the survivor's `get_entity` + `list_entities`
@@ -1317,6 +1395,15 @@ survivor must not silently win with the wrong type.
   survivor at export, so an archived survivor means no facts ship:
   consistent, zero orphans. Matrix case: merge -> archive survivor ->
   export + re-import -> zero orphaned facts, zero entity rows.
+  **`entity_redirects` rows are KEPT on archive (r21):** archiving
+  touches only `curated_entities.deleted_at`; the cluster's redirect
+  rows stay, so a stale loser link still resolves to the (archived)
+  survivor and the loser never reappears as a standalone row. There is
+  no un-archive path in CT today (`archive_entity` is one-way); if one
+  is added it must un-archive the whole cluster through the same
+  redirect rows, never the survivor alone. The merge sweep's grouping
+  ignores archived clusters (`deleted_at IS NOT NULL` members are not
+  candidates), so an archived cluster is never re-merged.
 - **Write paths must resolve redirects (restored as its own bullet,
   r15-m4 — it was spliced into the archive bullet):**
   `resolve_proposal` → `create_entity_if_needed` (`commit.rs:2365`),
@@ -1332,7 +1419,7 @@ survivor must not silently win with the wrong type.
   bundle-format anything. (The replica converges via the wave-2 outbox
   graph export.)
 
-**R2.7.6 Auto-merge gate:** bodies/summaries agree → auto-merge
+**R2.7.6 Auto-merge gate:** summaries agree → auto-merge
 eligible; else → queue. (Evidence-gated; conservative for a one-time
 destructive command.) "Agree" is precise (r8-M3): both summaries
 NON-EMPTY and normalized-equal (same normalization as §2.7.2). An
@@ -1411,19 +1498,23 @@ entities, both empty summaries → queued, never auto-merged.
 ### 2.9 Data integrity prerequisites
 
 **R2.9.1 Clear-list extension.** Every new table this spec adds (origin
-ledger / degrade ledger, `merged_into` redirects, queue items) joins the
-explicit clear list in `clear_vault_tables`, with the `queries.rs:849-871`
-test extended. Matrix: seeded vault opt-out row survival follows the
+ledger `entity_type_origin`, `merged_into` redirects, queue items) joins the
+explicit clear list in `clear_vault_tables`, with the clear-list test
+extended. (Landed in plan Task 0 for the three V26 tables: delete batch
+`queries.rs:253-255`, test `queries.rs:943`. A queue-item table, if
+wave 1 adds one, joins the same list.) Matrix: seeded vault opt-out row survival follows the
 decided scoping (directory rows live in config and survive; entity-level
 rows do not leak).
 
 **R2.9.2 Split-clear fix (PREREQUISITE of `ct ontology set --entity`).**
 Entity-level manifest rows must be cleared or vault-keyed on vault switch
 (path-derived entity ids are identical across vaults; `clear_vault_tables`
-keeps `llm_wiki_entity_manifests`; the test at `queries.rs:881-885` pins
-only tier-row survival — extend the seed with an entity-level row). Both
+kept `llm_wiki_entity_manifests` at baseline; the test pinned only
+tier-row survival — extend the seed with an entity-level row). Both
 switch paths get a test: restore branch and clear branch
-(§1.7).
+(§1.7). (Clear branch landed in plan Task 0: `queries.rs:271-289`,
+pinned both directions at `queries.rs:1017-1034`; restore branch
+pinned by the test at `db/restore_sync.rs:1047`.)
 
 **R2.9.3 Incidental-off census (heal pre-flight).** Before flipping any
 semantics on a brain, heal censuses
