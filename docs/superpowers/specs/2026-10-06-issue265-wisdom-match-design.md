@@ -155,6 +155,12 @@ For each distinct `--exclude` id, in the order given:
 5. Several excluded ids that resolve to the same head produce **one** correction whose
    `supersedes` lists all of them, in input order.
 
+**One id, one list.** Corrections are computed before matching. A correction head
+that would also pass the gate is removed from the `entries` candidates before step 5's
+truncation, so it appears **only** in `corrections`, where it carries its `supersedes`
+marker. `entries` then fills up to `max` from the remaining candidates. No id ever
+appears twice in one response.
+
 A correction is emitted whether or not it matches `<text>`. `score` is `null` and it
 does not need an embedding. Corrections are not counted against `--max`, and are
 ordered by the first excluded id that produced each one. The cost is one indexed
@@ -236,6 +242,8 @@ brain in a temp dir from fixtures:
 - corrections: a single hop; a multi-hop chain to its head; a chain ending in a deleted
   row; a cycle; depth > 100; a head already excluded; two excludes to one head merged;
   a non-superseded exclude; an unknown id;
+- one id, one list: a correction head that also clears the floor appears only in
+  `corrections`, and `entries` backfills to `max` from the next candidate;
 - provenance mapping, including unknown values and NULL;
 - `gate_model_key` for each profile variant and for the stub.
 
