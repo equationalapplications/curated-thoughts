@@ -69,13 +69,16 @@ commit, never touch the live brain).
   HERE (plan-review F1: test (d) in Task 3 needs it; the raw key stays).** Unit
   tests for resolution + fail-closed paths + both floor keys.
 - [ ] **Task 2 — Write path.** `embed_text_for_entry` applies the doc prefix per the
-  WRITE scheme; all blob-writing paths (write-time precompute, db/wisdom, and the
-  sweep's ORDINARY write path — Task 4 re-affirms stamping for the new scheme-filtered
-  mode) stamp `embed_scheme` from the WRITE constant in the same statement; parity
+  WRITE scheme; all blob-writing paths stamp `embed_scheme` from the WRITE constant
+  in the same statement; parity
   (`commit.rs:1534-1538, 1721-1725`) compares against the same WRITE-scheme text
   function. Test (c) lands here, plus the writer-inventory test (F4): grep-test
   asserting every UPDATE/INSERT site touching `embedding_blob` also writes
-  `embed_scheme` from the WRITE constant. **GUARDRAIL (F5): committed fixtures and
+  `embed_scheme` from the WRITE constant. **Writer checklist (from the caller
+  trace, scratch/step0-callers.md): embed_sweep.rs (sweep), db/commit.rs:1534/1721,
+  db/wisdom.rs:66-79, entities_api.rs:83/104, schema_guard.rs:34 — all five plus
+  the graph_reanchor migration bin's write path must stamp.** **GUARDRAIL (F5):
+  committed fixtures and
   snapshots are NOT touched in this task — regeneration is Task 5's alone; if a
   raw-text fixture test goes red here, the sanctioned move is to mark it
   scheme-dependent and fix it in Task 5, never to regenerate or hand-edit fixtures.**
