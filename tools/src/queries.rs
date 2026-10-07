@@ -757,6 +757,72 @@ pub fn wisdom_match_cmd(
     Ok(0)
 }
 
+// ---------------------------------------------------------------------------
+// `ct wisdom scheme` — issue #265 cutover admin (plan Task 4).
+// ---------------------------------------------------------------------------
+
+/// `ct wisdom scheme status`: per-`embed_scheme` counts over live entries and
+/// the active read scheme. Read-only; the counts are what the operator checks
+/// before (and the remaining raw count during) the migration window.
+pub fn wisdom_scheme_status_cmd(json_mode: bool) -> Result<i32> {
+    use tauri_app_lib::embed_sweep::{scheme_counts, SchemeCounts};
+
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    let read_scheme = tauri_app_lib::embed_scheme::read_scheme(&conn)?;
+    let counts = scheme_counts(&conn)?;
+    if json_mode {
+        print_json(&json!({
+            "active_scheme": read_scheme.as_str(),
+            "raw": counts.raw,
+            "instr1": counts.instr1,
+            "other": counts.other,
+            "null_blob": counts.null_blob,
+        }));
+    } else {
+        let SchemeCounts {
+            raw,
+            instr1,
+            other,
+            null_blob,
+        } = counts;
+        println!("active read scheme: {}", read_scheme.as_str());
+        println!("raw:    {raw}");
+        println!("instr1: {instr1}");
+        println!("other:  {other}");
+        println!("null:   {null_blob}");
+    }
+    Ok(0)
+}
+
+/// `ct wisdom scheme activate instr1`: the cutover. Precondition (raw
+/// non-null count = 0) and the atomic meta flip live in the library
+/// (`embed_scheme::activate_instr1`); this surface prints the refusal with
+/// the outstanding count (exit 1) or the flip outcome (exit 0, idempotent).
+pub fn wisdom_scheme_activate_cmd(target: &str) -> Result<i32> {
+    use tauri_app_lib::embed_scheme::{activate_instr1, ActivateOutcome};
+
+    let brain = resolve()?;
+    let conn = open_rw(&brain)?;
+    match activate_instr1(&conn, target)? {
+        ActivateOutcome::Activated => {
+            println!("active read scheme flipped to {target}");
+            Ok(0)
+        }
+        ActivateOutcome::AlreadyActive => {
+            println!("already active: {target} (no-op)");
+            Ok(0)
+        }
+        ActivateOutcome::Refused { outstanding } => {
+            eprintln!(
+                "refusing: {outstanding} live non-null row(s) not stamped '{target}' — \
+                 run the scheme sweep to re-embed them first"
+            );
+            Ok(1)
+        }
+    }
+}
+
 // The historic cli_common.rs does not carry a `mod tests` block for the
 // read-side fns; integration coverage lives under tools/tests/. We keep the
 // file self-contained but only assert on the units that are cheap to test

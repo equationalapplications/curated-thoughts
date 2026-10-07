@@ -16,7 +16,7 @@
 //! the vocabulary and the byte-exact instruction).
 
 use anyhow::{anyhow, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// The E5/MTEB query instruction, byte-exact as the spec pins it. `\n` is a
 /// real newline, there is NO space after `Query:`, and application is direct
@@ -131,6 +131,50 @@ pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
         Scheme::Raw => truncated_query.to_string(),
         Scheme::Instr1 => format!("{QUERY_INSTRUCTION_PREFIX}{truncated_query}"),
     }
+}
+
+/// Outcome of [`activate_instr1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivateOutcome {
+    /// Precondition held and the meta flip executed (one UPDATE).
+    Activated,
+    /// The read scheme was already `instr1` — idempotent no-op success.
+    AlreadyActive,
+    /// Refused: `outstanding` live non-null rows are not stamped `instr1`.
+    Refused { outstanding: usize },
+}
+
+/// Cutover (spec §Migration window semantics, mechanism 3): flip the active
+/// read scheme to `instr1`. ONLY `instr1` is an accepted target — any other
+/// value (including `raw`) is a hard error, fail-closed. Precondition: zero
+/// live non-null rows unstamped `instr1` (counted via the scheme sweep's
+/// workset query); the refusal carries the outstanding count for the operator.
+/// The flip itself is a single upsert on `llm_wiki_meta` — atomic, and
+/// idempotent (an already-`instr1` DB is a no-op success).
+pub fn activate_instr1(conn: &Connection, target: &str) -> Result<ActivateOutcome> {
+    // Fail closed on anything but the WRITE scheme — including `raw`: there
+    // is no sanctioned rollback via this command (spec mechanism 4: rollback
+    // is a deliberate owner procedure, not an instant revert).
+    match Scheme::parse(target) {
+        Ok(Scheme::Instr1) => {}
+        _ => anyhow::bail!(
+            "activate: only {WRITE_SCHEME:?} is a valid target, got {target:?} \
+             (fail-closed; rollback is a manual owner procedure)"
+        ),
+    }
+    let outstanding = crate::embed_sweep::count_unstamped_entries(conn)?;
+    if outstanding > 0 {
+        return Ok(ActivateOutcome::Refused { outstanding });
+    }
+    if read_scheme(conn)? == Scheme::Instr1 {
+        return Ok(ActivateOutcome::AlreadyActive);
+    }
+    conn.execute(
+        "INSERT INTO llm_wiki_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![ACTIVE_SCHEME_META_KEY, WRITE_SCHEME],
+    )?;
+    Ok(ActivateOutcome::Activated)
 }
 
 #[cfg(test)]
@@ -395,5 +439,100 @@ mod tests {
             crate::wisdom_match::gate_floor("external:qwen/qwen3-embedding-4b:instr1"),
             Some(0.64)
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // activate_instr1 (issue #265, plan Task 4): refusal / atomic flip /
+    // idempotence / fail-closed target validation.
+    // -------------------------------------------------------------------------
+
+    fn seed_with_blob(conn: &Connection, id: &str, scheme: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embed_scheme, embedding
+             ) VALUES (?1, 'ent-1', 'T', 'B', '[]', 'inferred',
+                       'librarian_inferred', NULL, NULL, 100, 100, NULL, 0,
+                       NULL, x'00000000', ?2, NULL)",
+            params![id, scheme],
+        )
+        .unwrap();
+    }
+
+    fn active_scheme_value(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT value FROM llm_wiki_meta WHERE key = ?1",
+            [ACTIVE_SCHEME_META_KEY],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn activate_refuses_while_unstamped_rows_remain() {
+        let conn = open_in_memory().unwrap();
+        seed_with_blob(&conn, "fact_raw", SCHEME_RAW);
+        assert_eq!(
+            activate_instr1(&conn, WRITE_SCHEME).unwrap(),
+            ActivateOutcome::Refused { outstanding: 1 }
+        );
+        // Refusal must not touch the meta value.
+        assert_eq!(active_scheme_value(&conn), SCHEME_RAW);
+        assert_eq!(read_scheme(&conn).unwrap(), Scheme::Raw);
+    }
+
+    #[test]
+    fn activate_succeeds_atomically_when_raw_count_is_zero() {
+        let conn = open_in_memory().unwrap();
+        // Only instr1-stamped rows and scheme-agnostic NULL blobs: cutover OK.
+        seed_with_blob(&conn, "fact_done", WRITE_SCHEME);
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embed_scheme, embedding
+             ) VALUES ('fact_null', 'ent-1', 'T', 'B', '[]', 'inferred',
+                       'librarian_inferred', NULL, NULL, 100, 100, NULL, 0,
+                       NULL, NULL, 'raw', NULL)",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            activate_instr1(&conn, WRITE_SCHEME).unwrap(),
+            ActivateOutcome::Activated
+        );
+        assert_eq!(active_scheme_value(&conn), WRITE_SCHEME);
+        assert_eq!(read_scheme(&conn).unwrap(), Scheme::Instr1);
+    }
+
+    #[test]
+    fn activate_is_idempotent() {
+        let conn = open_in_memory().unwrap();
+        assert_eq!(
+            activate_instr1(&conn, WRITE_SCHEME).unwrap(),
+            ActivateOutcome::Activated
+        );
+        assert_eq!(
+            activate_instr1(&conn, WRITE_SCHEME).unwrap(),
+            ActivateOutcome::AlreadyActive
+        );
+        assert_eq!(active_scheme_value(&conn), WRITE_SCHEME);
+    }
+
+    #[test]
+    fn activate_rejects_everything_but_instr1() {
+        let conn = open_in_memory().unwrap();
+        for target in [SCHEME_RAW, "some_future_scheme", "INSTR1", ""] {
+            let err = activate_instr1(&conn, target)
+                .expect_err("only instr1 is a valid target (fail-closed)");
+            assert!(
+                err.to_string().contains("fail-closed"),
+                "target {target:?}: {err}"
+            );
+        }
+        // Nothing was flipped.
+        assert_eq!(active_scheme_value(&conn), SCHEME_RAW);
     }
 }

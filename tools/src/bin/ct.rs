@@ -305,6 +305,26 @@ enum WisdomCmd {
         #[arg(last = true, required = true)]
         text: Vec<String>,
     },
+    /// Embed-scheme administration (issue #265 cutover): status / activate.
+    Scheme {
+        #[command(subcommand)]
+        cmd: SchemeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SchemeCmd {
+    /// Per-`embed_scheme` counts over live entries + the active read scheme.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Flip the active read scheme to `instr1` (the only valid target).
+    /// Refuses while any live non-null row is unstamped; idempotent.
+    Activate {
+        /// Target scheme. Only `instr1` is accepted (fail-closed).
+        target: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +625,10 @@ fn run(cmd: Cmd) -> Result<i32> {
                 }
                 cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json)
             }
+            WisdomCmd::Scheme { cmd } => match cmd {
+                SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),
+                SchemeCmd::Activate { target } => cli_common::wisdom_scheme_activate_cmd(&target),
+            },
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
         Cmd::Heal { yes } => {
