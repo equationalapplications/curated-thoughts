@@ -798,6 +798,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // skip `if version < 22`, and permanently skip V22's `documents.path`
     // rewrite and its FATAL re-warn. (This ALSO caps a rootless open at 21:
     // V22's stamp gate reads MAX(version), so 26 must never land before 22.)
+    rebuild_pre_r21_origin_ledger(conn)?;
     conn.execute_batch(MIGRATION_V26)?;
     if stamped_now >= 22 {
         conn.execute(
@@ -920,6 +921,51 @@ fn apply_v24_temporal_columns(conn: &Connection, stamp: bool) -> Result<()> {
             let _ = conn.execute_batch("ROLLBACK;");
             return Err(e);
         }
+    }
+    Ok(())
+}
+
+/// Drop a pre-r21 `entity_type_origin` so `MIGRATION_V26` re-creates it in
+/// the r21 shape (spec R2.4.6: nullable `original_type`, new `reason`).
+///
+/// V26 never shipped in a release and nothing wrote the ledger before the
+/// r21 revision, so a dev brain that ran the first V26 DDL holds an EMPTY
+/// table: dropping it loses nothing. A non-empty pre-r21 table means some
+/// writer existed that this code does not know about — fail the open loudly
+/// rather than guess a `reason` for its rows.
+///
+/// Same concurrency shape as `apply_v24_temporal_columns`: the unlocked
+/// pre-check keeps the steady state lock-free, and the rebuild re-inspects
+/// under BEGIN IMMEDIATE so a racing `--mcp` open cannot drop a table the
+/// winner just re-created.
+fn rebuild_pre_r21_origin_ledger(conn: &Connection) -> Result<()> {
+    // An absent table reads as no columns: nothing to rebuild.
+    let needs_rebuild = |conn: &Connection| -> Result<bool> {
+        let existing = crate::db::ddl_compat::existing_columns(conn, "entity_type_origin")?;
+        Ok(!existing.is_empty() && !existing.iter().any(|c| c == "reason"))
+    };
+    if !needs_rebuild(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let rebuilt = (|| -> Result<()> {
+        if !needs_rebuild(conn)? {
+            return Ok(());
+        }
+        let rows: i64 =
+            conn.query_row("SELECT COUNT(*) FROM entity_type_origin", [], |r| r.get(0))?;
+        if rows > 0 {
+            anyhow::bail!(
+                "entity_type_origin has {rows} row(s) in the pre-r21 shape (no `reason` \
+                 column); refusing to guess a reason — inspect and clear the table by hand"
+            );
+        }
+        conn.execute_batch("DROP TABLE entity_type_origin;")?;
+        Ok(())
+    })();
+    if let Err(e) = rebuilt.and_then(|()| Ok(conn.execute_batch("COMMIT;")?)) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(e);
     }
     Ok(())
 }

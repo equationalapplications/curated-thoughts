@@ -4,8 +4,9 @@ mod helpers;
 
 use helpers::TestApp;
 use rusqlite::Connection;
-use tauri_app_lib::db::connection::open_in_memory;
+use tauri_app_lib::db::connection::{migrate_open_db, open_in_memory};
 use tauri_app_lib::db::okf_migration::{entity_id_from_wiki_path, run_okf_migration};
+use tauri_app_lib::db::schema::OriginReason;
 use tempfile::TempDir;
 
 fn seed_v6_wiki_page(conn: &Connection, path: &str, status: &str, source_doc_ids: &str) {
@@ -505,6 +506,7 @@ fn v26_creates_the_three_ontology_gate_tables() {
     for expected in [
         "entity_id",
         "original_type",
+        "reason",
         "source_directory",
         "recorded_at",
     ] {
@@ -528,8 +530,9 @@ fn v26_creates_the_three_ontology_gate_tables() {
 
     // Each table is live, not a stub: a row round-trips through its PK.
     conn.execute(
-        "INSERT INTO entity_type_origin (entity_id, original_type, source_directory, recorded_at)
-         VALUES ('ent_a', 'character', 'notes/agents', 1)",
+        "INSERT INTO entity_type_origin
+             (entity_id, original_type, reason, source_directory, recorded_at)
+         VALUES ('ent_a', 'character', 'gate_skipped', 'notes/agents', 1)",
         [],
     )
     .unwrap();
@@ -545,13 +548,125 @@ fn v26_creates_the_three_ontology_gate_tables() {
         [],
     )
     .unwrap();
-    // NULL source_directory is legal: a bundle-imported fallback has none.
+    // NULL original_type AND NULL source_directory are legal (spec r21
+    // R2.4.6): a bundle-imported fallback landing has neither a label nor
+    // a source directory.
     conn.execute(
-        "INSERT INTO entity_type_origin (entity_id, original_type, source_directory, recorded_at)
-         VALUES ('ent_b', 'concept', NULL, 1)",
+        "INSERT INTO entity_type_origin
+             (entity_id, original_type, reason, source_directory, recorded_at)
+         VALUES ('ent_b', NULL, 'unlabeled_landing', NULL, 1)",
         [],
     )
     .unwrap();
+    // `reason` is NOT NULL: every row says why it exists.
+    assert!(
+        conn.execute(
+            "INSERT INTO entity_type_origin (entity_id, original_type, recorded_at)
+             VALUES ('ent_c', 'agent', 1)",
+            [],
+        )
+        .is_err(),
+        "a ledger row without a reason must be rejected"
+    );
+}
+
+/// The pre-r21 V26 ledger shape: `original_type NOT NULL`, no `reason`.
+const PRE_R21_ORIGIN_LEDGER: &str = "
+DROP TABLE entity_type_origin;
+CREATE TABLE entity_type_origin (
+    entity_id        TEXT PRIMARY KEY,
+    original_type    TEXT NOT NULL,
+    source_directory TEXT,
+    recorded_at      INTEGER NOT NULL
+);";
+
+fn origin_columns(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(entity_type_origin)")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Spec r21 R2.4.6: a dev brain that ran the first V26 DDL holds an EMPTY
+/// pre-r21 ledger (no writer existed); the next open rebuilds it in the r21
+/// shape.
+#[test]
+fn v26_rebuilds_an_empty_pre_r21_origin_ledger() {
+    let conn = open_in_memory().unwrap();
+    conn.execute_batch(PRE_R21_ORIGIN_LEDGER).unwrap();
+    assert!(!origin_columns(&conn).iter().any(|c| c == "reason"));
+
+    migrate_open_db(&conn, None).unwrap();
+
+    assert!(
+        origin_columns(&conn).iter().any(|c| c == "reason"),
+        "the empty pre-r21 table must be rebuilt with a reason column"
+    );
+    conn.execute(
+        "INSERT INTO entity_type_origin (entity_id, original_type, reason, recorded_at)
+         VALUES ('ent_a', NULL, 'unlabeled_landing', 1)",
+        [],
+    )
+    .expect("the rebuilt table must accept a NULL original_type");
+    // Steady state: a second open leaves the r21 table and its rows alone.
+    migrate_open_db(&conn, None).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entity_type_origin", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "an r21-shaped ledger must survive later opens");
+}
+
+/// Spec r21 R2.4.6: a NON-empty pre-r21 ledger fails the open loudly — the
+/// migration never guesses a `reason` — and leaves the rows untouched.
+#[test]
+fn v26_refuses_a_non_empty_pre_r21_origin_ledger() {
+    let conn = open_in_memory().unwrap();
+    conn.execute_batch(PRE_R21_ORIGIN_LEDGER).unwrap();
+    conn.execute(
+        "INSERT INTO entity_type_origin (entity_id, original_type, recorded_at)
+         VALUES ('ent_a', 'agent', 1)",
+        [],
+    )
+    .unwrap();
+
+    let err = migrate_open_db(&conn, None).expect_err("a non-empty pre-r21 ledger must fail");
+    assert!(
+        err.to_string().contains("pre-r21"),
+        "the error must name the cause, got: {err}"
+    );
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entity_type_origin", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "the refused open must not drop the existing rows");
+    assert!(
+        conn.is_autocommit(),
+        "the refused rebuild must not leave a transaction open"
+    );
+}
+
+/// `OriginReason` is the single owner of the `reason` vocabulary: every
+/// variant round-trips through its stored string, and the strings are the
+/// ones spec R2.4.6 names.
+#[test]
+fn origin_reason_round_trips_the_spec_vocabulary() {
+    let stored: Vec<&str> = OriginReason::ALL.iter().map(|r| r.as_str()).collect();
+    assert_eq!(
+        stored,
+        [
+            "degraded",
+            "unlabeled_landing",
+            "gate_skipped",
+            "alias_retype",
+            "queue_retype"
+        ]
+    );
+    for r in OriginReason::ALL {
+        assert_eq!(OriginReason::parse(r.as_str()), Some(r));
+    }
+    assert_eq!(OriginReason::parse("mode:off"), None);
 }
 
 #[test]

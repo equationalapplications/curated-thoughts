@@ -496,7 +496,14 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
 ///   retyped (the D8 case). `source_directory` sits beside the original
 ///   label because R2.3.5's off-sourced mint record needs the directory:
 ///   without it the stale-hash climb above is undetectable. Nullable — a
-///   bundle-imported fallback has no source directory.
+///   bundle-imported fallback has no source directory. `original_type` is
+///   nullable too (spec r21): NULL means no label was supplied (a bundle
+///   carries no graph type), never `''` or a sentinel a reader could take
+///   for a real label. `reason` says why the row exists — one of
+///   [`OriginReason`]; writers go through that enum, and there is no SQL
+///   CHECK so adding a reason never needs a table rebuild. Rows are
+///   first-origin-wins (`INSERT OR IGNORE`): later transitions never
+///   overwrite an entity's origin.
 /// * `entity_redirects` — merge-duplicates loser→survivor redirects
 ///   (R2.7.5). One row per loser (`entity_id` PK; chain compression keeps
 ///   it pointing at the FINAL survivor); the loser row itself stays live in
@@ -522,7 +529,8 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
 pub const MIGRATION_V26: &str = "
 CREATE TABLE IF NOT EXISTS entity_type_origin (
     entity_id        TEXT PRIMARY KEY,
-    original_type    TEXT NOT NULL,
+    original_type    TEXT,
+    reason           TEXT NOT NULL,
     source_directory TEXT,
     recorded_at      INTEGER NOT NULL
 );
@@ -554,4 +562,50 @@ pub const VALID_TIERS: &[&str] = &["fact", "wisdom"];
 /// boundary rather than by a string, so it is deliberately not a member here.
 pub fn is_valid_tier(tier: &str) -> bool {
     VALID_TIERS.contains(&tier)
+}
+
+/// Why an `entity_type_origin` row exists (spec R2.4.6). The single
+/// writer-side owner of the `reason` column's vocabulary — the column has no
+/// SQL CHECK, so this enum is the only thing standing between a writer and an
+/// unknown reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginReason {
+    /// The gate degraded an undeclared label to `fallback_node_type`.
+    Degraded,
+    /// A bundle import landed a label-less entity as the fallback.
+    UnlabeledLanding,
+    /// The gate SKIPped: the `'concept'` literal landed, or the mint's mode
+    /// came from an `off` `folder_ontology` entry.
+    GateSkipped,
+    /// Heal applied a signed alias. A reversibility record, never drift.
+    AliasRetype,
+    /// An approved queue item retyped the entity. A reversibility record,
+    /// never drift.
+    QueueRetype,
+}
+
+impl OriginReason {
+    pub const ALL: [OriginReason; 5] = [
+        OriginReason::Degraded,
+        OriginReason::UnlabeledLanding,
+        OriginReason::GateSkipped,
+        OriginReason::AliasRetype,
+        OriginReason::QueueRetype,
+    ];
+
+    /// The stored `reason` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OriginReason::Degraded => "degraded",
+            OriginReason::UnlabeledLanding => "unlabeled_landing",
+            OriginReason::GateSkipped => "gate_skipped",
+            OriginReason::AliasRetype => "alias_retype",
+            OriginReason::QueueRetype => "queue_retype",
+        }
+    }
+
+    /// Inverse of [`OriginReason::as_str`]; `None` for an unknown value.
+    pub fn parse(stored: &str) -> Option<OriginReason> {
+        Self::ALL.into_iter().find(|r| r.as_str() == stored)
+    }
 }

@@ -907,8 +907,9 @@ mod clear_vault_tables_tests {
         // Wave-1 ontology-gate tables (spec §2.9.1): all three are clear-list
         // rows, seeded here and asserted empty below.
         conn.execute(
-            "INSERT INTO entity_type_origin (entity_id, original_type, source_directory, recorded_at)
-             VALUES ('ent_a', 'character', 'notes/agents', 1)",
+            "INSERT INTO entity_type_origin
+                 (entity_id, original_type, reason, source_directory, recorded_at)
+             VALUES ('ent_a', 'character', 'gate_skipped', 'notes/agents', 1)",
             [],
         )
         .unwrap();
