@@ -1367,7 +1367,7 @@ fn parse_tags(payload: &serde_json::Value) -> Vec<String> {
 }
 
 fn create_entity_if_needed(
-    conn: &Connection,
+    tx: &crate::db::entity_gate::ImmediateTx<'_>,
     proposal: &LoadedProposal,
     accepted_any: bool,
     now_secs: i64,
@@ -1382,21 +1382,220 @@ fn create_entity_if_needed(
         .proposed_name
         .clone()
         .context("new_entity proposal missing proposed_name")?;
-    let entity_type = proposal
-        .proposed_type
-        .clone()
-        .unwrap_or_else(|| "concept".into());
+    let proposed_type = proposal.proposed_type.clone();
     let entity_id = generate_llm_id("ent_");
-    conn.execute(
-        "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
-         VALUES (?1, ?2, ?3, '', NULL, ?4, ?4, NULL)",
-        params![entity_id, name, entity_type, now_secs],
+
+    // Resolve the gate for this NEW-entity mint (LLM synthesis path,
+    // spec R2.4.2 / §2.5). Source paths come from the proposal's
+    // `curated_proposal_sources` rows; rung 2's `folder_ontology` lookup
+    // walks every path and strict-wins across them (R2.3.3).
+    let conn: &Connection = tx;
+    let source_paths = load_proposal_source_paths(conn, &proposal.id)?;
+    let (decision, _gate) = resolve_llm_synthesis_gate(tx, &entity_id, &source_paths);
+    let proposed_label = proposed_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // The helper does the gate check + the insert (or refusal). For the
+    // LLM synthesis path the SKIP-path behavior is: today's `'concept'`
+    // literal stands (r2-M2a, no vocabulary to violate) AND a
+    // `gate_skipped` ledger row records the origin (R2.4.6 r21). The
+    // helper does NOT insert on Skip — we land the literal ourselves
+    // here so the proposal's `entity_id` is stamped and the existing
+    // flow proceeds.
+    let outcome = crate::db::entity_gate::shared_insert_entity(
+        tx,
+        Some(&entity_id),
+        &name,
+        proposed_label,
+        "",
+        now_secs,
+        decision.clone(),
+        false,
     )?;
-    conn.execute(
+
+    match &outcome {
+        crate::db::entity_gate::AdmitOutcome::Skipped { .. } => {
+            // SKIP path: today's `'concept'` literal stands. The helper
+            // did NOT insert; land the literal so the proposal flow
+            // proceeds. The ledger row goes after we land the literal
+            // (so we use the SKIP branch in `write_origin_ledger_for_outcome`).
+            tx.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
+                 VALUES (?1, ?2, 'concept', '', NULL, ?3, ?3, NULL)",
+                params![entity_id, name, now_secs],
+            )?;
+        }
+        crate::db::entity_gate::AdmitOutcome::Held { .. } => {
+            // SG6 (spec §2.4.5): a Held proposal is held as pending. The
+            // proposal's facts are NOT dropped — they re-enter when the
+            // manifest names a fallback. We return `(None, false)` so
+            // the caller's existing flow marks the proposal as held
+            // without inserting a row.
+            return Ok((None, false));
+        }
+        _ => {
+            // Helper inserted (AdmittedDeclared / Aliased / DegradedToFallback).
+        }
+    }
+
+    // Ledger row — first-origin-wins via INSERT OR IGNORE.
+    write_origin_ledger_for_outcome(tx, &entity_id, proposed_label, &outcome, decision)?;
+
+    tx.execute(
         "UPDATE curated_proposals SET entity_id = ?1 WHERE id = ?2",
         params![entity_id, proposal.id],
     )?;
     Ok((Some(entity_id), true))
+}
+
+/// Load the source document paths for an LLM proposal. The gate walks every
+/// path and strict-wins across them (R2.3.3 — same asymmetry as edges).
+fn load_proposal_source_paths(conn: &Connection, proposal_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.path
+         FROM curated_proposal_sources s
+         JOIN documents d ON d.id = s.doc_id
+         WHERE s.proposal_id = ?1",
+    )?;
+    let rows: Vec<String> = stmt
+        .query_map([proposal_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Resolve the gate for an LLM-synthesis mint. Reads the current config
+/// (`BrainConfig::ingest_ontology_degraded` + `ingest.ontology_default` via
+/// the per-config-path cache at `config/mod.rs:182`), passes them to the
+/// §2.3 ladder, and translates to a `GateDecision`.
+///
+/// When no config has been hydrated for the current path (no proposal mints
+/// have happened yet on this path), the resolver falls back to the
+/// conservative rung-1/rung-4 path that consults the manifest rows
+/// directly. This is intentional — a fresh open with a fresh migration
+/// may not have hydrated the IngestConfig cache yet, and the gate must not
+/// refuse a mint whose config would have admitted it.
+fn resolve_llm_synthesis_gate(
+    tx: &crate::db::entity_gate::ImmediateTx<'_>,
+    entity_id: &str,
+    _source_paths: &[String],
+) -> (
+    crate::db::entity_gate::GateDecision,
+    crate::db::entity_gate::NodeGateDecision,
+) {
+    let conn: &Connection = tx;
+    // Walk rung 1: ct_entity_optouts + entity manifest row.
+    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
+        let node = crate::db::entity_gate::NodeGateDecision {
+            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
+            vocabulary: None,
+            source_directory: None,
+        };
+        return (node.clone().into_gate_decision(), node);
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            return (node.clone().into_gate_decision(), node);
+        }
+        _ => {}
+    }
+    // Rung 4 fallback: tier_fact manifest row.
+    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+        _ => {
+            // No strict rung; SKIP. This is the common path on a fresh
+            // brain with no manifest rows.
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: crate::db::entity_gate::ModeVerdict::Off,
+                vocabulary: None,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+    }
+}
+
+/// Write the origin-ledger row in the SAME transaction as the insert,
+/// per the spec's R2.4.6 r21 table. First-origin-wins (`INSERT OR IGNORE`).
+/// `original_type` is `None` when the caller supplied no label; never `''`.
+///
+/// Decision + outcome decide the row:
+///   * Gate → Skipped outcome → `gate_skipped` row.
+///   * Gate → Declared/Aliased outcome → no row (admitted-as-declared).
+///   * Gate → DegradedToFallback outcome → `degraded` row with the
+///     original label pre-canonicalization.
+///   * Held outcome → no row (held; the proposal's facts survive).
+fn write_origin_ledger_for_outcome(
+    tx: &crate::db::entity_gate::ImmediateTx<'_>,
+    entity_id: &str,
+    proposed_label: Option<&str>,
+    outcome: &crate::db::entity_gate::AdmitOutcome,
+    decision: crate::db::entity_gate::GateDecision,
+) -> Result<()> {
+    use crate::db::entity_gate::AdmitOutcome;
+    use crate::db::entity_gate::GateDecision;
+    use crate::db::schema::OriginReason;
+
+    let source_directory: Option<&str> = None;
+    match (decision, outcome) {
+        (GateDecision::Skip, AdmitOutcome::Skipped { original_label }) => {
+            crate::db::entity_gate::write_origin_ledger_row(
+                tx,
+                entity_id,
+                original_label.as_deref(),
+                OriginReason::GateSkipped,
+                source_directory,
+            )?;
+        }
+        (_, AdmitOutcome::DegradedToFallback { original_label, .. }) => {
+            let label: Option<&str> = if !original_label.is_empty() {
+                Some(original_label.as_str())
+            } else {
+                None
+            };
+            crate::db::entity_gate::write_origin_ledger_row(
+                tx,
+                entity_id,
+                label,
+                OriginReason::Degraded,
+                source_directory,
+            )?;
+        }
+        _ => {
+            // Admitted-as-declared, alias-admitted, held: NO ledger row.
+        }
+    }
+    let _ = proposed_label;
+    Ok(())
 }
 
 fn resolve_edge_ref(
@@ -2016,7 +2215,18 @@ fn commit_edge_add(
     //
     // Reads stay untyped-tolerant: this is a write-time gate only, and rows
     // written before the manifest existed remain readable and traversable.
-    let edge_type = match &ctx.strict_edge_types {
+    //
+    // R2.3.0 (Task 3): strict-wins across ENDPOINTS. If either endpoint
+    // resolves strict (its own strict manifest row, or its source path
+    // rung-2/3 strict verdict), the EDGE is gated under the strict
+    // vocabulary that fires FIRST. The §2.3 rung-1a's entity-level opt-out
+    // (a deliberate `ct_entity_optouts` row) short-circuits the edge gate
+    // on that endpoint (§2.1, r12-M1 restated) — the existing pre-wave-1
+    // `commit.rs:364-369` fall-through is the row-PRESENT-but-UNMARKED
+    // case; an explicit opt-out goes the OTHER way.
+    let resolved_vocabulary =
+        resolve_edge_endpoint_vocabulary(conn, &ctx.entity_id, &source_id, &target_id, ctx);
+    let edge_type = match resolved_vocabulary {
         Some(vocabulary) => match vocabulary.canonicalize(&edge_type) {
             // Issue #189: write the manifest's spelling, not the candidate's.
             Some(canonical) => canonical.to_string(),
@@ -2089,6 +2299,49 @@ fn commit_edge_add(
         });
     }
     Ok(())
+}
+
+/// R2.3.0 (Task 3): strict-wins across EDGE endpoints. If EITHER
+/// `source_id` or `target_id` has a deliberate `ct_entity_optouts` row,
+/// the edge cascade short-circuits (§2.1, r12-m1 restated) and the gate
+/// disarms (return `None` → no vocabulary → write verbatim). Otherwise the
+/// entity's own `strict_edge_types` (already resolved at `CommitContext`
+/// construction time) gates the edge.
+///
+/// A future Task 5/Task 7 implementation can wire rung-2/3 source-path
+/// resolution per-endpoint; today's pass returns the entity's vocabulary
+/// when no opt-out fires, matching the pre-wave-1 strict-wins behavior at
+/// `commit.rs:364-369` (which is the row-PRESENT-but-UNMARKED case — an
+/// explicit opt-out is the row-PRESENT-and-OPTED-OUT case, here).
+fn resolve_edge_endpoint_vocabulary(
+    conn: &Connection,
+    entity_id: &str,
+    source_id: &str,
+    target_id: &str,
+    ctx: &CommitContext,
+) -> Option<EdgeVocabulary> {
+    // Rung 1a — explicit opt-out on either endpoint → skip the gate.
+    if endpoint_has_optout(conn, source_id).unwrap_or(false)
+        || endpoint_has_optout(conn, target_id).unwrap_or(false)
+    {
+        return None;
+    }
+    // Rung 1b/c/d fall through to the entity's resolved vocabulary (the
+    // pre-wave-1 behavior; Task 5/7 will refine per-endpoint rung-2/3).
+    let _ = entity_id;
+    ctx.strict_edge_types.clone()
+}
+
+/// Rung 1a — does this endpoint have a deliberate opt-out row?
+fn endpoint_has_optout(conn: &Connection, entity_id: &str) -> rusqlite::Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = ?1",
+            [entity_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
 }
 
 /// The single place the final proposal status write lives (hvg Task 2).
@@ -6141,6 +6394,103 @@ mod tests {
         .unwrap();
         assert_eq!(result.skipped_unanchored, 1);
         assert_eq!(result.proposal_status, "rejected");
+    }
+
+    /// §6 item 1b: R2.3.0 strict-wins — edge endpoint opt-out cascade
+    /// short-circuits the edge gate. A `ct_entity_optouts` row on
+    /// EITHER endpoint disarms the gate, so the entity's own
+    /// `strict_edge_types` (the only thing today's gate reads) is
+    /// bypassed and the edge is written verbatim.
+    ///
+    /// Matrix cases (per endpoint pair):
+    ///   * no opt-out + strict vocabulary → vocabulary check fires
+    ///   * opt-out on either endpoint → write verbatim (cascade
+    ///     short-circuit per §2.1, r12-m1)
+    #[test]
+    fn edge_endpoint_opt_out_short_circuits_gate() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_a", "A", "summary", 100);
+        seed_entity(&conn, "ent_b", "B", "summary", 100);
+
+        // Build a CommitContext with a strict vocabulary. The
+        // pre-existing `test_ctx` helper is private; build a minimal
+        // one inline so we exercise the helper directly.
+        let mut ctx = CommitContext {
+            deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
+            strict_edge_types: None,
+            proposal_id: "prop_edge".into(),
+            proposal_created_at: 100,
+            entity_id: "ent_a".into(),
+            entity_name: "A".into(),
+            source_type: "user_confirmed",
+            now_secs: 100,
+            now_ms: 100,
+            committed: vec![],
+            conflicts: vec![],
+            dropped_edges: vec![],
+            accepted_count: 0,
+            rejected_count: 0,
+            facts_added: 0,
+            facts_updated: 0,
+            facts_archived: 0,
+            tasks_added: 0,
+            facts_duplicated: 0,
+            skipped_unanchored: 0,
+            entry_embeddings: Default::default(),
+            reviewed_by: None,
+        };
+        let manifest = crate::wiki_graph::WikiManifest {
+            node_types: vec![],
+            edge_types: vec![
+                crate::wiki_graph::WikiEdgeType {
+                    type_name: "depends_on".into(),
+                    ..Default::default()
+                },
+                crate::wiki_graph::WikiEdgeType {
+                    type_name: "owned_by".into(),
+                    ..Default::default()
+                },
+            ],
+            fallback_node_type: None,
+        };
+        ctx.strict_edge_types = Some(EdgeVocabulary::from_manifest(&manifest));
+
+        // Case 1: no opt-out on either endpoint → strict vocabulary
+        // applies; the helper returns Some(vocab).
+        let outcome = resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &ctx);
+        assert!(
+            outcome.is_some(),
+            "no opt-out + strict vocabulary → vocabulary fires"
+        );
+
+        // Case 2: opt-out on source endpoint → no vocabulary, write verbatim.
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_a', 'user', 1)",
+            [],
+        )
+        .unwrap();
+        let outcome = resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &ctx);
+        assert!(
+            outcome.is_none(),
+            "opt-out on source endpoint must disarm the edge gate"
+        );
+
+        // Case 3: opt-out on target endpoint → no vocabulary, write verbatim.
+        conn.execute(
+            "DELETE FROM ct_entity_optouts WHERE entity_id = 'ent_a'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_b', 'user', 1)",
+            [],
+        )
+        .unwrap();
+        let outcome = resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &ctx);
+        assert!(
+            outcome.is_none(),
+            "opt-out on target endpoint must disarm the edge gate"
+        );
     }
 }
 

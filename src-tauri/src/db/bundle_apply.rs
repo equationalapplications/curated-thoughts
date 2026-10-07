@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db::entity_gate::ImmediateTx;
@@ -734,29 +734,182 @@ fn ensure_entity(
             |r| r.get(0),
         )
         .ok();
-    match existing {
-        None => {
-            tx.execute(
-                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
-                 VALUES (?1, ?2, 'concept', ?3, ?4, ?4)",
-                params![target_entity_id, name, bundle_summary, now_secs],
-            )?;
-        }
-        Some(local_summary) => {
-            let write_summary = match mode {
-                ImportMode::Replace => entity.summary.is_some(),
-                ImportMode::Merge => entity.summary.is_some() && local_summary.trim().is_empty(),
-                ImportMode::Clone => false,
-            };
-            if write_summary {
+
+    // Bundle import path (spec §2.5 / R2.4.2). Wave-1 bundles carry NO
+    // graph type label — the gate's caller supplies `None` for the
+    // proposed label. The four §2.5 ladder branches are summarized below.
+    //
+    // * Gate → unlabeled entity → insert as `fallback_node_type`
+    //   (NEVER the literal `'concept'`). Write an `unlabeled_landing` row
+    //   in the origin ledger; the entity goes to the review queue.
+    // * Gate → no declared fallback (Held) → atomic ABORT. Per spec §2.5
+    //   bundle bullet: "If no fallback is declared, the import ABORTS
+    //   ATOMICALLY with a report, facts intact." We bail here and the
+    // outer IMMEDIATE transaction rolls back the bundle.
+    // * Skip → SKIP-path `'concept'` literal + `gate_skipped` row.
+    //   source_directory is NULL here (the §2.5 bundle bullet never sets
+    //   a source directory because bundle import has no document path).
+    // * Skip on a label-less entity (per spec R2.4.6 r21 "SKIP on
+    //   bundle import (no label)"): the gate returns Skipped with
+    //   `original_label: None`; we land `'concept'` and write a
+    //   `gate_skipped` row with original_type = NULL.
+    let conn: &Connection = tx;
+    if existing.is_none() {
+        let (decision, _gate) = resolve_bundle_gate(tx, target_entity_id);
+        let outcome = crate::db::entity_gate::shared_insert_entity(
+            tx,
+            Some(target_entity_id),
+            &name,
+            None,
+            &bundle_summary,
+            now_secs,
+            decision.clone(),
+            false,
+        )?;
+
+        use crate::db::entity_gate::AdmitOutcome;
+        use crate::db::entity_gate::GateDecision;
+        use crate::db::schema::OriginReason;
+
+        match (&outcome, &decision) {
+            (AdmitOutcome::DegradedToFallback { landed_as, .. }, _) => {
+                // Degraded/unlabeled landing: helper inserted as the
+                // declared fallback. Write an `unlabeled_landing` ledger
+                // row (original_type NULL — r21 contract).
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    target_entity_id,
+                    None,
+                    OriginReason::UnlabeledLanding,
+                    None,
+                )?;
+                let _ = landed_as;
+            }
+            (AdmitOutcome::Skipped { .. }, GateDecision::Skip) => {
+                // SKIP path: today's `'concept'` literal stands (spec
+                // §2.5 bundle bullet, r2-M2a). Helper did NOT insert —
+                // land the literal ourselves, then write the
+                // `gate_skipped` ledger row (original_type NULL when no
+                // label was supplied, r21 table).
                 tx.execute(
-                    "UPDATE curated_entities SET summary=?2, updated_at=?3 WHERE id=?1",
-                    params![target_entity_id, bundle_summary, now_secs],
+                    "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES (?1, ?2, 'concept', ?3, ?4, ?4)",
+                    params![target_entity_id, name, bundle_summary, now_secs],
+                )?;
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    target_entity_id,
+                    None,
+                    OriginReason::GateSkipped,
+                    None,
                 )?;
             }
+            (AdmitOutcome::Held { .. }, _) => {
+                // §2.5 bullet: "If no fallback is declared, the import
+                // ABORTS ATOMICALLY with a report, facts intact." The
+                // outer IMMEDIATE transaction rolls back via bail!
+                // (caller propagates → apply_import returns Err →
+                // tx.rollback()). Facts intact because the LLM-mint
+                // path is in the same batch.
+                bail!(
+                    "bundle import aborted: strict ontology gate held an unlabeled entity mint \
+                     (spec §2.4.5: no fallback_node_type declared); facts are intact and will \
+                     re-enter when the manifest names a fallback"
+                );
+            }
+            _ => {
+                // Admitted-as-declared or alias-admitted without a label —
+                // nothing the bundle entry needed, but the helper
+                // inserted anyway. We don't write a ledger row.
+            }
         }
+        let _ = conn;
+        return Ok(());
+    }
+
+    // Existing row: only the summary update path remains.
+    let local_summary = existing.unwrap_or_default();
+    let write_summary = match mode {
+        ImportMode::Replace => entity.summary.is_some(),
+        ImportMode::Merge => entity.summary.is_some() && local_summary.trim().is_empty(),
+        ImportMode::Clone => false,
+    };
+    if write_summary {
+        tx.execute(
+            "UPDATE curated_entities SET summary=?2, updated_at=?3 WHERE id=?1",
+            params![target_entity_id, bundle_summary, now_secs],
+        )?;
     }
     Ok(())
+}
+
+/// Resolve the bundle import's gate decision. Bundle entries have no
+/// proposal (R2.3.4), so the §2.3 ladder starts at rung 3. The resolver
+/// here walks rung 1 (opt-out + entity manifest) + rung 4 (`tier_fact`) —
+/// the same conservative shape `resolve_llm_synthesis_gate` /
+/// `resolve_gui_gate` use, since bundle mints have no proposal-supplied
+/// source paths to drive rung 2/3.
+fn resolve_bundle_gate(
+    tx: &ImmediateTx<'_>,
+    entity_id: &str,
+) -> (
+    crate::db::entity_gate::GateDecision,
+    crate::db::entity_gate::NodeGateDecision,
+) {
+    let conn: &Connection = tx;
+    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
+        let node = crate::db::entity_gate::NodeGateDecision {
+            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
+            vocabulary: None,
+            source_directory: None,
+        };
+        return (node.clone().into_gate_decision(), node);
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            return (node.clone().into_gate_decision(), node);
+        }
+        _ => {}
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+        _ => {
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: crate::db::entity_gate::ModeVerdict::Off,
+                vocabulary: None,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+    }
 }
 
 /// Wipe an entity's entries, tasks and events for a Replace-mode import.

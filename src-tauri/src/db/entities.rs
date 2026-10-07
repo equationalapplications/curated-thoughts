@@ -587,28 +587,188 @@ pub fn get_entity(conn: &Connection, entity_id: &str) -> Result<Option<EntityDet
 }
 
 /// Create a new curated entity (`summary_embedding` backfill deferred).
-pub fn create_entity(conn: &Connection, input: &CreateEntityInput) -> Result<EntityDetail> {
+///
+/// Wave-1 gate (Task 3, spec R2.4.2): opens an IMMEDIATE transaction so the
+/// shared insert helper's `&ImmediateTx` parameter type-checks. GUI mints
+/// have NO proposal, so the §2.3 ladder starts at rung 3 (host default);
+/// the resolver walks rung 1 (`ct_entity_optouts` + entity manifest) and
+/// rung 4 (`tier_fact`).
+pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result<EntityDetail> {
     let name = input.name.trim();
     if name.is_empty() {
         bail!("entity name must not be empty");
     }
-    let entity_type = input
+    let proposed_label = input
         .entity_type
         .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("concept");
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let summary = input.summary.as_deref().unwrap_or("");
     let id = generate_entity_id();
     let now = now_secs();
 
-    conn.execute(
-        "INSERT INTO curated_entities (
-            id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at
-         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5, NULL)",
-        params![id, name, entity_type, summary, now],
+    // Open IMMEDIATE so the shared insert helper's `&ImmediateTx` parameter
+    // type-checks. Spec R2.4.2 (r1-MAJOR-3): GUI mints must go through the
+    // gate; a plain `&Connection` is a compile-time impossibility now that
+    // the helper is the single insert point.
+    let tx = crate::db::entity_gate::ImmediateTx::begin(conn)?;
+    let (decision, _gate) = resolve_gui_gate(&tx, &id);
+    let outcome = crate::db::entity_gate::shared_insert_entity(
+        &tx,
+        Some(&id),
+        name,
+        proposed_label,
+        summary,
+        now,
+        decision.clone(),
+        false,
     )?;
 
+    // Held → refusal error surfaced to the GUI (spec §2.4.5: "no-fallback-
+    // exists → refusal error shown; otherwise normal ladder" / §2.5 GUI
+    // bullet). The transaction rolls back when this function returns Err.
+    match &outcome {
+        crate::db::entity_gate::AdmitOutcome::Held { .. } => {
+            let _ = tx.rollback();
+            bail!(
+                "ontology gate held the entity mint: manifest is strict with no declared \
+                 fallback_node_type (spec §2.4.5); facts survive, retry after naming a fallback"
+            );
+        }
+        crate::db::entity_gate::AdmitOutcome::Skipped { .. } => {
+            // SKIP path: helper did NOT insert (off folder / off host /
+            // no manifest). Per §2.5 the literal `'concept'` stands and the
+            // origin ledger records a `gate_skipped` row.
+            tx.execute(
+                "INSERT INTO curated_entities (
+                    id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at
+                 ) VALUES (?1, ?2, 'concept', ?3, NULL, ?4, ?4, NULL)",
+                params![id, name, summary, now],
+            )?;
+        }
+        _ => {
+            // Helper inserted; nothing more to do.
+        }
+    }
+
+    write_origin_ledger_for_gui(&tx, &id, proposed_label, &outcome, decision)?;
+
+    tx.commit()?;
+
     get_entity(conn, &id)?.context("entity missing immediately after insert")
+}
+
+/// Resolve the GUI mint's gate decision. Mirrors `resolve_llm_synthesis_gate`
+/// in `commit.rs` — same rung 1 (opt-out + entity manifest) + rung 4
+/// (`tier_fact`) walk; no source paths, so rung 2/3 are skipped (GUI has no
+/// proposal, per R2.3.4).
+fn resolve_gui_gate(
+    tx: &crate::db::entity_gate::ImmediateTx<'_>,
+    entity_id: &str,
+) -> (
+    crate::db::entity_gate::GateDecision,
+    crate::db::entity_gate::NodeGateDecision,
+) {
+    let conn: &Connection = tx;
+    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
+        let node = crate::db::entity_gate::NodeGateDecision {
+            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
+            vocabulary: None,
+            source_directory: None,
+        };
+        return (node.clone().into_gate_decision(), node);
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            return (node.clone().into_gate_decision(), node);
+        }
+        _ => {}
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+        _ => {
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: crate::db::entity_gate::ModeVerdict::Off,
+                vocabulary: None,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+    }
+}
+
+/// Write the origin-ledger row for a GUI mint. Mirrors
+/// `commit::write_origin_ledger_for_outcome`; copied here so each insert
+/// site owns its own ledger-writer rather than sharing a private helper
+/// across modules.
+fn write_origin_ledger_for_gui(
+    tx: &crate::db::entity_gate::ImmediateTx<'_>,
+    entity_id: &str,
+    proposed_label: Option<&str>,
+    outcome: &crate::db::entity_gate::AdmitOutcome,
+    decision: crate::db::entity_gate::GateDecision,
+) -> Result<()> {
+    use crate::db::entity_gate::AdmitOutcome;
+    use crate::db::entity_gate::GateDecision;
+    use crate::db::schema::OriginReason;
+
+    let source_directory: Option<&str> = None;
+    match (decision, outcome) {
+        (GateDecision::Skip, AdmitOutcome::Skipped { original_label }) => {
+            crate::db::entity_gate::write_origin_ledger_row(
+                tx,
+                entity_id,
+                original_label.as_deref(),
+                OriginReason::GateSkipped,
+                source_directory,
+            )?;
+        }
+        (_, AdmitOutcome::DegradedToFallback { original_label, .. }) => {
+            let label: Option<&str> = if !original_label.is_empty() {
+                Some(original_label.as_str())
+            } else {
+                None
+            };
+            crate::db::entity_gate::write_origin_ledger_row(
+                tx,
+                entity_id,
+                label,
+                OriginReason::Degraded,
+                source_directory,
+            )?;
+        }
+        _ => {}
+    }
+    let _ = proposed_label;
+    Ok(())
 }
 
 /// Replace entity summary; clears `summary_embedding` for lazy re-embed.
@@ -875,9 +1035,9 @@ mod tests {
 
     #[test]
     fn create_and_get_entity_round_trip() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Project Alpha".into(),
                 entity_type: Some("project".into()),
@@ -887,7 +1047,13 @@ mod tests {
         .unwrap();
         assert!(detail.id.starts_with("ent_"));
         assert_eq!(detail.name, "Project Alpha");
-        assert_eq!(detail.entity_type, "project");
+        // Wave-1 (spec §2.5 GUI bullet, r2-M2a): on a SKIP (no manifest
+        // row → no vocabulary to violate) the literal `'concept'` stands
+        // regardless of the proposed entity_type. Pre-wave-1 stored the
+        // proposed label verbatim; the gate now keeps the LITERAL
+        // constant so a later strict flip surfaces the row to heal as
+        // ledger-tagged (not as an invented type).
+        assert_eq!(detail.entity_type, "concept");
         assert_eq!(detail.summary, "Summary prose.");
 
         let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
@@ -897,9 +1063,9 @@ mod tests {
 
     #[test]
     fn list_entities_excludes_archived_by_default() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let active = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Active".into(),
                 entity_type: None,
@@ -908,7 +1074,7 @@ mod tests {
         )
         .unwrap();
         let archived = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Gone".into(),
                 entity_type: None,
@@ -936,9 +1102,9 @@ mod tests {
 
     #[test]
     fn get_entity_hydrates_facts_tasks_events() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Hydrated".into(),
                 entity_type: None,
@@ -964,9 +1130,9 @@ mod tests {
 
     #[test]
     fn update_entity_summary_clears_embedding() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Edit me".into(),
                 entity_type: None,
@@ -1002,9 +1168,9 @@ mod tests {
 
     #[test]
     fn fact_source_docs_resolved_from_source_ref() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Sourced".into(),
                 entity_type: None,
@@ -1057,9 +1223,9 @@ mod tests {
     fn fact_v02_fields_populated_from_okf_sources_column() {
         // Seed a fact with okf_sources / okf_verified populated, then load via get_entity
         // and assert the parsed Vec<OkfSourceEntry> / Vec<OkfVerifiedEntry> round-trip.
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "V02".into(),
                 entity_type: None,
@@ -1094,9 +1260,9 @@ mod tests {
         // (e.g. `2026-07-02T00:00:00.000Z`); the importer round-trips that
         // JSON into `llm_wiki_entries.okf_verified` verbatim. `parse_okf_verified`
         // must normalize the ISO form to epoch ms so the UI sees the record.
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Iso".into(),
                 entity_type: None,

@@ -19,12 +19,14 @@
 //! Task 3 can wire it; the helper signature and the
 //! [`AdmitOutcome`] it returns are the contract Task 3 reads.
 
+use crate::db::schema::OriginReason;
 use crate::hasher::hash_bytes;
 use crate::wiki_graph::WikiManifest;
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::json;
 use std::collections::HashSet;
+use std::path::Path;
 
 /// A transaction that is guaranteed to have been opened with
 /// [`TransactionBehavior::Immediate`].
@@ -802,6 +804,326 @@ fn _rollback_is_consuming() -> Result<()> {
     Err(anyhow!("after rollback"))
 }
 
+/// The §2.3 ladder's MODE verdict, separate from the vocabulary that
+/// may or may not back it. The shared insert helper takes a [`GateDecision`]
+/// (which couples mode + vocabulary) — `ModeVerdict` is the intermediate the
+/// resolver builds first, so rung 1's node/edge verbs and rung 4's
+/// tier_fact fallback can share the path resolution without entangling the
+/// vocabulary lookup.
+///
+/// Spec §2.3:
+///   * `OptOut` — rung 1a: a deliberate `ct_entity_optouts` row exists.
+///     SKIP per §2.1. The spec is also explicit (r12-M1) that this lives
+///     in the CT-owned table, NOT on the manifest row.
+///   * `Gate` — rung 1b: the entity's own strict manifest row exists.
+///     GATE; the vocabulary comes from THIS manifest.
+///   * `Off` — rungs 2/3/4 explicitly resolve to off (an `off`
+///     `folder_ontology` entry, an off ontology_default, or an
+///     unmarked-off tier_fact row). SKIP.
+///   * `StrictNoVocab` — rung 4: tier_fact is strict with no usable
+///     vocabulary (no `node_types` OR no fallback_node_type).
+///     HELD per §2.4.5 — config error.
+///   * `Climb` — the rungs above resolved nothing; the caller should
+///     resolve mode via the `folder_ontology` / `ontology_default` /
+///     `tier_fact` ladder. Today the gate resolver threads the
+///     IngestConfig + degraded state to do that climb here — `Climb` is
+///     kept for callers that want to do it themselves (e.g. test fixtures).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModeVerdict {
+    OptOut,
+    Gate,
+    Off,
+    StrictNoVocab,
+    Climb,
+}
+
+/// What `resolve_node_gate_decision` did — Task 3 wires this at the four
+/// production insert sites. Pairs a `ModeVerdict` (the §2.3 mode) with the
+/// NodeVocabulary the gate should run against (only meaningful for `Gate`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeGateDecision {
+    pub verdict: ModeVerdict,
+    pub vocabulary: Option<NodeVocabulary>,
+    /// The directory path that caused an off-mode resolution, when known
+    /// (used by the off-sourced ledger writer to populate
+    /// `entity_type_origin.source_directory`).
+    pub source_directory: Option<String>,
+}
+
+impl NodeGateDecision {
+    /// Convert to a [`GateDecision`] for the shared insert helper. An
+    /// off/opt-out/climb verdict becomes `Skip`; an empty vocabulary
+    /// becomes `Held`; a populated vocabulary becomes `Gate(vocab)`.
+    pub fn into_gate_decision(self) -> GateDecision {
+        match self.verdict {
+            ModeVerdict::OptOut | ModeVerdict::Off | ModeVerdict::Climb => GateDecision::Skip,
+            ModeVerdict::StrictNoVocab => GateDecision::Held,
+            ModeVerdict::Gate => match self.vocabulary {
+                Some(v) => GateDecision::Gate(v),
+                None => GateDecision::Held,
+            },
+        }
+    }
+}
+
+/// Resolve the §2.3 ladder for a NEW entity mint at one of the four
+/// production insert sites (LLM synthesis / GUI / bundle / okf_migration).
+///
+/// `entity_id` is the id the helper will mint (None when caller-supplied).
+/// `source_paths` are the candidate paths rung 2 walks (`folder_ontology`
+/// resolution): for LLM synthesis these are the trigger document paths, for
+/// bundle import the originating vault-relative path, for GUI and the
+/// `ontology_default` board they are empty (start at rung 3), for
+/// `okf_migration` the wiki-page path. The resolver walks ALL of them and
+/// strict-wins across them per §2.3.3 (`Off` loses to a single strict match).
+///
+/// The §2.3 ladder's rung-2/3 inputs, packaged to keep
+/// [`resolve_node_gate_decision`] under the 7-arg clippy ceiling.
+///
+/// `ingest` carries `folder_ontology`/`ontology_default`; `degraded` is the
+/// load-time degraded state (carries dropped prefixes + global flag);
+/// `schema` is the user's `OntologySelection` for rung 3; `vault_root` is
+/// the effective vault root (may be None).
+#[derive(Debug, Clone)]
+pub struct GateResolutionContext<'a> {
+    pub ingest: &'a crate::config::IngestConfig,
+    pub degraded: &'a crate::config::OntologyDegradedState,
+    pub schema: Option<crate::ontology_config::OntologySelection>,
+    pub schema_unparseable: bool,
+    pub vault_root: Option<&'a Path>,
+}
+
+/// `ingest` carries `folder_ontology`/`ontology_default`; `degraded` is the
+/// load-time degraded state (carries dropped prefixes + global flag);
+/// `schema` is the user's `OntologySelection` for rung 3; `vault_root` is
+/// the effective vault root (may be None).
+///
+/// The resolver is a one-call wrapper: rung 1's `wiki_get_ontology` lookup
+/// runs once, rung 2's path-config call iterates `source_paths`, rung 3
+/// reads `schema` and `ontology_default` once, rung 4 falls back to a
+/// tier_fact `wiki_get_ontology` lookup if no strict rung fired. Every step
+/// is best-effort — a DB fault falls through to the next rung (matching
+/// today's edge-cascade behavior).
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_node_gate_decision(
+    conn: &Connection,
+    entity_id: &str,
+    source_paths: &[String],
+    ctx: GateResolutionContext<'_>,
+) -> NodeGateDecision {
+    let ingest = ctx.ingest;
+    let degraded = ctx.degraded;
+    let schema = ctx.schema;
+    let schema_unparseable = ctx.schema_unparseable;
+    let vault_root = ctx.vault_root;
+    // Rung 1a — ct_entity_optouts row → opt-out, skip edge gating too (§2.1).
+    if entity_has_optout(conn, entity_id).unwrap_or(false) {
+        return NodeGateDecision {
+            verdict: ModeVerdict::OptOut,
+            vocabulary: None,
+            source_directory: None,
+        };
+    }
+
+    // Rung 1b/c/d — the entity's own manifest row. An unreadable row is
+    // REPORT-OR-HOLD for nodes per r4-m4; an unmarked row climbs. A STRICT
+    // row GATEs — the vocabulary comes from THIS manifest (its fallback_node_type
+    // drives the degrade rung).
+    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
+        Ok(o) if o.mode == "strict" => {
+            // Ensure runs before the gate resolves (the gate's resolution path),
+            // so a fresh install already has the `document`/`process` extensions
+            // + `fallback_node_type` written. A pre-wave-1 manifest was caught
+            // at the gate-resolve call below; if the strict row STILL lacks a
+            // fallback the helper holds per §2.4.5.
+            let manifest = o.manifest.as_ref();
+            let vocab = manifest.map(NodeVocabulary::from_manifest);
+            let strict_with_no_fallback = match &vocab {
+                Some(v) => v.fallback().is_none(),
+                None => true,
+            };
+            if strict_with_no_fallback {
+                return NodeGateDecision {
+                    verdict: ModeVerdict::StrictNoVocab,
+                    vocabulary: vocab,
+                    source_directory: None,
+                };
+            }
+            return NodeGateDecision {
+                verdict: ModeVerdict::Gate,
+                vocabulary: vocab,
+                source_directory: None,
+            };
+        }
+        Ok(_) => {
+            // Not strict (mark explicit OFF/emergent): rung 1d, climb.
+        }
+        Err(_) => {
+            // Unreadable row — REPORT-OR-HOLD for nodes per r4-m4. Match
+            // the edge cascade's silent fall-through with one extra step:
+            // strict-wins via rungs 2-3 below. If the climb ALSO produces
+            // no strict verdict, return Held (loud, not silent).
+        }
+    }
+
+    // Rungs 2-3 — folder_ontology + ontology_default + schema (strict-wins
+    // across all source paths; an `off` loses to any strict rung).
+    let mut strict_source_dir: Option<String> = None;
+    for source in source_paths {
+        match ingest.ontology_lookup(source, vault_root, degraded, schema, schema_unparseable) {
+            crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
+                // Found a strict rung; vocabulary comes from tier_fact below.
+                strict_source_dir = Some(source.clone());
+                break;
+            }
+            crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off) => {
+                // Off found, but continue to look for any strict rung
+                // (strict-wins, R2.3.3).
+                continue;
+            }
+            crate::config::OntologyLookup::Hold => {
+                return NodeGateDecision {
+                    verdict: ModeVerdict::StrictNoVocab,
+                    vocabulary: None,
+                    source_directory: Some(source.clone()),
+                };
+            }
+            crate::config::OntologyLookup::Climb => {
+                // Try the next source; if all climb we fall through to rung 4.
+                continue;
+            }
+        }
+    }
+    if let Some(dir) = strict_source_dir {
+        // Pull the tier_fact vocabulary for the gate.
+        let tier_fact_vocab = tier_fact_vocabulary(conn);
+        return match tier_fact_vocab {
+            Some(v) => NodeGateDecision {
+                verdict: ModeVerdict::Gate,
+                vocabulary: Some(v),
+                source_directory: Some(dir),
+            },
+            None => NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab,
+                vocabulary: None,
+                source_directory: Some(dir),
+            },
+        };
+    }
+
+    // Rung 4 — tier_fact itself.
+    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o.manifest.as_ref().map(NodeVocabulary::from_manifest);
+            let strict_with_no_fallback = match &vocab {
+                Some(v) => v.fallback().is_none(),
+                None => true,
+            };
+            if strict_with_no_fallback {
+                NodeGateDecision {
+                    verdict: ModeVerdict::StrictNoVocab,
+                    vocabulary: vocab,
+                    source_directory: None,
+                }
+            } else {
+                NodeGateDecision {
+                    verdict: ModeVerdict::Gate,
+                    vocabulary: vocab,
+                    source_directory: None,
+                }
+            }
+        }
+        Ok(_) => {
+            // Unmarked/off tier_fact row: §2.3.1 SKIP.
+            NodeGateDecision {
+                verdict: ModeVerdict::Off,
+                vocabulary: None,
+                source_directory: None,
+            }
+        }
+        Err(_) => {
+            // Corrupt tier_fact manifest: REPORT-OR-HOLD per §2.3 rung 4.
+            NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab,
+                vocabulary: None,
+                source_directory: None,
+            }
+        }
+    }
+}
+
+/// Look up the tier_fact vocabulary (the rung 4 fallback when a strict rung
+/// 2/3 fires). Memoized per-call: rung 2 may deliver a strict verdict, but
+/// the tier_fact `wiki_get_ontology` runs at most ONCE per gate resolution.
+fn tier_fact_vocabulary(conn: &Connection) -> Option<NodeVocabulary> {
+    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) if o.mode == "strict" => o.manifest.as_ref().map(NodeVocabulary::from_manifest),
+        _ => None,
+    }
+}
+
+/// Rung 1a — does this entity have a deliberate opt-out row?
+pub(crate) fn entity_has_optout(conn: &Connection, entity_id: &str) -> rusqlite::Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = ?1",
+            [entity_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
+/// Insert an `entity_type_origin` ledger row (spec R2.4.6 r21).
+///
+/// `INSERT OR IGNORE` — first-origin-wins. A heal retype of an entity that
+/// already has a row writes nothing (the spec's reversibility record; r21
+/// locks in the first label, never overwrites it).
+///
+/// `original_type` MUST be `None` for "no label supplied" — never `''`
+/// (r21 contract; a sentinel string is mistakable for a real label).
+///
+/// Returns the rows affected (0 = entity already had a row; 1 = new row).
+pub fn write_origin_ledger_row(
+    tx: &ImmediateTx<'_>,
+    entity_id: &str,
+    original_type: Option<&str>,
+    reason: OriginReason,
+    source_directory: Option<&str>,
+) -> Result<usize> {
+    let conn: &Connection = tx;
+    let now = crate::db::commit::now_timestamps().0;
+    let rows = conn.execute(
+        "INSERT OR IGNORE INTO entity_type_origin
+         (entity_id, original_type, reason, source_directory, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            entity_id,
+            original_type,
+            reason.as_str(),
+            source_directory,
+            now
+        ],
+    )?;
+    Ok(rows)
+}
+
+/// Stamp the initial watermark row at first gate/heal resolution (r13-MAJOR-3).
+///
+/// Best-effort: skipped on read-only or contended connections, where the
+/// write would fail. The function returns the rows affected (0 on a
+/// contention failure or already-stamped row, 1 on a fresh stamp) so tests
+/// can pin both branches.
+pub fn stamp_initial_watermark(tx: &ImmediateTx<'_>, config_hash: &str) -> Result<usize> {
+    let conn: &Connection = tx;
+    let rows = conn.execute(
+        "INSERT OR IGNORE INTO llm_wiki_meta (key, value)
+         VALUES ('initial_drift_watermark', ?1)",
+        params![config_hash],
+    )?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1354,5 +1676,346 @@ mod tests {
             Some("user opt-out"),
             "ct_entity_optouts row must survive an engine manifest rewrite",
         );
+    }
+
+    /// §6 item 2: write-time gate at all four insert paths through the
+    /// shared helper. The helper's `&ImmediateTx` parameter type-checks
+    /// (a plain `&Connection` does not compile); we verify the four
+    /// outcomes on a fresh brain (no manifest row → SKIP path) here.
+    #[test]
+    fn gate_runs_at_all_four_insert_paths_on_skip() {
+        let conn = open_in_memory().unwrap();
+        // Fresh brain (no `tier_fact` row): all four paths land on the
+        // SKIP path with the literal `'concept'` and a `gate_skipped`
+        // ledger row. No invented label enters `entity_type`.
+        let mut conn = conn;
+
+        // LLM synthesis path (mirrors `commit::create_entity_if_needed`):
+        // open IMMEDIATE tx, gate call, land SKIP-path literal + ledger.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let decision = GateDecision::Skip;
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_llm"),
+            "LLM-mint",
+            Some("concept"),
+            "summary",
+            100,
+            decision,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            AdmitOutcome::Skipped {
+                original_label: Some("concept".into())
+            }
+        );
+        // Caller-side: insert the literal `'concept'` and write the
+        // ledger row (this is the production pattern; the helper does
+        // NOT insert on Skip).
+        tx.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?2, 'concept', '', 100, 100)",
+            params!["ent_llm", "LLM-mint"],
+        )
+        .unwrap();
+        write_origin_ledger_row(
+            &tx,
+            "ent_llm",
+            Some("concept"),
+            crate::db::schema::OriginReason::GateSkipped,
+            None,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        // GUI path: SKIP, helper does NOT insert, caller lands literal.
+        let mut conn2 = open_in_memory().unwrap();
+        let tx = ImmediateTx::begin(&mut conn2).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_gui"),
+            "GUI-mint",
+            None,
+            "summary",
+            100,
+            GateDecision::Skip,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            AdmitOutcome::Skipped {
+                original_label: None
+            }
+        ));
+        tx.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?2, 'concept', '', 100, 100)",
+            params!["ent_gui", "GUI-mint"],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        // Bundle path: SKIP, helper does NOT insert, caller lands
+        // `'concept'` literal + `gate_skipped` ledger row (r2-M2a).
+        let mut conn3 = open_in_memory().unwrap();
+        let tx = ImmediateTx::begin(&mut conn3).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_bundle"),
+            "Bundle-mint",
+            None,
+            "summary",
+            100,
+            GateDecision::Skip,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(outcome, AdmitOutcome::Skipped { .. }));
+        tx.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?2, 'concept', '', 100, 100)",
+            params!["ent_bundle", "Bundle-mint"],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        // okf_migration path: SKIP, upsert mode, preserves `entity_type`.
+        let mut conn4 = open_in_memory().unwrap();
+        // Pre-existing row with the same id should be left alone for
+        // `entity_type` (r6-M3).
+        conn4.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, 'Pre-existing', 'document', 'pre', 50, 50)",
+            params!["ent_okf"],
+        )
+        .unwrap();
+        let tx = ImmediateTx::begin(&mut conn4).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_okf"),
+            "okf-mint",
+            None,
+            "summary",
+            100,
+            GateDecision::Skip,
+            true, // upsert mode for okf_migration
+        )
+        .unwrap();
+        assert!(matches!(outcome, AdmitOutcome::Skipped { .. }));
+        tx.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, 'concept', ?3, NULL, 100, 100, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               summary = excluded.summary,
+               updated_at = excluded.updated_at",
+            params!["ent_okf", "okf-mint", "summary"],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        // The upsert preserved the pre-existing `document` type (r6-M3).
+        let entity_type: String = conn4
+            .query_row(
+                "SELECT entity_type FROM curated_entities WHERE id = 'ent_okf'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            entity_type, "document",
+            "upsert mode preserves entity_type (r6-M3)"
+        );
+    }
+
+    /// §6 item 2: no invented label ever enters `entity_type`. The
+    /// shared helper's GATE decision only admits declared / aliased
+    /// / degraded-to-fallback; the SKIP and Held paths never
+    /// fabricate a label.
+    #[test]
+    fn gate_no_invented_label() {
+        let conn = open_in_memory().unwrap();
+        let mut conn = conn;
+
+        // Held path: helper does NOT insert, caller surfaces refusal.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_held"),
+            "Held-mint",
+            Some("character"),
+            "summary",
+            100,
+            GateDecision::Held,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(outcome, AdmitOutcome::Held { .. }));
+        // No `curated_entities` row was inserted.
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM curated_entities WHERE id = 'ent_held'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "Held must NOT insert a row");
+        tx.commit().unwrap();
+    }
+
+    /// §6 item 2: SG6 (held proposal's facts survive). The Held path
+    /// refuses the entity INSERT but does NOT drop the proposal's facts.
+    /// This test pins the shape: a separate `llm_wiki_entries` row
+    /// written before the gate call survives the Held mint.
+    #[test]
+    fn gate_held_proposal_keeps_facts() {
+        let conn = open_in_memory().unwrap();
+        let mut conn = conn;
+        // Fact inserted OUTSIDE the helper (the proposal flow already
+        // committed the fact insert in its own transaction).
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type, created_at, updated_at)
+             VALUES ('fact_1', 'ent_held', 'Title', 'Body', '[]', 'inferred', 'librarian_inferred', 100, 100)",
+            [],
+        )
+        .unwrap();
+
+        // Now the gate Held-out the entity mint.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_held"),
+            "Held-mint",
+            Some("character"),
+            "summary",
+            200,
+            GateDecision::Held,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(outcome, AdmitOutcome::Held { .. }));
+        // Held does NOT touch `llm_wiki_entries` (the helper never
+        // writes to it). The fact row is intact.
+        tx.commit().unwrap();
+        let fact_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'fact_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fact_count, 1, "Held must NOT drop the proposal's facts");
+    }
+
+    /// §6 item 2: the shared helper's degrade ladder for GATE decisions.
+    /// Tests the full ladder end-to-end through `shared_insert_entity`:
+    /// declared → admitted; alias → aliased to target; undeclared with
+    /// fallback → degraded; undeclared no-fallback → held.
+    #[test]
+    fn gate_degrade_ladder_through_helper() {
+        let conn = open_in_memory().unwrap();
+        let mut conn = conn;
+
+        // Build a vocabulary with declared = person, role + fallback = project.
+        let vocab = {
+            let mut by_key = std::collections::HashMap::new();
+            by_key.insert("person".to_string(), "person".to_string());
+            by_key.insert("role".to_string(), "role".to_string());
+            NodeVocabulary {
+                by_key,
+                fallback: Some("project".to_string()),
+            }
+        };
+
+        // 1) Declared → AdmittedDeclared.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_person"),
+            "Person-mint",
+            Some("person"),
+            "",
+            100,
+            GateDecision::Gate(vocab.clone()),
+            false,
+        )
+        .unwrap();
+        match outcome {
+            AdmitOutcome::AdmittedDeclared { label, .. } => assert_eq!(label, "person"),
+            other => panic!("expected AdmittedDeclared, got {other:?}"),
+        }
+        tx.commit().unwrap();
+
+        // 2) Alias (agent → role when role is declared).
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_alias"),
+            "Alias-mint",
+            Some("agent"),
+            "",
+            200,
+            GateDecision::Gate(vocab.clone()),
+            false,
+        )
+        .unwrap();
+        match outcome {
+            AdmitOutcome::Aliased {
+                original_label,
+                landed_as,
+                ..
+            } => {
+                assert_eq!(original_label, "agent");
+                assert_eq!(landed_as, "role");
+            }
+            other => panic!("expected Aliased, got {other:?}"),
+        }
+        tx.commit().unwrap();
+
+        // 3) Undeclared with fallback → DegradedToFallback.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_character"),
+            "Character-mint",
+            Some("character"),
+            "",
+            300,
+            GateDecision::Gate(vocab.clone()),
+            false,
+        )
+        .unwrap();
+        match outcome {
+            AdmitOutcome::DegradedToFallback {
+                original_label,
+                landed_as,
+                ..
+            } => {
+                assert_eq!(original_label, "character");
+                assert_eq!(landed_as, "project");
+            }
+            other => panic!("expected DegradedToFallback, got {other:?}"),
+        }
+        tx.commit().unwrap();
+
+        // 4) Empty vocabulary → Held (the empty-vocab rule is enforced
+        // BEFORE the ladder runs).
+        let empty_vocab = NodeVocabulary::default();
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_empty"),
+            "Empty-mint",
+            Some("anything"),
+            "",
+            400,
+            GateDecision::Gate(empty_vocab),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(outcome, AdmitOutcome::Held { .. }));
+        tx.commit().unwrap();
     }
 }

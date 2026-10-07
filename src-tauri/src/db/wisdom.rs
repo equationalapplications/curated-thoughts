@@ -424,7 +424,7 @@ mod tests {
     fn add_wisdom_with_profile_stores_an_embedding() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
-            let entity_id = make_entity(&conn);
+            let entity_id = make_entity(&mut conn);
             let profile = crate::embedder::EmbedProfile::default();
 
             let fact = add_wisdom_with_profile(
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn add_wisdom_without_a_profile_leaves_the_blob_null() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
 
         let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
 
@@ -467,7 +467,7 @@ mod tests {
     // pre-existing tests
     // -------------------------------------------------------------------------
 
-    fn make_entity(conn: &Connection) -> String {
+    fn make_entity(conn: &mut Connection) -> String {
         create_entity(
             conn,
             &CreateEntityInput {
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn add_wisdom_inserts_row_outbox_and_touches_entity() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         conn.execute(
             "UPDATE curated_entities SET updated_at = 1 WHERE id = ?1",
             [&entity_id],
@@ -535,7 +535,7 @@ mod tests {
         // `proposal_idnullevidence`, identical for every manual row. NULL is
         // the "no provenance" value and sits outside the engine's selector.
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
 
         let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
 
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn add_wisdom_rejects_empty_body_and_missing_entity() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         assert!(add_wisdom(&mut conn, &entity_id, "   ").is_err());
         assert!(add_wisdom(&mut conn, "ent_missing", "Body").is_err());
     }
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn update_wisdom_rewrites_body_and_pushes_outbox_update() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "Old body.").unwrap();
 
         update_wisdom(
@@ -584,7 +584,7 @@ mod tests {
     fn update_wisdom_clears_embedding_blob_so_sweep_rederives_it() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
-            let entity_id = make_entity(&conn);
+            let entity_id = make_entity(&mut conn);
             let profile = crate::embedder::EmbedProfile::default();
 
             // Seed a fact with a real (non-NULL) embedding blob.
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn update_wisdom_rejects_unknown_or_archived_fact() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         assert!(update_wisdom(&mut conn, &entity_id, "fact_missing", "x").is_err());
         let fact = add_wisdom(&mut conn, &entity_id, "Body.").unwrap();
         archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn archive_wisdom_soft_deletes_and_pushes_outbox_delete() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "Ephemeral.").unwrap();
 
         archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn archive_wisdom_purges_edges_touching_the_fact() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
         let other = add_wisdom(&mut conn, &entity_id, "The surviving fact body.").unwrap();
 
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn archive_wisdom_leaves_unrelated_edges_alone() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
         let b = add_wisdom(&mut conn, &entity_id, "Fact B body.").unwrap();
         let c = add_wisdom(&mut conn, &entity_id, "Fact C body.").unwrap();

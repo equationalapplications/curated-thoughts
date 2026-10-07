@@ -3,7 +3,7 @@
 
 use crate::db::okf_ddl::LLM_WIKI_META_TABLE;
 use crate::hasher::hash_bytes;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Component, Path};
 
@@ -84,7 +84,8 @@ fn okf_migration_complete(conn: &Connection) -> Result<bool> {
     Ok(migrated.is_some())
 }
 
-fn migrate_approved_wiki_pages(conn: &Connection, vault_root: &Path, now: i64) -> Result<usize> {
+fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64) -> Result<usize> {
+    let conn: &Connection = tx;
     let mut stmt =
         conn.prepare("SELECT id, path FROM wiki_pages WHERE status = 'approved' ORDER BY id")?;
     let rows: Vec<(i64, String)> = stmt
@@ -98,15 +99,87 @@ fn migrate_approved_wiki_pages(conn: &Connection, vault_root: &Path, now: i64) -
         let name = wiki_page_entity_name(&path, &body);
         let summary = body;
 
-        conn.execute(
-            "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, 'concept', ?3, NULL, ?4, ?4, NULL)
-             ON CONFLICT(id) DO UPDATE SET
-               name = excluded.name,
-               summary = excluded.summary,
-               updated_at = excluded.updated_at",
-            params![entity_id, name, summary, now],
+        // §2.5 okf_migration bullet: ids are path-derived, so it
+        // resolves `folder_ontology` mode from the note's path like
+        // any ingest. The abort-vs-skip decision (plan-p3-m4) is
+        // THIS task's:
+        //
+        //   * Gate without fallback (Held) → abort WITHOUT setting
+        //     `okf_migrated_at`. The V7 guard at `mark_okf_migrated`
+        //     makes retry safe (no half-stamp).
+        //   * Gate with declared fallback → helper inserts via the
+        //     shared helper (upsert mode r6-M3 preserves
+        //     `entity_type`).
+        //   * Skip → today's `'concept'` literal stands + ledger row.
+        //
+        // `tx` is already an `ImmediateTx` opened by `run_okf_migration`;
+        // a `bail!` here rolls back the entire batch and the caller
+        // observes the abort at the `AppDb::open_with_config` site
+        // (Task 9 owns the loud logging there).
+        let (decision, _gate) = resolve_okf_gate(conn, &entity_id, &path);
+        let outcome = crate::db::entity_gate::shared_insert_entity(
+            tx,
+            Some(&entity_id),
+            &name,
+            None,
+            &summary,
+            now,
+            decision.clone(),
+            true,
         )?;
+
+        use crate::db::entity_gate::AdmitOutcome;
+        use crate::db::entity_gate::GateDecision;
+        use crate::db::schema::OriginReason;
+
+        match (&outcome, &decision) {
+            (AdmitOutcome::Skipped { .. }, GateDecision::Skip) => {
+                // SKIP path: today's `'concept'` literal stands (r2-M2a).
+                // Helper did NOT insert (upsert mode preserved
+                // `entity_type` on the upsert path; here the SKIP path
+                // is a literal hardcoded `'concept'` per spec). Land
+                // the literal + write the `gate_skipped` ledger row.
+                conn.execute(
+                    "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
+                     VALUES (?1, ?2, 'concept', ?3, NULL, ?4, ?4, NULL)
+                     ON CONFLICT(id) DO UPDATE SET
+                       name = excluded.name,
+                       summary = excluded.summary,
+                       updated_at = excluded.updated_at",
+                    params![entity_id, name, summary, now],
+                )?;
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    &entity_id,
+                    Some("concept"),
+                    OriginReason::GateSkipped,
+                    None,
+                )?;
+            }
+            (AdmitOutcome::Held { .. }, _) => {
+                // §2.5 abort trigger (r12-M2/r3-M1): abort WITHOUT
+                // setting `okf_migrated_at`. The outer
+                // `ImmediateTx::rollback` rolls back the entire
+                // migration, so the retry safety holds.
+                bail!(
+                    "okf_migration aborted: strict ontology gate held a wiki-page mint \
+                     (entity {entity_id}, path {path:?}): manifest is strict with no \
+                     declared `fallback_node_type`; migration is retried after the manifest \
+                     gains a fallback (spec §2.4.5 / §2.5)"
+                );
+            }
+            (AdmitOutcome::DegradedToFallback { .. }, _) => {
+                // Helper inserted as the manifest's declared fallback.
+                // No ledger row (the helper inserted as a declared
+                // type, not as a degrade; r21 — `degraded` reason is
+                // reserved for label-proposed-and-degraded, not
+                // unlabeled-then-degraded). Bundle import owns the
+                // `unlabeled_landing` reason.
+            }
+            _ => {
+                // Admitted as declared / aliased: nothing to do.
+            }
+        }
 
         let event_id = format!("evt-migrate-{}", &hash_bytes(entity_id.as_bytes())[..12]);
         let summary_text = if file_found {
@@ -122,6 +195,74 @@ fn migrate_approved_wiki_pages(conn: &Connection, vault_root: &Path, now: i64) -
         count += 1;
     }
     Ok(count)
+}
+
+/// Resolve the §2.3 ladder for an okf_migration mint (spec §2.5).
+///
+/// `path` is the wiki-page vault-relative path; the §2.3 rung 2 lookup
+/// uses it as the source path. Rungs 1 and 4 mirror the LLM/GUI/bundle
+/// paths: opt-out + entity manifest → tier_fact fallback.
+fn resolve_okf_gate(
+    conn: &Connection,
+    entity_id: &str,
+    _path: &str,
+) -> (
+    crate::db::entity_gate::GateDecision,
+    crate::db::entity_gate::NodeGateDecision,
+) {
+    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
+        let node = crate::db::entity_gate::NodeGateDecision {
+            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
+            vocabulary: None,
+            source_directory: None,
+        };
+        return (node.clone().into_gate_decision(), node);
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            return (node.clone().into_gate_decision(), node);
+        }
+        _ => {}
+    }
+    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) if o.mode == "strict" => {
+            let vocab = o
+                .manifest
+                .as_ref()
+                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
+                    crate::db::entity_gate::ModeVerdict::Gate
+                } else {
+                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
+                },
+                vocabulary: vocab,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+        _ => {
+            let node = crate::db::entity_gate::NodeGateDecision {
+                verdict: crate::db::entity_gate::ModeVerdict::Off,
+                vocabulary: None,
+                source_directory: None,
+            };
+            (node.clone().into_gate_decision(), node)
+        }
+    }
 }
 
 fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<()> {
@@ -185,11 +326,10 @@ pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()>
 
     let tx = ImmediateTx::begin(conn)?;
     let commit_result = (|| -> Result<()> {
-        let conn: &Connection = &tx;
-        migrate_approved_wiki_pages(conn, vault_root, now)?;
-        drop_pending_wiki_proposals(conn, vault_root)?;
-        purge_wiki_tier_documents(conn)?;
-        mark_okf_migrated(conn, now)?;
+        migrate_approved_wiki_pages(&tx, vault_root, now)?;
+        drop_pending_wiki_proposals(&tx, vault_root)?;
+        purge_wiki_tier_documents(&tx)?;
+        mark_okf_migrated(&tx, now)?;
         Ok(())
     })();
     match commit_result {

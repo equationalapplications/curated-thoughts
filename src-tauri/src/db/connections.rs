@@ -211,7 +211,7 @@ mod tests {
     use crate::db::connection::open_in_memory;
     use crate::db::entities::{create_entity, CreateEntityInput};
 
-    fn make_entity(conn: &Connection, name: &str, summary: &str) -> String {
+    fn make_entity(conn: &mut Connection, name: &str, summary: &str) -> String {
         create_entity(
             conn,
             &CreateEntityInput {
@@ -236,8 +236,8 @@ mod tests {
 
     #[test]
     fn outgoing_edges_resolve_endpoint_labels() {
-        let conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn, "Alpha", "");
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&mut conn, "Alpha", "");
         seed_fact(&conn, &entity_id, "fact_a", "Fact A title", "Body A");
         conn.execute(
             "INSERT INTO llm_wiki_tasks (id, entity_id, description, status, priority, created_at, updated_at)
@@ -262,9 +262,9 @@ mod tests {
 
     #[test]
     fn backlinks_found_in_fact_bodies_and_summaries() {
-        let conn = open_in_memory().unwrap();
-        let alpha = make_entity(&conn, "Alpha", "");
-        let by_fact = make_entity(&conn, "Fact Referrer", "");
+        let mut conn = open_in_memory().unwrap();
+        let alpha = make_entity(&mut conn, "Alpha", "");
+        let by_fact = make_entity(&mut conn, "Fact Referrer", "");
         seed_fact(
             &conn,
             &by_fact,
@@ -272,10 +272,10 @@ mod tests {
             "T",
             "Works with [[Alpha]] weekly.",
         );
-        let by_summary = make_entity(&conn, "Summary Referrer", "Depends on [[Alpha]].");
+        let by_summary = make_entity(&mut conn, "Summary Referrer", "Depends on [[Alpha]].");
         // Self-mention and unrelated entity must not appear.
         seed_fact(&conn, &alpha, "fact_self", "T", "I am [[Alpha]].");
-        make_entity(&conn, "Bystander", "Nothing relevant.");
+        make_entity(&mut conn, "Bystander", "Nothing relevant.");
 
         let connections = get_entity_connections(&conn, &alpha).unwrap();
         let names: Vec<&str> = connections
@@ -290,12 +290,12 @@ mod tests {
 
     #[test]
     fn like_wildcards_in_entity_name_are_escaped() {
-        let conn = open_in_memory().unwrap();
-        let pct = make_entity(&conn, "100% Done", "");
-        let exact = make_entity(&conn, "Exact Referrer", "See [[100% Done]].");
+        let mut conn = open_in_memory().unwrap();
+        let pct = make_entity(&mut conn, "100% Done", "");
+        let exact = make_entity(&mut conn, "Exact Referrer", "See [[100% Done]].");
         // Would match "100% Done" under an unescaped LIKE '%[[100% Done]]%'? No —
         // but an unescaped '%' means '[[100' + anything + ' Done]]' matches too:
-        make_entity(&conn, "Loose Referrer", "See [[100 NOT Done]].");
+        make_entity(&mut conn, "Loose Referrer", "See [[100 NOT Done]].");
         let _ = exact;
 
         let connections = get_entity_connections(&conn, &pct).unwrap();
@@ -318,8 +318,8 @@ mod tests {
     /// survives.
     #[test]
     fn outgoing_edges_filter_off_manifest_types_when_ontology_is_strict() {
-        let conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn, "Strict", "");
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&mut conn, "Strict", "");
         // Endpoints anchored on curated entities (not entries) — the live
         // corruption shape.
         conn.execute(
@@ -362,8 +362,8 @@ mod tests {
     /// Non-strict ontology: no filter. Every edge admitted.
     #[test]
     fn outgoing_edges_admit_every_edge_when_ontology_is_not_strict() {
-        let conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn, "Open", "");
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&mut conn, "Open", "");
         conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at, deleted_at)
              VALUES ('ce_src', 'src', 'concept', '', 1, 1, NULL),

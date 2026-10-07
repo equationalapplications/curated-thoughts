@@ -345,7 +345,7 @@ mod tests {
     use crate::db::entities::{create_entity, CreateEntityInput};
     use rusqlite::params;
 
-    fn make_entity(conn: &Connection) -> String {
+    fn make_entity(conn: &mut Connection) -> String {
         create_entity(
             conn,
             &CreateEntityInput {
@@ -370,8 +370,8 @@ mod tests {
 
     #[test]
     fn list_tasks_groups_carry_entity_names_and_filter_by_status() {
-        let conn = open_in_memory().unwrap();
-        let ent1 = make_entity(&conn);
+        let mut conn = open_in_memory().unwrap();
+        let ent1 = make_entity(&mut conn);
         let ent2_id = "ent_second";
         conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, created_at, updated_at)
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn create_task_inserts_row_and_outbox() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
 
         let task = create_task(&mut conn, &entity_id, "  Create a test  ").unwrap();
         assert!(task.id.starts_with("task_"));
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn set_task_status_done_sets_resolved_at_and_outbox_update() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let task = create_task(&mut conn, &entity_id, "Task to resolve").unwrap();
 
         set_task_status(&mut conn, &task.id, "done").unwrap();
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn archive_task_sets_deleted_at_and_outbox_update() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let task = create_task(&mut conn, &entity_id, "Task to archive").unwrap();
 
         archive_task(&mut conn, &task.id).unwrap();

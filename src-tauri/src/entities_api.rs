@@ -40,8 +40,8 @@ pub fn create_entity_cmd(
     input: CreateEntityInput,
     db_state: State<DbState>,
 ) -> Result<EntityDetail, String> {
-    let guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    create_entity(&guard.0, &input).map_err(|e| e.to_string())
+    let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
+    create_entity(&mut guard.0, &input).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
