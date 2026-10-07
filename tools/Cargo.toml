@@ -24,9 +24,14 @@ notify.workspace = true
 sha2.workspace = true
 # Home-dir resolution for the trusted-links ledger.
 dirs.workspace = true
+# Direct dep for `calibrate_wisdom_gate` (sha256 over fixture files). The src-tauri
+# crate already uses 0.4; pinned here so the version is in lockstep.
+hex = "0.4"
+# tempfile moves out of dev-deps: `calibrate_wisdom_gate` builds a scratch brain
+# in a tempdir at runtime.
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 temp-env.workspace = true
 
 [[bin]]
@@ -80,3 +85,7 @@ path = "src/bin/tier_backfill.rs"
 [[bin]]
 name = "ct"
 path = "src/bin/ct.rs"
+
+[[bin]]
+name = "calibrate_wisdom_gate"
+path = "src/bin/calibrate_wisdom_gate.rs"

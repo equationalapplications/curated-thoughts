@@ -50,3 +50,4 @@ Regeneration (when intentionally refreshing vectors) is documented in those modu
 |-----------|----------------------------------------|
 | 2026-05-07 | [2026-05-07-recall-benchmarks.md](./2026-05-07-recall-benchmarks.md) |
 | 2026-05-07 | [2026-05-07-recall-benchmarks-v2.md](./2026-05-07-recall-benchmarks-v2.md) (rerun, `bbd2b97`) |
+| 2026-10-07 | [2026-10-07-wisdom-gate-qwen3-embedding-4b.md](./2026-10-07-wisdom-gate-qwen3-embedding-4b.md) (`ct wisdom match` floor, #265) |

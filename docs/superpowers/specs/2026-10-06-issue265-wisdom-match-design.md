@@ -1,7 +1,7 @@
 # `ct wisdom match`: relevance-gated, read-only wisdom match (issue #265)
 
 **Date:** 2026-10-06
-**Status:** Draft (brainstorm-approved 2026-10-06; dual review pending)
+**Status:** implemented; calibrated 2026-10-07 for `external:qwen/qwen3-embedding-4b` (floor 0.70, hit@2 0.44, FP 0.05 — `docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md`). Latency measured 2026-10-07 on Linux: p50 0.44 s / p95 1.21 s warm over 50 calls (target ≤ 1.5 s — pass).
 **Branch:** `feat/issue-265-wisdom-match`
 **Issue:** #265
 **Consumer:** curated-thoughts-integrations (CTI) live wisdom delivery. CTI spec
@@ -45,7 +45,7 @@ stdout with `--json`:
 ```json
 {
   "schema": 1,
-  "gate": "semantic-v1:local:nomic-embed-code",
+  "gate": "semantic-v1:external:qwen/qwen3-embedding-4b",
   "entries": [
     {"id": "fact_…", "title": "…", "text": "…", "score": 0.71,
      "supersedes": [], "provenance": "librarian_inferred"}
@@ -98,7 +98,7 @@ The `gate` output field is `"semantic-v1:" + key` when the key has a floor, and
 /// docs/benchmarks/. A model not listed here abstains.
 pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     ("stub:constant8", 0.5), // test-only key: unreachable without CURATED_EMBED_STUB
-    // ("local:nomic-embed-code", <set by the first calibration run>),
+    ("external:qwen/qwen3-embedding-4b", 0.70), // calibrated 2026-10-07
 ];
 ```
 
@@ -187,7 +187,7 @@ brain in a temp dir from fixtures:
 - `--facts tools/tests/fixtures/wisdom_gate/facts.jsonl`: ≥ 100 developer-domain facts,
   each `{id, title, body, source_type}`. The tool creates a fresh brain with the app
   schema (`AppDb`), inserts the rows, and embeds them with the **real** profile under
-  test (`--profile <json>`, default `local:nomic-embed-code` via Ollama). It refuses to
+  test (`--profile <json>`, default the production embedder, OpenRouter `qwen/qwen3-embedding-4b`). It refuses to
   run when `CURATED_EMBED_STUB` is set.
 - `--probes tools/tests/fixtures/wisdom_gate/probes.jsonl`: ≥ 200 probes, each
   `{text, expect: [fact ids]}`. They are split roughly evenly:
@@ -259,8 +259,8 @@ brain in a temp dir from fixtures:
 
 **Benchmark:** the calibration run plus the frozen-vector regression test above.
 
-**Latency:** p95 ≤ 1.5 s warm over 50 calls on the reference machine with
-`local:nomic-embed-code`, recorded in the benchmark snapshot. The candidate scan is
+**Latency:** p95 ≤ 1.5 s warm over 50 calls with
+`external:qwen/qwen3-embedding-4b`, recorded in the benchmark snapshot. The candidate scan is
 O(live embedded entries × dim): about 7.7 M multiply-adds at 10⁴ × 768, small next to
 the query embedding call.
 
