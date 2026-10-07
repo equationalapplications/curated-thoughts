@@ -407,6 +407,20 @@ fn remap_pass(
             continue;
         }
 
+        // Item 2a (r4-m4): an UNREADABLE entity manifest row is
+        // report-or-hold for heal — the ladder would fall through to
+        // rungs 2-4 and possibly Gate via tier_fact, but retyping an
+        // entity whose own scoped manifest we cannot parse is exactly the
+        // silent mutation the rule forbids. Report loudly and queue.
+        if crate::wiki_graph::wiki_get_ontology(conn, &id).is_err() {
+            counts.queued += 1;
+            eprintln!(
+                "ontology heal: {id} ({entity_type}) has an UNREADABLE entity manifest \
+                 row — report-or-hold (r4-m4); queued, not retyped"
+            );
+            continue;
+        }
+
         let mut paths = resolved_paths;
         if paths.is_empty() {
             if let Some(dir) = &ledger_source_dir {
@@ -1106,5 +1120,320 @@ mod tests {
             "gate-era config change must be visible to the first heal: {r:?}"
         );
         assert_eq!(r.drift.as_ref().unwrap().old_hash, "oldgate");
+    }
+
+    // ------------------------------------------------------------------
+    // Fix round 1 — the brief's §6 enumerated heal-half scenarios
+    // ------------------------------------------------------------------
+
+    /// Grounded source helper: a document at `path` with a chunk whose
+    /// content_hash the evidence cites.
+    fn seed_grounded_doc(conn: &Connection, path: &str, hash: &str) {
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES (?1, 'h', 'user_doc', 'indexed')",
+            [path],
+        )
+        .unwrap();
+        let doc_id: i64 = conn
+            .query_row("SELECT id FROM documents WHERE path = ?1", [path], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, content_hash)
+             VALUES (?1, 't', 0, 1, 1, ?2)",
+            params![doc_id, hash],
+        )
+        .unwrap();
+    }
+
+    fn seed_evidence_fact(conn: &Connection, entity_id: &str, hash: &str) {
+        seed_fact(
+            conn,
+            &format!("f_{entity_id}_{hash}"),
+            entity_id,
+            Some(&format!(r#"{{"evidence":[{{"content_hash":"{hash}"}}]}}"#)),
+        );
+    }
+
+    /// §6 item 3: the remaining signed alias pairs — `component`→`service`
+    /// and `software`→`document` (the target legalized by the ensure).
+    #[test]
+    fn remaining_alias_pairs_retype() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e_comp", "component");
+        seed_entity(&conn, "e_sw", "software");
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(r.retyped, 2, "{r:?}");
+        assert_eq!(r.queued, 0, "{r:?}");
+        assert_eq!(entity_type(&conn, "e_comp"), "service");
+        assert_eq!(entity_type(&conn, "e_sw"), "document");
+    }
+
+    /// §6 item 3: `process` becomes legal via the ensure → compliant.
+    #[test]
+    fn process_is_legalized_by_the_ensure() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], None);
+        seed_entity(&conn, "e_proc", "process");
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.queued, 0, "{r:?}");
+        assert_eq!(entity_type(&conn, "e_proc"), "process");
+    }
+
+    /// §6 item 9 (vault-moved): an absolute source path that can no longer
+    /// be placed inside the vault (root None) under an off prefix → Hold →
+    /// zero retypes (unplaceable-with-root).
+    #[test]
+    fn vault_moved_off_prefix_zero_retypes() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        seed_grounded_doc(&conn, "/gone/vault/ops/a.md", "aaa111");
+        seed_evidence_fact(&conn, "e1", "aaa111");
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".into(), OntologyMode::Off);
+        // vault_root None → the absolute path is Unplaceable → Hold.
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §6 item 8: `folder_ontology` non-empty + effective root None +
+    /// `heal --yes` → zero retypes (the unplaceable path cannot be matched,
+    /// so no folder mode may decide — Hold via the map's off entry).
+    #[test]
+    fn nonempty_map_with_no_root_zero_retypes() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        seed_grounded_doc(&conn, "/elsewhere/x.md", "bbb222");
+        seed_evidence_fact(&conn, "e1", "bbb222");
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".into(), OntologyMode::Off);
+        ingest
+            .folder_ontology
+            .insert("people".into(), OntologyMode::Strict);
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §6 item 9 (SKIP + warning): mode=strict via rung 2 with NO strict
+    /// tier_fact vocabulary row → the verdict is StrictNoVocab (SKIP for
+    /// the retype) and the census warns `unmarked_tier_fact`.
+    #[test]
+    fn strict_rung2_without_vocabulary_skips_and_warns() {
+        let mut conn = open_in_memory().unwrap();
+        // NO tier_fact manifest row at all.
+        seed_entity(&conn, "e1", "agent");
+        seed_grounded_doc(&conn, "people/x.md", "ccc333");
+        seed_evidence_fact(&conn, "e1", "ccc333");
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("people".into(), OntologyMode::Strict);
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.queued, 0, "{r:?}");
+        assert!(
+            r.census.unmarked_tier_fact,
+            "census must warn on the unmarked tier_fact row: {:?}",
+            r.census
+        );
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §6 item 9 (same-bytes invalidation): the live hash the drift compare
+    /// consumes is the canonical, insertion-order-independent hash built by
+    /// `ontology_config_watermark_hash` — same map in two insertion orders
+    /// hashes identically (no false drift), while a SAME-LENGTH key edit
+    /// still changes it (no stale-policy miss). (Order-independence is
+    /// pinned directly in config/mod.rs
+    /// `watermark_hash_is_insertion_order_independent` and the raw-marker /
+    /// tie-degraded rows; this pins the heal-side consumption.)
+    #[test]
+    fn live_hash_order_independent_and_same_length_edits_invalidate() {
+        let build = |ops_first: bool| {
+            let mut ingest = IngestConfig::default();
+            if ops_first {
+                ingest
+                    .folder_ontology
+                    .insert("ops".into(), OntologyMode::Off);
+                ingest
+                    .folder_ontology
+                    .insert("people".into(), OntologyMode::Strict);
+            } else {
+                ingest
+                    .folder_ontology
+                    .insert("people".into(), OntologyMode::Strict);
+                ingest
+                    .folder_ontology
+                    .insert("ops".into(), OntologyMode::Off);
+            }
+            crate::config::ontology_config_watermark_hash(&ingest, None, false)
+        };
+        assert_eq!(
+            build(true),
+            build(false),
+            "insertion order must not change the live hash"
+        );
+        // Same-length edit (`aaa` → `aab`) must change the hash — a
+        // bytes-keyed cache or length-based stamp would miss it.
+        let mut edited = IngestConfig::default();
+        edited
+            .folder_ontology
+            .insert("aab".into(), OntologyMode::Off);
+        edited
+            .folder_ontology
+            .insert("people".into(), OntologyMode::Strict);
+        assert_ne!(
+            build(true),
+            crate::config::ontology_config_watermark_hash(&edited, None, false),
+            "a same-length key edit must invalidate the live hash"
+        );
+    }
+
+    /// §6 item 10: the V20 empty-evidence sentinel
+    /// (`{"proposal_id":null,"evidence":[]}`) is claimed-but-unresolved →
+    /// report-only under an off-scoped map; the auto-retype count stays 0.
+    #[test]
+    fn v20_empty_evidence_sentinel_is_report_only() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        seed_fact(
+            &conn,
+            "f1",
+            "e1",
+            Some(r#"{"proposal_id":null,"evidence":[]}"#),
+        );
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".into(), OntologyMode::Off);
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.report_only, 1, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §6 item 10 / R2.3.2a row: a PLAIN PATH ref (`documents/notes.md`) is
+    /// `HadEvidenceUnresolved`, never a silent climb → report-only under an
+    /// off-scoped map, zero retypes. (The resolver-row halves — plain path,
+    /// truncated JSON, empty evidence, absent ref — are pinned directly in
+    /// `db::entities` `resolve_source_core` tests.)
+    #[test]
+    fn plain_path_ref_is_report_only() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        seed_fact(&conn, "f1", "e1", Some("documents/notes.md"));
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".into(), OntologyMode::Off);
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.report_only, 1, "{r:?}");
+    }
+
+    /// R2.3.2a fault row, heal side: a DB fault mid-census propagates out
+    /// of the scan and lands in `error` (plan-p8-m1) — never "no source".
+    #[test]
+    fn census_db_fault_is_captured_into_error() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        conn.execute("DROP TABLE entity_type_origin", []).unwrap();
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert!(r.error.is_some(), "fault must surface in error: {r:?}");
+        assert_eq!(r.retyped, 0, "{r:?}");
+    }
+
+    /// §6 item 10 (r10-M3): an engine-side manifest rewrite never removes a
+    /// deliberate `ct_entity_optouts` row — the drifted entity keeps its
+    /// opt-out across the rewrite and is never retyped.
+    #[test]
+    fn engine_manifest_rewrite_keeps_the_optout() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at)
+             VALUES ('e1', 'deliberate', 1)",
+            [],
+        )
+        .unwrap();
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "opt-out must skip the gate (rung 1a): {r:?}");
+        // Engine-style rewrite of the manifest row (UPDATE manifest_json).
+        conn.execute(
+            "UPDATE llm_wiki_entity_manifests
+             SET manifest_json = '{\"node_types\":[{\"type\":\"role\"}],\"edge_types\":[]}',
+                 updated_at = 2
+             WHERE entity_id = 'tier_fact'",
+            [],
+        )
+        .unwrap();
+        let still: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still, 1, "the opt-out row survives the rewrite");
+        let r2 = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(r2.retyped, 0, "{r2:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §6 item 2a: an UNREADABLE entity manifest row (malformed
+    /// manifest_json on the entity's own row) → report-or-hold: queued with
+    /// a loud note, never retyped.
+    #[test]
+    fn unreadable_entity_manifest_row_is_report_or_hold() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('e1', 'strict', '{not json', 1)",
+            [],
+        )
+        .unwrap();
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.queued, 1, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §6 item 2a: an UNMARKED entity manifest row (mode not strict) climbs
+    /// rungs 2-4 — the tier_fact vocabulary gates normally.
+    #[test]
+    fn unmarked_entity_manifest_row_climbs() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('e1', 'emergent', '{}', 1)",
+            [],
+        )
+        .unwrap();
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(
+            r.retyped, 1,
+            "climb reaches the strict tier_fact rung: {r:?}"
+        );
+        assert_eq!(entity_type(&conn, "e1"), "role");
     }
 }
