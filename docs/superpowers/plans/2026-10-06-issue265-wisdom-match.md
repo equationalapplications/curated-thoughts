@@ -1120,7 +1120,8 @@ for batch in range(4):
     # made GLM produce 9/100 "irrelevant" probes a fact actually answered
     # (WAL mode, busy_timeout, VACUUM, JSON expression indexes, brotli).
     # Fully off-topic wording below; the fixture README also carries a
-    # post-generation cosine check — run it before calibrating.
+    # post-generation cosine check — run it on the fresh sweep before
+    # committing the new calibration.
     text = ask(
         "Write 25 short developer messages to a coding agent, one per line, no numbering. "
         "They must be about everyday development topics unrelated to git, CI, Rust, "

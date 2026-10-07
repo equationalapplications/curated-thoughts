@@ -88,17 +88,27 @@ with open("src-tauri/tests/fixtures/wisdom_gate/probes.jsonl", "w") as fh:
     for p in probes:
         fh.write(json.dumps(p, ensure_ascii=False) + "\n")
 
-# Post-generation check (run before calibrating): no "irrelevant" probe may
-# score at or above the calibrated floor against any fact vector.
+# Post-generation check — run AFTER the calibration sweep below: the sweep
+# embeds every CURRENT probe, so the fresh vectors.json.gz covers the new
+# probes (a missing vector means the sweep wasn't rerun — fail, don't skip).
+# No "irrelevant" probe may score at or above the calibrated floor against
+# any fact vector; any that does is a fact-answer in disguise and would
+# inflate FP and drag the chosen floor down.
 import gzip
 sweep = json.load(gzip.open("src-tauri/tests/fixtures/wisdom_gate/vectors.json.gz"))
 floor = json.load(open("src-tauri/tests/fixtures/wisdom_gate/expected.json"))["floor"]
+by_text = {v["text"]: v["vector"] for v in sweep["probes"]}
 def cos(a, b):
     d = sum(x*y for x, y in zip(a, b)); na = sum(x*x for x in a) ** .5; nb = sum(x*x for x in b) ** .5
     return d / (na * nb) if na and nb else 0.0
-bad = [p["text"] for p in probes if not p["expect"] and
-       any(cos(p_vec, f_vec) >= floor for p_vec in [v["vector"] for v in sweep["probes"] if v["text"] == p["text"]]
-           for f_vec in [v["vector"] for v in sweep["facts"]])]
+bad = []
+for p in probes:
+    if p["expect"]:
+        continue
+    if p["text"] not in by_text:
+        raise SystemExit(f"no vector for irrelevant probe — rerun the sweep first: {p['text'][:60]!r}")
+    if any(cos(by_text[p["text"]], f["vector"]) >= floor for f in sweep["facts"]):
+        bad.append(p["text"])
 print("probes that a fact answers — DROP AND REGENERATE:", bad)
 ```
 
