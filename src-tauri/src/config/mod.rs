@@ -168,7 +168,7 @@ fn usable_prefix(key: &str) -> String {
         .split('/')
         .filter(|s| !s.is_empty() && *s != ".")
         .collect();
-    if segs.iter().any(|s| *s == "..") {
+    if segs.contains(&"..") {
         return String::new();
     }
     segs.join("/")
@@ -309,10 +309,9 @@ fn match_prefixes<T: PartialEq + Copy>(
 /// inert keys must not degrade the config. Used by the load-time tie
 /// scans, the `ontology_ties` helper, and the watermark hash's degraded
 /// encoding.
-fn normalized_key_ties<T: PartialEq>(map: &std::collections::HashMap<String, T>) -> Vec<(String, T)>
-where
-    T: Copy,
-{
+fn normalized_key_ties<T: PartialEq + Copy>(
+    map: &std::collections::HashMap<String, T>,
+) -> Vec<(String, T)> {
     let mut groups: std::collections::BTreeMap<String, Vec<T>> = std::collections::BTreeMap::new();
     for (k, v) in map {
         if !key_is_matchable(k) {
@@ -838,9 +837,10 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         // document, and one line per document would flood the log.
         Err(e) => {
             report_config_read_error_once(&paths.config_path, &e);
-            let mut policy = IngestPolicy::default();
-            policy.ingest_ontology_degraded = true;
-            return policy;
+            return IngestPolicy {
+                ingest_ontology_degraded: true,
+                ..IngestPolicy::default()
+            };
         }
     };
 
@@ -868,12 +868,13 @@ fn parse_ingest_policy_from_bytes(contents: &[u8]) -> IngestPolicy {
         Ok(t) => t,
         Err(_) => {
             eprintln!("config: ingest policy file is not valid UTF-8; degraded (ontology holds)");
-            let mut policy = IngestPolicy::default();
-            policy.ingest_ontology_degraded = true;
-            return policy;
+            return IngestPolicy {
+                ingest_ontology_degraded: true,
+                ..IngestPolicy::default()
+            };
         }
     };
-    let mut policy = match BrainConfig::load_lenient_from_str(text) {
+    let policy = match BrainConfig::load_lenient_from_str(text) {
         Ok(report) => {
             let degraded = report.config.ontology_degraded.clone();
             IngestPolicy {
@@ -892,9 +893,10 @@ fn parse_ingest_policy_from_bytes(contents: &[u8]) -> IngestPolicy {
         }
         Err(e) => {
             eprintln!("config: could not parse ingest policy ({e}); degraded (ontology holds)");
-            let mut policy = IngestPolicy::default();
-            policy.ingest_ontology_degraded = true;
-            return policy;
+            return IngestPolicy {
+                ingest_ontology_degraded: true,
+                ..IngestPolicy::default()
+            };
         }
     };
     // Ties deliberately do NOT set `ingest_ontology_degraded` (I-3: the
@@ -2609,7 +2611,7 @@ mod tests {
     /// pass through salvage, so the scan runs in both arms.
     #[test]
     fn load_flags_tie_diagnostic_without_global_degrade() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"folder_ontology":{"ops":"off","ops/":"strict"}}}"#,
@@ -2647,7 +2649,7 @@ mod tests {
     /// (resolver step (2)).
     #[test]
     fn tie_holds_tied_prefixes_but_not_unrelated_paths() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"folder_ontology":{"ops":"off","ops/":"strict"}}}"#,
@@ -2655,7 +2657,7 @@ mod tests {
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
         let report = BrainConfig::load_lenient(&paths).unwrap();
-        assert!(report.config.ontology_degraded.global == false);
+        assert!(!report.config.ontology_degraded.global);
         assert!(!ontology_ties(&report.config.ingest).is_empty());
         // Tied prefixes: Hold (step (2)).
         assert_eq!(
@@ -2690,7 +2692,7 @@ mod tests {
     /// tie hold; the policy still carries the tied tiers for refuse sites.
     #[test]
     fn policy_does_not_globally_degrade_on_tie() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"folder_ontology":{"ops":"off","ops/":"strict"}},"vault_path":"/v"}"#,
@@ -2711,7 +2713,7 @@ mod tests {
     /// case-sensitive (`Off` is a bad value → dropped → degraded).
     #[test]
     fn ontology_mode_values_are_lowercase_and_case_sensitive() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"ontology_default":"Off","folder_ontology":{"x":"Off"}}}"#,
@@ -2729,7 +2731,7 @@ mod tests {
         assert!(report.config.ontology_degraded.default_dropped);
         assert_eq!(report.config.ontology_degraded.dropped_prefixes, vec!["x"]);
 
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"ontology_default":"strict","folder_ontology":{"x":"off"}}}"#,
@@ -2753,7 +2755,7 @@ mod tests {
     /// does not degrade globally.
     #[test]
     fn salvage_keys_are_independent() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"folder_ontology":{"good":"off","bad":"Bogus"}}}"#,
@@ -2793,7 +2795,7 @@ mod tests {
     /// → GLOBAL degraded.
     #[test]
     fn non_object_ingest_block_degrades_globally() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(&paths, r#"{"ingest":[1,2,3]}"#);
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
@@ -2805,13 +2807,13 @@ mod tests {
     /// byte-for-byte (raw_ingest leave-untouched rule, r15-m1).
     #[test]
     fn degraded_write_leaves_ingest_block_untouched() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         let raw = r#"{"ingest":{"folder_ontology":{"x":"Off"}},"vault_path":"/v"}"#;
         write_cfg(&paths, raw);
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
         // Strict load() routes through lenient salvage → degraded.
-        let mut cfg = BrainConfig::load(&paths).unwrap();
+        let cfg = BrainConfig::load(&paths).unwrap();
         assert!(cfg.raw_ingest.is_some());
         cfg.write(&paths).unwrap();
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
@@ -2834,7 +2836,7 @@ mod tests {
     /// precondition: write() leaves on-disk ingest untouched).
     #[test]
     fn degraded_write_discards_typed_ingest_mutations() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"folder_ontology":{"x":"Off"}},"vault_path":"/v"}"#,
@@ -2857,7 +2859,7 @@ mod tests {
     /// (matrix: healthy config + typed edit survives a write).
     #[test]
     fn healthy_write_persists_typed_ingest() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(&paths, BASE_CFG);
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
@@ -2881,7 +2883,7 @@ mod tests {
     /// R2.2.4 (r13-m2): unknown ingest sub-keys survive BOTH load arms.
     #[test]
     fn unknown_ingest_subkeys_survive_both_load_arms() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"future_key":1,"folder_tiers":{"a":"full"}},"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}"#,
@@ -2918,7 +2920,7 @@ mod tests {
     /// an UNRELATED writer leaves the on-disk ontology value untouched.
     #[test]
     fn unparseable_ontology_survives_unrelated_write() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ontology":{"schema":"bogus-selection"},"vault_path":"/v"}"#,
@@ -2952,7 +2954,7 @@ mod tests {
     /// R2.2.5 (r17-MAJOR-2): `replace_ontology` is the only escape hatch.
     #[test]
     fn replace_ontology_clears_degraded_marker_and_writes() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ontology":{"schema":"bogus-selection"},"vault_path":"/v"}"#,
@@ -2995,7 +2997,7 @@ mod tests {
     /// new schema AND leave unrelated preserved keys intact.
     #[test]
     fn replace_ontology_purges_parked_preserved_ontology_key() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ontology":{"schema":"emergent"},"trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":0}],"x_custom":1}"#,
@@ -3067,7 +3069,7 @@ mod tests {
     /// R2.2.4: non-NotFound I/O errors are DEGRADED, missing config is not.
     #[test]
     fn unreadable_config_is_degraded_but_missing_is_not() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         let cfg_path = paths.config_path.clone();
         std::fs::create_dir_all(&cfg_path).unwrap(); // EISDIR on read
         let db = paths.db_path.to_str().unwrap().to_string();
@@ -3101,9 +3103,7 @@ mod tests {
         // Ontology-only change (same length not required — bytes differ).
         std::fs::write(
             &cfg_path,
-            &format!(
-                r#"{{"ontology":{{"schema":"off"}},"vault_path":"/v","migrated_to_v2":false,"generation":{{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null}},"embedding":{{"provider":"fastembed","external_url":null}},"privacy":{{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}}}"#
-            ),
+            r#"{"ontology":{"schema":"off"},"vault_path":"/v","migrated_to_v2":false,"generation":{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null},"embedding":{"provider":"fastembed","external_url":null},"privacy":{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}}"#,
         )
         .unwrap();
         let p2 = ingest_policy_for_db(Some(&db));
@@ -3298,14 +3298,14 @@ mod tests {
     /// config carried the empty default and write() erased the ledger.
     #[test]
     fn non_object_ingest_does_not_erase_trusted_links() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":"bogus","trusted_links":[{"link":"docs/specs","target":"/vault/docs/specs","approved_at":1}],"vault_path":"/v"}"#,
         );
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
-        let mut cfg = BrainConfig::load_lenient(&paths).unwrap().config;
+        let cfg = BrainConfig::load_lenient(&paths).unwrap().config;
         assert!(cfg.ontology_degraded.global, "non-object ingest degrades");
         assert_eq!(
             cfg.trusted_links.len(),
@@ -3444,7 +3444,7 @@ mod tests {
             .insert("ops/".to_string(), IngestTier::ChunksOnly);
         assert_eq!(cfg2.tier_for("ops/a.md"), IngestTier::ChunksOnly);
         // The load path emits the ranking-naming diagnostic.
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(
             &paths,
             r#"{"ingest":{"folder_tiers":{"ops":"full","ops/":"none"}}}"#,
@@ -3509,7 +3509,7 @@ mod tests {
     /// write leaves the block untouched).
     #[test]
     fn non_object_folder_ontology_value_degrades_globally() {
-        let (tmp, paths) = degraded_fixture_dir();
+        let (_tmp, paths) = degraded_fixture_dir();
         write_cfg(&paths, r#"{"ingest":{"folder_ontology":"off"}}"#);
         // tmp stays alive until end of test: dropping it deletes the
         // fixture directory the loads below must read.
